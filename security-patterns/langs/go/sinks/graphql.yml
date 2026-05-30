@@ -34,7 +34,7 @@
         graphql.Do(nil)
       }
     expect_no_match: true
-  description: "graphql.Do(params) — dynamic GraphQL query text or context reaches resolver execution."
+  description: "graphql.Do(params) - dynamic GraphQL query text or context reaches resolver execution."
 - id: go.graphql.playground_handler
   enabled: true
   language: go
@@ -61,4 +61,4 @@
       }
     expect_match_text:
     - playground.Handler
-  description: "playground.Handler — exposes interactive GraphQL execution and introspection entry points."
+  description: "playground.Handler - exposes interactive GraphQL execution and introspection entry points."

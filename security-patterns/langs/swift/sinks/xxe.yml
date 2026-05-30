@@ -20,7 +20,7 @@
       code: |
         func test() { XMLParser("<root/>") }
       expect_no_match: true
-  description: "XMLParser(data:) — review shouldResolveExternalEntities setting."
+  description: "XMLParser(data:) - review shouldResolveExternalEntities setting."
 
 - id: swift.xxe.should_resolve_external_entities
   enabled: true
@@ -45,7 +45,7 @@
       code: |
         func test(input: Bool) { let shouldResolveExternalEntities = input }
       expect_no_match: true
-  description: "XMLParser.shouldResolveExternalEntities = true — enables XXE."
+  description: "XMLParser.shouldResolveExternalEntities = true - enables XXE."
 
 - id: swift.xxe.xmldocument_init
   enabled: true
@@ -68,7 +68,7 @@
       code: |
         func test() { XMLDocument("<root/>") }
       expect_no_match: true
-  description: "XMLDocument(data:options:) — XMLNode.Options.documentTidyHTML enables entity resolution."
+  description: "XMLDocument(data:options:) - XMLNode.Options.documentTidyHTML enables entity resolution."
 
 - id: swift.xxe.libxml2_xmlreadmemory
   enabled: true

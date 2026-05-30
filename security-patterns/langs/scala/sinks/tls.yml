@@ -20,7 +20,7 @@
           disableCertVerification(input)
         }
       }
-  description: "sttp backend with disableCertVerification — trusts any server cert."
+  description: "sttp backend with disableCertVerification - trusts any server cert."
 
 - id: scala.tls.akka_http_https_permissive
   enabled: true
@@ -44,7 +44,7 @@
           ConnectionContext.https(input)
         }
       }
-  description: "Akka HTTP ConnectionContext.https(...) — dangerous if SSLContext trusts all / hostnameVerifier is noop."
+  description: "Akka HTTP ConnectionContext.https(...) - dangerous if SSLContext trusts all / hostnameVerifier is noop."
 
   imports:
   - akka.http.scaladsl
@@ -69,7 +69,7 @@
           acceptAnyCertificate = input
         }
       }
-  description: "Play WS acceptAnyCertificate=true — disables TLS cert validation."
+  description: "Play WS acceptAnyCertificate=true - disables TLS cert validation."
 
   imports:
   - play.api.libs.ws
@@ -94,7 +94,7 @@
           hostnameVerifier(input)
         }
       }
-  description: "okhttp builder.hostnameVerifier(...) — flag when set to allow-all implementation."
+  description: "okhttp builder.hostnameVerifier(...) - flag when set to allow-all implementation."
 
 - id: scala.tls.x509_trust_manager_empty
   enabled: true
@@ -116,7 +116,7 @@
         }
       }
       class X509TrustManager(args: Any*)
-  description: "Anonymous X509TrustManager — flag when checkClient/ServerTrusted is empty."
+  description: "Anonymous X509TrustManager - flag when checkClient/ServerTrusted is empty."
 
 - id: scala.tls.ssl_context_init
   enabled: true
@@ -137,4 +137,4 @@
           SSLContext.init(input)
         }
       }
-  description: "SSLContext.init(_, trustManagers, _) — flag when trustManagers contains TrustAll."
+  description: "SSLContext.init(_, trustManagers, _) - flag when trustManagers contains TrustAll."

@@ -29,7 +29,7 @@
         xmlReadFile("safe");
       }
     expect_no_match: true
-  description: "libxml2 xmlReadFile — flag when options include XML_PARSE_NOENT or XML_PARSE_DTDLOAD."
+  description: "libxml2 xmlReadFile - flag when options include XML_PARSE_NOENT or XML_PARSE_DTDLOAD."
 
 - id: cpp.xxe.libxml2_xmlreadmemory
   enabled: true
@@ -61,7 +61,7 @@
         xmlReadMemory("safe");
       }
     expect_no_match: true
-  description: "libxml2 xmlReadMemory — same options concern as xmlReadFile."
+  description: "libxml2 xmlReadMemory - same options concern as xmlReadFile."
 
 - id: cpp.xxe.libxml2_xmlctxtreadfile
   enabled: true
@@ -93,7 +93,7 @@
         xmlCtxtReadFile("safe");
       }
     expect_no_match: true
-  description: "libxml2 xmlCtxtReadFile — context-based reader with same entity risk."
+  description: "libxml2 xmlCtxtReadFile - context-based reader with same entity risk."
 
 - id: cpp.xxe.libxml2_xmlparsefile
   enabled: true
@@ -125,7 +125,7 @@
         xmlParseFile("safe");
       }
     expect_no_match: true
-  description: "libxml2 xmlParseFile — legacy API, entities enabled by default."
+  description: "libxml2 xmlParseFile - legacy API, entities enabled by default."
 
 - id: cpp.xxe.xerces_parser_parse
   enabled: true
@@ -157,7 +157,7 @@
         XercesDOMParser::parse("safe");
       }
     expect_no_match: true
-  description: "Xerces-C XercesDOMParser::parse — flag without setDisableDefaultEntityResolution / XMLReader features."
+  description: "Xerces-C XercesDOMParser::parse - flag without setDisableDefaultEntityResolution / XMLReader features."
 
 - id: cpp.xxe.xerces_sax_parse
   enabled: true
@@ -189,7 +189,7 @@
         SAXParser::parse("safe");
       }
     expect_no_match: true
-  description: "SAXParser::parse — covers Xerces-C and Poco::XML (same attribute chain). Flag without disabling external entities."
+  description: "SAXParser::parse - covers Xerces-C and Poco::XML (same attribute chain). Flag without disabling external entities."
 
 - id: cpp.xxe.qt_qxmlsimplereader_parse
   enabled: true
@@ -223,7 +223,7 @@
         QXmlSimpleReader::parse("safe");
       }
     expect_no_match: true
-  description: "Qt QXmlSimpleReader::parse — deprecated API with entity resolution."
+  description: "Qt QXmlSimpleReader::parse - deprecated API with entity resolution."
 
   imports:
   - QtCore
@@ -241,7 +241,7 @@
     kind: call
     callee:
       attribute: [SAXParser, parse]
-  description: "Disabled — merged into cpp.xxe.xerces_sax_parse (same `[SAXParser, parse]` attribute chain; packages list now covers Poco)."
+  description: "Disabled - merged into cpp.xxe.xerces_sax_parse (same `[SAXParser, parse]` attribute chain; packages list now covers Poco)."
 
 - id: cpp.xxe.tinyxml2_loadfile
   enabled: false
@@ -256,7 +256,7 @@
     kind: call
     callee:
       attribute: [XMLDocument, LoadFile]
-  description: "Disabled — tinyxml2 has limited entity support; no XXE surface."
+  description: "Disabled - tinyxml2 has limited entity support; no XXE surface."
 
 - id: cpp.xxe.pugixml_load_file
   enabled: false
@@ -271,4 +271,4 @@
     kind: call
     callee:
       attribute: [xml_document, load_file]
-  description: "Disabled — pugixml does not resolve external entities."
+  description: "Disabled - pugixml does not resolve external entities."

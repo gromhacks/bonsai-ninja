@@ -30,7 +30,7 @@
           obj.get_object("reports/fixed.csv");
       }
     expect_no_match: true
-  description: "aws-sdk-s3 get_object — tainted bucket/key selector reads arbitrary object data."
+  description: "aws-sdk-s3 get_object - tainted bucket/key selector reads arbitrary object data."
 
   imports:
   - aws_sdk_s3
@@ -66,7 +66,7 @@
           obj.put_object("reports/fixed.csv");
       }
     expect_no_match: true
-  description: "aws-sdk-s3 put_object — tainted bucket/key selector overwrites attacker-chosen object keys."
+  description: "aws-sdk-s3 put_object - tainted bucket/key selector overwrites attacker-chosen object keys."
 
   imports:
   - aws_sdk_s3
@@ -102,7 +102,7 @@
           obj.get_secret_value("app/prod/db");
       }
     expect_no_match: true
-  description: "aws-sdk-secretsmanager get_secret_value — tainted secret id reads arbitrary secret material."
+  description: "aws-sdk-secretsmanager get_secret_value - tainted secret id reads arbitrary secret material."
 
   imports:
   - aws_sdk_secretsmanager
@@ -138,6 +138,6 @@
           obj.access_secret_version("projects/app/secrets/db/versions/latest");
       }
     expect_no_match: true
-  description: "Secret Manager access_secret_version — tainted resource name reads arbitrary secret versions."
+  description: "Secret Manager access_secret_version - tainted resource name reads arbitrary secret versions."
   imports:
   - google_cloud_secretmanager

@@ -22,7 +22,7 @@
         char *fmt = arg;
         gpio_get_value(arg);
       }
-  description: "Linux gpio_get_value — GPIO pin read; physical-origin bit."
+  description: "Linux gpio_get_value - GPIO pin read; physical-origin bit."
 
   imports:
   - linux
@@ -47,7 +47,7 @@
         char *fmt = arg;
         gpiod_line_get_value(arg);
       }
-  description: "libgpiod gpiod_line_get_value — GPIO line state from external hardware."
+  description: "libgpiod gpiod_line_get_value - GPIO line state from external hardware."
 
 - id: c.phys.i2c_smbus_read_byte
   enabled: true
@@ -72,7 +72,7 @@
         char *fmt = arg;
         i2c_smbus_read_byte(arg);
       }
-  description: "i2c_smbus_read_byte — I2C peripheral byte read."
+  description: "i2c_smbus_read_byte - I2C peripheral byte read."
 
   imports:
   - linux
@@ -100,7 +100,7 @@
         char *fmt = arg;
         i2c_smbus_read_byte_data(arg);
       }
-  description: "i2c_smbus_read_byte_data — reads a device register over SMBus/I2C."
+  description: "i2c_smbus_read_byte_data - reads a device register over SMBus/I2C."
 
   imports:
   - linux
@@ -128,7 +128,7 @@
         char *fmt = arg;
         i2c_smbus_read_word_data(arg);
       }
-  description: "i2c_smbus_read_word_data — reads a 16-bit register from an attached device."
+  description: "i2c_smbus_read_word_data - reads a 16-bit register from an attached device."
 
   imports:
   - linux
@@ -153,7 +153,7 @@
         char *fmt = arg;
         wiringPiI2CReadReg8(arg);
       }
-  description: "wiringPiI2CReadReg8 — 8-bit register read from a chip-to-chip bus."
+  description: "wiringPiI2CReadReg8 - 8-bit register read from a chip-to-chip bus."
 
 - id: c.phys.wiringpi_i2c_read_reg16
   enabled: true
@@ -175,7 +175,7 @@
         char *fmt = arg;
         wiringPiI2CReadReg16(arg);
       }
-  description: "wiringPiI2CReadReg16 — 16-bit register read from a peripheral."
+  description: "wiringPiI2CReadReg16 - 16-bit register read from a peripheral."
 
 - id: c.phys.serial_getchar
   enabled: true
@@ -197,7 +197,7 @@
         char *fmt = arg;
         serialGetchar(arg);
       }
-  description: "wiringPi serialGetchar — UART/serial byte received from external hardware."
+  description: "wiringPi serialGetchar - UART/serial byte received from external hardware."
 
 - id: c.phys.serialport_blocking_read
   enabled: true
@@ -220,7 +220,7 @@
         char buf[256];
         sp_blocking_read(port, buf, sizeof(buf), 1000);
       }
-  description: "libserialport sp_blocking_read — serial frame bytes from a connected device."
+  description: "libserialport sp_blocking_read - serial frame bytes from a connected device."
 
 - id: c.phys.wiringpi_spi_data_rw
   enabled: true
@@ -243,7 +243,7 @@
         unsigned char data[16];
         wiringPiSPIDataRW(0, data, sizeof(data));
       }
-  description: "wiringPiSPIDataRW — full-duplex SPI exchange reads peripheral response bytes."
+  description: "wiringPiSPIDataRW - full-duplex SPI exchange reads peripheral response bytes."
 
 - id: c.phys.mraa_gpio_read
   enabled: true
@@ -265,7 +265,7 @@
         char *fmt = arg;
         mraa_gpio_read(arg);
       }
-  description: "mraa_gpio_read — digital pin state from hardware."
+  description: "mraa_gpio_read - digital pin state from hardware."
 
 - id: c.phys.mraa_aio_read
   enabled: true
@@ -287,7 +287,7 @@
         char *fmt = arg;
         mraa_aio_read(arg);
       }
-  description: "mraa_aio_read — analog sensor sample from an attached device."
+  description: "mraa_aio_read - analog sensor sample from an attached device."
 
 - id: c.phys.analogread
   enabled: true
@@ -312,7 +312,7 @@
         char *fmt = arg;
         analogRead(arg);
       }
-  description: "Arduino analogRead — ADC sample from a physical pin."
+  description: "Arduino analogRead - ADC sample from a physical pin."
   imports:
   - Arduino.h
   - Arduino

@@ -21,7 +21,7 @@
     code: "sub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  system(\"\
       echo safe\")\n}\n"
     expect_no_match: true
-  description: "system() \u2014 Perl builtin. Single-string form invokes /bin/sh -c,\
+  description: "system() - Perl builtin. Single-string form invokes /bin/sh -c,\
     \ so any tainted substring is shell-metachar injection. List form is safer; taint-flow\
     \ + arg shape filters."
 - id: perl.cmdi.exec
@@ -47,7 +47,7 @@
     code: "sub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  exec(\"\
       echo safe\")\n}\n"
     expect_no_match: true
-  description: "exec() \u2014 Perl builtin (perlfunc). Same shell semantics as system()\
+  description: "exec() - Perl builtin (perlfunc). Same shell semantics as system()\
     \ for the single-string form; replaces current process. Bare-name match is correct:\
     \ this is a true language global."
 - id: perl.cmdi.qx_backticks
@@ -73,7 +73,7 @@
     code: "sub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  qx(\"\
       echo safe\")\n}\n"
     expect_no_match: true
-  description: "Backticks / qx// \u2014 Perl quote-like operator. Always runs via\
+  description: "Backticks / qx// - Perl quote-like operator. Always runs via\
     \ /bin/sh -c; tainted interpolation is direct shell injection. No package gate\
     \ possible."
 - id: perl.cmdi.open_pipe
@@ -95,7 +95,7 @@
   - name: perl.cmdi.open_pipe example
     code: "sub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  open(\"\
       |whoami\")\n}\n"
-  description: "open() with a leading or trailing `|` \u2014 Perl builtin pipe-open\
+  description: "open() with a leading or trailing `|` - Perl builtin pipe-open\
     \ form (`open(FH,\"|cmd\")` or `open(FH,\"cmd|\")`); spawns a shell. Tainted mode/filename\
     \ string = RCE. Pipe-shape regex narrows to actual pipe usage; bare-name is correct\
     \ because `open` is a Perl global. Also covers merged aliases: perl.path.open_concat."
@@ -126,7 +126,7 @@
     code: "use IPC::Open2;\nsub example {\n  my ($input, $url, $id, $payload, $request)\
       \ = @_;\n  my ($read, $write);\n  open2($read, $write, \"echo safe\")\n}\n"
     expect_no_match: true
-  description: "IPC::Open2 open2 \u2014 single-string form spawns a shell; tainted\
+  description: "IPC::Open2 open2 - single-string form spawns a shell; tainted\
     \ command = RCE."
 - id: perl.cmdi.ipc_open3
   enabled: true
@@ -155,7 +155,7 @@
       \ = @_;\n  my ($write, $read, $err);\n  open3($write, $read, $err, \"echo safe\"\
       )\n}\n"
     expect_no_match: true
-  description: "IPC::Open3 open3 \u2014 single-string form spawns a shell; tainted\
+  description: "IPC::Open3 open3 - single-string form spawns a shell; tainted\
     \ command = RCE."
 - id: perl.cmdi.ipc_run_run
   enabled: true
@@ -184,7 +184,7 @@
     code: "use IPC::Run;\nsub example {\n  my ($input, $url, $id, $payload, $request)\
       \ = @_;\n  IPC::Run->run(\"echo safe\")\n}\n"
     expect_no_match: true
-  description: "IPC::Run::run \u2014 shell-style harness; tainted argv or shell-string\
+  description: "IPC::Run::run - shell-style harness; tainted argv or shell-string\
     \ spec = RCE."
 - id: perl.cmdi.proc_simple
   enabled: true
@@ -211,7 +211,7 @@
     code: "use Proc::Simple;\nsub example {\n  my ($input, $url, $id, $payload, $request)\
       \ = @_;\n  Proc::Simple->start(\"echo safe\")\n}\n"
     expect_no_match: true
-  description: "Proc::Simple $p->start(STRING) \u2014 single-string form delegates\
+  description: "Proc::Simple $p->start(STRING) - single-string form delegates\
     \ to shell; tainted cmd = RCE."
 - id: perl.cmdi.proc_background
   enabled: true
@@ -240,5 +240,5 @@
     code: "use Proc::Background;\nsub example {\n  my ($input, $url, $id, $payload,\
       \ $request) = @_;\n  Proc::Background->new(\"echo safe\")\n}\n"
     expect_no_match: true
-  description: "Proc::Background->new(STRING) \u2014 single-string form forks a shell;\
+  description: "Proc::Background->new(STRING) - single-string form forks a shell;\
     \ tainted cmd = RCE."

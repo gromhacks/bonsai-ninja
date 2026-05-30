@@ -20,7 +20,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    new FileInputStream(\"\
       safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "new FileInputStream(tainted) \u2014 read arbitrary file."
+  description: "new FileInputStream(tainted) - read arbitrary file."
 - id: java.path.fileoutputstream
   enabled: true
   language: java
@@ -43,7 +43,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    new FileOutputStream(\"\
       safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "new FileOutputStream(tainted) \u2014 overwrite arbitrary file."
+  description: "new FileOutputStream(tainted) - overwrite arbitrary file."
 - id: java.path.file_reader_ctor
   enabled: true
   language: java
@@ -135,7 +135,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    new File(\"\
       safe\");\n  }\n}\nclass File {\n  File(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "new File(tainted_path) \u2014 flag path construction from untrusted input."
+  description: "new File(tainted_path) - flag path construction from untrusted input."
 - id: java.path.file_ctor_child
   enabled: true
   language: java
@@ -158,7 +158,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    new File(\"\
       safe\", \"child.txt\");\n  }\n}\nclass File {\n  File(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "new File(parent, tainted_child) \u2014 tainted child segments can escape the intended parent."
+  description: "new File(parent, tainted_child) - tainted child segments can escape the intended parent."
 - id: java.path.files_write
   enabled: true
   language: java
@@ -356,7 +356,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Files.copy(\"\
       safe\", \"dest\");\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.copy(tainted_source, dest) \u2014 attacker-controlled source path."
+  description: "java.nio.file.Files.copy(tainted_source, dest) - attacker-controlled source path."
 - id: java.path.files_copy_dest
   enabled: true
   language: java
@@ -381,7 +381,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Files.copy(\"\
       safe\", \"dest\");\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.copy(source, tainted_dest) \u2014 attacker-controlled destination path."
+  description: "java.nio.file.Files.copy(source, tainted_dest) - attacker-controlled destination path."
 - id: java.path.path_resolve
   enabled: true
   language: java
@@ -407,7 +407,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    resolve(\"\
       safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "Path.resolve(tainted child) \u2014 attacker-controlled path segment\
+  description: "Path.resolve(tainted child) - attacker-controlled path segment\
     \ joined under a base path before file read/copy APIs."
 - id: java.path.files_move
   enabled: true
@@ -433,7 +433,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Files.move(\"\
       safe\", \"dest\");\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.move(tainted_source, dest) \u2014 attacker-controlled source path."
+  description: "java.nio.file.Files.move(tainted_source, dest) - attacker-controlled source path."
 - id: java.path.files_move_dest
   enabled: true
   language: java
@@ -458,7 +458,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Files.move(\"\
       safe\", \"dest\");\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.move(source, tainted_dest) \u2014 attacker-controlled destination path."
+  description: "java.nio.file.Files.move(source, tainted_dest) - attacker-controlled destination path."
 - id: java.path.paths_get
   enabled: true
   language: java
@@ -498,7 +498,7 @@
         }
       }
     expect_no_match: true
-  description: "java.nio.file.Paths.get(tainted) — constructs a filesystem path from attacker-controlled input."
+  description: "java.nio.file.Paths.get(tainted) - constructs a filesystem path from attacker-controlled input."
 - id: java.path.filesystem_getpath
   enabled: true
   language: java
@@ -523,7 +523,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    FileSystem.getPath(\"\
       safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "FileSystem.getPath(tainted_first, more...) \u2014 path construction from untrusted input."
+  description: "FileSystem.getPath(tainted_first, more...) - path construction from untrusted input."
 - id: java.path.filesystem_getpath_more
   enabled: true
   language: java
@@ -548,7 +548,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    FileSystem.getPath(\"\
       safe\", \"child.txt\");\n  }\n}\n"
     expect_no_match: true
-  description: "FileSystem.getPath(first, tainted_more) \u2014 tainted path segments can escape the intended root."
+  description: "FileSystem.getPath(first, tainted_more) - tainted path segments can escape the intended root."
 - id: java.path.commons_fileutils_read_file_to_string
   enabled: true
   language: java
@@ -742,4 +742,4 @@
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    ZipEntry.getName(input);\n\
       \  }\n}\n"
-  description: "Disabled — ZipEntry.getName() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
+  description: "Disabled - ZipEntry.getName() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."

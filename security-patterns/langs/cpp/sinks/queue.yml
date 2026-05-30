@@ -29,7 +29,7 @@
         SQSClient::SendMessage("safe");
       }
     expect_no_match: true
-  description: "AWS SDK C++ SQSClient::SendMessage — tainted queue target/body injects arbitrary SQS messages."
+  description: "AWS SDK C++ SQSClient::SendMessage - tainted queue target/body injects arbitrary SQS messages."
 
 - id: cpp.queue.aws_sns_publish
   enabled: false
@@ -44,7 +44,7 @@
     kind: call
     callee:
       attribute: [SNSClient, Publish]
-  description: "Disabled — SNS Publish is real queue fanout, but `Publish` is shared across several non-queue APIs in C++ bindings."
+  description: "Disabled - SNS Publish is real queue fanout, but `Publish` is shared across several non-queue APIs in C++ bindings."
 
 - id: cpp.queue.azure_servicebus_send_message
   enabled: true
@@ -77,4 +77,4 @@
         ServiceBusSender::SendMessage("safe");
       }
     expect_no_match: true
-  description: "Azure ServiceBusSender::SendMessage — tainted entity path/payload injects arbitrary Service Bus messages."
+  description: "Azure ServiceBusSender::SendMessage - tainted entity path/payload injects arbitrary Service Bus messages."

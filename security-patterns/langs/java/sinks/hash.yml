@@ -33,7 +33,7 @@
         }
       }
     expect_no_match: true
-  description: 'MessageDigest.getInstance("SHA1"/"SHA-1") — collision-weakened hash.'
+  description: 'MessageDigest.getInstance("SHA1"/"SHA-1") - collision-weakened hash.'
 
 - id: java.hash.messagedigest_dynamic_algorithm
   enabled: true
@@ -73,4 +73,4 @@
         }
       }
     expect_no_match: true
-  description: "MessageDigest.getInstance(dynamicAlgorithm) — algorithm is not a literal known-safe digest."
+  description: "MessageDigest.getInstance(dynamicAlgorithm) - algorithm is not a literal known-safe digest."

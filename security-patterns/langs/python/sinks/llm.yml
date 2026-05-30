@@ -25,7 +25,7 @@
   - name: llm openai chat literal negative
     code: "import openai\ndef example(user_input):\n    return openai.ChatCompletion.create({\"messages\": [{\"role\": \"user\", \"content\": \"safe\"}]})\n"
     expect_no_match: true
-  description: "OpenAI ChatCompletion.create — prompt may include tainted input."
+  description: "OpenAI ChatCompletion.create - prompt may include tainted input."
 - id: python.llm.openai_chat_completions_create
   enabled: true
   language: python
@@ -53,7 +53,7 @@
   - name: llm openai chat completions literal negative
     code: "import openai\ndef example(user_input):\n    return openai.chat.completions.create({\"messages\": [{\"role\": \"user\", \"content\": \"safe\"}]})\n"
     expect_no_match: true
-  description: "openai.chat.completions.create — tainted prompt content reaches an LLM tool / instruction surface."
+  description: "openai.chat.completions.create - tainted prompt content reaches an LLM tool / instruction surface."
 - id: python.llm.openai_responses_create
   enabled: true
   language: python
@@ -81,7 +81,7 @@
   - name: llm openai responses literal negative
     code: "import openai\ndef example(user_input):\n    return openai.responses.create({\"input\": \"safe\"})\n"
     expect_no_match: true
-  description: "openai.responses.create — tainted input can steer model output, tool calls, or data disclosure."
+  description: "openai.responses.create - tainted input can steer model output, tool calls, or data disclosure."
 - id: python.llm.langchain_run
   enabled: false
   disabled_reason:
@@ -102,7 +102,7 @@
       attribute:
       - chain
       - run
-  description: "Disabled — chain.run is too broad without receiver typing; use app-specific LangChain sink rules for concrete chains/agents."
+  description: "Disabled - chain.run is too broad without receiver typing; use app-specific LangChain sink rules for concrete chains/agents."
 - id: python.llm.langchain_invoke
   enabled: false
   disabled_reason:
@@ -124,7 +124,7 @@
       attribute:
       - chain
       - invoke
-  description: "Disabled — chain.invoke is the modern LCEL entrypoint but `invoke` is too generic; enable with concrete chain typing."
+  description: "Disabled - chain.invoke is the modern LCEL entrypoint but `invoke` is too generic; enable with concrete chain typing."
 - id: python.llm.anthropic_messages_create
   enabled: true
   language: python
@@ -155,7 +155,7 @@
   - name: llm anthropic messages literal negative
     code: "import anthropic\ndef example(user_input):\n    return client.messages.create({\"messages\": [{\"role\": \"user\", \"content\": \"safe\"}]})\n"
     expect_no_match: true
-  description: "anthropic client.messages.create — tainted user content can hijack instructions, exfiltrate via tool_use, or inject untrusted output."
+  description: "anthropic client.messages.create - tainted user content can hijack instructions, exfiltrate via tool_use, or inject untrusted output."
 - id: python.llm.cohere_chat
   enabled: true
   language: python
@@ -184,7 +184,7 @@
   - name: llm cohere chat literal negative
     code: "import cohere\ndef example(user_input):\n    return client.chat(\"safe prompt\")\n"
     expect_no_match: true
-  description: "cohere client.chat — tainted user message steers Cohere chat completions. `min_args: 1` rejects unrelated `client.chat()` 0-arg accessors (chat-room/IM helpers that share the verb)."
+  description: "cohere client.chat - tainted user message steers Cohere chat completions. `min_args: 1` rejects unrelated `client.chat()` 0-arg accessors (chat-room/IM helpers that share the verb)."
 - id: python.llm.boto3_bedrock_invokemodel
   enabled: true
   language: python
@@ -211,7 +211,7 @@
   - name: llm boto3 bedrock invokemodel literal negative
     code: "import boto3\ndef example(user_input):\n    return bedrock.invoke_model(body='{\"prompt\":\"safe\"}')\n"
     expect_no_match: true
-  description: "boto3 bedrock-runtime invoke_model — tainted body steers underlying foundation model (Claude/Llama/Titan)."
+  description: "boto3 bedrock-runtime invoke_model - tainted body steers underlying foundation model (Claude/Llama/Titan)."
 - id: python.llm.google_genai_generate_content
   enabled: true
   language: python
@@ -239,7 +239,7 @@
   - name: llm google genai generate content literal negative
     code: "import googlegenerativeai\ndef example(user_input):\n    return model.generate_content(\"safe prompt\")\n"
     expect_no_match: true
-  description: "google.generativeai model.generate_content — tainted prompt steers Gemini output and tool calls. `min_args: 1` rejects 0-arg decoys."
+  description: "google.generativeai model.generate_content - tainted prompt steers Gemini output and tool calls. `min_args: 1` rejects 0-arg decoys."
   imports:
   - googlegenerativeai
 
@@ -282,7 +282,7 @@
       def example():
           return LLMChain.invoke({"question": "What is 2+2?"})
     expect_no_match: true
-  description: "LangChain LLMChain.invoke(tainted) — attacker-controlled chain input drives the LLM, can hijack instructions, exfiltrate tool data, or drive tool calls."
+  description: "LangChain LLMChain.invoke(tainted) - attacker-controlled chain input drives the LLM, can hijack instructions, exfiltrate tool data, or drive tool calls."
 
 - id: python.llm.langchain_agent_run
   enabled: true
@@ -324,7 +324,7 @@
       class AgentExecutor:
           def run(self, *args): pass
     expect_no_match: true
-  description: "LangChain agent.run(tainted) / executor.run(tainted) — agent instruction surface; attacker can steer tool calls, leak data, or escape system prompt."
+  description: "LangChain agent.run(tainted) / executor.run(tainted) - agent instruction surface; attacker can steer tool calls, leak data, or escape system prompt."
 
 - id: python.llm.langchain_chain_ainvoke
   enabled: true
@@ -367,7 +367,7 @@
       class Runnable:
           async def ainvoke(self, *args): pass
     expect_no_match: true
-  description: "LangChain chain.ainvoke(tainted) / runnable.ainvoke — async LCEL invocation with attacker-controlled input drives downstream LLM/tool surface."
+  description: "LangChain chain.ainvoke(tainted) / runnable.ainvoke - async LCEL invocation with attacker-controlled input drives downstream LLM/tool surface."
 
 - id: python.llm.mistralai_chat
   enabled: true
@@ -402,7 +402,7 @@
       def example(user_input):
           return client.chat(messages=[{"role": "user", "content": "safe"}])
     expect_no_match: true
-  description: "mistralai client.chat — tainted message content drives Mistral chat completions; prompt-injection / instruction-hijack risk."
+  description: "mistralai client.chat - tainted message content drives Mistral chat completions; prompt-injection / instruction-hijack risk."
 
 - id: python.llm.openai_assistants_runs_create
   enabled: true
@@ -438,4 +438,4 @@
       def example():
           return openai.beta.threads.runs.create(thread_id="t-1", assistant_id="a-1", instructions="Be concise.")
     expect_no_match: true
-  description: "openai.beta.threads.runs.create(instructions=tainted) — Assistants API run override; attacker-controlled instructions hijack the agent's system prompt."
+  description: "openai.beta.threads.runs.create(instructions=tainted) - Assistants API run override; attacker-controlled instructions hijack the agent's system prompt."

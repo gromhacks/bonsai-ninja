@@ -27,7 +27,7 @@
         log.Println(user)
       }
     expect_no_match: true
-  description: "log.Println(... + tainted) / log.Println(fmt.Sprintf(...)) — CRLF in attacker text forges log entries."
+  description: "log.Println(... + tainted) / log.Println(fmt.Sprintf(...)) - CRLF in attacker text forges log entries."
 - id: go.log_injection.log_print_concat
   enabled: true
   language: go
@@ -57,7 +57,7 @@
         log.Print(user)
       }
     expect_no_match: true
-  description: "log.Print — log-injection via concat / Sprintf."
+  description: "log.Print - log-injection via concat / Sprintf."
 - id: go.log_injection.log_fatal_concat
   enabled: true
   language: go
@@ -87,7 +87,7 @@
         log.Fatal(user)
       }
     expect_no_match: true
-  description: "log.Fatal — log-injection via concat / Sprintf."
+  description: "log.Fatal - log-injection via concat / Sprintf."
 - id: go.log_injection.log_panic_concat
   enabled: true
   language: go
@@ -117,7 +117,7 @@
         log.Panic(user)
       }
     expect_no_match: true
-  description: "log.Panic — log-injection via concat / Sprintf."
+  description: "log.Panic - log-injection via concat / Sprintf."
 - id: go.log_injection.logger_info_concat
   enabled: true
   language: go
@@ -147,7 +147,7 @@
         logger.Info(user)
       }
     expect_no_match: true
-  description: "logger.Info(... + tainted) — log-injection via concat (logrus/zap/slog)."
+  description: "logger.Info(... + tainted) - log-injection via concat (logrus/zap/slog)."
 - id: go.log_injection.slog_info_concat
   enabled: true
   language: go
@@ -182,7 +182,7 @@
         slog.Info(user)
       }
     expect_no_match: true
-  description: "slog.Info(... + tainted) — concatenated attacker text in structured log messages can forge log entries. Merged aliases: go.log_injection.slog_info_message, go.log_injection.slog_info_constant_message_arg."
+  description: "slog.Info(... + tainted) - concatenated attacker text in structured log messages can forge log entries. Merged aliases: go.log_injection.slog_info_message, go.log_injection.slog_info_constant_message_arg."
   aliases:
   - go.log_injection.slog_info_message
   - go.log_injection.slog_info_constant_message_arg
@@ -264,7 +264,7 @@
       type Event struct{}
       func (e Event) Msg(msg string) {}
     expect_no_match: true
-  description: "zerolog Event.Msg(taintedMessage) — attacker-controlled log message text can forge log output. Merged aliases: go.log_injection.zerolog_msg_concat."
+  description: "zerolog Event.Msg(taintedMessage) - attacker-controlled log message text can forge log output. Merged aliases: go.log_injection.zerolog_msg_concat."
   aliases:
   - go.log_injection.zerolog_msg_concat
 - id: go.log_injection.logger_error_concat
@@ -296,4 +296,4 @@
         logger.Error(user)
       }
     expect_no_match: true
-  description: "logger.Error(... + tainted) — log-injection via concat."
+  description: "logger.Error(... + tainted) - log-injection via concat."

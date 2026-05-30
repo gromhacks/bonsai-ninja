@@ -25,7 +25,7 @@
       def example(user_input):
           return cursor.execute('safe')
     expect_no_match: true
-  description: "DB-API cursor.execute — flag string-built SQL. Package gate names the canonical DB-API drivers (sqlite3 stdlib + popular wheels) so the rule is constrained to files that actually load one."
+  description: "DB-API cursor.execute - flag string-built SQL. Package gate names the canonical DB-API drivers (sqlite3 stdlib + popular wheels) so the rule is constrained to files that actually load one."
 
 - id: python.sqli.cursor_executemany
   enabled: true
@@ -81,7 +81,7 @@
       def example(user_input):
           return cursor.executescript('safe')
     expect_no_match: true
-  description: "sqlite3 cursor.executescript — multi-statement. sqlite3-only DB-API extension."
+  description: "sqlite3 cursor.executescript - multi-statement. sqlite3-only DB-API extension."
 
 - id: python.sqli.connection_execute
   enabled: true
@@ -122,7 +122,7 @@
       def example(conn: sqlite3.Connection, user_input):
           return conn.execute('safe')
     expect_no_match: true
-  description: "Connection.execute — sqlite3/asyncpg/aiosqlite typed connection receivers. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical)."
+  description: "Connection.execute - sqlite3/asyncpg/aiosqlite typed connection receivers. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical)."
 
 - id: python.sqli.named_connection_execute
   enabled: true
@@ -197,7 +197,7 @@
       def example(user_input):
           return Cursor.execute('safe')
     expect_no_match: true
-  description: "psycopg2/psycopg/aiopg Cursor.execute — placeholders parameterise; string-built SQL does not."
+  description: "psycopg2/psycopg/aiopg Cursor.execute - placeholders parameterise; string-built SQL does not."
 
 - id: python.sqli.asyncpg_connection_execute
   enabled: false
@@ -230,7 +230,7 @@
       async def example(conn: asyncpg.Connection):
           return await conn.execute('safe')
     expect_no_match: true
-  description: "asyncpg Connection.execute(string) — the `$1` placeholders are the sanitizer, not the executor. DB-API exempt from SQL-keyword arg shape; `min_args: 1` rejects 0-arg decoys."
+  description: "asyncpg Connection.execute(string) - the `$1` placeholders are the sanitizer, not the executor. DB-API exempt from SQL-keyword arg shape; `min_args: 1` rejects 0-arg decoys."
 
 - id: python.sqli.asyncpg_connection_fetch
   enabled: true
@@ -259,7 +259,7 @@
       def example(user_input):
           return Connection.fetch('safe')
     expect_no_match: true
-  description: "asyncpg Connection.fetch(string) — same risk as execute. DB-API exempt; `min_args: 1` rejects 0-arg decoys."
+  description: "asyncpg Connection.fetch(string) - same risk as execute. DB-API exempt; `min_args: 1` rejects 0-arg decoys."
 
 - id: python.sqli.asyncpg_connection_fetchrow
   enabled: true
@@ -349,7 +349,7 @@
       async def example(conn):
           return await conn.fetch('select 1')
     expect_no_match: true
-  description: "asyncpg variable receiver .fetch(sql) — package-gated receiver-agnostic rule for dynamically typed connection variables."
+  description: "asyncpg variable receiver .fetch(sql) - package-gated receiver-agnostic rule for dynamically typed connection variables."
 
 - id: python.sqli.asyncpg_conn_fetchrow
   enabled: true
@@ -379,7 +379,7 @@
       async def example(conn):
           return await conn.fetchrow('select 1')
     expect_no_match: true
-  description: "asyncpg variable receiver .fetchrow(sql) — package-gated receiver-agnostic rule for dynamically typed connection variables."
+  description: "asyncpg variable receiver .fetchrow(sql) - package-gated receiver-agnostic rule for dynamically typed connection variables."
 
 - id: python.sqli.asyncpg_conn_fetchval
   enabled: true
@@ -409,7 +409,7 @@
       async def example(conn):
           return await conn.fetchval('select 1')
     expect_no_match: true
-  description: "asyncpg variable receiver .fetchval(sql) — package-gated receiver-agnostic rule for dynamically typed connection variables."
+  description: "asyncpg variable receiver .fetchval(sql) - package-gated receiver-agnostic rule for dynamically typed connection variables."
 
 - id: python.sqli.asyncpg_conn_execute
   enabled: false
@@ -533,7 +533,7 @@
       def example(user_input):
           return sqlalchemy.text('safe')
     expect_no_match: true
-  description: "sqlalchemy.text(tainted) — wraps raw SQL without binding; only safe when the argument is a literal."
+  description: "sqlalchemy.text(tainted) - wraps raw SQL without binding; only safe when the argument is a literal."
 
 - id: python.sqli.sqlalchemy_engine_execute
   enabled: true
@@ -562,7 +562,7 @@
       def example(user_input):
           return Engine.execute('safe')
     expect_no_match: true
-  description: "SQLAlchemy Engine.execute — raw SQL string."
+  description: "SQLAlchemy Engine.execute - raw SQL string."
 
 - id: python.sqli.sqlalchemy_engine_execute_variable
   enabled: false
@@ -667,7 +667,7 @@
     kind: call
     callee:
       attribute: [connection, cursor]
-  description: "Disabled — connection.cursor() is setup, not a sink; the injection point is the downstream cursor.execute(string). Covered by python.sqli.cursor_execute."
+  description: "Disabled - connection.cursor() is setup, not a sink; the injection point is the downstream cursor.execute(string). Covered by python.sqli.cursor_execute."
 
 - id: python.sqli.django_extra
   enabled: true
@@ -703,7 +703,7 @@
       def example(qs):
           return qs.extra(where=["is_active = true"])
     expect_no_match: true
-  description: "Django QuerySet.extra(where=…/select=…/tables=…/order_by=…). Taint reachability determines whether a caller-controlled value reaches the API. Merged aliases: python.sqli.django_queryset_extra_order_by."
+  description: "Django QuerySet.extra(where=.../select=.../tables=.../order_by=...). Taint reachability determines whether a caller-controlled value reaches the API. Merged aliases: python.sqli.django_queryset_extra_order_by."
   aliases:
   - python.sqli.django_queryset_extra_order_by
 
@@ -720,7 +720,7 @@
     kind: call
     callee:
       name: extra
-  description: "Disabled duplicate — same `extra(...)` adapter fact as python.sqli.django_extra; keep the broader Django QuerySet.extra sink as canonical."
+  description: "Disabled duplicate - same `extra(...)` adapter fact as python.sqli.django_extra; keep the broader Django QuerySet.extra sink as canonical."
 
 - id: python.sqli.django_filter_lookup
   enabled: false
@@ -735,7 +735,7 @@
     kind: call
     callee:
       attribute: [objects, filter]
-  description: "Disabled — Django ORM filter is parameterised."
+  description: "Disabled - Django ORM filter is parameterised."
 
 - id: python.sqli.peewee_execute_sql
   enabled: true
@@ -1002,7 +1002,7 @@
       def example(user_input):
           return Connection.executescript('safe')
     expect_no_match: true
-  description: "sqlite3 Connection.executescript — runs the whole string as SQL; no parameter binding available. Signature: `executescript(sql_script)` — exactly 1 arg; bounds reject same-name decoys."
+  description: "sqlite3 Connection.executescript - runs the whole string as SQL; no parameter binding available. Signature: `executescript(sql_script)` - exactly 1 arg; bounds reject same-name decoys."
 
 - id: python.sqli.databases_execute
   enabled: true

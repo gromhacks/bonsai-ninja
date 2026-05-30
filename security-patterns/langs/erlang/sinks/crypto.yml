@@ -28,7 +28,7 @@
         test(Input) ->
           crypto:hash(sha256, Input).
       expect_no_match: true
-  description: "crypto:hash — algorithm argument may be md5/sha (collision-broken); use sha256+."
+  description: "crypto:hash - algorithm argument may be md5/sha (collision-broken); use sha256+."
 - id: erlang.crypto.des
   enabled: true
   language: erlang
@@ -58,7 +58,7 @@
         test(Input) ->
           crypto:block_encrypt(aes_gcm, <<"1234567890123456">>, Input).
       expect_no_match: true
-  description: "crypto:block_encrypt — flag des_cbc/3des/rc4/aes_ecb (no integrity/weak or ECB mode)."
+  description: "crypto:block_encrypt - flag des_cbc/3des/rc4/aes_ecb (no integrity/weak or ECB mode)."
 - id: erlang.crypto.rand_uniform
   enabled: true
   language: erlang
@@ -77,4 +77,4 @@
         -export([test/1]).
         test(Input) ->
           random:uniform(Input).
-  description: "random:uniform / rand:uniform — PRNG seeded from wall clock; not for tokens/keys. Use crypto:strong_rand_bytes."
+  description: "random:uniform / rand:uniform - PRNG seeded from wall clock; not for tokens/keys. Use crypto:strong_rand_bytes."

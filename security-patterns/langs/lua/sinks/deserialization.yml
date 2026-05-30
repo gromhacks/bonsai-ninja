@@ -27,7 +27,7 @@
         marshal.decode("cached-state")
       end
     expect_no_match: true
-  description: "lua-marshal marshal.decode — deserialises arbitrary Lua values including functions/upvalues; tainted blob = RCE."
+  description: "lua-marshal marshal.decode - deserialises arbitrary Lua values including functions/upvalues; tainted blob = RCE."
 
 - id: lua.deser.lua_marshal_load_alt
   enabled: true
@@ -57,7 +57,7 @@
         marshal.load("cached-state")
       end
     expect_no_match: true
-  description: "lua-marshal marshal.load — legacy alias for marshal.decode."
+  description: "lua-marshal marshal.load - legacy alias for marshal.decode."
 
 - id: lua.deser.pickle_unpickle
   enabled: true
@@ -87,7 +87,7 @@
         pickle.unpickle("safe")
       end
     expect_no_match: true
-  description: "luapickle pickle.unpickle — deserialises Lua objects by eval()ing them; tainted input is RCE."
+  description: "luapickle pickle.unpickle - deserialises Lua objects by eval()ing them; tainted input is RCE."
 
 - id: lua.deser.persistence_load
   enabled: true
@@ -117,7 +117,7 @@
         persistence.load("state.lua")
       end
     expect_no_match: true
-  description: "persistence.lua persistence.load — loadfile/load of the persisted chunk; tainted file is RCE."
+  description: "persistence.lua persistence.load - loadfile/load of the persisted chunk; tainted file is RCE."
 
 - id: lua.deser.serpent_load
   enabled: true
@@ -147,7 +147,7 @@
         serpent.load("{answer = 42}")
       end
     expect_no_match: true
-  description: "serpent.load(src, {safe=false}) — evaluates serialised tables via load(); unsafe mode is RCE."
+  description: "serpent.load(src, {safe=false}) - evaluates serialised tables via load(); unsafe mode is RCE."
 
 - id: lua.deser.loadstring
   enabled: false
@@ -161,7 +161,7 @@
     kind: call
     callee:
       name: loadstring
-  description: "Disabled — canonical rule is lua.eval.loadstring; tracked in eval.yml as code-injection."
+  description: "Disabled - canonical rule is lua.eval.loadstring; tracked in eval.yml as code-injection."
 
 - id: lua.deser.load_bytecode
   enabled: false
@@ -175,7 +175,7 @@
     kind: call
     callee:
       name: load
-  description: "Disabled — canonical rule is lua.eval.load; tracked in eval.yml as code-injection."
+  description: "Disabled - canonical rule is lua.eval.load; tracked in eval.yml as code-injection."
 
 - id: lua.deser.cjson_decode
   enabled: false
@@ -190,4 +190,4 @@
     kind: call
     callee:
       attribute: [cjson, decode]
-  description: "Disabled — cjson.decode emits typed Lua tables/primitives only; not a deserialisation gadget surface."
+  description: "Disabled - cjson.decode emits typed Lua tables/primitives only; not a deserialisation gadget surface."

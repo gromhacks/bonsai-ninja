@@ -28,7 +28,7 @@
         store!("avatar.png")
       end
     expect_no_match: true
-  description: "CarrierWave Uploader#store! — flag when dest filename is tainted."
+  description: "CarrierWave Uploader#store! - flag when dest filename is tainted."
 
 - id: ruby.upload.shrine_upload
   enabled: true
@@ -58,7 +58,7 @@
         Shrine.upload("avatar.png")
       end
     expect_no_match: true
-  description: "Shrine upload with tainted storage path / filename — attacker-controlled uploads can escape the storage root."
+  description: "Shrine upload with tainted storage path / filename - attacker-controlled uploads can escape the storage root."
 
 - id: ruby.upload.activestorage_attach
   enabled: true
@@ -88,7 +88,7 @@
         attach("avatar.png")
       end
     expect_no_match: true
-  description: "ActiveStorage attach — user-controlled attachment metadata."
+  description: "ActiveStorage attach - user-controlled attachment metadata."
 
 - id: ruby.upload.paperclip_assign
   enabled: false
@@ -103,4 +103,4 @@
     kind: write
     target:
       name: avatar
-  description: "Disabled — Paperclip has-attached-file assignment requires per-model shape to avoid noise."
+  description: "Disabled - Paperclip has-attached-file assignment requires per-model shape to avoid noise."

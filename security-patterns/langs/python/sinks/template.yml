@@ -34,7 +34,7 @@
       def example(user_input):
           return Environment.from_string('safe')
     expect_no_match: true
-  description: "Jinja2 Environment.from_string(tainted) — SSTI to RCE in default config."
+  description: "Jinja2 Environment.from_string(tainted) - SSTI to RCE in default config."
 - id: python.template.jinja2_env_from_string_instance
   enabled: true
   language: python
@@ -189,7 +189,7 @@
       def example(user_input):
           return mako.Template('safe', '{{ user }}')
     expect_no_match: true
-  description: "mako.template.Template(tainted) — RCE via Python evaluation blocks."
+  description: "mako.template.Template(tainted) - RCE via Python evaluation blocks."
 - id: python.template.mako_template_lookup
   enabled: true
   language: python
@@ -410,7 +410,7 @@
       attribute:
       - Template
       - substitute
-  description: "Disabled — string.Template only does $var substitution; not RCE."
+  description: "Disabled - string.Template only does $var substitution; not RCE."
 - id: python.template.tornado_template_string
   enabled: true
   language: python
@@ -449,7 +449,7 @@
       def example(user_input):
           return tornado.Template('safe', '{{ user }}')
     expect_no_match: true
-  description: "tornado.template.Template(tainted) — Python in template tags."
+  description: "tornado.template.Template(tainted) - Python in template tags."
 - id: python.template.cheetah_template
   enabled: false
   disabled_reason:
@@ -466,7 +466,7 @@
     kind: new
     callee:
       name: Template
-  description: "Disabled — bare `Template(...)` collides with jinja2.Template / mako.Template / string.Template and many app-level classes named Template. Re-enable when a qualified-name match for `Cheetah.Template.Template` is wired up."
+  description: "Disabled - bare `Template(...)` collides with jinja2.Template / mako.Template / string.Template and many app-level classes named Template. Re-enable when a qualified-name match for `Cheetah.Template.Template` is wired up."
 - id: python.template.airflow_jinja_render
   enabled: false
   disabled_reason:
@@ -484,7 +484,7 @@
       attribute:
       - Template
       - render
-  description: "Disabled — Airflow Jinja templating; flag with op_kwargs source."
+  description: "Disabled - Airflow Jinja templating; flag with op_kwargs source."
 - id: python.template.jinja2_environment_ctor
   enabled: true
   language: python
@@ -510,7 +510,7 @@
       import jinja2
       def example(user_input):
           return jinja2.Environment(user_input, "{{ user }}")
-  description: "jinja2.Environment(...) — config-shape sink; flag the call so a downstream auditor can verify autoescape=True and a non-FileSystemLoader root. Merged aliases: python.template.jinja2_environment_autoescape_off."
+  description: "jinja2.Environment(...) - config-shape sink; flag the call so a downstream auditor can verify autoescape=True and a non-FileSystemLoader root. Merged aliases: python.template.jinja2_environment_autoescape_off."
   aliases:
   - python.template.jinja2_environment_autoescape_off
   - python.xss.jinja2_environment_autoescape_false
@@ -534,7 +534,7 @@
     kind: call
     callee:
       regex: ^render_template_string$
-  description: "Disabled duplicate of python.template.flask_render_template_string — alias expansion already covers `from flask import render_template_string`."
+  description: "Disabled duplicate of python.template.flask_render_template_string - alias expansion already covers `from flask import render_template_string`."
 - id: python.template.jinja2_native_environment
   enabled: true
   language: python
@@ -569,7 +569,7 @@
       def example(user_input):
           return NativeEnvironment.from_string('safe', '{{ user }}')
     expect_no_match: true
-  description: "jinja2.nativetypes.NativeEnvironment.from_string(tainted) — evaluates Python literal expressions in the template; SSTI -> arbitrary expr."
+  description: "jinja2.nativetypes.NativeEnvironment.from_string(tainted) - evaluates Python literal expressions in the template; SSTI -> arbitrary expr."
 - id: python.template.jinja2_environment_no_autoescape
   enabled: true
   language: python
@@ -592,7 +592,7 @@
       import jinja2
       def example(user_input):
           return Environment.init(user_input, "autoescape=False")
-  description: "Environment init with autoescape=False — same XSS exposure."
+  description: "Environment init with autoescape=False - same XSS exposure."
 
 - id: python.template.jinja2_sandboxed_environment_from_string
   enabled: true
@@ -630,4 +630,4 @@
       def example(env):
           return SandboxedEnvironment.from_string('Hello {{ name }}')
     expect_no_match: true
-  description: "jinja2.sandbox.SandboxedEnvironment.from_string(tainted) — sandbox raises SecurityError on most attribute access but historic bypass vectors (str.format, mro chains, magic dunders) recur; tainted templates remain untrusted code."
+  description: "jinja2.sandbox.SandboxedEnvironment.from_string(tainted) - sandbox raises SecurityError on most attribute access but historic bypass vectors (str.format, mro chains, magic dunders) recur; tainted templates remain untrusted code."

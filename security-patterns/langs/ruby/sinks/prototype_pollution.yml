@@ -1,6 +1,6 @@
 # ruby prototype_pollution sinks.
 
-# Prototype-pollution sinks (round 3 — cross-language).
+# Prototype-pollution sinks (round 3 - cross-language).
 - id: ruby.proto_pollution.deep_merge_bang
   enabled: true
   language: ruby
@@ -29,4 +29,4 @@
         Hash.deep_merge!({feature: true})
       end
     expect_no_match: true
-  description: 'Hash#deep_merge!(params) — ActiveSupport recursive merge into the receiver; attacker keys shadow defaults including config flags.'
+  description: 'Hash#deep_merge!(params) - ActiveSupport recursive merge into the receiver; attacker keys shadow defaults including config flags.'

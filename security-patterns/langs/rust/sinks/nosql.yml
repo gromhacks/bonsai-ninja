@@ -27,7 +27,7 @@
           Collection::find(doc! {"status": "active"});
       }
     expect_no_match: true
-  description: "mongodb Collection::find — tainted Document filter enables NoSQL operator-injection ($where, $expr, $regex)."
+  description: "mongodb Collection::find - tainted Document filter enables NoSQL operator-injection ($where, $expr, $regex)."
 - id: rust.nosql.mongodb_collection_find_one
   enabled: true
   language: rust
@@ -56,7 +56,7 @@
           Collection::find_one(doc! {"status": "active"});
       }
     expect_no_match: true
-  description: "mongodb Collection::find_one — tainted Document filter enables auth-bypass via operator-injection ($ne, $gt)."
+  description: "mongodb Collection::find_one - tainted Document filter enables auth-bypass via operator-injection ($ne, $gt)."
 
 - id: rust.nosql.mongodb_collection_aggregate
   enabled: true
@@ -86,7 +86,7 @@
           Collection::aggregate(vec![doc! {"$match": {"status": "active"}}]);
       }
     expect_no_match: true
-  description: "mongodb Collection::aggregate — tainted pipeline stages enable $lookup/$out data exfiltration and server-side script abuse."
+  description: "mongodb Collection::aggregate - tainted pipeline stages enable $lookup/$out data exfiltration and server-side script abuse."
 
 - id: rust.nosql.mongodb_database_run_command
   enabled: true
@@ -116,7 +116,7 @@
           Database::run_command(doc! {"ping": 1});
       }
     expect_no_match: true
-  description: "mongodb Database::run_command — executes raw bson::Document; tainted fields bypass typed query builders."
+  description: "mongodb Database::run_command - executes raw bson::Document; tainted fields bypass typed query builders."
 - id: rust.nosql.mongodb_collection_update_many
   enabled: true
   language: rust
@@ -145,7 +145,7 @@
           Collection::update_many(doc! {"status": "active"}, update);
       }
     expect_no_match: true
-  description: "mongodb Collection::update_many — tainted filter/update doc enables operator-injection ($where, $expr)."
+  description: "mongodb Collection::update_many - tainted filter/update doc enables operator-injection ($where, $expr)."
 - id: rust.nosql.mongodb_collection_update_many_update
   enabled: true
   language: rust
@@ -174,7 +174,7 @@
           Collection::update_many(doc! {"status": "active"}, doc! {"$set": {"flag": true}});
       }
     expect_no_match: true
-  description: "mongodb Collection::update_many(filter, update) — tainted update documents can inject operators or alter unintended fields."
+  description: "mongodb Collection::update_many(filter, update) - tainted update documents can inject operators or alter unintended fields."
 - id: rust.nosql.mongodb_collection_delete_many
   enabled: true
   language: rust
@@ -203,7 +203,7 @@
           Collection::delete_many(doc! {"status": "expired"});
       }
     expect_no_match: true
-  description: "mongodb Collection::delete_many — tainted filter can match unintended docs."
+  description: "mongodb Collection::delete_many - tainted filter can match unintended docs."
 
 - id: rust.nosql.redis_cmd_eval
   enabled: true
@@ -272,7 +272,7 @@
           Session::query("select * from users where id = ?");
       }
     expect_no_match: true
-  description: "scylla / cdrs-tokio Session::query — tainted CQL string = CQL injection (use prepared statements with bind values)."
+  description: "scylla / cdrs-tokio Session::query - tainted CQL string = CQL injection (use prepared statements with bind values)."
 
 - id: rust.nosql.elasticsearch_search
   enabled: false
@@ -296,4 +296,4 @@
           let query = "user";
           Elasticsearch::search("$where");
       }
-  description: "Disabled — Elasticsearch::search selects the endpoint; the tainted query body is supplied through builder/body APIs that need a separate receiver-state rule."
+  description: "Disabled - Elasticsearch::search selects the endpoint; the tainted query body is supplied through builder/body APIs that need a separate receiver-state rule."

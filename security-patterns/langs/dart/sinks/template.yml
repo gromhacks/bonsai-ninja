@@ -37,7 +37,7 @@
       class Template { Template([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var result = Template("Hello {{name}}"); }
     expect_no_match: true
-  description: "new Template(tainted source) — covers mustache_template and jinja (same bare `Template` constructor name). Also covers merged aliases: dart.template.mustache_html_escape_off. Merged collision aliases: dart.template.liquid_engine_parse."
+  description: "new Template(tainted source) - covers mustache_template and jinja (same bare `Template` constructor name). Also covers merged aliases: dart.template.mustache_html_escape_off. Merged collision aliases: dart.template.liquid_engine_parse."
   imports:
   - mustache_template/mustache_template.dart
 - id: dart.template.mustache_render_string
@@ -73,7 +73,7 @@
       import 'package:mustache_template/mustache_template.dart';
       void test() { template.renderString("Hello {{name}}"); }
     expect_no_match: true
-  description: "mustache Template.renderString — tainted template-source."
+  description: "mustache Template.renderString - tainted template-source."
   imports:
   - mustache_template/mustache_template.dart
 - id: dart.template.jinja_from_string
@@ -126,4 +126,4 @@
     kind: new
     callee:
       name: Template
-  description: "Disabled — merged into dart.template.mustache_template (same bare `Template` constructor name)."
+  description: "Disabled - merged into dart.template.mustache_template (same bare `Template` constructor name)."

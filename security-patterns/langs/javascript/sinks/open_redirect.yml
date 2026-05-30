@@ -63,7 +63,7 @@
         return res.location("/dashboard");
       }
     expect_no_match: true
-  description: "Express res.location(tainted) — sets Location header."
+  description: "Express res.location(tainted) - sets Location header."
 - id: javascript.open_redirect.koa_redirect
   enabled: true
   language: javascript
@@ -261,7 +261,7 @@
     kind: write
     target:
       name: location
-  description: "Disabled — bare `.location = ...` fires on any field named `location` (very common in config objects); enable with receiver narrowing to `window`/`document`."
+  description: "Disabled - bare `.location = ...` fires on any field named `location` (very common in config objects); enable with receiver narrowing to `window`/`document`."
 
 - id: javascript.open_redirect.simple_oauth2_redirect_tainted
   enabled: true
@@ -295,4 +295,4 @@
       }
       login({ authorizeURL: () => null });
     expect_no_match: true
-  description: "simple-oauth2 client.authorizeURL({redirect_uri: tainted}) — attacker-controlled redirect_uri leaks the auth code or token to a malicious endpoint."
+  description: "simple-oauth2 client.authorizeURL({redirect_uri: tainted}) - attacker-controlled redirect_uri leaks the auth code or token to a malicious endpoint."

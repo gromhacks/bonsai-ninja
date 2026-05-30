@@ -11,4 +11,4 @@
     kind: read
     target:
       name: userInfo
-  description: "Disabled — the current Swift adapter does not index property reads like `notification.userInfo`."
+  description: "Disabled - the current Swift adapter does not index property reads like `notification.userInfo`."

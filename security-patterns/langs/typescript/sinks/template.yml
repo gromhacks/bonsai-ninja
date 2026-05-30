@@ -33,7 +33,7 @@
         return ejs.render("Hello <%= user %>", "<%= user %>");
       }
     expect_no_match: true
-  description: "ejs.render(tainted) — server-side template injection. Merged aliases: typescript.template.ejs_render_template_variable."
+  description: "ejs.render(tainted) - server-side template injection. Merged aliases: typescript.template.ejs_render_template_variable."
   aliases:
   - typescript.template.ejs_render_template_variable
 - id: typescript.template.ejs_compile
@@ -70,7 +70,7 @@
         return ejs.compile("Hello <%= user %>", "<%= user %>");
       }
     expect_no_match: true
-  description: "ejs.compile(tainted) — full SSTI-to-RCE in default config. Merged aliases: typescript.template.ejs_compile_template_variable."
+  description: "ejs.compile(tainted) - full SSTI-to-RCE in default config. Merged aliases: typescript.template.ejs_compile_template_variable."
   aliases:
   - typescript.template.ejs_compile_template_variable
 - id: typescript.template.ejs_renderfile
@@ -90,7 +90,7 @@
       attribute:
       - ejs
       - renderFile
-  description: "Disabled — renderFile uses a filesystem path; flag as path-traversal, not SSTI."
+  description: "Disabled - renderFile uses a filesystem path; flag as path-traversal, not SSTI."
 - id: typescript.template.handlebars_compile
   enabled: true
   language: typescript
@@ -124,7 +124,7 @@
         return Handlebars.compile("Hello {{user}}", "<%= user %>");
       }
     expect_no_match: true
-  description: "Handlebars.compile(tainted) — RCE on some helper combos. Merged aliases: typescript.template.handlebars_compile_template_variable."
+  description: "Handlebars.compile(tainted) - RCE on some helper combos. Merged aliases: typescript.template.handlebars_compile_template_variable."
   aliases:
   - typescript.template.handlebars_compile_template_variable
 - id: typescript.template.handlebars_lower_compile
@@ -161,7 +161,7 @@
         return handlebars.compile("Hello user");
       }
     expect_no_match: true
-  description: "handlebars.compile(tainted) — lowercase module binding for Handlebars template compilation."
+  description: "handlebars.compile(tainted) - lowercase module binding for Handlebars template compilation."
 - id: typescript.template.hbs_compile
   enabled: true
   language: typescript
@@ -192,7 +192,7 @@
         return hbs.compile("Hello {{user}}", "{{ user }}");
       }
     expect_no_match: true
-  description: "hbs.compile(tainted) — hbs exposes Handlebars template compilation; attacker-controlled template source is SSTI."
+  description: "hbs.compile(tainted) - hbs exposes Handlebars template compilation; attacker-controlled template source is SSTI."
 - id: typescript.template.handlebars_safestring
   enabled: true
   language: typescript
@@ -224,7 +224,7 @@
         return new Handlebars.SafeString("<strong>safe</strong>", "<%= user %>");
       }
     expect_no_match: true
-  description: "new Handlebars.SafeString(tainted) — bypasses template escape."
+  description: "new Handlebars.SafeString(tainted) - bypasses template escape."
 - id: typescript.template.pug_compile
   enabled: true
   language: typescript
@@ -259,7 +259,7 @@
         return pug.compile("p Hello", "<%= user %>");
       }
     expect_no_match: true
-  description: "pug.compile(tainted) — Jade/Pug SSTI."
+  description: "pug.compile(tainted) - Jade/Pug SSTI."
 - id: typescript.template.pug_render
   enabled: true
   language: typescript
@@ -327,7 +327,7 @@
         return nunjucks.renderString("Hello {{ user }}", "<%= user %>");
       }
     expect_no_match: true
-  description: "nunjucks.renderString(tainted) — SSTI-to-RCE via range(). Merged aliases: typescript.template.nunjucks_renderstring_template_variable."
+  description: "nunjucks.renderString(tainted) - SSTI-to-RCE via range(). Merged aliases: typescript.template.nunjucks_renderstring_template_variable."
   aliases:
   - typescript.template.nunjucks_renderstring_template_variable
 - id: typescript.template.nunjucks_compile
@@ -362,7 +362,7 @@
         return nunjucks.compile("Hello {{ user }}", "{{ user }}");
       }
     expect_no_match: true
-  description: "nunjucks.compile(tainted) — compiles attacker-controlled template source."
+  description: "nunjucks.compile(tainted) - compiles attacker-controlled template source."
 - id: typescript.template.nunjucks_render_template_source
   enabled: true
   language: typescript
@@ -404,7 +404,7 @@
         return nunjucks.render("safe-template.html", {});
       }
     expect_no_match: true
-  description: "nunjucks.render(templateSource, data) with variable or constructed template names/source — audit for attacker-controlled template selection or SSTI."
+  description: "nunjucks.render(templateSource, data) with variable or constructed template names/source - audit for attacker-controlled template selection or SSTI."
 - id: typescript.template.dot_template
   enabled: true
   language: typescript
@@ -437,7 +437,7 @@
         return doT.template("Hello {{=it.user}}", "<%= user %>");
       }
     expect_no_match: true
-  description: "doT.template(tainted) — JS evaluation in template."
+  description: "doT.template(tainted) - JS evaluation in template."
 - id: typescript.template.mustache_render
   enabled: false
   disabled_reason:
@@ -455,7 +455,7 @@
       attribute:
       - Mustache
       - render
-  description: "Disabled — Mustache is logic-less; not SSTI-to-RCE."
+  description: "Disabled - Mustache is logic-less; not SSTI-to-RCE."
 - id: typescript.template.lodash_template
   enabled: true
   language: typescript
@@ -488,7 +488,7 @@
         return _.template("Hello <%= user %>", "<%= user %>");
       }
     expect_no_match: true
-  description: "_.template(tainted) — evaluates JS in template tags (also matches underscore.js with the `_` alias)."
+  description: "_.template(tainted) - evaluates JS in template tags (also matches underscore.js with the `_` alias)."
 - id: typescript.template.consolidate_render
   enabled: false
   disabled_reason:
@@ -506,7 +506,7 @@
       attribute:
       - consolidate
       - render
-  description: "Disabled — generic render; flag with engine-specific constraint instead."
+  description: "Disabled - generic render; flag with engine-specific constraint instead."
 - id: typescript.template.swig_setdefaults_autoescape_off
   enabled: true
   language: typescript
@@ -530,7 +530,7 @@
       function demo(input, req, obj) {
         return swig.setDefaults(input, { autoescape: false });
       }
-  description: "swig.setDefaults({autoescape: false}) — TypeScript via the same swig API."
+  description: "swig.setDefaults({autoescape: false}) - TypeScript via the same swig API."
 - id: typescript.template.nunjucks_configure_autoescape_off
   enabled: true
   language: typescript
@@ -554,7 +554,7 @@
       function demo(input, req, obj) {
         return nunjucks.configure(input, { autoescape: false });
       }
-  description: "nunjucks.configure(path, {autoescape: false}) — autoescape disabled."
+  description: "nunjucks.configure(path, {autoescape: false}) - autoescape disabled."
 
 - id: typescript.template.nunjucks_environment_renderstring
   enabled: true
@@ -590,7 +590,7 @@
         return env.renderString("Hello {{ user }}", {});
       }
     expect_no_match: true
-  description: "nunjucks Environment instance .renderString(tainted) — local nunjucks Environment receivers also reach SSTI when rendering attacker-controlled source."
+  description: "nunjucks Environment instance .renderString(tainted) - local nunjucks Environment receivers also reach SSTI when rendering attacker-controlled source."
 
 - id: typescript.template.pug_compile_file
   enabled: true
@@ -627,4 +627,4 @@
         return pug.compileFile("views/profile.pug");
       }
     expect_no_match: true
-  description: "pug.compileFile(taintedPath) — attacker-controlled file path lets the user pick an arbitrary template (path-traversal + SSTI compound)."
+  description: "pug.compileFile(taintedPath) - attacker-controlled file path lets the user pick an arbitrary template (path-traversal + SSTI compound)."

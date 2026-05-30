@@ -16,7 +16,7 @@
           char *fmt = arg;
           strcpy(arg);
         }
-  description: "strcpy(dst, tainted_src) — copies until NUL with no length check; classic stack/heap buffer overflow."
+  description: "strcpy(dst, tainted_src) - copies until NUL with no length check; classic stack/heap buffer overflow."
 - id: c.memory.strncpy
   enabled: false
   disabled_reason:
@@ -37,7 +37,7 @@
           char *fmt = arg;
           strncpy(arg);
         }
-  description: "Disabled — `strncpy` is only a finding when the analyzer can prove missing/manual-terminator misuse. A bare call rule over-reports common bounded-copy patterns that immediately NUL-terminate."
+  description: "Disabled - `strncpy` is only a finding when the analyzer can prove missing/manual-terminator misuse. A bare call rule over-reports common bounded-copy patterns that immediately NUL-terminate."
 - id: c.memory.strcat
   enabled: true
   language: c
@@ -56,7 +56,7 @@
           char *fmt = arg;
           strcat(arg);
         }
-  description: "strcat(dst, tainted_src) — appends until NUL with no bound; overflows dst if remaining space < strlen(src)."
+  description: "strcat(dst, tainted_src) - appends until NUL with no bound; overflows dst if remaining space < strlen(src)."
 - id: c.memory.strncat
   enabled: false
   disabled_reason:
@@ -77,7 +77,7 @@
           char *fmt = arg;
           strncat(arg);
         }
-  description: "Disabled — `strncat` needs capacity/arithmetic context to distinguish misuse from bounded remaining-capacity patterns."
+  description: "Disabled - `strncat` needs capacity/arithmetic context to distinguish misuse from bounded remaining-capacity patterns."
 - id: c.memory.gets
   enabled: true
   language: c
@@ -96,7 +96,7 @@
           char *fmt = arg;
           gets(arg);
         }
-  description: "gets — always unsafe (removed in C11). Writes attacker-controlled bytes past the destination buffer end (OOB write, CWE-787)."
+  description: "gets - always unsafe (removed in C11). Writes attacker-controlled bytes past the destination buffer end (OOB write, CWE-787)."
 - id: c.memory.scanf
   enabled: true
   language: c
@@ -115,7 +115,7 @@
           char *fmt = arg;
           scanf(fmt);
         }
-  description: "scanf without field width — buffer overflow."
+  description: "scanf without field width - buffer overflow."
 - id: c.memory.memcpy
   enabled: true
   language: c
@@ -142,7 +142,7 @@
           memcpy(dst, src, FIXED_LEN);
         }
       expect_no_match: true
-  description: "memcpy(dst, src, n) — tainted n past dst is OOB write (CWE-787); tainted n past src is OOB read (CWE-125, e.g. Heartbleed); generic copy-overflow is CWE-120."
+  description: "memcpy(dst, src, n) - tainted n past dst is OOB write (CWE-787); tainted n past src is OOB read (CWE-125, e.g. Heartbleed); generic copy-overflow is CWE-120."
 - id: c.memory.memmove
   enabled: true
   language: c
@@ -169,7 +169,7 @@
           memmove(dst, src, FIXED_LEN);
         }
       expect_no_match: true
-  description: "memmove(dst, src, n) — tainted n past dst is OOB write (CWE-787); tainted n past src is OOB read (CWE-125); generic copy-overflow is CWE-120."
+  description: "memmove(dst, src, n) - tainted n past dst is OOB write (CWE-787); tainted n past src is OOB read (CWE-125); generic copy-overflow is CWE-120."
 - id: c.memory.alloca
   enabled: true
   language: c
@@ -199,7 +199,7 @@
           return argc;
         }
       expect_no_match: true
-  description: "alloca with tainted size — stack exhaustion."
+  description: "alloca with tainted size - stack exhaustion."
 - id: c.memory.stpcpy
   enabled: true
   language: c
@@ -218,7 +218,7 @@
           char *fmt = arg;
           stpcpy(arg);
         }
-  description: "stpcpy — unbounded copy (strcpy variant returning end pointer)."
+  description: "stpcpy - unbounded copy (strcpy variant returning end pointer)."
 - id: c.memory.getwd
   enabled: true
   language: c
@@ -237,7 +237,7 @@
           char *fmt = arg;
           getwd(arg);
         }
-  description: "getwd — deprecated, no bound on output buffer (use getcwd)."
+  description: "getwd - deprecated, no bound on output buffer (use getcwd)."
 - id: c.memory.tmpnam
   enabled: true
   language: c
@@ -256,7 +256,7 @@
           char *fmt = arg;
           tmpnam(arg);
         }
-  description: "tmpnam — predictable temp filename (race to symlink)."
+  description: "tmpnam - predictable temp filename (race to symlink)."
 - id: c.memory.mktemp
   enabled: true
   language: c
@@ -275,7 +275,7 @@
           char *fmt = arg;
           mktemp(arg);
         }
-  description: "mktemp — predictable temp filename; use mkstemp."
+  description: "mktemp - predictable temp filename; use mkstemp."
 - id: c.memory.free_double
   enabled: true
   language: c
@@ -304,7 +304,7 @@
           free(p);
       }
     expect_no_match: true
-  description: "Double-free — `free(p)` called when the binding is already `freed` from a preceding `free(p)`. Re-freeing is a heap-corruption primitive (CWE-415); glibc tcache / dlmalloc poisoning attacks pivot off this. The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so the single-free case stays silent."
+  description: "Double-free - `free(p)` called when the binding is already `freed` from a preceding `free(p)`. Re-freeing is a heap-corruption primitive (CWE-415); glibc tcache / dlmalloc poisoning attacks pivot off this. The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so the single-free case stays silent."
 - id: c.memory.realloc_zero
   enabled: true
   language: c
@@ -332,11 +332,11 @@
         realloc(p, 64);
       }
     expect_no_match: true
-  description: "realloc(ptr, 0) — implementation-defined/free-like behavior that commonly causes leaks, double-free, or use-after-free mistakes."
+  description: "realloc(ptr, 0) - implementation-defined/free-like behavior that commonly causes leaks, double-free, or use-after-free mistakes."
 # Allocation-size sinks. malloc/calloc/realloc/aligned_alloc with a
 # tainted size argument is the classic CWE-190 (integer overflow ->
 # smaller-than-expected buffer -> OOB write on subsequent copy).
-# Sinks fire only when taint reaches the size parameter — the engine
+# Sinks fire only when taint reaches the size parameter - the engine
 # decides reachability; the rule just labels the site.
 - id: c.memory.malloc_tainted_size
   enabled: true
@@ -368,7 +368,7 @@
           return argc;
         }
       expect_no_match: true
-  description: "malloc(n) with a tainted/computed size — CWE-190 integer overflow when arithmetic on attacker-controlled values wraps to a smaller allocation, leading to OOB writes (CWE-787) by later copies sized against the un-overflowed value."
+  description: "malloc(n) with a tainted/computed size - CWE-190 integer overflow when arithmetic on attacker-controlled values wraps to a smaller allocation, leading to OOB writes (CWE-787) by later copies sized against the un-overflowed value."
 - id: c.memory.calloc_tainted_size
   enabled: true
   language: c
@@ -398,7 +398,7 @@
           return argc;
         }
       expect_no_match: true
-  description: "calloc(nmemb, size) — tainted nmemb can overflow size_t producing a small allocation."
+  description: "calloc(nmemb, size) - tainted nmemb can overflow size_t producing a small allocation."
 - id: c.memory.calloc_tainted_element_size
   enabled: true
   language: c
@@ -428,7 +428,7 @@
           return argc;
         }
       expect_no_match: true
-  description: "calloc(nmemb, size) — tainted element size can overflow nmemb*size and under-allocate."
+  description: "calloc(nmemb, size) - tainted element size can overflow nmemb*size and under-allocate."
 - id: c.memory.realloc_tainted_size
   enabled: true
   language: c
@@ -459,7 +459,7 @@
           return argc;
         }
       expect_no_match: true
-  description: "realloc(ptr, n) — tainted size with multiplicative computation overflows to small allocation; subsequent writes against original size go OOB."
+  description: "realloc(ptr, n) - tainted size with multiplicative computation overflows to small allocation; subsequent writes against original size go OOB."
 - id: c.memory.aligned_alloc_tainted_size
   enabled: true
   language: c
@@ -489,4 +489,4 @@
           return argc;
         }
       expect_no_match: true
-  description: "aligned_alloc(alignment, size) with tainted size — overflow leads to under-allocation and downstream OOB."
+  description: "aligned_alloc(alignment, size) with tainted size - overflow leads to under-allocation and downstream OOB."

@@ -30,7 +30,7 @@
           filt = '(uid=' + user_input + ')'
           return Connection.search('dc=example,dc=com', 'safe')
     expect_no_match: true
-  description: "ldap3 Connection.search(search_base, search_filter) — the second argument is an LDAP filter; string interpolation is injectable."
+  description: "ldap3 Connection.search(search_base, search_filter) - the second argument is an LDAP filter; string interpolation is injectable."
 
 - id: python.ldap.ldap3_connection_search_method
   enabled: true
@@ -61,7 +61,7 @@
       def example(conn):
           return conn.search("dc=example,dc=com", "(uid=safe)")
     expect_no_match: true
-  description: "ldap3 variable receiver .search(search_base, search_filter) — the second argument is an LDAP filter."
+  description: "ldap3 variable receiver .search(search_base, search_filter) - the second argument is an LDAP filter."
 
 - id: python.ldap.ldap3_modify
   enabled: true
@@ -119,7 +119,7 @@
       def example(user_input):
           return Connection.modify_dn('safe')
     expect_no_match: true
-  description: "ldap3 Connection.modify_dn — flag tainted DN."
+  description: "ldap3 Connection.modify_dn - flag tainted DN."
 
 - id: python.ldap.ldap3_add
   enabled: true
@@ -192,7 +192,7 @@
     kind: call
     callee:
       attribute: [Connection, bind]
-  description: "Disabled — bind is auth, not injection; flag DN-injection only with constraint."
+  description: "Disabled - bind is auth, not injection; flag DN-injection only with constraint."
 
 - id: python.ldap.python_ldap_search_s
   enabled: true
@@ -225,7 +225,7 @@
           filt = '(uid=' + user_input + ')'
           return conn.search_s('dc=example,dc=com', SCOPE_SUBTREE, 'safe')
     expect_no_match: true
-  description: "python-ldap search_s(base, scope, filterstr) — the filter string is injectable when string-built."
+  description: "python-ldap search_s(base, scope, filterstr) - the filter string is injectable when string-built."
 
 - id: python.ldap.python_ldap_search_ext_s
   enabled: true
@@ -257,7 +257,7 @@
           filt = '(mail=' + user_input + ')'
           return conn.search_ext_s('dc=example,dc=com', SCOPE_SUBTREE, 'safe')
     expect_no_match: true
-  description: "python-ldap search_ext_s(base, scope, filterstr) — the filter string is injectable when string-built."
+  description: "python-ldap search_ext_s(base, scope, filterstr) - the filter string is injectable when string-built."
 
   imports:
   - pythonldap
@@ -367,4 +367,4 @@
     kind: write
     target:
       name: AUTH_LDAP_USER_SEARCH
-  description: "Disabled — config-only check; flag if filter built from user input."
+  description: "Disabled - config-only check; flag if filter built from user input."

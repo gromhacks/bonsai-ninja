@@ -23,7 +23,7 @@
         const char *query = arg;
         gpio_get_value(arg);
       }
-  description: "Linux gpio_get_value — GPIO pin read; physical-origin bit."
+  description: "Linux gpio_get_value - GPIO pin read; physical-origin bit."
 
   imports:
   - linux
@@ -49,7 +49,7 @@
         const char *query = arg;
         gpiod_line_get_value(arg);
       }
-  description: "libgpiod gpiod_line_get_value — GPIO line state from an attached device."
+  description: "libgpiod gpiod_line_get_value - GPIO line state from an attached device."
 
 - id: cpp.phys.i2c_smbus_read_byte_data
   enabled: true
@@ -75,7 +75,7 @@
         const char *query = arg;
         i2c_smbus_read_byte_data(arg);
       }
-  description: "i2c_smbus_read_byte_data — reads a peripheral register over SMBus/I2C."
+  description: "i2c_smbus_read_byte_data - reads a peripheral register over SMBus/I2C."
 
   imports:
   - linux
@@ -104,7 +104,7 @@
         const char *query = arg;
         i2c_smbus_read_word_data(arg);
       }
-  description: "i2c_smbus_read_word_data — reads a 16-bit device register."
+  description: "i2c_smbus_read_word_data - reads a 16-bit device register."
 
   imports:
   - linux
@@ -130,7 +130,7 @@
         const char *query = arg;
         wiringPiI2CReadReg8(arg);
       }
-  description: "wiringPiI2CReadReg8 — 8-bit chip-to-chip register read."
+  description: "wiringPiI2CReadReg8 - 8-bit chip-to-chip register read."
 
 - id: cpp.phys.wiringpi_i2c_read_reg16
   enabled: true
@@ -153,7 +153,7 @@
         const char *query = arg;
         wiringPiI2CReadReg16(arg);
       }
-  description: "wiringPiI2CReadReg16 — 16-bit peripheral register read."
+  description: "wiringPiI2CReadReg16 - 16-bit peripheral register read."
 
 - id: cpp.phys.serial_getchar
   enabled: true
@@ -176,7 +176,7 @@
         const char *query = arg;
         serialGetchar(arg);
       }
-  description: "serialGetchar — UART/serial byte received from external hardware."
+  description: "serialGetchar - UART/serial byte received from external hardware."
 
 - id: cpp.phys.serialport_blocking_read
   enabled: true
@@ -199,7 +199,7 @@
         char buf[256];
         sp_blocking_read(port, buf, sizeof(buf), 1000);
       }
-  description: "sp_blocking_read — serial bytes from a connected device."
+  description: "sp_blocking_read - serial bytes from a connected device."
 
 - id: cpp.phys.wiringpi_spi_data_rw
   enabled: true
@@ -222,7 +222,7 @@
         unsigned char data[16];
         wiringPiSPIDataRW(0, data, sizeof(data));
       }
-  description: "wiringPiSPIDataRW — SPI transfer reads peripheral response bytes."
+  description: "wiringPiSPIDataRW - SPI transfer reads peripheral response bytes."
 
 - id: cpp.phys.analogread
   enabled: true
@@ -248,7 +248,7 @@
         const char *query = arg;
         analogRead(arg);
       }
-  description: "Arduino analogRead — ADC sample from a physical pin."
+  description: "Arduino analogRead - ADC sample from a physical pin."
   imports:
   - Arduino.h
   - Arduino

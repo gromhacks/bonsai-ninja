@@ -27,7 +27,7 @@
         }
       }
     expect_no_match: true
-  description: "MessageDigest.getInstance(\"MD5\") — broken hash. Merged aliases: scala.crypto.message_digest_sha1."
+  description: "MessageDigest.getInstance(\"MD5\") - broken hash. Merged aliases: scala.crypto.message_digest_sha1."
   aliases:
   - scala.crypto.message_digest_sha1
 - id: scala.crypto.cipher_des
@@ -59,7 +59,7 @@
         }
       }
     expect_no_match: true
-  description: "Cipher.getInstance(\"DES\") — broken symmetric cipher. Merged aliases: scala.crypto.cipher_3des, scala.crypto.cipher_rc4, scala.crypto.cipher_ecb, scala.crypto.cipher_blowfish."
+  description: "Cipher.getInstance(\"DES\") - broken symmetric cipher. Merged aliases: scala.crypto.cipher_3des, scala.crypto.cipher_rc4, scala.crypto.cipher_ecb, scala.crypto.cipher_blowfish."
   aliases:
   - scala.crypto.cipher_3des
   - scala.crypto.cipher_rc4
@@ -82,7 +82,7 @@
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextInt(input)\n  }\n}\n"
-  description: "scala.util.Random.nextInt — non-crypto PRNG; use SecureRandom."
+  description: "scala.util.Random.nextInt - non-crypto PRNG; use SecureRandom."
 - id: scala.crypto.scala_util_random_nextbytes
   enabled: true
   language: scala
@@ -100,7 +100,7 @@
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextBytes(input)\n  }\n}\n"
-  description: "scala.util.Random.nextBytes — non-crypto PRNG."
+  description: "scala.util.Random.nextBytes - non-crypto PRNG."
 - id: scala.crypto.scala_util_random_nextlong
   enabled: true
   language: scala
@@ -118,7 +118,7 @@
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextLong(input)\n  }\n}\n"
-  description: "scala.util.Random.nextLong — non-crypto PRNG."
+  description: "scala.util.Random.nextLong - non-crypto PRNG."
 - id: scala.crypto.scala_util_random_nextdouble
   enabled: true
   language: scala
@@ -142,7 +142,7 @@
           Random.nextDouble()
         }
       }
-  description: "scala.util.Random.nextDouble — non-cryptographic PRNG output; use SecureRandom for secrets, tokens, nonces, and keys."
+  description: "scala.util.Random.nextDouble - non-cryptographic PRNG output; use SecureRandom for secrets, tokens, nonces, and keys."
 - id: scala.crypto.scala_util_random_nextfloat
   enabled: true
   language: scala
@@ -166,7 +166,7 @@
           Random.nextFloat()
         }
       }
-  description: "scala.util.Random.nextFloat — non-cryptographic PRNG output; do not use for security-sensitive randomness."
+  description: "scala.util.Random.nextFloat - non-cryptographic PRNG output; do not use for security-sensitive randomness."
 - id: scala.crypto.scala_util_random_nextgaussian
   enabled: true
   language: scala
@@ -190,7 +190,7 @@
           Random.nextGaussian()
         }
       }
-  description: "scala.util.Random.nextGaussian — non-cryptographic PRNG output; use a CSPRNG for security-sensitive random values."
+  description: "scala.util.Random.nextGaussian - non-cryptographic PRNG output; use a CSPRNG for security-sensitive random values."
 - id: scala.crypto.math_random
   enabled: true
   language: scala
@@ -208,4 +208,4 @@
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Math.random(input)\n  }\n}\n"
-  description: "java.lang.Math.random() / scala.math random output — non-cryptographic PRNG."
+  description: "java.lang.Math.random() / scala.math random output - non-cryptographic PRNG."

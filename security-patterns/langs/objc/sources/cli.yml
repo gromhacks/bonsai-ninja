@@ -15,7 +15,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; fgets(input); }
-  description: "fgets(buf, size, stdin) — interactive stdin read; buf is tainted via output argument 0."
+  description: "fgets(buf, size, stdin) - interactive stdin read; buf is tainted via output argument 0."
 
 - id: objc.source.nsprocessinfo_arguments
   enabled: true
@@ -31,7 +31,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].arguments; }
-  description: "NSProcessInfo.processInfo.arguments — CLI argv. Local trust; still attacker-controllable via launch agents."
+  description: "NSProcessInfo.processInfo.arguments - CLI argv. Local trust; still attacker-controllable via launch agents."
 
 - id: objc.source.nsprocessinfo_environment
   enabled: true
@@ -47,7 +47,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].environment; }
-  description: "NSProcessInfo.processInfo.environment — env vars. Local trust but crosses boundaries when spawned from untrusted parent."
+  description: "NSProcessInfo.processInfo.environment - env vars. Local trust but crosses boundaries when spawned from untrusted parent."
 
 - id: objc.source.cli_argv
   enabled: false
@@ -60,7 +60,7 @@
     kind: param
     target:
       name: argv
-  description: "Disabled — `argv` parameter name is also used by unrelated C functions; flag only when main()'s argv crosses a trust boundary."
+  description: "Disabled - `argv` parameter name is also used by unrelated C functions; flag only when main()'s argv crosses a trust boundary."
 
 - id: objc.source.env_getenv
   enabled: false
@@ -73,7 +73,7 @@
     kind: call
     callee:
       name: getenv
-  description: "Disabled — libc getenv is local; enable when reading security-sensitive env vars in a privileged context."
+  description: "Disabled - libc getenv is local; enable when reading security-sensitive env vars in a privileged context."
 
 - id: objc.source.nsfilehandle_standardinput
   enabled: false
@@ -86,7 +86,7 @@
     kind: call
     callee:
       name: fileHandleWithStandardInput
-  description: "Disabled — NSFileHandle standardInput is stdin; rarely used in iOS apps, enable for CLI/macOS tools."
+  description: "Disabled - NSFileHandle standardInput is stdin; rarely used in iOS apps, enable for CLI/macOS tools."
 
 - id: objc.source.readline
   enabled: false
@@ -99,7 +99,7 @@
     kind: call
     callee:
       name: readline
-  description: "Disabled — GNU readline; enable for interactive CLI tools bridging libreadline."
+  description: "Disabled - GNU readline; enable for interactive CLI tools bridging libreadline."
 
 - id: objc.source.uitextfield_text
   enabled: false
@@ -113,7 +113,7 @@
     kind: read
     target:
       name: text
-  description: "Disabled — bare `.text` read matches every UIKit attribute named text and every NSAttributedString; enable only with receiver narrowing."
+  description: "Disabled - bare `.text` read matches every UIKit attribute named text and every NSAttributedString; enable only with receiver narrowing."
 
 - id: objc.source.uitextview_text
   enabled: false
@@ -126,7 +126,7 @@
     kind: read
     target:
       name: text
-  description: "Disabled — duplicate of objc.source.uitextfield_text. Bare name 'text' matches every UIKit .text accessor."
+  description: "Disabled - duplicate of objc.source.uitextfield_text. Bare name 'text' matches every UIKit .text accessor."
 
 - id: objc.source.user_defaults_object
   enabled: true
@@ -142,7 +142,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; [NSUserDefaults objectForKey:input]; }
-  description: "NSUserDefaults -objectForKey: — local prefs storage. Untrusted when shared via app group / extension (suiteName:), since any group member can write. Constrained to NSUserDefaults receivers."
+  description: "NSUserDefaults -objectForKey: - local prefs storage. Untrusted when shared via app group / extension (suiteName:), since any group member can write. Constrained to NSUserDefaults receivers."
 
 - id: objc.source.user_defaults_string
   enabled: true
@@ -160,7 +160,7 @@
     - name: declared shape
       code: |
         void test(NSUserDefaults *defaults, id input) { id target = input; int amount = 1; [defaults stringForKey:input]; }
-  description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: — typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:."
+  description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: - typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:."
 
 - id: objc.source.uipasteboard_string
   enabled: true
@@ -178,7 +178,7 @@
     - name: declared shape
       code: |
         void test(UIPasteboard *pasteboard, id input) { id target = input; int amount = 1; [pasteboard stringForType:input]; }
-  description: "UIPasteboard/NSPasteboard typed accessors — clipboard contents originate from any other app or user paste action; treat as untrusted IPC input."
+  description: "UIPasteboard/NSPasteboard typed accessors - clipboard contents originate from any other app or user paste action; treat as untrusted IPC input."
 
 - id: objc.source.nspasteboard_string
   enabled: true
@@ -194,4 +194,4 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; [NSPasteboard generalPasteboard:input]; }
-  description: "NSPasteboard +generalPasteboard (AppKit) — macOS clipboard accessor; subsequent -stringForType: returns cross-app input."
+  description: "NSPasteboard +generalPasteboard (AppKit) - macOS clipboard accessor; subsequent -stringForType: returns cross-app input."

@@ -27,7 +27,7 @@
       test() ->
         os:cmd("whoami").
     expect_no_match: true
-  description: "os:cmd/1 — runs argument under /bin/sh -c; any tainted substring → RCE."
+  description: "os:cmd/1 - runs argument under /bin/sh -c; any tainted substring -> RCE."
 
 - id: erlang.cmdi.os_cmd_2
   enabled: false
@@ -42,7 +42,7 @@
     kind: call
     callee:
       regex: "^os:cmd/2$"
-  description: "Disabled — adapter emits callee without arity; os_cmd above already matches."
+  description: "Disabled - adapter emits callee without arity; os_cmd above already matches."
 
 - id: erlang.cmdi.erlang_open_port
   enabled: true
@@ -72,7 +72,7 @@
       test() ->
         erlang:open_port({spawn, "ls"}, []).
     expect_no_match: true
-  description: "erlang:open_port({spawn, Cmd}, _) — Cmd runs under a shell; {spawn_executable, _} is the safer form."
+  description: "erlang:open_port({spawn, Cmd}, _) - Cmd runs under a shell; {spawn_executable, _} is the safer form."
 
 - id: erlang.cmdi.exec_run
   enabled: true
@@ -105,7 +105,7 @@
       test() ->
         exec:run("whoami").
     expect_no_match: true
-  description: "erlexec exec:run/2 — executes a shell command; tainted argv → RCE."
+  description: "erlexec exec:run/2 - executes a shell command; tainted argv -> RCE."
 
 - id: erlang.cmdi.exec_shell
   enabled: true
@@ -137,7 +137,7 @@
       test() ->
         exec:shell("whoami").
     expect_no_match: true
-  description: "erlexec exec:shell — spawns /bin/sh with tainted string."
+  description: "erlexec exec:shell - spawns /bin/sh with tainted string."
 
 - id: erlang.cmdi.rebar3_sh
   enabled: true
@@ -169,4 +169,4 @@
       test() ->
         rebar_utils:sh("git --version").
     expect_no_match: true
-  description: "rebar_utils:sh/1 — build-tool shell execution; tainted command strings are CI/build RCE."
+  description: "rebar_utils:sh/1 - build-tool shell execution; tainted command strings are CI/build RCE."

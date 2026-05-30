@@ -30,7 +30,7 @@
         Mongo::Collection.find({"name" => "alice"})
       end
     expect_no_match: true
-  description: "Mongo::Collection#find (class-qualified form) — flag tainted filter Hash with operators. Merged collision aliases: ruby.nosql.mongo_collection_find_filter_value_object."
+  description: "Mongo::Collection#find (class-qualified form) - flag tainted filter Hash with operators. Merged collision aliases: ruby.nosql.mongo_collection_find_filter_value_object."
   aliases:
   - ruby.nosql.mongo_collection_find_filter_value_object
 - id: ruby.nosql.mongo_aggregate
@@ -98,7 +98,7 @@
         Mongo::Database.command({"ping" => 1})
       end
     expect_no_match: true
-  description: "Mongo::Database#command — runs arbitrary command document."
+  description: "Mongo::Database#command - runs arbitrary command document."
 - id: ruby.nosql.mongoid_where
   enabled: false
   disabled_reason:
@@ -114,7 +114,7 @@
     kind: call
     callee:
       name: where
-  description: "Disabled duplicate — bare where collides with ActiveRecord SQLi in v1 matching; enable only when receiver typing can prove Mongoid."
+  description: "Disabled duplicate - bare where collides with ActiveRecord SQLi in v1 matching; enable only when receiver typing can prove Mongoid."
 - id: ruby.nosql.mongoid_javascript
   enabled: true
   language: ruby
@@ -178,7 +178,7 @@
         redis.eval("return redis.call('PING')")
       end
     expect_no_match: true
-  description: "Redis#eval(script, ...) on a local Redis client receiver — package-gated receiver regex avoids colliding with bare Kernel#eval."
+  description: "Redis#eval(script, ...) on a local Redis client receiver - package-gated receiver regex avoids colliding with bare Kernel#eval."
 - id: ruby.nosql.redis_evalsha
   enabled: true
   language: ruby
@@ -210,7 +210,7 @@
         redis.evalsha("0123456789abcdef")
       end
     expect_no_match: true
-  description: "Redis#evalsha(sha, ...) on a local Redis client receiver — tainted script SHA can execute attacker-selected Lua."
+  description: "Redis#evalsha(sha, ...) on a local Redis client receiver - tainted script SHA can execute attacker-selected Lua."
 - id: ruby.nosql.elasticsearch_search
   enabled: true
   language: ruby
@@ -276,4 +276,4 @@
         session.execute("SELECT * FROM users")
       end
     expect_no_match: true
-  description: "cassandra-driver session.execute(cql) — CQL injection."
+  description: "cassandra-driver session.execute(cql) - CQL injection."

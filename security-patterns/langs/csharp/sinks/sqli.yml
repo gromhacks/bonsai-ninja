@@ -22,7 +22,7 @@
     code: |
       class SqlCommand { public SqlCommand(dynamic input) { } } class App { void Test() { var result = new SqlCommand("select 1"); } }
     expect_no_match: true
-  description: "new SqlCommand(tainted) \u2014 System.Data.SqlClient/Microsoft.Data.SqlClient;\
+  description: "new SqlCommand(tainted) - System.Data.SqlClient/Microsoft.Data.SqlClient;\
     \ flag if first arg is interpolated SQL."
 - id: csharp.sqli.sqlcommand_executereader
   enabled: false
@@ -45,7 +45,7 @@
       dynamic amount = 1; SqlCommand.ExecuteReader(input); } }
 
       '
-  description: "Disabled — SqlCommand.ExecuteReader() executes SQL stored on CommandText/constructor state; use the CommandText/SqlCommand constructor sinks until receiver-state tracking exists."
+  description: "Disabled - SqlCommand.ExecuteReader() executes SQL stored on CommandText/constructor state; use the CommandText/SqlCommand constructor sinks until receiver-state tracking exists."
 - id: csharp.sqli.sqlcommand_executenonquery
   enabled: false
   disabled_reason:
@@ -67,7 +67,7 @@
       dynamic amount = 1; SqlCommand.ExecuteNonQuery(input); } }
 
       '
-  description: "Disabled — SqlCommand.ExecuteNonQuery() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
+  description: "Disabled - SqlCommand.ExecuteNonQuery() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
 - id: csharp.sqli.sqlcommand_executescalar
   enabled: false
   disabled_reason:
@@ -89,7 +89,7 @@
       dynamic amount = 1; SqlCommand.ExecuteScalar(input); } }
 
       '
-  description: "Disabled — SqlCommand.ExecuteScalar() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
+  description: "Disabled - SqlCommand.ExecuteScalar() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
 - id: csharp.sqli.sqlcommand_commandtext
   enabled: true
   language: csharp
@@ -137,7 +137,7 @@
       dynamic amount = 1; OracleCommand.ExecuteNonQuery(input); } }
 
       '
-  description: "Disabled — OracleCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - OracleCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.npgsql_command_executenonquery
   enabled: false
   disabled_reason:
@@ -163,7 +163,7 @@
       amount = 1; NpgsqlCommand.ExecuteNonQuery(input); } }
 
       '
-  description: "Disabled — NpgsqlCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - NpgsqlCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.mysql_command_executereader
   enabled: false
   disabled_reason:
@@ -189,7 +189,7 @@
       amount = 1; MySqlCommand.ExecuteReader(input); } }
 
       '
-  description: "Disabled — MySqlCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - MySqlCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.sqlite_command_executereader
   enabled: false
   disabled_reason:
@@ -216,7 +216,7 @@
       amount = 1; SQLiteCommand.ExecuteReader(input); } }
 
       '
-  description: "Disabled — SQLiteCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - SQLiteCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.oledb_command_executereader
   enabled: false
   disabled_reason:
@@ -238,7 +238,7 @@
       dynamic amount = 1; OleDbCommand.ExecuteReader(input); } }
 
       '
-  description: "Disabled — OleDbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - OleDbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.ef_database_executesqlraw
   enabled: true
   language: csharp
@@ -270,7 +270,7 @@
       using Microsoft.EntityFrameworkCore;
       class App { void Test() { Database.ExecuteSqlRaw("select 1"); } }
     expect_no_match: true
-  description: "EF Core Database.ExecuteSqlRaw \u2014 flag if string built."
+  description: "EF Core Database.ExecuteSqlRaw - flag if string built."
 - id: csharp.sqli.ef_database_executesqlrawasync
   enabled: true
   language: csharp
@@ -364,7 +364,7 @@
       using Microsoft.EntityFrameworkCore;
       class App { void Test() { FromSqlRaw("select 1"); } }
     expect_no_match: true
-  description: "EF Core DbSet.FromSqlRaw \u2014 string-built variant."
+  description: "EF Core DbSet.FromSqlRaw - string-built variant."
 - id: csharp.sqli.ef_database_executesqlcommand
   enabled: true
   language: csharp
@@ -423,7 +423,7 @@
       using Dapper;
       class App { void Test() { Query("select 1"); } }
     expect_no_match: true
-  description: "Dapper Query(sql, ...) — raw SQL text remains injectable when built from attacker-controlled input; parameter objects only protect values."
+  description: "Dapper Query(sql, ...) - raw SQL text remains injectable when built from attacker-controlled input; parameter objects only protect values."
 - id: csharp.sqli.dapper_execute
   enabled: true
   language: csharp
@@ -450,7 +450,7 @@
       using Dapper;
       class App { void Test() { Execute("delete from sessions where expired = 1"); } }
     expect_no_match: true
-  description: "Dapper Execute(sql, ...) — raw SQL text remains injectable when built from tainted input; Dapper parameters do not sanitize SQL syntax."
+  description: "Dapper Execute(sql, ...) - raw SQL text remains injectable when built from tainted input; Dapper parameters do not sanitize SQL syntax."
 - id: csharp.sqli.dapper_queryasync
   enabled: true
   language: csharp
@@ -477,7 +477,7 @@
       using Dapper;
       class App { void Test() { QueryAsync("select 1"); } }
     expect_no_match: true
-  description: "Dapper QueryAsync(sql, ...) — async raw SQL query with tainted command text."
+  description: "Dapper QueryAsync(sql, ...) - async raw SQL query with tainted command text."
 - id: csharp.sqli.dapper_execute_async
   enabled: true
   language: csharp
@@ -504,7 +504,7 @@
       using Dapper;
       class App { void Test() { ExecuteAsync("delete from sessions where expired = 1"); } }
     expect_no_match: true
-  description: "Dapper ExecuteAsync(sql, ...) — async raw SQL execution with tainted command text."
+  description: "Dapper ExecuteAsync(sql, ...) - async raw SQL execution with tainted command text."
 - id: csharp.sqli.nhibernate_createsqlquery
   enabled: true
   language: csharp
@@ -536,7 +536,7 @@
       using NHibernate;
       class App { void Test() { ISession.CreateSQLQuery("select 1"); } }
     expect_no_match: true
-  description: "NHibernate ISession.CreateSQLQuery \u2014 raw SQL."
+  description: "NHibernate ISession.CreateSQLQuery - raw SQL."
 - id: csharp.sqli.nhibernate_createquery_string
   enabled: true
   language: csharp
@@ -568,7 +568,7 @@
       using NHibernate;
       class App { void Test() { ISession.CreateQuery("from User"); } }
     expect_no_match: true
-  description: "NHibernate CreateQuery(HQL) \u2014 string-built HQL."
+  description: "NHibernate CreateQuery(HQL) - string-built HQL."
 - id: csharp.sqli.linq2db_query
   enabled: false
   disabled_reason:
@@ -584,7 +584,7 @@
     kind: call
     callee:
       name: Query
-  description: "Disabled \u2014 bare Query collides with Dapper / LINQ; enable only\
+  description: "Disabled - bare Query collides with Dapper / LINQ; enable only\
     \ when linq2db DataConnection receiver confirmed."
 - id: csharp.sqli.dbcommand_executenonquery
   enabled: false
@@ -607,7 +607,7 @@
       dynamic amount = 1; DbCommand.ExecuteNonQuery(input); } }
 
       '
-  description: "Disabled — DbCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - DbCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.dbcommand_executereader
   enabled: false
   disabled_reason:
@@ -629,7 +629,7 @@
       dynamic amount = 1; DbCommand.ExecuteReader(input); } }
 
       '
-  description: "Disabled — DbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - DbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.dbcommand_executescalar
   enabled: false
   disabled_reason:
@@ -651,7 +651,7 @@
       dynamic amount = 1; DbCommand.ExecuteScalar(input); } }
 
       '
-  description: "Disabled — DbCommand.ExecuteScalar() executes receiver CommandText state, not a taintable SQL argument."
+  description: "Disabled - DbCommand.ExecuteScalar() executes receiver CommandText state, not a taintable SQL argument."
 - id: csharp.sqli.ef_database_sqlquery
   enabled: true
   language: csharp
@@ -683,7 +683,7 @@
       using EntityFramework;
       class App { void Test() { Database.SqlQuery("select 1"); } }
     expect_no_match: true
-  description: "EF6 Database.SqlQuery<T>(string sql, ...) \u2014 string-built variant;\
+  description: "EF6 Database.SqlQuery<T>(string sql, ...) - string-built variant;\
     \ FromSqlInterpolated/SqlQuery<T>(FormattableString) is the safe form (covered\
     \ as sanitizer)."
 - id: csharp.sqli.ef_dbset_sqlquery
@@ -717,7 +717,7 @@
       using EntityFramework;
       class App { void Test() { DbSet.SqlQuery("select 1"); } }
     expect_no_match: true
-  description: "EF6 DbSet<T>.SqlQuery \u2014 raw SQL on entity set."
+  description: "EF6 DbSet<T>.SqlQuery - raw SQL on entity set."
 - id: csharp.sqli.ef_relationaldatabasefacade_sqlqueryraw
   enabled: false
   disabled_reason:
@@ -741,7 +741,7 @@
       amount = 1; SqlQueryRaw(input); } }
 
       '
-  description: "Disabled \u2014 bare SqlQueryRaw is too broad; canonical EF Core\
+  description: "Disabled - bare SqlQueryRaw is too broad; canonical EF Core\
     \ raw SQL coverage is csharp.sqli.ef_database_sqlquery_raw."
 - id: csharp.sqli.ef_dbset_fromsql
   enabled: true
@@ -773,7 +773,7 @@
       using Microsoft.EntityFrameworkCore;
       class App { void Test() { FromSql("select 1"); } }
     expect_no_match: true
-  description: "EF Core DbSet.FromSql (legacy 2.x) \u2014 string-built variant; FromSqlInterpolated\
+  description: "EF Core DbSet.FromSql (legacy 2.x) - string-built variant; FromSqlInterpolated\
     \ is the safe form."
 - id: csharp.sqli.dapper_query_attr
   enabled: true
@@ -803,7 +803,7 @@
       using Dapper;
       class App { void Test(object conn) { SqlMapper.Query(conn, "select 1"); } }
     expect_no_match: true
-  description: "Dapper SqlMapper.Query (extension call form) \u2014 flag when SQL\
+  description: "Dapper SqlMapper.Query (extension call form) - flag when SQL\
     \ string is built from taint; parameter object should be used instead of concat."
 - id: csharp.sqli.dapper_execute_attr
   enabled: true
@@ -833,7 +833,7 @@
       using Dapper;
       class App { void Test(object conn) { SqlMapper.Execute(conn, "delete from sessions where expired = 1"); } }
     expect_no_match: true
-  description: "Dapper SqlMapper.Execute(conn, sql, ...) extension call form — tainted SQL command text."
+  description: "Dapper SqlMapper.Execute(conn, sql, ...) extension call form - tainted SQL command text."
 - id: csharp.sqli.dapper_queryasync_attr
   enabled: true
   language: csharp
@@ -927,5 +927,5 @@
       using ServiceStack.OrmLite;
       class App { void Test() { SqlList("select 1"); } }
     expect_no_match: true
-  description: "ServiceStack OrmLite IDbConnection.SqlList(rawSql) \u2014 raw SQL\
+  description: "ServiceStack OrmLite IDbConnection.SqlList(rawSql) - raw SQL\
     \ execution."

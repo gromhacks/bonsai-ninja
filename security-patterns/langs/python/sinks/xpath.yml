@@ -29,7 +29,7 @@
           expr = "//user[name='" + user_input + "']"
           return etree.XPath('safe')
     expect_no_match: true
-  description: "lxml.etree.XPath(tainted expression) — concatenated predicates allow XPath injection."
+  description: "lxml.etree.XPath(tainted expression) - concatenated predicates allow XPath injection."
 
 - id: python.xpath.lxml_xpath_instance_call
   enabled: true
@@ -62,7 +62,7 @@
           expr = "//user[name='" + user_input + "']"
           return doc.xpath('safe')
     expect_no_match: true
-  description: "lxml Element.xpath(tainted expression) — method form of XPath injection."
+  description: "lxml Element.xpath(tainted expression) - method form of XPath injection."
 
 - id: python.xpath.lxml_etxpath
   enabled: true
@@ -95,4 +95,4 @@
           expr = "//user[name='" + user_input + "']"
           return etree.ETXPath('safe')
     expect_no_match: true
-  description: "lxml.etree.ETXPath(tainted expression) — ElementTree-compatible XPath constructor with injection risk."
+  description: "lxml.etree.ETXPath(tainted expression) - ElementTree-compatible XPath constructor with injection risk."

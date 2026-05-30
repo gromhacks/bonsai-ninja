@@ -37,7 +37,7 @@
         conn.Search("constantRequest")
       }
     expect_no_match: true
-  description: "go-ldap Conn.Search(req) — tainted Filter = LDAP injection; escape with ldap.EscapeFilter."
+  description: "go-ldap Conn.Search(req) - tainted Filter = LDAP injection; escape with ldap.EscapeFilter."
 - id: go.ldap.conn_searchwithpaging
   enabled: true
   language: go
@@ -77,7 +77,7 @@
         conn.SearchWithPaging("constantRequest")
       }
     expect_no_match: true
-  description: "go-ldap Conn.SearchWithPaging — tainted filter search variant."
+  description: "go-ldap Conn.SearchWithPaging - tainted filter search variant."
 - id: go.ldap.conn_modify
   enabled: true
   language: go
@@ -117,7 +117,7 @@
         conn.Modify("constantRequest")
       }
     expect_no_match: true
-  description: "go-ldap Conn.Modify — tainted DN / attribute values mutate directory entries."
+  description: "go-ldap Conn.Modify - tainted DN / attribute values mutate directory entries."
 - id: go.ldap.conn_del
   enabled: true
   language: go
@@ -157,7 +157,7 @@
         conn.Del("constantRequest")
       }
     expect_no_match: true
-  description: "go-ldap Conn.Del — tainted DN deletes attacker-chosen entries."
+  description: "go-ldap Conn.Del - tainted DN deletes attacker-chosen entries."
 - id: go.ldap.newsearchrequest
   enabled: true
   language: go
@@ -196,4 +196,4 @@
         _ = ldap.NewSearchRequest("dc=example,dc=com", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, "(uid=alice)", attrs, nil)
       }
     expect_no_match: true
-  description: "ldap.NewSearchRequest — tainted Filter string argument; constant filter strings are excluded so tainted attribute-name arrays do not masquerade as LDAP filter injection."
+  description: "ldap.NewSearchRequest - tainted Filter string argument; constant filter strings are excluded so tainted attribute-name arrays do not masquerade as LDAP filter injection."

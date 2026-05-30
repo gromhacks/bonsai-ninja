@@ -20,7 +20,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    new Html(\"safe\")\n  }\n}\nclass Html(args: Any*)\n"
     expect_no_match: true
-  description: "Twirl Html(tainted) — bypasses auto-escaping."
+  description: "Twirl Html(tainted) - bypasses auto-escaping."
 - id: scala.xss.twirl_html_apply
   enabled: true
   language: scala
@@ -60,7 +60,7 @@
         }
       }
     expect_no_match: true
-  description: "Twirl Html.apply(tainted) — companion-object form of Html(...)."
+  description: "Twirl Html.apply(tainted) - companion-object form of Html(...)."
 - id: scala.xss.scalatags_raw
   enabled: true
   language: scala
@@ -96,7 +96,7 @@
         }
       }
     expect_no_match: true
-  description: "ScalaTags raw(str) — inserts unescaped HTML. Merged collision aliases: scala.xss.twirl_raw_helper."
+  description: "ScalaTags raw(str) - inserts unescaped HTML. Merged collision aliases: scala.xss.twirl_raw_helper."
   aliases:
   - scala.xss.twirl_raw_helper
   frameworks:
@@ -137,7 +137,7 @@
       }
       class RawFrag(args: Any*)
     expect_no_match: true
-  description: "ScalaTags RawFrag(str) constructor — unescaped HTML."
+  description: "ScalaTags RawFrag(str) constructor - unescaped HTML."
 - id: scala.xss.akka_http_complete_html
   enabled: true
   language: scala
@@ -178,7 +178,7 @@
         }
       }
     expect_no_match: true
-  description: "akka-http HttpEntity(ContentTypes.text/html, tainted) — interpolated HTML response body; risk only if marshalled with text/html and tainted."
+  description: "akka-http HttpEntity(ContentTypes.text/html, tainted) - interpolated HTML response body; risk only if marshalled with text/html and tainted."
 - id: scala.xss.spring_responseentity_ok_html_concat
   enabled: true
   language: scala
@@ -217,7 +217,7 @@
         }
       }
     expect_no_match: true
-  description: "ResponseEntity.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "ResponseEntity.ok(raw HTML concat) - reflected HTML response built from attacker-controlled text."
   imports:
   - org.springframework.web
 - id: scala.xss.webflux_serverresponse_bodyvalue_html_concat
@@ -258,7 +258,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: scala.xss.jaxrs_response_ok_html_concat
   enabled: true
   language: scala
@@ -299,7 +299,7 @@
         }
       }
     expect_no_match: true
-  description: "JAX-RS / Quarkus Response.ok(raw HTML concat) — reflected HTML response body built from attacker-controlled text."
+  description: "JAX-RS / Quarkus Response.ok(raw HTML concat) - reflected HTML response body built from attacker-controlled text."
 - id: scala.xss.play_results_ok_html_concat
   enabled: true
   language: scala
@@ -336,7 +336,7 @@
         }
       }
     expect_no_match: true
-  description: "Play Ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Play Ok(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: scala.xss.vertx_response_end_html_concat
   enabled: true
   language: scala
@@ -379,7 +379,7 @@
         def end(args: Any*): Unit = {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.end(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Vert.x HttpServerResponse.end(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: scala.xss.html_string_concat
   enabled: false
   disabled_reason:

@@ -10,7 +10,7 @@
   match_examples:
   - name: php.source.superglobal_get example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_GET;;\n}\n"
-  description: $_GET — query parameters.
+  description: $_GET - query parameters.
 - id: php.source.superglobal_post
   enabled: true
   language: php
@@ -23,7 +23,7 @@
   match_examples:
   - name: php.source.superglobal_post example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_POST;;\n}\n"
-  description: $_POST — form body.
+  description: $_POST - form body.
 - id: php.source.superglobal_request
   enabled: true
   language: php
@@ -36,7 +36,7 @@
   match_examples:
   - name: php.source.superglobal_request example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_REQUEST;;\n}\n"
-  description: $_REQUEST — combined GET/POST/COOKIE.
+  description: $_REQUEST - combined GET/POST/COOKIE.
 - id: php.source.superglobal_cookie
   enabled: true
   language: php
@@ -49,7 +49,7 @@
   match_examples:
   - name: php.source.superglobal_cookie example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_COOKIE;;\n}\n"
-  description: $_COOKIE superglobal — attacker-controlled cookie values sent with every request. Values are trust-boundary user input and can be spoofed via CSRF or a malicious site if SameSite isn't set.
+  description: $_COOKIE superglobal - attacker-controlled cookie values sent with every request. Values are trust-boundary user input and can be spoofed via CSRF or a malicious site if SameSite isn't set.
 - id: php.source.superglobal_files
   enabled: true
   language: php
@@ -62,7 +62,7 @@
   match_examples:
   - name: php.source.superglobal_files example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_FILES;;\n}\n"
-  description: $_FILES — uploaded file metadata; name is client-controlled.
+  description: $_FILES - uploaded file metadata; name is client-controlled.
 - id: php.source.superglobal_server
   enabled: true
   language: php
@@ -75,7 +75,7 @@
   match_examples:
   - name: php.source.superglobal_server example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_SERVER;;\n}\n"
-  description: $_SERVER — many keys are client-controlled (HTTP_*, etc).
+  description: $_SERVER - many keys are client-controlled (HTTP_*, etc).
 - id: php.source.php_input_stream
   enabled: true
   language: php
@@ -95,7 +95,7 @@
   - name: php.source.php_input_stream example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents();\n}\n"
     expect_no_match: true
-  description: file_get_contents('php://input') — raw request body.
+  description: file_get_contents('php://input') - raw request body.
 - id: php.source.fopen_php_input
   enabled: true
   language: php
@@ -131,7 +131,7 @@
       attribute:
       - Request
       - get
-  description: Disabled — adapters index local `$request->get(...)` calls by receiver name, not Symfony Request type facts; a bare `get` fallback would match unrelated APIs.
+  description: Disabled - adapters index local `$request->get(...)` calls by receiver name, not Symfony Request type facts; a bare `get` fallback would match unrelated APIs.
 - id: php.source.symfony_request_query_get
   enabled: true
   language: php
@@ -186,7 +186,7 @@
       function example($input, $url, $id, $payload, $request) {
         $request->get($input);
       }
-  description: 'Symfony/Yii request->get — request body/query accessor. Signature: `get($key, $default = null)`; `min_args: 1` rejects unrelated 0-arg `request->get()` decoys (container.get, Map.get accessors).'
+  description: 'Symfony/Yii request->get - request body/query accessor. Signature: `get($key, $default = null)`; `min_args: 1` rejects unrelated 0-arg `request->get()` decoys (container.get, Map.get accessors).'
   imports:
   - symfony
   - symfony/httpfoundation
@@ -242,7 +242,7 @@
       function example($input, $url, $id, $payload, $request) {
         $cookies->get($input);
       }
-  description: Symfony $request->cookies->get — ParameterBag accessor.
+  description: Symfony $request->cookies->get - ParameterBag accessor.
   imports:
   - symfony
   - symfony/httpfoundation
@@ -270,7 +270,7 @@
       function example($input, $url, $id, $payload, $request) {
         $files->get($input);
       }
-  description: Symfony $request->files->get — FileBag (UploadedFile with client-controlled name).
+  description: Symfony $request->files->get - FileBag (UploadedFile with client-controlled name).
   imports:
   - symfony
   - symfony/httpfoundation
@@ -303,7 +303,7 @@
       }
     expect_match_text:
     - "$file->getClientOriginalName"
-  description: Symfony/Laravel UploadedFile::getClientOriginalName() — browser-supplied multipart filename; preserve taint into path/file-upload sinks.
+  description: Symfony/Laravel UploadedFile::getClientOriginalName() - browser-supplied multipart filename; preserve taint into path/file-upload sinks.
   imports:
   - symfony
   - symfony/httpfoundation
@@ -338,7 +338,7 @@
       }
     expect_match_text:
     - "$uploadedFile->getClientFilename"
-  description: PSR-7 UploadedFileInterface::getClientFilename() — untrusted Content-Disposition filename from multipart upload.
+  description: PSR-7 UploadedFileInterface::getClientFilename() - untrusted Content-Disposition filename from multipart upload.
   imports:
   - psr/httpmessage
   - psr
@@ -366,7 +366,7 @@
       function example($input, $url, $id, $payload, $request) {
         $server->get($input);
       }
-  description: Symfony $request->server->get — wraps $_SERVER (HTTP_* is client-controlled).
+  description: Symfony $request->server->get - wraps $_SERVER (HTTP_* is client-controlled).
   imports:
   - symfony
   - symfony/httpfoundation
@@ -394,7 +394,7 @@
       function example($input, $url, $id, $payload, $request) {
         $attributes->get($input);
       }
-  description: Symfony $request->attributes->get — route params are URL-derived and remote.
+  description: Symfony $request->attributes->get - route params are URL-derived and remote.
   imports:
   - symfony
   - symfony/httpfoundation
@@ -444,7 +444,7 @@
       attribute:
       - Request
       - input
-  description: Disabled — adapters index local `$request->input(...)` calls by receiver name, not Illuminate Request type facts; a bare `input` fallback would match unrelated APIs.
+  description: Disabled - adapters index local `$request->input(...)` calls by receiver name, not Illuminate Request type facts; a bare `input` fallback would match unrelated APIs.
 - id: php.source.laravel_request_all
   enabled: false
   disabled_reason:
@@ -460,7 +460,7 @@
       attribute:
       - Request
       - all
-  description: Disabled — typed receiver matching does not work for local `$request->all()` calls, and bare `all` is far too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->all()` calls, and bare `all` is far too broad.
 - id: php.source.laravel_request_query
   enabled: false
   disabled_reason:
@@ -476,7 +476,7 @@
       attribute:
       - Request
       - query
-  description: Disabled — typed receiver matching does not work for local `$request->query(...)` calls, and bare `query` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->query(...)` calls, and bare `query` is too broad.
 - id: php.source.laravel_request_get
   enabled: false
   disabled_reason:
@@ -492,7 +492,7 @@
       attribute:
       - Request
       - get
-  description: Disabled — typed receiver matching does not work for local `$request->get(...)` calls, and bare `get` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->get(...)` calls, and bare `get` is too broad.
 - id: php.source.laravel_request_header
   enabled: false
   disabled_reason:
@@ -508,7 +508,7 @@
       attribute:
       - Request
       - header
-  description: Disabled — typed receiver matching does not work for local `$request->header(...)` calls, and bare `header` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->header(...)` calls, and bare `header` is too broad.
 - id: php.source.laravel_request_cookie
   enabled: false
   disabled_reason:
@@ -524,7 +524,7 @@
       attribute:
       - Request
       - cookie
-  description: Disabled — typed receiver matching does not work for local `$request->cookie(...)` calls, and bare `cookie` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->cookie(...)` calls, and bare `cookie` is too broad.
 - id: php.source.laravel_request_file
   enabled: false
   disabled_reason:
@@ -540,7 +540,7 @@
       attribute:
       - Request
       - file
-  description: Disabled — typed receiver matching does not work for local `$request->file(...)` calls, and bare `file` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->file(...)` calls, and bare `file` is too broad.
 - id: php.source.laravel_request_post
   enabled: false
   disabled_reason:
@@ -556,7 +556,7 @@
       attribute:
       - Request
       - post
-  description: Disabled — typed receiver matching does not work for local `$request->post(...)` calls, and bare `post` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->post(...)` calls, and bare `post` is too broad.
 - id: php.source.laravel_request_only
   enabled: false
   disabled_reason:
@@ -572,7 +572,7 @@
       attribute:
       - Request
       - only
-  description: Disabled — typed receiver matching does not work for local `$request->only(...)` calls, and bare `only` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->only(...)` calls, and bare `only` is too broad.
 - id: php.source.laravel_request_json
   enabled: false
   disabled_reason:
@@ -588,7 +588,7 @@
       attribute:
       - Request
       - json
-  description: Disabled — typed receiver matching does not work for local `$request->json(...)` calls, and bare `json` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->json(...)` calls, and bare `json` is too broad.
 - id: php.source.laravel_route_param
   enabled: false
   disabled_reason:
@@ -604,7 +604,7 @@
       attribute:
       - Request
       - route
-  description: Disabled — typed receiver matching does not work for local `$request->route(...)` calls, and bare `route` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->route(...)` calls, and bare `route` is too broad.
 - id: php.source.slim_request_get_params
   enabled: true
   language: php
@@ -648,7 +648,7 @@
       attribute:
       - Request
       - getBody
-  description: Disabled — typed receiver matching does not work for local `$request->getBody()` calls, and bare `getBody` is too broad.
+  description: Disabled - typed receiver matching does not work for local `$request->getBody()` calls, and bare `getBody` is too broad.
 - id: php.source.slim_request_parsed
   enabled: true
   language: php
@@ -751,7 +751,7 @@
       function example($input, $url, $id, $payload, $request) {
         $input->cookie($input);
       }
-  description: CodeIgniter $this->input->cookie — client-supplied cookies.
+  description: CodeIgniter $this->input->cookie - client-supplied cookies.
   imports:
   - codeigniter4\framework
   - codeigniter4
@@ -777,7 +777,7 @@
       function example($input, $url, $id, $payload, $request) {
         $input->server($input);
       }
-  description: CodeIgniter $this->input->server — HTTP_* keys are client-controlled.
+  description: CodeIgniter $this->input->server - HTTP_* keys are client-controlled.
   imports:
   - codeigniter4\framework
   - codeigniter4
@@ -852,7 +852,7 @@
       attribute:
       - request
       - get
-  description: Disabled duplicate — same `request.get` shape as php.source.symfony_request_request_get; Yii package metadata is merged there.
+  description: Disabled duplicate - same `request.get` shape as php.source.symfony_request_request_get; Yii package metadata is merged there.
 - id: php.source.yii_request_post
   enabled: true
   language: php
@@ -895,7 +895,7 @@
     kind: read
     target:
       name: _GET
-  description: Disabled duplicate — covered by superglobal_get.
+  description: Disabled duplicate - covered by superglobal_get.
 - id: php.source.server_http_host
   enabled: true
   language: php
@@ -908,7 +908,7 @@
   match_examples:
   - name: php.source.server_http_host example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_HOST;;\n}\n"
-  description: $_SERVER['HTTP_HOST'] — client-controlled header.
+  description: $_SERVER['HTTP_HOST'] - client-controlled header.
 - id: php.source.getallheaders
   enabled: true
   language: php
@@ -921,7 +921,7 @@
   match_examples:
   - name: php.source.getallheaders example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  getallheaders($input);\n}\n"
-  description: getallheaders() — all client request headers.
+  description: getallheaders() - all client request headers.
 - id: php.source.apache_request_headers
   enabled: true
   language: php
@@ -934,7 +934,7 @@
   match_examples:
   - name: php.source.apache_request_headers example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  apache_request_headers($input);\n}\n"
-  description: apache_request_headers() — same as getallheaders.
+  description: apache_request_headers() - same as getallheaders.
 - id: php.source.server_http_user_agent
   enabled: true
   language: php
@@ -947,7 +947,7 @@
   match_examples:
   - name: php.source.server_http_user_agent example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_USER_AGENT;;\n}\n"
-  description: $_SERVER['HTTP_USER_AGENT'] — client-controlled User-Agent header; logged or parsed as a string and frequently flows into SQL/log/template sinks.
+  description: $_SERVER['HTTP_USER_AGENT'] - client-controlled User-Agent header; logged or parsed as a string and frequently flows into SQL/log/template sinks.
 - id: php.source.server_http_referer
   enabled: true
   language: php
@@ -960,7 +960,7 @@
   match_examples:
   - name: php.source.server_http_referer example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_REFERER;;\n}\n"
-  description: $_SERVER['HTTP_REFERER'] — client-controlled Referer header; commonly used for back-link redirects (open-redirect / SSRF risk).
+  description: $_SERVER['HTTP_REFERER'] - client-controlled Referer header; commonly used for back-link redirects (open-redirect / SSRF risk).
 - id: php.source.server_http_x_forwarded_for
   enabled: true
   language: php
@@ -973,7 +973,7 @@
   match_examples:
   - name: php.source.server_http_x_forwarded_for example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_FOR;;\n}\n"
-  description: $_SERVER['HTTP_X_FORWARDED_FOR'] — proxy-supplied client IP chain; spoofable when the app does not strip it at the trusted edge.
+  description: $_SERVER['HTTP_X_FORWARDED_FOR'] - proxy-supplied client IP chain; spoofable when the app does not strip it at the trusted edge.
 - id: php.source.wp_unslash
   enabled: true
   language: php
@@ -994,7 +994,7 @@
       function example($input, $url, $id, $payload, $request) {
         wp_unslash($input);
       }
-  description: WordPress wp_unslash() — strips magic-quote slashes from $_GET/$_POST/$_COOKIE values; the returned string is still client-controlled and must be re-validated.
+  description: WordPress wp_unslash() - strips magic-quote slashes from $_GET/$_POST/$_COOKIE values; the returned string is still client-controlled and must be re-validated.
 - id: php.source.wp_get_query_var
   enabled: true
   language: php
@@ -1015,7 +1015,7 @@
       function example($input, $url, $id, $payload, $request) {
         get_query_var($input);
       }
-  description: WordPress get_query_var() — returns a public query-var resolved from the URL/$_GET; remote input passthrough.
+  description: WordPress get_query_var() - returns a public query-var resolved from the URL/$_GET; remote input passthrough.
 - id: php.source.laravel_auth_user
   enabled: false
   disabled_reason:
@@ -1029,7 +1029,7 @@
     kind: call
     callee:
       name: auth
-  description: Disabled — auth()->user() returns the authenticated identity; values are session-bound but identity fields (name, email) are user-editable. Enable in projects that treat identity as untrusted; currently off because bare `auth` would match unrelated helpers and the chain `auth()->user()->name` resolves through the typed-receiver path that the v1 adapter does not model.
+  description: Disabled - auth()->user() returns the authenticated identity; values are session-bound but identity fields (name, email) are user-editable. Enable in projects that treat identity as untrusted; currently off because bare `auth` would match unrelated helpers and the chain `auth()->user()->name` resolves through the typed-receiver path that the v1 adapter does not model.
 - id: php.source.lumen_request_input
   enabled: false
   disabled_reason:
@@ -1045,7 +1045,7 @@
       attribute:
       - Request
       - input
-  description: Disabled — Lumen reuses Illuminate\Http\Request; same typed-receiver limitation as php.source.laravel_request_input. Tracked here so audits know Lumen is intentionally covered by the Laravel rules once the adapter resolves typed receivers.
+  description: Disabled - Lumen reuses Illuminate\Http\Request; same typed-receiver limitation as php.source.laravel_request_input. Tracked here so audits know Lumen is intentionally covered by the Laravel rules once the adapter resolves typed receivers.
 
 - id: php.source.graphql_resolver_args_param
   enabled: true
@@ -1082,4 +1082,4 @@
         return $args;
       }
     expect_no_match: true
-  description: "webonyx/graphql-php resolver resolve(..., $args) parameter — GraphQL caller-supplied arguments. Scoped to resolver method names to avoid tainting ordinary helpers named args."
+  description: "webonyx/graphql-php resolver resolve(..., $args) parameter - GraphQL caller-supplied arguments. Scoped to resolver method names to avoid tainting ordinary helpers named args."

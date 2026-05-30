@@ -32,7 +32,7 @@
       function example($input, $url, $id, $payload, $request) {\n  JWT::encode($input, $input, \"HS256\");\n\
       }\n"
     expect_no_match: true
-  description: 'Firebase JWT::decode — flag missing/none alg whitelist. Merged aliases:
+  description: 'Firebase JWT::decode - flag missing/none alg whitelist. Merged aliases:
     php.jwt.alg_confusion.'
   aliases:
   - php.jwt.alg_confusion
@@ -111,7 +111,7 @@
     code: "<?php\nuse lcobucci\\jwt;\nuse lcobucci\\jwt;\nfunction example($input,
       $url, $id, $payload, $request) {\n  Parser::validate($input);\n}\n"
     expect_no_match: true
-  description: lcobucci/jwt Parser::parse — flag if no subsequent
+  description: lcobucci/jwt Parser::parse - flag if no subsequent
     validate/verify.
   imports:
   - lcobucci\jwt
@@ -133,7 +133,7 @@
       attribute:
       - Validator
       - validate
-  description: Disabled — Validator is the check; flag missing SignedWith
+  description: Disabled - Validator is the check; flag missing SignedWith
     constraint.
 - id: php.jwt.web_token_jws_loader
   enabled: false
@@ -162,8 +162,8 @@
       function example($input, $url, $id, $payload, $request) {
         JWSLoader::loadAndVerifyWithKey($input);
       }
-  description: Disabled — requires a rulepack constraint that proves the unsafe
-    JWT configuration, not just the broad API shape. web-token JWSLoader — flag
+  description: Disabled - requires a rulepack constraint that proves the unsafe
+    JWT configuration, not just the broad API shape. web-token JWSLoader - flag
     if no alg whitelist.
   imports:
   - webtoken
@@ -200,7 +200,7 @@
     code: "<?php\nuse emarref\\jwt;\nuse emarref\\jwt;\nfunction example($input, $url,
       $id, $payload, $request) {\n  Token::serialize($input);\n}\n"
     expect_no_match: true
-  description: emarref Token::deserialize — parses without verification.
+  description: emarref Token::deserialize - parses without verification.
   imports:
   - emarref\jwt
   - emarref

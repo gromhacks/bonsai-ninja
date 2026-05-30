@@ -18,7 +18,7 @@
       function example($pdo) {
           $pdo->commit();
       }
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). PDO::commit() — transaction-after-error race-pair; later $pdo->prepare/execute on the same connection runs outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). PDO::commit() - transaction-after-error race-pair; later $pdo->prepare/execute on the same connection runs outside the intended transaction window."
 - id: php.race.pdo_rollback
   enabled: true
   language: php
@@ -37,4 +37,4 @@
       function example($pdo) {
           $pdo->rollBack();
       }
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). PDO::rollBack() — transaction-after-error race-pair; later $pdo->execute on the same connection persists writes the rollback was supposed to undo."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). PDO::rollBack() - transaction-after-error race-pair; later $pdo->execute on the same connection persists writes the rollback was supposed to undo."

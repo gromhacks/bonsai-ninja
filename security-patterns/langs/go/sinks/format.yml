@@ -30,7 +30,7 @@
         fmt.Printf("%s", "safe")
       }
     expect_no_match: true
-  description: "fmt.Printf with tainted format string — attacker can include extra `%s`/`%d` directives that read past the supplied arg list (Go panics on arg-count mismatch but still leaks pre-panic output)."
+  description: "fmt.Printf with tainted format string - attacker can include extra `%s`/`%d` directives that read past the supplied arg list (Go panics on arg-count mismatch but still leaks pre-panic output)."
 
 - id: go.format.fmt_sprintf_tainted
   enabled: true

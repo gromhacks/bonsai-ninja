@@ -31,4 +31,4 @@
         let _ = factory.build("//safe");
       }
     expect_no_match: true
-  description: "sxd_xpath Factory::build — compile XPath from user-supplied string; later evaluation injects."
+  description: "sxd_xpath Factory::build - compile XPath from user-supplied string; later evaluation injects."

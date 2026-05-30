@@ -30,7 +30,7 @@
       def example(secret_token):
           return logging.error('safe')
     expect_no_match: true
-  description: "logging.error(secret/token/password) — secret-shaped data written to application logs. Merged collision aliases: python.log_injection.logger_error_concat, python.log_injection.structlog_error_concat."
+  description: "logging.error(secret/token/password) - secret-shaped data written to application logs. Merged collision aliases: python.log_injection.logger_error_concat, python.log_injection.structlog_error_concat."
   aliases:
   - python.log_injection.logger_error_concat
   - python.log_injection.structlog_error_concat
@@ -73,7 +73,7 @@
       def handler():
           return jsonify({"error": "empty"}), 400
     expect_no_match: true
-  description: "Flask jsonify(exception/traceback) — returns internal exception details to the client."
+  description: "Flask jsonify(exception/traceback) - returns internal exception details to the client."
 - id: python.info_disclosure.django_technical_500_response
   enabled: true
   language: python
@@ -95,4 +95,4 @@
           return technical_500_response(request, *sys.exc_info())
     expect_match_text:
     - technical_500_response
-  description: "Django technical_500_response — debug error page exposes stack frames, settings, and request context."
+  description: "Django technical_500_response - debug error page exposes stack frames, settings, and request context."

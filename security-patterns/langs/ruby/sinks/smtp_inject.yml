@@ -1,9 +1,9 @@
-# Ruby `Mail.new(...)` — disabled until adapter call shape is
+# Ruby `Mail.new(...)` - disabled until adapter call shape is
 # confirmed. Both `kind: call` and `kind: new` against
 # `[Mail, new]` miss the example, suggesting tree-sitter-ruby
 # emits this as a class-method call with a different shape (likely
 # `attribute: [Mail]` callee with no `.new` suffix). Pending
-# per-language receiver narrowing fix per docs/contributing/review-checklist.mdx §4 T-7.
+# per-language receiver narrowing fix per docs/contributing/review-checklist.mdx section 4 T-7.
 - id: ruby.smtpinj.mail_new
   enabled: false
   disabled_reason:
@@ -18,4 +18,4 @@
     kind: call
     callee:
       attribute: [Mail, new]
-  description: "Mail.new(from:, to:, subject:, ...) — disabled pending adapter fact for class-constructor call shape."
+  description: "Mail.new(from:, to:, subject:, ...) - disabled pending adapter fact for class-constructor call shape."

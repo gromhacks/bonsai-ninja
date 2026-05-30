@@ -10,4 +10,4 @@
     kind: call
     callee:
       name: unchecked
-  description: "Disabled — `unchecked { … }` disables 0.8+ overflow checks; re-enable once arithmetic-in-block analysis is wired up."
+  description: "Disabled - `unchecked { ... }` disables 0.8+ overflow checks; re-enable once arithmetic-in-block analysis is wired up."

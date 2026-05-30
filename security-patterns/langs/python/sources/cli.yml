@@ -19,7 +19,7 @@
       def example():
           value = sys.argv
           return value
-  description: sys.argv — process command-line arguments.
+  description: sys.argv - process command-line arguments.
 
 - id: python.cli.sys_stdin_read
   enabled: true
@@ -38,7 +38,7 @@
       import sys
       def example(user_input):
           return sys.stdin.read(user_input)
-  description: sys.stdin.read — reads the entire stdin stream.
+  description: sys.stdin.read - reads the entire stdin stream.
 
 - id: python.cli.sys_stdin_readline
   enabled: true
@@ -57,7 +57,7 @@
       import sys
       def example(user_input):
           return sys.stdin.readline(user_input)
-  description: sys.stdin.readline — reads a single line from stdin.
+  description: sys.stdin.readline - reads a single line from stdin.
 
 - id: python.cli.builtin_input
   enabled: true
@@ -74,7 +74,7 @@
     code: |
       def example(user_input):
           return input(user_input)
-  description: input() — interactive prompt; returns a user-supplied string (Python 3; Python 2 input() is code-exec and covered by the eval sink).
+  description: input() - interactive prompt; returns a user-supplied string (Python 3; Python 2 input() is code-exec and covered by the eval sink).
 
 - id: python.cli.argparse_parse_args
   enabled: true
@@ -97,8 +97,8 @@
           parser = argparse.ArgumentParser()
           return parser.parse_args(user_input)
     expect_match_text: [parser.parse_args]
-  description: "argparse parser.parse_args(...) — receiver-regex match across local parser variable names, gated by argparse imports."
+  description: "argparse parser.parse_args(...) - receiver-regex match across local parser variable names, gated by argparse imports."
 
-# click/typer source rule removed — needs decorator-scoped parameter
+# click/typer source rule removed - needs decorator-scoped parameter
 # matching in the adapter to fire only on @click.command-decorated
 # functions. Until then, a bare-regex placeholder is a footgun.

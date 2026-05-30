@@ -1,5 +1,5 @@
 # Rust HTTP / RPC remote-input sources.
-# Web-framework extractors — actix-web, axum, warp, rocket, hyper.
+# Web-framework extractors - actix-web, axum, warp, rocket, hyper.
 - id: rust.actix.web_query
   enabled: true
   language: rust
@@ -25,7 +25,7 @@
           let query = "user";
           actix_web::web::Query(target);
       }
-  description: "actix_web::web::Query<T> extractor — parses querystring into T."
+  description: "actix_web::web::Query<T> extractor - parses querystring into T."
   imports:
   - actix_web
 - id: rust.actix.web_path
@@ -51,7 +51,7 @@
           let query = "user";
           actix_web::web::Path(target);
       }
-  description: "actix_web::web::Path<T> extractor — parses path segments."
+  description: "actix_web::web::Path<T> extractor - parses path segments."
   imports:
   - actix_web
 - id: rust.actix.web_form
@@ -77,7 +77,7 @@
           let query = "user";
           web::Form(target);
       }
-  description: "actix_web::web::Form<T> extractor — parses form body."
+  description: "actix_web::web::Form<T> extractor - parses form body."
   imports:
   - actix_web
 - id: rust.actix.web_json
@@ -103,7 +103,7 @@
           let query = "user";
           actix_web::web::Json(target);
       }
-  description: "actix_web::web::Json<T> extractor — parses JSON body."
+  description: "actix_web::web::Json<T> extractor - parses JSON body."
   imports:
   - actix_web
 - id: rust.axum.query
@@ -127,7 +127,7 @@
           let query = "user";
           extract::Query(target);
       }
-  description: "axum::extract::Query<T> extractor — parses querystring."
+  description: "axum::extract::Query<T> extractor - parses querystring."
 - id: rust.axum.json
   enabled: true
   language: rust
@@ -149,7 +149,7 @@
           let query = "user";
           extract::Json(target);
       }
-  description: "axum::extract::Json<T> extractor — parses JSON body."
+  description: "axum::extract::Json<T> extractor - parses JSON body."
 - id: rust.axum.path
   enabled: true
   language: rust
@@ -171,7 +171,7 @@
           let query = "user";
           extract::Path(target);
       }
-  description: "axum::extract::Path<T> extractor — parses path segments."
+  description: "axum::extract::Path<T> extractor - parses path segments."
 - id: rust.axum.form
   enabled: true
   language: rust
@@ -193,7 +193,7 @@
           let query = "user";
           extract::Form(target);
       }
-  description: "axum::extract::Form<T> extractor — parses form body."
+  description: "axum::extract::Form<T> extractor - parses form body."
 - id: rust.axum.multipart
   enabled: true
   language: rust
@@ -215,7 +215,7 @@
           let query = "user";
           extract::Multipart(target);
       }
-  description: "axum::extract::Multipart extractor — parses multipart/form-data."
+  description: "axum::extract::Multipart extractor - parses multipart/form-data."
 - id: rust.axum.multipart_field_file_name
   enabled: true
   language: rust
@@ -237,7 +237,7 @@
       fn example(field: Field) {
           field.file_name();
       }
-  description: "axum multipart Field::file_name() — client-controlled Content-Disposition filename; taints path/file-upload sinks."
+  description: "axum multipart Field::file_name() - client-controlled Content-Disposition filename; taints path/file-upload sinks."
 - id: rust.actix.multipart_field_filename
   enabled: true
   language: rust
@@ -260,7 +260,7 @@
           cd.get_filename();
       }
     expect_match_text: [cd.get_filename]
-  description: "actix_multipart ContentDisposition::get_filename() — client-controlled multipart filename; taints path/file-upload sinks."
+  description: "actix_multipart ContentDisposition::get_filename() - client-controlled multipart filename; taints path/file-upload sinks."
 - id: rust.warp.filter_query
   enabled: true
   language: rust
@@ -282,7 +282,7 @@
           let query = "user";
           warp::query(target);
       }
-  description: "warp::query() filter — extracts querystring."
+  description: "warp::query() filter - extracts querystring."
 - id: rust.warp.body_json
   enabled: true
   language: rust
@@ -304,7 +304,7 @@
           let query = "user";
           body::json(target);
       }
-  description: "warp::body::json() filter — parses JSON body."
+  description: "warp::body::json() filter - parses JSON body."
 - id: rust.warp.body_form
   enabled: true
   language: rust
@@ -326,7 +326,7 @@
           let query = "user";
           body::form(target);
       }
-  description: "warp::body::form() filter — parses form body."
+  description: "warp::body::form() filter - parses form body."
 - id: rust.rocket.form_data
   enabled: true
   language: rust
@@ -348,7 +348,7 @@
           let query = "user";
           rocket::form::Form(target);
       }
-  description: "rocket::form::Form<T> guard — parses form body."
+  description: "rocket::form::Form<T> guard - parses form body."
 - id: rust.rocket.json
   enabled: true
   language: rust
@@ -370,7 +370,7 @@
           let query = "user";
           json::Json(target);
       }
-  description: "rocket::serde::json::Json<T> guard — parses JSON body."
+  description: "rocket::serde::json::Json<T> guard - parses JSON body."
 - id: rust.hyper.request_uri_query
   enabled: true
   language: rust
@@ -392,7 +392,7 @@
           let query = "user";
           uri::query(target);
       }
-  description: "hyper Request::uri().query() — raw querystring bytes."
+  description: "hyper Request::uri().query() - raw querystring bytes."
 - id: rust.hyper.request_headers
   enabled: true
   language: rust
@@ -414,7 +414,7 @@
           let query = "user";
           headers::get(target);
       }
-  description: "HeaderMap::get(name) — attacker-controlled HTTP header value; sink-side risk is header-reflection XSS / log-injection / SSRF (Host, X-Forwarded-For)."
+  description: "HeaderMap::get(name) - attacker-controlled HTTP header value; sink-side risk is header-reflection XSS / log-injection / SSRF (Host, X-Forwarded-For)."
 - id: rust.hyper.request_uri_path
   enabled: true
   language: rust
@@ -436,7 +436,7 @@
           let query = "user";
           uri::path(target);
       }
-  description: "hyper Request::uri().path() — raw request path; tainted value if used in fs operations = traversal."
+  description: "hyper Request::uri().path() - raw request path; tainted value if used in fs operations = traversal."
 - id: rust.tonic.request_into_inner
   enabled: true
   language: rust
@@ -457,7 +457,7 @@
           Request::into_inner();
       }
     expect_match_text: ["Request::into_inner"]
-  description: "tonic Request::into_inner — takes the client-supplied protobuf message out of the request; local receiver calls require semantic Request receiver-type facts."
+  description: "tonic Request::into_inner - takes the client-supplied protobuf message out of the request; local receiver calls require semantic Request receiver-type facts."
 - id: rust.axum.typed_header
   enabled: true
   language: rust
@@ -479,7 +479,7 @@
           let query = "user";
           extract::TypedHeader(target);
       }
-  description: "axum::extract::TypedHeader<T> — typed wrapper around an attacker-controlled HTTP header value."
+  description: "axum::extract::TypedHeader<T> - typed wrapper around an attacker-controlled HTTP header value."
 - id: rust.axum.header_extract
   enabled: true
   language: rust
@@ -501,7 +501,7 @@
           let query = "user";
           extract::Header(target);
       }
-  description: "axum::extract::Header — single header extractor; tainted header value reaches the handler."
+  description: "axum::extract::Header - single header extractor; tainted header value reaches the handler."
 - id: rust.axum.extension
   enabled: false
   disabled_reason:
@@ -516,7 +516,7 @@
     kind: call
     callee:
       attribute: [extract, Extension]
-  description: "Disabled — Extension<T> wraps server-side state injected by middleware (DB pools, configs); only attacker-controlled when middleware stores parsed request data, which over-fires by default."
+  description: "Disabled - Extension<T> wraps server-side state injected by middleware (DB pools, configs); only attacker-controlled when middleware stores parsed request data, which over-fires by default."
 - id: rust.actix.request_headers
   enabled: true
   language: rust
@@ -540,7 +540,7 @@
           let query = "user";
           HttpRequest::headers(target);
       }
-  description: "actix_web::HttpRequest::headers() — attacker-controlled HTTP header map."
+  description: "actix_web::HttpRequest::headers() - attacker-controlled HTTP header map."
   imports:
   - actix_web
 - id: rust.actix.request_cookies
@@ -566,7 +566,7 @@
           let query = "user";
           HttpRequest::cookie(target);
       }
-  description: "actix_web::HttpRequest::cookie(name) — attacker-controlled cookie value."
+  description: "actix_web::HttpRequest::cookie(name) - attacker-controlled cookie value."
   imports:
   - actix_web
 - id: rust.warp.header_filter
@@ -590,7 +590,7 @@
           let query = "user";
           warp::header(target);
       }
-  description: "warp::header(name) filter — extracts an attacker-controlled HTTP header value."
+  description: "warp::header(name) filter - extracts an attacker-controlled HTTP header value."
 - id: rust.rocket.state_guard
   enabled: false
   disabled_reason:
@@ -605,7 +605,7 @@
     kind: call
     callee:
       attribute: [rocket, State]
-  description: "Disabled — &State<T> wraps managed application state (DB pools, configs), not request input; would over-fire on every framework state access."
+  description: "Disabled - &State<T> wraps managed application state (DB pools, configs), not request input; would over-fire on every framework state access."
 - id: rust.poem.json
   enabled: true
   language: rust
@@ -627,7 +627,7 @@
           let query = "user";
           poem::web::Json(target);
       }
-  description: "poem::web::Json<T> extractor — parses JSON body. Shares attribute chain with actix `web::Json`; both are HTTP body extractors of the same trust class."
+  description: "poem::web::Json<T> extractor - parses JSON body. Shares attribute chain with actix `web::Json`; both are HTTP body extractors of the same trust class."
 - id: rust.poem.path
   enabled: true
   language: rust
@@ -649,7 +649,7 @@
           let query = "user";
           poem::web::Path(target);
       }
-  description: "poem::web::Path<T> extractor — parses path segments."
+  description: "poem::web::Path<T> extractor - parses path segments."
 - id: rust.poem.query
   enabled: true
   language: rust
@@ -671,7 +671,7 @@
           let query = "user";
           poem::web::Query(target);
       }
-  description: "poem::web::Query<T> extractor — parses querystring."
+  description: "poem::web::Query<T> extractor - parses querystring."
 - id: rust.tonic.request_get_ref
   enabled: true
   language: rust
@@ -693,7 +693,7 @@
           let query = "user";
           tonic::Request::get_ref(target);
       }
-  description: "tonic::Request::get_ref — borrows the inner protobuf message; contents are attacker-controlled gRPC client input."
+  description: "tonic::Request::get_ref - borrows the inner protobuf message; contents are attacker-controlled gRPC client input."
 - id: rust.tokio.async_read
   enabled: false
   disabled_reason:
@@ -708,7 +708,7 @@
     kind: call
     callee:
       attribute: [AsyncReadExt, read]
-  description: "Disabled — `AsyncReadExt::read` covers both untrusted sockets and trusted local files; default-on would over-fire on every file/byte read. Enable for TCP/UDP-handler audits where the reader is known to be a network socket."
+  description: "Disabled - `AsyncReadExt::read` covers both untrusted sockets and trusted local files; default-on would over-fire on every file/byte read. Enable for TCP/UDP-handler audits where the reader is known to be a network socket."
 
 - id: rust.source.async_graphql_context_args
   enabled: true
@@ -744,4 +744,4 @@
           ctx.args();
       }
     expect_no_match: true
-  description: "async-graphql Context::args() — resolver arguments supplied by the GraphQL caller. Receiver type is required so generic args() helpers stay clean."
+  description: "async-graphql Context::args() - resolver arguments supplied by the GraphQL caller. Receiver type is required so generic args() helpers stay clean."

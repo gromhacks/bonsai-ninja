@@ -18,7 +18,7 @@
     kind: call
     callee:
       name: String
-  description: "Disabled — String(contentsOfFile:) init; bare `String(...)` is ubiquitous without kwarg-presence filter."
+  description: "Disabled - String(contentsOfFile:) init; bare `String(...)` is ubiquitous without kwarg-presence filter."
 - id: swift.path.file_handle_init
   enabled: false
   disabled_reason:
@@ -31,7 +31,7 @@
     kind: call
     callee:
       name: FileHandle
-  description: "Disabled — FileHandle(forReadingAtPath:) init; needs kwarg-presence constraint."
+  description: "Disabled - FileHandle(forReadingAtPath:) init; needs kwarg-presence constraint."
 - id: swift.path.url_fileurl_init
   enabled: false
   disabled_reason:
@@ -44,7 +44,7 @@
     kind: call
     callee:
       name: URL
-  description: "Disabled — URL(fileURLWithPath:) init; bare `URL(...)` is ubiquitous."
+  description: "Disabled - URL(fileURLWithPath:) init; bare `URL(...)` is ubiquitous."
 - id: swift.path.data_init_contents
   enabled: false
   disabled_reason:
@@ -57,7 +57,7 @@
     kind: call
     callee:
       name: Data
-  description: "Disabled — Data(contentsOf:) init; bare `Data(...)` is ubiquitous."
+  description: "Disabled - Data(contentsOf:) init; bare `Data(...)` is ubiquitous."
 - id: swift.path.fm_create_file
   enabled: true
   language: swift
@@ -145,7 +145,7 @@
     code: |
       func test() { copyItem("safe", "safe") }
     expect_no_match: true
-  description: "FileManager.copyItem(at:to:) — tainted destinations can overwrite files outside the intended directory."
+  description: "FileManager.copyItem(at:to:) - tainted destinations can overwrite files outside the intended directory."
 - id: swift.path.fm_move_item
   enabled: true
   language: swift
@@ -189,7 +189,7 @@
     code: |
       func test() { moveItem("safe", "safe") }
     expect_no_match: true
-  description: "FileManager.moveItem(at:to:) — tainted destinations can overwrite files outside the intended directory."
+  description: "FileManager.moveItem(at:to:) - tainted destinations can overwrite files outside the intended directory."
 - id: swift.path.fm_contents_of_dir
   enabled: true
   language: swift
@@ -211,7 +211,7 @@
     code: |
       func test() { contentsOfDirectory("/tmp/safe") }
     expect_no_match: true
-  description: "FileManager.default.contentsOfDirectory(atPath:) — directory enumeration."
+  description: "FileManager.default.contentsOfDirectory(atPath:) - directory enumeration."
 - id: swift.path.fm_create_directory
   enabled: true
   language: swift
@@ -257,9 +257,9 @@
     code: |
       func test() { unzipItem("safe") }
     expect_no_match: true
-  description: "ZIPFoundation unzipItem(at:to:) — zip slip risk."
+  description: "ZIPFoundation unzipItem(at:to:) - zip slip risk."
 
-# FileManager.default.contents(atPath:) — read-arbitrary-file. The
+# FileManager.default.contents(atPath:) - read-arbitrary-file. The
 # `String(contentsOfFile:)` family above is disabled until the engine
 # has labeled-init kwarg-presence narrowers, but FileManager's
 # `contents` method is unambiguous and has stable receiver+selector
@@ -287,9 +287,9 @@
     code: |
       func test() { unzipItem("safe", "safe") }
     expect_no_match: true
-  description: "ZIPFoundation unzipItem(at:to:) — tainted destinations can extract outside the intended directory."
+  description: "ZIPFoundation unzipItem(at:to:) - tainted destinations can extract outside the intended directory."
 
-# FileManager.default.contents(atPath:) — read-arbitrary-file. The
+# FileManager.default.contents(atPath:) - read-arbitrary-file. The
 # `String(contentsOfFile:)` family above is disabled until the engine
 # has labeled-init kwarg-presence narrowers, but FileManager's
 # `contents` method is unambiguous and has stable receiver+selector
@@ -315,4 +315,4 @@
     code: |
       func test() { FileManager.contents("/tmp/safe.txt") }
     expect_no_match: true
-  description: "FileManager.default.contents(atPath: \"...\" + name) — reads arbitrary file when path is tainted; first-arg concat shape is the canonical traversal vector."
+  description: "FileManager.default.contents(atPath: \"...\" + name) - reads arbitrary file when path is tainted; first-arg concat shape is the canonical traversal vector."

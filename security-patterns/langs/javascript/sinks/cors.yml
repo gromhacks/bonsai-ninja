@@ -19,7 +19,7 @@
       function demo(input, req, obj) {
         return cors(input, { origin: "*", credentials: true });
       }
-  description: "cors() called with wildcard origin and credentials true — Express CORS allow-all-with-credentials. Reflect-origin attack via misconfigured ACAO. Merged aliases: javascript.cors.cors_origin_true, javascript.cors.express_cors_origin_star."
+  description: "cors() called with wildcard origin and credentials true - Express CORS allow-all-with-credentials. Reflect-origin attack via misconfigured ACAO. Merged aliases: javascript.cors.cors_origin_true, javascript.cors.express_cors_origin_star."
   aliases:
   - javascript.cors.cors_origin_true
   - javascript.cors.express_cors_origin_star

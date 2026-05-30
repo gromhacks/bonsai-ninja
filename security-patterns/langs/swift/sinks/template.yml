@@ -78,4 +78,4 @@
 
       '
     expect_no_match: true
-  description: "Leaf #unsafeHTML(tainted) \u2014 explicitly bypasses Vapor's autoescape."
+  description: "Leaf #unsafeHTML(tainted) - explicitly bypasses Vapor's autoescape."

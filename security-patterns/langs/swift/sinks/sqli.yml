@@ -20,7 +20,7 @@
     code: |
       func test(input: String) { sqlite3_exec(db, "SELECT 1", nil, nil, nil) }
     expect_no_match: true
-  description: "sqlite3_exec — concatenated SQL."
+  description: "sqlite3_exec - concatenated SQL."
 - id: swift.sqli.sqlite3_prepare_v2
   enabled: true
   language: swift
@@ -139,7 +139,7 @@
       import fmdb // fmdb
       func test() { executeStatements("CREATE TABLE safe(id INTEGER)") }
     expect_no_match: true
-  description: "FMDB executeStatements — multi-statement raw SQL."
+  description: "FMDB executeStatements - multi-statement raw SQL."
 - id: swift.sqli.grdb_execute
   enabled: true
   language: swift

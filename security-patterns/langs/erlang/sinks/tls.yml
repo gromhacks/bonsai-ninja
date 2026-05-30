@@ -1,4 +1,4 @@
-# Erlang TLS misconfig — peer verification disabled.
+# Erlang TLS misconfig - peer verification disabled.
 - id: erlang.tls.ssl_verify_none
   enabled: true
   language: erlang
@@ -17,7 +17,7 @@
         -export([test/1]).
         test(Input) ->
           ssl:connect(Input).
-  description: "ssl:connect — flag when options include {verify, verify_none}; no cert chain validation → MITM."
+  description: "ssl:connect - flag when options include {verify, verify_none}; no cert chain validation -> MITM."
 
 - id: erlang.tls.httpc_request_no_verify
   enabled: false
@@ -31,4 +31,4 @@
     kind: call
     callee:
       regex: "^httpc:request"
-  description: "Disabled — duplicates erlang.ssrf.httpc_request regex; tls check needs [{ssl,[{verify,verify_none}]}] constraint support."
+  description: "Disabled - duplicates erlang.ssrf.httpc_request regex; tls check needs [{ssl,[{verify,verify_none}]}] constraint support."

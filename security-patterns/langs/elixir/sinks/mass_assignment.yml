@@ -21,6 +21,6 @@
           Ecto.Changeset.cast(params)
         end
       end
-  description: 'Ecto.Changeset.cast(struct, params, [...]) — third arg is the permitted-field list. Casting with too broad a list (or building it from `params` keys) is mass-assignment.'
+  description: 'Ecto.Changeset.cast(struct, params, [...]) - third arg is the permitted-field list. Casting with too broad a list (or building it from `params` keys) is mass-assignment.'
   imports:
   - Ecto

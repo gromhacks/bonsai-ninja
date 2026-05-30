@@ -34,7 +34,7 @@
         }
       }
     expect_no_match: true
-  description: "Scala SLF4J Logger.info with embedded newline in user text — log forging. Merged aliases: scala.log_injection.logger_info_concat."
+  description: "Scala SLF4J Logger.info with embedded newline in user text - log forging. Merged aliases: scala.log_injection.logger_info_concat."
   aliases:
   - scala.log_injection.logger_info_concat
 - id: scala.log_injection.logger_debug_concat
@@ -74,7 +74,7 @@
         }
       }
     expect_no_match: true
-  description: "Logger.debug — log-injection via concat / interpolation."
+  description: "Logger.debug - log-injection via concat / interpolation."
 - id: scala.log_injection.logger_warn_concat
   enabled: true
   language: scala
@@ -97,7 +97,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Logger.warn(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Logger.warn — log-injection via concat / interpolation."
+  description: "Logger.warn - log-injection via concat / interpolation."
 - id: scala.log_injection.logger_error_concat
   enabled: true
   language: scala
@@ -135,7 +135,7 @@
         }
       }
     expect_no_match: true
-  description: "Logger.error — log-injection via concat / interpolation."
+  description: "Logger.error - log-injection via concat / interpolation."
 - id: scala.log_injection.mdc_put
   enabled: true
   language: scala
@@ -175,4 +175,4 @@
         }
       }
     expect_no_match: true
-  description: "MDC.put(key, tainted header) — attacker-controlled logging context value can forge structured logs or poison downstream log correlation."
+  description: "MDC.put(key, tainted header) - attacker-controlled logging context value can forge structured logs or poison downstream log correlation."

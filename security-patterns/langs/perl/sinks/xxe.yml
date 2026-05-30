@@ -31,7 +31,7 @@
         parse_file("config/trusted.xml")
       }
     expect_no_match: true
-  description: "XML::LibXML $parser->parse_file — disable load_ext_dtd / expand_entities."
+  description: "XML::LibXML $parser->parse_file - disable load_ext_dtd / expand_entities."
 
 - id: perl.xxe.xml_libxml_parse_string
   enabled: true
@@ -95,7 +95,7 @@
         load_xml(string => "<root/>")
       }
     expect_no_match: true
-  description: "XML::LibXML->load_xml — class-method form."
+  description: "XML::LibXML->load_xml - class-method form."
 
 - id: perl.xxe.xml_parser_parse
   enabled: true
@@ -159,4 +159,4 @@
         XMLin("<root/>")
       }
     expect_no_match: true
-  description: "XML::Simple XMLin — uses XML::SAX or XML::Parser under the hood."
+  description: "XML::Simple XMLin - uses XML::SAX or XML::Parser under the hood."

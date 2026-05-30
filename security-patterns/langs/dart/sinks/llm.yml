@@ -31,7 +31,7 @@
       import 'package:dart_openai/dart_openai.dart';
       void test() { OpenAI.instance.chat.create("summarize safe text"); }
     expect_no_match: true
-  description: "dart_openai OpenAI.instance.chat.create — tainted prompt content reaches an LLM instruction / tool surface."
+  description: "dart_openai OpenAI.instance.chat.create - tainted prompt content reaches an LLM instruction / tool surface."
 
 - id: dart.llm.openai_dart_create_chat_completion
   enabled: true
@@ -65,7 +65,7 @@
       import 'package:openai_dart/openai_dart.dart';
       void test() { createChatCompletion("summarize safe text"); }
     expect_no_match: true
-  description: "openai_dart createChatCompletion — user-controlled content can steer model output and tool calls."
+  description: "openai_dart createChatCompletion - user-controlled content can steer model output and tool calls."
 
 - id: dart.llm.bedrock_invoke_model
   enabled: true
@@ -96,6 +96,6 @@
       import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
       void test() { invokeModel("safe prompt"); }
     expect_no_match: true
-  description: "Bedrock Runtime invokeModel — tainted request body steers the underlying foundation model."
+  description: "Bedrock Runtime invokeModel - tainted request body steers the underlying foundation model."
   imports:
   - aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart

@@ -30,7 +30,7 @@
         }
       }
     expect_no_match: true
-  description: "S3Client.getObject(bucket/key) — tainted selector can read arbitrary object data."
+  description: "S3Client.getObject(bucket/key) - tainted selector can read arbitrary object data."
 
   imports:
   - software.amazon.awssdk.s3
@@ -66,7 +66,7 @@
         }
       }
     expect_no_match: true
-  description: "S3Client.putObject(bucket/key) — tainted selector can overwrite arbitrary object keys."
+  description: "S3Client.putObject(bucket/key) - tainted selector can overwrite arbitrary object keys."
 
   imports:
   - software.amazon.awssdk.s3
@@ -102,7 +102,7 @@
         }
       }
     expect_no_match: true
-  description: "SecretsManagerClient.getSecretValue — tainted secret id reads arbitrary secret material."
+  description: "SecretsManagerClient.getSecretValue - tainted secret id reads arbitrary secret material."
 
   imports:
   - software.amazon.awssdk.secretsmanager
@@ -128,7 +128,7 @@
           BlobClient.downloadContent(input);
         }
       }
-  description: "Disabled — BlobClient.downloadContent() carries the container/blob selector in receiver state, not a call argument."
+  description: "Disabled - BlobClient.downloadContent() carries the container/blob selector in receiver state, not a call argument."
 
   imports:
   - com.azure.storage.blob
@@ -154,7 +154,7 @@
           BlobClient.upload(input);
         }
       }
-  description: "Disabled — BlobClient.upload(...) carries the container/blob selector in receiver state; the argument is upload content/options, not the target selector."
+  description: "Disabled - BlobClient.upload(...) carries the container/blob selector in receiver state; the argument is upload content/options, not the target selector."
 
   imports:
   - com.azure.storage.blob
@@ -191,7 +191,7 @@
         }
       }
     expect_no_match: true
-  description: "SecretClient.getSecret — tainted secret name reads arbitrary Key Vault material."
+  description: "SecretClient.getSecret - tainted secret name reads arbitrary Key Vault material."
 
   imports:
   - com.azure.security.keyvault.secrets
@@ -227,7 +227,7 @@
         }
       }
     expect_no_match: true
-  description: "Storage.readAllBytes(bucket, blob) — tainted selector reads arbitrary GCS objects."
+  description: "Storage.readAllBytes(bucket, blob) - tainted selector reads arbitrary GCS objects."
 
   imports:
   - com.google.cloud.storage
@@ -263,7 +263,7 @@
         }
       }
     expect_no_match: true
-  description: "Storage.create(blobInfo, ...) — tainted bucket/blob selector writes attacker-chosen GCS objects."
+  description: "Storage.create(blobInfo, ...) - tainted bucket/blob selector writes attacker-chosen GCS objects."
 
   imports:
   - com.google.cloud.storage
@@ -299,7 +299,7 @@
         }
       }
     expect_no_match: true
-  description: "SecretManagerServiceClient.accessSecretVersion — tainted resource name reads arbitrary secret versions."
+  description: "SecretManagerServiceClient.accessSecretVersion - tainted resource name reads arbitrary secret versions."
 
   imports:
   - com.google.cloud.secretmanager
@@ -335,7 +335,7 @@
         }
       }
     expect_no_match: true
-  description: "javax.naming.InitialContext.lookup(tainted) — Log4Shell-style remote class load and deserialization (LDAP/RMI/CORBA URI). Instance calls require semantic receiver-type facts for InitialContext."
+  description: "javax.naming.InitialContext.lookup(tainted) - Log4Shell-style remote class load and deserialization (LDAP/RMI/CORBA URI). Instance calls require semantic receiver-type facts for InitialContext."
 
 - id: java.access.jndi_initialcontext_lookup_local
   enabled: false
@@ -363,7 +363,7 @@
         Object lookup(Object... args) { return null; }
       }
     expect_match_text: [initialContext.lookup]
-  description: "InitialContext.lookup(name) on a local naming context — attacker-controlled JNDI name can trigger remote lookup and deserialization."
+  description: "InitialContext.lookup(name) on a local naming context - attacker-controlled JNDI name can trigger remote lookup and deserialization."
   imports:
   - javax.naming
 - id: java.access.jndi_context_lookup
@@ -410,7 +410,7 @@
         }
       }
     expect_no_match: true
-  description: "javax.naming.Context.lookup(tainted) — same JNDI remote class load risk via the abstract Context API. JNDI signature is `lookup(Name|String)` — exactly 1 arg; `min_args: 1` + `max_args: 1` rejects unrelated `lookup()` decoys (Map.lookup overloads etc.)."
+  description: "javax.naming.Context.lookup(tainted) - same JNDI remote class load risk via the abstract Context API. JNDI signature is `lookup(Name|String)` - exactly 1 arg; `min_args: 1` + `max_args: 1` rejects unrelated `lookup()` decoys (Map.lookup overloads etc.)."
 
 - id: java.access.jndi_initialdircontext_lookup
   enabled: true
@@ -453,4 +453,4 @@
         }
       }
     expect_no_match: true
-  description: "javax.naming.InitialDirContext.lookup(tainted) — JNDI lookup through a directory context."
+  description: "javax.naming.InitialDirContext.lookup(tainted) - JNDI lookup through a directory context."

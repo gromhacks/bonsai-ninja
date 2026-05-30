@@ -36,7 +36,7 @@
         }
       }
     expect_no_match: true
-  description: "MimeMessage.setSubject — CR/LF in subject injects additional MIME headers."
+  description: "MimeMessage.setSubject - CR/LF in subject injects additional MIME headers."
 
 - id: java.smtpinj.mime_message_add_header
   enabled: true
@@ -76,4 +76,4 @@
         }
       }
     expect_no_match: true
-  description: "MimeMessage.addHeader(name, value) — CR/LF in `value` injects additional headers."
+  description: "MimeMessage.addHeader(name, value) - CR/LF in `value` injects additional headers."

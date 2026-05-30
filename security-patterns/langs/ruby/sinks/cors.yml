@@ -19,4 +19,4 @@
         origins("*")
       end
   description: |-
-    rack-cors origins '*' — wildcard CORS allow-all.
+    rack-cors origins '*' - wildcard CORS allow-all.

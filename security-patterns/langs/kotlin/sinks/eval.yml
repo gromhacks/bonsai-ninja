@@ -23,7 +23,7 @@
   - name: arg tainted literal negative
     code: "class App {\n  fun handle(input: String) {\n    ScriptEngine.eval(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "javax.script ScriptEngine.eval — Nashorn / Rhino RCE."
+  description: "javax.script ScriptEngine.eval - Nashorn / Rhino RCE."
 
 - id: kotlin.eval.compiledscript_eval
   enabled: false
@@ -45,7 +45,7 @@
           CompiledScript.eval(input)
         }
       }
-  description: "Disabled — CompiledScript.eval() executes code compiled earlier; needs receiver state from a tainted compile step, not an eval argument."
+  description: "Disabled - CompiledScript.eval() executes code compiled earlier; needs receiver state from a tainted compile step, not an eval argument."
 
 - id: kotlin.eval.method_invoke
   enabled: false
@@ -59,7 +59,7 @@
     kind: call
     callee:
       attribute: [Method, invoke]
-  description: "Disabled — reflection.Method.invoke; flag only when method-name tainted."
+  description: "Disabled - reflection.Method.invoke; flag only when method-name tainted."
 
 - id: kotlin.eval.class_forname
   enabled: true
@@ -90,7 +90,7 @@
       }
       }
     expect_no_match: true
-  description: "Class.forName(tainted) — arbitrary class load."
+  description: "Class.forName(tainted) - arbitrary class load."
 
 - id: kotlin.eval.classloader_loadclass
   enabled: true
@@ -250,7 +250,7 @@
           SpelExpressionParser.parseExpression(input)
         }
       }
-  description: "Disabled duplicate — SpEL template parsing is classified by canonical kotlin.template.spel_parseexpression as SSTI CWE-1336."
+  description: "Disabled duplicate - SpEL template parsing is classified by canonical kotlin.template.spel_parseexpression as SSTI CWE-1336."
 
   imports:
   - org.springframework.expression
@@ -286,7 +286,7 @@
       }
       }
     expect_no_match: true
-  description: "OGNL Ognl.getValue — Struts2 RCE family."
+  description: "OGNL Ognl.getValue - Struts2 RCE family."
 
 - id: kotlin.eval.mvel_eval
   enabled: true
@@ -391,7 +391,7 @@
       }
       }
     expect_no_match: true
-  description: "GroovyShell.run(tainted script) — compiles and executes caller-controlled Groovy code."
+  description: "GroovyShell.run(tainted script) - compiles and executes caller-controlled Groovy code."
 
 - id: kotlin.eval.groovy_eval_me
   enabled: true
@@ -426,4 +426,4 @@
       }
       }
     expect_no_match: true
-  description: "groovy.util.Eval.me(tainted expression) — evaluates caller-controlled Groovy code."
+  description: "groovy.util.Eval.me(tainted expression) - evaluates caller-controlled Groovy code."

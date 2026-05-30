@@ -31,7 +31,7 @@
         $ua->get("https://example.com/health")
       }
     expect_no_match: true
-  description: "$ua->get(tainted_url) — LWP::UserAgent / HTTP::Tiny / Mojo::UserAgent share the verb name; tainted URL = SSRF to internal services / cloud metadata. Receiver allowlist filters generic `get` collisions on hash/object accessors that don't actually issue HTTP requests."
+  description: "$ua->get(tainted_url) - LWP::UserAgent / HTTP::Tiny / Mojo::UserAgent share the verb name; tainted URL = SSRF to internal services / cloud metadata. Receiver allowlist filters generic `get` collisions on hash/object accessors that don't actually issue HTTP requests."
 
 - id: perl.ssrf.useragent_post
   enabled: true
@@ -63,7 +63,7 @@
         $ua->post("https://example.com/submit")
       }
     expect_no_match: true
-  description: "$ua->post(tainted_url, ...) — same three clients; tainted URL = SSRF. Receiver allowlist filters generic `post` collisions on non-HTTP-client receivers."
+  description: "$ua->post(tainted_url, ...) - same three clients; tainted URL = SSRF. Receiver allowlist filters generic `post` collisions on non-HTTP-client receivers."
 
 - id: perl.ssrf.useragent_request
   enabled: true
@@ -95,7 +95,7 @@
         $ua->request("GET https://example.com/health")
       }
     expect_no_match: true
-  description: "$ua->request(HTTP::Request->new(...)) — issues an arbitrary request; tainted URL/method inside the request object = SSRF."
+  description: "$ua->request(HTTP::Request->new(...)) - issues an arbitrary request; tainted URL/method inside the request object = SSRF."
 
 - id: perl.ssrf.http_tiny_mirror
   enabled: true
@@ -127,7 +127,7 @@
         mirror("https://example.com/file")
       }
     expect_no_match: true
-  description: "HTTP::Tiny $ht->mirror — fetches tainted URL and writes to disk; combines SSRF with file-write primitive."
+  description: "HTTP::Tiny $ht->mirror - fetches tainted URL and writes to disk; combines SSRF with file-write primitive."
 
 - id: perl.ssrf.www_mechanize_get
   enabled: true
@@ -159,7 +159,7 @@
         follow_link("next")
       }
     expect_no_match: true
-  description: "WWW::Mechanize $mech->follow_link — follows tainted URL/name on the current page; SSRF if the hrefs come from attacker HTML."
+  description: "WWW::Mechanize $mech->follow_link - follows tainted URL/name on the current page; SSRF if the hrefs come from attacker HTML."
 
 - id: perl.ssrf.net_http_new
   enabled: true
@@ -191,4 +191,4 @@
         Net::HTTP->new(Host => "example.com")
       }
     expect_no_match: true
-  description: "Net::HTTP->new(Host => tainted) — raw HTTP client; tainted Host = SSRF to arbitrary internal host."
+  description: "Net::HTTP->new(Host => tainted) - raw HTTP client; tainted Host = SSRF to arbitrary internal host."

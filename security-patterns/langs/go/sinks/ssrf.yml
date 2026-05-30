@@ -34,7 +34,7 @@
         _, _ = http.Get("https://example.test/health")
       }
     expect_no_match: true
-  description: "http.Get(tainted URL) \u2014 server-side fetch of attacker-chosen\
+  description: "http.Get(tainted URL) - server-side fetch of attacker-chosen\
     \ URL."
 - id: go.ssrf.http_client_get
   enabled: true
@@ -78,7 +78,7 @@
       }
     expect_no_match: true
   description: "(*http.Client).Get(tainted URL), including http.DefaultClient.Get\
-    \ \u2014 method form of net/http SSRF."
+    \ - method form of net/http SSRF."
 - id: go.ssrf.http_client_post
   enabled: true
   language: go
@@ -110,7 +110,7 @@
         _, _ = client.Post("https://example.test/upload", "application/json", nil)
       }
     expect_no_match: true
-  description: "(*http.Client).Post(tainted URL, ...) \u2014 server-side POST to attacker-chosen\
+  description: "(*http.Client).Post(tainted URL, ...) - server-side POST to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_client_head
   enabled: true
@@ -142,7 +142,7 @@
         _, _ = http.DefaultClient.Head("https://example.test/health")
       }
     expect_no_match: true
-  description: "(*http.Client).Head(tainted URL) \u2014 server-side HEAD to attacker-chosen\
+  description: "(*http.Client).Head(tainted URL) - server-side HEAD to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_client_postform
   enabled: true
@@ -175,7 +175,7 @@
         _, _ = client.PostForm("https://example.test/form", nil)
       }
     expect_no_match: true
-  description: "(*http.Client).PostForm(tainted URL, form) \u2014 server-side form\
+  description: "(*http.Client).PostForm(tainted URL, form) - server-side form\
     \ POST to attacker-chosen URL."
 - id: go.ssrf.http_post
   enabled: true
@@ -206,7 +206,7 @@
         http.Post("https://example.test/upload", "application/json", nil)
       }
     expect_no_match: true
-  description: "http.Post(tainted URL, \u2026) \u2014 server-side POST to attacker-chosen\
+  description: "http.Post(tainted URL, ...) - server-side POST to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_head
   enabled: true
@@ -237,7 +237,7 @@
         http.Head("https://example.test/health")
       }
     expect_no_match: true
-  description: "http.Head(tainted URL) \u2014 server-side HEAD to attacker-chosen\
+  description: "http.Head(tainted URL) - server-side HEAD to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_postform
   enabled: true
@@ -302,7 +302,7 @@
         _, _ = http.NewRequest(method, "https://example.test/health", nil)
       }
     expect_no_match: true
-  description: "http.NewRequest(method, url, body) \u2014 only arg 1 is SSRF-relevant."
+  description: "http.NewRequest(method, url, body) - only arg 1 is SSRF-relevant."
 - id: go.ssrf.http_newrequestwithcontext
   enabled: true
   language: go
@@ -376,7 +376,7 @@
         _, _ = client.Do(req)
       }
     expect_no_match: true
-  description: "*http.Client.Do(req) \u2014 when req.URL came from user input this\
+  description: "*http.Client.Do(req) - when req.URL came from user input this\
     \ fetches attacker-chosen URL."
 - id: go.ssrf.net_dial
   enabled: true
@@ -409,7 +409,7 @@
         net.Dial(network, "example.test:443")
       }
     expect_no_match: true
-  description: "net.Dial(network, tainted addr) \u2014 raw TCP/UDP to attacker-chosen\
+  description: "net.Dial(network, tainted addr) - raw TCP/UDP to attacker-chosen\
     \ host."
 - id: go.ssrf.resty_get
   enabled: true
@@ -441,7 +441,7 @@
         client.R().Get("https://example.test/health")
       }
     expect_no_match: true
-  description: "resty client.R().Get(tainted URL) \u2014 fluent-client SSRF."
+  description: "resty client.R().Get(tainted URL) - fluent-client SSRF."
 - id: go.ssrf.req_get
   enabled: true
   language: go
@@ -495,7 +495,7 @@
     code: "import \"github.com/valyala/fasthttp\"\npackage main\n\nfunc example()\
       \ {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  fasthttp.Do(target)\n\
       }\n"
-  description: "fasthttp.Do(req, resp) \u2014 tainted URL on req = SSRF."
+  description: "fasthttp.Do(req, resp) - tainted URL on req = SSRF."
   disabled_reason:
     code: over-broad
 - id: go.ssrf.net_dialtcp
@@ -529,7 +529,7 @@
         net.DialTCP(network, nil, nil)
       }
     expect_no_match: true
-  description: "net.DialTCP(network, laddr, tainted raddr) \u2014 raw TCP to attacker-chosen\
+  description: "net.DialTCP(network, laddr, tainted raddr) - raw TCP to attacker-chosen\
     \ host:port."
 - id: go.ssrf.httputil_reverseproxy
   enabled: true
@@ -567,5 +567,5 @@
         httputil.NewSingleHostReverseProxy(target)
       }
     expect_no_match: true
-  description: "httputil.NewSingleHostReverseProxy(tainted URL) \u2014 reverse-proxies\
+  description: "httputil.NewSingleHostReverseProxy(tainted URL) - reverse-proxies\
     \ arbitrary upstream; request smuggling / SSRF when the target is user-controlled."

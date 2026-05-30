@@ -11,7 +11,7 @@
     kind: read
     target:
       name: arguments
-  description: "Disabled — the current Swift adapter does not index property reads like `CommandLine.arguments`."
+  description: "Disabled - the current Swift adapter does not index property reads like `CommandLine.arguments`."
 - id: swift.cli.readline
   enabled: true
   language: swift
@@ -26,7 +26,7 @@
     - name: declared shape
       code: |
         func test() { let input = "x"; let amount = 1; readLine(input) }
-  description: "readLine() — stdin."
+  description: "readLine() - stdin."
 - id: swift.os.environment
   enabled: false
   disabled_reason:
@@ -39,7 +39,7 @@
     kind: read
     target:
       name: environment
-  description: "Disabled — the current Swift adapter does not index property reads like `ProcessInfo.processInfo.environment`."
+  description: "Disabled - the current Swift adapter does not index property reads like `ProcessInfo.processInfo.environment`."
 - id: swift.argparser_argument
   enabled: false
   disabled_reason:
@@ -53,7 +53,7 @@
     kind: read
     target:
       name: Argument
-  description: "Disabled — swift-argument-parser @Argument/@Option are property wrappers; not directly observable as reads without annotation support."
+  description: "Disabled - swift-argument-parser @Argument/@Option are property wrappers; not directly observable as reads without annotation support."
 
 - id: swift.ui.text_field_text
   enabled: false
@@ -67,7 +67,7 @@
     kind: read
     target:
       name: text
-  description: "Disabled — bare `.text` read matches too broadly without receiver narrowing to UITextField."
+  description: "Disabled - bare `.text` read matches too broadly without receiver narrowing to UITextField."
 
 - id: swift.ui.textview_text
   enabled: false
@@ -81,7 +81,7 @@
     kind: read
     target:
       name: string
-  description: "Disabled — NSTextView.string overlaps with every Swift String."
+  description: "Disabled - NSTextView.string overlaps with every Swift String."
 
 - id: swift.ui.textfield_text
   enabled: false
@@ -95,7 +95,7 @@
     kind: call
     callee:
       attribute: [UITextField, text]
-  description: "Disabled — `field.text` is a property read, and the current Swift adapter does not index that shape."
+  description: "Disabled - `field.text` is a property read, and the current Swift adapter does not index that shape."
 
 - id: swift.ui.textview_string
   enabled: false
@@ -109,7 +109,7 @@
     kind: call
     callee:
       attribute: [NSTextView, string]
-  description: "Disabled — `view.string` is a property read, and the current Swift adapter does not index that shape."
+  description: "Disabled - `view.string` is a property read, and the current Swift adapter does not index that shape."
 
 - id: swift.swiftui.textfield_binding
   enabled: false
@@ -124,4 +124,4 @@
     kind: call
     callee:
       attribute: [TextField, init]
-  description: "Disabled — SwiftUI TextField(_:text:) binds a local @State string; match fires on the declaration rather than the read, and property-wrapper flow isn't tracked."
+  description: "Disabled - SwiftUI TextField(_:text:) binds a local @State string; match fires on the declaration rather than the read, and property-wrapper flow isn't tracked."

@@ -37,7 +37,7 @@
         return $client->chat(["messages" => [["role" => "user", "content" => "hello"]]]);
       }
     expect_no_match: true
-  description: OpenAI client chat request — tainted prompt/tool content reaches an LLM instruction surface.
+  description: OpenAI client chat request - tainted prompt/tool content reaches an LLM instruction surface.
   imports:
   - openaiphp
   - openaiphp/client
@@ -82,7 +82,7 @@
         return $anthropic->messages->create(["messages" => [["role" => "user", "content" => "hello"]]]);
       }
     expect_no_match: true
-  description: Anthropic messages create — tainted prompt content can steer model output or tool calls.
+  description: Anthropic messages create - tainted prompt content can steer model output or tool calls.
   imports:
   - anthropicphp
   - anthropicphp/anthropic
@@ -126,7 +126,7 @@
         return $bedrock->invokeModel(["body" => "{}"]);
       }
     expect_no_match: true
-  description: Bedrock invokeModel — tainted model body reaches a foundation-model execution surface.
+  description: Bedrock invokeModel - tainted model body reaches a foundation-model execution surface.
   imports:
   - aws
   - aws/awssdkphp

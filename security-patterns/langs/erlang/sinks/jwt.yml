@@ -1,4 +1,4 @@
-# Erlang JWT sinks. jose / erljwt — unverified or weak-alg decode.
+# Erlang JWT sinks. jose / erljwt - unverified or weak-alg decode.
 - id: erlang.jwt.jose_jwt_verify
   enabled: false
   disabled_reason:
@@ -20,8 +20,8 @@
       -export([test/1]).
       test(Input) ->
         jose_jwt:verify(Input).
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. jose_jwt:verify — flag when caller
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. jose_jwt:verify - flag when caller
     omits alg whitelist (none/HS256 with RSA pubkey confusion)."
 
 - id: erlang.jwt.jose_jwt_peek
@@ -50,7 +50,7 @@
     code: "-include_lib(\"jose/include/jose.hrl\").\n-module(example).\n-export([test/1]).\n\
       test(Input) ->\n  jose_jwt:verify(Input).\n"
     expect_no_match: true
-  description: "jose_jwt:peek — decodes payload WITHOUT verifying signature; must
+  description: "jose_jwt:peek - decodes payload WITHOUT verifying signature; must
     be followed by verify."
 
 - id: erlang.jwt.erljwt_decode
@@ -79,5 +79,5 @@
     code: "-include_lib(\"erljwt/include/erljwt.hrl\").\n-module(example).\n-export([test/1]).\n\
       test(Input) ->\n  erljwt:encode(Input).\n"
     expect_no_match: true
-  description: "erljwt:decode — does not verify signature unless explicitly invoked;
+  description: "erljwt:decode - does not verify signature unless explicitly invoked;
     trusts attacker claims."

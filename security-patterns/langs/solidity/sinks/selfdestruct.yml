@@ -14,7 +14,7 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { selfdestruct(input); } }
-  description: "selfdestruct(recipient) — erases code, forwards entire balance to recipient. Unauthenticated caller = bricked contract + stolen funds."
+  description: "selfdestruct(recipient) - erases code, forwards entire balance to recipient. Unauthenticated caller = bricked contract + stolen funds."
 - id: solidity.selfdestruct.suicide_legacy
   enabled: true
   language: solidity
@@ -31,4 +31,4 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { suicide(input); } }
-  description: "Deprecated `suicide(recipient)` — pre-0.5 alias of selfdestruct; same contract-destroy + balance-forward hazard."
+  description: "Deprecated `suicide(recipient)` - pre-0.5 alias of selfdestruct; same contract-destroy + balance-forward hazard."

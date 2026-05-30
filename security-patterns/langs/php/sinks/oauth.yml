@@ -23,7 +23,7 @@
       function example($input, $url, $id, $payload, $request) {
         Provider::getAuthorizationUrl($input);
       }
-  description: league/oauth2-client Provider::getAuthorizationUrl — verify the returned `state` is round-tripped to detect CSRF on the callback.
+  description: league/oauth2-client Provider::getAuthorizationUrl - verify the returned `state` is round-tripped to detect CSRF on the callback.
   imports:
   - league
   - league/oauth2client

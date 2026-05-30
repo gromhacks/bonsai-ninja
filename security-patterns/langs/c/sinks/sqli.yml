@@ -27,7 +27,7 @@
         sqlite3_exec("safe", "safe");
       }
     expect_no_match: true
-  description: "sqlite3_exec(db, tainted_sql, ...) — runs raw SQL; no parameterisation, concatenating user input = SQLi."
+  description: "sqlite3_exec(db, tainted_sql, ...) - runs raw SQL; no parameterisation, concatenating user input = SQLi."
 - id: c.sqli.sqlite3_prepare_v2
   enabled: true
   language: c
@@ -87,7 +87,7 @@
         mysql_query("safe", "safe");
       }
     expect_no_match: true
-  description: "mysql_query(conn, tainted_sql) — no parameter binding; use mysql_stmt_prepare + mysql_stmt_bind_param."
+  description: "mysql_query(conn, tainted_sql) - no parameter binding; use mysql_stmt_prepare + mysql_stmt_bind_param."
 - id: c.sqli.mysql_real_query
   enabled: true
   language: c
@@ -117,7 +117,7 @@
         mysql_real_query("safe", "safe");
       }
     expect_no_match: true
-  description: "mysql_real_query(conn, tainted_sql, len) — length-prefixed variant of mysql_query; still no parameterisation."
+  description: "mysql_real_query(conn, tainted_sql, len) - length-prefixed variant of mysql_query; still no parameterisation."
 - id: c.sqli.pq_exec
   enabled: true
   language: c
@@ -150,7 +150,7 @@
         PQexec("safe", "safe");
       }
     expect_no_match: true
-  description: "libpq PQexec — use PQexecParams."
+  description: "libpq PQexec - use PQexecParams."
   imports:
   - libpq-fe.h
   - libpq-fe
@@ -186,7 +186,7 @@
         PQsendQuery("safe", "safe");
       }
     expect_no_match: true
-  description: "PQsendQuery(conn, tainted_sql) — async variant of PQexec; same SQLi surface, use PQsendQueryParams."
+  description: "PQsendQuery(conn, tainted_sql) - async variant of PQexec; same SQLi surface, use PQsendQueryParams."
   imports:
   - libpq-fe.h
   - libpq-fe

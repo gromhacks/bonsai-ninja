@@ -1,6 +1,6 @@
 # Perl open-redirect.
 # Catalyst $c->res->redirect and Dancer2 redirect() both match the cgi_redirect
-# rule's bare name — one rule covers them all.
+# rule's bare name - one rule covers them all.
 - id: perl.open_redirect.cgi_redirect
   enabled: true
   language: perl
@@ -31,7 +31,7 @@
         $cgi->redirect("/dashboard")
       }
     expect_no_match: true
-  description: "CGI $q->redirect / Dancer2 redirect / Catalyst $c->res->redirect — tainted URL."
+  description: "CGI $q->redirect / Dancer2 redirect / Catalyst $c->res->redirect - tainted URL."
 
 - id: perl.open_redirect.mojo_redirect_to
   enabled: true

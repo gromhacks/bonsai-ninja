@@ -31,7 +31,7 @@
         end
       end
     expect_no_match: true
-  description: "Regex.compile(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "Regex.compile(tainted_pattern) - attacker-controlled regular expressions can trigger catastrophic backtracking."
 
   imports:
   - Stdlib

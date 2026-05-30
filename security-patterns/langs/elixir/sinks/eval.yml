@@ -25,7 +25,7 @@
   - name: arg tainted literal negative
     code: "defmodule App do\n  def test(input) do\n    Code.eval_string(\"safe\")\n  end\nend\n"
     expect_no_match: true
-  description: "Code.eval_string/1 — compiles and evaluates arbitrary Elixir source at runtime; full RCE if the string is tainted."
+  description: "Code.eval_string/1 - compiles and evaluates arbitrary Elixir source at runtime; full RCE if the string is tainted."
 - id: elixir.eval.code_eval_quoted
   enabled: true
   language: elixir
@@ -55,7 +55,7 @@
         end
       end
     expect_no_match: true
-  description: "Code.eval_quoted/2 — executes any AST, including attacker-built quoted expressions."
+  description: "Code.eval_quoted/2 - executes any AST, including attacker-built quoted expressions."
 - id: elixir.eval.code_compile_string
   enabled: true
   language: elixir
@@ -85,7 +85,7 @@
         end
       end
     expect_no_match: true
-  description: "Code.compile_string/1 — compiles arbitrary Elixir at runtime."
+  description: "Code.compile_string/1 - compiles arbitrary Elixir at runtime."
 - id: elixir.eval.code_eval_file
   enabled: true
   language: elixir
@@ -115,7 +115,7 @@
         end
       end
     expect_no_match: true
-  description: "Code.eval_file/1 — executes whatever is at the (tainted) path."
+  description: "Code.eval_file/1 - executes whatever is at the (tainted) path."
 - id: elixir.eval.code_require_file
   enabled: true
   language: elixir
@@ -145,7 +145,7 @@
         end
       end
     expect_no_match: true
-  description: "Code.require_file/1 — loads and evaluates the file."
+  description: "Code.require_file/1 - loads and evaluates the file."
 - id: elixir.eval.kernel_apply
   enabled: true
   language: elixir
@@ -175,7 +175,7 @@
         end
       end
     expect_no_match: true
-  description: "apply/2,3 with a tainted function or module operand — attacker controls dynamic dispatch. The argument-list operand alone is intentionally not a sink."
+  description: "apply/2,3 with a tainted function or module operand - attacker controls dynamic dispatch. The argument-list operand alone is intentionally not a sink."
 - id: elixir.eval.kernel_apply_function_name
   enabled: true
   language: elixir
@@ -205,7 +205,7 @@
         end
       end
     expect_no_match: true
-  description: "apply(Module, tainted_function, args) — attacker controls which exported function is invoked."
+  description: "apply(Module, tainted_function, args) - attacker controls which exported function is invoked."
 - id: elixir.eval.string_to_atom
   enabled: true
   language: elixir
@@ -235,7 +235,7 @@
         end
       end
     expect_no_match: true
-  description: "String.to_atom/1 — unbounded atom creation exhausts the BEAM atom table (max ~1M, not GC'd); prefer String.to_existing_atom/1."
+  description: "String.to_atom/1 - unbounded atom creation exhausts the BEAM atom table (max ~1M, not GC'd); prefer String.to_existing_atom/1."
 
 - id: elixir.eval.list_to_atom
   enabled: true
@@ -266,7 +266,7 @@
         end
       end
     expect_no_match: true
-  description: "List.to_atom/1 — charlist variant; same unbounded atom-table growth risk as String.to_atom."
+  description: "List.to_atom/1 - charlist variant; same unbounded atom-table growth risk as String.to_atom."
 
 - id: elixir.eval.erl_eval
   enabled: true
@@ -297,4 +297,4 @@
         end
       end
     expect_no_match: true
-  description: "Erlang :erl_eval.exprs/2 — evaluates an Erlang AST; tainted AST = arbitrary code execution."
+  description: "Erlang :erl_eval.exprs/2 - evaluates an Erlang AST; tainted AST = arbitrary code execution."

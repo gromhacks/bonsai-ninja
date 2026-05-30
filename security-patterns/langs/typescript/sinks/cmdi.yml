@@ -27,7 +27,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.execSync(\"echo safe\");\n}\n"
     expect_no_match: true
-  description: "child_process.execSync \u2014 shell-interprets its first arg."
+  description: "child_process.execSync - shell-interprets its first arg."
 - id: typescript.cmdi.exec_sync_imported
   enabled: true
   language: typescript
@@ -55,7 +55,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return execSync(\"echo safe\");\n}\n"
     expect_no_match: true
-  description: "Named-import execSync from child_process \u2014 same shell-interpreting\
+  description: "Named-import execSync from child_process - same shell-interpreting\
     \ command sink as child_process.execSync."
 - id: typescript.cmdi.exec
   enabled: true
@@ -84,7 +84,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo() {\n  return child_process.exec(\"\
       whoami\");\n}\n"
     expect_no_match: true
-  description: "child_process.exec \u2014 shell-interprets its first arg."
+  description: "child_process.exec - shell-interprets its first arg."
 - id: typescript.cmdi.exec_imported
   enabled: true
   language: typescript
@@ -110,7 +110,7 @@
   - name: exec imported literal negative
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj) {\n  return exec(\"echo safe\");\n}\n"
     expect_no_match: true
-  description: "Named-import exec from child_process \u2014 shell-interprets its\
+  description: "Named-import exec from child_process - shell-interprets its\
     \ first argument."
 - id: typescript.cmdi.spawn
   enabled: true
@@ -139,7 +139,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.spawn(\"ls\", { shell: true });\n}\n"
     expect_no_match: true
-  description: "child_process.spawn({shell: true}) \u2014 shell-interpreted command\
+  description: "child_process.spawn({shell: true}) - shell-interpreted command\
     \ execution."
 - id: typescript.cmdi.spawn_args
   enabled: true
@@ -168,7 +168,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.spawn(\"sh\", [\"-c\", \"whoami\"], { shell: true });\n}\n"
     expect_no_match: true
-  description: "child_process.spawn(cmd, taintedArgs, {shell: true}) \u2014 tainted\
+  description: "child_process.spawn(cmd, taintedArgs, {shell: true}) - tainted\
     \ argv is shell-interpreted."
 - id: typescript.cmdi.spawn_sync
   enabled: true
@@ -197,7 +197,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.spawnSync(\"ls\", { shell: true });\n}\n"
     expect_no_match: true
-  description: "child_process.spawnSync(cmd, ..., {shell: true}) \u2014 tainted command\
+  description: "child_process.spawnSync(cmd, ..., {shell: true}) - tainted command\
     \ string is shell-interpreted."
 - id: typescript.cmdi.spawn_sync_args
   enabled: true
@@ -226,7 +226,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.spawnSync(\"sh\", [\"-c\", \"whoami\"], { shell: true });\n}\n"
     expect_no_match: true
-  description: "child_process.spawnSync(cmd, taintedArgs, {shell: true}) \u2014 tainted\
+  description: "child_process.spawnSync(cmd, taintedArgs, {shell: true}) - tainted\
     \ argv is shell-interpreted."
 - id: typescript.cmdi.spawn_sync_imported_shell
   enabled: true
@@ -256,7 +256,7 @@
       \ {\n  return spawnSync(\"ls\", { shell: true });\n}\n"
     expect_no_match: true
   description: "Named-import spawnSync(cmd, ..., {shell: true}) from child_process\
-    \ \u2014 tainted command string is shell-interpreted."
+    \ - tainted command string is shell-interpreted."
 - id: typescript.cmdi.spawn_sync_imported_shell_args
   enabled: true
   language: typescript
@@ -285,7 +285,7 @@
       \ {\n  return spawnSync(\"sh\", [\"-c\", \"whoami\"], { shell: true });\n}\n"
     expect_no_match: true
   description: "Named-import spawnSync(cmd, taintedArgs, {shell: true}) from child_process\
-    \ \u2014 tainted argv is shell-interpreted."
+    \ - tainted argv is shell-interpreted."
 - id: typescript.cmdi.exec_file
   enabled: true
   language: typescript
@@ -312,7 +312,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.execFile(\"node\");\n}\n"
     expect_no_match: true
-  description: "child_process.execFile \u2014 tainted binary path = arbitrary exec."
+  description: "child_process.execFile - tainted binary path = arbitrary exec."
 - id: typescript.cmdi.exec_file_imported
   enabled: true
   language: typescript
@@ -339,7 +339,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return execFile(\"node\");\n}\n"
     expect_no_match: true
-  description: "Named-import execFile from child_process \u2014 tainted binary path\
+  description: "Named-import execFile from child_process - tainted binary path\
     \ = arbitrary exec."
 - id: typescript.cmdi.exec_file_sync
   enabled: true
@@ -394,7 +394,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return execFileSync(\"node\");\n}\n"
     expect_no_match: true
-  description: "Named-import execFileSync from child_process \u2014 tainted binary\
+  description: "Named-import execFileSync from child_process - tainted binary\
     \ path = arbitrary exec."
 - id: typescript.cmdi.fork
   enabled: true
@@ -422,7 +422,7 @@
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.fork(\"./worker.js\");\n}\n"
     expect_no_match: true
-  description: "child_process.fork(taintedModulePath) \u2014 attacker-controlled Node\
+  description: "child_process.fork(taintedModulePath) - attacker-controlled Node\
     \ module path is arbitrary code execution."
 - id: typescript.cmdi.shelljs_exec
   enabled: true
@@ -450,7 +450,7 @@
     code: "const _u = require(\"shelljs\");\nfunction demo(input, req, obj) {\n  return\
       \ shelljs.exec(\"echo safe\");\n}\n"
     expect_no_match: true
-  description: "shelljs.exec \u2014 wraps child_process.exec."
+  description: "shelljs.exec - wraps child_process.exec."
 - id: typescript.cmdi.execa
   enabled: false
   disabled_reason:
@@ -466,7 +466,7 @@
     kind: call
     callee:
       name: execa
-  description: "Disabled \u2014 execa(cmd, args) is argv-style by default; flag only\
+  description: "Disabled - execa(cmd, args) is argv-style by default; flag only\
     \ the {shell: true} form."
 - id: typescript.cmdi.execa_shell
   enabled: true
@@ -493,7 +493,7 @@
     code: "const _u = require(\"execa\");\nfunction demo(input, req, obj) {\n  return\
       \ execa(\"echo safe\", { shell: true });\n}\n"
     expect_no_match: true
-  description: "execa(..., {shell: true}) \u2014 shell interpolation reinstated."
+  description: "execa(..., {shell: true}) - shell interpolation reinstated."
 - id: typescript.cmdi.execa_command
   enabled: true
   language: typescript
@@ -520,7 +520,7 @@
     code: "const _u = require(\"execa\");\nfunction demo(input, req, obj) {\n  return\
       \ execa.command(\"echo safe\");\n}\n"
     expect_no_match: true
-  description: "execa.command \u2014 always parses the whole command string."
+  description: "execa.command - always parses the whole command string."
 - id: typescript.cmdi.execa_command_sync
   enabled: true
   language: typescript
@@ -571,7 +571,7 @@
     code: "function demo(input, req, obj) {\n  return new Deno.Command(\"node\");\n\
       }\n"
     expect_no_match: true
-  description: "new Deno.Command(cmd, {args}) \u2014 tainted args or cmd = RCE."
+  description: "new Deno.Command(cmd, {args}) - tainted args or cmd = RCE."
 - id: typescript.cmdi.deno_run
   enabled: true
   language: typescript
@@ -594,7 +594,7 @@
   - name: deno run literal negative
     code: "function demo(input, req, obj) {\n  return Deno.run({ cmd: [\"echo\", \"safe\"] });\n}\n"
     expect_no_match: true
-  description: "Deno.run (legacy) \u2014 subprocess execution."
+  description: "Deno.run (legacy) - subprocess execution."
 - id: typescript.cmdi.bun_spawn
   enabled: true
   language: typescript
@@ -617,7 +617,7 @@
   - name: bun spawn literal negative
     code: "function demo(input, req, obj) {\n  return Bun.spawn([\"echo\", \"safe\"]);\n}\n"
     expect_no_match: true
-  description: "Bun.spawn \u2014 tainted executable path or argv launches arbitrary\
+  description: "Bun.spawn - tainted executable path or argv launches arbitrary\
     \ process. Bun is a runtime global, so this rule uses the exact strict `['Bun',\
     \ 'spawn']` receiver match."
 - id: typescript.cmdi.nodepty_spawn
@@ -646,7 +646,7 @@
     code: "const _u = require(\"node-pty\");\nfunction demo(input, req, obj) {\n \
       \ return pty.spawn(\"bash\");\n}\n"
     expect_no_match: true
-  description: "node-pty spawn runs an interactive shell \u2014 tainted command or\
+  description: "node-pty spawn runs an interactive shell - tainted command or\
     \ args can control a live terminal."
 - id: typescript.cmdi.cross_spawn_shell
   enabled: true
@@ -673,7 +673,7 @@
     code: "const _u = require(\"cross-spawn\");\nfunction demo(input, req, obj) {\n\
       \  return spawn(\"ls\", [\"-la\"], { shell: true });\n}\n"
     expect_no_match: true
-  description: "cross-spawn spawn(cmd, ..., {shell: true}) \u2014 tainted command\
+  description: "cross-spawn spawn(cmd, ..., {shell: true}) - tainted command\
     \ string is shell-interpreted."
 - id: typescript.cmdi.cross_spawn_shell_args
   enabled: true
@@ -700,7 +700,7 @@
     code: "const _u = require(\"cross-spawn\");\nfunction demo(input, req, obj) {\n\
       \  return spawn(\"sh\", [\"-c\", \"whoami\"], { shell: true });\n}\n"
     expect_no_match: true
-  description: "cross-spawn spawn(cmd, taintedArgs, {shell: true}) \u2014 tainted\
+  description: "cross-spawn spawn(cmd, taintedArgs, {shell: true}) - tainted\
     \ argv is shell-interpreted."
 - id: typescript.cmdi.zx_dollar
   enabled: false
@@ -717,5 +717,5 @@
     kind: call
     callee:
       name: $
-  description: "Disabled \u2014 zx $`...` tagged template; bare `$` name is too ambiguous\
+  description: "Disabled - zx $`...` tagged template; bare `$` name is too ambiguous\
     \ to enable globally."

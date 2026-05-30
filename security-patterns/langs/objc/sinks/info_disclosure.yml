@@ -16,7 +16,7 @@
       #import <CocoaLumberjack/CocoaLumberjack.h>
       void test(id input) { DDLogError(@"api_key=%@", input); }
     expect_match_text: [DDLogError]
-  description: "DDLogError with secret-shaped data — structured logs can persist credentials."
+  description: "DDLogError with secret-shaped data - structured logs can persist credentials."
 
 - id: objc.info_disclosure.gcdwebserver_error_response
   enabled: true
@@ -35,4 +35,4 @@
       #import <GCDWebServer/GCDWebServer.h>
       void test(id input) { [GCDWebServerDataResponse responseWithStatusCode:500 text:input]; }
     expect_match_text: [GCDWebServerDataResponse.responseWithStatusCode]
-  description: "GCDWebServer responseWithStatusCode:500 text:error — sends internal diagnostics in HTTP error pages."
+  description: "GCDWebServer responseWithStatusCode:500 text:error - sends internal diagnostics in HTTP error pages."

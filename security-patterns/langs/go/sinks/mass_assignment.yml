@@ -25,4 +25,4 @@
         value := "value"
         mergo.Merge(target)
       }
-  description: "mergo.Merge(target, src) — bulk struct merge; combine with explicit allowlist for admin fields."
+  description: "mergo.Merge(target, src) - bulk struct merge; combine with explicit allowlist for admin fields."

@@ -27,7 +27,7 @@
         client.chat(parameters: {messages: [{role: "user", content: "hello"}]})
       end
     expect_no_match: true
-  description: "OpenAI client.chat(parameters:) — tainted prompt/tool content reaches an LLM instruction surface."
+  description: "OpenAI client.chat(parameters:) - tainted prompt/tool content reaches an LLM instruction surface."
 
 - id: ruby.llm.anthropic_messages
   enabled: true
@@ -58,7 +58,7 @@
         client.messages(parameters: {messages: [{role: "user", content: "hello"}]})
       end
     expect_no_match: true
-  description: "Anthropic client.messages(parameters:) — tainted prompt content can steer model output or tool calls."
+  description: "Anthropic client.messages(parameters:) - tainted prompt content can steer model output or tool calls."
 
 - id: ruby.llm.bedrock_invoke_model
   enabled: true
@@ -89,4 +89,4 @@
         bedrock.invoke_model(body: "{\"prompt\":\"hello\"}")
       end
     expect_no_match: true
-  description: "bedrock.invoke_model(body:) — tainted model body reaches a foundation-model execution surface."
+  description: "bedrock.invoke_model(body:) - tainted model body reaches a foundation-model execution surface."

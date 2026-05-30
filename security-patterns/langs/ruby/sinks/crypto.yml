@@ -14,7 +14,7 @@
   match_examples:
   - name: ruby.crypto.digest_md5 example
     code: "def example(input, url, id, payload, request, params)\n  Digest.MD5(input)\nend\n"
-  description: "Digest::MD5 \u2014 broken hash."
+  description: "Digest::MD5 - broken hash."
 - id: ruby.crypto.digest_sha1
   enabled: true
   language: ruby
@@ -31,7 +31,7 @@
   match_examples:
   - name: ruby.crypto.digest_sha1 example
     code: "def example(input, url, id, payload, request, params)\n  Digest.SHA1(input)\nend\n"
-  description: "Digest::SHA1 \u2014 collision-vulnerable."
+  description: "Digest::SHA1 - collision-vulnerable."
 - id: ruby.crypto.openssl_md5
   enabled: true
   language: ruby
@@ -81,7 +81,7 @@
   match_examples:
   - name: ruby.crypto.openssl_cipher_des example
     code: "def example(input, url, id, payload, request, params)\n  Cipher.new(\"DES\")\nend\n"
-  description: "OpenSSL::Cipher.new('DES') \u2014 broken cipher. Merged aliases: ruby.crypto.openssl_cipher_des_cbc, ruby.crypto.openssl_cipher_rc4,\
+  description: "OpenSSL::Cipher.new('DES') - broken cipher. Merged aliases: ruby.crypto.openssl_cipher_des_cbc, ruby.crypto.openssl_cipher_rc4,\
     \ ruby.crypto.openssl_cipher_bf, ruby.crypto.openssl_cipher_aes128_ecb, ruby.crypto.openssl_cipher_aes256_ecb."
   aliases:
   - ruby.crypto.openssl_cipher_des_cbc
@@ -102,7 +102,7 @@
     kind: call
     callee:
       name: rand
-  description: "Disabled \u2014 Kernel#rand only matters for security-sensitive ID/token gen and fires on every rand() call."
+  description: "Disabled - Kernel#rand only matters for security-sensitive ID/token gen and fires on every rand() call."
 - id: ruby.crypto.kernel_srand
   enabled: false
   disabled_reason:
@@ -116,7 +116,7 @@
     kind: call
     callee:
       name: srand
-  description: "Disabled \u2014 srand seeding the insecure PRNG."
+  description: "Disabled - srand seeding the insecure PRNG."
 - id: ruby.crypto.bcrypt_low_cost
   enabled: true
   language: ruby
@@ -159,4 +159,4 @@
         BCrypt::Password.create(password, cost: 12)
       end
     expect_no_match: true
-  description: "BCrypt::Password.create(password, cost: N) with explicit cost < 10 — too cheap to compute; the default cost remains safe."
+  description: "BCrypt::Password.create(password, cost: N) with explicit cost < 10 - too cheap to compute; the default cost remains safe."

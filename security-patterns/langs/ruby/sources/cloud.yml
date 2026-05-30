@@ -1,5 +1,5 @@
 # Ruby cloud serverless sources. Handlers take attacker-controlled event
-# payloads. trust: service — upstream gateway brokered.
+# payloads. trust: service - upstream gateway brokered.
 - id: ruby.source.aws_lambda_event
   enabled: true
   language: ruby

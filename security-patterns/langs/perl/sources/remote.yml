@@ -23,7 +23,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         param($input)
       }
-  description: "->param('name') — CGI $q->param, Plack::Request $req->param, Dancer/Dancer2 param helper, Catalyst $c->req->param. All return user-supplied query/body values."
+  description: "->param('name') - CGI $q->param, Plack::Request $req->param, Dancer/Dancer2 param helper, Catalyst $c->req->param. All return user-supplied query/body values."
 
 - id: perl.source.cgi_vars
   enabled: true
@@ -45,7 +45,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         Vars($input)
       }
-  description: "CGI $q->Vars / Vars() — flat hash of every query/body param name=>value pair."
+  description: "CGI $q->Vars / Vars() - flat hash of every query/body param name=>value pair."
 
 - id: perl.source.cgi_cookie
   enabled: true
@@ -67,7 +67,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         cookie($input)
       }
-  description: "->cookie('name') — CGI $q->cookie / Plack::Request $req->cookies / Dancer2 cookie() / Catalyst $c->req->cookie. Cookie values are attacker-controlled."
+  description: "->cookie('name') - CGI $q->cookie / Plack::Request $req->cookies / Dancer2 cookie() / Catalyst $c->req->cookie. Cookie values are attacker-controlled."
 
 - id: perl.source.cgi_url_param
   enabled: true
@@ -89,7 +89,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         url_param($input)
       }
-  description: "CGI $q->url_param — query-string-only variant of param() (ignores POST body)."
+  description: "CGI $q->url_param - query-string-only variant of param() (ignores POST body)."
 
 - id: perl.source.cgi_header_in
   enabled: true
@@ -111,7 +111,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         http($input)
       }
-  description: "CGI $q->http('HEADER') — read inbound HTTP request header by name."
+  description: "CGI $q->http('HEADER') - read inbound HTTP request header by name."
 
 # -- Plack ----------------------------------------------------------
 - id: perl.source.plack_request_parameters
@@ -134,7 +134,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         parameters($input)
       }
-  description: "Plack::Request $req->parameters — merged query+body params (Hash::MultiValue)."
+  description: "Plack::Request $req->parameters - merged query+body params (Hash::MultiValue)."
 
 - id: perl.source.plack_request_body_parameters
   enabled: true
@@ -156,7 +156,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         body_parameters($input)
       }
-  description: "Plack::Request / Dancer2 body_parameters — POST body form fields."
+  description: "Plack::Request / Dancer2 body_parameters - POST body form fields."
 
 - id: perl.source.plack_request_query_parameters
   enabled: true
@@ -178,7 +178,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         query_parameters($input)
       }
-  description: "Plack::Request $req->query_parameters — query string only."
+  description: "Plack::Request $req->query_parameters - query string only."
 
 - id: perl.source.plack_request_raw_body
   enabled: true
@@ -200,7 +200,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         raw_body($input)
       }
-  description: "Plack::Request $req->raw_body / content — raw HTTP request body bytes."
+  description: "Plack::Request $req->raw_body / content - raw HTTP request body bytes."
 
 - id: perl.source.plack_upload_filename
   enabled: true
@@ -224,7 +224,7 @@
         my ($upload) = @_;
         $upload->filename()
       }
-  description: "Plack/Mojolicious/CGI upload filename accessor — client-controlled multipart filename metadata."
+  description: "Plack/Mojolicious/CGI upload filename accessor - client-controlled multipart filename metadata."
 
 # -- Dancer / Dancer2 ----------------------------------------------
 - id: perl.source.dancer_params
@@ -247,7 +247,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         params($input)
       }
-  description: "params helper — Dancer/Dancer2 params (merged), Catalyst $c->req->params. Attacker-controlled."
+  description: "params helper - Dancer/Dancer2 params (merged), Catalyst $c->req->params. Attacker-controlled."
 
 - id: perl.source.dancer2_body_parameters
   enabled: false
@@ -271,7 +271,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         body_parameters($input)
       }
-  description: "Disabled duplicate — perl.source.plack_request_body_parameters carries the same `body_parameters` call shape and includes Dancer2 package metadata."
+  description: "Disabled duplicate - perl.source.plack_request_body_parameters carries the same `body_parameters` call shape and includes Dancer2 package metadata."
 
 - id: perl.source.dancer2_route_parameters
   enabled: true
@@ -293,7 +293,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         route_parameters($input)
       }
-  description: "Dancer2 route_parameters — captured URL path segments (e.g. /user/:id). Attacker-controlled."
+  description: "Dancer2 route_parameters - captured URL path segments (e.g. /user/:id). Attacker-controlled."
 
 # -- Catalyst -------------------------------------------------------
 - id: perl.source.catalyst_body_data
@@ -316,7 +316,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         body_data($input)
       }
-  description: "Catalyst $c->req->body_data — parsed JSON/XML/YAML request body. Fully attacker-controlled."
+  description: "Catalyst $c->req->body_data - parsed JSON/XML/YAML request body. Fully attacker-controlled."
 
 # -- Mojolicious ---------------------------------------------------
 - id: perl.source.mojolicious_req_query_params
@@ -339,7 +339,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         query_params($input)
       }
-  description: "Mojolicious $c->req->query_params — query string params."
+  description: "Mojolicious $c->req->query_params - query string params."
 
 - id: perl.source.mojolicious_req_body_params
   enabled: true
@@ -361,7 +361,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         body_params($input)
       }
-  description: "Mojolicious $c->req->body_params — POST body params."
+  description: "Mojolicious $c->req->body_params - POST body params."
 
 # -- DBI second-order taint ----------------------------------------
 # Database row reads are not first-order remote, but represent
@@ -386,7 +386,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         fetchrow_array($input)
       }
-  description: "DBI $sth->fetchrow_array — row values previously written to the DB. Models second-order injection (stored XSS / SQL gadget reuse)."
+  description: "DBI $sth->fetchrow_array - row values previously written to the DB. Models second-order injection (stored XSS / SQL gadget reuse)."
 
 - id: perl.source.dbi_fetchrow_hashref
   enabled: true
@@ -407,7 +407,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         fetchrow_hashref($input)
       }
-  description: "DBI $sth->fetchrow_hashref — hash form of fetchrow_array; same second-order trust model."
+  description: "DBI $sth->fetchrow_hashref - hash form of fetchrow_array; same second-order trust model."
 
 # -- Other I/O sources ---------------------------------------------
 - id: perl.source.anyevent_socket_recv
@@ -430,7 +430,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         recv($input)
       }
-  description: "AnyEvent::Socket / AnyEvent::Handle recv — raw network bytes from a peer. Attacker-controlled when the socket faces the network."
+  description: "AnyEvent::Socket / AnyEvent::Handle recv - raw network bytes from a peer. Attacker-controlled when the socket faces the network."
 
 - id: perl.source.env_http
   enabled: true
@@ -450,7 +450,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         my $value = $ENV;
       }
-  description: "%ENV HTTP_* — CGI env-var form of inbound request headers. Also used by many Plack-style runners."
+  description: "%ENV HTTP_* - CGI env-var form of inbound request headers. Also used by many Plack-style runners."
 
 # -- Disabled / FP-prone -------------------------------------------
 - id: perl.source.dancer_request_body
@@ -466,7 +466,7 @@
     kind: call
     callee:
       name: request
-  description: "Disabled — bare `name: request` collides with perl.ssrf.useragent_request ($ua->request). Body coverage already provided by dancer2_body_parameters / catalyst_body_data."
+  description: "Disabled - bare `name: request` collides with perl.ssrf.useragent_request ($ua->request). Body coverage already provided by dancer2_body_parameters / catalyst_body_data."
 
 - id: perl.source.mojolicious_req_param
   enabled: false
@@ -481,7 +481,7 @@
     kind: call
     callee:
       name: param
-  description: "Disabled — overlaps perl.source.cgi_param (same bare `param` name). One rule covers both."
+  description: "Disabled - overlaps perl.source.cgi_param (same bare `param` name). One rule covers both."
 
 - id: perl.source.mojolicious_req_body
   enabled: false
@@ -496,7 +496,7 @@
     kind: call
     callee:
       name: body
-  description: "Disabled — bare `body` overmatches HTTP::Response/email/HTML body accessors. body_params + plack_request_raw_body cover the real cases."
+  description: "Disabled - bare `body` overmatches HTTP::Response/email/HTML body accessors. body_params + plack_request_raw_body cover the real cases."
 
 - id: perl.source.mojolicious_req_headers
   enabled: false
@@ -511,4 +511,4 @@
     kind: call
     callee:
       name: headers
-  description: "Disabled — bare `headers` overmatches HTTP::Response::headers, email headers, etc. Use env_http / specific header reads instead."
+  description: "Disabled - bare `headers` overmatches HTTP::Response::headers, email headers, etc. Use env_http / specific header reads instead."

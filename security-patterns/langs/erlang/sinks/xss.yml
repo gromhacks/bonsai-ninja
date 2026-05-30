@@ -12,7 +12,7 @@
     kind: call
     callee:
       regex: "^cowboy_req:reply"
-  description: "Disabled — shares regex with open_redirect.cowboy_reply_location; distinguishing XSS vs redirect needs header/body map inspection."
+  description: "Disabled - shares regex with open_redirect.cowboy_reply_location; distinguishing XSS vs redirect needs header/body map inspection."
 
 - id: erlang.xss.mochiweb_response_write
   enabled: true
@@ -44,7 +44,7 @@
       test() ->
         mochiweb_response:write(<<"ok">>).
     expect_no_match: true
-  description: "mochiweb_response:write — writes HTML body unescaped; tainted content reflects as XSS."
+  description: "mochiweb_response:write - writes HTML body unescaped; tainted content reflects as XSS."
 
 # Cowboy binary-concat HTML response: `cowboy_req:reply(Status, #{}, <<"<p>", Q/binary, "</p>">>, Req)`.
 # The disabled erlang.xss.cowboy_html_response above shares regex with
@@ -82,7 +82,7 @@
       test(Req) ->
         cowboy_req:reply(200, #{}, <<"<h1>ok</h1>">>, Req).
     expect_no_match: true
-  description: 'cowboy_req:reply with binary-concat HTML body (`<<"<p>", Q/binary, "</p>">>`) — tainted Q reflects in unescaped HTML. Constraint requires `<<` binary-concat with HTML tag literal to skip non-HTML reply shapes. Also covers merged aliases: erlang.info_disclosure.cowboy_reply_error_body.'
+  description: 'cowboy_req:reply with binary-concat HTML body (`<<"<p>", Q/binary, "</p>">>`) - tainted Q reflects in unescaped HTML. Constraint requires `<<` binary-concat with HTML tag literal to skip non-HTML reply shapes. Also covers merged aliases: erlang.info_disclosure.cowboy_reply_error_body.'
 
 - id: erlang.xss.yaws_out_html
   enabled: true
@@ -115,7 +115,7 @@
       test() ->
         yaws_api:htmlize(<<"ok">>).
     expect_no_match: true
-  description: "yaws_api:htmlize / Yaws HTML response helpers — flag tainted content that is prepared for raw HTML output."
+  description: "yaws_api:htmlize / Yaws HTML response helpers - flag tainted content that is prepared for raw HTML output."
 - id: erlang.xss.cowboy_stream_body
   enabled: true
   language: erlang
@@ -146,4 +146,4 @@
       test(Req) ->
         cowboy_req:stream_body(<<"ok">>, fin, Req).
     expect_no_match: true
-  description: "cowboy_req:stream_body/3 — streams raw response bytes; tainted HTML/JS reflects to the client."
+  description: "cowboy_req:stream_body/3 - streams raw response bytes; tainted HTML/JS reflects to the client."

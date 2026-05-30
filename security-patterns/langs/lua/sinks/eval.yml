@@ -2,7 +2,7 @@
 #
 # NOTE on bare-name 'load': Lua's `load` is a real built-in global (Lua 5.2+),
 # not a generic verb. Unlike `open`/`exec`/`query` it has no common shadowing
-# in Lua codebases — there is no module-prefixed alternative. Keeping the
+# in Lua codebases - there is no module-prefixed alternative. Keeping the
 # bare-name match is intentional; tighten with `top_level: true` so that
 # `obj:load()`/`module.load()` calls do not match. Audit reports flag this
 # as fragile but it is the canonical Lua spelling.
@@ -31,7 +31,7 @@
         loadstring("return 1")
       end
     expect_no_match: true
-  description: "loadstring(src) — compiles and returns a function from a tainted string (Lua 5.1 / LuaJIT)."
+  description: "loadstring(src) - compiles and returns a function from a tainted string (Lua 5.1 / LuaJIT)."
 
 - id: lua.eval.load
   enabled: true
@@ -58,7 +58,7 @@
         load("return 1")
       end
     expect_no_match: true
-  description: "load(chunk) — Lua 5.2+ chunk loader; string chunk is compiled as Lua source."
+  description: "load(chunk) - Lua 5.2+ chunk loader; string chunk is compiled as Lua source."
 
 - id: lua.eval.dofile
   enabled: true
@@ -85,7 +85,7 @@
         dofile("init.lua")
       end
     expect_no_match: true
-  description: "dofile(path) — loads and executes a Lua file at tainted path."
+  description: "dofile(path) - loads and executes a Lua file at tainted path."
 
 - id: lua.eval.loadfile
   enabled: true
@@ -112,7 +112,7 @@
         loadfile("config.lua")
       end
     expect_no_match: true
-  description: "loadfile(path) — compiles a Lua file at tainted path for later execution."
+  description: "loadfile(path) - compiles a Lua file at tainted path for later execution."
 
 - id: lua.eval.debug_sethook
   enabled: false
@@ -126,7 +126,7 @@
     kind: call
     callee:
       attribute: [debug, sethook]
-  description: "Disabled — debug.sethook installs a hook function; dangerous only when the hook is built from tainted source."
+  description: "Disabled - debug.sethook installs a hook function; dangerous only when the hook is built from tainted source."
 
 - id: lua.eval.require
   enabled: false
@@ -140,4 +140,4 @@
     kind: call
     callee:
       name: require
-  description: "Disabled — require(tainted) loads an arbitrary module; enable with module-name narrowing."
+  description: "Disabled - require(tainted) loads an arbitrary module; enable with module-name narrowing."

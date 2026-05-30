@@ -23,7 +23,7 @@
       using RazorEngine;
       class App { void Test() { Engine.RunCompile("Hello @Model.Name"); } }
     expect_no_match: true
-  description: "RazorEngine Engine.RunCompile(tainted) — full SSTI to RCE."
+  description: "RazorEngine Engine.RunCompile(tainted) - full SSTI to RCE."
 
 - id: csharp.template.razor_engine_parse
   enabled: true
@@ -75,7 +75,7 @@
       using Scriban;
       class App { void Test() { Template.Parse("Hello {{ name }}"); } }
     expect_no_match: true
-  description: "Template.Parse(tainted) — covers Scriban and DotLiquid (same `[Template, Parse]` attribute chain)."
+  description: "Template.Parse(tainted) - covers Scriban and DotLiquid (same `[Template, Parse]` attribute chain)."
 
 - id: csharp.template.dotliquid_template_parse
   enabled: false
@@ -90,7 +90,7 @@
     kind: call
     callee:
       attribute: [Template, Parse]
-  description: "Disabled — merged into csharp.template.scriban_template_parse."
+  description: "Disabled - merged into csharp.template.scriban_template_parse."
 
 - id: csharp.template.handlebars_compile
   enabled: true
@@ -171,4 +171,4 @@
       using Microsoft.AspNetCore.Mvc.Razor;
       class App { void Test() { Razor.WriteLiteral("<p>safe</p>"); } }
     expect_no_match: true
-  description: "Razor WriteLiteral(tainted) — bypasses HTML encoding; XSS for tainted input."
+  description: "Razor WriteLiteral(tainted) - bypasses HTML encoding; XSS for tainted input."

@@ -20,7 +20,7 @@
     code: |
       void test(LDAP *ld, const char *input) { ldap_search_ext(ld, input, 0, "(uid=safe)", NULL, 0, NULL, NULL, NULL, 0, NULL); }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_ext(_s) — tainted filter string permits LDAP filter injection."
+  description: "OpenLDAP ldap_search_ext(_s) - tainted filter string permits LDAP filter injection."
 
 - id: objc.ldap.ldap_search_s
   enabled: true
@@ -43,7 +43,7 @@
     code: |
       void test(LDAP *ld, const char *input) { ldap_search(ld, input, 0, "(uid=safe)", NULL, 0); }
     expect_no_match: true
-  description: "OpenLDAP ldap_search / ldap_search_s / ldap_search_st — deprecated synchronous search with tainted filter."
+  description: "OpenLDAP ldap_search / ldap_search_s / ldap_search_st - deprecated synchronous search with tainted filter."
 
 - id: objc.ldap.ldap_modify
   enabled: true
@@ -68,7 +68,7 @@
         ldap_modify("safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_modify(_s/_ext/_ext_s) — tainted DN/mods permit DIT modification."
+  description: "OpenLDAP ldap_modify(_s/_ext/_ext_s) - tainted DN/mods permit DIT modification."
 
 - id: objc.ldap.ldap_modify_attrs
   enabled: true
@@ -95,7 +95,7 @@
         ldap_modify("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "ldap_modify(_s/_ext) — tainted modifications can alter unintended directory attributes."
+  description: "ldap_modify(_s/_ext) - tainted modifications can alter unintended directory attributes."
 
 - id: objc.ldap.ldap_delete
   enabled: true
@@ -118,7 +118,7 @@
     code: |
       void test(LDAP *ld) { ldap_delete(ld, "uid=safe,dc=example,dc=com"); }
     expect_no_match: true
-  description: "OpenLDAP ldap_delete(_s/_ext/_ext_s) — tainted DN deletes arbitrary directory entries."
+  description: "OpenLDAP ldap_delete(_s/_ext/_ext_s) - tainted DN deletes arbitrary directory entries."
 
 - id: objc.ldap.ldap_add
   enabled: true
@@ -143,7 +143,7 @@
         ldap_add("safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_add(_s/_ext/_ext_s) — tainted DN/attributes enables directory injection."
+  description: "OpenLDAP ldap_add(_s/_ext/_ext_s) - tainted DN/attributes enables directory injection."
 - id: objc.ldap.ldap_add_attrs
   enabled: true
   language: objc
@@ -169,4 +169,4 @@
         ldap_add("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "ldap_add(_s/_ext) — tainted attributes can create rogue directory entries."
+  description: "ldap_add(_s/_ext) - tainted attributes can create rogue directory entries."

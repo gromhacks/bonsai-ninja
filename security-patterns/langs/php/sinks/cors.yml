@@ -21,7 +21,7 @@
       function example($input, $url, $id, $payload, $request) {
         header("Access-Control-Allow-Origin: *");
       }
-  description: 'header(''Access-Control-Allow-Origin: *'') — explicit wildcard CORS via header(). Merged aliases: php.header.builtin, php.smuggle.header_dual_cl_te.'
+  description: 'header(''Access-Control-Allow-Origin: *'') - explicit wildcard CORS via header(). Merged aliases: php.header.builtin, php.smuggle.header_dual_cl_te.'
   aliases:
   - php.header.builtin
   - php.smuggle.header_dual_cl_te

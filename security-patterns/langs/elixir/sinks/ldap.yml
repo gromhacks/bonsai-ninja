@@ -31,7 +31,7 @@
         end
       end
     expect_no_match: true
-  description: "Erlang :eldap.search/2 — tainted filter string allows LDAP filter injection; `*)(|(uid=*` matches every user."
+  description: "Erlang :eldap.search/2 - tainted filter string allows LDAP filter injection; `*)(|(uid=*` matches every user."
 
   imports:
   - Eldap
@@ -67,7 +67,7 @@
         end
       end
     expect_no_match: true
-  description: "Erlang :eldap.equalityMatch/2 — tainted attribute value composed into a filter can break out of the match when unescaped."
+  description: "Erlang :eldap.equalityMatch/2 - tainted attribute value composed into a filter can break out of the match when unescaped."
 
   imports:
   - Eldap
@@ -103,7 +103,7 @@
         end
       end
     expect_no_match: true
-  description: "Exldap.search_with_filter/3 — tainted filter string bypasses LDAP auth or enumerates entries."
+  description: "Exldap.search_with_filter/3 - tainted filter string bypasses LDAP auth or enumerates entries."
 
   imports:
   - Exldap
@@ -140,6 +140,6 @@
         end
       end
     expect_no_match: true
-  description: "Paddle.authenticate/2 — DN built from tainted username enables DN injection / auth bypass."
+  description: "Paddle.authenticate/2 - DN built from tainted username enables DN injection / auth bypass."
   imports:
   - Paddle

@@ -25,7 +25,7 @@
       }
     expect_no_match: true
   description: |
-    eval() — attacker-controlled JS is executed in the current scope.
+    eval() - attacker-controlled JS is executed in the current scope.
     Bare-name match is intentional: `eval` is a real ECMAScript global.
     The `top_level: true` constraint excludes property access shapes
     like `foo.eval(x)` (e.g. mongodb db.eval, vm.runInThisContext)
@@ -43,7 +43,7 @@
     kind: new
     callee:
       name: Function
-  description: "Disabled duplicate — adapter also emits new Function(...) as the call-form Function fact, covered by javascript.eval.function_constructor_call."
+  description: "Disabled duplicate - adapter also emits new Function(...) as the call-form Function fact, covered by javascript.eval.function_constructor_call."
 
 - id: javascript.eval.function_constructor_call
   aliases: [javascript.eval.function_constructor]
@@ -81,7 +81,7 @@
   - name: arg tainted literal negative
     code: "function demo(input, req, obj) {\n  return new Function(\"safe\");\n}\n"
     expect_no_match: true
-  description: "Function('...' + body) / Function(body) — call-form Function constructor compiles attacker-controlled source."
+  description: "Function('...' + body) / Function(body) - call-form Function constructor compiles attacker-controlled source."
 
 - id: javascript.eval.settimeout_string
   enabled: false
@@ -95,7 +95,7 @@
     kind: call
     callee:
       name: setTimeout
-  description: "Disabled — setTimeout(fn, ms) is almost always called with a function; the eval-string form is uncommon and can't be distinguished without a string-type constraint we don't have."
+  description: "Disabled - setTimeout(fn, ms) is almost always called with a function; the eval-string form is uncommon and can't be distinguished without a string-type constraint we don't have."
 
 - id: javascript.eval.setinterval_string
   enabled: false
@@ -109,7 +109,7 @@
     kind: call
     callee:
       name: setInterval
-  description: "Disabled — same as setTimeout; enable only when first-arg-type analysis is available."
+  description: "Disabled - same as setTimeout; enable only when first-arg-type analysis is available."
 
 - id: javascript.eval.setimmediate_string
   enabled: false
@@ -123,7 +123,7 @@
     kind: call
     callee:
       name: setImmediate
-  description: "Disabled — setImmediate doesn't even accept a string form; kept as a placeholder."
+  description: "Disabled - setImmediate doesn't even accept a string form; kept as a placeholder."
 
 - id: javascript.eval.execscript
   enabled: true
@@ -150,7 +150,7 @@
         return execScript("1 + 1");
       }
     expect_no_match: true
-  description: execScript() — legacy IE explicit-eval API; no legitimate modern use.
+  description: execScript() - legacy IE explicit-eval API; no legitimate modern use.
 
 - id: javascript.eval.vm_runinthiscontext
   enabled: true
@@ -180,7 +180,7 @@
         return vm.runInThisContext("1 + 1");
       }
     expect_no_match: true
-  description: Node vm.runInThisContext(tainted) — runs JS source in the host realm.
+  description: Node vm.runInThisContext(tainted) - runs JS source in the host realm.
 
 - id: javascript.eval.vm_runinnewcontext
   enabled: true
@@ -206,7 +206,7 @@
   - name: arg tainted literal negative
     code: "const _u = require(\"vm\");\nfunction demo(input, req, obj) {\n  return vm.runInNewContext(\"safe\");\n}\n"
     expect_no_match: true
-  description: vm.runInNewContext(tainted) — runs JS source, sandbox escapes are common.
+  description: vm.runInNewContext(tainted) - runs JS source, sandbox escapes are common.
 
 - id: javascript.eval.vm_runincontext
   enabled: true
@@ -236,7 +236,7 @@
         return vm.runInContext("1 + 1", ctx);
       }
     expect_no_match: true
-  description: vm.runInContext(tainted) — runs JS source in a pre-built context.
+  description: vm.runInContext(tainted) - runs JS source in a pre-built context.
 
 - id: javascript.eval.safe_eval
   enabled: true
@@ -305,7 +305,7 @@
         return vm.compileFunction("return 1");
       }
     expect_no_match: true
-  description: vm.compileFunction(tainted) — compiles attacker-controlled body.
+  description: vm.compileFunction(tainted) - compiles attacker-controlled body.
 
 - id: javascript.eval.vm_script_ctor
   enabled: true
@@ -335,7 +335,7 @@
         return new vm.Script("1 + 1");
       }
     expect_no_match: true
-  description: new vm.Script(tainted) — compiles a Script object from attacker source.
+  description: new vm.Script(tainted) - compiles a Script object from attacker source.
 
 - id: javascript.eval.dynamic_import
   enabled: false
@@ -349,7 +349,7 @@
     kind: call
     callee:
       name: import
-  description: "Disabled — bare `import(x)` fires on every dynamic import; dangerous only when the module specifier is tainted. Enable with source-proximity."
+  description: "Disabled - bare `import(x)` fires on every dynamic import; dangerous only when the module specifier is tainted. Enable with source-proximity."
 
 - id: javascript.eval.require_dynamic
   enabled: true
@@ -376,7 +376,7 @@
         return require("express");
       }
     expect_no_match: true
-  description: "require(tainted) — attacker-controlled CommonJS module specifier can load unintended code or files."
+  description: "require(tainted) - attacker-controlled CommonJS module specifier can load unintended code or files."
 
 # Reflection-based dynamic invocation (T406). Tag
 # code-injection so reviewer enumerates with `security sinks
@@ -407,4 +407,4 @@
         return Reflect.apply(Math.max, null, [1, 2]);
       }
     expect_no_match: true
-  description: "Reflect.apply(target, this, args) — when target is selected by attacker name, eval-equivalent. JS Reflect global has no canonical ecosystem package, so strict `['Reflect', 'apply']` match only."
+  description: "Reflect.apply(target, this, args) - when target is selected by attacker name, eval-equivalent. JS Reflect global has no canonical ecosystem package, so strict `['Reflect', 'apply']` match only."

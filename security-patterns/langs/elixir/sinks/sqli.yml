@@ -41,7 +41,7 @@
         end
       end
     expect_no_match: true
-  description: "Repo.query/2 or App.Repo.query/2 — raw SQL with interpolated values bypasses Ecto's parameter binding."
+  description: "Repo.query/2 or App.Repo.query/2 - raw SQL with interpolated values bypasses Ecto's parameter binding."
   imports:
   - Ecto.Adapters.SQL
   - Ecto_sql
@@ -87,7 +87,7 @@
         end
       end
     expect_no_match: true
-  description: "Repo.query!/2 or App.Repo.query!/2 — raw SQL variant; same interpolation risk as query/2."
+  description: "Repo.query!/2 or App.Repo.query!/2 - raw SQL variant; same interpolation risk as query/2."
   imports:
   - Ecto.Adapters.SQL
   - Ecto_sql
@@ -125,7 +125,7 @@
         end
       end
     expect_no_match: true
-  description: "Ecto fragment(\"...\") — string interpolation inside fragment is spliced directly into SQL. Merged collision aliases: elixir.sqli.ecto_query_api_fragment."
+  description: "Ecto fragment(\"...\") - string interpolation inside fragment is spliced directly into SQL. Merged collision aliases: elixir.sqli.ecto_query_api_fragment."
   aliases:
   - elixir.sqli.ecto_query_api_fragment
   imports:
@@ -169,7 +169,7 @@
         end
       end
     expect_no_match: true
-  description: "Ecto.Adapters.SQL.query/3 — tainted SQL string is executed verbatim."
+  description: "Ecto.Adapters.SQL.query/3 - tainted SQL string is executed verbatim."
   imports:
   - Ecto_sql
 - id: elixir.sqli.ecto_adapters_sql_query_bang
@@ -210,7 +210,7 @@
         end
       end
     expect_no_match: true
-  description: "Ecto.Adapters.SQL.query!/3 — raw SQL variant with exception on error."
+  description: "Ecto.Adapters.SQL.query!/3 - raw SQL variant with exception on error."
   imports:
   - Ecto_sql
 - id: elixir.sqli.postgrex_query
@@ -250,7 +250,7 @@
         end
       end
     expect_no_match: true
-  description: "Postgrex.query/3 — raw SQL; $n placeholders only if the caller uses them."
+  description: "Postgrex.query/3 - raw SQL; $n placeholders only if the caller uses them."
   imports:
   - Postgrex
 - id: elixir.sqli.postgrex_query_bang
@@ -289,7 +289,7 @@
         end
       end
     expect_no_match: true
-  description: "Postgrex.query!/3 — bang raw SQL variant; tainted SQL string executes verbatim."
+  description: "Postgrex.query!/3 - bang raw SQL variant; tainted SQL string executes verbatim."
   imports:
   - Postgrex
 - id: elixir.sqli.myxql_query
@@ -329,7 +329,7 @@
         end
       end
     expect_no_match: true
-  description: "MyXQL.query/3 — raw MySQL; interpolated string becomes part of the statement."
+  description: "MyXQL.query/3 - raw MySQL; interpolated string becomes part of the statement."
   imports:
   - Myxql
 - id: elixir.sqli.myxql_query_bang
@@ -368,7 +368,7 @@
         end
       end
     expect_no_match: true
-  description: "MyXQL.query!/3 — bang raw SQL variant; tainted SQL string executes verbatim."
+  description: "MyXQL.query!/3 - bang raw SQL variant; tainted SQL string executes verbatim."
   imports:
   - Myxql
 - id: elixir.sqli.exqlite_query
@@ -408,7 +408,7 @@
         end
       end
     expect_no_match: true
-  description: "Exqlite.query/3 — raw SQLite; bindings are optional, caller may splice strings."
+  description: "Exqlite.query/3 - raw SQLite; bindings are optional, caller may splice strings."
   imports:
   - Exqlite
 - id: elixir.sqli.exqlite_query_bang
@@ -447,6 +447,6 @@
         end
       end
     expect_no_match: true
-  description: "Exqlite.query!/2,3 — bang raw SQLite variant; tainted SQL string executes verbatim."
+  description: "Exqlite.query!/2,3 - bang raw SQLite variant; tainted SQL string executes verbatim."
   imports:
   - Exqlite

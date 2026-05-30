@@ -36,4 +36,4 @@
         }
       }
     expect_no_match: true
-  description: "MimeMessage.setSubject — CR/LF in subject injects MIME headers."
+  description: "MimeMessage.setSubject - CR/LF in subject injects MIME headers."

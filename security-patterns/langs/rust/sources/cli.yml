@@ -17,7 +17,7 @@
           let query = "user";
           env::args(target);
       }
-  description: "std::env::args — process argv."
+  description: "std::env::args - process argv."
 - id: rust.cli.argv_os
   enabled: true
   language: rust
@@ -36,7 +36,7 @@
           let query = "user";
           env::args_os(target);
       }
-  description: "std::env::args_os — OS-flavored argv."
+  description: "std::env::args_os - OS-flavored argv."
 - id: rust.cli.std_env_current_exe
   enabled: true
   language: rust
@@ -56,7 +56,7 @@
           std::env::current_exe(target);
       }
     expect_match_text: [std::env::current_exe]
-  description: "std::env::current_exe() — executable path is not trustworthy for security decisions."
+  description: "std::env::current_exe() - executable path is not trustworthy for security decisions."
 - id: rust.cli.std_env_temp_dir
   enabled: true
   language: rust
@@ -76,7 +76,7 @@
           std::env::temp_dir(target);
       }
     expect_match_text: [std::env::temp_dir]
-  description: "std::env::temp_dir() — shared temporary directories require safe random file creation and containment checks."
+  description: "std::env::temp_dir() - shared temporary directories require safe random file creation and containment checks."
 - id: rust.cli.clap_parse
   enabled: true
   language: rust
@@ -98,7 +98,7 @@
           let query = "user";
           Parser::parse(target);
       }
-  description: "clap::Parser::parse — argv-derived struct."
+  description: "clap::Parser::parse - argv-derived struct."
 - id: rust.cli.stdin_read_line
   enabled: true
   language: rust
@@ -119,7 +119,7 @@
           let query = "user";
           read_line(target);
       }
-  description: "std::io::Stdin::read_line — interactive input."
+  description: "std::io::Stdin::read_line - interactive input."
 - id: rust.cli.env_var
   enabled: true
   language: rust
@@ -138,4 +138,4 @@
           let query = "user";
           env::var(target);
       }
-  description: "std::env::var — process environment variable."
+  description: "std::env::var - process environment variable."

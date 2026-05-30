@@ -27,7 +27,7 @@
       import 'package:shelf/shelf.dart';
       void test() { Response.change(headers: {"X-Trace": "safe"}); }
     expect_no_match: true
-  description: "shelf Response.change(headers: {…tainted…})."
+  description: "shelf Response.change(headers: {...tainted...})."
 
   imports:
   - shelf/shelf.dart
@@ -52,7 +52,7 @@
     code: |
       void test(String input) { headers.set(input, "safe"); }
     expect_no_match: true
-  description: "HttpHeaders.set(name, tainted) — dart:io request/response headers."
+  description: "HttpHeaders.set(name, tainted) - dart:io request/response headers."
 
 - id: dart.header.httpheaders_add
   enabled: true
@@ -89,4 +89,4 @@
     kind: call
     callee:
       attribute: [request, headers]
-  description: "Disabled — `.headers` is a getter not a call; actual CRLF sink is covered by dart.header.httpheaders_set / httpheaders_add."
+  description: "Disabled - `.headers` is a getter not a call; actual CRLF sink is covered by dart.header.httpheaders_set / httpheaders_add."

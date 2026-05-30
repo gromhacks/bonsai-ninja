@@ -58,7 +58,7 @@
     code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return\
       \ res.location(\"/account\");\n}\n"
     expect_no_match: true
-  description: "Express res.location(tainted) \u2014 sets Location header."
+  description: "Express res.location(tainted) - sets Location header."
 - id: typescript.open_redirect.koa_redirect
   enabled: true
   language: typescript
@@ -235,7 +235,7 @@
     kind: write
     target:
       name: location
-  description: "Disabled \u2014 `target.name: location` matches any `x.location =\
+  description: "Disabled - `target.name: location` matches any `x.location =\
     \ y` assignment (too broad); flag `location.href = tainted` downstream via href\
     \ target once receiver narrowing is supported."
 
@@ -269,4 +269,4 @@
         return client.authorizeURL({ redirect_uri: "https://app.example.com/cb", scope: "read" });
       }
     expect_no_match: true
-  description: "simple-oauth2 client.authorizeURL({redirect_uri: tainted}) — attacker-controlled redirect_uri leaks the auth code or token to a malicious endpoint."
+  description: "simple-oauth2 client.authorizeURL({redirect_uri: tainted}) - attacker-controlled redirect_uri leaks the auth code or token to a malicious endpoint."

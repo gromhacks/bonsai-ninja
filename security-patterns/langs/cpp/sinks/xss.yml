@@ -28,7 +28,7 @@
         Response::set_content("safe");
       }
     expect_no_match: true
-  description: "cpp-httplib Response::set_content(tainted, \"text/html\") — reflected XSS. Also covers merged aliases: cpp.info_disclosure.httplib_error_detail."
+  description: "cpp-httplib Response::set_content(tainted, \"text/html\") - reflected XSS. Also covers merged aliases: cpp.info_disclosure.httplib_error_detail."
   imports:
   - httplib.h
   - httplib
@@ -60,7 +60,7 @@
         res.body = "<p>safe</p>";
       }
     expect_no_match: true
-  description: "crow res.body = tainted — reflected XSS if Content-Type is HTML."
+  description: "crow res.body = tainted - reflected XSS if Content-Type is HTML."
 - id: cpp.xss.drogon_response_setbody
   enabled: true
   language: cpp
@@ -88,7 +88,7 @@
         HttpResponse::setBody("safe");
       }
     expect_no_match: true
-  description: "Drogon HttpResponse::setBody(tainted) — reflected XSS when content-type is HTML."
+  description: "Drogon HttpResponse::setBody(tainted) - reflected XSS when content-type is HTML."
 - id: cpp.xss.drogon_newhttpresponse
   enabled: false
   disabled_reason:
@@ -106,7 +106,7 @@
       attribute:
       - HttpResponse
       - newHttpResponse
-  description: "Disabled — newHttpResponse is a factory; the actual sink is setBody on the returned object."
+  description: "Disabled - newHttpResponse is a factory; the actual sink is setBody on the returned object."
 - id: cpp.xss.pistache_setbody
   enabled: true
   language: cpp
@@ -140,7 +140,7 @@
         ResponseWriter::send(200, "safe");
       }
     expect_no_match: true
-  description: "pistache ResponseWriter::send(code, tainted) — reflected XSS when body is HTML."
+  description: "pistache ResponseWriter::send(code, tainted) - reflected XSS when body is HTML."
 - id: cpp.xss.qt_qwebengineview_sethtml
   enabled: true
   language: cpp
@@ -166,7 +166,7 @@
         qt_qwebengineview_sethtml("safe");
       }
     expect_no_match: true
-  description: "Qt QWebEngineView::setHtml(tainted) — attacker-controlled DOM in embedded browser."
+  description: "Qt QWebEngineView::setHtml(tainted) - attacker-controlled DOM in embedded browser."
   imports:
   - QtCore
   - QtCore/Qt
@@ -195,7 +195,7 @@
         qt_qwebenginepage_sethtml("safe");
       }
     expect_no_match: true
-  description: "Qt QWebEnginePage::setHtml(tainted) — attacker-controlled DOM."
+  description: "Qt QWebEnginePage::setHtml(tainted) - attacker-controlled DOM."
   imports:
   - QtCore
   - QtCore/Qt
@@ -227,7 +227,7 @@
         QWebEnginePage::runJavaScript("safe");
       }
     expect_no_match: true
-  description: "Qt QWebEnginePage::runJavaScript(tainted) — arbitrary JS in embedded context."
+  description: "Qt QWebEnginePage::runJavaScript(tainted) - arbitrary JS in embedded context."
   imports:
   - QtCore
   - QtCore/Qt
@@ -264,7 +264,7 @@
         response::write("safe");
       }
     expect_no_match: true
-  description: "Crow response.write(tainted) — appends to response body; reflected XSS when content-type is HTML."
+  description: "Crow response.write(tainted) - appends to response body; reflected XSS when content-type is HTML."
 - id: cpp.xss.drogon_response_appendbody
   enabled: true
   language: cpp
@@ -292,7 +292,7 @@
         HttpResponse::appendBody("safe");
       }
     expect_no_match: true
-  description: "Drogon HttpResponse::appendBody(tainted) — reflected XSS when HTML."
+  description: "Drogon HttpResponse::appendBody(tainted) - reflected XSS when HTML."
 - id: cpp.xss.drogon_response_redirect
   enabled: true
   language: cpp
@@ -326,4 +326,4 @@
         HttpResponse::redirect("/safe");
       }
     expect_no_match: true
-  description: "Drogon HttpResponse::redirect(tainted) — open redirect to attacker host."
+  description: "Drogon HttpResponse::redirect(tainted) - open redirect to attacker host."

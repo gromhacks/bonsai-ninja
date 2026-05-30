@@ -18,4 +18,4 @@
     code: |
       using Microsoft.AspNetCore.Mvc;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TryUpdateModel(input); } }
-  description: "ASP.NET Core TryUpdateModel(model) without a [Bind] include list — overpost vector."
+  description: "ASP.NET Core TryUpdateModel(model) without a [Bind] include list - overpost vector."

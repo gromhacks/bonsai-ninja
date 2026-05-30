@@ -61,7 +61,7 @@
         char *fmt = arg;
         DES_set_key(arg);
       }
-  description: "DES_set_key — configures 56-bit DES cipher (broken; use AES-GCM)."
+  description: "DES_set_key - configures 56-bit DES cipher (broken; use AES-GCM)."
 - id: c.crypto.rand_default
   enabled: true
   language: c
@@ -81,7 +81,7 @@
         char *fmt = arg;
         rand(arg);
       }
-  description: "rand() — non-crypto."
+  description: "rand() - non-crypto."
 - id: c.crypto.srand
   enabled: true
   language: c
@@ -101,7 +101,7 @@
         char *fmt = arg;
         srand(arg);
       }
-  description: "srand — predictable seed for rand()."
+  description: "srand - predictable seed for rand()."
 - id: c.crypto.rand_r
   enabled: true
   language: c
@@ -121,7 +121,7 @@
         char *fmt = arg;
         rand_r(arg);
       }
-  description: "rand_r — reentrant but still non-crypto PRNG."
+  description: "rand_r - reentrant but still non-crypto PRNG."
 - id: c.crypto.evp_md5
   enabled: true
   language: c
@@ -143,7 +143,7 @@
         char *fmt = arg;
         EVP_md5(arg);
       }
-  description: "OpenSSL EVP_md5 — MD5 via EVP interface."
+  description: "OpenSSL EVP_md5 - MD5 via EVP interface."
 - id: c.crypto.evp_sha1
   enabled: true
   language: c
@@ -165,7 +165,7 @@
         char *fmt = arg;
         EVP_sha1(arg);
       }
-  description: "OpenSSL EVP_sha1 — SHA-1 via EVP interface."
+  description: "OpenSSL EVP_sha1 - SHA-1 via EVP interface."
 - id: c.crypto.evp_des_ecb
   enabled: true
   language: c
@@ -187,7 +187,7 @@
         char *fmt = arg;
         EVP_des_ecb(arg);
       }
-  description: "OpenSSL EVP_des_ecb — DES in ECB mode."
+  description: "OpenSSL EVP_des_ecb - DES in ECB mode."
 - id: c.crypto.evp_rc4
   enabled: true
   language: c
@@ -209,7 +209,7 @@
         char *fmt = arg;
         EVP_rc4(arg);
       }
-  description: "OpenSSL EVP_rc4 — broken stream cipher."
+  description: "OpenSSL EVP_rc4 - broken stream cipher."
 - id: c.crypto.des_encrypt
   enabled: true
   language: c
@@ -231,4 +231,4 @@
         char *fmt = arg;
         DES_ecb_encrypt(arg);
       }
-  description: "OpenSSL DES_ecb_encrypt — legacy DES API."
+  description: "OpenSSL DES_ecb_encrypt - legacy DES API."

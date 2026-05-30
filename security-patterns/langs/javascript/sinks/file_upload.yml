@@ -12,7 +12,7 @@
     kind: call
     callee:
       attribute: [multer, diskStorage]
-  description: "Disabled duplicate — javascript.upload.multer_destination_filename_callbacks covers the same multer.diskStorage site with callback-specific examples."
+  description: "Disabled duplicate - javascript.upload.multer_destination_filename_callbacks covers the same multer.diskStorage site with callback-specific examples."
 
 - id: javascript.upload.formidable_form
   enabled: false
@@ -34,7 +34,7 @@
       function demo(input, req, obj) {
         return new formidable.IncomingForm(input);
       }
-  description: "Disabled — new formidable.IncomingForm() is upload parser setup, not a vulnerability by itself. Flag the downstream path/write using multipart filename sources."
+  description: "Disabled - new formidable.IncomingForm() is upload parser setup, not a vulnerability by itself. Flag the downstream path/write using multipart filename sources."
 
 - id: javascript.upload.express_fileupload_mv
   enabled: false
@@ -50,7 +50,7 @@
     kind: call
     callee:
       attribute: [files, mv]
-  description: "Subsumed by javascript.upload.express_fileupload_mv_any_file — the receiver-agnostic regex covers `files.mv` plus the more common `req.files.<name>.mv` shape."
+  description: "Subsumed by javascript.upload.express_fileupload_mv_any_file - the receiver-agnostic regex covers `files.mv` plus the more common `req.files.<name>.mv` shape."
 
 - id: javascript.upload.busboy_on_file
   enabled: false
@@ -72,7 +72,7 @@
       function demo(input, req, obj) {
         return busboy.on('file');
       }
-  description: "Disabled — busboy.on('file', handler) is normal event registration. Model handler filename metadata as a source and flag downstream writes."
+  description: "Disabled - busboy.on('file', handler) is normal event registration. Model handler filename metadata as a source and flag downstream writes."
 
 - id: javascript.upload.express_fileupload_mv_any_file
   enabled: true
@@ -113,7 +113,7 @@
         return file.mv("/srv/uploads/avatar.png");
       }
     expect_no_match: true
-  description: "express-fileupload .mv(dest) — writing uploaded content to attacker-influenced destination paths. Receiver-agnostic; package context gate on express-fileupload narrows to that ecosystem."
+  description: "express-fileupload .mv(dest) - writing uploaded content to attacker-influenced destination paths. Receiver-agnostic; package context gate on express-fileupload narrows to that ecosystem."
 
 - id: javascript.upload.path_join_original_filename
   enabled: true
@@ -150,7 +150,7 @@
         return path.join(uploadDir, info.filename);
       }
     expect_match_text: [path.join]
-  description: "Joining upload directories with client-controlled filenames — filename traversal/overwrite sink before file write or mv."
+  description: "Joining upload directories with client-controlled filenames - filename traversal/overwrite sink before file write or mv."
 
 - id: javascript.upload.multer_destination_filename_callbacks
   enabled: false
@@ -184,4 +184,4 @@
         }
       });
     expect_match_text: [multer.diskStorage]
-  description: "Disabled — multer.diskStorage itself is normal upload configuration. Flag path.join/file-write flows fed by file.originalname or request fields instead."
+  description: "Disabled - multer.diskStorage itself is normal upload configuration. Flag path.join/file-write flows fed by file.originalname or request fields instead."

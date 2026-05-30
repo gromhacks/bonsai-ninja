@@ -32,7 +32,7 @@
           chat_completion_create("Summarize the release notes");
       }
     expect_no_match: true
-  description: "openai-api-rs chat_completion_create — tainted prompt content reaches an LLM instruction / tool surface."
+  description: "openai-api-rs chat_completion_create - tainted prompt content reaches an LLM instruction / tool surface."
 
   imports:
   - openai_api_rs
@@ -69,7 +69,7 @@
           invoke_model("Summarize the release notes");
       }
     expect_no_match: true
-  description: "aws-sdk-bedrockruntime invoke_model — tainted request body steers the underlying foundation model."
+  description: "aws-sdk-bedrockruntime invoke_model - tainted request body steers the underlying foundation model."
 
   imports:
   - aws_sdk_bedrockruntime
@@ -102,4 +102,4 @@
           anthropic::messages::create("Summarize the release notes");
       }
     expect_no_match: true
-  description: "Anthropic Rust client messages::create — tainted prompt content reaches Claude."
+  description: "Anthropic Rust client messages::create - tainted prompt content reaches Claude."

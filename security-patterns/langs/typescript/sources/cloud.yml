@@ -1,6 +1,6 @@
 # TypeScript cloud-event sources (Lambda / GCF / Azure Functions / CloudEvents).
 # Bare handler param names (event/req/context) over-fire outside of an
-# audit profile — disabled by default. Attribute-chain sources stay on.
+# audit profile - disabled by default. Attribute-chain sources stay on.
 
 - id: typescript.source.aws_lambda_event
   enabled: false
@@ -14,7 +14,7 @@
     kind: param
     target:
       name: event
-  description: "AWS Lambda handler `event` param — APIGatewayEvent body/headers/queryStringParameters are tainted. Disabled — bare `event` matches every event-emitter handler; enable in Lambda audits."
+  description: "AWS Lambda handler `event` param - APIGatewayEvent body/headers/queryStringParameters are tainted. Disabled - bare `event` matches every event-emitter handler; enable in Lambda audits."
 
 - id: typescript.source.aws_lambda_apigw_event
   enabled: false
@@ -28,7 +28,7 @@
     kind: param
     target:
       name: APIGatewayEvent
-  description: "Disabled — `APIGatewayEvent` is a TypeScript type name; parameters are named `event: APIGatewayEvent`, so the param-name match is dead. Use aws_lambda_event in Lambda audits."
+  description: "Disabled - `APIGatewayEvent` is a TypeScript type name; parameters are named `event: APIGatewayEvent`, so the param-name match is dead. Use aws_lambda_event in Lambda audits."
 
 
 - id: typescript.source.cloudevents
@@ -43,7 +43,7 @@
     kind: new
     callee:
       name: CloudEvent
-  description: "Disabled — `new CloudEvent({data})` is typically constructed by producers, not consumed; consume-side `cloudEvent.data` attribute read is the tainted source."
+  description: "Disabled - `new CloudEvent({data})` is typically constructed by producers, not consumed; consume-side `cloudEvent.data` attribute read is the tainted source."
 
 - id: typescript.source.aws_lambda_event_body
   enabled: true
@@ -63,7 +63,7 @@
       function demo(input, req, obj) {
         return event.body;
       }
-  description: "AWS Lambda/APIGateway event.body — cloud-delivered request payload."
+  description: "AWS Lambda/APIGateway event.body - cloud-delivered request payload."
 
 - id: typescript.source.aws_lambda_event_headers
   enabled: true
@@ -83,7 +83,7 @@
       function demo(input, req, obj) {
         return event.headers;
       }
-  description: "AWS Lambda/APIGateway event.headers — attacker-controlled request headers."
+  description: "AWS Lambda/APIGateway event.headers - attacker-controlled request headers."
 
 - id: typescript.source.aws_lambda_event_query
   enabled: true
@@ -103,7 +103,7 @@
       function demo(input, req, obj) {
         return event.queryStringParameters;
       }
-  description: "AWS Lambda/APIGateway event.queryStringParameters — cloud-delivered query input."
+  description: "AWS Lambda/APIGateway event.queryStringParameters - cloud-delivered query input."
 
 - id: typescript.source.aws_lambda_event_path
   enabled: true
@@ -123,7 +123,7 @@
       function demo(input, req, obj) {
         return event.pathParameters;
       }
-  description: "AWS Lambda/APIGateway event.pathParameters — cloud-delivered route parameters."
+  description: "AWS Lambda/APIGateway event.pathParameters - cloud-delivered route parameters."
 
 - id: typescript.source.cloudevents_data
   enabled: true
@@ -142,4 +142,4 @@
       function demo(input, req, obj) {
         return cloudEvent.data;
       }
-  description: "CloudEvents cloudEvent.data attribute — service-delivered event payload."
+  description: "CloudEvents cloudEvent.data attribute - service-delivered event payload."

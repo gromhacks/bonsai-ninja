@@ -29,4 +29,4 @@
           serde::from_value(json!({"name": "safe"}));
       }
     expect_no_match: true
-  description: 'serde_json::from_value::<Model>(req.body) — fields auto-deserialised; verify allowlist with #[serde(deny_unknown_fields)] + skip admin fields.'
+  description: 'serde_json::from_value::<Model>(req.body) - fields auto-deserialised; verify allowlist with #[serde(deny_unknown_fields)] + skip admin fields.'

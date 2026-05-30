@@ -29,7 +29,7 @@
         log.Printf("user value", username)
       }
     expect_no_match: true
-  description: "log.Printf(secret/token/password) — secret-shaped data written to application logs. Merged aliases: go.log_injection.log_printf_format, go.log_injection.log_printf_constant_format_arg."
+  description: "log.Printf(secret/token/password) - secret-shaped data written to application logs. Merged aliases: go.log_injection.log_printf_format, go.log_injection.log_printf_constant_format_arg."
   aliases:
   - go.log_injection.log_printf_format
   - go.log_injection.log_printf_constant_format_arg
@@ -62,7 +62,7 @@
     code: "package main\nimport (\n  \"net/http\"\n  \"github.com/go-chi/chi/v5\"\n)\nfunc handler(w http.ResponseWriter, r *http.Request, err error) {\n  _ = chi.URLParam(r, \"id\")\n  http.Error(w, \"debug: \"+err.Error(), 500)\n}\n"
     expect_match_text:
     - http.Error
-  description: "http.Error(w, err.Error/stack) — returns internal exception details to the client."
+  description: "http.Error(w, err.Error/stack) - returns internal exception details to the client."
 - id: go.info_disclosure.pprof_index
   enabled: true
   language: go
@@ -88,4 +88,4 @@
       }
     expect_match_text:
     - pprof.Index
-  description: "pprof.Index exposed as an HTTP handler — debug profiling pages can disclose process internals."
+  description: "pprof.Index exposed as an HTTP handler - debug profiling pages can disclose process internals."

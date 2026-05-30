@@ -15,7 +15,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL);\n  }\n}\n"
-  description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) — global bypass."
+  description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) - global bypass."
 - id: java.tls.set_hostname_verifier_allow
   enabled: true
   language: java
@@ -33,7 +33,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    HttpsURLConnection.setHostnameVerifier(input);\n  }\n}\n"
-  description: "HttpsURLConnection.setHostnameVerifier — accepts any."
+  description: "HttpsURLConnection.setHostnameVerifier - accepts any."
 - id: java.tls.set_default_ssl_socket_factory_trustall
   enabled: true
   language: java
@@ -69,7 +69,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    SSLContext.init(input);\n  }\n}\n"
-  description: "SSLContext.init(km, [TrustAllCerts], rng) — accept-any X509TrustManager."
+  description: "SSLContext.init(km, [TrustAllCerts], rng) - accept-any X509TrustManager."
 - id: java.tls.okhttp_hostnameverifier_allow
   enabled: true
   language: java
@@ -121,7 +121,7 @@
           Builder.sslSocketFactory(input);
         }
       }
-  description: "OkHttp Builder.sslSocketFactory(trustAll, …)."
+  description: "OkHttp Builder.sslSocketFactory(trustAll, ...)."
 - id: java.tls.apache_httpclient_noopverifier
   enabled: true
   language: java
@@ -185,7 +185,7 @@
     kind: new
     callee:
       name: X509TrustManager
-  description: "Disabled — too broad; real risk is anonymous X509TrustManager subclass with empty checkServerTrusted/checkClientTrusted. Flag via body inspection."
+  description: "Disabled - too broad; real risk is anonymous X509TrustManager subclass with empty checkServerTrusted/checkClientTrusted. Flag via body inspection."
 - id: java.tls.sslcontext_getinstance_ssl
   enabled: true
   language: java
@@ -204,7 +204,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    SSLContext.getInstance(\"SSL\");\n  }\n}\n"
-  description: "SSLContext.getInstance(\"SSL\") — use TLSv1.2 or newer. Merged aliases: java.tls.sslcontext_getinstance_sslv3, java.tls.sslcontext_getinstance_tlsv10, java.tls.sslcontext_getinstance_tlsv11."
+  description: "SSLContext.getInstance(\"SSL\") - use TLSv1.2 or newer. Merged aliases: java.tls.sslcontext_getinstance_sslv3, java.tls.sslcontext_getinstance_tlsv10, java.tls.sslcontext_getinstance_tlsv11."
   aliases:
   - java.tls.sslcontext_getinstance_sslv3
   - java.tls.sslcontext_getinstance_tlsv10
@@ -235,7 +235,7 @@
           HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL);
         }
       }
-  description: "HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL) — accepts any TLS hostname."
+  description: "HttpsURLConnection.setDefaultHostnameVerifier(ALLOW_ALL) - accepts any TLS hostname."
   imports:
   - javax
 - id: java.tls.disable_verify_trust_all_x509
@@ -255,4 +255,4 @@
       attribute:
       - X509TrustManager
       - checkServerTrusted
-  description: "Custom X509TrustManager.checkServerTrusted — when override is empty, accepts any cert (trust-all manager pattern)."
+  description: "Custom X509TrustManager.checkServerTrusted - when override is empty, accepts any cert (trust-all manager pattern)."

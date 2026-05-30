@@ -161,7 +161,7 @@
         }
       }
     expect_no_match: true
-  description: "ExecutionInput.newExecutionInput().query(tainted) — fluent GraphQL builder; attacker-controlled GraphQL document drives later GraphQL.executeAsync."
+  description: "ExecutionInput.newExecutionInput().query(tainted) - fluent GraphQL builder; attacker-controlled GraphQL document drives later GraphQL.executeAsync."
 
 - id: java.graphql.parser_parsedocument
   enabled: true
@@ -202,4 +202,4 @@
         }
       }
     expect_no_match: true
-  description: "graphql.parser.Parser.parseDocument(tainted_source) — attacker-controlled GraphQL source becomes a Document AST consumed by downstream execution."
+  description: "graphql.parser.Parser.parseDocument(tainted_source) - attacker-controlled GraphQL source becomes a Document AST consumed by downstream execution."

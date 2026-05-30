@@ -25,7 +25,7 @@
       import OpenAI
       func test() { client.chats.create("Summarize the release notes") }
     expect_no_match: true
-  description: "OpenAI Swift client.chats.create — tainted prompt content reaches an LLM instruction / tool surface."
+  description: "OpenAI Swift client.chats.create - tainted prompt content reaches an LLM instruction / tool surface."
 
 - id: swift.llm.anthropic_messages_create
   enabled: true
@@ -52,7 +52,7 @@
       import Anthropic // Anthropic
       func test() { anthropic.messages.create("Summarize the release notes") }
     expect_no_match: true
-  description: "Anthropic Swift wrapper messages.create — tainted prompt content reaches Claude."
+  description: "Anthropic Swift wrapper messages.create - tainted prompt content reaches Claude."
 
 - id: swift.llm.bedrock_invoke_model
   enabled: true
@@ -79,4 +79,4 @@
       import AWSSDKSwift // AWSSDKSwift
       func test() { invokeModel("Summarize the release notes") }
     expect_no_match: true
-  description: "AWS Bedrock invokeModel — tainted request body steers the underlying foundation model."
+  description: "AWS Bedrock invokeModel - tainted request body steers the underlying foundation model."

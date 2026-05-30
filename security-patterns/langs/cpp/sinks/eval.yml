@@ -27,7 +27,7 @@
         dlopen("safe");
       }
     expect_no_match: true
-  description: "dlopen(tainted) — loads arbitrary shared library as code."
+  description: "dlopen(tainted) - loads arbitrary shared library as code."
 
 - id: cpp.eval.dlsym
   enabled: true
@@ -54,7 +54,7 @@
         dlsym(handle, "plugin_init");
       }
     expect_no_match: true
-  description: "dlsym(handle, tainted_symbol) — resolves an attacker-chosen symbol from a loaded shared object; unsafe plugin dispatch can become code execution."
+  description: "dlsym(handle, tainted_symbol) - resolves an attacker-chosen symbol from a loaded shared object; unsafe plugin dispatch can become code execution."
 
 - id: cpp.eval.loadlibrary
   enabled: true
@@ -84,7 +84,7 @@
         LoadLibraryA("safe");
       }
     expect_no_match: true
-  description: "Win32 LoadLibraryA(tainted) — loads arbitrary DLL."
+  description: "Win32 LoadLibraryA(tainted) - loads arbitrary DLL."
 
 - id: cpp.eval.loadlibraryw
   enabled: true
@@ -114,7 +114,7 @@
         LoadLibraryW("safe");
       }
     expect_no_match: true
-  description: "Win32 LoadLibraryW(tainted) — loads arbitrary DLL (wide-char)."
+  description: "Win32 LoadLibraryW(tainted) - loads arbitrary DLL (wide-char)."
 
 - id: cpp.eval.loadlibraryex
   enabled: true
@@ -144,7 +144,7 @@
         LoadLibraryExA("safe");
       }
     expect_no_match: true
-  description: "Win32 LoadLibraryExA(tainted) — loads arbitrary DLL."
+  description: "Win32 LoadLibraryExA(tainted) - loads arbitrary DLL."
 
 - id: cpp.eval.lua_dostring
   enabled: true
@@ -176,7 +176,7 @@
         luaL_dostring("safe", "safe");
       }
     expect_no_match: true
-  description: "Embedded Lua luaL_dostring(L, tainted) — evaluates Lua source."
+  description: "Embedded Lua luaL_dostring(L, tainted) - evaluates Lua source."
 
 - id: cpp.eval.lua_dofile
   enabled: true
@@ -208,7 +208,7 @@
         luaL_dofile("safe", "safe");
       }
     expect_no_match: true
-  description: "Embedded Lua luaL_dofile(L, tainted) — runs file as Lua."
+  description: "Embedded Lua luaL_dofile(L, tainted) - runs file as Lua."
 
 - id: cpp.eval.sol_do_string
   enabled: true
@@ -243,7 +243,7 @@
         state::do_string("safe");
       }
     expect_no_match: true
-  description: "sol::state::do_string(tainted) — evaluates Lua source."
+  description: "sol::state::do_string(tainted) - evaluates Lua source."
 
   imports:
   - sol
@@ -281,7 +281,7 @@
         state::script("safe");
       }
     expect_no_match: true
-  description: "sol::state::script(tainted) — evaluates Lua source."
+  description: "sol::state::script(tainted) - evaluates Lua source."
 
   imports:
   - sol
@@ -317,7 +317,7 @@
         PyRun_SimpleString("safe");
       }
     expect_no_match: true
-  description: "Embedded CPython PyRun_SimpleString(tainted) — executes Python source."
+  description: "Embedded CPython PyRun_SimpleString(tainted) - executes Python source."
 
   imports:
   - Python
@@ -353,7 +353,7 @@
         PyRun_String("safe");
       }
     expect_no_match: true
-  description: "Embedded CPython PyRun_String(tainted, ...) — executes Python source."
+  description: "Embedded CPython PyRun_String(tainted, ...) - executes Python source."
 
   imports:
   - Python
@@ -388,7 +388,7 @@
         Script::Compile("safe");
       }
     expect_no_match: true
-  description: "v8::Script::Compile(tainted) then Run() — JS execution."
+  description: "v8::Script::Compile(tainted) then Run() - JS execution."
 
 - id: cpp.eval.duktape_eval
   enabled: true
@@ -420,7 +420,7 @@
         duk_eval_string("safe", "safe");
       }
     expect_no_match: true
-  description: "duktape duk_eval_string — evaluates JS source."
+  description: "duktape duk_eval_string - evaluates JS source."
 
 - id: cpp.eval.duktape_peval
   enabled: true
@@ -452,7 +452,7 @@
         duk_peval_string("safe", "safe");
       }
     expect_no_match: true
-  description: "duktape duk_peval_string — protected eval of JS source."
+  description: "duktape duk_peval_string - protected eval of JS source."
 
 - id: cpp.eval.quickjs_eval
   enabled: true
@@ -484,7 +484,7 @@
         JS_Eval("safe", "safe");
       }
     expect_no_match: true
-  description: "QuickJS JS_Eval — evaluates JS source."
+  description: "QuickJS JS_Eval - evaluates JS source."
 
 - id: cpp.eval.chaiscript_eval
   enabled: true
@@ -516,7 +516,7 @@
         ChaiScript::eval("safe");
       }
     expect_no_match: true
-  description: "ChaiScript::eval(tainted) — evaluates ChaiScript source."
+  description: "ChaiScript::eval(tainted) - evaluates ChaiScript source."
 
 - id: cpp.eval.chaiscript_eval_file
   enabled: true
@@ -548,4 +548,4 @@
         ChaiScript::eval_file("safe");
       }
     expect_no_match: true
-  description: "ChaiScript::eval_file(tainted) — executes file as ChaiScript."
+  description: "ChaiScript::eval_file(tainted) - executes file as ChaiScript."

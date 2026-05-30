@@ -33,7 +33,7 @@
         db.Query("SELECT * FROM users WHERE name = ?", name)
       }
     expect_no_match: true
-  description: "database/sql DB.Query / Tx.Query / Stmt.Query — tainted SQL = injection; use ? / $1 placeholders."
+  description: "database/sql DB.Query / Tx.Query / Stmt.Query - tainted SQL = injection; use ? / $1 placeholders."
 - id: go.sqli.db_queryrow
   enabled: true
   language: go
@@ -69,7 +69,7 @@
         db.QueryRow("SELECT * FROM users WHERE name = ?", name)
       }
     expect_no_match: true
-  description: "database/sql DB.QueryRow / Tx.QueryRow — tainted SQL without placeholders."
+  description: "database/sql DB.QueryRow / Tx.QueryRow - tainted SQL without placeholders."
 - id: go.sqli.db_query_context
   enabled: true
   language: go
@@ -111,7 +111,7 @@
         db.QueryContext(ctx, "SELECT * FROM users WHERE name = ?", name)
       }
     expect_no_match: true
-  description: "database/sql DB.QueryContext / Tx.QueryContext — tainted SQL = injection."
+  description: "database/sql DB.QueryContext / Tx.QueryContext - tainted SQL = injection."
 - id: go.sqli.db_queryrow_context
   enabled: true
   language: go
@@ -220,7 +220,7 @@
   - name: gorm raw literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc byName(db *gorm.DB, name string) {\n  db.Raw(\"SELECT * FROM users WHERE name = ?\", name)\n}\n"
     expect_no_match: true
-  description: "GORM DB.Raw(tainted) — raw SQL; use placeholders or First/Where struct form."
+  description: "GORM DB.Raw(tainted) - raw SQL; use placeholders or First/Where struct form."
 - id: go.sqli.gorm_where_raw
   enabled: true
   language: go
@@ -245,7 +245,7 @@
   - name: gorm where literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc byName(db *gorm.DB, name string) {\n  db.Where(\"name = ?\", name)\n}\n"
     expect_no_match: true
-  description: "GORM DB.Where(tainted) — string-built Where clause is SQLi; use struct/map or ? placeholders."
+  description: "GORM DB.Where(tainted) - string-built Where clause is SQLi; use struct/map or ? placeholders."
 - id: go.sqli.gorm_exec
   enabled: false
   disabled_reason:
@@ -266,7 +266,7 @@
     code: "package main\nimport (\n  \"net/http\"\n  \"gorm.io/gorm\"\n)\nfunc update(db *gorm.DB, r *http.Request) {\n  role := \"admin\"\n  db.Exec(\"UPDATE users SET role = '\" + role + \"'\")\n}\n"
     expect_match_text:
     - db.Exec
-  description: "Disabled — duplicate call shape with go.sqli.db_exec for receiver `db.Exec`; until semantic receiver facts distinguish GORM from database/sql, the database/sql rule owns Exec sinks, including GORM-style raw SQL examples."
+  description: "Disabled - duplicate call shape with go.sqli.db_exec for receiver `db.Exec`; until semantic receiver facts distinguish GORM from database/sql, the database/sql rule owns Exec sinks, including GORM-style raw SQL examples."
 - id: go.sqli.gorm_order
   enabled: true
   language: go
@@ -291,7 +291,7 @@
   - name: gorm order literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Order(\"name desc\")\n}\n"
     expect_no_match: true
-  description: "GORM DB.Order(tainted) — ORDER BY expression injection; use a column allowlist."
+  description: "GORM DB.Order(tainted) - ORDER BY expression injection; use a column allowlist."
 - id: go.sqli.gorm_having
   enabled: true
   language: go
@@ -316,7 +316,7 @@
   - name: gorm having literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, threshold int) {\n  db.Table(\"users\").Having(\"count(*) > ?\", threshold)\n}\n"
     expect_no_match: true
-  description: "GORM DB.Having(tainted predicate) — raw HAVING clause injection; use placeholders."
+  description: "GORM DB.Having(tainted predicate) - raw HAVING clause injection; use placeholders."
 - id: go.sqli.gorm_joins
   enabled: true
   language: go
@@ -341,7 +341,7 @@
   - name: gorm joins literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Joins(\"JOIN emails ON emails.user_id = users.id\")\n}\n"
     expect_no_match: true
-  description: "GORM DB.Joins(tainted SQL fragment) — raw JOIN clause injection; use fixed join text."
+  description: "GORM DB.Joins(tainted SQL fragment) - raw JOIN clause injection; use fixed join text."
 - id: go.sqli.gorm_group
   enabled: true
   language: go
@@ -366,7 +366,7 @@
   - name: gorm group literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Group(\"role\")\n}\n"
     expect_no_match: true
-  description: "GORM DB.Group(tainted) — GROUP BY expression injection; use a fixed column allowlist."
+  description: "GORM DB.Group(tainted) - GROUP BY expression injection; use a fixed column allowlist."
 - id: go.sqli.gorm_distinct
   enabled: true
   language: go
@@ -391,7 +391,7 @@
   - name: gorm distinct literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Distinct(\"name\")\n}\n"
     expect_no_match: true
-  description: "GORM DB.Distinct(tainted) — raw SELECT DISTINCT expression injection; use a fixed column allowlist."
+  description: "GORM DB.Distinct(tainted) - raw SELECT DISTINCT expression injection; use a fixed column allowlist."
 - id: go.sqli.gorm_select
   enabled: true
   language: go
@@ -416,7 +416,7 @@
   - name: gorm select literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Select(\"name,email\")\n}\n"
     expect_no_match: true
-  description: "GORM DB.Select(tainted) — raw projection injection; use fixed fields or safe struct selection."
+  description: "GORM DB.Select(tainted) - raw projection injection; use fixed fields or safe struct selection."
 - id: go.sqli.gorm_pluck
   enabled: true
   language: go
@@ -441,7 +441,7 @@
   - name: gorm pluck literal negative
     code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  var values []string\n  db.Pluck(\"name\", &values)\n}\n"
     expect_no_match: true
-  description: "GORM DB.Pluck(tainted column) — raw column expression injection; use a column allowlist."
+  description: "GORM DB.Pluck(tainted column) - raw column expression injection; use a column allowlist."
 - id: go.sqli.sqlx_queryx
   enabled: true
   language: go
@@ -525,4 +525,4 @@
       - pgx
       - Conn
       - Query
-  description: "Disabled — real pgx usage is `conn.Query(ctx, sql, args...)` on a local var, not the literal chain `pgx.Conn.Query`; the bare `.Query$` rule (go.sqli.db_query) already covers pgx call shape."
+  description: "Disabled - real pgx usage is `conn.Query(ctx, sql, args...)` on a local var, not the literal chain `pgx.Conn.Query`; the bare `.Query$` rule (go.sqli.db_query) already covers pgx call shape."

@@ -1,5 +1,5 @@
 # Elixir file-upload sinks. `File.cp` / `File.rename` with tainted
-# destination are the canonical move-to-uploads pattern — they're also
+# destination are the canonical move-to-uploads pattern - they're also
 # tagged path-traversal in sinks/path.yml, but kept here under CWE-434
 # semantics because the *danger* (writing arbitrary uploaded bytes into
 # a web-served directory) differs from read/delete path traversal.
@@ -36,7 +36,7 @@
         end
       end
     expect_no_match: true
-  description: "Waffle Store.store/1 — filename derived from Plug.Upload is persisted directly unless the uploader's `filename/1` sanitises it (default preserves attacker-supplied name)."
+  description: "Waffle Store.store/1 - filename derived from Plug.Upload is persisted directly unless the uploader's `filename/1` sanitises it (default preserves attacker-supplied name)."
 
   imports:
   - Waffle
@@ -73,7 +73,7 @@
         end
       end
     expect_no_match: true
-  description: "Arc.Actions.Store.store/1 — legacy predecessor to Waffle; same filename-from-upload risk."
+  description: "Arc.Actions.Store.store/1 - legacy predecessor to Waffle; same filename-from-upload risk."
 
   imports:
   - Arc
@@ -110,6 +110,6 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Upload.chmod/2 — called on a tainted upload path; file-mode bits derived from user input can make uploads executable."
+  description: "Plug.Upload.chmod/2 - called on a tainted upload path; file-mode bits derived from user input can make uploads executable."
   imports:
   - Plug

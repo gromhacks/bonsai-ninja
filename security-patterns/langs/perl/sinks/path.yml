@@ -11,7 +11,7 @@
     kind: call
     callee:
       name: open
-  description: "Disabled — bare `name: open` is FP-prone; no canonical exists. Without a mode-string constraint we cannot distinguish path (`<path`) from cmdi (`|cmd`) or other open() shapes. Re-enable when adapter supports mode-string argument inspection. perl.path.file_slurp_read covers the safer File::Slurp call shape."
+  description: "Disabled - bare `name: open` is FP-prone; no canonical exists. Without a mode-string constraint we cannot distinguish path (`<path`) from cmdi (`|cmd`) or other open() shapes. Re-enable when adapter supports mode-string argument inspection. perl.path.file_slurp_read covers the safer File::Slurp call shape."
 
 - id: perl.path.unlink
   enabled: true
@@ -40,7 +40,7 @@
         unlink("tmp/report.txt")
       }
     expect_no_match: true
-  description: "unlink() — tainted path deletes arbitrary files (DoS, privilege escalation via replace-on-rename races)."
+  description: "unlink() - tainted path deletes arbitrary files (DoS, privilege escalation via replace-on-rename races)."
 
 - id: perl.path.rename
   enabled: true
@@ -68,7 +68,7 @@
         rename("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "rename() — tainted source or destination path allows arbitrary-file overwrite / symlink-race exploitation."
+  description: "rename() - tainted source or destination path allows arbitrary-file overwrite / symlink-race exploitation."
 - id: perl.path.rename_dest
   enabled: true
   language: perl
@@ -95,7 +95,7 @@
         rename("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "rename(src, dest) — tainted destination path allows arbitrary-file overwrite / symlink-race exploitation."
+  description: "rename(src, dest) - tainted destination path allows arbitrary-file overwrite / symlink-race exploitation."
 
 - id: perl.path.rmtree
   enabled: true
@@ -127,7 +127,7 @@
         rmtree("tmp/uploads")
       }
     expect_no_match: true
-  description: "File::Path::rmtree / remove_tree — tainted root recursively deletes; traversal = wipe the filesystem."
+  description: "File::Path::rmtree / remove_tree - tainted root recursively deletes; traversal = wipe the filesystem."
 
 - id: perl.path.make_path
   enabled: true
@@ -159,7 +159,7 @@
         make_path("tmp/uploads")
       }
     expect_no_match: true
-  description: "File::Path::make_path — tainted path lets attacker create directories outside the intended root (prep step for write-what-where)."
+  description: "File::Path::make_path - tainted path lets attacker create directories outside the intended root (prep step for write-what-where)."
 
 - id: perl.path.file_copy
   aliases:
@@ -192,7 +192,7 @@
         copy("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "File::Copy::copy — tainted source/dest path reads or overwrites arbitrary files. Also covers merged aliases: perl.upload_file_copy_to_client_filename."
+  description: "File::Copy::copy - tainted source/dest path reads or overwrites arbitrary files. Also covers merged aliases: perl.upload_file_copy_to_client_filename."
 - id: perl.path.file_copy_dest
   aliases:
   - perl.upload_file_copy_to_client_filename_dest
@@ -224,7 +224,7 @@
         copy("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "File::Copy::copy(src, dest) — tainted destination paths overwrite arbitrary files or write uploads outside the intended directory."
+  description: "File::Copy::copy(src, dest) - tainted destination paths overwrite arbitrary files or write uploads outside the intended directory."
 
 - id: perl.path.file_move
   enabled: true
@@ -255,7 +255,7 @@
         move("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "File::Copy::move — tainted source/dest path moves/overwrites arbitrary files."
+  description: "File::Copy::move - tainted source/dest path moves/overwrites arbitrary files."
 - id: perl.path.file_move_dest
   enabled: true
   language: perl
@@ -285,7 +285,7 @@
         move("tmp/input.txt", "tmp/output.txt")
       }
     expect_no_match: true
-  description: "File::Copy::move(src, dest) — tainted destination paths move files outside the intended directory or overwrite arbitrary files."
+  description: "File::Copy::move(src, dest) - tainted destination paths move files outside the intended directory or overwrite arbitrary files."
 
 - id: perl.path.file_slurp_read
   enabled: true
@@ -317,7 +317,7 @@
         read_file("priv/static/index.html")
       }
     expect_no_match: true
-  description: "File::Slurp::read_file — tainted path returns arbitrary file contents (/etc/passwd, secrets)."
+  description: "File::Slurp::read_file - tainted path returns arbitrary file contents (/etc/passwd, secrets)."
 
 - id: perl.path.file_slurp_write
   enabled: true
@@ -349,7 +349,7 @@
         write_file("tmp/output.txt")
       }
     expect_no_match: true
-  description: "File::Slurp::write_file — tainted path writes attacker-controlled content anywhere (webshell drop, config overwrite)."
+  description: "File::Slurp::write_file - tainted path writes attacker-controlled content anywhere (webshell drop, config overwrite)."
 
 # Archive extraction (Zip Slip class). Archive::Zip and Archive::Extract
 # trust archive entry names; joining entry name into a destination
@@ -384,7 +384,7 @@
         extractToFileNamed("tmp/unpacked/file.txt")
       }
     expect_no_match: true
-  description: "Archive::Zip member->extractToFileNamed(tainted dest) — destination derived from archive entry name is Zip Slip."
+  description: "Archive::Zip member->extractToFileNamed(tainted dest) - destination derived from archive entry name is Zip Slip."
 - id: perl.path.archive_zip_extract_member
   enabled: false
   disabled_reason:
@@ -406,7 +406,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         extractMember($input)
       }
-  description: "Disabled — extractMember(member [, dest]) is only a Zip Slip sink when dest/member state is archive-entry-derived; use extractToFileNamed(dest) until state tracking exists."
+  description: "Disabled - extractMember(member [, dest]) is only a Zip Slip sink when dest/member state is archive-entry-derived; use extractToFileNamed(dest) until state tracking exists."
 - id: perl.path.archive_extract_extract
   enabled: true
   language: perl
@@ -440,9 +440,9 @@
         extract(to => "/tmp/out")
       }
     expect_no_match: true
-  description: "Archive::Extract ->extract(to => tainted) — auto-detects tar/zip; trusts archive contents."
+  description: "Archive::Extract ->extract(to => tainted) - auto-detects tar/zip; trusts archive contents."
 
 # 3-arg `open(my $fh, '<', '/var/data/' . $name)` shape with a literal
 # `<` mode. Distinguished from the cmdi `open ... |cmd` form by the
-# arg-1 mode regex requiring `<`, `>`, `>>`, `<+`, `>+`, or `+>` —
+# arg-1 mode regex requiring `<`, `>`, `>>`, `<+`, `>+`, or `+>` -
 # never a leading `|` (that's the cmdi shape).

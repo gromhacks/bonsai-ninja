@@ -25,7 +25,7 @@
         end
       end
     expect_match_text: [Phoenix.HTML.html_escape]
-  description: "Phoenix.HTML.html_escape/1 — escapes `<`, `>`, `&`, `\"`, `'` and returns a :safe tuple; neutralises reflected
+  description: "Phoenix.HTML.html_escape/1 - escapes `<`, `>`, `&`, `\"`, `'` and returns a :safe tuple; neutralises reflected
     XSS in EEx/HEEx templates."
 
   imports:
@@ -49,7 +49,7 @@
         end
       end
     expect_match_text: [HtmlSanitizeEx.strip_tags]
-  description: "HtmlSanitizeEx.strip_tags/1 — drops every HTML tag, leaving only text; safe for plain-text contexts."
+  description: "HtmlSanitizeEx.strip_tags/1 - drops every HTML tag, leaving only text; safe for plain-text contexts."
 
   imports:
   - Html_sanitize_ex
@@ -72,7 +72,7 @@
         end
       end
     expect_match_text: [HtmlSanitizeEx.basic_html]
-  description: "HtmlSanitizeEx.basic_html/1 — allow-lists a safe subset of HTML tags / attributes."
+  description: "HtmlSanitizeEx.basic_html/1 - allow-lists a safe subset of HTML tags / attributes."
 
 # -- URL -------------------------------------------------------------
   imports:
@@ -94,7 +94,7 @@
         end
       end
     expect_match_text: [URI.encode]
-  description: "URI.encode/1 — percent-encodes reserved URL characters; breaks injection payloads embedded in URL paths."
+  description: "URI.encode/1 - percent-encodes reserved URL characters; breaks injection payloads embedded in URL paths."
 
 - id: elixir.sanitizer.uri_encode_www_form
   enabled: true
@@ -113,7 +113,7 @@
         end
       end
     expect_match_text: [URI.encode_www_form]
-  description: "URI.encode_www_form/1 — percent-encodes for application/x-www-form-urlencoded (also encodes `+` and spaces)."
+  description: "URI.encode_www_form/1 - percent-encodes for application/x-www-form-urlencoded (also encodes `+` and spaces)."
 
 - id: elixir.sanitizer.uri_encode_query
   enabled: true
@@ -132,7 +132,7 @@
         end
       end
     expect_match_text: [URI.encode_query]
-  description: "URI.encode_query/1 — builds an encoded query string from a keyword list; each value is escaped."
+  description: "URI.encode_query/1 - builds an encoded query string from a keyword list; each value is escaped."
 
 # -- SQL parameterisation -------------------------------------------
 - id: elixir.sanitizer.ecto_query_from
@@ -154,7 +154,7 @@
         end
       end
     expect_match_text: [Ecto.Query.from]
-  description: "Ecto.Query.from/2 — interpolated `^var` pins bind through the Ecto parameter engine, not string concatenation."
+  description: "Ecto.Query.from/2 - interpolated `^var` pins bind through the Ecto parameter engine, not string concatenation."
 
 # -- Constant-time comparison ---------------------------------------
   imports:
@@ -178,7 +178,7 @@
         end
       end
     expect_match_text: [Plug.Crypto.secure_compare]
-  description: "Plug.Crypto.secure_compare/2 — constant-time byte comparison; defeats timing oracles on session tokens / HMACs."
+  description: "Plug.Crypto.secure_compare/2 - constant-time byte comparison; defeats timing oracles on session tokens / HMACs."
 
 # -- Signed-token / JWT verify --------------------------------------
   imports:
@@ -201,7 +201,7 @@
         end
       end
     expect_match_text: [Phoenix.Token.verify]
-  description: "Phoenix.Token.verify/4 — HMAC-signed token with max-age; payload integrity is checked before use."
+  description: "Phoenix.Token.verify/4 - HMAC-signed token with max-age; payload integrity is checked before use."
 
 - id: elixir.sanitizer.plug_crypto_message_verifier_verify
   enabled: true
@@ -222,7 +222,7 @@
         end
       end
     expect_match_text: [Plug.Crypto.MessageVerifier.verify]
-  description: "Plug.Crypto.MessageVerifier.verify/2 — verifies a signed binary produced by `sign/2`; rejects tampered data."
+  description: "Plug.Crypto.MessageVerifier.verify/2 - verifies a signed binary produced by `sign/2`; rejects tampered data."
 
 # -- Path sanitisation ----------------------------------------------
   imports:
@@ -244,7 +244,7 @@
         end
       end
     expect_match_text: [Path.safe_relative_to]
-  description: "Path.safe_relative_to/2 — returns `:error` if the resolved path escapes the given root; canonical chroot check."
+  description: "Path.safe_relative_to/2 - returns `:error` if the resolved path escapes the given root; canonical chroot check."
 
 - id: elixir.sanitizer.path_safe_relative
   enabled: true
@@ -263,7 +263,7 @@
         end
       end
     expect_match_text: [Path.safe_relative]
-  description: "Path.safe_relative/1,2 — rejects absolute paths and traversal components; returns `:error` on unsafe input."
+  description: "Path.safe_relative/1,2 - rejects absolute paths and traversal components; returns `:error` on unsafe input."
 
 - id: elixir.sanitizer.path_expand_with_root
   enabled: false
@@ -275,7 +275,7 @@
     kind: call
     callee:
       attribute: [Path, expand]
-  description: "Disabled — Path.expand/2 normalises `..` but does NOT enforce a root on its own. Only counts as a sanitiser
+  description: "Disabled - Path.expand/2 normalises `..` but does NOT enforce a root on its own. Only counts as a sanitiser
     when paired with a `String.starts_with?(root)` check; enable manually once that pattern is confirmed."
 
 # -- Numeric coercion -----------------------------------------------
@@ -296,7 +296,7 @@
         end
       end
     expect_match_text: [String.to_integer]
-  description: "String.to_integer/1 — raises on non-integer input, so any injection payload blows up before reaching the sink."
+  description: "String.to_integer/1 - raises on non-integer input, so any injection payload blows up before reaching the sink."
 
 - id: elixir.sanitizer.string_to_float
   enabled: true
@@ -315,7 +315,7 @@
         end
       end
     expect_match_text: [String.to_float]
-  description: "String.to_float/1 — raises on non-numeric input; narrows taint to a float."
+  description: "String.to_float/1 - raises on non-numeric input; narrows taint to a float."
 
 - id: elixir.sanitizer.integer_parse
   enabled: true
@@ -334,7 +334,7 @@
         end
       end
     expect_match_text: [Integer.parse]
-  description: "Integer.parse/1 — returns `:error` for non-numeric input; the numeric result carries no injection payload."
+  description: "Integer.parse/1 - returns `:error` for non-numeric input; the numeric result carries no injection payload."
 
 - id: elixir.sanitizer.float_parse
   enabled: true
@@ -353,7 +353,7 @@
         end
       end
     expect_match_text: [Float.parse]
-  description: "Float.parse/1 — returns `:error` for non-numeric input."
+  description: "Float.parse/1 - returns `:error` for non-numeric input."
 
 # -- Validation / bounded atom creation -----------------------------
 - id: elixir.sanitizer.string_to_existing_atom
@@ -373,7 +373,7 @@
         end
       end
     expect_match_text: [String.to_existing_atom]
-  description: "String.to_existing_atom/1 — raises if the atom doesn't already exist; bounds atom-table growth (anti-DoS)."
+  description: "String.to_existing_atom/1 - raises if the atom doesn't already exist; bounds atom-table growth (anti-DoS)."
 
 - id: elixir.sanitizer.ecto_changeset_cast
   enabled: true
@@ -394,7 +394,7 @@
         end
       end
     expect_match_text: [Ecto.Changeset.cast]
-  description: "Ecto.Changeset.cast/4 — restricts input to declared fields and coerces types; invalid values land in errors
+  description: "Ecto.Changeset.cast/4 - restricts input to declared fields and coerces types; invalid values land in errors
     rather than flowing through."
 
   imports:
@@ -418,7 +418,7 @@
         end
       end
     expect_match_text: [Ecto.Changeset.validate_format]
-  description: "Ecto.Changeset.validate_format/4 — regex allow-list over a field; rejects values that don't match."
+  description: "Ecto.Changeset.validate_format/4 - regex allow-list over a field; rejects values that don't match."
 
   imports:
   - Ecto
@@ -441,7 +441,7 @@
         end
       end
     expect_match_text: [Ecto.Changeset.validate_inclusion]
-  description: "Ecto.Changeset.validate_inclusion/4 — enum allow-list; values outside the set are rejected."
+  description: "Ecto.Changeset.validate_inclusion/4 - enum allow-list; values outside the set are rejected."
 
 # -- Plug HTML escaping ---------------------------------------------
   imports:
@@ -465,7 +465,7 @@
         end
       end
     expect_match_text: [Plug.HTML.html_escape]
-  description: "Plug.HTML.html_escape/1 — escapes `&`, `<`, `>`, `\"`, `'` in a binary; safe for embedding inside HTML text/attribute
+  description: "Plug.HTML.html_escape/1 - escapes `&`, `<`, `>`, `\"`, `'` in a binary; safe for embedding inside HTML text/attribute
     contexts."
 
 # -- Password / KDF constant-time verifiers -------------------------
@@ -493,7 +493,7 @@
         end
       end
     expect_match_text: [Argon2.verify_pass]
-  description: "Argon2.verify_pass/2 — constant-time Argon2id password verification; defeats timing oracles on credential
+  description: "Argon2.verify_pass/2 - constant-time Argon2id password verification; defeats timing oracles on credential
     checks."
 
   imports:
@@ -517,7 +517,7 @@
         end
       end
     expect_match_text: [Pbkdf2.verify_pass]
-  description: "Pbkdf2.verify_pass/2 — constant-time PBKDF2-HMAC password verification."
+  description: "Pbkdf2.verify_pass/2 - constant-time PBKDF2-HMAC password verification."
 
   imports:
   - Pbkdf2_elixir
@@ -540,7 +540,7 @@
         end
       end
     expect_match_text: [Bcrypt.verify_pass]
-  description: "Bcrypt.verify_pass/2 — constant-time bcrypt password verification."
+  description: "Bcrypt.verify_pass/2 - constant-time bcrypt password verification."
 
   imports:
   - Bcrypt_elixir
@@ -563,7 +563,7 @@
         end
       end
     expect_match_text: [Comeonin.verify_pass]
-  description: "Comeonin.verify_pass/3 — constant-time hash comparison that dispatches to the configured Argon2/Bcrypt/Pbkdf2
+  description: "Comeonin.verify_pass/3 - constant-time hash comparison that dispatches to the configured Argon2/Bcrypt/Pbkdf2
     backend."
 
 # -- Ecto parameterised splice (^var) -------------------------------
@@ -592,7 +592,7 @@
         end
       end
     expect_match_text: [Ecto.Query.dynamic]
-  description: "Ecto.Query.dynamic/2 — builds a composable WHERE clause; `^value` interpolations bind through the parameter
+  description: "Ecto.Query.dynamic/2 - builds a composable WHERE clause; `^value` interpolations bind through the parameter
     engine instead of string-concat."
 
   imports:
@@ -621,7 +621,7 @@
   - name: starts_with local path negative constraint boundary
     code: "defmodule App do\n  def test(input) do\n    String.starts_with?()\n  end\nend\n"
     expect_no_match: true
-  description: "String.starts_with?(input, \"/...\") — same-origin redirect/path guard for slash-rooted local paths."
+  description: "String.starts_with?(input, \"/...\") - same-origin redirect/path guard for slash-rooted local paths."
 
 - id: elixir.sanitizer.allowlist_member
   enabled: false
@@ -647,8 +647,8 @@
   - name: enum member allowlist negative constraint boundary
     code: "defmodule App do\n  def test(input) do\n    Enum.member?()\n  end\nend\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Enum.member?/MapSet.member?/Map.has_key? against an allowlist-named collection — validates membership in a finite accepted
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Enum.member?/MapSet.member?/Map.has_key? against an allowlist-named collection - validates membership in a finite accepted
     set."
 
   disabled_reason:
@@ -677,7 +677,7 @@
   - name: anchored Regex.match? negative constraint boundary
     code: "defmodule App do\n  def test(input) do\n    Regex.match?()\n  end\nend\n"
     expect_no_match: true
-  description: "Regex.match? with an anchored full-string allowlist pattern — validates slug/UUID-style shape before downstream
+  description: "Regex.match? with an anchored full-string allowlist pattern - validates slug/UUID-style shape before downstream
     use."
 
 - id: elixir.sanitizer.postgrex_query_bind
@@ -701,7 +701,7 @@
         end
       end
     expect_match_text: [Postgrex.query]
-  description: "Postgrex.query(conn, sql, params) — sends a separate parameter list for $N placeholders instead of SQL concatenation."
+  description: "Postgrex.query(conn, sql, params) - sends a separate parameter list for $N placeholders instead of SQL concatenation."
 
   imports:
   - Postgrex
@@ -728,11 +728,11 @@
   - name: strip non slug chars negative constraint boundary
     code: "defmodule App do\n  def test(input) do\n    String.replace()\n  end\nend\n"
     expect_no_match: true
-  description: "String.replace(input, ~r/[^safe]/, \"\") — strips characters outside a safe allowlist."
+  description: "String.replace(input, ~r/[^safe]/, \"\") - strips characters outside a safe allowlist."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: elixir.passthrough.uri_decode
@@ -754,7 +754,7 @@
         end
       end
     expect_match_text: [URI.decode]
-  description: "URI.decode(s) — preserves taint."
+  description: "URI.decode(s) - preserves taint."
 - id: elixir.passthrough.string_upcase
   enabled: true
   language: elixir
@@ -774,7 +774,7 @@
         end
       end
     expect_match_text: [String.upcase]
-  description: "String.upcase(s) — case-normalizes but preserves taint from s."
+  description: "String.upcase(s) - case-normalizes but preserves taint from s."
 - id: elixir.passthrough.string_downcase
   enabled: true
   language: elixir
@@ -794,7 +794,7 @@
         end
       end
     expect_match_text: [String.downcase]
-  description: "String.downcase(s) — case-normalizes but preserves taint from s."
+  description: "String.downcase(s) - case-normalizes but preserves taint from s."
 - id: elixir.passthrough.uri_decode_www_form
   enabled: true
   language: elixir
@@ -814,7 +814,7 @@
         end
       end
     expect_match_text: [URI.decode_www_form]
-  description: "URI.decode_www_form(s) — preserves taint."
+  description: "URI.decode_www_form(s) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -838,7 +838,7 @@
         end
       end
     expect_match_text: [Plug.CSRFProtection.call]
-  description: "Plug.CSRFProtection — Phoenix's default CSRF plug."
+  description: "Plug.CSRFProtection - Phoenix's default CSRF plug."
 - id: elixir.csrf.protect_from_forgery
   enabled: true
   language: elixir
@@ -856,7 +856,7 @@
         end
       end
     expect_match_text: [protect_from_forgery]
-  description: "Phoenix protect_from_forgery — controller CSRF enforcement."
+  description: "Phoenix protect_from_forgery - controller CSRF enforcement."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer
@@ -907,6 +907,6 @@
         end
       end
     expect_match_text: [Hammer.check_rate]
-  description: 'Hammer.check_rate — Elixir rate-limit primitive.'
+  description: 'Hammer.check_rate - Elixir rate-limit primitive.'
   imports:
   - Hammer

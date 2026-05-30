@@ -31,7 +31,7 @@
         end
       end
     expect_no_match: true
-  description: "Mongo.find/4 — tainted filter map allows operator injection ($where, $ne, $regex)."
+  description: "Mongo.find/4 - tainted filter map allows operator injection ($where, $ne, $regex)."
 
   imports:
   - Mongodb_driver
@@ -68,7 +68,7 @@
         end
       end
     expect_no_match: true
-  description: "Mongo.aggregate/4 — tainted pipeline stages enable arbitrary query logic."
+  description: "Mongo.aggregate/4 - tainted pipeline stages enable arbitrary query logic."
 
   imports:
   - Mongodb_driver
@@ -104,7 +104,7 @@
         end
       end
     expect_no_match: true
-  description: "Mongo.update_many/5 — tainted filter or update doc allows mass tampering."
+  description: "Mongo.update_many/5 - tainted filter or update doc allows mass tampering."
 
   imports:
   - Mongodb_driver
@@ -140,7 +140,7 @@
         end
       end
     expect_no_match: true
-  description: "Mongo.update_many/5 — tainted update documents can inject operators or alter unintended fields."
+  description: "Mongo.update_many/5 - tainted update documents can inject operators or alter unintended fields."
 
   imports:
   - Mongodb_driver
@@ -177,7 +177,7 @@
         end
       end
     expect_no_match: true
-  description: "Mongo.command/3 — runs an arbitrary admin command (eval, runCommand) against the database."
+  description: "Mongo.command/3 - runs an arbitrary admin command (eval, runCommand) against the database."
 
   imports:
   - Mongodb_driver
@@ -214,7 +214,7 @@
         end
       end
     expect_no_match: true
-  description: "Redix.command/3 — tainted command list (EVAL, CONFIG SET, MODULE LOAD) abuses Redis."
+  description: "Redix.command/3 - tainted command list (EVAL, CONFIG SET, MODULE LOAD) abuses Redis."
 
   imports:
   - Redix
@@ -250,7 +250,7 @@
         end
       end
     expect_no_match: true
-  description: "Xandra.execute/4 — raw CQL with interpolated strings enables CQL injection; use prepared statements (`Xandra.prepare!/2` + `%Xandra.Prepared{}`)."
+  description: "Xandra.execute/4 - raw CQL with interpolated strings enables CQL injection; use prepared statements (`Xandra.prepare!/2` + `%Xandra.Prepared{}`)."
 
   imports:
   - Xandra
@@ -286,7 +286,7 @@
         end
       end
     expect_no_match: true
-  description: "Xandra.Cluster.execute/4 — cluster variant; same raw-CQL injection risk as Xandra.execute."
+  description: "Xandra.Cluster.execute/4 - cluster variant; same raw-CQL injection risk as Xandra.execute."
 
   imports:
   - Xandra
@@ -323,6 +323,6 @@
         end
       end
     expect_no_match: true
-  description: "Redix.pipeline/3 — list-of-commands variant; tainted command strings (EVAL, FLUSHALL, CONFIG) abuse Redis."
+  description: "Redix.pipeline/3 - list-of-commands variant; tainted command strings (EVAL, FLUSHALL, CONFIG) abuse Redis."
   imports:
   - Redix

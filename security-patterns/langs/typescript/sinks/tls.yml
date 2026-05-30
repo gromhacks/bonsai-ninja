@@ -16,7 +16,7 @@
       function demo(input, req, obj) {
         rejectUnauthorized = input; return rejectUnauthorized;
       }
-  description: "rejectUnauthorized: false — disables TLS certificate validation."
+  description: "rejectUnauthorized: false - disables TLS certificate validation."
 
 - id: typescript.tls.node_tls_reject_unauth_env
   enabled: true
@@ -35,7 +35,7 @@
       function demo(input, req, obj) {
         NODE_TLS_REJECT_UNAUTHORIZED = input; return NODE_TLS_REJECT_UNAUTHORIZED;
       }
-  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0' — disables TLS verification globally."
+  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0' - disables TLS verification globally."
 
 - id: typescript.tls.https_agent_insecure
   enabled: true
@@ -54,7 +54,7 @@
       function demo(input, req, obj) {
         return new https.Agent(input);
       }
-  description: "new https.Agent({ rejectUnauthorized: false }) — disables cert validation per-agent."
+  description: "new https.Agent({ rejectUnauthorized: false }) - disables cert validation per-agent."
 
 - id: typescript.tls.request_strict_ssl_false
   enabled: true
@@ -75,7 +75,7 @@
       function demo(input, req, obj) {
         strictSSL = input; return strictSSL;
       }
-  description: "request strictSSL: false — disables TLS verification."
+  description: "request strictSSL: false - disables TLS verification."
 
 - id: typescript.tls.grpc_create_insecure
   enabled: true
@@ -119,7 +119,7 @@
     kind: write
     target:
       name: rejectUnauthorized
-  description: "Disabled — overlaps with reject_unauthorized_false; kept for doc."
+  description: "Disabled - overlaps with reject_unauthorized_false; kept for doc."
 
 - id: typescript.tls.fetch_insecure_http_parser
   enabled: false
@@ -133,4 +133,4 @@
     kind: write
     target:
       name: insecureHTTPParser
-  description: "Disabled — insecureHTTPParser is request-smuggling laxity, not TLS."
+  description: "Disabled - insecureHTTPParser is request-smuggling laxity, not TLS."

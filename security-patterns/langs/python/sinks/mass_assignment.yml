@@ -19,7 +19,7 @@
             Meta.fields = "__all__"
             return value
       expect_match_text: [Meta.fields]
-  description: "Django ModelForm / DRF Serializer `class Meta: fields = '__all__'` — exposes every model field including admin / staff flags; explicitly list fields instead."
+  description: "Django ModelForm / DRF Serializer `class Meta: fields = '__all__'` - exposes every model field including admin / staff flags; explicitly list fields instead."
 - id: python.mass_assign.django_serializer_fields_all
   enabled: false
   disabled_reason:

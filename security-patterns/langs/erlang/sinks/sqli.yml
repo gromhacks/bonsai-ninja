@@ -30,7 +30,7 @@
       test(Conn) ->
         epgsql:squery(Conn, "select 1").
     expect_no_match: true
-  description: "epgsql:squery — executes raw SQL string; no parameterization. Use equery with $1 placeholders."
+  description: "epgsql:squery - executes raw SQL string; no parameterization. Use equery with $1 placeholders."
 - id: erlang.sqli.epgsql_squery3
   enabled: false
   disabled_reason:
@@ -44,7 +44,7 @@
     kind: call
     callee:
       regex: "^epgsql:squery/3$"
-  description: "Disabled — adapter emits callee without arity; squery above already matches."
+  description: "Disabled - adapter emits callee without arity; squery above already matches."
 - id: erlang.sqli.mysql_query
   enabled: true
   language: erlang
@@ -75,7 +75,7 @@
       test(Conn) ->
         mysql:query(Conn, "select 1").
     expect_no_match: true
-  description: "mysql-otp mysql:query — string concatenation is injectable; use prepared/`?` placeholders."
+  description: "mysql-otp mysql:query - string concatenation is injectable; use prepared/`?` placeholders."
 - id: erlang.sqli.emysql_execute
   enabled: true
   language: erlang
@@ -106,7 +106,7 @@
       test() ->
         emysql:execute("select 1").
     expect_no_match: true
-  description: "emysql:execute — flag when SQL string built from tainted input rather than stmt_id + bindings."
+  description: "emysql:execute - flag when SQL string built from tainted input rather than stmt_id + bindings."
 - id: erlang.sqli.odbc_sql_query
   enabled: true
   language: erlang
@@ -137,7 +137,7 @@
       test(Conn) ->
         odbc:sql_query(Conn, "select 1").
     expect_no_match: true
-  description: "odbc:sql_query/2 — raw SQL; use param_query with typed bindings instead."
+  description: "odbc:sql_query/2 - raw SQL; use param_query with typed bindings instead."
 - id: erlang.sqli.mnesia_match_object
   enabled: false
   disabled_reason:
@@ -152,7 +152,7 @@
     kind: call
     callee:
       regex: "^mnesia:(match_object|select)$"
-  description: "Disabled — mnesia uses term patterns, not SQL; tainted match-spec/object patterns are covered under erlang.nosql.mnesia_select_matchspec and erlang.nosql.mnesia_match_object."
+  description: "Disabled - mnesia uses term patterns, not SQL; tainted match-spec/object patterns are covered under erlang.nosql.mnesia_select_matchspec and erlang.nosql.mnesia_match_object."
 - id: erlang.sqli.eredis_q
   enabled: false
   disabled_reason:
@@ -167,7 +167,7 @@
     kind: call
     callee:
       regex: "^eredis:q$"
-  description: "Disabled — covered by erlang.nosql.eredis_q."
+  description: "Disabled - covered by erlang.nosql.eredis_q."
 - id: erlang.sqli.mongo_find
   enabled: false
   disabled_reason:
@@ -182,4 +182,4 @@
     kind: call
     callee:
       regex: "^mongo:find$"
-  description: "Disabled — duplicates erlang.nosql.mongoc_find."
+  description: "Disabled - duplicates erlang.nosql.mongoc_find."

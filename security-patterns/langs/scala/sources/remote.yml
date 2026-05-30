@@ -24,7 +24,7 @@
         def getParameter(args: Any*): Any = null
       }
     expect_match_text: [servletRequest.getParameter]
-  description: "HttpServletRequest.getParameter — Scala servlet / Spring handler parameter."
+  description: "HttpServletRequest.getParameter - Scala servlet / Spring handler parameter."
 
 - id: scala.servlet.get_parameter_values
   enabled: true
@@ -51,7 +51,7 @@
         def getParameterValues(args: Any*): Array[String] = Array.empty
       }
     expect_match_text: [servletRequest.getParameterValues]
-  description: "HttpServletRequest.getParameterValues(name) — query/form parameter values supplied by the HTTP client."
+  description: "HttpServletRequest.getParameterValues(name) - query/form parameter values supplied by the HTTP client."
 
 - id: scala.servlet.get_parameter_map
   enabled: true
@@ -78,7 +78,7 @@
         def getParameterMap(args: Any*): Map[String, Array[String]] = Map.empty
       }
     expect_match_text: [servletRequest.getParameterMap]
-  description: "HttpServletRequest.getParameterMap() — map of attacker-controlled query/form parameter names and values."
+  description: "HttpServletRequest.getParameterMap() - map of attacker-controlled query/form parameter names and values."
 
 - id: scala.servlet.get_parameter_names
   enabled: true
@@ -105,7 +105,7 @@
         def getParameterNames(args: Any*): java.util.Enumeration[String] = null
       }
     expect_match_text: [servletRequest.getParameterNames]
-  description: "HttpServletRequest.getParameterNames() — attacker-controlled query/form parameter names."
+  description: "HttpServletRequest.getParameterNames() - attacker-controlled query/form parameter names."
 
 - id: scala.servlet.get_header
   enabled: true
@@ -132,7 +132,7 @@
         def getHeader(args: Any*): String = ""
       }
     expect_match_text: [servletRequest.getHeader]
-  description: "HttpServletRequest.getHeader(name) — client-supplied HTTP header value."
+  description: "HttpServletRequest.getHeader(name) - client-supplied HTTP header value."
 
 - id: scala.servlet.get_headers
   enabled: true
@@ -159,7 +159,7 @@
         def getHeaders(args: Any*): java.util.Enumeration[String] = null
       }
     expect_match_text: [servletRequest.getHeaders]
-  description: "HttpServletRequest.getHeaders(name) — all client-supplied values for an HTTP header."
+  description: "HttpServletRequest.getHeaders(name) - all client-supplied values for an HTTP header."
 
 - id: scala.servlet.get_header_names
   enabled: true
@@ -186,7 +186,7 @@
         def getHeaderNames(args: Any*): java.util.Enumeration[String] = null
       }
     expect_match_text: [servletRequest.getHeaderNames]
-  description: "HttpServletRequest.getHeaderNames() — attacker-controlled HTTP header names."
+  description: "HttpServletRequest.getHeaderNames() - attacker-controlled HTTP header names."
 
 - id: scala.servlet.get_cookies
   enabled: true
@@ -214,7 +214,7 @@
       }
       trait Cookie
     expect_match_text: [servletRequest.getCookies]
-  description: "HttpServletRequest.getCookies() — cookie array supplied by the HTTP client."
+  description: "HttpServletRequest.getCookies() - cookie array supplied by the HTTP client."
 
 - id: scala.servlet.cookie_get_value
   enabled: true
@@ -241,7 +241,7 @@
         def getValue(args: Any*): String = ""
       }
     expect_match_text: [cookie.getValue]
-  description: "javax.servlet.http.Cookie.getValue() — cookie value from an HTTP request; covers elements returned by request.getCookies()."
+  description: "javax.servlet.http.Cookie.getValue() - cookie value from an HTTP request; covers elements returned by request.getCookies()."
 
 - id: scala.servlet.cookie_get_name
   enabled: true
@@ -268,7 +268,7 @@
         def getName(args: Any*): String = ""
       }
     expect_match_text: [theCookie.getName]
-  description: "javax.servlet.http.Cookie.getName() — attacker-chosen cookie name from an HTTP request."
+  description: "javax.servlet.http.Cookie.getName() - attacker-chosen cookie name from an HTTP request."
 
 - id: scala.servlet.get_input_stream
   enabled: true
@@ -295,7 +295,7 @@
         def getInputStream(args: Any*): Any = null
       }
     expect_match_text: [servletRequest.getInputStream]
-  description: "HttpServletRequest.getInputStream() — raw request body bytes supplied by the HTTP client."
+  description: "HttpServletRequest.getInputStream() - raw request body bytes supplied by the HTTP client."
 
 - id: scala.servlet.get_reader
   enabled: true
@@ -322,7 +322,7 @@
         def getReader(args: Any*): Any = null
       }
     expect_match_text: [servletRequest.getReader]
-  description: "HttpServletRequest.getReader() — text request body supplied by the HTTP client."
+  description: "HttpServletRequest.getReader() - text request body supplied by the HTTP client."
 
 - id: scala.servlet.get_query_string
   enabled: true
@@ -349,7 +349,7 @@
         def getQueryString(args: Any*): String = ""
       }
     expect_match_text: [servletRequest.getQueryString]
-  description: "HttpServletRequest.getQueryString() — raw query string supplied by the HTTP client."
+  description: "HttpServletRequest.getQueryString() - raw query string supplied by the HTTP client."
 
 - id: scala.servlet.get_request_uri
   enabled: true
@@ -376,7 +376,7 @@
         def getRequestURI(args: Any*): String = ""
       }
     expect_match_text: [servletRequest.getRequestURI]
-  description: "HttpServletRequest.getRequestURI() — request path supplied by the HTTP client."
+  description: "HttpServletRequest.getRequestURI() - request path supplied by the HTTP client."
 
 - id: scala.servlet.get_request_url
   enabled: true
@@ -403,7 +403,7 @@
         def getRequestURL(args: Any*): StringBuffer = new StringBuffer("")
       }
     expect_match_text: [servletRequest.getRequestURL]
-  description: "HttpServletRequest.getRequestURL() — full request URL supplied by the HTTP client."
+  description: "HttpServletRequest.getRequestURL() - full request URL supplied by the HTTP client."
 
 - id: scala.servlet.get_path_info
   enabled: true
@@ -430,7 +430,7 @@
         def getPathInfo(args: Any*): String = ""
       }
     expect_match_text: [servletRequest.getPathInfo]
-  description: "HttpServletRequest.getPathInfo() — extra request path supplied by the HTTP client."
+  description: "HttpServletRequest.getPathInfo() - extra request path supplied by the HTTP client."
 
 - id: scala.servlet.session_get_attribute
   enabled: true
@@ -460,7 +460,7 @@
         def getAttribute(args: Any*): Any = null
       }
     expect_match_text: [session.getAttribute]
-  description: "HttpSession.getAttribute(name) — session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
+  description: "HttpSession.getAttribute(name) - session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
 
 - id: scala.play.request_param
   enabled: true
@@ -497,7 +497,7 @@
     kind: param
     target:
       name: req
-  description: "Disabled duplicate — merged into scala.play.request_param."
+  description: "Disabled duplicate - merged into scala.play.request_param."
 
 - id: scala.play.request_get_query_string
   enabled: true
@@ -543,7 +543,7 @@
           request.body()
         }
       }
-  description: "Play request.body — narrowed to attribute chain to avoid bare name FPs. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+  description: "Play request.body - narrowed to attribute chain to avoid bare name FPs. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
 - id: scala.play.request_headers
   enabled: true
@@ -568,7 +568,7 @@
           request.headers()
         }
       }
-  description: "Play request.headers — narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
+  description: "Play request.headers - narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
 
 - id: scala.play.request_cookies
   enabled: true
@@ -593,7 +593,7 @@
           request.cookies()
         }
       }
-  description: "Play request.cookies — narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
+  description: "Play request.cookies - narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
 
 - id: scala.akka.entity
   enabled: true
@@ -614,7 +614,7 @@
           entity(value)
         }
       }
-  description: "akka-http entity(as[T]) directive — unmarshals request body."
+  description: "akka-http entity(as[T]) directive - unmarshals request body."
 
 - id: scala.akka.parameters
   enabled: true
@@ -635,7 +635,7 @@
           parameters(value)
         }
       }
-  description: "akka-http parameters(...) directive — query string."
+  description: "akka-http parameters(...) directive - query string."
 
 - id: scala.akka.formfields
   enabled: true
@@ -656,7 +656,7 @@
           formFields(value)
         }
       }
-  description: "akka-http formFields directive — form body."
+  description: "akka-http formFields directive - form body."
 
 - id: scala.akka.path
   enabled: true
@@ -677,7 +677,7 @@
           pathPrefix(value)
         }
       }
-  description: "akka-http pathPrefix / path extractor — URL path segment."
+  description: "akka-http pathPrefix / path extractor - URL path segment."
 
 - id: scala.play.request_as_json
   enabled: true
@@ -698,7 +698,7 @@
           asJson(value)
         }
       }
-  description: "Play request.body.asJson — parsed JSON request body."
+  description: "Play request.body.asJson - parsed JSON request body."
 
 - id: scala.play.request_as_form
   enabled: true
@@ -719,7 +719,7 @@
           asFormUrlEncoded(value)
         }
       }
-  description: "Play request.body.asFormUrlEncoded — parsed form-encoded body."
+  description: "Play request.body.asFormUrlEncoded - parsed form-encoded body."
 
 - id: scala.akka.header_value_by_name
   enabled: true
@@ -740,7 +740,7 @@
           headerValueByName(value)
         }
       }
-  description: "akka-http headerValueByName(name) directive — extracts a request header value."
+  description: "akka-http headerValueByName(name) directive - extracts a request header value."
 
 - id: scala.akka.cookie
   enabled: true
@@ -761,7 +761,7 @@
           cookie(value)
         }
       }
-  description: "akka-http cookie(name) directive — extracts a request cookie."
+  description: "akka-http cookie(name) directive - extracts a request cookie."
 
 - id: scala.akka.parameter_singular
   enabled: true
@@ -782,7 +782,7 @@
           parameter(value)
         }
       }
-  description: "akka-http parameter(name) directive — singular form of parameters(...)."
+  description: "akka-http parameter(name) directive - singular form of parameters(...)."
 
 - id: scala.http4s.request_body
   enabled: true
@@ -807,7 +807,7 @@
           Request.body()
         }
       }
-  description: "http4s Request.body — raw entity stream from the client. Property-style getter (no args)."
+  description: "http4s Request.body - raw entity stream from the client. Property-style getter (no args)."
 
 - id: scala.http4s.uri_params
   enabled: true
@@ -830,7 +830,7 @@
           uri.params(value)
         }
       }
-  description: "http4s req.uri.params — parsed query string map."
+  description: "http4s req.uri.params - parsed query string map."
 
 - id: scala.http4s.request_headers
   enabled: true
@@ -855,7 +855,7 @@
           Request.headers()
         }
       }
-  description: "http4s Request.headers — request header collection. Property-style getter (no args)."
+  description: "http4s Request.headers - request header collection. Property-style getter (no args)."
 
 - id: scala.tapir.input_query
   enabled: true
@@ -882,7 +882,7 @@
           query(value)
         }
       }
-  description: "Tapir endpoint .in(query[T](\"name\")) — declares a query-string input bound into the handler. `top_level` rejects `obj.query(...)` ORM/SQL `query` decoys; `min/max_args: 1` matches Tapir's `query[T](name: String)` shape."
+  description: "Tapir endpoint .in(query[T](\"name\")) - declares a query-string input bound into the handler. `top_level` rejects `obj.query(...)` ORM/SQL `query` decoys; `min/max_args: 1` matches Tapir's `query[T](name: String)` shape."
 
 - id: scala.tapir.input_json_body
   enabled: true
@@ -905,7 +905,7 @@
           jsonBody(value)
         }
       }
-  description: "Tapir endpoint .in(jsonBody[T]) — declares a JSON request body input."
+  description: "Tapir endpoint .in(jsonBody[T]) - declares a JSON request body input."
 
 - id: scala.zio.http_request_body
   enabled: false
@@ -932,7 +932,7 @@
           Request.body()
         }
       }
-  description: "Disabled duplicate — same matcher as canonical scala.http4s.request_body; receiver type is not available in YAML."
+  description: "Disabled duplicate - same matcher as canonical scala.http4s.request_body; receiver type is not available in YAML."
 
   imports:
   - dev
@@ -959,7 +959,7 @@
         def handle(request: String): Unit = {
         }
       }
-  description: "Disabled duplicate — same bare parameter matcher as canonical scala.play.request_param; service framework type is not available in YAML."
+  description: "Disabled duplicate - same bare parameter matcher as canonical scala.play.request_param; service framework type is not available in YAML."
 
   imports:
   - com
@@ -989,7 +989,7 @@
         def getArgument(values: Any*): Any = null
       }
     expect_match_text: [env.getArgument]
-  description: "graphql-java DataFetchingEnvironment.getArgument(name) — resolver argument supplied by the GraphQL caller."
+  description: "graphql-java DataFetchingEnvironment.getArgument(name) - resolver argument supplied by the GraphQL caller."
 
   imports:
   - graphql
@@ -1019,6 +1019,6 @@
         def getArguments(values: Any*): Any = null
       }
     expect_match_text: [environment.getArguments]
-  description: "graphql-java DataFetchingEnvironment.getArguments() — map of caller-controlled resolver arguments."
+  description: "graphql-java DataFetchingEnvironment.getArguments() - map of caller-controlled resolver arguments."
   imports:
   - graphql

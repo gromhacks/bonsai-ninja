@@ -24,7 +24,7 @@
       function demo(input, req, obj) {
         return crypto.createHash('md5');
       }
-  description: "crypto.createHash('md5') — broken hash. Merged aliases: typescript.crypto.createhash_sha1."
+  description: "crypto.createHash('md5') - broken hash. Merged aliases: typescript.crypto.createhash_sha1."
   aliases:
   - typescript.crypto.createhash_sha1
 - id: typescript.crypto.createcipher_des
@@ -50,7 +50,7 @@
       function demo(input, req, obj) {
         return crypto.createCipheriv('des');
       }
-  description: "crypto.createCipheriv('des', …). Merged aliases: typescript.crypto.createcipher_des_ede, typescript.crypto.createcipher_rc4, typescript.crypto.createcipher_aes_ecb."
+  description: "crypto.createCipheriv('des', ...). Merged aliases: typescript.crypto.createcipher_des_ede, typescript.crypto.createcipher_rc4, typescript.crypto.createcipher_aes_ecb."
   aliases:
   - typescript.crypto.createcipher_des_ede
   - typescript.crypto.createcipher_rc4
@@ -78,7 +78,7 @@
       function demo(input, req, obj) {
         return crypto.createCipher(input);
       }
-  description: "crypto.createCipher (no IV) — deprecated, predictable IVs."
+  description: "crypto.createCipher (no IV) - deprecated, predictable IVs."
 - id: typescript.crypto.deprecated_createdecipher
   enabled: true
   language: typescript
@@ -105,7 +105,7 @@
       }
     expect_match_text:
     - crypto.createDecipher
-  description: "crypto.createDecipher (no IV) — deprecated API derives predictable IVs from password material."
+  description: "crypto.createDecipher (no IV) - deprecated API derives predictable IVs from password material."
 - id: typescript.crypto.gcm_decipher_no_authtaglength
   enabled: true
   language: typescript
@@ -223,7 +223,7 @@
       function demo(input, req, obj) {
         return CryptoJS.TripleDES.encrypt(input);
       }
-  description: "crypto-js TripleDES.encrypt — deprecated."
+  description: "crypto-js TripleDES.encrypt - deprecated."
 - id: typescript.crypto.cryptojs_rc4
   enabled: true
   language: typescript
@@ -245,7 +245,7 @@
       function demo(input, req, obj) {
         return CryptoJS.RC4.encrypt(input);
       }
-  description: "crypto-js RC4.encrypt — broken stream cipher."
+  description: "crypto-js RC4.encrypt - broken stream cipher."
 - id: typescript.crypto.math_random
   enabled: true
   language: typescript
@@ -264,7 +264,7 @@
   match_examples:
   - name: math random
     code: "function demo(input, req, obj) {\n  return Math.random(input);\n}\n"
-  description: "Math.random — non-cryptographic; flag in security-sensitive paths. JS Math global has no canonical ecosystem package, so strict `['Math', 'random']` match only."
+  description: "Math.random - non-cryptographic; flag in security-sensitive paths. JS Math global has no canonical ecosystem package, so strict `['Math', 'random']` match only."
 - id: typescript.crypto.bcrypt_low_rounds
   enabled: true
   language: typescript
@@ -301,4 +301,4 @@
         return bcrypt.hash(password, 12);
       }
     expect_no_match: true
-  description: "bcrypt.hash(password, rounds) with rounds < 10 — too cheap to compute; use an adequate work factor."
+  description: "bcrypt.hash(password, rounds) with rounds < 10 - too cheap to compute; use an adequate work factor."

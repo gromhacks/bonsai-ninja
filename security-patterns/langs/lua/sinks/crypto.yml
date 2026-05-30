@@ -16,7 +16,7 @@
       function example(input, url, id, payload, request, params, user)
         md5.sum(input)
       end
-  description: "md5.sum — MD5 is broken (collisions); unsafe for signatures, password-hashing, or integrity."
+  description: "md5.sum - MD5 is broken (collisions); unsafe for signatures, password-hashing, or integrity."
 
 - id: lua.crypto.md5_sumhexa
   enabled: true
@@ -35,7 +35,7 @@
       function example(input, url, id, payload, request, params, user)
         md5.sumhexa(input)
       end
-  description: "md5.sumhexa — MD5 hex digest; same collision weakness as md5.sum."
+  description: "md5.sumhexa - MD5 hex digest; same collision weakness as md5.sum."
 
 - id: lua.crypto.sha1_sum
   enabled: true
@@ -54,7 +54,7 @@
       function example(input, url, id, payload, request, params, user)
         sha1.sum(input)
       end
-  description: "sha1.sum — SHA-1 is collision-broken; unsafe for new signatures or integrity checks."
+  description: "sha1.sum - SHA-1 is collision-broken; unsafe for new signatures or integrity checks."
 
 - id: lua.crypto.resty_md5_final
   enabled: true
@@ -75,7 +75,7 @@
       function example(input, url, id, payload, request, params, user)
         md5.final(input)
       end
-  description: "lua-resty-md5 md5:final() — MD5 digest; collision-broken."
+  description: "lua-resty-md5 md5:final() - MD5 digest; collision-broken."
 
 - id: lua.crypto.resty_sha1_final
   enabled: true
@@ -96,7 +96,7 @@
       function example(input, url, id, payload, request, params, user)
         sha1.final(input)
       end
-  description: "lua-resty-string sha1:final() — SHA-1 digest; collision-broken."
+  description: "lua-resty-string sha1:final() - SHA-1 digest; collision-broken."
 
 - id: lua.crypto.openssl_md5
   enabled: true
@@ -117,7 +117,7 @@
       function example(input, url, id, payload, request, params, user)
         crypto.digest(input)
       end
-  description: "crypto.digest(algo, ...) — flag when algo is 'md5', 'md4', 'sha1'."
+  description: "crypto.digest(algo, ...) - flag when algo is 'md5', 'md4', 'sha1'."
 
 - id: lua.crypto.openssl_evp_digest
   enabled: true
@@ -138,7 +138,7 @@
       function example(input, url, id, payload, request, params, user)
         evp.digest(input)
       end
-  description: "lua-openssl evp.digest(algo) — flag weak algorithms (md5/md4/sha1)."
+  description: "lua-openssl evp.digest(algo) - flag weak algorithms (md5/md4/sha1)."
 
 - id: lua.crypto.openssl_cipher_des
   enabled: true
@@ -159,7 +159,7 @@
       function example(input, url, id, payload, request, params, user)
         cipher.new(input)
       end
-  description: "openssl.cipher.new — flag when algorithm is DES/3DES/RC4/AES-ECB (no confidentiality)."
+  description: "openssl.cipher.new - flag when algorithm is DES/3DES/RC4/AES-ECB (no confidentiality)."
 
 - id: lua.crypto.openssl_cipher_encrypt_ecb
   enabled: false
@@ -174,7 +174,7 @@
     kind: call
     callee:
       attribute: [cipher, encrypt]
-  description: "Disabled — cipher:encrypt is context-dependent; flag with ECB-mode narrowing."
+  description: "Disabled - cipher:encrypt is context-dependent; flag with ECB-mode narrowing."
 
 - id: lua.crypto.math_random
   enabled: true
@@ -193,7 +193,7 @@
       function example(input, url, id, payload, request, params, user)
         math.random(input)
       end
-  description: "math.random — Mersenne Twister; non-cryptographic, predictable from seed/state."
+  description: "math.random - Mersenne Twister; non-cryptographic, predictable from seed/state."
 
 - id: lua.crypto.math_randomseed
   enabled: true
@@ -212,4 +212,4 @@
       function example(input, url, id, payload, request, params, user)
         math.randomseed(input)
       end
-  description: "math.randomseed — seeds non-crypto PRNG; often seeded with os.time (predictable)."
+  description: "math.randomseed - seeds non-crypto PRNG; often seeded with os.time (predictable)."

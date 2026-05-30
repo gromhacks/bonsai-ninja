@@ -23,7 +23,7 @@
       using Microsoft.CodeAnalysis.CSharp.Scripting;
       class App { void Test() { CSharpScript.EvaluateAsync("1 + 1"); } }
     expect_no_match: true
-  description: "CSharpScript.EvaluateAsync — Roslyn dynamic compilation."
+  description: "CSharpScript.EvaluateAsync - Roslyn dynamic compilation."
 
 - id: csharp.eval.csharpscript_runasync
   enabled: true
@@ -75,7 +75,7 @@
       using System.CodeDom.Compiler;
       class App { void Test() { CSharpCodeProvider.CompileAssemblyFromSource("class Safe {}"); } }
     expect_no_match: true
-  description: "CodeDom CompileAssemblyFromSource — runtime compilation."
+  description: "CodeDom CompileAssemblyFromSource - runtime compilation."
 
 - id: csharp.eval.activator_create_instance
   enabled: false
@@ -89,7 +89,7 @@
     kind: call
     callee:
       attribute: [Activator, CreateInstance]
-  description: "Disabled — too generic; flag only when type name is tainted."
+  description: "Disabled - too generic; flag only when type name is tainted."
 
 - id: csharp.eval.assembly_load
   enabled: true
@@ -112,7 +112,7 @@
     code: |
       class App { void Test() { Assembly.Load(new byte[] {}); } }
     expect_no_match: true
-  description: "Assembly.Load(byte[]) — RCE if assembly bytes tainted."
+  description: "Assembly.Load(byte[]) - RCE if assembly bytes tainted."
 
 - id: csharp.eval.assembly_loadfile
   enabled: true
@@ -195,7 +195,7 @@
     kind: call
     callee:
       name: InvokeMember
-  description: "Disabled — Type.InvokeMember; flag only when method name tainted."
+  description: "Disabled - Type.InvokeMember; flag only when method name tainted."
 
 - id: csharp.eval.scriptengine_run
   enabled: true
@@ -247,7 +247,7 @@
       using System.CodeDom.Compiler;
       class App { void Test() { VBCodeProvider.CompileAssemblyFromSource("Module Safe\nEnd Module"); } }
     expect_no_match: true
-  description: "VBCodeProvider.CompileAssemblyFromSource — runtime VB compilation."
+  description: "VBCodeProvider.CompileAssemblyFromSource - runtime VB compilation."
 
 - id: csharp.eval.codedom_compile_from_file
   enabled: true
@@ -273,7 +273,7 @@
       using System.CodeDom.Compiler;
       class App { void Test() { CompileAssemblyFromFile("src/Safe.cs"); } }
     expect_no_match: true
-  description: "CodeDom CompileAssemblyFromFile(tainted path) — compiles attacker-controlled source file."
+  description: "CodeDom CompileAssemblyFromFile(tainted path) - compiles attacker-controlled source file."
 
 - id: csharp.eval.csharpsyntaxtree_parsetext
   enabled: false
@@ -288,7 +288,7 @@
     kind: call
     callee:
       attribute: [CSharpSyntaxTree, ParseText]
-  description: "Disabled — ParseText alone is not exec; flag only when followed by Compilation.Emit / EvaluateAsync."
+  description: "Disabled - ParseText alone is not exec; flag only when followed by Compilation.Emit / EvaluateAsync."
 
 - id: csharp.eval.scriptblock_create
   enabled: true
@@ -314,7 +314,7 @@
       using System.Management.Automation;
       class App { void Test() { ScriptBlock.Create("Get-Process"); } }
     expect_no_match: true
-  description: "ScriptBlock.Create(tainted) — builds executable PowerShell script block from string."
+  description: "ScriptBlock.Create(tainted) - builds executable PowerShell script block from string."
 
 - id: csharp.eval.dynamicmethod_ctor
   enabled: false
@@ -328,7 +328,7 @@
     kind: new
     callee:
       name: DynamicMethod
-  description: "Disabled — DynamicMethod is rarely fed user input directly; flag with constraint when name/IL is tainted."
+  description: "Disabled - DynamicMethod is rarely fed user input directly; flag with constraint when name/IL is tainted."
 
 - id: csharp.eval.scripthost_evaluate
   enabled: true
@@ -354,4 +354,4 @@
       using Microsoft.JScript;
       class App { void Test() { Eval.JScriptEvaluate("1 + 1"); } }
     expect_no_match: true
-  description: "Microsoft.JScript Eval.JScriptEvaluate — legacy JScript runtime eval."
+  description: "Microsoft.JScript Eval.JScriptEvaluate - legacy JScript runtime eval."

@@ -28,7 +28,7 @@
   - name: arg tainted literal negative
     code: "import pickle\ndef example(user_input):\n    return pickle.loads(\"safe\")\n"
     expect_no_match: true
-  description: "pickle.loads(tainted bytes) — arbitrary code execution via __reduce__."
+  description: "pickle.loads(tainted bytes) - arbitrary code execution via __reduce__."
 - id: python.deser.pickle_load
   enabled: true
   language: python
@@ -63,7 +63,7 @@
       def example(user_input):
           return pickle.load('safe')
     expect_no_match: true
-  description: "pickle.load(file) — same RCE as pickle.loads."
+  description: "pickle.load(file) - same RCE as pickle.loads."
 - id: python.deser.pickle_unpickler
   enabled: true
   language: python
@@ -101,7 +101,7 @@
       def example(user_input):
           return pickle.Unpickler('safe')
     expect_no_match: true
-  description: "pickle.Unpickler(file) — RCE via subsequent .load()."
+  description: "pickle.Unpickler(file) - RCE via subsequent .load()."
 - id: python.deser._pickle_loads
   enabled: true
   language: python
@@ -133,7 +133,7 @@
       def example(user_input):
           return _pickle.loads('safe')
     expect_no_match: true
-  description: "_pickle.loads — C-accelerated pickle, same risk."
+  description: "_pickle.loads - C-accelerated pickle, same risk."
 - id: python.deser._pickle_load
   enabled: true
   language: python
@@ -165,7 +165,7 @@
       def example(user_input):
           return _pickle.load('safe')
     expect_no_match: true
-  description: "_pickle.load() — C-accelerated pickle deserialization; attacker-controlled stream deserializes into arbitrary code via __reduce__."
+  description: "_pickle.load() - C-accelerated pickle deserialization; attacker-controlled stream deserializes into arbitrary code via __reduce__."
 - id: python.deser.cpickle_loads
   enabled: true
   language: python
@@ -197,7 +197,7 @@
       def example(user_input):
           return cPickle.loads('safe')
     expect_no_match: true
-  description: "Python 2 cPickle.loads — legacy code path."
+  description: "Python 2 cPickle.loads - legacy code path."
 - id: python.deser.cpickle_load
   enabled: true
   language: python
@@ -245,7 +245,7 @@
       attribute:
       - copyreg
       - __reduce_ex__
-  description: "Disabled — copyreg helpers; rarely a direct sink."
+  description: "Disabled - copyreg helpers; rarely a direct sink."
 - id: python.deser.dill_loads
   enabled: true
   language: python
@@ -279,7 +279,7 @@
       def example(user_input):
           return dill.loads('safe')
     expect_no_match: true
-  description: "dill.loads — extended pickle."
+  description: "dill.loads - extended pickle."
 - id: python.deser.dill_load
   enabled: true
   language: python
@@ -311,7 +311,7 @@
       def example(user_input):
           return dill.load('safe')
     expect_no_match: true
-  description: "dill.load() — extended pickle protocol; RCE on untrusted input."
+  description: "dill.load() - extended pickle protocol; RCE on untrusted input."
 - id: python.deser.dill_unpickler
   enabled: true
   language: python
@@ -381,7 +381,7 @@
       def example(user_input):
           return cloudpickle.loads('safe')
     expect_no_match: true
-  description: "cloudpickle.loads — distributed-Python pickle wrapper."
+  description: "cloudpickle.loads - distributed-Python pickle wrapper."
 - id: python.deser.cloudpickle_load
   enabled: true
   language: python
@@ -447,7 +447,7 @@
       def example(user_input):
           return jsonpickle.decode('safe')
     expect_no_match: true
-  description: "jsonpickle.decode — can invoke constructors."
+  description: "jsonpickle.decode - can invoke constructors."
 - id: python.deser.jsonpickle_loads
   enabled: true
   language: python
@@ -479,7 +479,7 @@
       def example(user_input):
           return jsonpickle.loads('safe')
     expect_no_match: true
-  description: "jsonpickle.loads — alias of decode."
+  description: "jsonpickle.loads - alias of decode."
 - id: python.deser.marshal_loads
   enabled: true
   language: python
@@ -511,7 +511,7 @@
       def example(user_input):
           return marshal.loads('safe')
     expect_no_match: true
-  description: "marshal.loads — arbitrary bytecode."
+  description: "marshal.loads - arbitrary bytecode."
 - id: python.deser.marshal_load
   enabled: true
   language: python
@@ -543,7 +543,7 @@
       def example(user_input):
           return marshal.load('safe')
     expect_no_match: true
-  description: "marshal.load — file-based bytecode."
+  description: "marshal.load - file-based bytecode."
 - id: python.deser.shelve_open
   enabled: true
   language: python
@@ -575,7 +575,7 @@
       def example(user_input):
           return shelve.open('safe')
     expect_no_match: true
-  description: "shelve.open — uses pickle under the hood."
+  description: "shelve.open - uses pickle under the hood."
 - id: python.deser.dbm_open
   enabled: false
   disabled_reason:
@@ -591,7 +591,7 @@
       attribute:
       - dbm
       - open
-  description: "Disabled — dbm itself is bytes; pickling depends on caller."
+  description: "Disabled - dbm itself is bytes; pickling depends on caller."
 - id: python.deser.yaml_load
   enabled: true
   language: python
@@ -626,7 +626,7 @@
       def example(user_input):
           return yaml.load('safe')
     expect_no_match: true
-  description: "yaml.load without SafeLoader — arbitrary Python."
+  description: "yaml.load without SafeLoader - arbitrary Python."
 - id: python.deser.yaml_unsafe_load
   enabled: true
   language: python
@@ -658,7 +658,7 @@
       def example(user_input):
           return yaml.unsafe_load('safe')
     expect_no_match: true
-  description: "yaml.unsafe_load — explicit unsafe loader."
+  description: "yaml.unsafe_load - explicit unsafe loader."
 - id: python.deser.yaml_load_all
   enabled: true
   language: python
@@ -690,7 +690,7 @@
       def example(user_input):
           return yaml.load_all('safe')
     expect_no_match: true
-  description: "yaml.load_all — multi-doc unsafe loader."
+  description: "yaml.load_all - multi-doc unsafe loader."
 - id: python.deser.yaml_full_load
   enabled: true
   language: python
@@ -722,7 +722,7 @@
       def example(user_input):
           return yaml.full_load('safe')
     expect_no_match: true
-  description: "yaml.full_load — full loader (constructs Python objects)."
+  description: "yaml.full_load - full loader (constructs Python objects)."
 - id: python.deser.ruamel_yaml_load
   enabled: true
   language: python
@@ -754,7 +754,7 @@
       def example(user_input):
           return YAML.load('safe')
     expect_no_match: true
-  description: "ruamel.yaml YAML(typ='unsafe').load — arbitrary objects."
+  description: "ruamel.yaml YAML(typ='unsafe').load - arbitrary objects."
 - id: python.deser.numpy_load_allow_pickle
   enabled: true
   language: python
@@ -786,7 +786,7 @@
       def example(user_input):
           return numpy.load('safe', allow_pickle=True)
     expect_no_match: true
-  description: "numpy.load(allow_pickle=True) — npy/npz that pickles."
+  description: "numpy.load(allow_pickle=True) - npy/npz that pickles."
 - id: python.deser.np_load_allow_pickle
   enabled: true
   language: python
@@ -818,7 +818,7 @@
       def example(user_input):
           return np.load('safe', allow_pickle=True)
     expect_no_match: true
-  description: "np.load(allow_pickle=True) — common alias."
+  description: "np.load(allow_pickle=True) - common alias."
 - id: python.deser.joblib_load
   enabled: true
   language: python
@@ -850,7 +850,7 @@
       def example(user_input):
           return joblib.load('safe')
     expect_no_match: true
-  description: "joblib.load — sklearn model files; pickle under the hood."
+  description: "joblib.load - sklearn model files; pickle under the hood."
 - id: python.deser.pandas_read_pickle
   enabled: true
   language: python
@@ -882,7 +882,7 @@
       def example(user_input):
           return pd.read_pickle('safe')
     expect_no_match: true
-  description: "pd.read_pickle — pandas DataFrame pickle loader."
+  description: "pd.read_pickle - pandas DataFrame pickle loader."
 - id: python.deser.pandas_read_pickle_full
   enabled: true
   language: python
@@ -946,7 +946,7 @@
       def example(user_input):
           return torch.load('safe')
     expect_no_match: true
-  description: "torch.load — PyTorch model pickle loader (pre-2.4 default)."
+  description: "torch.load - PyTorch model pickle loader (pre-2.4 default)."
 - id: python.deser.tf_load_model
   enabled: false
   disabled_reason:
@@ -964,7 +964,7 @@
       attribute:
       - keras
       - load_model
-  description: "Disabled — tf.keras.models.load_model can pickle Lambda layers."
+  description: "Disabled - tf.keras.models.load_model can pickle Lambda layers."
 - id: python.deser.xmlrpc_loads
   enabled: true
   language: python
@@ -997,7 +997,7 @@
       def example(user_input):
           return xmlrpc.loads('safe')
     expect_no_match: true
-  description: "xmlrpc.client.loads — also XXE-capable."
+  description: "xmlrpc.client.loads - also XXE-capable."
 - id: python.deser.plistlib_loads
   enabled: false
   disabled_reason:
@@ -1013,7 +1013,7 @@
       attribute:
       - plistlib
       - loads
-  description: "Disabled — plistlib can be exploited via crafted XML; rare."
+  description: "Disabled - plistlib can be exploited via crafted XML; rare."
 - id: python.deser.toml_loads
   enabled: false
   disabled_reason:
@@ -1029,7 +1029,7 @@
       attribute:
       - tomllib
       - loads
-  description: "Disabled — TOML is generally safe."
+  description: "Disabled - TOML is generally safe."
 - id: python.deser.msgpack_unpack_use_list
   enabled: true
   language: python
@@ -1083,7 +1083,7 @@
       attribute:
       - bson
       - decode
-  description: "Disabled — BSON itself is type-bounded."
+  description: "Disabled - BSON itself is type-bounded."
 - id: python.deser.django_signed_cookie_loads
   enabled: true
   language: python
@@ -1131,7 +1131,7 @@
     kind: write
     target:
       name: SESSION_SERIALIZATION_FORMAT
-  description: "Disabled — config check; flask-session pickle serializer is dangerous."
+  description: "Disabled - config check; flask-session pickle serializer is dangerous."
 - id: python.deser.celery_pickle_serializer
   enabled: false
   disabled_reason:
@@ -1147,7 +1147,7 @@
     kind: write
     target:
       name: CELERY_TASK_SERIALIZER
-  description: "Disabled — only CELERY_TASK_SERIALIZER='pickle' is the dangerous configuration; write-value equality is not available for this target shape."
+  description: "Disabled - only CELERY_TASK_SERIALIZER='pickle' is the dangerous configuration; write-value equality is not available for this target shape."
 - id: python.deser.multiprocessing_connection_recv
   enabled: false
   disabled_reason:
@@ -1163,4 +1163,4 @@
     kind: call
     callee:
       regex: ^(multiprocessing\.connection\.)?(Connection|Client)\.recv$
-  description: "multiprocessing.connection Connection.recv()/Client.recv() — recv unpickles received bytes; use only over authenticated/trusted connections."
+  description: "multiprocessing.connection Connection.recv()/Client.recv() - recv unpickles received bytes; use only over authenticated/trusted connections."

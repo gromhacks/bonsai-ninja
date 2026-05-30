@@ -22,7 +22,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeQuery(\"\
       select 1\");\n  }\n}\n"
     expect_no_match: true
-  description: "JDBC Statement.executeQuery with string-built SQL \u2014 use PreparedStatement."
+  description: "JDBC Statement.executeQuery with string-built SQL - use PreparedStatement."
 
 - id: java.sqli.statement_execute
   enabled: true
@@ -62,7 +62,7 @@
         }
       }
     expect_no_match: true
-  description: "JDBC Statement.execute(sql) with tainted SQL text — raw query execution."
+  description: "JDBC Statement.execute(sql) with tainted SQL text - raw query execution."
 
 - id: java.sqli.statement_executeupdate
   enabled: true
@@ -200,7 +200,7 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Connection.prepareCall(\"\
       {call healthcheck()}\");\n  }\n}\n"
     expect_no_match: true
-  description: "JDBC Connection.prepareCall \u2014 flag if SQL is string-built. Typed-receiver\
+  description: "JDBC Connection.prepareCall - flag if SQL is string-built. Typed-receiver\
     \ sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects\
     \ 0-arg decoys."
 
@@ -242,7 +242,7 @@
         }
       }
     expect_no_match: true
-  description: "Connection.prepareStatement(taintedSql) — placeholders only protect values when the SQL template itself is not attacker-controlled."
+  description: "Connection.prepareStatement(taintedSql) - placeholders only protect values when the SQL template itself is not attacker-controlled."
 
 - id: java.sqli.spring_jdbctemplate_query
   enabled: true
@@ -393,7 +393,7 @@
       }
     expect_no_match: true
   description: "Spring JdbcTemplate.execute(sql) on a local JdbcTemplate variable\
-    \ \u2014 raw SQL string execution."
+    \ - raw SQL string execution."
   imports:
   - org
 - id: java.sqli.hibernate_create_query_local
@@ -418,7 +418,7 @@
       \ {\n  Object createQuery(Object... args) { return null; }\n}\n"
     expect_match_text:
     - session.createQuery
-  description: "Hibernate Session.createQuery(HQL) on a local Session variable \u2014\
+  description: "Hibernate Session.createQuery(HQL) on a local Session variable -\
     \ string-built HQL injection."
   imports:
   - org
@@ -448,7 +448,7 @@
     code: "import org.hibernate.*;\nclass App {\n  void handle(String input) throws\
       \ Exception {\n    Session.createSQLQuery(\"select 1\");\n  }\n}\n"
     expect_no_match: true
-  description: "Hibernate Session.createSQLQuery \u2014 raw SQL. Typed-receiver sqli;\
+  description: "Hibernate Session.createSQLQuery - raw SQL. Typed-receiver sqli;\
     \ `min_args: 1` rejects 0-arg decoys."
 - id: java.sqli.hibernate_create_native_query
   enabled: true
@@ -474,7 +474,7 @@
     code: "import org.hibernate.*;\nclass App {\n  void handle(String input) throws\
       \ Exception {\n    Session.createNativeQuery(\"select 1\");\n  }\n}\n"
     expect_no_match: true
-  description: "Hibernate Session.createNativeQuery \u2014 raw SQL. Typed-receiver\
+  description: "Hibernate Session.createNativeQuery - raw SQL. Typed-receiver\
     \ sqli; `min_args: 1` rejects 0-arg decoys."
 - id: java.sqli.jpa_create_native_query
   enabled: true
@@ -538,7 +538,7 @@
     expect_match_text:
     - em.createNativeQuery
   description: "JPA EntityManager.createNativeQuery(sql) on a local EntityManager\
-    \ variable \u2014 raw native SQL execution."
+    \ variable - raw native SQL execution."
   imports:
   - javax
 - id: java.sqli.r2dbc_databaseclient_sql
@@ -570,7 +570,7 @@
     code: "import org.springframework.r2dbc.*;\nclass App {\n  void handle(String\
       \ input) throws Exception {\n    DatabaseClient.sql(\"select 1\");\n  }\n}\n"
     expect_no_match: true
-  description: "Spring R2DBC DatabaseClient.sql(sql) \u2014 SQL text remains injectable\
+  description: "Spring R2DBC DatabaseClient.sql(sql) - SQL text remains injectable\
     \ when built from tainted input; bind values separately."
 - id: java.sqli.mybatis_select_one
   enabled: false
@@ -589,7 +589,7 @@
       attribute:
       - SqlSession
       - selectOne
-  description: "Disabled \u2014 MyBatis selectOne usually safe; only dangerous with\
+  description: "Disabled - MyBatis selectOne usually safe; only dangerous with\
     \ ${} interpolation in mapper XML."
 - id: java.sqli.spring_jdbctemplate_batchupdate
   enabled: true
@@ -620,7 +620,7 @@
       \ throws Exception {\n    JdbcTemplate.batchUpdate(\"update users set active\
       \ = true\");\n  }\n}\n"
     expect_no_match: true
-  description: "Spring JdbcTemplate.batchUpdate(sql...) \u2014 raw SQL string batch\
+  description: "Spring JdbcTemplate.batchUpdate(sql...) - raw SQL string batch\
     \ form; use placeholders with BatchPreparedStatementSetter or argument arrays."
 - id: java.sqli.namedparameterjdbctemplate_query
   enabled: true
@@ -652,7 +652,7 @@
       \ throws Exception {\n    NamedParameterJdbcTemplate.query(\"select 1\");\n\
       \  }\n}\n"
     expect_no_match: true
-  description: "NamedParameterJdbcTemplate.query(sql, ...) \u2014 SQL text remains\
+  description: "NamedParameterJdbcTemplate.query(sql, ...) - SQL text remains\
     \ injectable when built from tainted input; named parameters only protect values."
 - id: java.sqli.namedparameterjdbctemplate_update
   enabled: true
@@ -684,7 +684,7 @@
       \ throws Exception {\n    NamedParameterJdbcTemplate.update(\"update users set\
       \ active = true\");\n  }\n}\n"
     expect_no_match: true
-  description: "NamedParameterJdbcTemplate.update(sql, ...) \u2014 named placeholders\
+  description: "NamedParameterJdbcTemplate.update(sql, ...) - named placeholders\
     \ bind values but do not sanitize tainted SQL text."
 - id: java.sqli.jdbi_handle_createquery
   enabled: true
@@ -716,7 +716,7 @@
     code: "import org.jdbi.*;\nclass App {\n  void handle(String input) throws Exception\
       \ {\n    createQuery(\"select 1\");\n  }\n}\n"
     expect_no_match: true
-  description: "JDBI Handle.createQuery(sql) \u2014 raw SQL text remains injectable\
+  description: "JDBI Handle.createQuery(sql) - raw SQL text remains injectable\
     \ when built from attacker-controlled input. Merged collision aliases: java.sqli.hibernate_create_query,\
     \ java.sqli.jpa_create_query."
   aliases:
@@ -752,7 +752,7 @@
     code: "import org.jdbi.*;\nclass App {\n  void handle(String input) throws Exception\
       \ {\n    createUpdate(\"update users set active = true\");\n  }\n}\n"
     expect_no_match: true
-  description: "JDBI Handle.createUpdate(sql) \u2014 raw update SQL text remains injectable\
+  description: "JDBI Handle.createUpdate(sql) - raw update SQL text remains injectable\
     \ when constructed with tainted input."
 - id: java.sqli.jdbi_handle_execute
   enabled: false
@@ -785,7 +785,7 @@
       \ args) { return 0; }\n}\n"
     expect_match_text:
     - handle.execute
-  description: "JDBI Handle.execute(sql) \u2014 executes raw SQL built by the caller.\
+  description: "JDBI Handle.execute(sql) - executes raw SQL built by the caller.\
     \ Merged collision aliases: java.cmdi.commons_exec_executor, java.graphql.graphql_execute,\
     \ java.nosql.cqlsession_execute, java.ssrf.httpclient_execute, java.ssrf.closeable_httpclient_execute,\
     \ java.ssrf.okhttp_call_execute, java.template.mustache_execute."

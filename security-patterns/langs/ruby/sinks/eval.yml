@@ -18,7 +18,7 @@
   - name: arg tainted literal negative
     code: "def example(input, url, id, payload, request, params)\n  eval(\"safe\")\nend\n"
     expect_no_match: true
-  description: "Kernel#eval — evaluates tainted Ruby source code; arbitrary code execution. Merged collision aliases: ruby.eval.binding_eval."
+  description: "Kernel#eval - evaluates tainted Ruby source code; arbitrary code execution. Merged collision aliases: ruby.eval.binding_eval."
   aliases:
   - ruby.eval.binding_eval
 - id: ruby.eval.instance_eval
@@ -97,7 +97,7 @@
     kind: call
     callee:
       name: send
-  description: "Disabled — send/public_send method-name flag requires per-call constraint."
+  description: "Disabled - send/public_send method-name flag requires per-call constraint."
 - id: ruby.eval.method_invoke
   enabled: false
   disabled_reason:
@@ -111,7 +111,7 @@
     kind: call
     callee:
       name: __send__
-  description: "Disabled — same as send, ubiquitous."
+  description: "Disabled - same as send, ubiquitous."
 - id: ruby.eval.active_support_constantize
   enabled: false
   disabled_reason:
@@ -137,7 +137,7 @@
       end
     expect_match_text:
     - input.constantize
-  description: "Disabled — constantize resolves the receiver string; needs receiver-taint tracking for the class name."
+  description: "Disabled - constantize resolves the receiver string; needs receiver-taint tracking for the class name."
 - id: ruby.eval.active_support_safe_constantize
   enabled: false
   disabled_reason:
@@ -163,7 +163,7 @@
       end
     expect_match_text:
     - input.safe_constantize
-  description: "Disabled — safe_constantize resolves the receiver string; needs receiver-taint tracking for the class name."
+  description: "Disabled - safe_constantize resolves the receiver string; needs receiver-taint tracking for the class name."
 - id: ruby.eval.module_const_get
   enabled: true
   language: ruby

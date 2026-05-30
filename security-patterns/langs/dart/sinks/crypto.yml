@@ -20,7 +20,7 @@
       import 'package:crypto/crypto.dart';
       import 'package:crypto/crypto.dart'; // crypto
       void test() { var input = "x"; var amount = 1; md5.convert(input); }
-  description: "package:crypto md5.convert — collision-broken hash."
+  description: "package:crypto md5.convert - collision-broken hash."
 
   imports:
   - crypto/crypto.dart
@@ -45,7 +45,7 @@
       import 'package:crypto/crypto.dart';
       import 'package:crypto/crypto.dart'; // crypto
       void test() { var input = "x"; var amount = 1; sha1.convert(input); }
-  description: "package:crypto sha1.convert — collision-weak."
+  description: "package:crypto sha1.convert - collision-weak."
 
   imports:
   - crypto/crypto.dart
@@ -65,7 +65,7 @@
     code: |
       class Random { Random([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var input = "x"; var result = Random(input); }
-  description: "Random() default — non-crypto PRNG. Use Random.secure()."
+  description: "Random() default - non-crypto PRNG. Use Random.secure()."
 
 - id: dart.crypto.ecb_cipher
   enabled: true
@@ -85,7 +85,7 @@
       import 'package:pointycastle/pointycastle.dart' show ECBCipher;
       class ECBCipher { ECBCipher([dynamic input]); }
       void test() { var input = "x"; var result = ECBCipher(input); }
-  description: "pointycastle ECBCipher — deterministic/leaks plaintext structure."
+  description: "pointycastle ECBCipher - deterministic/leaks plaintext structure."
 
   imports:
   - pointycastle/pointycastle.dart

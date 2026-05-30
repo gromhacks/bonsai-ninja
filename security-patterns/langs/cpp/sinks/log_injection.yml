@@ -35,4 +35,4 @@
         spdlog::info("user={}", user);
       }
     expect_no_match: true
-  description: 'spdlog::info("... {} ...\n", user) — newline log forging.'
+  description: 'spdlog::info("... {} ...\n", user) - newline log forging.'

@@ -14,7 +14,7 @@
     kind: call
     callee:
       regex: ^Command::new$
-  description: "Disabled — bare Command::new with no arg constraint fires on every process spawn. The real RCE sinks are rust.cmdi.std_command_new_shell and rust.cmdi.std_command_new_bash (argv-form without a shell wrapper is safe)."
+  description: "Disabled - bare Command::new with no arg constraint fires on every process spawn. The real RCE sinks are rust.cmdi.std_command_new_shell and rust.cmdi.std_command_new_bash (argv-form without a shell wrapper is safe)."
 - id: rust.cmdi.std_command_new_shell
   enabled: true
   language: rust
@@ -50,7 +50,7 @@
           Command::new("true");
       }
     expect_no_match: true
-  description: "Command::new(tainted) — attacker-controlled program names select arbitrary binaries. Shell-wrapper command strings are covered by tainted Command.arg(...) calls. Merged collision aliases: rust.cmdi.tokio_command_new, rust.cmdi.async_process_command, rust.cmdi.async_std_command_new."
+  description: "Command::new(tainted) - attacker-controlled program names select arbitrary binaries. Shell-wrapper command strings are covered by tainted Command.arg(...) calls. Merged collision aliases: rust.cmdi.tokio_command_new, rust.cmdi.async_process_command, rust.cmdi.async_std_command_new."
   aliases:
   - rust.cmdi.tokio_command_new
   - rust.cmdi.async_process_command
@@ -86,7 +86,7 @@
           c.arg("safe");
       }
     expect_no_match: true
-  description: "Command.arg(tainted) — argument added to a shell-backed std::process::Command."
+  description: "Command.arg(tainted) - argument added to a shell-backed std::process::Command."
 - id: rust.cmdi.duct_cmd
   enabled: true
   language: rust
@@ -153,7 +153,7 @@
           duct::sh("safe");
       }
     expect_no_match: true
-  description: "duct sh — shell variant."
+  description: "duct sh - shell variant."
 - id: rust.cmdi.run_script_run
   enabled: true
   language: rust
@@ -186,7 +186,7 @@
           run_script::run("echo safe");
       }
     expect_no_match: true
-  description: "run_script::run — shell-style runner."
+  description: "run_script::run - shell-style runner."
 - id: rust.cmdi.subprocess_exec
   enabled: true
   language: rust
@@ -219,7 +219,7 @@
           Exec::shell("id");
       }
     expect_no_match: true
-  description: "subprocess Exec::shell — explicit shell."
+  description: "subprocess Exec::shell - explicit shell."
 - id: rust.cmdi.cmd_lib_run
   enabled: true
   language: rust
@@ -284,7 +284,7 @@
           libc::system("whoami");
       }
     expect_no_match: true
-  description: "libc::system — invokes /bin/sh."
+  description: "libc::system - invokes /bin/sh."
 - id: rust.cmdi.libc_execv
   enabled: true
   language: rust
@@ -317,7 +317,7 @@
           libc::execv("/bin/true");
       }
     expect_no_match: true
-  description: "libc::execv — replaces the current process with tainted program + argv; direct arbitrary-binary execution."
+  description: "libc::execv - replaces the current process with tainted program + argv; direct arbitrary-binary execution."
 - id: rust.cmdi.nix_unistd_execvp
   enabled: true
   language: rust
@@ -350,7 +350,7 @@
           unistd::execvp("true");
       }
     expect_no_match: true
-  description: "nix::unistd::execvp — tainted argv[0] replaces the process image with attacker binary."
+  description: "nix::unistd::execvp - tainted argv[0] replaces the process image with attacker binary."
 - id: rust.cmdi.nix_unistd_execv
   enabled: true
   language: rust
@@ -383,7 +383,7 @@
           unistd::execv("/bin/true");
       }
     expect_no_match: true
-  description: "nix::unistd::execv — tainted path/argv executes arbitrary binary."
+  description: "nix::unistd::execv - tainted path/argv executes arbitrary binary."
 - id: rust.cmdi.command_env_tainted
   enabled: true
   language: rust
@@ -420,7 +420,7 @@
           Command::env("safe", "safe");
       }
     expect_no_match: true
-  description: "Command::env(name, tainted) — injects an attacker-controlled environment variable into a child process; pair with missing env_clear() to detect env-bleed (PATH, LD_PRELOAD, AWS_*) into spawned processes."
+  description: "Command::env(name, tainted) - injects an attacker-controlled environment variable into a child process; pair with missing env_clear() to detect env-bleed (PATH, LD_PRELOAD, AWS_*) into spawned processes."
 - id: rust.cmdi.command_env_name_tainted
   enabled: true
   language: rust
@@ -455,7 +455,7 @@
           Command::env("safe");
       }
     expect_no_match: true
-  description: "Command::env(name, value) — tainted environment variable names can override sensitive child-process settings."
+  description: "Command::env(name, value) - tainted environment variable names can override sensitive child-process settings."
 - id: rust.cmdi.command_envs_tainted
   enabled: true
   language: rust
@@ -492,4 +492,4 @@
           Command::envs("safe");
       }
     expect_no_match: true
-  description: "Command::envs(iter) — bulk env injection; tainted map keys/values reach the child process."
+  description: "Command::envs(iter) - bulk env injection; tainted map keys/values reach the child process."

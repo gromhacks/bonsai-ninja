@@ -1,7 +1,7 @@
 # Elixir memory-safety / lifecycle audit-pair sites for OTP processes.
 # OTP semantic: GenServer.stop / Supervisor.terminate_child end the
 # child process; subsequent GenServer.call / Process.send to the same
-# pid yields :noproc / :exit — i.e. use-after-stop. The Elixir adapter
+# pid yields :noproc / :exit - i.e. use-after-stop. The Elixir adapter
 # only recognises `:gen_server.stop` (Erlang-style) and `Process.exit`
 # in its lifecycle transition table; `GenServer.stop` (Elixir
 # capitalisation) and `Supervisor.terminate_child` are NOT yet wired,
@@ -27,7 +27,7 @@
         end
       end
     expect_match_text: [GenServer.stop]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. GenServer.stop(pid) — OTP terminates the callback module; subsequent GenServer.call/cast on the same pid raises :exit{:noproc, ...} (use-after-stop, CWE-672). The `GenServer.stop` selector (Elixir capitalisation) isn't in the adapter's lifecycle transition table, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. GenServer.stop(pid) - OTP terminates the callback module; subsequent GenServer.call/cast on the same pid raises :exit{:noproc, ...} (use-after-stop, CWE-672). The `GenServer.stop` selector (Elixir capitalisation) isn't in the adapter's lifecycle transition table, so this rule remains a transition-site audit-pair."
 - id: elixir.memory.supervisor_terminate_child
   enabled: true
   language: elixir
@@ -47,4 +47,4 @@
         end
       end
     expect_match_text: [Supervisor.terminate_child]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Supervisor.terminate_child(sup, child) — OTP shuts the child down; subsequent traffic addressed to the child pid yields :noproc / :exit (use-after-shutdown, CWE-672). The `Supervisor.terminate_child` selector isn't in the adapter's lifecycle transition table, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Supervisor.terminate_child(sup, child) - OTP shuts the child down; subsequent traffic addressed to the child pid yields :noproc / :exit (use-after-shutdown, CWE-672). The `Supervisor.terminate_child` selector isn't in the adapter's lifecycle transition table, so this rule remains a transition-site audit-pair."

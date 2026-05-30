@@ -26,4 +26,4 @@
           Regex::new("^[a-z]+$");
       }
     expect_no_match: true
-  description: "regex::Regex::new(tainted_pattern) — attacker-controlled regex strings can consume excessive CPU during matching."
+  description: "regex::Regex::new(tainted_pattern) - attacker-controlled regex strings can consume excessive CPU during matching."

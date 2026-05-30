@@ -21,7 +21,7 @@
         const char *query = arg;
         EVP_md5(arg);
       }
-  description: "OpenSSL EVP_md5 — MD5 is collision-broken."
+  description: "OpenSSL EVP_md5 - MD5 is collision-broken."
 
 - id: cpp.crypto.md4_evp
   enabled: true
@@ -45,7 +45,7 @@
         const char *query = arg;
         EVP_md4(arg);
       }
-  description: "OpenSSL EVP_md4 — MD4 is broken."
+  description: "OpenSSL EVP_md4 - MD4 is broken."
 
 - id: cpp.crypto.md2_evp
   enabled: true
@@ -69,7 +69,7 @@
         const char *query = arg;
         EVP_md2(arg);
       }
-  description: "OpenSSL EVP_md2 — MD2 is broken."
+  description: "OpenSSL EVP_md2 - MD2 is broken."
 
 - id: cpp.crypto.sha1_evp
   enabled: true
@@ -93,7 +93,7 @@
         const char *query = arg;
         EVP_sha1(arg);
       }
-  description: "OpenSSL EVP_sha1 — SHA-1 is collision-broken for signatures."
+  description: "OpenSSL EVP_sha1 - SHA-1 is collision-broken for signatures."
 
 - id: cpp.crypto.md5_legacy
   enabled: true
@@ -117,7 +117,7 @@
         const char *query = arg;
         MD5(arg);
       }
-  description: "OpenSSL MD5() legacy one-shot — broken hash."
+  description: "OpenSSL MD5() legacy one-shot - broken hash."
 
 - id: cpp.crypto.sha1_legacy
   enabled: true
@@ -141,7 +141,7 @@
         const char *query = arg;
         SHA1(arg);
       }
-  description: "OpenSSL SHA1() legacy one-shot — broken for signatures."
+  description: "OpenSSL SHA1() legacy one-shot - broken for signatures."
 
 - id: cpp.crypto.des_evp
   enabled: true
@@ -165,7 +165,7 @@
         const char *query = arg;
         EVP_des_cbc(arg);
       }
-  description: "OpenSSL EVP_des_cbc — single-DES, 56-bit key."
+  description: "OpenSSL EVP_des_cbc - single-DES, 56-bit key."
 
 - id: cpp.crypto.des_ecb_evp
   enabled: true
@@ -189,7 +189,7 @@
         const char *query = arg;
         EVP_des_ecb(arg);
       }
-  description: "OpenSSL EVP_des_ecb — DES + ECB mode."
+  description: "OpenSSL EVP_des_ecb - DES + ECB mode."
 
 - id: cpp.crypto.des3_ecb_evp
   enabled: true
@@ -213,7 +213,7 @@
         const char *query = arg;
         EVP_des_ede3_ecb(arg);
       }
-  description: "OpenSSL EVP_des_ede3_ecb — 3DES + ECB."
+  description: "OpenSSL EVP_des_ede3_ecb - 3DES + ECB."
 
 - id: cpp.crypto.rc4_evp
   enabled: true
@@ -237,7 +237,7 @@
         const char *query = arg;
         EVP_rc4(arg);
       }
-  description: "OpenSSL EVP_rc4 — RC4 stream cipher has biases."
+  description: "OpenSSL EVP_rc4 - RC4 stream cipher has biases."
 
 - id: cpp.crypto.rc2_evp
   enabled: true
@@ -261,7 +261,7 @@
         const char *query = arg;
         EVP_rc2_cbc(arg);
       }
-  description: "OpenSSL EVP_rc2_cbc — RC2 block cipher."
+  description: "OpenSSL EVP_rc2_cbc - RC2 block cipher."
 
 - id: cpp.crypto.blowfish_evp
   enabled: true
@@ -285,7 +285,7 @@
         const char *query = arg;
         EVP_bf_cbc(arg);
       }
-  description: "OpenSSL EVP_bf_cbc — Blowfish with 64-bit block (birthday bound)."
+  description: "OpenSSL EVP_bf_cbc - Blowfish with 64-bit block (birthday bound)."
 
 - id: cpp.crypto.aes_ecb_evp
   enabled: true
@@ -309,7 +309,7 @@
         const char *query = arg;
         EVP_aes_128_ecb(arg);
       }
-  description: "OpenSSL EVP_aes_128_ecb — ECB leaks repeating plaintext blocks."
+  description: "OpenSSL EVP_aes_128_ecb - ECB leaks repeating plaintext blocks."
 
 - id: cpp.crypto.aes_256_ecb_evp
   enabled: true
@@ -333,7 +333,7 @@
         const char *query = arg;
         EVP_aes_256_ecb(arg);
       }
-  description: "OpenSSL EVP_aes_256_ecb — ECB mode, not semantically secure."
+  description: "OpenSSL EVP_aes_256_ecb - ECB mode, not semantically secure."
 
 - id: cpp.crypto.std_rand
   enabled: true
@@ -355,7 +355,7 @@
         const char *query = arg;
         rand(arg);
       }
-  description: "rand() — non-crypto PRNG; do not use for tokens/keys/IVs."
+  description: "rand() - non-crypto PRNG; do not use for tokens/keys/IVs."
 
 - id: cpp.crypto.std_srand
   enabled: true
@@ -377,7 +377,7 @@
         const char *query = arg;
         srand(arg);
       }
-  description: "srand() — seeds the insecure rand; seeding with time() is predictable."
+  description: "srand() - seeds the insecure rand; seeding with time() is predictable."
 
 - id: cpp.crypto.std_mt19937
   enabled: true
@@ -397,7 +397,7 @@
         const char *arg = "tainted";
         auto *x = new mt19937(arg);
       }
-  description: "std::mt19937 — fast PRNG but not crypto-secure; use for auth tokens = weakness."
+  description: "std::mt19937 - fast PRNG but not crypto-secure; use for auth tokens = weakness."
 
 - id: cpp.crypto.std_mt19937_64
   enabled: true
@@ -417,7 +417,7 @@
         const char *arg = "tainted";
         auto *x = new mt19937_64(arg);
       }
-  description: "std::mt19937_64 — 64-bit Mersenne Twister; not crypto-secure."
+  description: "std::mt19937_64 - 64-bit Mersenne Twister; not crypto-secure."
 
 - id: cpp.crypto.qt_qrandomgenerator_global
   enabled: false
@@ -432,7 +432,7 @@
     kind: call
     callee:
       attribute: [QRandomGenerator, global]
-  description: "Disabled — QRandomGenerator::global() uses system CSPRNG; flag QRandomGenerator(seed) or bounded() on auth paths."
+  description: "Disabled - QRandomGenerator::global() uses system CSPRNG; flag QRandomGenerator(seed) or bounded() on auth paths."
 
 - id: cpp.crypto.botan_des
   enabled: true
@@ -454,7 +454,7 @@
         const char *arg = "tainted";
         auto *x = new DES(arg);
       }
-  description: "Botan DES block cipher — 56-bit key."
+  description: "Botan DES block cipher - 56-bit key."
 
 - id: cpp.crypto.cryptopp_md5
   enabled: true
@@ -476,7 +476,7 @@
         const char *arg = "tainted";
         auto *x = new Weak::MD5(arg);
       }
-  description: "Crypto++ Weak::MD5 — library explicitly flags it as weak; MD5 is collision-broken."
+  description: "Crypto++ Weak::MD5 - library explicitly flags it as weak; MD5 is collision-broken."
 
 - id: cpp.crypto.cryptopp_sha1
   enabled: true
@@ -498,7 +498,7 @@
         const char *arg = "tainted";
         auto *x = new CryptoPP::SHA1(arg);
       }
-  description: "Crypto++ CryptoPP::SHA1 — SHA-1 is collision-broken for signatures."
+  description: "Crypto++ CryptoPP::SHA1 - SHA-1 is collision-broken for signatures."
 
 - id: cpp.crypto.cryptopp_des
   enabled: true
@@ -520,7 +520,7 @@
         const char *arg = "tainted";
         auto *x = new CryptoPP::DES(arg);
       }
-  description: "Crypto++ CryptoPP::DES — 56-bit single-DES block cipher."
+  description: "Crypto++ CryptoPP::DES - 56-bit single-DES block cipher."
 
 - id: cpp.crypto.botan_hash_md5
   aliases:
@@ -546,4 +546,4 @@
         const char *query = arg;
         HashFunction::create("MD5");
       }
-  description: 'Botan HashFunction::create("MD5") — instantiates broken MD5 hash. Also covers merged aliases: cpp.crypto.botan_hash_sha1.'
+  description: 'Botan HashFunction::create("MD5") - instantiates broken MD5 hash. Also covers merged aliases: cpp.crypto.botan_hash_sha1.'

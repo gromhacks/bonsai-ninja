@@ -26,7 +26,7 @@
           fs::read_to_string("/var/app/config.txt");
       }
     expect_no_match: true
-  description: "std::fs::read_to_string (and tokio::fs::read_to_string via suffix) — tainted path reads arbitrary files."
+  description: "std::fs::read_to_string (and tokio::fs::read_to_string via suffix) - tainted path reads arbitrary files."
 - id: rust.path.fs_read
   enabled: true
   language: rust
@@ -55,7 +55,7 @@
           fs::read("/var/app/config.txt");
       }
     expect_no_match: true
-  description: "std::fs::read (and tokio::fs::read via suffix) — tainted path reads arbitrary files."
+  description: "std::fs::read (and tokio::fs::read via suffix) - tainted path reads arbitrary files."
 - id: rust.path.fs_write
   enabled: true
   language: rust
@@ -84,7 +84,7 @@
           fs::write("/var/app/output.txt", "safe contents");
       }
     expect_no_match: true
-  description: "std::fs::write (and tokio::fs::write via suffix) — tainted path overwrites arbitrary files."
+  description: "std::fs::write (and tokio::fs::write via suffix) - tainted path overwrites arbitrary files."
 - id: rust.path.fs_remove_file
   enabled: true
   language: rust
@@ -162,7 +162,7 @@
           File::open("/var/app/config.txt");
       }
     expect_no_match: true
-  description: "File::open with tainted path — attacker-controlled paths read arbitrary files on disk."
+  description: "File::open with tainted path - attacker-controlled paths read arbitrary files on disk."
 - id: rust.path.file_create
   enabled: true
   language: rust
@@ -191,7 +191,7 @@
           File::create("/var/app/output.txt");
       }
     expect_no_match: true
-  description: "File::create with tainted path — attacker-controlled paths create / overwrite arbitrary files."
+  description: "File::create with tainted path - attacker-controlled paths create / overwrite arbitrary files."
 - id: rust.path.tokio_fs_read
   enabled: false
   disabled_reason:
@@ -205,7 +205,7 @@
     kind: call
     callee:
       attribute: [tokio, fs, read]
-  description: "Disabled — suffix-matches against rust.path.fs_read (`[fs, read]`). Leaving both enabled double-fires on every tokio::fs::read call."
+  description: "Disabled - suffix-matches against rust.path.fs_read (`[fs, read]`). Leaving both enabled double-fires on every tokio::fs::read call."
 - id: rust.path.tokio_fs_read_to_string
   enabled: false
   disabled_reason:
@@ -219,7 +219,7 @@
     kind: call
     callee:
       attribute: [tokio, fs, read_to_string]
-  description: "Disabled — suffix-matches against rust.path.fs_read_to_string. The std rule already catches tokio::fs::read_to_string via suffix."
+  description: "Disabled - suffix-matches against rust.path.fs_read_to_string. The std rule already catches tokio::fs::read_to_string via suffix."
 - id: rust.path.tokio_fs_write
   enabled: false
   disabled_reason:
@@ -233,7 +233,7 @@
     kind: call
     callee:
       attribute: [tokio, fs, write]
-  description: "Disabled — suffix-matches against rust.path.fs_write. The std rule already catches tokio::fs::write via suffix."
+  description: "Disabled - suffix-matches against rust.path.fs_write. The std rule already catches tokio::fs::write via suffix."
 - id: rust.path.fs_rename
   enabled: true
   language: rust
@@ -262,7 +262,7 @@
           fs::rename("/var/app/input.txt", "/var/app/output.txt");
       }
     expect_no_match: true
-  description: "std::fs::rename — tainted source/dest enables arbitrary-file overwrite."
+  description: "std::fs::rename - tainted source/dest enables arbitrary-file overwrite."
 - id: rust.path.fs_rename_dest
   enabled: true
   language: rust
@@ -291,7 +291,7 @@
           fs::rename("/var/app/input.txt", "/var/app/output.txt");
       }
     expect_no_match: true
-  description: "std::fs::rename(src, dest) — tainted destination enables arbitrary-file overwrite or moves outside the intended directory."
+  description: "std::fs::rename(src, dest) - tainted destination enables arbitrary-file overwrite or moves outside the intended directory."
 - id: rust.path.fs_create_dir_all
   enabled: true
   language: rust
@@ -320,7 +320,7 @@
           fs::create_dir_all("/var/app/uploads");
       }
     expect_no_match: true
-  description: "std::fs::create_dir_all — tainted path can create directories outside intended root."
+  description: "std::fs::create_dir_all - tainted path can create directories outside intended root."
 - id: rust.path.tar_unpack
   enabled: true
   language: rust
@@ -349,7 +349,7 @@
           Archive::unpack("/var/app/extract");
       }
     expect_no_match: true
-  description: "tar::Archive::unpack — tar-slip: entries with `../` escape the target dir."
+  description: "tar::Archive::unpack - tar-slip: entries with `../` escape the target dir."
 - id: rust.path.zip_extract
   enabled: true
   language: rust
@@ -378,4 +378,4 @@
           ZipArchive::extract("/var/app/extract");
       }
     expect_no_match: true
-  description: "zip::read::ZipArchive::extract — zip-slip: member names with `../` write outside dest."
+  description: "zip::read::ZipArchive::extract - zip-slip: member names with `../` write outside dest."

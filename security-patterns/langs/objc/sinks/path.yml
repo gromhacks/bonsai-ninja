@@ -20,7 +20,7 @@
       code: |
         void test(void) { contentsAtPath(@"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -contentsAtPath: — reads arbitrary file; tainted path allows reading outside intended directory."
+  description: "NSFileManager -contentsAtPath: - reads arbitrary file; tainted path allows reading outside intended directory."
 
 - id: objc.path.remove_item_at_path
   enabled: true
@@ -43,7 +43,7 @@
       code: |
         void test(void) { removeItemAtPath(@"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -removeItemAtPath: / -removeItemAtURL: — deletes arbitrary file when path is tainted."
+  description: "NSFileManager -removeItemAtPath: / -removeItemAtURL: - deletes arbitrary file when path is tainted."
 
 - id: objc.path.move_item_at_path
   aliases:
@@ -68,7 +68,7 @@
       code: |
         void test(void) { moveItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: — relocates files; tainted src/dst permits arbitrary overwrite. Also covers merged aliases: objc.upload_gcdwebserver_uploaded_file_path."
+  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: - relocates files; tainted src/dst permits arbitrary overwrite. Also covers merged aliases: objc.upload_gcdwebserver_uploaded_file_path."
 - id: objc.path.move_item_at_path_dest
   aliases:
     - objc.upload_gcdwebserver_uploaded_file_path_dest
@@ -92,7 +92,7 @@
       code: |
         void test(void) { moveItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: — tainted destination permits arbitrary overwrite."
+  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: - tainted destination permits arbitrary overwrite."
 
 - id: objc.path.copy_item_at_path
   enabled: true
@@ -115,7 +115,7 @@
       code: |
         void test(void) { copyItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -copyItemAtPath:toPath: / -copyItemAtURL:toURL: — tainted path lets attacker read/write across directories."
+  description: "NSFileManager -copyItemAtPath:toPath: / -copyItemAtURL:toURL: - tainted path lets attacker read/write across directories."
 - id: objc.path.copy_item_at_path_dest
   enabled: true
   language: objc
@@ -137,7 +137,7 @@
       code: |
         void test(void) { copyItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -copyItemAtPath:toPath: / -copyItemAtURL:toURL: — tainted destination permits arbitrary overwrite."
+  description: "NSFileManager -copyItemAtPath:toPath: / -copyItemAtURL:toURL: - tainted destination permits arbitrary overwrite."
 
 - id: objc.path.create_file_at_path
   enabled: true
@@ -160,7 +160,7 @@
       code: |
         void test(void) { createFileAtPath(@"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileManager -createFileAtPath:contents:attributes: — writes arbitrary bytes to tainted path."
+  description: "NSFileManager -createFileAtPath:contents:attributes: - writes arbitrary bytes to tainted path."
 
 - id: objc.path.create_directory
   enabled: true
@@ -183,7 +183,7 @@
       code: |
         void test(void) { createDirectoryAtPath(@"/tmp/safe"); }
       expect_no_match: true
-  description: "NSFileManager -createDirectoryAtPath: / -createDirectoryAtURL: — tainted path allows mkdir outside sandbox."
+  description: "NSFileManager -createDirectoryAtPath: / -createDirectoryAtURL: - tainted path allows mkdir outside sandbox."
 
 - id: objc.path.contents_of_directory
   enabled: true
@@ -206,7 +206,7 @@
       code: |
         void test(void) { contentsOfDirectoryAtPath(@"/tmp/safe"); }
       expect_no_match: true
-  description: "NSFileManager -contentsOfDirectoryAtPath: / -contentsOfDirectoryAtURL: — directory enumeration leak."
+  description: "NSFileManager -contentsOfDirectoryAtPath: / -contentsOfDirectoryAtURL: - directory enumeration leak."
 
 - id: objc.path.data_with_contents_of_file
   enabled: true
@@ -229,7 +229,7 @@
       code: |
         void test(void) { dataWithContentsOfFile(@"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSData +dataWithContentsOfFile: / +dataWithContentsOfMappedFile: — reads arbitrary file into memory when path is tainted."
+  description: "NSData +dataWithContentsOfFile: / +dataWithContentsOfMappedFile: - reads arbitrary file into memory when path is tainted."
 
 - id: objc.path.string_with_contents_of_file
   enabled: true
@@ -252,7 +252,7 @@
       code: |
         void test(void) { stringWithContentsOfFile(@"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSString +stringWithContentsOfFile:encoding:error: — arbitrary file read via tainted path."
+  description: "NSString +stringWithContentsOfFile:encoding:error: - arbitrary file read via tainted path."
 
 - id: objc.path.nsinputstream_filepath
   enabled: true
@@ -275,7 +275,7 @@
       code: |
         void test(void) { [NSInputStream inputStreamWithFileAtPath:@"/tmp/safe.txt"]; }
       expect_no_match: true
-  description: "NSInputStream/NSOutputStream +inputStreamWithFileAtPath: / -initWithFileAtPath: — opens arbitrary file. Constrained to stream receivers to avoid collisions with other initWithFileAtPath: consumers."
+  description: "NSInputStream/NSOutputStream +inputStreamWithFileAtPath: / -initWithFileAtPath: - opens arbitrary file. Constrained to stream receivers to avoid collisions with other initWithFileAtPath: consumers."
 
 - id: objc.path.nsfilehandle_for_path
   enabled: true
@@ -298,7 +298,7 @@
       code: |
         void test(void) { fileHandleForReadingAtPath(@"/tmp/safe.txt"); }
       expect_no_match: true
-  description: "NSFileHandle +fileHandleForReadingAtPath: / +fileHandleForWritingAtPath: / +fileHandleForUpdatingAtPath: — opens tainted path for I/O."
+  description: "NSFileHandle +fileHandleForReadingAtPath: / +fileHandleForWritingAtPath: / +fileHandleForUpdatingAtPath: - opens tainted path for I/O."
 
 - id: objc.path.fopen
   enabled: true
@@ -321,7 +321,7 @@
       code: |
         void test(void) { fopen("safe.txt", "r"); }
       expect_no_match: true
-  description: "libc fopen/freopen — opens arbitrary file when path is tainted (C bridging). Bare `open` excluded as too ubiquitous."
+  description: "libc fopen/freopen - opens arbitrary file when path is tainted (C bridging). Bare `open` excluded as too ubiquitous."
 
 # Archive extraction (Zip Slip class). SSZipArchive is the canonical
 # iOS archive library; trusts entry names from the archive.
@@ -346,7 +346,7 @@
       code: |
         void test(void) { [SSZipArchive unzipFileAtPath:@"bundle.zip" toDestination:@"/tmp/out"]; }
       expect_no_match: true
-  description: "SSZipArchive unzipFileAtPath:toDestination: — extracts archive entries; entry names are attacker-controlled, so any name with `..` escapes the destination dir."
+  description: "SSZipArchive unzipFileAtPath:toDestination: - extracts archive entries; entry names are attacker-controlled, so any name with `..` escapes the destination dir."
 - id: objc.path.sszip_unzip_with_password
   enabled: false
   disabled_reason:
@@ -363,4 +363,4 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; [SSZipArchive unzipFileAtPath:input toDestination:input overwrite:YES password:input error:nil]; }
-  description: "Disabled duplicate — Objective-C selector facts expose the same `unzipFileAtPath` call shape as objc.path.sszip_unzip_file_at_path, which is the canonical SSZipArchive Zip Slip rule."
+  description: "Disabled duplicate - Objective-C selector facts expose the same `unzipFileAtPath` call shape as objc.path.sszip_unzip_file_at_path, which is the canonical SSZipArchive Zip Slip rule."

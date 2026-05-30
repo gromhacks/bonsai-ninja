@@ -20,7 +20,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Source.fromFile(\"safe.txt\")\n  }\n}\n"
     expect_no_match: true
-  description: "scala.io.Source.fromFile(path) — reads attacker-controlled file."
+  description: "scala.io.Source.fromFile(path) - reads attacker-controlled file."
 - id: scala.path.files_readstring
   enabled: true
   language: scala
@@ -43,7 +43,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.readString(\"safe.txt\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.readString(path) — reads tainted path; traversal yields arbitrary-file disclosure."
+  description: "java.nio.file.Files.readString(path) - reads tainted path; traversal yields arbitrary-file disclosure."
 - id: scala.path.files_readallbytes
   enabled: true
   language: scala
@@ -64,7 +64,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllBytes(\"safe.txt\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.readAllBytes(path) — tainted path enables arbitrary-file read."
+  description: "java.nio.file.Files.readAllBytes(path) - tainted path enables arbitrary-file read."
 - id: scala.path.files_readalllines
   enabled: true
   language: scala
@@ -87,7 +87,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllLines(\"safe.txt\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.readAllLines(path) — tainted path enables arbitrary-file read."
+  description: "java.nio.file.Files.readAllLines(path) - tainted path enables arbitrary-file read."
 - id: scala.path.files_write
   enabled: true
   language: scala
@@ -125,7 +125,7 @@
         }
       }
     expect_no_match: true
-  description: "java.nio.file.Files.write(path, bytes) — tainted path enables arbitrary-file write/overwrite."
+  description: "java.nio.file.Files.write(path, bytes) - tainted path enables arbitrary-file write/overwrite."
 - id: scala.path.files_writestring
   enabled: true
   language: scala
@@ -148,7 +148,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.writeString(\"safe.txt\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.writeString(path, content) — tainted path enables arbitrary-file write."
+  description: "java.nio.file.Files.writeString(path, content) - tainted path enables arbitrary-file write."
 - id: scala.path.files_copy
   enabled: true
   language: scala
@@ -171,7 +171,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.copy(\"safe\", \"dest\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.copy(tainted_source, dest) — source path tainted."
+  description: "java.nio.file.Files.copy(tainted_source, dest) - source path tainted."
 - id: scala.path.files_copy_dest
   enabled: true
   language: scala
@@ -194,7 +194,7 @@
   - name: literal destination negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.copy(\"safe\", \"dest\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.copy(source, tainted_dest) — destination path tainted."
+  description: "java.nio.file.Files.copy(source, tainted_dest) - destination path tainted."
 - id: scala.path.files_move
   enabled: true
   language: scala
@@ -217,7 +217,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.move(\"safe\", \"dest\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.move(tainted_source, dest) — source path tainted."
+  description: "java.nio.file.Files.move(tainted_source, dest) - source path tainted."
 - id: scala.path.files_move_dest
   enabled: true
   language: scala
@@ -240,7 +240,7 @@
   - name: literal destination negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Files.move(\"safe\", \"dest\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.nio.file.Files.move(source, tainted_dest) — destination path tainted."
+  description: "java.nio.file.Files.move(source, tainted_dest) - destination path tainted."
 - id: scala.path.files_delete
   enabled: true
   language: scala
@@ -278,7 +278,7 @@
         }
       }
     expect_no_match: true
-  description: "java.nio.file.Files.delete(path) — tainted path enables arbitrary-file deletion / DoS."
+  description: "java.nio.file.Files.delete(path) - tainted path enables arbitrary-file deletion / DoS."
 - id: scala.path.paths_get
   enabled: true
   language: scala
@@ -314,7 +314,7 @@
         }
       }
     expect_no_match: true
-  description: "java.nio.file.Paths.get(tainted) — early indicator of user-controlled path. Merged collision aliases: scala.ssrf.play_wsrequest_get, scala.ssrf.http4s_client_get, scala.ssrf.sttp_basic_request_url."
+  description: "java.nio.file.Paths.get(tainted) - early indicator of user-controlled path. Merged collision aliases: scala.ssrf.play_wsrequest_get, scala.ssrf.http4s_client_get, scala.ssrf.sttp_basic_request_url."
   aliases:
   - scala.ssrf.play_wsrequest_get
   - scala.ssrf.http4s_client_get
@@ -360,7 +360,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.read(path) — tainted path enables arbitrary-file disclosure."
+  description: "os-lib os.read(path) - tainted path enables arbitrary-file disclosure."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -400,7 +400,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.write(path, content) — tainted path enables arbitrary-file write."
+  description: "os-lib os.write(path, content) - tainted path enables arbitrary-file write."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -440,7 +440,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.remove(path) — tainted path enables arbitrary-file deletion."
+  description: "os-lib os.remove(path) - tainted path enables arbitrary-file deletion."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -480,7 +480,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.copy(tainted_src, dest) — tainted source enables arbitrary-file read."
+  description: "os-lib os.copy(tainted_src, dest) - tainted source enables arbitrary-file read."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -520,7 +520,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.copy(src, tainted_dest) — tainted destination enables arbitrary-file overwrite."
+  description: "os-lib os.copy(src, tainted_dest) - tainted destination enables arbitrary-file overwrite."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -560,7 +560,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.move(tainted_src, dest) — tainted source enables arbitrary-file relocation."
+  description: "os-lib os.move(tainted_src, dest) - tainted source enables arbitrary-file relocation."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -600,7 +600,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.move(src, tainted_dest) — tainted destination enables arbitrary-file relocation."
+  description: "os-lib os.move(src, tainted_dest) - tainted destination enables arbitrary-file relocation."
   imports:
   - com.lihaoyi.oslib
   - com
@@ -624,7 +624,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    new File(\"safe.txt\")\n  }\n}\nclass File(args: Any*)\n"
     expect_no_match: true
-  description: "new java.io.File(tainted) — early path construction sink."
+  description: "new java.io.File(tainted) - early path construction sink."
 - id: scala.path.file_new_child
   enabled: true
   language: scala
@@ -645,7 +645,7 @@
   - name: literal child negative
     code: "object App {\n  def handle(input: String): Unit = {\n    new File(\"safe\", \"child.txt\")\n  }\n}\nclass File(args: Any*)\n"
     expect_no_match: true
-  description: "new java.io.File(parent, tainted_child) — tainted child segment can escape the intended parent."
+  description: "new java.io.File(parent, tainted_child) - tainted child segment can escape the intended parent."
 - id: scala.path.fileinputstream_new
   enabled: true
   language: scala
@@ -666,7 +666,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    new FileInputStream(\"safe.txt\")\n  }\n}\nclass FileInputStream(args: Any*)\n"
     expect_no_match: true
-  description: "new FileInputStream(tainted) — opens tainted path; traversal enables arbitrary-file read."
+  description: "new FileInputStream(tainted) - opens tainted path; traversal enables arbitrary-file read."
 - id: scala.path.fileoutputstream_new
   enabled: true
   language: scala
@@ -687,7 +687,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    new FileOutputStream(\"safe.txt\")\n  }\n}\nclass FileOutputStream(args: Any*)\n"
     expect_no_match: true
-  description: "new FileOutputStream(tainted) — opens tainted path for write; traversal enables arbitrary-file overwrite."
+  description: "new FileOutputStream(tainted) - opens tainted path for write; traversal enables arbitrary-file overwrite."
 - id: scala.path.zipinputstream_get_next_entry
   enabled: false
   disabled_reason:
@@ -704,7 +704,7 @@
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    ZipInputStream.getNextEntry(input)\n  }\n}\n"
-  description: "Disabled — ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
+  description: "Disabled - ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
 - id: scala.path.commons_compress_archive_input_get_next_entry
   enabled: false
   disabled_reason:
@@ -729,4 +729,4 @@
           ArchiveInputStream.getNextEntry(input)
         }
       }
-  description: "Disabled — ArchiveInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
+  description: "Disabled - ArchiveInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."

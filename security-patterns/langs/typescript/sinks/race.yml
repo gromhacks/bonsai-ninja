@@ -1,6 +1,6 @@
 # typescript race / TOCTOU sinks (T501).
 
-# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# TOCTOU check sites - pair with subsequent open/chmod use-sites
 # in source order to identify the race window.
 - id: typescript.toctou.fs_existssync
   enabled: true
@@ -19,4 +19,4 @@
         function demo(input, req, obj) {
           return fs.existsSync(input);
         }
-  description: "fs.existsSync(path) — check site preceding fs.openSync/readFileSync."
+  description: "fs.existsSync(path) - check site preceding fs.openSync/readFileSync."

@@ -19,4 +19,4 @@
       import Vapor // vapor
       func test() { let input = "x"; let amount = 1; CORSMiddleware.Configuration("all") }
   description: |-
-    Vapor CORSMiddleware.Configuration(allowedOrigin: .all) — allow any origin.
+    Vapor CORSMiddleware.Configuration(allowedOrigin: .all) - allow any origin.

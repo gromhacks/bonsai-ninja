@@ -131,4 +131,4 @@
     kind: call
     callee:
       name: launchUrl
-  description: "Disabled — url_launcher.launchUrl opens external app; flag with context."
+  description: "Disabled - url_launcher.launchUrl opens external app; flag with context."

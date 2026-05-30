@@ -34,4 +34,4 @@
           return app.log.info("login failed");
         }
       expect_no_match: true
-  description: "app.log.info/logger/slog with concatenated attacker text — control characters or forged prefixes can corrupt audit logs."
+  description: "app.log.info/logger/slog with concatenated attacker text - control characters or forged prefixes can corrupt audit logs."

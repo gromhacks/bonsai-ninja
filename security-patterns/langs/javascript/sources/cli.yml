@@ -18,7 +18,7 @@
       function demo(input, req, obj) {
         return question(input);
       }
-  description: "readline.Interface.question — interactive stdin prompt; callback arg is tainted."
+  description: "readline.Interface.question - interactive stdin prompt; callback arg is tainted."
 
 - id: javascript.source.process_argv
   enabled: true
@@ -35,7 +35,7 @@
       function demo(input, req, obj) {
         return process.argv;
       }
-  description: process.argv — CLI arguments, attacker-controlled when the Node process is launched with untrusted args.
+  description: process.argv - CLI arguments, attacker-controlled when the Node process is launched with untrusted args.
 
 - id: javascript.source.process_stdin
   enabled: true
@@ -52,7 +52,7 @@
       function demo(input, req, obj) {
         return process.stdin;
       }
-  description: process.stdin — raw stream from the parent process or user terminal.
+  description: process.stdin - raw stream from the parent process or user terminal.
 
 - id: javascript.source.process_env
   enabled: true
@@ -69,7 +69,7 @@
       function demo(input, req, obj) {
         return process.env;
       }
-  description: "process.env — environment variables (attacker may influence via CI/CD, shells, or a compromised parent process)."
+  description: "process.env - environment variables (attacker may influence via CI/CD, shells, or a compromised parent process)."
 
 - id: javascript.source.deno_args
   enabled: true
@@ -86,7 +86,7 @@
       function demo(input, req, obj) {
         return Deno.args;
       }
-  description: "Deno.args — command-line arguments."
+  description: "Deno.args - command-line arguments."
 
 - id: javascript.source.deno_env_get
   enabled: true
@@ -103,7 +103,7 @@
       function demo(input, req, obj) {
         return Deno.env.get(input);
       }
-  description: "Deno.env.get(name) — environment variable."
+  description: "Deno.env.get(name) - environment variable."
 
 - id: javascript.source.deno_stdin
   enabled: true
@@ -120,7 +120,7 @@
       function demo(input, req, obj) {
         return Deno.stdin;
       }
-  description: "Deno.stdin — reads bytes from standard input; attacker-controllable in CLI / TTY contexts."
+  description: "Deno.stdin - reads bytes from standard input; attacker-controllable in CLI / TTY contexts."
 
 - id: javascript.source.bun_argv
   enabled: true
@@ -137,7 +137,7 @@
       function demo(input, req, obj) {
         return Bun.argv;
       }
-  description: "Bun.argv — CLI args."
+  description: "Bun.argv - CLI args."
 
 - id: javascript.source.yargs_argv
   enabled: true
@@ -156,7 +156,7 @@
       function demo(input, req, obj) {
         return yargs.argv;
       }
-  description: "yargs argv — parsed CLI flags."
+  description: "yargs argv - parsed CLI flags."
 
 - id: javascript.source.commander_opts
   enabled: true
@@ -175,4 +175,4 @@
       function demo(input, req, obj) {
         return program.opts(input);
       }
-  description: "commander program.opts() — parsed CLI flags."
+  description: "commander program.opts() - parsed CLI flags."

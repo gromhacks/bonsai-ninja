@@ -12,7 +12,7 @@
     - name: declared shape
       code: |
         class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ReadLine(input); } }
-  description: "Console.ReadLine — local CLI input from stdin."
+  description: "Console.ReadLine - local CLI input from stdin."
 
 - id: csharp.source.environment_args
   enabled: false
@@ -25,7 +25,7 @@
     kind: call
     callee:
       attribute: [Environment, GetCommandLineArgs]
-  description: "Disabled — argv; flag only across a trust boundary."
+  description: "Disabled - argv; flag only across a trust boundary."
 
 - id: csharp.source.environment_getenv
   enabled: false
@@ -38,7 +38,7 @@
     kind: call
     callee:
       attribute: [Environment, GetEnvironmentVariable]
-  description: "Disabled — Environment.GetEnvironmentVariable; flag only across trust boundary."
+  description: "Disabled - Environment.GetEnvironmentVariable; flag only across trust boundary."
 
 - id: csharp.source.main_args_param
   enabled: false
@@ -51,4 +51,4 @@
     kind: param
     target:
       name: args
-  description: "Disabled — Main(string[] args); enable when CLI faces untrusted input."
+  description: "Disabled - Main(string[] args); enable when CLI faces untrusted input."

@@ -23,7 +23,7 @@
       using Microsoft.AspNetCore.Mvc;
       class App { void Test() { Microsoft.AspNetCore.Mvc.Redirect("/home"); } }
     expect_no_match: true
-  description: "Controller.Redirect(tainted url) — scoped to MVC namespace to avoid colliding with other Redirect helpers."
+  description: "Controller.Redirect(tainted url) - scoped to MVC namespace to avoid colliding with other Redirect helpers."
 
 - id: csharp.open_redirect.controller_redirectpermanent
   enabled: true
@@ -49,7 +49,7 @@
       using Microsoft.AspNetCore.Mvc;
       class App { void Test() { Microsoft.AspNetCore.Mvc.RedirectPermanent("/home"); } }
     expect_no_match: true
-  description: "Controller.RedirectPermanent — scoped to MVC. Same literal-constant filter as controller_redirect."
+  description: "Controller.RedirectPermanent - scoped to MVC. Same literal-constant filter as controller_redirect."
 
 - id: csharp.open_redirect.controller_redirecttoaction_url
   enabled: false
@@ -64,7 +64,7 @@
     kind: call
     callee:
       name: RedirectToAction
-  description: "Disabled — RedirectToAction routes internally; safe unless action name tainted."
+  description: "Disabled - RedirectToAction routes internally; safe unless action name tainted."
 
 - id: csharp.open_redirect.response_redirect
   enabled: true
@@ -102,4 +102,4 @@
     kind: call
     callee:
       name: LocalRedirect
-  description: "Disabled — LocalRedirect rejects external URLs by default."
+  description: "Disabled - LocalRedirect rejects external URLs by default."

@@ -29,4 +29,4 @@
         return try node.nodes(forXPath: "//safe")
       }
     expect_no_match: true
-  description: "XMLNode.nodes(forXPath:) — XPath injection on a Foundation XML node."
+  description: "XMLNode.nodes(forXPath:) - XPath injection on a Foundation XML node."

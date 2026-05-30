@@ -11,7 +11,7 @@
     kind: param
     target:
       name: handleRequest
-  description: "Disabled — `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."
 
 - id: kotlin.source.gcloud_function_handle
   enabled: false
@@ -25,7 +25,7 @@
     kind: param
     target:
       name: service
-  description: "Disabled — `service` is the handler method name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `service` is the handler method name; `kind: param` only matches parameter identifiers."
 
 - id: kotlin.source.azure_http_trigger
   enabled: true
@@ -57,4 +57,4 @@
         }
       }
     expect_no_match: true
-  description: "Azure Functions @HttpTrigger annotated parameter — HTTP request envelope supplied by the remote caller."
+  description: "Azure Functions @HttpTrigger annotated parameter - HTTP request envelope supplied by the remote caller."

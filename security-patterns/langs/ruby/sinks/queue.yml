@@ -26,7 +26,7 @@
         send_message(queue_url: "https://sqs.example/queue", message_body: "ok")
       end
     expect_no_match: true
-  description: "aws-sdk-sqs send_message — tainted queue target/body injects arbitrary broker payloads."
+  description: "aws-sdk-sqs send_message - tainted queue target/body injects arbitrary broker payloads."
 
 - id: ruby.queue.publish
   enabled: false
@@ -41,4 +41,4 @@
     kind: call
     callee:
       name: publish
-  description: "Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across Ruby clients and app code."
+  description: "Disabled - cloud publish is real queue fanout, but bare `publish` is too generic across Ruby clients and app code."

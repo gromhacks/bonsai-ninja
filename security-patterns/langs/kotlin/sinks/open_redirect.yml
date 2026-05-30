@@ -115,7 +115,7 @@
       }
       class ModelAndView(vararg args: Any?)
     expect_no_match: true
-  description: "Spring ModelAndView(\"redirect:\" + target) — tainted redirect view suffix can send users to attacker-controlled locations."
+  description: "Spring ModelAndView(\"redirect:\" + target) - tainted redirect view suffix can send users to attacker-controlled locations."
   imports:
   - org.springframework.web.servlet
 - id: kotlin.open_redirect.jaxrs_response_seeother
@@ -283,7 +283,7 @@
       attribute:
       - ResponseEntity
       - status
-  description: "Disabled — flag only when 30x + Location header is tainted."
+  description: "Disabled - flag only when 30x + Location header is tainted."
 - id: kotlin.open_redirect.android_intent_parseuri
   enabled: true
   language: kotlin
@@ -321,4 +321,4 @@
       }
       }
     expect_no_match: true
-  description: "Android Intent.parseUri(tainted) — attacker-controlled URI string can craft an Intent targeting any component (intent-redirection / privilege escalation)."
+  description: "Android Intent.parseUri(tainted) - attacker-controlled URI string can craft an Intent targeting any component (intent-redirection / privilege escalation)."

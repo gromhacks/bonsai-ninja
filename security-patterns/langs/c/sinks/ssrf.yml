@@ -34,7 +34,7 @@
         curl_easy_setopt("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "curl_easy_setopt(handle, CURLOPT_URL, tainted) — attacker-chosen URL. Also covers merged aliases: c.ssrf.curl_easy_setopt_postfields, c.tls.curl_ssl_verifypeer_off, c.tls.curl_ssl_verifyhost_off."
+  description: "curl_easy_setopt(handle, CURLOPT_URL, tainted) - attacker-chosen URL. Also covers merged aliases: c.ssrf.curl_easy_setopt_postfields, c.tls.curl_ssl_verifypeer_off, c.tls.curl_ssl_verifyhost_off."
   imports:
   - curl/curl.h
   - curl
@@ -65,7 +65,7 @@
         getaddrinfo("safe");
       }
     expect_no_match: true
-  description: "getaddrinfo with tainted host — DNS lookup for attacker-chosen target."
+  description: "getaddrinfo with tainted host - DNS lookup for attacker-chosen target."
 - id: c.ssrf.curl_easy_perform
   enabled: false
   disabled_reason:
@@ -79,7 +79,7 @@
     kind: call
     callee:
       name: curl_easy_perform
-  description: "Disabled — flag if URL is tainted."
+  description: "Disabled - flag if URL is tainted."
 - id: c.ssrf.gethostbyname
   enabled: true
   language: c

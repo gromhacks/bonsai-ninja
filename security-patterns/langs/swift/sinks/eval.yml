@@ -20,7 +20,7 @@
     code: |
       func test() { NSPredicate("name == 'safe'") }
     expect_no_match: true
-  description: "NSPredicate(format: tainted) — predicate injection. Note: also covered by nosql.nspredicate_init_format for NoSQL category; kept here for code-injection tag."
+  description: "NSPredicate(format: tainted) - predicate injection. Note: also covered by nosql.nspredicate_init_format for NoSQL category; kept here for code-injection tag."
 - id: swift.eval.nsexpression_format
   enabled: true
   language: swift
@@ -42,7 +42,7 @@
     code: |
       func test() { NSExpression("1 + 1") }
     expect_no_match: true
-  description: "NSExpression(format: tainted) — expression injection."
+  description: "NSExpression(format: tainted) - expression injection."
 - id: swift.eval.evaluate_javascript
   enabled: false
   disabled_reason:
@@ -59,7 +59,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; evaluateJavaScript(input) }
-  description: "Disabled duplicate — same bare `evaluateJavaScript` call fact as swift.xss.wkwebview_evaluate_javascript. Keep the WebKit/XSS rule enabled until semantic WebKit receiver facts can distinguish a broader code-injection variant."
+  description: "Disabled duplicate - same bare `evaluateJavaScript` call fact as swift.xss.wkwebview_evaluate_javascript. Keep the WebKit/XSS rule enabled until semantic WebKit receiver facts can distinguish a broader code-injection variant."
 - id: swift.eval.jscontext_evaluate
   enabled: true
   language: swift
@@ -84,4 +84,4 @@
       import JavaScriptCore // JavaScriptCore
       func test() { evaluateScript("1 + 1") }
     expect_no_match: true
-  description: "JSContext.evaluateScript(tainted) — JavaScriptCore."
+  description: "JSContext.evaluateScript(tainted) - JavaScriptCore."

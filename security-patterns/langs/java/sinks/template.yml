@@ -40,7 +40,7 @@
       \ String input) throws Exception {\n    engine.process(\"safe\");\n  }\n}\n\
       "
     expect_no_match: true
-  description: "Thymeleaf TemplateEngine.process \u2014 flag when template source\
+  description: "Thymeleaf TemplateEngine.process - flag when template source\
     \ is tainted. Merged collision aliases: java.template.freemarker_process, java.template.freemarker_template_process_local,\
     \ java.template.thymeleaf_fragment_concat."
   aliases:
@@ -72,7 +72,7 @@
       \ args) { return null; }\n}\n"
     expect_match_text:
     - engine.process
-  description: "Disabled duplicate \u2014 folded into java.template.thymeleaf_processstring\
+  description: "Disabled duplicate - folded into java.template.thymeleaf_processstring\
     \ with fragment-expression examples."
   imports:
   - org
@@ -95,7 +95,7 @@
   - name: generated shape example
     code: "import org.thymeleaf.StringTemplateResolver;\nclass App {\n  void handle(String input) throws\
       \ Exception {\n    new StringTemplateResolver(input);\n  }\n}\n"
-  description: "new StringTemplateResolver \u2014 evaluates template text directly\
+  description: "new StringTemplateResolver - evaluates template text directly\
     \ from input."
 - id: java.template.freemarker_template_ctor
   enabled: true
@@ -124,7 +124,7 @@
       \ Object cfg) throws Exception {\n    new Template(source, \"safe\", cfg);\n\
       \  }\n}\nclass Template {\n  Template(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "new freemarker.template.Template(name, tainted-source, cfg) \u2014\
+  description: "new freemarker.template.Template(name, tainted-source, cfg) -\
     \ compiles template text at runtime."
 - id: java.template.velocity_evaluate
   enabled: true
@@ -211,7 +211,7 @@
   - name: generated shape example
     code: "import org.apache.velocity.*;\nclass App {\n  void handle(String input)\
       \ throws Exception {\n    Template.merge(\"{{\" + input);\n  }\n}\n"
-  description: "Disabled — Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
+  description: "Disabled - Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
   imports:
   - org.apache.velocity
 - id: java.template.pebble_compile
@@ -367,7 +367,7 @@
       attribute:
       - DefaultMustacheFactory
       - compile
-  description: "Disabled \u2014 Mustache is logic-less; template injection not RCE."
+  description: "Disabled - Mustache is logic-less; template injection not RCE."
 - id: java.template.spel_expressionparser_parseexpression
   enabled: false
   disabled_reason:
@@ -392,7 +392,7 @@
       }\n"
     expect_match_text:
     - ExpressionParser.parseExpression
-  description: "Disabled duplicate \u2014 same runtime matcher surface as canonical\
+  description: "Disabled duplicate - same runtime matcher surface as canonical\
     \ java.template.spel_parseexpression."
   imports:
   - org
@@ -419,7 +419,7 @@
       \ {\n  Object parseExpression(Object... args) { return null; }\n}\n"
     expect_match_text:
     - parser.parseExpression
-  description: "Disabled duplicate \u2014 parser.parseExpression(template) is covered\
+  description: "Disabled duplicate - parser.parseExpression(template) is covered\
     \ by canonical java.template.spel_parseexpression."
   imports:
   - org
@@ -445,7 +445,7 @@
       \ throws Exception {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY);\n\
       \  }\n}\n"
   description: "FreeMarker Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\
-    \ \u2014 turns off autoescape."
+    \ - turns off autoescape."
 - id: java.template.velocity_unescape
   enabled: false
   disabled_reason:
@@ -468,5 +468,5 @@
   - name: generated shape example
     code: "import org.apache.velocity.app.*;\nclass App {\n  void handle(String input) throws Exception\
       \ {\n    VelocityEngine.evaluate(\"{{\" + input);\n  }\n}\n"
-  description: "Disabled duplicate \u2014 same matcher as canonical java.template.velocity_engine_evaluate;\
+  description: "Disabled duplicate - same matcher as canonical java.template.velocity_engine_evaluate;\
     \ template evaluation is represented once as SSTI."

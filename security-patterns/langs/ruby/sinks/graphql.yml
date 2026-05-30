@@ -29,7 +29,7 @@
         schema.execute("{ viewer { id } }", context: context)
       end
     expect_no_match: true
-  description: "schema.execute(query, context:) — tainted GraphQL document or context reaches resolver execution."
+  description: "schema.execute(query, context:) - tainted GraphQL document or context reaches resolver execution."
 
 - id: ruby.graphql.query_new
   enabled: true
@@ -61,7 +61,7 @@
         GraphQL::Query.new(schema, "{ viewer { id } }")
       end
     expect_no_match: true
-  description: "GraphQL::Query.new(schema, tainted_query) — dynamic documents enter GraphQL parsing and execution planning."
+  description: "GraphQL::Query.new(schema, tainted_query) - dynamic documents enter GraphQL parsing and execution planning."
 
 - id: ruby.graphql.client_parse
   enabled: true
@@ -93,7 +93,7 @@
         GraphQL::Client.parse("{ viewer { id } }")
       end
     expect_no_match: true
-  description: "GraphQL::Client.parse(tainted_query) — dynamic client-side GraphQL documents can trigger injection-prone query construction."
+  description: "GraphQL::Client.parse(tainted_query) - dynamic client-side GraphQL documents can trigger injection-prone query construction."
 
 - id: ruby.graphql.client_query
   enabled: true
@@ -125,7 +125,7 @@
         GraphQL::Client.query("{ viewer { id } }")
       end
     expect_no_match: true
-  description: "GraphQL::Client.query(tainted_query) — sends attacker-controlled GraphQL document to a remote endpoint."
+  description: "GraphQL::Client.query(tainted_query) - sends attacker-controlled GraphQL document to a remote endpoint."
 
 - id: ruby.graphql.schema_execute_async
   enabled: true
@@ -158,4 +158,4 @@
         schema.multiplex([{ query: "{ viewer { id } }" }])
       end
     expect_no_match: true
-  description: "schema.multiplex(tainted_queries) — graphql-ruby batched execution; attacker-controlled query bodies enter resolver chain."
+  description: "schema.multiplex(tainted_queries) - graphql-ruby batched execution; attacker-controlled query bodies enter resolver chain."

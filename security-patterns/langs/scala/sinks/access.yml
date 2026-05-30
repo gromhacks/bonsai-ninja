@@ -30,7 +30,7 @@
         }
       }
     expect_no_match: true
-  description: "S3Client.getObject(bucket/key) — tainted selector can read arbitrary object data."
+  description: "S3Client.getObject(bucket/key) - tainted selector can read arbitrary object data."
 
   imports:
   - software.amazon.awssdk.s3
@@ -67,7 +67,7 @@
         }
       }
     expect_no_match: true
-  description: "S3Client.putObject(bucket/key) — tainted selector can overwrite arbitrary object keys."
+  description: "S3Client.putObject(bucket/key) - tainted selector can overwrite arbitrary object keys."
 
   imports:
   - software.amazon.awssdk.s3
@@ -104,7 +104,7 @@
         }
       }
     expect_no_match: true
-  description: "SecretsManagerClient.getSecretValue — tainted secret id reads arbitrary secret material."
+  description: "SecretsManagerClient.getSecretValue - tainted secret id reads arbitrary secret material."
 
   imports:
   - software.amazon.awssdk.secretsmanager
@@ -131,7 +131,7 @@
           BlobClient.downloadContent(input)
         }
       }
-  description: "Disabled — BlobClient.downloadContent() carries the container/blob selector in receiver state, not a call argument."
+  description: "Disabled - BlobClient.downloadContent() carries the container/blob selector in receiver state, not a call argument."
 
   imports:
   - com.azure.azurestorageblob
@@ -159,7 +159,7 @@
           BlobClient.upload(input)
         }
       }
-  description: "Disabled — BlobClient.upload(...) carries the container/blob selector in receiver state; the argument is upload content/options, not the target selector."
+  description: "Disabled - BlobClient.upload(...) carries the container/blob selector in receiver state; the argument is upload content/options, not the target selector."
 
   imports:
   - com.azure.azurestorageblob
@@ -196,7 +196,7 @@
         }
       }
     expect_no_match: true
-  description: "SecretClient.getSecret — tainted secret name reads arbitrary Key Vault material."
+  description: "SecretClient.getSecret - tainted secret name reads arbitrary Key Vault material."
 
   imports:
   - com.azure.azuresecuritykeyvaultsecrets
@@ -233,7 +233,7 @@
         }
       }
     expect_no_match: true
-  description: "Storage.readAllBytes(bucket, blob) — tainted selector reads arbitrary GCS objects."
+  description: "Storage.readAllBytes(bucket, blob) - tainted selector reads arbitrary GCS objects."
 
   imports:
   - com.google.cloud.googlecloudstorage
@@ -272,7 +272,7 @@
         }
       }
     expect_no_match: true
-  description: "Storage.create(blobInfo, ...) — tainted bucket/blob selector writes attacker-chosen GCS objects."
+  description: "Storage.create(blobInfo, ...) - tainted bucket/blob selector writes attacker-chosen GCS objects."
 
   imports:
   - com.google.cloud.googlecloudstorage
@@ -309,7 +309,7 @@
         }
       }
     expect_no_match: true
-  description: "SecretManagerServiceClient.accessSecretVersion — tainted resource name reads arbitrary secret versions."
+  description: "SecretManagerServiceClient.accessSecretVersion - tainted resource name reads arbitrary secret versions."
 
   imports:
   - com.google.cloud.googlecloudsecretmanager
@@ -348,4 +348,4 @@
         }
       }
     expect_no_match: true
-  description: "javax.naming.InitialContext.lookup(tainted) — remote JNDI lookup can trigger class loading or deserialization."
+  description: "javax.naming.InitialContext.lookup(tainted) - remote JNDI lookup can trigger class loading or deserialization."

@@ -29,7 +29,7 @@
         warn("startup ok");
       }
     expect_no_match: true
-  description: "warn with secret-shaped data — credentials or tokens can leak to application logs. Also covers merged aliases: perl.log_injection.warn_newline."
+  description: "warn with secret-shaped data - credentials or tokens can leak to application logs. Also covers merged aliases: perl.log_injection.warn_newline."
 
 - id: perl.info_disclosure.dancer_send_error
   enabled: true
@@ -62,4 +62,4 @@
         send_error("not found", $err);
       }
     expect_no_match: true
-  description: "Dancer2 send_error with raw exception / stack details — exposes internal diagnostics in error pages."
+  description: "Dancer2 send_error with raw exception / stack details - exposes internal diagnostics in error pages."

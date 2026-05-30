@@ -22,4 +22,4 @@
       code: |
         func test() { print("line\\nnext") }
       expect_no_match: true
-  description: 'print("... \(user) ...\n") — newline in user text — log forging.'
+  description: 'print("... \(user) ...\n") - newline in user text - log forging.'

@@ -29,7 +29,7 @@
           Model::fill(["name" => "Alice"]);
         }
       expect_no_match: true
-  description: "Laravel Eloquent Model::fill(request()->all()) — bulk-sets every attribute; bypasses guarded/fillable unless explicitly listed."
+  description: "Laravel Eloquent Model::fill(request()->all()) - bulk-sets every attribute; bypasses guarded/fillable unless explicitly listed."
 - id: php.mass_assign.eloquent_forcefill
   enabled: true
   language: php
@@ -57,4 +57,4 @@
           Model::forceFill(["name" => "Alice"]);
         }
       expect_no_match: true
-  description: "Eloquent Model::forceFill — explicitly bypasses fillable allowlist. `forceFill(array)` takes exactly one attribute-array arg; `min_args/max_args: 1` rejects unrelated overloads of `forceFill`."
+  description: "Eloquent Model::forceFill - explicitly bypasses fillable allowlist. `forceFill(array)` takes exactly one attribute-array arg; `min_args/max_args: 1` rejects unrelated overloads of `forceFill`."

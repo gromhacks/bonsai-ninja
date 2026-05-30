@@ -26,7 +26,7 @@
         ldap_search_ext_s("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_ext_s — flag tainted filter (5th arg)."
+  description: "OpenLDAP ldap_search_ext_s - flag tainted filter (5th arg)."
 
 - id: c.ldap.ldap_search_s
   enabled: true
@@ -55,7 +55,7 @@
         ldap_search_s("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_s(ld, base, scope, tainted_filter, ...) — LDAP filter injection via unescaped metacharacters *()\\."
+  description: "OpenLDAP ldap_search_s(ld, base, scope, tainted_filter, ...) - LDAP filter injection via unescaped metacharacters *()\\."
 
 - id: c.ldap.ldap_search
   enabled: true
@@ -84,4 +84,4 @@
         ldap_search("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_search(ld, base, scope, tainted_filter, ...) — deprecated async search; same filter-injection bug class."
+  description: "OpenLDAP ldap_search(ld, base, scope, tainted_filter, ...) - deprecated async search; same filter-injection bug class."

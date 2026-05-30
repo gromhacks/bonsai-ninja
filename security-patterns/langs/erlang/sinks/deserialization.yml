@@ -1,4 +1,4 @@
-# Erlang insecure deserialization — binary_to_term without {safe, true}.
+# Erlang insecure deserialization - binary_to_term without {safe, true}.
 - id: erlang.deser.binary_to_term
   enabled: true
   language: erlang
@@ -26,7 +26,7 @@
         test() ->
           binary_to_term(<<131,100,0,2,111,107>>).
       expect_no_match: true
-  description: "binary_to_term/1 — crafted term triggers atom-table exhaustion (DoS) and record/pid forging. Use binary_to_term/2 with [safe]."
+  description: "binary_to_term/1 - crafted term triggers atom-table exhaustion (DoS) and record/pid forging. Use binary_to_term/2 with [safe]."
 - id: erlang.deser.binary_to_term_2
   enabled: false
   disabled_reason:
@@ -39,7 +39,7 @@
     kind: call
     callee:
       regex: "^binary_to_term/2$"
-  description: "Disabled — arity-2 with [safe] is the safe form; cannot distinguish without constraint support."
+  description: "Disabled - arity-2 with [safe] is the safe form; cannot distinguish without constraint support."
 - id: erlang.deser.term_to_binary
   enabled: false
   disabled_reason:
@@ -52,7 +52,7 @@
     kind: call
     callee:
       regex: "^term_to_binary$"
-  description: "Disabled — encoding side is not an attack surface."
+  description: "Disabled - encoding side is not an attack surface."
 
 - id: erlang.deser.list_to_atom
   enabled: true
@@ -81,7 +81,7 @@
         test() ->
           list_to_atom("safe_atom").
       expect_no_match: true
-  description: "list_to_atom/binary_to_atom on tainted input — atom table is global, never GC'd; unbounded keys exhaust the VM. Use list_to_existing_atom."
+  description: "list_to_atom/binary_to_atom on tainted input - atom table is global, never GC'd; unbounded keys exhaust the VM. Use list_to_existing_atom."
 
 - id: erlang.deser.ets_match_spec
   enabled: true
@@ -110,4 +110,4 @@
         test(Table) ->
           ets:select(Table, [{{'$1'}, [], ['$1']}]).
       expect_no_match: true
-  description: "ets:select/match/match_object/match_delete — tainted match-spec or pattern enables full-table scan DoS or unauthorized row read."
+  description: "ets:select/match/match_object/match_delete - tainted match-spec or pattern enables full-table scan DoS or unauthorized row read."

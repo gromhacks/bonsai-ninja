@@ -20,7 +20,7 @@
     code: |
       func test() { unarchiveObject("safe") }
     expect_no_match: true
-  description: "NSKeyedUnarchiver.unarchiveObject — without secureCoding = RCE."
+  description: "NSKeyedUnarchiver.unarchiveObject - without secureCoding = RCE."
 
 - id: swift.deser.nskeyedunarchiver_unarchivetoplevel
   enabled: true
@@ -60,7 +60,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; NSKeyedUnarchiver(input) }
-  description: "NSKeyedUnarchiver(forReadingFrom:/forReadingWith:) — review requiresSecureCoding."
+  description: "NSKeyedUnarchiver(forReadingFrom:/forReadingWith:) - review requiresSecureCoding."
 
 - id: swift.deser.requiressecurecoding_false
   enabled: true
@@ -77,7 +77,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; requiresSecureCoding = input }
-  description: "NSKeyedUnarchiver.requiresSecureCoding = false — disables secure coding enforcement."
+  description: "NSKeyedUnarchiver.requiresSecureCoding = false - disables secure coding enforcement."
 
 - id: swift.deser.nskeyedunarchiver_unarchivedobject_class
   enabled: false
@@ -91,7 +91,7 @@
     kind: call
     callee:
       name: unarchivedObject
-  description: "Disabled — class-bounded unarchive; flag with [Any].self constraint."
+  description: "Disabled - class-bounded unarchive; flag with [Any].self constraint."
 
 - id: swift.deser.propertylist_serialization
   enabled: true
@@ -128,7 +128,7 @@
     kind: call
     callee:
       attribute: [PropertyListDecoder, decode]
-  description: "Disabled — type-bounded decoder; not directly exploitable."
+  description: "Disabled - type-bounded decoder; not directly exploitable."
 
 - id: swift.deser.yams_load
   enabled: true
@@ -154,7 +154,7 @@
       import Yams // Yams
       func test() { Yams.load("name: safe") }
     expect_no_match: true
-  description: "Yams.load — flag if untrusted input."
+  description: "Yams.load - flag if untrusted input."
 
 - id: swift.deser.yams_load_all
   enabled: true
@@ -180,4 +180,4 @@
       import Yams // Yams
       func test() { Yams.load_all("name: safe") }
     expect_no_match: true
-  description: "Yams.load_all — multi-doc YAML load."
+  description: "Yams.load_all - multi-doc YAML load."

@@ -35,7 +35,7 @@
         conn:execute("SELECT 1")
       end
     expect_no_match: true
-  description: "LuaSQL conn:execute(sql) / conn.execute(sql) — driver runs concatenated SQL; bind via ? placeholders + cursor. Receiver alternation (conn/cur/cursor/stmt/db/env/database/connection/sql) covers the documented LuaSQL convention without colliding with stdlib `os.execute(cmd)`. Both `.` and `:` call shapes are matched."
+  description: "LuaSQL conn:execute(sql) / conn.execute(sql) - driver runs concatenated SQL; bind via ? placeholders + cursor. Receiver alternation (conn/cur/cursor/stmt/db/env/database/connection/sql) covers the documented LuaSQL convention without colliding with stdlib `os.execute(cmd)`. Both `.` and `:` call shapes are matched."
 
 - id: lua.sqli.luasql_execute_db
   enabled: true
@@ -65,7 +65,7 @@
         db.execute("SELECT 1")
       end
     expect_no_match: true
-  description: "LuaSQL/LuaDBI db:execute(sql) — driver runs concatenated SQL."
+  description: "LuaSQL/LuaDBI db:execute(sql) - driver runs concatenated SQL."
 
 - id: lua.sqli.luaresty_mysql_query
   enabled: false
@@ -82,7 +82,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]query$
-  description: "Subsumed by lua.sqli.luaresty_postgres_query — same regex; merged into the canonical lua-resty SQL query rule."
+  description: "Subsumed by lua.sqli.luaresty_postgres_query - same regex; merged into the canonical lua-resty SQL query rule."
 
 - id: lua.sqli.luaresty_postgres_query
   enabled: true
@@ -112,7 +112,7 @@
         postgres.query("SELECT 1")
       end
     expect_no_match: true
-  description: "lua-resty-postgres / pgmoon db:query(sql) — no parameter binding; interpolated SQL is injectable."
+  description: "lua-resty-postgres / pgmoon db:query(sql) - no parameter binding; interpolated SQL is injectable."
 
 - id: lua.sqli.pgmoon_query
   enabled: false
@@ -128,7 +128,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]query$
-  description: "Subsumed by lua.sqli.luaresty_postgres_query — pgmoon already in canonical rule's packages."
+  description: "Subsumed by lua.sqli.luaresty_postgres_query - pgmoon already in canonical rule's packages."
 
 - id: lua.sqli.cqueues_sqlite3_exec
   enabled: true
@@ -158,7 +158,7 @@
         db.exec("SELECT 1")
       end
     expect_no_match: true
-  description: "lsqlite3/cqueues db:exec(sql) — executes multi-statement SQL without binding."
+  description: "lsqlite3/cqueues db:exec(sql) - executes multi-statement SQL without binding."
 
 - id: lua.sqli.luadbi_prepare
   enabled: false
@@ -173,7 +173,7 @@
     kind: call
     callee:
       attribute: [dbh, prepare]
-  description: "Disabled — LuaDBI dbh:prepare is safe when placeholders are used; only dangerous if SQL is concatenated."
+  description: "Disabled - LuaDBI dbh:prepare is safe when placeholders are used; only dangerous if SQL is concatenated."
 # Generic Lua method-call SQL-injection sketch. Kept disabled because
 # bare `execute(...)` is not a database API shape; package-gated
 # receiver-method rules carry the useful coverage.
@@ -195,7 +195,7 @@
       function example(input, url, id, payload, request, params, user)
         execute("SELECT " .. user)
       end
-  description: "Disabled overbroad variant — bare name `execute` collides across unrelated Lua APIs; receiver-method SQL rules cover the database call shapes."
+  description: "Disabled overbroad variant - bare name `execute` collides across unrelated Lua APIs; receiver-method SQL rules cover the database call shapes."
 
 # LuaDBI-specific complement. `dbh:execute` carries the same shape but
 # with LuaDBI's `dbh` receiver convention; named-package gate for the
@@ -214,4 +214,4 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]execute$
-  description: "Subsumed by lua.sqli.luasql_execute_db — same regex; canonical rule should add luadbi to its packages list."
+  description: "Subsumed by lua.sqli.luasql_execute_db - same regex; canonical rule should add luadbi to its packages list."

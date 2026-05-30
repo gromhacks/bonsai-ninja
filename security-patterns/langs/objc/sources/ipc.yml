@@ -13,7 +13,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; id notification; id result = notification.userInfo; }
-  description: "NSNotification.userInfo — IPC payload from -postNotification: can cross process boundaries via Darwin notifications."
+  description: "NSNotification.userInfo - IPC payload from -postNotification: can cross process boundaries via Darwin notifications."
 
 - id: objc.source.pasteboard_string
   enabled: true
@@ -28,4 +28,4 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; [UIPasteboard generalPasteboard:input]; }
-  description: "UIPasteboard.generalPasteboard.string — clipboard contents are user-controlled and may originate from other apps."
+  description: "UIPasteboard.generalPasteboard.string - clipboard contents are user-controlled and may originate from other apps."

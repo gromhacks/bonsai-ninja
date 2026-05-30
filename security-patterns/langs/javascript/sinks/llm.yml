@@ -27,7 +27,7 @@
         return openai.chat.completions.create({ messages: [{ role: "user", content: "safe" }] });
       }
     expect_no_match: true
-  description: "openai.chat.completions.create — tainted prompt content reaches an LLM instruction / tool surface."
+  description: "openai.chat.completions.create - tainted prompt content reaches an LLM instruction / tool surface."
 
 - id: javascript.llm.openai_responses_create
   enabled: true
@@ -58,7 +58,7 @@
         return openai.responses.create({ input: "safe" });
       }
     expect_no_match: true
-  description: "openai.responses.create — tainted input can steer model output, tool calls, or data disclosure."
+  description: "openai.responses.create - tainted input can steer model output, tool calls, or data disclosure."
 
 - id: javascript.llm.anthropic_messages_create
   enabled: true
@@ -89,7 +89,7 @@
         return anthropic.messages.create({ messages: [{ role: "user", content: "safe" }] });
       }
     expect_no_match: true
-  description: "anthropic.messages.create — tainted prompt content reaches an LLM instruction / tool surface."
+  description: "anthropic.messages.create - tainted prompt content reaches an LLM instruction / tool surface."
 
 - id: javascript.llm.langchain_chain_invoke
   enabled: true
@@ -123,7 +123,7 @@
         return chain.invoke({ question: "What is 2+2?" });
       }
     expect_no_match: true
-  description: "LangChain chain.invoke(tainted) / runnable.invoke — attacker-controlled chain input drives the LLM, can hijack instructions or steer tool calls."
+  description: "LangChain chain.invoke(tainted) / runnable.invoke - attacker-controlled chain input drives the LLM, can hijack instructions or steer tool calls."
 
 - id: javascript.llm.langchain_agent_call
   enabled: true
@@ -157,7 +157,7 @@
         return agent.call({ input: "What is 2+2?" });
       }
     expect_no_match: true
-  description: "LangChain agent.call(tainted) / executor.call — legacy agent invocation; attacker can steer tool calls, leak data, or override the system prompt."
+  description: "LangChain agent.call(tainted) / executor.call - legacy agent invocation; attacker can steer tool calls, leak data, or override the system prompt."
 
 - id: javascript.llm.cohere_chat
   enabled: true
@@ -191,4 +191,4 @@
         return client.chat({ message: "Hello" });
       }
     expect_no_match: true
-  description: "Cohere client.chat({message: tainted}) — attacker-controlled message hijacks Cohere chat instructions and can drive tool / connector calls."
+  description: "Cohere client.chat({message: tainted}) - attacker-controlled message hijacks Cohere chat instructions and can drive tool / connector calls."

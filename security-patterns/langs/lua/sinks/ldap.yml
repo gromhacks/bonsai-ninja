@@ -22,7 +22,7 @@
     code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
       \ payload, request, params, user)\n  conn.search(\"(uid=user)\")\nend\n"
     expect_no_match: true
-  description: "lualdap conn:search{ filter = tainted } \u2014 filter string concatenation\
+  description: "lualdap conn:search{ filter = tainted } - filter string concatenation\
     \ enables LDAP injection."
 - id: lua.ldap.lualdap_modify
   enabled: true
@@ -49,7 +49,7 @@
       \ payload, request, params, user)\n  conn.modify(\"uid=user,ou=people,dc=example,dc=com\"\
       )\nend\n"
     expect_no_match: true
-  description: "lualdap conn:modify(dn, ...) \u2014 tainted DN/attrs allow unauthorized\
+  description: "lualdap conn:modify(dn, ...) - tainted DN/attrs allow unauthorized\
     \ directory modification."
 - id: lua.ldap.lualdap_add
   enabled: true
@@ -76,7 +76,7 @@
       \ payload, request, params, user)\n  conn.add(\"uid=user,ou=people,dc=example,dc=com\"\
       )\nend\n"
     expect_no_match: true
-  description: "lualdap conn:add(dn, attrs) \u2014 tainted DN/attrs inject arbitrary\
+  description: "lualdap conn:add(dn, attrs) - tainted DN/attrs inject arbitrary\
     \ directory entries."
 - id: lua.ldap.lualdap_delete
   enabled: true
@@ -103,7 +103,7 @@
       \ payload, request, params, user)\n  conn.delete(\"uid=user,ou=people,dc=example,dc=com\"\
       )\nend\n"
     expect_no_match: true
-  description: "lualdap conn:delete(dn) \u2014 tainted DN removes arbitrary directory\
+  description: "lualdap conn:delete(dn) - tainted DN removes arbitrary directory\
     \ entries."
 - id: lua.ldap.lualdap_compare
   enabled: true
@@ -130,5 +130,5 @@
       \ payload, request, params, user)\n  conn.compare(\"uid=user,ou=people,dc=example,dc=com\"\
       )\nend\n"
     expect_no_match: true
-  description: "lualdap conn:compare(dn, attr, value) \u2014 tainted DN/attr enables\
+  description: "lualdap conn:compare(dn, attr, value) - tainted DN/attr enables\
     \ auth bypass via compare oracle."

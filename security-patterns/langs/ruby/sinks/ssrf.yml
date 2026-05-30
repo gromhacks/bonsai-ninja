@@ -121,7 +121,7 @@
     kind: call
     callee:
       name: open
-  description: "Disabled \u2014 duplicates ruby.cmdi.kernel_open_pipe on name: open;\
+  description: "Disabled - duplicates ruby.cmdi.kernel_open_pipe on name: open;\
     \ use ruby.ssrf.uri_open (URI.open) which is the modern shape."
 - id: ruby.ssrf.faraday_get
   enabled: true
@@ -176,7 +176,7 @@
     code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
       \  Faraday.post(\"https://example.com\", \"body\")\nend\n"
     expect_no_match: true
-  description: "Faraday.post(url) \u2014 HTTP POST to tainted URL allows SSRF with\
+  description: "Faraday.post(url) - HTTP POST to tainted URL allows SSRF with\
     \ request-body exfiltration."
 - id: ruby.ssrf.httparty_get
   enabled: true
@@ -204,7 +204,7 @@
     code: "require \"httparty\"\ndef example(input, url, id, payload, request, params)\n\
       \  HTTParty.get(\"https://example.com\")\nend\n"
     expect_no_match: true
-  description: "HTTParty.get(url) \u2014 HTTP GET to tainted URL allows SSRF to internal\
+  description: "HTTParty.get(url) - HTTP GET to tainted URL allows SSRF to internal\
     \ services / cloud metadata."
 - id: ruby.ssrf.httparty_post
   enabled: true
@@ -232,7 +232,7 @@
     code: "require \"httparty\"\ndef example(input, url, id, payload, request, params)\n\
       \  HTTParty.post(\"https://example.com\", body: \"ok\")\nend\n"
     expect_no_match: true
-  description: "HTTParty.post(url) \u2014 HTTP POST to tainted URL allows SSRF with\
+  description: "HTTParty.post(url) - HTTP POST to tainted URL allows SSRF with\
     \ request-body exfiltration."
 - id: ruby.ssrf.rest_client_get
   enabled: true
@@ -341,7 +341,7 @@
     code: "require \"typhoeus\"\ndef example(input, url, id, payload, request, params)\n\
       \  Typhoeus.get(\"https://example.com\")\nend\n"
     expect_no_match: true
-  description: "Typhoeus.get(url) \u2014 libcurl-backed HTTP GET to tainted URL allows\
+  description: "Typhoeus.get(url) - libcurl-backed HTTP GET to tainted URL allows\
     \ SSRF."
 - id: ruby.ssrf.excon_get
   enabled: true
@@ -369,7 +369,7 @@
     code: "require \"excon\"\ndef example(input, url, id, payload, request, params)\n\
       \  Excon.get(\"https://example.com\")\nend\n"
     expect_no_match: true
-  description: "Excon.get(url) \u2014 HTTP GET to tainted URL allows SSRF to internal\
+  description: "Excon.get(url) - HTTP GET to tainted URL allows SSRF to internal\
     \ services / cloud metadata."
 - id: ruby.ssrf.typhoeus_post
   enabled: true
@@ -397,7 +397,7 @@
     code: "require \"typhoeus\"\ndef example(input, url, id, payload, request, params)\n\
       \  Typhoeus.post(\"https://example.com\")\nend\n"
     expect_no_match: true
-  description: "Typhoeus.post(url) \u2014 libcurl-backed HTTP POST to tainted URL\
+  description: "Typhoeus.post(url) - libcurl-backed HTTP POST to tainted URL\
     \ allows SSRF with request-body exfiltration."
 - id: ruby.ssrf.faraday_run_request
   enabled: true

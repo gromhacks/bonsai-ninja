@@ -23,7 +23,7 @@
         _ = msg.Value
       }
     expect_match_text: [msg.Value]
-  description: "Kafka ConsumerMessage.Value / Message.Value — narrowed to attribute chain."
+  description: "Kafka ConsumerMessage.Value / Message.Value - narrowed to attribute chain."
 
 - id: go.amqp.delivery_body
   enabled: true
@@ -46,7 +46,7 @@
         _ = delivery.Body
       }
     expect_match_text: [delivery.Body]
-  description: "amqp Delivery.Body — narrowed to attribute chain."
+  description: "amqp Delivery.Body - narrowed to attribute chain."
 
 - id: go.nats.msg_data
   enabled: true
@@ -69,7 +69,7 @@
         _ = msg.Data
       }
     expect_match_text: [msg.Data]
-  description: "nats.Msg.Data / GCP pubsub.Message.Data — attacker-controlled queue message payload. Shared attribute chain covers both libraries."
+  description: "nats.Msg.Data / GCP pubsub.Message.Data - attacker-controlled queue message payload. Shared attribute chain covers both libraries."
 
 - id: go.gcp.pubsub_message_data
   enabled: false
@@ -85,7 +85,7 @@
     kind: read
     target:
       attribute: [msg, Data]
-  description: "Disabled — duplicate signature with go.nats.msg_data (both match attribute chain [msg, Data] on kind:read). The nats rule's packages list now documents GCP pubsub coverage."
+  description: "Disabled - duplicate signature with go.nats.msg_data (both match attribute chain [msg, Data] on kind:read). The nats rule's packages list now documents GCP pubsub coverage."
 
 - id: go.aws.sqs_message_body
   enabled: true
@@ -108,4 +108,4 @@
         _ = message.Body
       }
     expect_match_text: [message.Body]
-  description: "AWS SQS types.Message.Body — attacker-controlled message content pulled from a queue."
+  description: "AWS SQS types.Message.Body - attacker-controlled message content pulled from a queue."

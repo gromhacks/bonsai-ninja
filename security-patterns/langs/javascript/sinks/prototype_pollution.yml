@@ -10,7 +10,7 @@
     kind: call
     callee:
       attribute: [Object, assign]
-  description: "Disabled — Object.assign is only prototype-pollution relevant when merging untrusted keys into a sensitive target."
+  description: "Disabled - Object.assign is only prototype-pollution relevant when merging untrusted keys into a sensitive target."
 
 # Prototype-pollution sinks. Object-merge / set-by-path APIs
 # that honor `__proto__` / `constructor` / `prototype` keys.
@@ -46,7 +46,7 @@
         return Object.assign(target, { safe: true });
       }
     expect_no_match: true
-  description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
+  description: "Object.assign(target, source) - shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
 
 - id: javascript.proto_pollution.lodash_merge
   enabled: false
@@ -62,7 +62,7 @@
     kind: call
     callee:
       attribute: [_, merge]
-  description: "Disabled — `_.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape and any local namespace alias."
+  description: "Disabled - `_.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape and any local namespace alias."
 - id: javascript.proto_pollution.lodash_set
   enabled: true
   language: javascript
@@ -105,7 +105,7 @@
         return _.set({}, "safe.path", "safe");
       }
     expect_no_match: true
-  description: "_.set(obj, attacker_path, value) — path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
+  description: "_.set(obj, attacker_path, value) - path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
 - id: javascript.proto_pollution.lodash_setwith
   enabled: true
   language: javascript
@@ -134,7 +134,7 @@
         return _.setWith({}, "safe.path", "safe");
       }
     expect_no_match: true
-  description: "_.setWith — same prototype-pollution as _.set."
+  description: "_.setWith - same prototype-pollution as _.set."
 - id: javascript.proto_pollution.deep_extend
   enabled: true
   language: javascript
@@ -159,7 +159,7 @@
         return deepExtend({});
       }
     expect_no_match: true
-  description: "deep-extend(target, attacker_src) — npm `deep-extend` was CVE-2018-3728."
+  description: "deep-extend(target, attacker_src) - npm `deep-extend` was CVE-2018-3728."
 - id: javascript.proto_pollution.merge_options
   enabled: true
   language: javascript
@@ -187,7 +187,7 @@
         return mergeOptions({});
       }
     expect_no_match: true
-  description: "merge-options package — known prototype-pollution vector."
+  description: "merge-options package - known prototype-pollution vector."
 
 - id: javascript.proto_pollution.recursive_merge
   enabled: true
@@ -226,7 +226,7 @@
         target.safe = "safe";
       }
     expect_no_match: true
-  description: "Recursive merge target[key] = source[key] — homemade deep-merge vector when __proto__/constructor/prototype keys are not filtered."
+  description: "Recursive merge target[key] = source[key] - homemade deep-merge vector when __proto__/constructor/prototype keys are not filtered."
 
 - id: javascript.proto_pollution.recursive_deep_merge
   enabled: true
@@ -256,7 +256,7 @@
         return recursiveDeepMerge({}, {});
       }
     expect_no_match: true
-  description: "recursive-deep-merge(target, attacker_obj) — recursive merge APIs can honor `__proto__` / `constructor.prototype` keys and pollute Object.prototype."
+  description: "recursive-deep-merge(target, attacker_obj) - recursive merge APIs can honor `__proto__` / `constructor.prototype` keys and pollute Object.prototype."
 
 - id: javascript.proto_pollution.recursive_deep_merge_method
   enabled: false
@@ -272,7 +272,7 @@
     kind: call
     callee:
       attribute: [recursiveDeepMerge, merge]
-  description: "Disabled — `recursiveDeepMerge.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
+  description: "Disabled - `recursiveDeepMerge.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
 
 - id: javascript.proto_pollution.deepmerge_package
   enabled: true
@@ -309,7 +309,7 @@
         return deepmerge({}, {});
       }
     expect_no_match: true
-  description: "Deep recursive merge package calls — audit tainted objects for __proto__/constructor/prototype keys before merging."
+  description: "Deep recursive merge package calls - audit tainted objects for __proto__/constructor/prototype keys before merging."
 
 - id: javascript.proto_pollution.lodash_namespace_merge_variants
   enabled: true
@@ -346,4 +346,4 @@
         return lodash.merge({}, {});
       }
     expect_no_match: true
-  description: "lodash merge/defaultsDeep variants and lodash.merge package default export — recursive merge prototype-pollution sinks."
+  description: "lodash merge/defaultsDeep variants and lodash.merge package default export - recursive merge prototype-pollution sinks."

@@ -22,7 +22,7 @@
           let query = "user";
           HttpResponse::Found(target);
       }
-  description: "Disabled — HttpResponse::Found() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
+  description: "Disabled - HttpResponse::Found() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
 
   imports:
   - actix_web
@@ -49,7 +49,7 @@
           let query = "user";
           HttpResponse::TemporaryRedirect(target);
       }
-  description: "Disabled — HttpResponse::TemporaryRedirect() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
+  description: "Disabled - HttpResponse::TemporaryRedirect() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
 
   imports:
   - actix_web
@@ -81,7 +81,7 @@
           Redirect::to("/dashboard");
       }
     expect_no_match: true
-  description: "Redirect::to(tainted) — covers axum and rocket (same `[Redirect, to]` suffix). Tainted URL = open redirect."
+  description: "Redirect::to(tainted) - covers axum and rocket (same `[Redirect, to]` suffix). Tainted URL = open redirect."
 
 - id: rust.open_redirect.axum_redirect_temporary
   enabled: true
@@ -111,7 +111,7 @@
           Redirect::temporary("/dashboard");
       }
     expect_no_match: true
-  description: "axum Redirect::temporary(tainted) — 307 redirect to attacker URL."
+  description: "axum Redirect::temporary(tainted) - 307 redirect to attacker URL."
 - id: rust.open_redirect.axum_redirect_permanent
   enabled: true
   language: rust
@@ -140,7 +140,7 @@
           Redirect::permanent("/dashboard");
       }
     expect_no_match: true
-  description: "axum Redirect::permanent(tainted) — 308 redirect to attacker URL."
+  description: "axum Redirect::permanent(tainted) - 308 redirect to attacker URL."
 
 - id: rust.open_redirect.rocket_redirect_to
   enabled: false
@@ -155,7 +155,7 @@
     kind: call
     callee:
       attribute: [Redirect, to]
-  description: "Disabled — merged into rust.open_redirect.axum_redirect_to (same `[Redirect, to]` suffix covers both crates)."
+  description: "Disabled - merged into rust.open_redirect.axum_redirect_to (same `[Redirect, to]` suffix covers both crates)."
 
 - id: rust.open_redirect.warp_redirect
   enabled: true
@@ -185,4 +185,4 @@
           redirect::found("/dashboard");
       }
     expect_no_match: true
-  description: "warp redirect::found(tainted) — 302 redirect to tainted URI; classic open-redirect sink."
+  description: "warp redirect::found(tainted) - 302 redirect to tainted URI; classic open-redirect sink."

@@ -1,7 +1,7 @@
 # Python eval / dynamic-code sinks. Builtins + import + ast hooks.
 #
 # Note: builtin_eval / builtin_exec use bare-name match (`eval` / `exec`).
-# This is intentional — both are real Python builtins and have no library
+# This is intentional - both are real Python builtins and have no library
 # scope to attach a `packages:` constraint to. The same applies to
 # `compile`, `__import__`, and `execfile`. Negative fixtures live in
 # tests/fixtures/python/eval/.
@@ -28,7 +28,7 @@
       def example():
           return eval("1 + 1")
     expect_no_match: true
-  description: "eval() — executes attacker-controlled Python."
+  description: "eval() - executes attacker-controlled Python."
 
 - id: python.eval.builtin_exec
   enabled: true
@@ -51,7 +51,7 @@
   - name: arg tainted literal negative
     code: "def example(user_input):\n    return exec(\"safe\")\n"
     expect_no_match: true
-  description: "exec() — executes attacker-controlled Python."
+  description: "exec() - executes attacker-controlled Python."
 
 - id: python.eval.compile
   enabled: true
@@ -76,7 +76,7 @@
       def example(user_input):
           return compile('safe')
     expect_no_match: true
-  description: "compile() — compiles tainted source to a code object."
+  description: "compile() - compiles tainted source to a code object."
 
 - id: python.eval.input_python2
   enabled: false
@@ -90,7 +90,7 @@
     kind: call
     callee:
       name: input
-  description: "Disabled — Python 3 input() just returns a string; firing on every CLI `input()` call is pure FP. Only dangerous under Python 2. Enable with a py2-runtime gate."
+  description: "Disabled - Python 3 input() just returns a string; firing on every CLI `input()` call is pure FP. Only dangerous under Python 2. Enable with a py2-runtime gate."
 
 - id: python.eval.execfile
   enabled: true
@@ -115,7 +115,7 @@
       def example(user_input):
           return execfile('safe')
     expect_no_match: true
-  description: "Python-2 execfile() — runs tainted file path."
+  description: "Python-2 execfile() - runs tainted file path."
 
 - id: python.eval.importlib_import_module
   enabled: true
@@ -140,7 +140,7 @@
       def example(user_input):
           return importlib.import_module('safe')
     expect_no_match: true
-  description: "importlib.import_module(tainted) — arbitrary module load."
+  description: "importlib.import_module(tainted) - arbitrary module load."
 
 - id: python.eval.builtin_import
   enabled: true
@@ -165,7 +165,7 @@
       def example(user_input):
           return __import__('safe')
     expect_no_match: true
-  description: "__import__(tainted) — arbitrary module load."
+  description: "__import__(tainted) - arbitrary module load."
 
 - id: python.eval.ast_literal_eval
   enabled: false
@@ -179,7 +179,7 @@
     kind: call
     callee:
       attribute: [ast, literal_eval]
-  description: "Disabled — ast.literal_eval is bounded to literals."
+  description: "Disabled - ast.literal_eval is bounded to literals."
 
 - id: python.eval.code_interactconsole
   enabled: false
@@ -193,7 +193,7 @@
     kind: call
     callee:
       attribute: [code, interact]
-  description: "Disabled — code.interact() opens an interpreter, but its first argument is a banner, not code; needs an interactive-exposure source model."
+  description: "Disabled - code.interact() opens an interpreter, but its first argument is a banner, not code; needs an interactive-exposure source model."
 
 - id: python.eval.timeit_timer
   enabled: true
@@ -224,7 +224,7 @@
       def example(user_input):
           return timeit.Timer("x + 1")
     expect_no_match: true
-  description: "timeit.Timer(stmt) — compiles and executes a tainted benchmark statement."
+  description: "timeit.Timer(stmt) - compiles and executes a tainted benchmark statement."
 
 - id: python.eval.pdb_run
   enabled: true
@@ -249,7 +249,7 @@
       def example(user_input):
           return pdb.run('safe')
     expect_no_match: true
-  description: "pdb.run(tainted) — eval+exec."
+  description: "pdb.run(tainted) - eval+exec."
 
 - id: python.eval.flask_g_setattr
   enabled: false
@@ -263,7 +263,7 @@
     kind: call
     callee:
       name: setattr
-  description: "Disabled — setattr is generic; flag only when name tainted."
+  description: "Disabled - setattr is generic; flag only when name tainted."
 
 - id: python.eval.numexpr_evaluate
   enabled: true
@@ -292,7 +292,7 @@
       def example(user_input):
           return numexpr.evaluate('safe')
     expect_no_match: true
-  description: "numexpr.evaluate(tainted) — limited eval but still risky."
+  description: "numexpr.evaluate(tainted) - limited eval but still risky."
 
 - id: python.eval.pandas_eval
   enabled: true
@@ -321,7 +321,7 @@
       def example(user_input):
           return pd.eval('safe')
     expect_no_match: true
-  description: "pd.eval(tainted) — pandas expression eval."
+  description: "pd.eval(tainted) - pandas expression eval."
 
 - id: python.eval.dataframe_query
   enabled: false
@@ -336,7 +336,7 @@
     kind: call
     callee:
       attribute: [DataFrame, query]
-  description: "Disabled — DataFrame.query allows expressions; flag with tainted source."
+  description: "Disabled - DataFrame.query allows expressions; flag with tainted source."
 
 - id: python.eval.simpleeval_simple_eval
   enabled: true
@@ -365,7 +365,7 @@
       def example(user_input):
           return simple_eval('safe')
     expect_no_match: true
-  description: "simpleeval.simple_eval — marketed as 'safe', but a tainted expression with custom names/functions can call attacker-supplied callables and reach arbitrary code in many configurations."
+  description: "simpleeval.simple_eval - marketed as 'safe', but a tainted expression with custom names/functions can call attacker-supplied callables and reach arbitrary code in many configurations."
 
 - id: python.eval.asteval_call
   enabled: true
@@ -394,7 +394,7 @@
       def example(user_input):
           return Interpreter.eval('safe')
     expect_no_match: true
-  description: "asteval.Interpreter.eval — sandboxed Python interpreter; bypasses are well-known, treat tainted input as RCE-prone."
+  description: "asteval.Interpreter.eval - sandboxed Python interpreter; bypasses are well-known, treat tainted input as RCE-prone."
 
 - id: python.eval.rexec_compile
   enabled: false
@@ -408,7 +408,7 @@
     kind: call
     callee:
       attribute: [rexec, RExec]
-  description: "Disabled (legacy) — Python 2 rexec module; ships removed in Python 3 but appears in legacy bases."
+  description: "Disabled (legacy) - Python 2 rexec module; ships removed in Python 3 but appears in legacy bases."
 
 # Reflection-based dynamic invocation (T406). Tag
 # code-injection so reviewer enumerates with `security sinks
@@ -437,4 +437,4 @@
       def example(obj, user_input):
           return getattr(obj, 'safe')
     expect_no_match: true
-  description: "getattr(obj, attacker_name) — attribute name from input. Reaching `__call__` after this is eval-equivalent."
+  description: "getattr(obj, attacker_name) - attribute name from input. Reaching `__call__` after this is eval-equivalent."

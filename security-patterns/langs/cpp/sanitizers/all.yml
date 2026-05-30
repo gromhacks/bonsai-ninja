@@ -1,4 +1,4 @@
-# C++ sanitizers / validators — reduce severity or suppress when in-path.
+# C++ sanitizers / validators - reduce severity or suppress when in-path.
 - id: cpp.sanitizer.strncpy_bounded
   enabled: false
   disabled_reason:
@@ -19,7 +19,7 @@
         strncpy(arg);
       }
     expect_match_text: [strncpy]
-  description: "Disabled — strncpy bounds the write count but does not guarantee NUL-termination when the source length reaches
+  description: "Disabled - strncpy bounds the write count but does not guarantee NUL-termination when the source length reaches
     the bound; it is not a reliable sanitizer for buffer-overflow/string-safety taint."
 
 - id: cpp.sanitizer.strlcpy_bounded
@@ -40,7 +40,7 @@
         strlcpy(arg);
       }
     expect_match_text: [strlcpy]
-  description: "strlcpy — bounded copy with guaranteed NUL-termination."
+  description: "strlcpy - bounded copy with guaranteed NUL-termination."
 
 - id: cpp.sanitizer.strlcat_bounded
   enabled: true
@@ -60,7 +60,7 @@
         strlcat(arg);
       }
     expect_match_text: [strlcat]
-  description: "strlcat — bounded concat with guaranteed NUL-termination."
+  description: "strlcat - bounded concat with guaranteed NUL-termination."
 
 - id: cpp.sanitizer.snprintf_bounded
   enabled: true
@@ -84,7 +84,7 @@
         snprintf(arg);
       }
     expect_match_text: [snprintf]
-  description: "snprintf — bounded format; length-limited output."
+  description: "snprintf - bounded format; length-limited output."
 
 - id: cpp.sanitizer.std_filesystem_canonical
   enabled: false
@@ -96,7 +96,7 @@
     kind: call
     callee:
       attribute: [filesystem, canonical]
-  description: "Disabled — std::filesystem::canonical resolves symlinks but still requires trusted-root containment checking."
+  description: "Disabled - std::filesystem::canonical resolves symlinks but still requires trusted-root containment checking."
 
 - id: cpp.sanitizer.std_filesystem_weakly_canonical
   enabled: false
@@ -108,7 +108,7 @@
     kind: call
     callee:
       attribute: [filesystem, weakly_canonical]
-  description: "Disabled — std::filesystem::weakly_canonical normalizes relative segments but still requires trusted-root
+  description: "Disabled - std::filesystem::weakly_canonical normalizes relative segments but still requires trusted-root
     containment checking."
 
 - id: cpp.sanitizer.openssl_constant_time_memcmp
@@ -129,7 +129,7 @@
         CRYPTO_memcmp(arg);
       }
     expect_match_text: [CRYPTO_memcmp]
-  description: "OpenSSL CRYPTO_memcmp — constant-time comparison."
+  description: "OpenSSL CRYPTO_memcmp - constant-time comparison."
 
 - id: cpp.sanitizer.std_random_device
   enabled: true
@@ -147,7 +147,7 @@
         auto *x = new random_device(arg);
       }
     expect_match_text: [random_device]
-  description: "std::random_device — crypto-quality on most platforms (libc++, libstdc++ on Linux)."
+  description: "std::random_device - crypto-quality on most platforms (libc++, libstdc++ on Linux)."
 
 - id: cpp.sanitizer.sqlite3_bind_text
   enabled: true
@@ -167,7 +167,7 @@
         sqlite3_bind_text(arg);
       }
     expect_match_text: [sqlite3_bind_text]
-  description: "sqlite3_bind_text — binds placeholder value safely."
+  description: "sqlite3_bind_text - binds placeholder value safely."
 
 - id: cpp.sanitizer.sqlite3_bind_int
   enabled: true
@@ -187,7 +187,7 @@
         sqlite3_bind_int(arg);
       }
     expect_match_text: [sqlite3_bind_int]
-  description: "sqlite3_bind_int — binds integer placeholder."
+  description: "sqlite3_bind_int - binds integer placeholder."
 
 - id: cpp.sanitizer.libpqxx_exec_params
   enabled: true
@@ -207,7 +207,7 @@
         work::exec_params(arg);
       }
     expect_match_text: ["work::exec_params"]
-  description: "libpqxx work::exec_params — $N parameterised query."
+  description: "libpqxx work::exec_params - $N parameterised query."
 
 - id: cpp.sanitizer.qt_bindvalue
   enabled: true
@@ -227,7 +227,7 @@
         QSqlQuery::bindValue(arg);
       }
     expect_match_text: ["QSqlQuery::bindValue"]
-  description: "Qt QSqlQuery::bindValue — parameter binding after prepare()."
+  description: "Qt QSqlQuery::bindValue - parameter binding after prepare()."
 
 - id: cpp.sanitizer.qt_tohtmlescaped
   enabled: true
@@ -247,7 +247,7 @@
         QString::toHtmlEscaped(arg);
       }
     expect_match_text: ["QString::toHtmlEscaped"]
-  description: "QString::toHtmlEscaped — HTML-escapes special characters."
+  description: "QString::toHtmlEscaped - HTML-escapes special characters."
 
 - id: cpp.sanitizer.poco_uri_encode
   enabled: true
@@ -267,7 +267,7 @@
         URI.encode(arg);
       }
     expect_match_text: [URI.encode]
-  description: "Poco::URI::encode — percent-encodes reserved characters."
+  description: "Poco::URI::encode - percent-encodes reserved characters."
 
 - id: cpp.sanitizer.qt_qurl_toencoded
   enabled: true
@@ -287,7 +287,7 @@
         QUrl::toEncoded(arg);
       }
     expect_match_text: ["QUrl::toEncoded"]
-  description: "QUrl::toEncoded — produces percent-encoded representation."
+  description: "QUrl::toEncoded - produces percent-encoded representation."
 
 - id: cpp.sanitizer.std_stoi
   enabled: true
@@ -307,7 +307,7 @@
         std::stoi(arg);
       }
     expect_match_text: ["std::stoi"]
-  description: "std::stoi — throws on non-numeric input; narrows to int."
+  description: "std::stoi - throws on non-numeric input; narrows to int."
 
 - id: cpp.sanitizer.std_stol
   enabled: true
@@ -327,7 +327,7 @@
         std::stol(arg);
       }
     expect_match_text: ["std::stol"]
-  description: "std::stol — throws on non-numeric input; narrows to long."
+  description: "std::stol - throws on non-numeric input; narrows to long."
 
 - id: cpp.sanitizer.std_stod
   enabled: true
@@ -347,7 +347,7 @@
         std::stod(arg);
       }
     expect_match_text: ["std::stod"]
-  description: "std::stod — throws on non-numeric input; narrows to double."
+  description: "std::stod - throws on non-numeric input; narrows to double."
 
 - id: cpp.sanitizer.ldap_escape_filter
   enabled: true
@@ -367,7 +367,7 @@
         ldap_escape_filter(arg);
       }
     expect_match_text: [ldap_escape_filter]
-  description: "ldap_escape_filter — escapes LDAP filter metacharacters before filter construction."
+  description: "ldap_escape_filter - escapes LDAP filter metacharacters before filter construction."
 
 - id: cpp.sanitizer.std_filesystem_canonical_strict
   enabled: false
@@ -379,7 +379,7 @@
     kind: call
     callee:
       attribute: [filesystem, canonical]
-  description: "Disabled — std::filesystem::canonical(path) normalizes and resolves symlinks but does not prove the result
+  description: "Disabled - std::filesystem::canonical(path) normalizes and resolves symlinks but does not prove the result
     remains under a trusted root. Re-enable only with a containment check such as starts_with(root) / equivalent prefix validation."
 
 - id: cpp.sanitizer.std_string_view_substr
@@ -392,7 +392,7 @@
     kind: call
     callee:
       attribute: [string_view, substr]
-  description: "Disabled — std::string_view::substr enforces bounds and throws std::out_of_range; only relevant in length-controlled
+  description: "Disabled - std::string_view::substr enforces bounds and throws std::out_of_range; only relevant in length-controlled
     flows (audit only)."
 
 - id: cpp.sanitizer.absl_strformat
@@ -423,7 +423,7 @@
         absl::StrFormat(fmt, arg);
       }
     expect_no_match: true
-  description: "absl::StrFormat with a literal format string — user data is bound as arguments rather than interpreted as
+  description: "absl::StrFormat with a literal format string - user data is bound as arguments rather than interpreted as
     format syntax."
 
 - id: cpp.sanitizer.fmt_format_literal
@@ -454,7 +454,7 @@
         fmt::format(fmt, arg);
       }
     expect_no_match: true
-  description: "fmt::format with a literal or FMT_STRING format — attacker data is passed as a value argument, not as format
+  description: "fmt::format with a literal or FMT_STRING format - attacker data is passed as a value argument, not as format
     syntax."
 
 - id: cpp.sanitizer.botan_constant_time_compare
@@ -475,7 +475,7 @@
         Botan::constant_time_compare(arg);
       }
     expect_match_text: ["Botan::constant_time_compare"]
-  description: "Botan::constant_time_compare — timing-safe equality."
+  description: "Botan::constant_time_compare - timing-safe equality."
 
 - id: cpp.sanitizer.cryptopp_verify_bufs_equal
   enabled: true
@@ -495,7 +495,7 @@
         CryptoPP::VerifyBufsEqual(arg);
       }
     expect_match_text: ["CryptoPP::VerifyBufsEqual"]
-  description: "CryptoPP::VerifyBufsEqual — constant-time buffer comparison."
+  description: "CryptoPP::VerifyBufsEqual - constant-time buffer comparison."
 
 - id: cpp.sanitizer.libsodium_memcmp
   enabled: true
@@ -515,7 +515,7 @@
         sodium_memcmp(arg);
       }
     expect_match_text: [sodium_memcmp]
-  description: "libsodium sodium_memcmp — constant-time memory comparison."
+  description: "libsodium sodium_memcmp - constant-time memory comparison."
 
 - id: cpp.sanitizer.string_starts_with_same_origin
   enabled: true
@@ -540,7 +540,7 @@
   - name: string starts_with slash prefix negative constraint boundary
     code: "void example() {\n  std::string target = \"/next\";\n  target.starts_with();\n}\n"
     expect_no_match: true
-  description: "std::string/std::string_view starts_with(\"/...\") — same-origin redirect/path guard when the accepted prefix
+  description: "std::string/std::string_view starts_with(\"/...\") - same-origin redirect/path guard when the accepted prefix
     is a slash-rooted local path."
 
 - id: cpp.sanitizer.container_contains_allowlist
@@ -558,7 +558,7 @@
         allowed.contains(input);
       }
     expect_match_text: [allowed.contains]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Finite allowlist
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Finite allowlist
     container membership (contains/find/count) on allowlist-named sets/maps before using a tainted selector, path, or redirect
     target."
 
@@ -603,7 +603,7 @@
   - name: strip non slug chars negative constraint boundary
     code: "void example(std::string input) {\n  std::regex_replace();\n}\n"
     expect_no_match: true
-  description: "std::regex_replace with a `[^safe]` allowlist pattern and empty replacement — strips unsafe characters before
+  description: "std::regex_replace with a `[^safe]` allowlist pattern and empty replacement - strips unsafe characters before
     downstream use."
 
 - id: cpp.sanitizer.soci_use_bind
@@ -623,7 +623,7 @@
         soci::use(input);
       }
     expect_match_text: ["soci::use"]
-  description: "SOCI soci::use(value) — binds a C++ value into a prepared SQL statement placeholder."
+  description: "SOCI soci::use(value) - binds a C++ value into a prepared SQL statement placeholder."
 
 - id: cpp.sanitizer.std_span_subspan
   enabled: false
@@ -635,12 +635,12 @@
     kind: call
     callee:
       attribute: [span, subspan]
-  description: "Disabled — std::span::subspan enforces bounds (throws on overflow), but most callers use unchecked subscripts;
+  description: "Disabled - std::span::subspan enforces bounds (throws on overflow), but most callers use unchecked subscripts;
     only flag in size-validated flows (audit only)."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: cpp.passthrough.curl_easy_unescape
@@ -663,7 +663,7 @@
         curl_easy_unescape(arg);
       }
     expect_match_text: [curl_easy_unescape]
-  description: "libcurl curl_easy_unescape — preserves taint (C++ via libcurl)."
+  description: "libcurl curl_easy_unescape - preserves taint (C++ via libcurl)."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -686,7 +686,7 @@
         std::lock_guard(arg);
       }
     expect_match_text: ["std::lock_guard"]
-  description: "std::lock_guard<std::mutex>(m) — RAII lock guard."
+  description: "std::lock_guard<std::mutex>(m) - RAII lock guard."
 - id: cpp.lock.std_unique_lock
   enabled: true
   language: cpp
@@ -705,4 +705,4 @@
         std::unique_lock(arg);
       }
     expect_match_text: ["std::unique_lock"]
-  description: "std::unique_lock<std::mutex>(m) — RAII unique lock."
+  description: "std::unique_lock<std::mutex>(m) - RAII unique lock."

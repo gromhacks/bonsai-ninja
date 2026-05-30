@@ -17,7 +17,7 @@
       function demo(input, req, obj) {
         return question(input);
       }
-  description: "readline.Interface.question — interactive stdin prompt; callback arg is tainted."
+  description: "readline.Interface.question - interactive stdin prompt; callback arg is tainted."
 
 - id: typescript.source.process_argv
   enabled: true
@@ -34,7 +34,7 @@
       function demo(input, req, obj) {
         return process.argv;
       }
-  description: "process.argv — command-line arguments."
+  description: "process.argv - command-line arguments."
 
 - id: typescript.source.process_env
   enabled: true
@@ -51,7 +51,7 @@
       function demo(input, req, obj) {
         return process.env;
       }
-  description: "process.env — environment variables (attacker may influence via CI/CD or local malware)."
+  description: "process.env - environment variables (attacker may influence via CI/CD or local malware)."
 
 - id: typescript.source.process_stdin
   enabled: true
@@ -68,7 +68,7 @@
       function demo(input, req, obj) {
         return process.stdin;
       }
-  description: "process.stdin — piped input."
+  description: "process.stdin - piped input."
 
 - id: typescript.source.deno_args
   enabled: true
@@ -85,7 +85,7 @@
       function demo(input, req, obj) {
         return Deno.args;
       }
-  description: "Deno.args — command-line arguments."
+  description: "Deno.args - command-line arguments."
 
 - id: typescript.source.deno_env_get
   enabled: true
@@ -102,7 +102,7 @@
       function demo(input, req, obj) {
         return Deno.env.get(input);
       }
-  description: "Deno.env.get(name) — environment variable."
+  description: "Deno.env.get(name) - environment variable."
 
 - id: typescript.source.deno_stdin
   enabled: true
@@ -119,7 +119,7 @@
       function demo(input, req, obj) {
         return Deno.stdin;
       }
-  description: "Deno.stdin — reads bytes from standard input; attacker-controllable in CLI / TTY contexts."
+  description: "Deno.stdin - reads bytes from standard input; attacker-controllable in CLI / TTY contexts."
 
 - id: typescript.source.bun_argv
   enabled: true
@@ -136,7 +136,7 @@
       function demo(input, req, obj) {
         return Bun.argv;
       }
-  description: "Bun.argv — CLI args."
+  description: "Bun.argv - CLI args."
 
 - id: typescript.source.yargs_argv
   enabled: true
@@ -155,7 +155,7 @@
       function demo(input, req, obj) {
         return yargs.argv;
       }
-  description: "yargs argv — parsed CLI flags."
+  description: "yargs argv - parsed CLI flags."
 
 - id: typescript.source.commander_opts
   enabled: true
@@ -174,4 +174,4 @@
       function demo(input, req, obj) {
         return program.opts(input);
       }
-  description: "commander program.opts() — parsed CLI flags."
+  description: "commander program.opts() - parsed CLI flags."

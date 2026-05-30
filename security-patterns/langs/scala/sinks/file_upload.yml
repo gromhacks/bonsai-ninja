@@ -22,7 +22,7 @@
           FilePart.filename(input)
         }
       }
-  description: "Disabled — FilePart.filename returns client-controlled state; report the later file-write/move sink until return-state tracking exists."
+  description: "Disabled - FilePart.filename returns client-controlled state; report the later file-write/move sink until return-state tracking exists."
 
 - id: scala.upload.play_ref_movetofile
   enabled: true
@@ -56,7 +56,7 @@
         }
       }
     expect_no_match: true
-  description: "Play TemporaryFile.moveTo(dest) — tainted dest => arbitrary file write."
+  description: "Play TemporaryFile.moveTo(dest) - tainted dest => arbitrary file write."
 
 - id: scala.upload.play_ref_atomicmoveto
   enabled: true
@@ -90,7 +90,7 @@
         }
       }
     expect_no_match: true
-  description: "Play TemporaryFile.atomicMoveWithFallback — same risk as moveTo."
+  description: "Play TemporaryFile.atomicMoveWithFallback - same risk as moveTo."
 
 - id: scala.upload.akka_http_multipart
   enabled: false
@@ -115,7 +115,7 @@
           BodyPart.filename(input)
         }
       }
-  description: "Disabled — BodyPart.filename returns client-controlled state; report the later file-write sink until return-state tracking exists."
+  description: "Disabled - BodyPart.filename returns client-controlled state; report the later file-write sink until return-state tracking exists."
 
   imports:
   - akka.http.scaladsl
@@ -141,7 +141,7 @@
           storeUploadedFile(input)
         }
       }
-  description: "Disabled — storeUploadedFile writes to a temp path chosen by the directive; unsafe caller-controlled filename/path needs state beyond the directive call."
+  description: "Disabled - storeUploadedFile writes to a temp path chosen by the directive; unsafe caller-controlled filename/path needs state beyond the directive call."
 
   imports:
   - akka.http.scaladsl
@@ -167,6 +167,6 @@
           fileUpload(input)
         }
       }
-  description: "Disabled — fileUpload extracts a multipart part and does not itself write to an attacker-controlled path."
+  description: "Disabled - fileUpload extracts a multipart part and does not itself write to an attacker-controlled path."
   imports:
   - akka.http.scaladsl

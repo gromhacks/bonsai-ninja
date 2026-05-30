@@ -42,7 +42,7 @@
       import 'package:xml/xml.dart';
       void test() { XmlDocument.parse("<root/>"); }
     expect_no_match: true
-  description: "package:xml XmlDocument.parse(tainted) — package:xml ignores entities by default but accepts a custom `entityMapping:` that can fetch external resources; flag for audit."
+  description: "package:xml XmlDocument.parse(tainted) - package:xml ignores entities by default but accepts a custom `entityMapping:` that can fetch external resources; flag for audit."
 
   imports:
   - xml/xml.dart
@@ -74,7 +74,7 @@
       import 'package:xml/xml.dart';
       void test() { XmlDocument.parseEvents("<root/>"); }
     expect_no_match: true
-  description: "package:xml XmlDocument.parseEvents — streaming parse surfaces DOCTYPE events the caller may resolve manually; tainted XML with entity references becomes XXE."
+  description: "package:xml XmlDocument.parseEvents - streaming parse surfaces DOCTYPE events the caller may resolve manually; tainted XML with entity references becomes XXE."
 
   imports:
   - xml/xml.dart
@@ -107,7 +107,7 @@
       import 'package:xml/xml.dart';
       void test() { XmlDocumentFragment.parse("<child/>"); }
     expect_no_match: true
-  description: "package:xml XmlDocumentFragment.parse — fragment parser with the same entity-mapping surface as XmlDocument.parse."
+  description: "package:xml XmlDocumentFragment.parse - fragment parser with the same entity-mapping surface as XmlDocument.parse."
 
   imports:
   - xml/xml.dart
@@ -124,7 +124,7 @@
     kind: call
     callee:
       name: parseEvents
-  description: "Disabled — bare parseEvents() without receiver context is too broad; the XmlDocument.parseEvents rule above is the narrower form."
+  description: "Disabled - bare parseEvents() without receiver context is too broad; the XmlDocument.parseEvents rule above is the narrower form."
 
 - id: dart.xxe.xml2json_parse
   enabled: true
@@ -155,7 +155,7 @@
       import 'package:xml2json/xml2json.dart';
       void test() { Xml2Json.parse("<root/>"); }
     expect_no_match: true
-  description: "xml2json Xml2Json.parse — builds on package:xml internally; tainted XML input inherits the same DOCTYPE-surface caveats."
+  description: "xml2json Xml2Json.parse - builds on package:xml internally; tainted XML input inherits the same DOCTYPE-surface caveats."
 
   imports:
   - xml2json/xml2json.dart
@@ -172,4 +172,4 @@
     kind: call
     callee:
       attribute: [LibXml, parse]
-  description: "Disabled placeholder — enable when the codebase calls dart:ffi libxml2 bindings that expand entities by default; the real danger lives in native-library shims."
+  description: "Disabled placeholder - enable when the codebase calls dart:ffi libxml2 bindings that expand entities by default; the real danger lives in native-library shims."

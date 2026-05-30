@@ -35,7 +35,7 @@
         }
       }
     expect_no_match: true
-  description: "XPath.evaluate(expr, doc) — XPath injection through javax.xml.xpath in Scala code."
+  description: "XPath.evaluate(expr, doc) - XPath injection through javax.xml.xpath in Scala code."
 
 - id: scala.xpath.xpath_compile
   enabled: true
@@ -73,4 +73,4 @@
         }
       }
     expect_no_match: true
-  description: "XPath.compile(expr) — compiled XPath expressions built by concatenating attacker input are injectable before later evaluation."
+  description: "XPath.compile(expr) - compiled XPath expressions built by concatenating attacker input are injectable before later evaluation."

@@ -14,7 +14,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; URLCredential(input) }
-  description: "URLCredential(trust:) passed to completion(.useCredential, ...) in urlSession(_:didReceive:completionHandler:) — cert-validation bypass."
+  description: "URLCredential(trust:) passed to completion(.useCredential, ...) in urlSession(_:didReceive:completionHandler:) - cert-validation bypass."
 
 - id: swift.tls.alamofire_servertrust_disabled
   enabled: true
@@ -33,7 +33,7 @@
     code: |
       import Alamofire
       func test() { let input = "x"; let amount = 1; DisabledTrustEvaluator(input) }
-  description: "Alamofire DisabledTrustEvaluator — explicitly disables server trust validation."
+  description: "Alamofire DisabledTrustEvaluator - explicitly disables server trust validation."
 
 - id: swift.tls.alamofire_servertrust_evaluator
   enabled: false
@@ -48,7 +48,7 @@
     kind: call
     callee:
       name: ServerTrustEvaluator
-  description: "Disabled — ServerTrustEvaluator is a protocol, not a callable; flag concrete implementors (DisabledTrustEvaluator, PinnedCertificatesTrustEvaluator) instead."
+  description: "Disabled - ServerTrustEvaluator is a protocol, not a callable; flag concrete implementors (DisabledTrustEvaluator, PinnedCertificatesTrustEvaluator) instead."
 
 - id: swift.tls.ssl_break_on_server_auth
   enabled: true
@@ -65,7 +65,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; SSLSetSessionOption(input) }
-  description: "SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth) — manual cert validation, often skipped."
+  description: "SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth) - manual cert validation, often skipped."
 
 - id: swift.tls.alamofire_revocation_skip
   enabled: true
@@ -84,7 +84,7 @@
     code: |
       import Alamofire
       func test() { let input = "x"; let amount = 1; RevocationTrustEvaluator(input) }
-  description: "Alamofire RevocationTrustEvaluator with `performRevocationFlags: []` skips OCSP/CRL revocation checks — review args."
+  description: "Alamofire RevocationTrustEvaluator with `performRevocationFlags: []` skips OCSP/CRL revocation checks - review args."
 
 - id: swift.tls.allow_arbitrary_loads_plist
   enabled: false
@@ -98,4 +98,4 @@
     kind: write
     target:
       name: NSAllowsArbitraryLoads
-  description: "Disabled — Info.plist setting; surface via plist scanner."
+  description: "Disabled - Info.plist setting; surface via plist scanner."

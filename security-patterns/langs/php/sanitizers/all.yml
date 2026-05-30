@@ -13,7 +13,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlspecialchars($input);\n}\n"
     expect_match_text:
     - htmlspecialchars
-  description: htmlspecialchars — entity-encodes <>&"'.
+  description: htmlspecialchars - entity-encodes <>&"'.
 - id: php.sanitizer.htmlentities
   enabled: true
   language: php
@@ -29,7 +29,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlentities($input);\n}\n"
     expect_match_text:
     - htmlentities
-  description: htmlentities — broader entity encoding.
+  description: htmlentities - broader entity encoding.
 - id: php.sanitizer.strip_tags
   enabled: true
   language: php
@@ -43,7 +43,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  strip_tags($input);\n}\n"
     expect_match_text:
     - strip_tags
-  description: strip_tags — removes HTML tags (not foolproof for attribute context).
+  description: strip_tags - removes HTML tags (not foolproof for attribute context).
 - id: php.sanitizer.urlencode
   enabled: true
   language: php
@@ -57,7 +57,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  urlencode($input);\n}\n"
     expect_match_text:
     - urlencode
-  description: urlencode() — percent-encodes reserved URL characters; clears taint for URL-context concatenation.
+  description: urlencode() - percent-encodes reserved URL characters; clears taint for URL-context concatenation.
 - id: php.sanitizer.rawurlencode
   enabled: true
   language: php
@@ -85,7 +85,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  escapeshellarg($input);\n}\n"
     expect_match_text:
     - escapeshellarg
-  description: escapeshellarg — quotes argument for shell.
+  description: escapeshellarg - quotes argument for shell.
 - id: php.sanitizer.escapeshellcmd
   enabled: true
   language: php
@@ -99,7 +99,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  escapeshellcmd($input);\n}\n"
     expect_match_text:
     - escapeshellcmd
-  description: escapeshellcmd — escapes command metacharacters (weaker than escapeshellarg).
+  description: escapeshellcmd - escapes command metacharacters (weaker than escapeshellarg).
 - id: php.sanitizer.mysqli_real_escape_string
   enabled: true
   language: php
@@ -115,7 +115,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->real_escape_string($input);\n}\n"
     expect_match_text:
     - $mysqli->real_escape_string
-  description: mysqli::real_escape_string — last-resort SQL escape.
+  description: mysqli::real_escape_string - last-resort SQL escape.
 - id: php.sanitizer.pdo_quote
   enabled: false
   disabled_reason:
@@ -128,7 +128,7 @@
       attribute:
       - PDO
       - quote
-  description: Disabled — PDO::quote is a partial escape helper and v1 matching cannot prove it is used only for value literals;
+  description: Disabled - PDO::quote is a partial escape helper and v1 matching cannot prove it is used only for value literals;
     prefer prepared statements.
 - id: php.sanitizer.addslashes
   enabled: false
@@ -140,7 +140,7 @@
     kind: call
     callee:
       name: addslashes
-  description: "Disabled — addslashes is a naive string escape and is not database-charset-aware; it can leave SQL injection
+  description: "Disabled - addslashes is a naive string escape and is not database-charset-aware; it can leave SQL injection
     exploitable under multibyte encodings or non-string SQL contexts."
 - id: php.sanitizer.intval
   enabled: true
@@ -155,7 +155,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  intval($input);\n}\n"
     expect_match_text:
     - intval
-  description: intval — coerces to int.
+  description: intval - coerces to int.
 - id: php.sanitizer.floatval
   enabled: true
   language: php
@@ -169,7 +169,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  floatval($input);\n}\n"
     expect_match_text:
     - floatval
-  description: floatval — coerces to float.
+  description: floatval - coerces to float.
 - id: php.sanitizer.filter_var
   enabled: false
   disabled_reason:
@@ -180,7 +180,7 @@
     kind: call
     callee:
       name: filter_var
-  description: "Disabled — bare filter_var($value) uses the default unsafe/raw filter and does not validate or sanitize attacker-controlled
+  description: "Disabled - bare filter_var($value) uses the default unsafe/raw filter and does not validate or sanitize attacker-controlled
     data. Use constrained FILTER_VALIDATE_* rules instead."
 - id: php.sanitizer.filter_input
   enabled: false
@@ -192,7 +192,7 @@
     kind: call
     callee:
       name: filter_input
-  description: "Disabled — filter_input requires a specific FILTER_VALIDATE_* or context-appropriate FILTER_SANITIZE_* argument;
+  description: "Disabled - filter_input requires a specific FILTER_VALIDATE_* or context-appropriate FILTER_SANITIZE_* argument;
     the bare call/default filter preserves dangerous taint."
 - id: php.sanitizer.json_encode
   enabled: false
@@ -204,7 +204,7 @@
     kind: call
     callee:
       name: json_encode
-  description: Disabled — json_encode escapes for JSON, not HTML.
+  description: Disabled - json_encode escapes for JSON, not HTML.
 - id: php.sanitizer.basename
   enabled: true
   language: php
@@ -218,7 +218,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  basename($input);\n}\n"
     expect_match_text:
     - basename
-  description: basename — strips directory; mitigates path traversal in filename.
+  description: basename - strips directory; mitigates path traversal in filename.
 - id: php.sanitizer.realpath
   enabled: false
   disabled_reason:
@@ -229,7 +229,7 @@
     kind: call
     callee:
       name: realpath
-  description: Disabled — realpath canonicalizes but does not by itself enforce trusted-root containment.
+  description: Disabled - realpath canonicalizes but does not by itself enforce trusted-root containment.
 - id: php.sanitizer.preg_quote
   enabled: true
   language: php
@@ -243,7 +243,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  preg_quote($input);\n}\n"
     expect_match_text:
     - preg_quote
-  description: preg_quote — escapes regex metacharacters.
+  description: preg_quote - escapes regex metacharacters.
 - id: php.sanitizer.ldap_escape
   enabled: true
   language: php
@@ -257,7 +257,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  ldap_escape($input);\n}\n"
     expect_match_text:
     - ldap_escape
-  description: ldap_escape — escapes LDAP filter chars (PHP 5.6+).
+  description: ldap_escape - escapes LDAP filter chars (PHP 5.6+).
 - id: php.sanitizer.symfony_html_purifier
   enabled: true
   language: php
@@ -413,7 +413,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  hash_equals($input);\n}\n"
     expect_match_text:
     - hash_equals
-  description: hash_equals — timing-safe string compare.
+  description: hash_equals - timing-safe string compare.
 - id: php.sanitizer.random_int
   enabled: true
   language: php
@@ -427,7 +427,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  random_int($input);\n}\n"
     expect_match_text:
     - random_int
-  description: random_int — CSPRNG int.
+  description: random_int - CSPRNG int.
 - id: php.sanitizer.random_bytes
   enabled: true
   language: php
@@ -441,7 +441,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  random_bytes($input);\n}\n"
     expect_match_text:
     - random_bytes
-  description: random_bytes — CSPRNG bytes.
+  description: random_bytes - CSPRNG bytes.
 - id: php.sanitizer.mysqli_real_escape_proc
   enabled: true
   language: php
@@ -469,7 +469,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pg_escape_string($input);\n}\n"
     expect_match_text:
     - pg_escape_string
-  description: pg_escape_string — Postgres escape.
+  description: pg_escape_string - Postgres escape.
 - id: php.sanitizer.pg_escape_literal
   enabled: true
   language: php
@@ -483,7 +483,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pg_escape_literal($input);\n}\n"
     expect_match_text:
     - pg_escape_literal
-  description: pg_escape_literal — Postgres literal escape.
+  description: pg_escape_literal - Postgres literal escape.
 - id: php.sanitizer.pdo_prepare
   enabled: true
   language: php
@@ -497,7 +497,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  PDO::prepare($input);\n}\n"
     expect_match_text:
     - PDO::prepare
-  description: PDO::prepare — returns bind-ready statement (paired with execute).
+  description: PDO::prepare - returns bind-ready statement (paired with execute).
 - id: php.sanitizer.mysqli_prepare
   enabled: true
   language: php
@@ -511,7 +511,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->prepare($input);\n}\n"
     expect_match_text:
     - $mysqli->prepare
-  description: mysqli::prepare — parameterised statement.
+  description: mysqli::prepare - parameterised statement.
 - id: php.sanitizer.twig_escape_filter
   enabled: true
   language: php
@@ -558,7 +558,7 @@
       }
     expect_match_text:
     - e
-  description: Laravel e() — htmlspecialchars wrapper for Blade.
+  description: Laravel e() - htmlspecialchars wrapper for Blade.
   imports:
   - laravel\framework
   - laravel
@@ -583,7 +583,7 @@
       }
     expect_match_text:
     - $wpdb->prepare
-  description: WordPress wpdb::prepare — parameterised SQL.
+  description: WordPress wpdb::prepare - parameterised SQL.
 - id: php.sanitizer.wordpress_esc_sql
   enabled: true
   language: php
@@ -605,7 +605,7 @@
       }
     expect_match_text:
     - esc_sql
-  description: WordPress esc_sql — last-resort SQL escape.
+  description: WordPress esc_sql - last-resort SQL escape.
 - id: php.sanitizer.filter_var_int
   enabled: false
   disabled_reason:
@@ -621,7 +621,7 @@
   - arg_equals:
       index: 1
       value: FILTER_VALIDATE_INT
-  description: "Disabled duplicate — php.sanitizer.filter_var_validate_int is the enabled constrained FILTER_VALIDATE_INT
+  description: "Disabled duplicate - php.sanitizer.filter_var_validate_int is the enabled constrained FILTER_VALIDATE_INT
     rule with examples."
 - id: php.sanitizer.htmlspecialchars_ent_quotes
   enabled: true
@@ -643,7 +643,7 @@
   - name: php.sanitizer.htmlspecialchars_ent_quotes example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlspecialchars();\n}\n"
     expect_no_match: true
-  description: htmlspecialchars(..., ENT_QUOTES) — encodes both single and double quotes, making output safe for double- AND
+  description: htmlspecialchars(..., ENT_QUOTES) - encodes both single and double quotes, making output safe for double- AND
     single-quoted attribute contexts. Without ENT_QUOTES the default (ENT_HTML401|ENT_QUOTES varies by PHP version; in <8.1
     single quotes were not escaped) leaves single-quoted attribute injection possible, so this constrained variant is a stronger
     sanitizer than the bare-name rule above.
@@ -667,7 +667,7 @@
   - name: php.sanitizer.htmlentities_ent_quotes example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlentities();\n}\n"
     expect_no_match: true
-  description: 'htmlentities(..., ENT_QUOTES) — same rationale as htmlspecialchars_ent_quotes: only the ENT_QUOTES variant
+  description: 'htmlentities(..., ENT_QUOTES) - same rationale as htmlspecialchars_ent_quotes: only the ENT_QUOTES variant
     is safe for single-quoted attribute contexts.'
 - id: php.sanitizer.filter_var_validate_int
   enabled: true
@@ -690,7 +690,7 @@
   - name: php.sanitizer.filter_var_validate_int example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var();\n}\n"
     expect_no_match: true
-  description: filter_var(value, FILTER_VALIDATE_INT) — returns the int or false; constrains taint to a numeric value safe
+  description: filter_var(value, FILTER_VALIDATE_INT) - returns the int or false; constrains taint to a numeric value safe
     for SQL/LDAP/path concat.
 - id: php.sanitizer.filter_var_validate_email
   enabled: true
@@ -713,7 +713,7 @@
   - name: php.sanitizer.filter_var_validate_email example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var();\n}\n"
     expect_no_match: true
-  description: filter_var(value, FILTER_VALIDATE_EMAIL) — RFC-compliant email validator; returns the string or false.
+  description: filter_var(value, FILTER_VALIDATE_EMAIL) - RFC-compliant email validator; returns the string or false.
 - id: php.sanitizer.filter_var_validate_url
   enabled: true
   language: php
@@ -735,7 +735,7 @@
   - name: php.sanitizer.filter_var_validate_url example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var();\n}\n"
     expect_no_match: true
-  description: 'filter_var(value, FILTER_VALIDATE_URL) — URL-shape validator. Note: validates syntax only; does NOT block
+  description: 'filter_var(value, FILTER_VALIDATE_URL) - URL-shape validator. Note: validates syntax only; does NOT block
     SSRF (an attacker URL like http://169.254.169.254/ still passes). Pair with an allow-list host check.'
 - id: php.sanitizer.password_verify
   enabled: true
@@ -750,7 +750,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  password_verify($input);\n}\n"
     expect_match_text:
     - password_verify
-  description: password_verify() — constant-time bcrypt/argon2 verification; protects against timing oracles on password comparison.
+  description: password_verify() - constant-time bcrypt/argon2 verification; protects against timing oracles on password comparison.
 - id: php.sanitizer.openssl_random_pseudo_bytes_strong
   enabled: true
   language: php
@@ -764,7 +764,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  openssl_random_pseudo_bytes($input);\n}\n"
     expect_match_text:
     - openssl_random_pseudo_bytes
-  description: openssl_random_pseudo_bytes() — CSPRNG bytes. The 2nd by-ref parameter `$crypto_strong` returns true when OpenSSL
+  description: openssl_random_pseudo_bytes() - CSPRNG bytes. The 2nd by-ref parameter `$crypto_strong` returns true when OpenSSL
     used a cryptographically strong RNG; callers must check it before using the output for crypto. The bare-call match here
     is the source-visible site; the by-ref-check is enforced as a manual review item.
 - id: php.sanitizer.pdo_quote_value
@@ -779,7 +779,7 @@
       attribute:
       - PDO
       - quote
-  description: "Disabled — PDO::quote is only safe for string-literal value contexts and cannot prove the quoted output is
+  description: "Disabled - PDO::quote is only safe for string-literal value contexts and cannot prove the quoted output is
     not used as an identifier, keyword, or larger SQL fragment. Prefer prepared statements and bind rules."
 - id: php.sanitizer.symfony_is_safe_redirect
   enabled: true
@@ -830,7 +830,7 @@
   - name: php.sanitizer.same_origin_str_starts_with example negative constraint boundary
     code: "<?php\nfunction example($next) {\n  str_starts_with();\n}\n"
     expect_no_match: true
-  description: str_starts_with($target, '/') — same-origin redirect/path guard for root-relative targets.
+  description: str_starts_with($target, '/') - same-origin redirect/path guard for root-relative targets.
 - id: php.sanitizer.in_array_strict_allowlist
   enabled: true
   language: php
@@ -851,7 +851,7 @@
   - name: php.sanitizer.in_array_strict_allowlist example negative constraint boundary
     code: "<?php\nfunction example($role) {\n  in_array();\n}\n"
     expect_no_match: true
-  description: in_array($value, $allowed, true) — strict enum allowlist check; third argument avoids PHP loose-comparison
+  description: in_array($value, $allowed, true) - strict enum allowlist check; third argument avoids PHP loose-comparison
     bypasses.
 - id: php.sanitizer.array_key_exists_allowlist
   enabled: false
@@ -871,8 +871,8 @@
   - name: php.sanitizer.array_key_exists_allowlist example negative constraint boundary
     code: "<?php\nfunction example($role) {\n  array_key_exists();\n}\n"
     expect_no_match: true
-  description: Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    array_key_exists($value, $allowed*) — associative-array allowlist membership check.
+  description: Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    array_key_exists($value, $allowed*) - associative-array allowlist membership check.
   disabled_reason:
     code: over-broad
 - id: php.sanitizer.preg_match_full_string_shape
@@ -895,7 +895,7 @@
   - name: php.sanitizer.preg_match_full_string_shape example negative constraint boundary
     code: "<?php\nfunction example($slug) {\n  preg_match();\n}\n"
     expect_no_match: true
-  description: preg_match with full-string anchors — shape validator for UUIDs, slugs, emails, and similar bounded formats.
+  description: preg_match with full-string anchors - shape validator for UUIDs, slugs, emails, and similar bounded formats.
 - id: php.sanitizer.pdo_statement_execute_bind_array
   enabled: true
   language: php
@@ -911,7 +911,7 @@
     code: "<?php\nfunction example(PDOStatement $stmt, $id) {\n  $stmt->execute([$id]);\n}\n"
     expect_match_text:
     - $stmt->execute
-  description: PDOStatement::execute([$value, ...]) — binds parameters out-of-band instead
+  description: PDOStatement::execute([$value, ...]) - binds parameters out-of-band instead
     of interpolating them into SQL.
 - id: php.sanitizer.pdo_statement_bind_value
   enabled: true
@@ -926,7 +926,7 @@
     code: "<?php\nfunction example(PDOStatement $stmt, $id) {\n  $stmt->bindValue(':id', $id);\n}\n"
     expect_match_text:
     - $stmt->bindValue
-  description: PDOStatement::bindValue — explicit parameter binding for prepared statements.
+  description: PDOStatement::bindValue - explicit parameter binding for prepared statements.
 - id: php.sanitizer.preg_replace_char_allowlist
   enabled: true
   language: php
@@ -950,7 +950,7 @@
   - name: php.sanitizer.preg_replace_char_allowlist example negative constraint boundary
     code: "<?php\nfunction example($input) {\n  preg_replace();\n}\n"
     expect_no_match: true
-  description: preg_replace('/[^safe]/', '', $value) — strips every character outside an explicit allowlist.
+  description: preg_replace('/[^safe]/', '', $value) - strips every character outside an explicit allowlist.
 - id: php.sanitizer.libxml_disable_entity_loader
   enabled: true
   language: php
@@ -967,7 +967,7 @@
   - name: php.sanitizer.libxml_disable_entity_loader example negative constraint boundary
     code: "<?php\nfunction example($xml) {\n  libxml_disable_entity_loader();\n}\n"
     expect_no_match: true
-  description: libxml_disable_entity_loader(true) — legacy PHP/libxml global guard that blocks external entity loading before
+  description: libxml_disable_entity_loader(true) - legacy PHP/libxml global guard that blocks external entity loading before
     XML parsing.
 - id: php.passthrough.urldecode
   enabled: true
@@ -984,7 +984,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  urldecode($input);\n}\n"
     expect_match_text:
     - urldecode
-  description: PHP urldecode($x) — preserves taint; %2F%2E%2E%2F decoded to /../ after a path-safety check is the Bludit CVE-2019-16113
+  description: PHP urldecode($x) - preserves taint; %2F%2E%2E%2F decoded to /../ after a path-safety check is the Bludit CVE-2019-16113
     amplifier.
 - id: php.passthrough.rawurldecode
   enabled: true
@@ -1001,7 +1001,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  rawurldecode($input);\n}\n"
     expect_match_text:
     - rawurldecode
-  description: PHP rawurldecode($x) — same identity-passthrough as urldecode.
+  description: PHP rawurldecode($x) - same identity-passthrough as urldecode.
 - id: php.passthrough.strtoupper
   enabled: true
   language: php
@@ -1017,7 +1017,7 @@
     code: "<?php\nfunction example($input) {\n  return strtoupper($input);\n}\n"
     expect_match_text:
     - strtoupper
-  description: PHP strtoupper($x) — case-normalizes but preserves taint from $x.
+  description: PHP strtoupper($x) - case-normalizes but preserves taint from $x.
 - id: php.passthrough.strtolower
   enabled: true
   language: php
@@ -1033,7 +1033,7 @@
     code: "<?php\nfunction example($input) {\n  return strtolower($input);\n}\n"
     expect_match_text:
     - strtolower
-  description: PHP strtolower($x) — case-normalizes but preserves taint from $x.
+  description: PHP strtolower($x) - case-normalizes but preserves taint from $x.
 - id: php.csrf.laravel_verify_csrf_token
   enabled: true
   language: php
@@ -1047,7 +1047,7 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $VerifyCsrfToken;;\n}\n"
     expect_match_text:
     - VerifyCsrfToken
-  description: Laravel App\Http\Middleware\VerifyCsrfToken — global kernel middleware enforcing CSRF.
+  description: Laravel App\Http\Middleware\VerifyCsrfToken - global kernel middleware enforcing CSRF.
 - id: php.csrf.symfony_csrf_token_manager
   enabled: true
   language: php
@@ -1064,7 +1064,7 @@
       }\n"
     expect_match_text:
     - $csrf_token_manager->isTokenValid
-  description: Symfony CsrfTokenManager::isTokenValid — explicit form CSRF check.
+  description: Symfony CsrfTokenManager::isTokenValid - explicit form CSRF check.
 - id: php.cookie.setcookie_with_httponly_secure
   enabled: true
   language: php
@@ -1083,7 +1083,7 @@
   - name: php.cookie.setcookie_with_httponly_secure example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  setcookie();\n}\n"
     expect_no_match: true
-  description: setcookie(name, val, opts) — verify the 5th/6th positional args (secure, httpOnly) are true.
+  description: setcookie(name, val, opts) - verify the 5th/6th positional args (secure, httpOnly) are true.
 - id: php.ratelimit.laravel_ratelimiter_for
   enabled: true
   language: php
@@ -1107,7 +1107,7 @@
       }
     expect_match_text:
     - RateLimiter::for
-  description: Laravel RateLimiter::for — declares a named rate-limit; absence on /login route is the finding.
+  description: Laravel RateLimiter::for - declares a named rate-limit; absence on /login route is the finding.
   imports:
   - laravel\framework
   - laravel
@@ -1134,7 +1134,7 @@
       }
     expect_match_text:
     - wp_verify_nonce
-  description: WordPress wp_verify_nonce(token, action) — explicit CSRF nonce verification.
+  description: WordPress wp_verify_nonce(token, action) - explicit CSRF nonce verification.
 - id: php.csrf.wordpress_check_admin_referer
   enabled: true
   language: php
@@ -1156,4 +1156,4 @@
       }
     expect_match_text:
     - check_admin_referer
-  description: WordPress check_admin_referer — admin action CSRF nonce verification.
+  description: WordPress check_admin_referer - admin action CSRF nonce verification.

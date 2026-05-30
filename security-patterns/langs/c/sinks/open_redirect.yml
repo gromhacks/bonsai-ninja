@@ -12,7 +12,7 @@
     kind: call
     callee:
       name: mg_http_reply
-  description: "Disabled — canonical rule is c.xss.mongoose_http_reply in xss.yml (no constraint differentiates Location-header calls from body calls, so we keep a single higher-coverage rule)."
+  description: "Disabled - canonical rule is c.xss.mongoose_http_reply in xss.yml (no constraint differentiates Location-header calls from body calls, so we keep a single higher-coverage rule)."
 
 - id: c.open_redirect.nginx_modsec_set_location
   enabled: false
@@ -27,7 +27,7 @@
     kind: call
     callee:
       name: ngx_http_send_redirect
-  description: "Disabled — internal nginx API; flag only in module code."
+  description: "Disabled - internal nginx API; flag only in module code."
 
 - id: c.open_redirect.printf_location_header
   enabled: false
@@ -41,4 +41,4 @@
     kind: call
     callee:
       name: printf
-  description: "Disabled — generic printf; flag with constraint on Location header emission."
+  description: "Disabled - generic printf; flag with constraint on Location header emission."

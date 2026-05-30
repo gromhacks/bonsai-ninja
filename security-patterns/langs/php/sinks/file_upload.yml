@@ -18,7 +18,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($tmp, $input, $url, $id, $payload, $request) {\n  move_uploaded_file($tmp, \"uploads/avatar.png\");\n}\n"
     expect_no_match: true
-  description: move_uploaded_file with tainted destination — overlaps path rule.
+  description: move_uploaded_file with tainted destination - overlaps path rule.
 - id: php.upload.symfony_uploadedfile_move
   enabled: true
   language: php
@@ -136,7 +136,7 @@
         $file->storeAs("uploads", "avatar.png");
       }
     expect_no_match: true
-  description: Laravel UploadedFile::storeAs(directory, tainted_name) — attacker-controlled upload name or path can create unsafe uploaded files.
+  description: Laravel UploadedFile::storeAs(directory, tainted_name) - attacker-controlled upload name or path can create unsafe uploaded files.
   imports:
   - laravel\framework
   - laravel

@@ -66,7 +66,7 @@
       }
       class ProcessBuilder(vararg args: Any?)
     expect_no_match: true
-  description: "ProcessBuilder(tainted) — untrusted command elements control child process execution."
+  description: "ProcessBuilder(tainted) - untrusted command elements control child process execution."
 - id: kotlin.cmdi.processbuilder_start
   enabled: true
   language: kotlin
@@ -130,7 +130,7 @@
       }
       }
     expect_no_match: true
-  description: Runtime.exec(String) — shell-parsed.
+  description: Runtime.exec(String) - shell-parsed.
 - id: kotlin.cmdi.processbuilder_command
   enabled: true
   language: kotlin
@@ -162,7 +162,7 @@
       }
       }
     expect_no_match: true
-  description: "java.lang.ProcessBuilder.command(varargs) — tainted command tokens control child process execution."
+  description: "java.lang.ProcessBuilder.command(varargs) - tainted command tokens control child process execution."
 - id: kotlin.cmdi.commons_exec_executor
   enabled: true
   language: kotlin
@@ -232,7 +232,7 @@
       }
       }
     expect_no_match: true
-  description: "commons-exec CommandLine.parse(tainted) — shell-parsed command string."
+  description: "commons-exec CommandLine.parse(tainted) - shell-parsed command string."
 - id: kotlin.cmdi.runtime_exec_array
   enabled: false
   disabled_reason:
@@ -245,7 +245,7 @@
     kind: call
     callee:
       name: exec
-  description: "Disabled — bare `exec` name is ubiquitous (`.exec()` extension, matchers, etc.); use attribute-qualified kotlin.cmdi.runtime_exec_string instead."
+  description: "Disabled - bare `exec` name is ubiquitous (`.exec()` extension, matchers, etc.); use attribute-qualified kotlin.cmdi.runtime_exec_string instead."
 - id: kotlin.cmdi.kotlin_process_extension
   enabled: true
   language: kotlin
@@ -278,7 +278,7 @@
       }
       }
     expect_no_match: true
-  description: "kotlin-process extension (\"cmd\".exec()) — shell-parsed command execution."
+  description: "kotlin-process extension (\"cmd\".exec()) - shell-parsed command execution."
 - id: kotlin.cmdi.desktop_browse
   enabled: true
   language: kotlin
@@ -313,7 +313,7 @@
       }
       }
     expect_no_match: true
-  description: "Desktop.browse(tainted URI) — OS-delegated URL handler can execute arbitrary app URIs."
+  description: "Desktop.browse(tainted URI) - OS-delegated URL handler can execute arbitrary app URIs."
 - id: kotlin.cmdi.desktop_open
   enabled: true
   language: kotlin
@@ -343,4 +343,4 @@
       }
       }
     expect_no_match: true
-  description: "Desktop.open(tainted file) — launches the associated local handler for attacker-controlled content."
+  description: "Desktop.open(tainted file) - launches the associated local handler for attacker-controlled content."

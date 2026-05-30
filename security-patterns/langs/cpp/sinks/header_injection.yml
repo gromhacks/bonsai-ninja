@@ -1,4 +1,4 @@
-# C++ header / CRLF injection — HTTP response header values from tainted input.
+# C++ header / CRLF injection - HTTP response header values from tainted input.
 - id: cpp.header.cpphttplib_set_header
   enabled: true
   language: cpp
@@ -30,7 +30,7 @@
         Response::set_header("safe", "safe");
       }
     expect_no_match: true
-  description: "cpp-httplib Response::set_header(name, tainted) — CRLF in value splits response."
+  description: "cpp-httplib Response::set_header(name, tainted) - CRLF in value splits response."
 
   imports:
   - httplib.h
@@ -62,7 +62,7 @@
         Response::set_header("safe");
       }
     expect_no_match: true
-  description: "Response::set_header(name, value) — tainted header names can corrupt response headers."
+  description: "Response::set_header(name, value) - tainted header names can corrupt response headers."
 
   imports:
   - httplib.h
@@ -97,7 +97,7 @@
         crowcpp_add_header("safe", "safe");
       }
     expect_no_match: true
-  description: "crow response.add_header(name, tainted) — CRLF injection."
+  description: "crow response.add_header(name, tainted) - CRLF injection."
 
 - id: cpp.header.crowcpp_add_header_name
   enabled: true
@@ -126,7 +126,7 @@
         response.add_header("safe", "safe");
       }
     expect_no_match: true
-  description: "response.add_header(name, value) — tainted header names can corrupt response headers."
+  description: "response.add_header(name, value) - tainted header names can corrupt response headers."
 
 - id: cpp.header.drogon_add_header
   enabled: true
@@ -158,7 +158,7 @@
         HttpResponse::addHeader("safe", "safe");
       }
     expect_no_match: true
-  description: "Drogon HttpResponse::addHeader(name, tainted) — CRLF injection."
+  description: "Drogon HttpResponse::addHeader(name, tainted) - CRLF injection."
 
 - id: cpp.header.drogon_add_header_name
   enabled: true
@@ -187,7 +187,7 @@
         HttpResponse::addHeader("safe");
       }
     expect_no_match: true
-  description: "HttpResponse::addHeader(name, value) — tainted header names can corrupt response headers."
+  description: "HttpResponse::addHeader(name, value) - tainted header names can corrupt response headers."
 
 - id: cpp.header.drogon_set_cookie
   enabled: true
@@ -219,7 +219,7 @@
         HttpResponse::addCookie("safe");
       }
     expect_no_match: true
-  description: "Drogon HttpResponse::addCookie — flag tainted cookie value."
+  description: "Drogon HttpResponse::addCookie - flag tainted cookie value."
 
 - id: cpp.header.poco_response_set
   enabled: true
@@ -251,7 +251,7 @@
         HTTPResponse::set("safe", "safe");
       }
     expect_no_match: true
-  description: "Poco::Net::HTTPResponse::set(name, tainted) — CRLF injection."
+  description: "Poco::Net::HTTPResponse::set(name, tainted) - CRLF injection."
 
 - id: cpp.header.poco_response_set_name
   enabled: true
@@ -280,7 +280,7 @@
         HTTPResponse::set("safe");
       }
     expect_no_match: true
-  description: "HTTPResponse::set(name, value) — tainted header names can corrupt response headers."
+  description: "HTTPResponse::set(name, value) - tainted header names can corrupt response headers."
 
 - id: cpp.header.poco_response_add
   enabled: true
@@ -312,7 +312,7 @@
         HTTPResponse::add("safe", "safe");
       }
     expect_no_match: true
-  description: "Poco::Net::HTTPResponse::add(name, tainted) — CRLF injection."
+  description: "Poco::Net::HTTPResponse::add(name, tainted) - CRLF injection."
 - id: cpp.header.poco_response_add_name
   enabled: true
   language: cpp
@@ -340,4 +340,4 @@
         HTTPResponse::add("safe");
       }
     expect_no_match: true
-  description: "HTTPResponse::add(name, value) — tainted header names can corrupt response headers."
+  description: "HTTPResponse::add(name, value) - tainted header names can corrupt response headers."

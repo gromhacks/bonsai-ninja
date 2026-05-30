@@ -30,7 +30,7 @@
         end
       end
     expect_no_match: true
-  description: "Absinthe.run/2,3 with tainted GraphQL document/options — attacker-controlled operation reaches resolver execution."
+  description: "Absinthe.run/2,3 with tainted GraphQL document/options - attacker-controlled operation reaches resolver execution."
 
   imports:
   - Absinthe
@@ -55,6 +55,6 @@
           Absinthe.Plug.run(conn)
         end
       end
-  description: "Absinthe.Plug.run(conn, opts) — GraphQL query, variables, and operation name from the Plug request reach the Absinthe executor."
+  description: "Absinthe.Plug.run(conn, opts) - GraphQL query, variables, and operation name from the Plug request reach the Absinthe executor."
   imports:
   - Absinthe_plug

@@ -10,7 +10,7 @@
     kind: param
     target:
       name: args
-  description: "Disabled — `kind: param` cannot currently prove the enclosing function is top-level `main`, so bare `args` overmatches ordinary helper parameters."
+  description: "Disabled - `kind: param` cannot currently prove the enclosing function is top-level `main`, so bare `args` overmatches ordinary helper parameters."
 
 - id: kotlin.source.system_getenv
   enabled: true
@@ -29,7 +29,7 @@
             System.getenv(input)
           }
         }
-  description: "System.getenv — environment variable."
+  description: "System.getenv - environment variable."
 
 - id: kotlin.source.system_getproperty
   enabled: true
@@ -48,7 +48,7 @@
             System.getProperty(input)
           }
         }
-  description: "System.getProperty — JVM system property."
+  description: "System.getProperty - JVM system property."
 
 - id: kotlin.source.kotlin_readline
   enabled: true
@@ -67,4 +67,4 @@
             readLine(input)
           }
         }
-  description: "kotlin.io.readLine() — stdin line."
+  description: "kotlin.io.readLine() - stdin line."

@@ -33,7 +33,7 @@
       }
       }
     expect_no_match: true
-  description: "SAXParser.parse — disable external entities."
+  description: "SAXParser.parse - disable external entities."
 
 - id: kotlin.xxe.saxparserfactory_newinstance
   enabled: true
@@ -54,7 +54,7 @@
           SAXParserFactory.newInstance(input)
         }
       }
-  description: "SAXParserFactory.newInstance — flag if XMLConstants.FEATURE_SECURE_PROCESSING off."
+  description: "SAXParserFactory.newInstance - flag if XMLConstants.FEATURE_SECURE_PROCESSING off."
 
 - id: kotlin.xxe.documentbuilder_parse
   enabled: true
@@ -111,7 +111,7 @@
           DocumentBuilderFactory.newInstance(input)
         }
       }
-  description: "DocumentBuilderFactory.newInstance — flag without disallow-doctype-decl."
+  description: "DocumentBuilderFactory.newInstance - flag without disallow-doctype-decl."
 
 - id: kotlin.xxe.xmlinputfactory_createreader
   enabled: true
@@ -142,7 +142,7 @@
       }
       }
     expect_no_match: true
-  description: "XMLInputFactory.createXMLStreamReader — flag if SUPPORT_DTD on."
+  description: "XMLInputFactory.createXMLStreamReader - flag if SUPPORT_DTD on."
 
 - id: kotlin.xxe.xmlinputfactory_createevent
   enabled: true
@@ -209,7 +209,7 @@
       }
       }
     expect_no_match: true
-  description: "Transformer.transform — flag without ACCESS_EXTERNAL_DTD/STYLESHEET disabled."
+  description: "Transformer.transform - flag without ACCESS_EXTERNAL_DTD/STYLESHEET disabled."
 
 - id: kotlin.xxe.schemafactory_newschema
   enabled: true
@@ -254,7 +254,7 @@
     kind: call
     callee:
       attribute: [XPath, evaluate]
-  description: "Disabled — XPath itself doesn't fetch entities; flag with XML source."
+  description: "Disabled - XPath itself doesn't fetch entities; flag with XML source."
 
 - id: kotlin.xxe.unmarshaller_unmarshal
   enabled: true
@@ -290,7 +290,7 @@
       }
       }
     expect_no_match: true
-  description: "JAXB Unmarshaller.unmarshal — wraps SAX parser; same XXE rules apply."
+  description: "JAXB Unmarshaller.unmarshal - wraps SAX parser; same XXE rules apply."
 
 # Note: XStream.fromXML is a dual-category sink (deser + XXE). Kept in
 # sinks/deserialization.yml as kotlin.deser.xstream_fromxml only to avoid
@@ -398,7 +398,7 @@
       }
       }
     expect_no_match: true
-  description: "Jackson XmlMapper.readValue — XXE unless external entities disabled."
+  description: "Jackson XmlMapper.readValue - XXE unless external entities disabled."
 
   imports:
   - com
@@ -440,4 +440,4 @@
       class InputStream
       class XSSFWorkbook(vararg args: Any?)
     expect_no_match: true
-  description: "Apache POI XSSFWorkbook(InputStream) — parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."
+  description: "Apache POI XSSFWorkbook(InputStream) - parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."

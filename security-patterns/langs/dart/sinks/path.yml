@@ -112,7 +112,7 @@
     code: |
       void test() { File.openRead("config/app.txt"); }
     expect_no_match: true
-  description: "File.openRead — streaming read."
+  description: "File.openRead - streaming read."
 
 - id: dart.path.file_open_write
   enabled: true
@@ -207,7 +207,7 @@
       import 'dart:io';
       void test() { File.delete("tmp/output.txt"); }
     expect_no_match: true
-  description: "File.delete with tainted path — attacker-controlled paths let the attacker delete arbitrary files on disk."
+  description: "File.delete with tainted path - attacker-controlled paths let the attacker delete arbitrary files on disk."
 
 - id: dart.path.file_rename
   enabled: true
@@ -233,7 +233,7 @@
       import 'dart:io';
       void test() { File.rename("tmp/output.txt"); }
     expect_no_match: true
-  description: "File.rename — destination is tainted."
+  description: "File.rename - destination is tainted."
 
 - id: dart.path.file_copy
   enabled: true
@@ -256,7 +256,7 @@
     code: |
       void test() { File.copy("tmp/output.txt"); }
     expect_no_match: true
-  description: "File.copy — destination is tainted."
+  description: "File.copy - destination is tainted."
 
 - id: dart.path.directory_create
   enabled: true
@@ -308,7 +308,7 @@
       import 'dart:io';
       void test() { Directory.delete("tmp/uploads"); }
     expect_no_match: true
-  description: "Directory.delete — recursive deletion risk."
+  description: "Directory.delete - recursive deletion risk."
 
 - id: dart.path.directory_rename
   enabled: true
@@ -364,7 +364,7 @@
       import 'package:archive/archive.dart';
       void test() { extractArchiveToDisk("fixtures/safe.zip"); }
     expect_no_match: true
-  description: "archive extractArchiveToDisk — zip-slip if member filenames contain ../ and are not validated before write."
+  description: "archive extractArchiveToDisk - zip-slip if member filenames contain ../ and are not validated before write."
 
   imports:
   - archive/archive.dart
@@ -396,7 +396,7 @@
       import 'package:archive/archive.dart';
       void test() { extractFileToDisk("fixtures/safe.zip"); }
     expect_no_match: true
-  description: "archive extractFileToDisk — zip-slip."
+  description: "archive extractFileToDisk - zip-slip."
 
   imports:
   - archive/archive.dart
@@ -421,7 +421,7 @@
     code: |
       void test() { Uri.file("config/app.txt"); }
     expect_no_match: true
-  description: "Uri.file(tainted) — constructs a file:// URI that can later be fed to File/HttpClient.openUrl, enabling local file disclosure when paired with traversal payloads."
+  description: "Uri.file(tainted) - constructs a file:// URI that can later be fed to File/HttpClient.openUrl, enabling local file disclosure when paired with traversal payloads."
 
 - id: dart.path.file_constructor
   enabled: true
@@ -446,7 +446,7 @@
       class File { File([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var result = File("config/app.txt"); }
     expect_no_match: true
-  description: "File(path) constructor — tainted path stored on the File receiver before later read/write/delete operations."
+  description: "File(path) constructor - tainted path stored on the File receiver before later read/write/delete operations."
 
 - id: dart.path.directory_constructor
   enabled: true
@@ -471,4 +471,4 @@
       class Directory { Directory([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var result = Directory("/var/app/data"); }
     expect_no_match: true
-  description: "Directory(path) constructor — tainted directory path controls later filesystem operations."
+  description: "Directory(path) constructor - tainted directory path controls later filesystem operations."

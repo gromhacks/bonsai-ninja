@@ -23,7 +23,7 @@
         sqlite3_exec("safe", "safe");
       }
     expect_no_match: true
-  description: "sqlite3_exec(db, sql, ...) — raw SQL, no binding."
+  description: "sqlite3_exec(db, sql, ...) - raw SQL, no binding."
 - id: cpp.sqli.sqlite3_prepare_v2
   enabled: true
   language: cpp
@@ -55,7 +55,7 @@
         sqlite3_prepare_v2(db, "SELECT * FROM users WHERE id = ?", -1, 0, 0);
       }
     expect_no_match: true
-  description: "sqlite3_prepare_v2(db, tainted_sql, ...) — placeholders are safe, but a tainted SQL string at prepare time still permits query construction injection."
+  description: "sqlite3_prepare_v2(db, tainted_sql, ...) - placeholders are safe, but a tainted SQL string at prepare time still permits query construction injection."
 - id: cpp.sqli.sqlite3_get_table
   enabled: true
   language: cpp
@@ -81,7 +81,7 @@
         sqlite3_get_table("safe", "safe");
       }
     expect_no_match: true
-  description: "sqlite3_get_table — raw SQL, no binding."
+  description: "sqlite3_get_table - raw SQL, no binding."
 - id: cpp.sqli.mysqlcppconn_execute
   enabled: true
   language: cpp
@@ -110,7 +110,7 @@
         Statement::execute("SELECT * FROM users WHERE id = ?");
       }
     expect_no_match: true
-  description: "MySQL Connector/C++ Statement::execute(sql) — raw SQL."
+  description: "MySQL Connector/C++ Statement::execute(sql) - raw SQL."
 - id: cpp.sqli.mysqlcppconn_executequery
   enabled: true
   language: cpp
@@ -138,7 +138,7 @@
         Statement::executeQuery("safe");
       }
     expect_no_match: true
-  description: "MySQL Connector/C++ Statement::executeQuery(sql) — raw SQL."
+  description: "MySQL Connector/C++ Statement::executeQuery(sql) - raw SQL."
 - id: cpp.sqli.mysqlcppconn_executeupdate
   enabled: true
   language: cpp
@@ -166,7 +166,7 @@
         Statement::executeUpdate("safe");
       }
     expect_no_match: true
-  description: "MySQL Connector/C++ Statement::executeUpdate(sql) — raw SQL."
+  description: "MySQL Connector/C++ Statement::executeUpdate(sql) - raw SQL."
 - id: cpp.sqli.mysql_query_c
   enabled: true
   language: cpp
@@ -192,7 +192,7 @@
         mysql_query("safe", "safe");
       }
     expect_no_match: true
-  description: "libmysqlclient mysql_query — raw SQL."
+  description: "libmysqlclient mysql_query - raw SQL."
   imports:
   - mysql/mysql.h
   - mysql
@@ -221,7 +221,7 @@
         mysql_real_query("safe", "safe");
       }
     expect_no_match: true
-  description: "libmysqlclient mysql_real_query — raw SQL with length."
+  description: "libmysqlclient mysql_real_query - raw SQL with length."
   imports:
   - mysql/mysql.h
   - mysql
@@ -253,7 +253,7 @@
         work::exec("SELECT 1");
       }
     expect_no_match: true
-  description: "libpqxx work::exec(sql) — raw SQL; prefer exec_params / prepared."
+  description: "libpqxx work::exec(sql) - raw SQL; prefer exec_params / prepared."
 - id: cpp.sqli.libpqxx_exec0
   enabled: true
   language: cpp
@@ -281,7 +281,7 @@
         work::exec0("safe");
       }
     expect_no_match: true
-  description: "libpqxx work::exec0(sql) — raw SQL expecting no rows."
+  description: "libpqxx work::exec0(sql) - raw SQL expecting no rows."
 - id: cpp.sqli.libpqxx_exec1
   enabled: true
   language: cpp
@@ -309,7 +309,7 @@
         work::exec1("safe");
       }
     expect_no_match: true
-  description: "libpqxx work::exec1(sql) — raw SQL expecting one row."
+  description: "libpqxx work::exec1(sql) - raw SQL expecting one row."
 - id: cpp.sqli.libpq_pqexec
   enabled: true
   language: cpp
@@ -335,7 +335,7 @@
         PQexec("safe", "safe");
       }
     expect_no_match: true
-  description: "libpq PQexec — raw SQL."
+  description: "libpq PQexec - raw SQL."
   imports:
   - libpq-fe.h
   - libpq-fe
@@ -371,7 +371,7 @@
         PQexecParams(conn, "SELECT * FROM users WHERE id = $1", 1, 0, params, 0, 0, 0);
       }
     expect_no_match: true
-  description: "PQexecParams(conn, tainted_sql, ...) — parameter values are safe, but a tainted SQL string at prepare/execute time is still raw dynamic SQL."
+  description: "PQexecParams(conn, tainted_sql, ...) - parameter values are safe, but a tainted SQL string at prepare/execute time is still raw dynamic SQL."
   imports:
   - libpq-fe.h
   - libpq-fe
@@ -400,7 +400,7 @@
         SQLExecDirect("safe", "safe");
       }
     expect_no_match: true
-  description: "ODBC SQLExecDirect — raw SQL."
+  description: "ODBC SQLExecDirect - raw SQL."
 - id: cpp.sqli.odbc_sqlexecdirectw
   enabled: true
   language: cpp
@@ -426,7 +426,7 @@
         SQLExecDirectW("safe", "safe");
       }
     expect_no_match: true
-  description: "ODBC SQLExecDirectW — raw wide SQL."
+  description: "ODBC SQLExecDirectW - raw wide SQL."
 - id: cpp.sqli.qsql_qsqlquery_exec
   enabled: true
   language: cpp
@@ -455,7 +455,7 @@
         QSqlQuery::exec("SELECT 1");
       }
     expect_no_match: true
-  description: "Qt QSqlQuery::exec(QString) — flag string-built SQL (prefer prepare + bindValue)."
+  description: "Qt QSqlQuery::exec(QString) - flag string-built SQL (prefer prepare + bindValue)."
   imports:
   - QtCore
   - QtCore/Qt
@@ -492,4 +492,4 @@
         Session::once("SELECT * FROM users WHERE id = :id");
       }
     expect_no_match: true
-  description: "SOCI Session::once(tainted_sql) — placeholders are safe, but string-built SQL is injectable."
+  description: "SOCI Session::once(tainted_sql) - placeholders are safe, but string-built SQL is injectable."

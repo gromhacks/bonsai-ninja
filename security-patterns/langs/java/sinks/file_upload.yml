@@ -125,4 +125,4 @@
     kind: call
     callee:
       name: transferTo
-  description: "Disabled — generic name; covered by package-scoped rule above."
+  description: "Disabled - generic name; covered by package-scoped rule above."

@@ -1,6 +1,6 @@
 # C# HTTP / RPC external sources. ASP.NET Core + WebForms + WCF + SignalR + gRPC + Blazor.
 #
-# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# -- Adapter coverage notes (audited 2026-04) ---------------------------------
 # ASP.NET request property reads are now represented as `kind: read`
 # attribute-chain facts, so the Request.Query/Form/Body/Header/etc rules
 # below are enabled. ASP.NET Core MVC parameter binding via attributes
@@ -35,7 +35,7 @@
     code: |
       using System.Web;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.ParseQueryString(input); } }
-  description: "HttpUtility.ParseQueryString(rawQuery) — parses the request query-string into a NameValueCollection; the input is attacker-controlled."
+  description: "HttpUtility.ParseQueryString(rawQuery) - parses the request query-string into a NameValueCollection; the input is attacker-controlled."
 
 - id: csharp.source.streamreader_readtoend
   enabled: false
@@ -49,7 +49,7 @@
     kind: call
     callee:
       attribute: [StreamReader, ReadToEnd]
-  description: "Disabled — StreamReader.ReadToEnd is generic file/stream IO; enable in audits where Request.Body wrapping is the primary surface."
+  description: "Disabled - StreamReader.ReadToEnd is generic file/stream IO; enable in audits where Request.Body wrapping is the primary surface."
 
 - id: csharp.source.signalr_hub_method_arg
   enabled: false
@@ -63,7 +63,7 @@
     kind: param
     target:
       name: message
-  description: "Disabled — SignalR Hub method parameters are attacker-controlled, but bare param names overmatch. Enable narrowed."
+  description: "Disabled - SignalR Hub method parameters are attacker-controlled, but bare param names overmatch. Enable narrowed."
 
 - id: csharp.source.grpc_request_param
   enabled: false
@@ -77,7 +77,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled — gRPC service-method `request` parameter is attacker-controlled; bare-name overmatch keeps it off by default."
+  description: "Disabled - gRPC service-method `request` parameter is attacker-controlled; bare-name overmatch keeps it off by default."
 
 - id: csharp.source.aspnet_request_query
   enabled: true
@@ -94,7 +94,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Query; } }
-  description: "ASP.NET Request.Query property read — query-string collection from the remote request."
+  description: "ASP.NET Request.Query property read - query-string collection from the remote request."
 
 - id: csharp.source.aspnet_request_form
   enabled: true
@@ -111,7 +111,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Form; } }
-  description: "ASP.NET Request.Form property read — form fields from the remote request."
+  description: "ASP.NET Request.Form property read - form fields from the remote request."
 
 - id: csharp.source.aspnet_request_body
   enabled: true
@@ -128,7 +128,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Body; } }
-  description: "ASP.NET Request.Body property read — request body stream controlled by the client."
+  description: "ASP.NET Request.Body property read - request body stream controlled by the client."
 
 - id: csharp.source.aspnet_request_headers
   enabled: true
@@ -145,7 +145,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Headers; } }
-  description: "ASP.NET Request.Headers property read — client-supplied HTTP headers."
+  description: "ASP.NET Request.Headers property read - client-supplied HTTP headers."
 
 - id: csharp.source.aspnet_request_cookies
   enabled: true
@@ -162,7 +162,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Cookies; } }
-  description: "ASP.NET Request.Cookies property read — client-supplied cookie values."
+  description: "ASP.NET Request.Cookies property read - client-supplied cookie values."
 
 - id: csharp.source.aspnet_request_routevalues
   enabled: true
@@ -179,7 +179,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.RouteValues; } }
-  description: "ASP.NET Request.RouteValues property read — route parameters from the remote request."
+  description: "ASP.NET Request.RouteValues property read - route parameters from the remote request."
 
 - id: csharp.source.aspnet_request_path
   enabled: true
@@ -196,7 +196,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Path; } }
-  description: "ASP.NET Request.Path property read — URL path supplied by the client."
+  description: "ASP.NET Request.Path property read - URL path supplied by the client."
 
 - id: csharp.source.aspnet_legacy_querystring
   enabled: true
@@ -211,7 +211,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.QueryString; } }
-  description: "ASP.NET legacy Request.QueryString property read — query-string values from the remote request."
+  description: "ASP.NET legacy Request.QueryString property read - query-string values from the remote request."
 
 - id: csharp.source.aspnet_legacy_form
   enabled: true
@@ -226,7 +226,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Params; } }
-  description: "ASP.NET legacy Request.Params property read — combined query/form/cookie/server variables."
+  description: "ASP.NET legacy Request.Params property read - combined query/form/cookie/server variables."
 
 - id: csharp.source.aspnet_legacy_unvalidated
   enabled: true
@@ -241,7 +241,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Unvalidated; } }
-  description: "ASP.NET Request.Unvalidated property read — unvalidated request values."
+  description: "ASP.NET Request.Unvalidated property read - unvalidated request values."
 
 - id: csharp.source.controller_bind_parameter
   enabled: false
@@ -255,7 +255,7 @@
     kind: param
     target:
       name: action
-  description: "Disabled — `target.name: action` does not map to a concrete attribute; [FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader] attribute rules cover bound action parameters precisely."
+  description: "Disabled - `target.name: action` does not map to a concrete attribute; [FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader] attribute rules cover bound action parameters precisely."
 
 - id: csharp.source.frombody_attr
   enabled: false
@@ -269,7 +269,7 @@
     kind: param
     target:
       name: FromBody
-  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromBody] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromBody] attributes."
 
 - id: csharp.source.fromquery_attr
   enabled: false
@@ -283,7 +283,7 @@
     kind: param
     target:
       name: FromQuery
-  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromQuery] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromQuery] attributes."
 
 - id: csharp.source.fromform_attr
   enabled: false
@@ -297,7 +297,7 @@
     kind: param
     target:
       name: FromForm
-  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromForm] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromForm] attributes."
 
 - id: csharp.source.fromroute_attr
   enabled: false
@@ -311,7 +311,7 @@
     kind: param
     target:
       name: FromRoute
-  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromRoute] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromRoute] attributes."
 
 - id: csharp.source.fromheader_attr
   enabled: false
@@ -325,7 +325,7 @@
     kind: param
     target:
       name: FromHeader
-  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromHeader] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not ASP.NET [FromHeader] attributes."
 
 - id: csharp.source.iformfile_param
   enabled: false
@@ -339,7 +339,7 @@
     kind: param
     target:
       name: IFormFile
-  description: "Disabled — `IFormFile` is a type name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `IFormFile` is a type name; `kind: param` only matches parameter identifiers."
 
 - id: csharp.source.signalr_hub_method
   enabled: false
@@ -353,7 +353,7 @@
     kind: param
     target:
       name: Hub
-  description: "Disabled — `Hub` is a type name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `Hub` is a type name; `kind: param` only matches parameter identifiers."
 
 - id: csharp.source.aspnet_iformfile_filename
   enabled: true
@@ -372,7 +372,7 @@
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var name = IFormFile.FileName; } }
     expect_match_text: [IFormFile.FileName]
-  description: "ASP.NET Core IFormFile.FileName — client-supplied multipart filename."
+  description: "ASP.NET Core IFormFile.FileName - client-supplied multipart filename."
 
 - id: csharp.source.aspnet_formfile_filename
   enabled: false
@@ -388,7 +388,7 @@
     kind: read
     target:
       attribute: [file, FileName]
-  description: "Disabled — hardcoded local receiver `file.FileName` is not semantic. The enabled IFormFile rule covers exact and typed IFormFile.FileName reads."
+  description: "Disabled - hardcoded local receiver `file.FileName` is not semantic. The enabled IFormFile rule covers exact and typed IFormFile.FileName reads."
 
 - id: csharp.source.websocket_receiveasync
   enabled: true
@@ -409,7 +409,7 @@
       using System.Net.WebSockets;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.ReceiveAsync(input); } }
     expect_match_text: [WebSocket.ReceiveAsync]
-  description: "System.Net.WebSockets WebSocket.ReceiveAsync — frame bytes supplied by the websocket peer."
+  description: "System.Net.WebSockets WebSocket.ReceiveAsync - frame bytes supplied by the websocket peer."
 
 - id: csharp.source.graphql_resolvefieldcontext_getargument
   enabled: true
@@ -444,4 +444,4 @@
       }
       class Helper { public string GetArgument(string name) => name; }
     expect_no_match: true
-  description: "GraphQL.NET IResolveFieldContext.GetArgument(name) — resolver argument supplied by the GraphQL caller. Receiver type is required so generic helper GetArgument methods stay clean."
+  description: "GraphQL.NET IResolveFieldContext.GetArgument(name) - resolver argument supplied by the GraphQL caller. Receiver type is required so generic helper GetArgument methods stay clean."

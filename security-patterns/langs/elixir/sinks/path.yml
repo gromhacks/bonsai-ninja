@@ -27,7 +27,7 @@
         end
       end
     expect_no_match: true
-  description: "File.open/2 — tainted path reads arbitrary files; with :write modes also overwrites."
+  description: "File.open/2 - tainted path reads arbitrary files; with :write modes also overwrites."
 - id: elixir.path.file_read
   enabled: true
   language: elixir
@@ -57,7 +57,7 @@
         end
       end
     expect_no_match: true
-  description: "File.read/1 — tainted path exfiltrates arbitrary file contents."
+  description: "File.read/1 - tainted path exfiltrates arbitrary file contents."
 - id: elixir.path.file_rm
   enabled: true
   language: elixir
@@ -87,7 +87,7 @@
         end
       end
     expect_no_match: true
-  description: "File.rm/1 — tainted path deletes attacker-chosen files."
+  description: "File.rm/1 - tainted path deletes attacker-chosen files."
 - id: elixir.path.file_write
   enabled: true
   language: elixir
@@ -120,7 +120,7 @@
         end
       end
     expect_no_match: true
-  description: "File.write/2 — tainted path lets attacker clobber arbitrary files."
+  description: "File.write/2 - tainted path lets attacker clobber arbitrary files."
 - id: elixir.path.file_rename
   enabled: true
   language: elixir
@@ -153,7 +153,7 @@
         end
       end
     expect_no_match: true
-  description: "File.rename/2 — tainted source moves files out of the intended directory."
+  description: "File.rename/2 - tainted source moves files out of the intended directory."
 - id: elixir.path.file_rename_dest
   enabled: true
   language: elixir
@@ -186,7 +186,7 @@
         end
       end
     expect_no_match: true
-  description: "File.rename/2 — tainted destination can clobber arbitrary files."
+  description: "File.rename/2 - tainted destination can clobber arbitrary files."
 - id: elixir.path.file_cp
   enabled: true
   language: elixir
@@ -216,7 +216,7 @@
         end
       end
     expect_no_match: true
-  description: "File.cp/2 — tainted src exposes arbitrary file contents via the copy."
+  description: "File.cp/2 - tainted src exposes arbitrary file contents via the copy."
 - id: elixir.path.file_cp_dest
   enabled: true
   language: elixir
@@ -246,7 +246,7 @@
         end
       end
     expect_no_match: true
-  description: "File.cp/2 — tainted destination path writes copied content outside the intended root."
+  description: "File.cp/2 - tainted destination path writes copied content outside the intended root."
 - id: elixir.path.file_mkdir_p
   enabled: true
   language: elixir
@@ -276,7 +276,7 @@
         end
       end
     expect_no_match: true
-  description: "File.mkdir_p!/1 — tainted path creates directories outside the intended root."
+  description: "File.mkdir_p!/1 - tainted path creates directories outside the intended root."
 - id: elixir.path.file_mkdir
   enabled: true
   language: elixir
@@ -306,7 +306,7 @@
         end
       end
     expect_no_match: true
-  description: "File.mkdir/1 — tainted dir name allows directory creation outside intended root."
+  description: "File.mkdir/1 - tainted dir name allows directory creation outside intended root."
 - id: elixir.path.file_stream
   enabled: true
   language: elixir
@@ -336,7 +336,7 @@
         end
       end
     expect_no_match: true
-  description: "File.stream!/3 — streams the (tainted) path line-by-line; allows arbitrary-file exfiltration."
+  description: "File.stream!/3 - streams the (tainted) path line-by-line; allows arbitrary-file exfiltration."
 
 - id: elixir.path.file_cp_r
   enabled: true
@@ -367,7 +367,7 @@
         end
       end
     expect_no_match: true
-  description: "File.cp_r/3 — recursive copy; tainted source moves entire trees out of the intended root."
+  description: "File.cp_r/3 - recursive copy; tainted source moves entire trees out of the intended root."
 - id: elixir.path.file_cp_r_dest
   enabled: true
   language: elixir
@@ -397,7 +397,7 @@
         end
       end
     expect_no_match: true
-  description: "File.cp_r/3 — tainted destination writes a copied tree outside the intended root."
+  description: "File.cp_r/3 - tainted destination writes a copied tree outside the intended root."
 
 - id: elixir.path.file_rm_rf
   enabled: true
@@ -428,7 +428,7 @@
         end
       end
     expect_no_match: true
-  description: "File.rm_rf/1 — recursive delete; tainted path wipes attacker-chosen directories."
+  description: "File.rm_rf/1 - recursive delete; tainted path wipes attacker-chosen directories."
 - id: elixir.path.file_rm_rf_bang
   enabled: true
   language: elixir
@@ -458,7 +458,7 @@
         end
       end
     expect_no_match: true
-  description: "File.rm_rf!/1 — bang recursive delete; tainted path wipes attacker-chosen directories."
+  description: "File.rm_rf!/1 - bang recursive delete; tainted path wipes attacker-chosen directories."
 
 - id: elixir.path.file_ls
   enabled: true
@@ -489,7 +489,7 @@
         end
       end
     expect_no_match: true
-  description: "File.ls/1 — lists a tainted directory; information disclosure across the filesystem."
+  description: "File.ls/1 - lists a tainted directory; information disclosure across the filesystem."
 - id: elixir.path.file_ls_bang
   enabled: true
   language: elixir
@@ -519,7 +519,7 @@
         end
       end
     expect_no_match: true
-  description: "File.ls!/1 — bang directory listing on a tainted path discloses arbitrary filesystem structure."
+  description: "File.ls!/1 - bang directory listing on a tainted path discloses arbitrary filesystem structure."
 
 - id: elixir.path.file_read_bang
   enabled: true
@@ -550,7 +550,7 @@
         end
       end
     expect_no_match: true
-  description: "File.read!/1 — bang variant of File.read; tainted path exfiltrates arbitrary file contents (raises on error)."
+  description: "File.read!/1 - bang variant of File.read; tainted path exfiltrates arbitrary file contents (raises on error)."
 
 - id: elixir.path.file_write_bang
   enabled: true
@@ -581,7 +581,7 @@
         end
       end
     expect_no_match: true
-  description: "File.write!/2 — bang variant of File.write; tainted path lets attacker clobber arbitrary files."
+  description: "File.write!/2 - bang variant of File.write; tainted path lets attacker clobber arbitrary files."
 
 - id: elixir.path.file_open_bang
   enabled: true
@@ -612,7 +612,7 @@
         end
       end
     expect_no_match: true
-  description: "File.open!/2 — bang variant of File.open; tainted path opens arbitrary files for read/write."
+  description: "File.open!/2 - bang variant of File.open; tainted path opens arbitrary files for read/write."
 - id: elixir.path.file_mkdir_p_bang
   enabled: true
   language: elixir
@@ -642,11 +642,11 @@
         end
       end
     expect_no_match: true
-  description: "File.mkdir_p!/1 — bang mkdir-p on a tainted path creates directories outside the intended root."
+  description: "File.mkdir_p!/1 - bang mkdir-p on a tainted path creates directories outside the intended root."
 
 # Archive extraction (Zip Slip class). Erlang's :zip module is
 # accessible from Elixir as :zip.extract/2. Trusts archive entry
-# names — joining entry name into dest without containment is Zip Slip.
+# names - joining entry name into dest without containment is Zip Slip.
 - id: elixir.path.zip_extract
   enabled: true
   language: elixir
@@ -676,7 +676,7 @@
         end
       end
     expect_no_match: true
-  description: ":zip.extract(archive, opts) — extracts entries to filesystem using attacker-controlled entry names; Zip Slip applies."
+  description: ":zip.extract(archive, opts) - extracts entries to filesystem using attacker-controlled entry names; Zip Slip applies."
 - id: elixir.path.zip_unzip
   enabled: true
   language: elixir
@@ -706,4 +706,4 @@
         end
       end
     expect_no_match: true
-  description: ":zip.unzip(archive, opts) — same as :zip.extract; documented alias."
+  description: ":zip.unzip(archive, opts) - same as :zip.extract; documented alias."

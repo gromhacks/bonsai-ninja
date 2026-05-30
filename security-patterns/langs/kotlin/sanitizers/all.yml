@@ -15,7 +15,7 @@
         }
       }
     expect_match_text: [prepareStatement]
-  description: "JDBC Connection.prepareStatement — parameterized query binding prevents SQL injection."
+  description: "JDBC Connection.prepareStatement - parameterized query binding prevents SQL injection."
 - id: kotlin.sanitizer.prepared_statement_setstring
   enabled: true
   language: kotlin
@@ -33,7 +33,7 @@
         }
       }
     expect_match_text: [PreparedStatement.setString]
-  description: "PreparedStatement.setString — bound parameter treats value as literal, not SQL."
+  description: "PreparedStatement.setString - bound parameter treats value as literal, not SQL."
 - id: kotlin.sanitizer.uri_create
   enabled: true
   language: kotlin
@@ -51,7 +51,7 @@
         }
       }
     expect_match_text: [URI.create]
-  description: "java.net.URI.create — throws on malformed URI; pair with host-allowlist check for SSRF."
+  description: "java.net.URI.create - throws on malformed URI; pair with host-allowlist check for SSRF."
 - id: kotlin.sanitizer.url_encoder
   enabled: true
   language: kotlin
@@ -69,7 +69,7 @@
         }
       }
     expect_match_text: [URLEncoder.encode]
-  description: "java.net.URLEncoder.encode — percent-encodes unsafe URL chars."
+  description: "java.net.URLEncoder.encode - percent-encodes unsafe URL chars."
 - id: kotlin.sanitizer.html_escape_text
   enabled: true
   language: kotlin
@@ -89,7 +89,7 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeHtml4]
-  description: "Apache Commons Text StringEscapeUtils.escapeHtml4 — HTML-encodes special chars."
+  description: "Apache Commons Text StringEscapeUtils.escapeHtml4 - HTML-encodes special chars."
 - id: kotlin.sanitizer.owasp_html_sanitizer
   enabled: true
   language: kotlin
@@ -109,7 +109,7 @@
         }
       }
     expect_match_text: [HtmlPolicyBuilder.sanitize]
-  description: "OWASP Java HTML Sanitizer — policy-driven HTML tag/attr allowlist."
+  description: "OWASP Java HTML Sanitizer - policy-driven HTML tag/attr allowlist."
   imports:
   - com
   - com.googlecode.owaspjavahtmlsanitizer
@@ -132,7 +132,7 @@
         }
       }
     expect_match_text: [HtmlUtils.htmlEscape]
-  description: "Spring HtmlUtils.htmlEscape — HTML entity encoding."
+  description: "Spring HtmlUtils.htmlEscape - HTML entity encoding."
   imports:
   - org.springframework.web
 - id: kotlin.sanitizer.owasp_encoder
@@ -154,7 +154,7 @@
         }
       }
     expect_match_text: [Encode.forHtml]
-  description: "OWASP Java Encoder Encode.forHtml — context-aware HTML encoding."
+  description: "OWASP Java Encoder Encode.forHtml - context-aware HTML encoding."
 - id: kotlin.sanitizer.jsoup_clean
   enabled: true
   language: kotlin
@@ -174,7 +174,7 @@
         }
       }
     expect_match_text: [Jsoup.clean]
-  description: "Jsoup.clean with a Safelist — strips unsafe HTML tags/attrs."
+  description: "Jsoup.clean with a Safelist - strips unsafe HTML tags/attrs."
 - id: kotlin.sanitizer.esapi_encoder
   enabled: true
   language: kotlin
@@ -194,7 +194,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder]
-  description: "OWASP ESAPI encoder — context-specific output encoding."
+  description: "OWASP ESAPI encoder - context-specific output encoding."
 - id: kotlin.sanitizer.path_normalize
   enabled: false
   disabled_reason:
@@ -205,7 +205,7 @@
     kind: call
     callee:
       attribute: [Path, normalize]
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
     traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
     must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
     Marking these as sanitizers produced false negatives on attacker-controlled paths."
@@ -219,7 +219,7 @@
     kind: call
     callee:
       attribute: [Path, startsWith]
-  description: "Disabled — startsWith only proves containment with a normalized Path receiver and trusted-root argument; v1
+  description: "Disabled - startsWith only proves containment with a normalized Path receiver and trusted-root argument; v1
     matching cannot verify that shape."
 - id: kotlin.sanitizer.integer_parseint
   enabled: true
@@ -238,7 +238,7 @@
         }
       }
     expect_match_text: [Integer.parseInt]
-  description: "Integer.parseInt — throws NumberFormatException on non-numeric, safe for downstream use."
+  description: "Integer.parseInt - throws NumberFormatException on non-numeric, safe for downstream use."
 - id: kotlin.sanitizer.long_parselong
   enabled: true
   language: kotlin
@@ -256,7 +256,7 @@
         }
       }
     expect_match_text: [Long.parseLong]
-  description: "Long.parseLong — rejects non-numeric, safe for SQL/path downstream."
+  description: "Long.parseLong - rejects non-numeric, safe for SQL/path downstream."
 - id: kotlin.sanitizer.kotlin_toint
   enabled: true
   language: kotlin
@@ -276,7 +276,7 @@
         }
       }
     expect_match_text: [toInt]
-  description: "Kotlin String.toInt / toIntOrNull — coerces to Int, removing injection payloads."
+  description: "Kotlin String.toInt / toIntOrNull - coerces to Int, removing injection payloads."
 - id: kotlin.sanitizer.kotlin_tolong
   enabled: true
   language: kotlin
@@ -296,7 +296,7 @@
         }
       }
     expect_match_text: [toLong]
-  description: "Kotlin String.toLong / toLongOrNull — numeric coercion."
+  description: "Kotlin String.toLong / toLongOrNull - numeric coercion."
 - id: kotlin.sanitizer.uuid_fromstring
   enabled: true
   language: kotlin
@@ -314,7 +314,7 @@
         }
       }
     expect_match_text: [UUID.fromString]
-  description: "UUID.fromString — throws on non-UUID; constrains input to hex+dash shape."
+  description: "UUID.fromString - throws on non-UUID; constrains input to hex+dash shape."
 - id: kotlin.sanitizer.messagedigest_isequal
   enabled: true
   language: kotlin
@@ -332,7 +332,7 @@
         }
       }
     expect_match_text: [MessageDigest.isEqual]
-  description: "MessageDigest.isEqual — constant-time byte-array compare, avoids timing side channel."
+  description: "MessageDigest.isEqual - constant-time byte-array compare, avoids timing side channel."
 
 - id: kotlin.sanitizer.ktor_escapehtml
   enabled: true
@@ -353,7 +353,7 @@
         }
       }
     expect_match_text: [escapeHTML]
-  description: "Ktor io.ktor.util.escapeHTML — encodes &, <, >, \", ' for safe HTML embedding."
+  description: "Ktor io.ktor.util.escapeHTML - encodes &, <, >, \", ' for safe HTML embedding."
 
 - id: kotlin.sanitizer.android_textutils_htmlencode
   enabled: true
@@ -374,7 +374,7 @@
         }
       }
     expect_match_text: [TextUtils.htmlEncode]
-  description: "Android TextUtils.htmlEncode — entity-encodes HTML special chars before WebView/HTML rendering."
+  description: "Android TextUtils.htmlEncode - entity-encodes HTML special chars before WebView/HTML rendering."
 
 - id: kotlin.sanitizer.android_html_escapehtml
   enabled: true
@@ -395,7 +395,7 @@
         }
       }
     expect_match_text: [Html.escapeHtml]
-  description: "Android Html.escapeHtml — entity-encodes a string for safe insertion into HTML markup."
+  description: "Android Html.escapeHtml - entity-encodes a string for safe insertion into HTML markup."
 
 - id: kotlin.sanitizer.kotlinx_html_text_plus
   enabled: false
@@ -408,7 +408,7 @@
     kind: call
     callee:
       name: text
-  description: "Disabled — kotlinx.html `+\"text\"` and `text(value)` builders auto-escape (safe vs `unsafe { +raw }`), but
+  description: "Disabled - kotlinx.html `+\"text\"` and `text(value)` builders auto-escape (safe vs `unsafe { +raw }`), but
     the bare `text` name overmatches helpers; enable when the matcher can scope it to the kotlinx.html DSL receiver."
 
 - id: kotlin.sanitizer.okhttp_httpurl_builder
@@ -430,7 +430,7 @@
         }
       }
     expect_match_text: [HttpUrl.parse]
-  description: "OkHttp HttpUrl.parse — strict URL parsing; subsequent .newBuilder().addQueryParameter() escapes path/query
+  description: "OkHttp HttpUrl.parse - strict URL parsing; subsequent .newBuilder().addQueryParameter() escapes path/query
     segments."
 
 - id: kotlin.sanitizer.okhttp_httpurl_addqueryparameter
@@ -452,7 +452,7 @@
         }
       }
     expect_match_text: [Builder.addQueryParameter]
-  description: "OkHttp HttpUrl.Builder.addQueryParameter(name, value) — percent-encodes the query value, preventing CRLF/URL
+  description: "OkHttp HttpUrl.Builder.addQueryParameter(name, value) - percent-encodes the query value, preventing CRLF/URL
     injection."
 
 - id: kotlin.sanitizer.bcrypt_verify
@@ -474,7 +474,7 @@
         }
       }
     expect_match_text: [BCrypt.verifyer]
-  description: "bcrypt verifier path (at.favre.lib `BCrypt.verifyer().verify(...)`) — constant-time hash check, not a string
+  description: "bcrypt verifier path (at.favre.lib `BCrypt.verifyer().verify(...)`) - constant-time hash check, not a string
     comparison."
 
 - id: kotlin.sanitizer.bcrypt_checkpw
@@ -496,7 +496,7 @@
         }
       }
     expect_match_text: [BCrypt.checkpw]
-  description: "jBCrypt / Spring Security BCrypt.checkpw — constant-time bcrypt password verification."
+  description: "jBCrypt / Spring Security BCrypt.checkpw - constant-time bcrypt password verification."
 
 - id: kotlin.sanitizer.spring_passwordencoder_matches
   enabled: true
@@ -517,11 +517,11 @@
         }
       }
     expect_match_text: [PasswordEncoder.matches]
-  description: "Spring Security PasswordEncoder.matches — delegates to the encoder's constant-time hash compare (BCrypt/Argon2/PBKDF2)."
+  description: "Spring Security PasswordEncoder.matches - delegates to the encoder's constant-time hash compare (BCrypt/Argon2/PBKDF2)."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: kotlin.passthrough.urldecoder_decode
@@ -543,7 +543,7 @@
         }
       }
     expect_match_text: [URLDecoder.decode]
-  description: "java.net.URLDecoder.decode(s, charset) — preserves taint (Kotlin via Java interop)."
+  description: "java.net.URLDecoder.decode(s, charset) - preserves taint (Kotlin via Java interop)."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -567,7 +567,7 @@
         }
       }
     expect_match_text: [http.csrf]
-  description: "Spring Security HttpSecurity#csrf() — Kotlin via Spring."
+  description: "Spring Security HttpSecurity#csrf() - Kotlin via Spring."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -618,7 +618,7 @@
   - name: generated shape example negative constraint boundary
     code: "class App {\n  fun handle(input: String) {\n    Cookie.setHttpOnly()\n  }\n}\n"
     expect_no_match: true
-  description: "Kotlin via Java servlet — Cookie.setHttpOnly(true)."
+  description: "Kotlin via Java servlet - Cookie.setHttpOnly(true)."
 
 # Rate-limit middleware presence sanitizers (round 2 fill).
 - id: kotlin.ratelimit.bucket4j_consume
@@ -699,7 +699,7 @@
     code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\"\
       )\n  }\n}\n"
     expect_no_match: true
-  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
+  description: "Disabled duplicate - the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
     //\") shape in kotlin.sanitizer.same_origin_path_startswith_slash."
 
 - id: kotlin.sanitizer.allowlist_contains
@@ -722,7 +722,7 @@
         }
       }
     expect_match_text: [allowed.contains]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
     allowlist membership check on explicitly allowlist-named receivers."
 
   disabled_reason:
@@ -747,7 +747,7 @@
         }
       }
     expect_match_text: [allowed.getOrDefault]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrDefault
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrDefault
     on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
   disabled_reason:
@@ -772,7 +772,7 @@
         }
       }
     expect_match_text: [AllowedRole.valueOf]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Enum valueOf
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Enum valueOf
     on narrowly named allowlist enums rejects values outside the enum domain."
 
   disabled_reason:
@@ -1022,7 +1022,7 @@
         fun handle(@Pattern slug: String) {
         }
       }
-  description: "Bean Validation @Pattern annotated parameter — framework validation constrains the accepted input shape."
+  description: "Bean Validation @Pattern annotated parameter - framework validation constrains the accepted input shape."
 
 - id: kotlin.sanitizer.spring_ldap_filter_encode
   enabled: true
@@ -1043,7 +1043,7 @@
         }
       }
     expect_match_text: [LdapEncoder.filterEncode]
-  description: "Spring LDAP LdapEncoder.filterEncode — escapes LDAP filter metacharacters."
+  description: "Spring LDAP LdapEncoder.filterEncode - escapes LDAP filter metacharacters."
 
 - id: kotlin.sanitizer.rdn_escape_value
   enabled: true
@@ -1064,7 +1064,7 @@
         }
       }
     expect_match_text: [Rdn.escapeValue]
-  description: "javax.naming.ldap.Rdn.escapeValue — escapes attacker input for an LDAP RDN value."
+  description: "javax.naming.ldap.Rdn.escapeValue - escapes attacker input for an LDAP RDN value."
 
 - id: kotlin.sanitizer.uri_host_allowlist
   enabled: false
@@ -1091,8 +1091,8 @@
     code: "class App {\n  fun allow(uri: java.net.URI, allowedHosts: Set<String>): Boolean {\n    return allowedHosts.contains()\n\
       \  }\n}\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
-    allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
+    allowlist check - validates the parsed host against a trusted set before SSRF-sensitive use."
 
   disabled_reason:
     code: over-broad
@@ -1132,7 +1132,7 @@
     code: "import javax.xml.parsers.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setFeature()\n\
       \  }\n}\nclass DocumentBuilderFactory {\n  fun setFeature(vararg args: Any?) {}\n}\n"
     expect_no_match: true
-  description: "XML parser feature hardening — disallows DOCTYPE declarations to block XXE payloads."
+  description: "XML parser feature hardening - disallows DOCTYPE declarations to block XXE payloads."
 
 - id: kotlin.sanitizer.xml_factory_restrict_external_access
   enabled: true
@@ -1176,4 +1176,4 @@
       \  }\n}\nclass DocumentBuilderFactory {\n  fun setAttribute(vararg args: Any?) {}\n}\nobject XMLConstants {\n  const
       val ACCESS_EXTERNAL_DTD = \"\"\n}\n"
     expect_no_match: true
-  description: "XMLConstants ACCESS_EXTERNAL_* set to empty string — blocks external DTD/schema/stylesheet resolution."
+  description: "XMLConstants ACCESS_EXTERNAL_* set to empty string - blocks external DTD/schema/stylesheet resolution."

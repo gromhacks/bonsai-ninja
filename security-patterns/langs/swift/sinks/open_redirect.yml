@@ -73,7 +73,7 @@
     code: |
       func test() { UIApplication.shared.open("https://safe.example") }
     expect_no_match: true
-  description: "UIApplication.shared.open(tainted URL). Suffix-match — won't fire on bare `.open()` calls."
+  description: "UIApplication.shared.open(tainted URL). Suffix-match - won't fire on bare `.open()` calls."
 
 - id: swift.open_redirect.safariview_url
   enabled: true
@@ -96,4 +96,4 @@
     code: |
       func test() { SFSafariViewController("https://safe.example") }
     expect_no_match: true
-  description: "SFSafariViewController(url: tainted) — init call form."
+  description: "SFSafariViewController(url: tainted) - init call form."

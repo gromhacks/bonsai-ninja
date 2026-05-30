@@ -47,7 +47,7 @@
       import WebKit
       func test() { evaluateJavaScript("document.title") }
     expect_no_match: true
-  description: "WKWebView.evaluateJavaScript with tainted JavaScript — executes attacker-controlled script in the webview."
+  description: "WKWebView.evaluateJavaScript with tainted JavaScript - executes attacker-controlled script in the webview."
 
 - id: swift.xss.wkusercontentcontroller_add_user_script
   enabled: true
@@ -74,7 +74,7 @@
       import WebKit
       func test() { userContentController.add("safe-script") }
     expect_no_match: true
-  description: "WKUserContentController.add(WKUserScript) — untrusted user scripts can inject DOM code into every matching page."
+  description: "WKUserContentController.add(WKUserScript) - untrusted user scripts can inject DOM code into every matching page."
 - id: swift.xss.webview_load_data
   enabled: false
   disabled_reason:
@@ -87,7 +87,7 @@
     kind: call
     callee:
       name: load
-  description: "Disabled — WKWebView.load(_: URLRequest); bare `.load()` is ubiquitous (Image/URL/Codable/etc.) without receiver narrowing."
+  description: "Disabled - WKWebView.load(_: URLRequest); bare `.load()` is ubiquitous (Image/URL/Codable/etc.) without receiver narrowing."
 - id: swift.xss.html_string_from
   enabled: false
   disabled_reason:
@@ -100,4 +100,4 @@
     kind: call
     callee:
       regex: "^loadHTML.*String$"
-  description: "Disabled — superseded by exact-match loadHTMLString rule; kept for reference."
+  description: "Disabled - superseded by exact-match loadHTMLString rule; kept for reference."

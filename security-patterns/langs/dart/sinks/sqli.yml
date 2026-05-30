@@ -27,7 +27,7 @@
       import 'package:sqflite/sqflite.dart';
       void test(String input) { rawQuery("SELECT * FROM users WHERE id = ?", [input]); }
     expect_no_match: true
-  description: "sqflite Database.rawQuery — concatenated SQL."
+  description: "sqflite Database.rawQuery - concatenated SQL."
 
   imports:
   - sqflite/sqflite.dart
@@ -141,7 +141,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by dart.sqli.postgres_execute — same receiver-agnostic regex covers all Dart SQL driver `Connection.execute` shapes."
+  description: "Subsumed by dart.sqli.postgres_execute - same receiver-agnostic regex covers all Dart SQL driver `Connection.execute` shapes."
 - id: dart.sqli.drift_custom_statement
   enabled: true
   language: dart
@@ -170,7 +170,7 @@
       import 'package:drift/drift.dart';
       void test() { customStatement("DELETE FROM sessions WHERE expired = 1"); }
     expect_no_match: true
-  description: "Drift/Moor customStatement — raw SQL."
+  description: "Drift/Moor customStatement - raw SQL."
 
   imports:
   - drift/drift.dart
@@ -202,7 +202,7 @@
       import 'package:drift/drift.dart';
       void test(String input) { customSelect("SELECT * FROM users WHERE id = ?", variables: [input]); }
     expect_no_match: true
-  description: "Drift/Moor customSelect — raw SQL."
+  description: "Drift/Moor customSelect - raw SQL."
 
   imports:
   - drift/drift.dart
@@ -230,7 +230,7 @@
       import 'package:postgres/postgres.dart';
       void test(String input) { connection.execute("SELECT * FROM users WHERE id = @id", parameters: {"id": input}); }
     expect_no_match: true
-  description: "Dart driver Connection.execute (postgres / sqlite3 / mysql_client) with tainted SQL string — driver runs concatenated SQL. Use parameterised statements / placeholders. Subsumes dart.sqli.sqlite3_execute and dart.sqli.mysql_client_execute."
+  description: "Dart driver Connection.execute (postgres / sqlite3 / mysql_client) with tainted SQL string - driver runs concatenated SQL. Use parameterised statements / placeholders. Subsumes dart.sqli.sqlite3_execute and dart.sqli.mysql_client_execute."
   aliases:
   - dart.sqli.sqlite3_execute
   - dart.sqli.mysql_client_execute
@@ -313,7 +313,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by dart.sqli.postgres_execute — same receiver-agnostic regex and canonical package gate cover `mysql_client`, `postgres`, and `sqlite3` Connection.execute shapes."
+  description: "Subsumed by dart.sqli.postgres_execute - same receiver-agnostic regex and canonical package gate cover `mysql_client`, `postgres`, and `sqlite3` Connection.execute shapes."
 - id: dart.sqli.mysql1_query
   enabled: false
   disabled_reason:
@@ -328,6 +328,6 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
-  description: "Subsumed by dart.sqli.postgres_query — same receiver-agnostic regex covers `mysql1` and `postgres` Connection.query shapes."
+  description: "Subsumed by dart.sqli.postgres_query - same receiver-agnostic regex covers `mysql1` and `postgres` Connection.query shapes."
   imports:
   - mysql1/mysql1.dart

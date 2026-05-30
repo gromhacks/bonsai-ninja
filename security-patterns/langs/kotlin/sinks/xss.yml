@@ -13,7 +13,7 @@
       attribute:
       - response
       - getWriter
-  description: "Disabled — getWriter() only returns a writer object; flag concrete PrintWriter.write/println/print sinks instead."
+  description: "Disabled - getWriter() only returns a writer object; flag concrete PrintWriter.write/println/print sinks instead."
 - id: kotlin.xss.printwriter_write
   enabled: true
   language: kotlin
@@ -79,7 +79,7 @@
       }
       }
     expect_no_match: true
-  description: "ServletResponse.writer.write(concat) — common Kotlin servlet shape (`resp.writer.write(\"<p>\" + name + \"</p>\")`) where the receiver is a property chain rather than a typed PrintWriter symbol."
+  description: "ServletResponse.writer.write(concat) - common Kotlin servlet shape (`resp.writer.write(\"<p>\" + name + \"</p>\")`) where the receiver is a property chain rather than a typed PrintWriter symbol."
 - id: kotlin.xss.printwriter_println
   enabled: true
   language: kotlin
@@ -209,7 +209,7 @@
       attribute:
       - out
       - println
-  description: "Disabled — `out.println` matches any `out` variable; enable with JSP-scope constraint."
+  description: "Disabled - `out.println` matches any `out` variable; enable with JSP-scope constraint."
 - id: kotlin.xss.spring_responseentity_body_html_concat
   enabled: true
   language: kotlin
@@ -248,7 +248,7 @@
       }
       }
     expect_no_match: true
-  description: "ResponseEntity.body(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "ResponseEntity.body(raw HTML concat) - reflected HTML response built from attacker-controlled text."
   imports:
   - org.springframework.web
 - id: kotlin.xss.spring_responseentity_ok_html_concat
@@ -289,7 +289,7 @@
       }
       }
     expect_no_match: true
-  description: "ResponseEntity.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "ResponseEntity.ok(raw HTML concat) - reflected HTML response built from attacker-controlled text."
   imports:
   - org.springframework.web
 - id: kotlin.xss.webflux_serverresponse_bodyvalue_html_concat
@@ -330,7 +330,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: kotlin.xss.jaxrs_response_ok_text_html
   enabled: true
   language: kotlin
@@ -371,7 +371,7 @@
       }
       }
     expect_no_match: true
-  description: "JAX-RS Response.ok(body, TEXT_HTML) — raw HTML response body built from attacker-controlled text. Merged aliases: kotlin.xss.jaxrs_response_ok_html_concat."
+  description: "JAX-RS Response.ok(body, TEXT_HTML) - raw HTML response body built from attacker-controlled text. Merged aliases: kotlin.xss.jaxrs_response_ok_html_concat."
   aliases:
   - kotlin.xss.jaxrs_response_ok_html_concat
 - id: kotlin.xss.micronaut_httpresponse_ok_html_concat
@@ -412,7 +412,7 @@
       }
       }
     expect_no_match: true
-  description: "Micronaut HttpResponse.ok(raw HTML concat) — reflected HTML response body built from attacker-controlled text."
+  description: "Micronaut HttpResponse.ok(raw HTML concat) - reflected HTML response body built from attacker-controlled text."
 - id: kotlin.xss.vertx_response_end_html_concat
   enabled: true
   language: kotlin
@@ -455,7 +455,7 @@
       fun end(vararg args: Any?) {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.end(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Vert.x HttpServerResponse.end(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: kotlin.xss.kotlinx_html_raw
   enabled: true
   language: kotlin
@@ -492,7 +492,7 @@
       }
       }
     expect_no_match: true
-  description: "kotlinx.html unsafe { raw(tainted) } — bypasses HTML escaping."
+  description: "kotlinx.html unsafe { raw(tainted) } - bypasses HTML escaping."
 - id: kotlin.xss.spring_modelandview_addobject
   enabled: false
   disabled_reason:
@@ -510,7 +510,7 @@
       attribute:
       - ModelAndView
       - addObject
-  description: "Disabled — Spring ModelAndView; flag with template-engine analysis."
+  description: "Disabled - Spring ModelAndView; flag with template-engine analysis."
 - id: kotlin.xss.thymeleaf_unescaped
   enabled: false
   disabled_reason:
@@ -526,7 +526,7 @@
     kind: write
     target:
       name: th:utext
-  description: "Disabled — th:utext (unescaped text) attr write; surface via template scanner."
+  description: "Disabled - th:utext (unescaped text) attr write; surface via template scanner."
 - id: kotlin.xss.struts_textparser
   enabled: false
   disabled_reason:
@@ -544,7 +544,7 @@
       attribute:
       - TextParseUtil
       - translateVariables
-  description: "Disabled — Struts2 TextParseUtil; flag with OGNL scope."
+  description: "Disabled - Struts2 TextParseUtil; flag with OGNL scope."
 - id: kotlin.xss.gwt_html_settext
   enabled: false
   disabled_reason:
@@ -562,7 +562,7 @@
       attribute:
       - HTML
       - setHTML
-  description: "Disabled — GWT HTML.setHTML; flag with constraint."
+  description: "Disabled - GWT HTML.setHTML; flag with constraint."
 - id: kotlin.xss.android_webview_loadurl
   enabled: true
   language: kotlin
@@ -600,7 +600,7 @@
       }
       }
     expect_no_match: true
-  description: "WebView.loadUrl(tainted) — `javascript:` URLs and arbitrary http(s) targets execute in the app's WebView origin."
+  description: "WebView.loadUrl(tainted) - `javascript:` URLs and arbitrary http(s) targets execute in the app's WebView origin."
 - id: kotlin.xss.android_webview_loaddata
   enabled: true
   language: kotlin
@@ -637,7 +637,7 @@
       }
       }
     expect_no_match: true
-  description: "WebView.loadData(tainted html, ...) — renders attacker HTML in the WebView origin."
+  description: "WebView.loadData(tainted html, ...) - renders attacker HTML in the WebView origin."
 - id: kotlin.xss.android_webview_loaddatawithbaseurl
   enabled: true
   language: kotlin
@@ -674,7 +674,7 @@
         }
       }
     expect_no_match: true
-  description: "WebView.loadDataWithBaseURL(tainted) — base URL + HTML controls origin and DOM contents."
+  description: "WebView.loadDataWithBaseURL(tainted) - base URL + HTML controls origin and DOM contents."
 - id: kotlin.xss.android_webview_loaddatawithbaseurl_data
   enabled: true
   language: kotlin
@@ -711,7 +711,7 @@
         }
       }
     expect_no_match: true
-  description: "WebView.loadDataWithBaseURL(baseUrl, taintedHtml, ...) — renders attacker HTML in the WebView origin."
+  description: "WebView.loadDataWithBaseURL(baseUrl, taintedHtml, ...) - renders attacker HTML in the WebView origin."
 - id: kotlin.xss.android_webview_evaluatejavascript
   enabled: true
   language: kotlin
@@ -749,4 +749,4 @@
       }
       }
     expect_no_match: true
-  description: "WebView.evaluateJavascript(tainted script, callback) — executes arbitrary JS in the WebView origin."
+  description: "WebView.evaluateJavascript(tainted script, callback) - executes arbitrary JS in the WebView origin."

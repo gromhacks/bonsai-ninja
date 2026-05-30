@@ -32,7 +32,7 @@
         mongoc_collection_find_with_opts("safe", "safe");
       }
     expect_no_match: true
-  description: "libmongoc mongoc_collection_find_with_opts(coll, tainted_filter, ...) — attacker-built BSON filter yields NoSQL-injection (e.g. {$ne: null})."
+  description: "libmongoc mongoc_collection_find_with_opts(coll, tainted_filter, ...) - attacker-built BSON filter yields NoSQL-injection (e.g. {$ne: null})."
 
 - id: c.nosql.mongoc_collection_find_legacy
   enabled: true
@@ -63,7 +63,7 @@
         mongoc_collection_find("safe", "safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "libmongoc mongoc_collection_find — deprecated; same filter-interpolation risk as the _with_opts variant."
+  description: "libmongoc mongoc_collection_find - deprecated; same filter-interpolation risk as the _with_opts variant."
 
 - id: c.nosql.mongoc_collection_count
   enabled: true
@@ -94,7 +94,7 @@
         mongoc_collection_count_documents("safe", "safe");
       }
     expect_no_match: true
-  description: "libmongoc mongoc_collection_count_documents — tainted filter lets the attacker influence the count query (information leak about indexed values)."
+  description: "libmongoc mongoc_collection_count_documents - tainted filter lets the attacker influence the count query (information leak about indexed values)."
 
 - id: c.nosql.mongoc_collection_update
   enabled: true
@@ -125,7 +125,7 @@
         mongoc_collection_update_one("safe", "safe");
       }
     expect_no_match: true
-  description: "libmongoc mongoc_collection_update_one — tainted filter or update document allows attacker-controlled writes (e.g. $set over arbitrary fields)."
+  description: "libmongoc mongoc_collection_update_one - tainted filter or update document allows attacker-controlled writes (e.g. $set over arbitrary fields)."
 
 - id: c.nosql.mongoc_collection_update_doc
   enabled: true
@@ -154,7 +154,7 @@
         mongoc_collection_update_one("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "mongoc_collection_update_one(collection, filter, update, ...) — tainted update documents can inject operators or alter unintended fields."
+  description: "mongoc_collection_update_one(collection, filter, update, ...) - tainted update documents can inject operators or alter unintended fields."
 
 - id: c.nosql.mongoc_collection_delete
   enabled: true
@@ -185,7 +185,7 @@
         mongoc_collection_delete_many("safe", "safe");
       }
     expect_no_match: true
-  description: "libmongoc mongoc_collection_delete_many — tainted filter can widen the delete to unintended documents (e.g. {$ne: null})."
+  description: "libmongoc mongoc_collection_delete_many - tainted filter can widen the delete to unintended documents (e.g. {$ne: null})."
 
 - id: c.nosql.mongoc_database_command
   enabled: true
@@ -216,7 +216,7 @@
         mongoc_database_command_simple("safe", "safe");
       }
     expect_no_match: true
-  description: "mongoc_database_command_simple — runs an arbitrary BSON admin command; tainted input controls the operation and arguments."
+  description: "mongoc_database_command_simple - runs an arbitrary BSON admin command; tainted input controls the operation and arguments."
 
 - id: c.nosql.hiredis_command_eval
   enabled: true
@@ -248,7 +248,7 @@
         redisCommand(ctx, "GET %s", arg);
       }
     expect_no_match: true
-  description: "redisCommand(ctx, fmt, ...) — tainted Redis command format allows arbitrary Redis operations such as EVAL, FLUSHDB, or CONFIG SET."
+  description: "redisCommand(ctx, fmt, ...) - tainted Redis command format allows arbitrary Redis operations such as EVAL, FLUSHDB, or CONFIG SET."
 
 - id: c.nosql.hiredis_command_format
   enabled: true
@@ -279,7 +279,7 @@
         redisvCommand("safe", "safe");
       }
     expect_no_match: true
-  description: "redisvCommand(ctx, fmt, ap) — format-string composed from tainted input allows arbitrary Redis commands (EVAL / FLUSHDB / CONFIG SET)."
+  description: "redisvCommand(ctx, fmt, ap) - format-string composed from tainted input allows arbitrary Redis commands (EVAL / FLUSHDB / CONFIG SET)."
 
 - id: c.nosql.hiredis_append
   enabled: true
@@ -310,7 +310,7 @@
         redisAppendCommand("safe", "safe");
       }
     expect_no_match: true
-  description: "redisAppendCommand — pipelined Redis command built with a format string; tainted arguments can inject additional commands into the pipeline."
+  description: "redisAppendCommand - pipelined Redis command built with a format string; tainted arguments can inject additional commands into the pipeline."
 
 - id: c.nosql.leveldb_write
   enabled: true
@@ -341,7 +341,7 @@
         leveldb_put("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "leveldb_put — tainted key allows writing to arbitrary keys outside the intended namespace (no ACL layer in leveldb itself)."
+  description: "leveldb_put - tainted key allows writing to arbitrary keys outside the intended namespace (no ACL layer in leveldb itself)."
 
 - id: c.nosql.leveldb_write_value
   enabled: true
@@ -370,7 +370,7 @@
         leveldb_put("safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "leveldb_put(..., key, value, ...) — tainted values can poison arbitrary key contents."
+  description: "leveldb_put(..., key, value, ...) - tainted values can poison arbitrary key contents."
 
 - id: c.nosql.leveldb_delete
   enabled: true
@@ -401,7 +401,7 @@
         leveldb_delete("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "leveldb_delete — tainted key allows deletion of arbitrary entries in the store."
+  description: "leveldb_delete - tainted key allows deletion of arbitrary entries in the store."
 
 - id: c.nosql.lmdb_put
   enabled: true
@@ -432,7 +432,7 @@
         mdb_put("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "mdb_put — LMDB write with tainted key lets the attacker overwrite arbitrary entries in the keyspace."
+  description: "mdb_put - LMDB write with tainted key lets the attacker overwrite arbitrary entries in the keyspace."
 
 - id: c.nosql.lmdb_put_value
   enabled: true
@@ -461,7 +461,7 @@
         mdb_put("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "mdb_put(txn, dbi, key, data, flags) — tainted data can overwrite arbitrary key contents."
+  description: "mdb_put(txn, dbi, key, data, flags) - tainted data can overwrite arbitrary key contents."
 
 - id: c.nosql.memcached_set
   enabled: true
@@ -492,7 +492,7 @@
         memcached_set("safe", "safe");
       }
     expect_no_match: true
-  description: "memcached_set — tainted key or value lets the attacker poison cache entries (session fixation, cache-poisoning fan-out)."
+  description: "memcached_set - tainted key or value lets the attacker poison cache entries (session fixation, cache-poisoning fan-out)."
 - id: c.nosql.memcached_set_value
   enabled: true
   language: c
@@ -520,4 +520,4 @@
         memcached_set("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "memcached_set(..., key, value, ...) — tainted values can poison cache entries."
+  description: "memcached_set(..., key, value, ...) - tainted values can poison cache entries."

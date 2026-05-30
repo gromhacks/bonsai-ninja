@@ -27,7 +27,7 @@
       import 'package:webview_flutter/webview_flutter.dart';
       void test() { controller.runJavaScript("console.log('safe')"); }
     expect_no_match: true
-  description: "webview_flutter WebViewController.runJavaScript(tainted). Signature is `runJavaScript(String)` — exactly one arg; bounds reject same-name decoys with different overload shapes."
+  description: "webview_flutter WebViewController.runJavaScript(tainted). Signature is `runJavaScript(String)` - exactly one arg; bounds reject same-name decoys with different overload shapes."
 
   imports:
   - webview_flutter/webview_flutter.dart
@@ -59,7 +59,7 @@
       import 'package:webview_flutter/webview_flutter.dart';
       void test() { controller.runJavaScriptReturningResult("window.location.href"); }
     expect_no_match: true
-  description: "runJavaScriptReturningResult. Signature is `runJavaScriptReturningResult(String)` — exactly one arg; bounds reject same-name decoys with different overload shapes."
+  description: "runJavaScriptReturningResult. Signature is `runJavaScriptReturningResult(String)` - exactly one arg; bounds reject same-name decoys with different overload shapes."
 
   imports:
   - webview_flutter/webview_flutter.dart
@@ -84,7 +84,7 @@
     code: |
       void test() { Isolate.spawnUri(Uri.parse("package:safe/main.dart")); }
     expect_no_match: true
-  description: "Isolate.spawnUri(tainted URI) — loads arbitrary Dart script."
+  description: "Isolate.spawnUri(tainted URI) - loads arbitrary Dart script."
 
 - id: dart.eval.expressions_new
   enabled: true
@@ -116,7 +116,7 @@
       class Expression { Expression([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var result = Expression("1 + 1"); }
     expect_no_match: true
-  description: "package:expressions Expression(tainted) — evaluated expression."
+  description: "package:expressions Expression(tainted) - evaluated expression."
 
   imports:
   - expressions/expressions.dart
@@ -165,7 +165,7 @@
     kind: call
     callee:
       attribute: [instanceMirror, invoke]
-  description: "Disabled — dart:mirrors InstanceMirror.invoke; flag only when method Symbol is tainted."
+  description: "Disabled - dart:mirrors InstanceMirror.invoke; flag only when method Symbol is tainted."
 
 # Receiver-agnostic mirrors invoke. Inline `reflect(obj).invoke(...)`
 # has no `instanceMirror` receiver name so the rule above misses it.
@@ -196,4 +196,4 @@
       import 'dart:mirrors';
       void test(String input) { invoke(Symbol("run"), [input]); }
     expect_no_match: true
-  description: "reflect(obj).invoke(Symbol(name), args) — dart:mirrors reflective dispatch with tainted method name = arbitrary method invocation (CWE-470 / CWE-94). Narrowed by `Symbol(...)` arg-0 shape."
+  description: "reflect(obj).invoke(Symbol(name), args) - dart:mirrors reflective dispatch with tainted method name = arbitrary method invocation (CWE-470 / CWE-94). Narrowed by `Symbol(...)` arg-0 shape."

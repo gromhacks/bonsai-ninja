@@ -23,6 +23,6 @@
           CorsLayer::allow_origin(Any);
       }
   description: |-
-    tower-http CorsLayer::allow_origin(Any) — wildcard CORS.
+    tower-http CorsLayer::allow_origin(Any) - wildcard CORS.
   imports:
   - tower_http

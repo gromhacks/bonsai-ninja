@@ -18,7 +18,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  unserialize('a:0:{}');\n}\n"
     expect_no_match: true
-  description: unserialize() — POP-chain RCE via __wakeup / __destruct.
+  description: unserialize() - POP-chain RCE via __wakeup / __destruct.
 - id: php.deser.phardata_new
   enabled: true
   language: php
@@ -39,7 +39,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  new PharData('archive.tar');\n}\n"
     expect_no_match: true
-  description: new PharData(tainted) — phar:// stream triggers unserialize.
+  description: new PharData(tainted) - phar:// stream triggers unserialize.
 - id: php.deser.phar_new
   enabled: true
   language: php
@@ -74,7 +74,7 @@
     kind: call
     callee:
       name: file_exists
-  description: Disabled — file_exists is ubiquitous; phar:// variant needs arg-string-prefix constraint not expressible in schema.
+  description: Disabled - file_exists is ubiquitous; phar:// variant needs arg-string-prefix constraint not expressible in schema.
 - id: php.deser.file_get_contents_phar
   enabled: false
   disabled_reason:
@@ -88,7 +88,7 @@
     kind: call
     callee:
       name: file_get_contents
-  description: Disabled — file_get_contents ubiquitous; phar:// needs path-prefix constraint. Already covered as SSRF/path sink.
+  description: Disabled - file_get_contents ubiquitous; phar:// needs path-prefix constraint. Already covered as SSRF/path sink.
 - id: php.deser.igbinary_unserialize
   enabled: true
   language: php
@@ -109,7 +109,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  igbinary_unserialize('a:0:{}');\n}\n"
     expect_no_match: true
-  description: igbinary_unserialize — same risk as unserialize.
+  description: igbinary_unserialize - same risk as unserialize.
 - id: php.deser.symfony_yaml_parse_object
   enabled: true
   language: php
@@ -205,7 +205,7 @@
       attribute:
       - Serializer
       - deserialize
-  description: Disabled — Symfony Serializer with PhpSerializer encoder only.
+  description: Disabled - Symfony Serializer with PhpSerializer encoder only.
 - id: php.deser.jms_serializer
   enabled: false
   disabled_reason:
@@ -223,7 +223,7 @@
       attribute:
       - SerializerBuilder
       - build
-  description: Disabled — JMS Serializer with type metadata can be abused.
+  description: Disabled - JMS Serializer with type metadata can be abused.
 - id: php.deser.wddx_deserialize
   enabled: true
   language: php
@@ -244,7 +244,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  wddx_deserialize('<wddxPacket version=\"1.0\"><data></data></wddxPacket>');\n}\n"
     expect_no_match: true
-  description: wddx_deserialize — XML-based PHP-variable deserialisation.
+  description: wddx_deserialize - XML-based PHP-variable deserialisation.
 - id: php.deser.yaml_parse
   enabled: true
   language: php
@@ -265,7 +265,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  yaml_parse('safe: true');\n}\n"
     expect_no_match: true
-  description: ext-yaml yaml_parse — object instantiation via !php/object tag.
+  description: ext-yaml yaml_parse - object instantiation via !php/object tag.
 - id: php.deser.syck_load
   enabled: true
   language: php
@@ -286,4 +286,4 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  syck_load('safe: true');\n}\n"
     expect_no_match: true
-  description: syck_load — legacy YAML parser.
+  description: syck_load - legacy YAML parser.

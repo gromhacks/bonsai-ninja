@@ -34,7 +34,7 @@
         }
       }
     expect_no_match: true
-  description: "HttpSession.setAttribute(taintedName, value) — attacker controls a session key across a trust boundary."
+  description: "HttpSession.setAttribute(taintedName, value) - attacker controls a session key across a trust boundary."
 
 - id: java.trustbound.session_setattribute_chained
   enabled: true
@@ -72,4 +72,4 @@
         }
       }
     expect_no_match: true
-  description: "HttpServletRequest.getSession().setAttribute(taintedName, value) — attacker controls a session key across a trust boundary."
+  description: "HttpServletRequest.getSession().setAttribute(taintedName, value) - attacker controls a session key across a trust boundary."

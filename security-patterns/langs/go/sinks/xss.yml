@@ -38,7 +38,7 @@
         template.HTML("<strong>safe</strong>")
       }
     expect_no_match: true
-  description: "template.HTML(tainted) — cast opts the string out of html/template auto-escape. Direct XSS (CWE-79); also CWE-94 since the cast lets attacker text inject template directives / scripts the engine would otherwise neutralize. Merged collision aliases: go.xss.echo_html."
+  description: "template.HTML(tainted) - cast opts the string out of html/template auto-escape. Direct XSS (CWE-79); also CWE-94 since the cast lets attacker text inject template directives / scripts the engine would otherwise neutralize. Merged collision aliases: go.xss.echo_html."
   aliases:
   - go.xss.echo_html
   frameworks:
@@ -82,7 +82,7 @@
         template.JSStr("safe")
       }
     expect_no_match: true
-  description: "template.JSStr(tainted) — marks string as safe inside a JS string literal context."
+  description: "template.JSStr(tainted) - marks string as safe inside a JS string literal context."
 - id: go.xss.template_js
   enabled: true
   language: go
@@ -121,7 +121,7 @@
         template.JS("console.log('safe')")
       }
     expect_no_match: true
-  description: "template.JS(tainted) — marks string as safe JavaScript; XSS if attacker-controlled."
+  description: "template.JS(tainted) - marks string as safe JavaScript; XSS if attacker-controlled."
 - id: go.xss.template_htmlattr
   enabled: true
   language: go
@@ -160,7 +160,7 @@
         template.HTMLAttr(`class="safe"`)
       }
     expect_no_match: true
-  description: "template.HTMLAttr(tainted) — marks string as a safe HTML attribute; enables attribute-break XSS."
+  description: "template.HTMLAttr(tainted) - marks string as a safe HTML attribute; enables attribute-break XSS."
 - id: go.xss.fmt_fprintf_w
   enabled: false
   disabled_reason:
@@ -176,7 +176,7 @@
       attribute:
       - fmt
       - Fprintf
-  description: "Disabled — generic fmt.Fprintf; enable with a Content-Type: text/html response constraint."
+  description: "Disabled - generic fmt.Fprintf; enable with a Content-Type: text/html response constraint."
 - id: go.xss.responsewriter_write
   enabled: false
   disabled_reason:
@@ -190,7 +190,7 @@
     kind: call
     callee:
       regex: \.Write$
-  description: "Disabled — w.Write([]byte(tainted)); enable when response Content-Type is text/html."
+  description: "Disabled - w.Write([]byte(tainted)); enable when response Content-Type is text/html."
 - id: go.xss.fmt_fprint_html_response
   enabled: true
   language: go
@@ -227,7 +227,7 @@
         fmt.Fprint(w, "<h1>safe</h1>")
       }
     expect_no_match: true
-  description: "fmt.Fprint(w, taintedHTML) after a text/html response Content-Type — stdlib raw HTML response body without template escaping. The matcher anchors to common ResponseWriter variables; review surrounding headers for text/html."
+  description: "fmt.Fprint(w, taintedHTML) after a text/html response Content-Type - stdlib raw HTML response body without template escaping. The matcher anchors to common ResponseWriter variables; review surrounding headers for text/html."
 - id: go.xss.gin_data
   enabled: true
   language: go
@@ -261,7 +261,7 @@
         c.Data(200, "text/html; charset=utf-8", []byte("<h1>safe</h1>"))
       }
     expect_no_match: true
-  description: "gin Context.Data(status, \"text/html...\", tainted) — writes raw HTML bytes, including concatenated response fragments, without auto-escape."
+  description: "gin Context.Data(status, \"text/html...\", tainted) - writes raw HTML bytes, including concatenated response fragments, without auto-escape."
 - id: go.xss.fiber_send_string
   enabled: false
   disabled_reason:
@@ -277,7 +277,7 @@
     kind: call
     callee:
       regex: \.SendString$
-  description: "Disabled — fiber Ctx.SendString; enable when response Content-Type is text/html."
+  description: "Disabled - fiber Ctx.SendString; enable when response Content-Type is text/html."
 - id: go.xss.buffalo_render_string
   enabled: false
   disabled_reason:
@@ -315,4 +315,4 @@
         return c.Render(200, r.String("<h1>safe</h1>"))
       }
     expect_no_match: true
-  description: "Disabled — buffalo Context.Render(status, r.String(...)) needs nested-call taint correlation so literal render strings stay quiet while attacker-controlled render strings are reported."
+  description: "Disabled - buffalo Context.Render(status, r.String(...)) needs nested-call taint correlation so literal render strings stay quiet while attacker-controlled render strings are reported."

@@ -23,7 +23,7 @@
         value := "value"
         md5.New(target)
       }
-  description: "md5.New — MD5 is collision-broken; unsafe for integrity or password hashing."
+  description: "md5.New - MD5 is collision-broken; unsafe for integrity or password hashing."
 - id: go.crypto.md5_sum
   enabled: true
   language: go
@@ -48,7 +48,7 @@
         value := "value"
         md5.Sum(target)
       }
-  description: "md5.Sum — one-shot MD5; collision-broken."
+  description: "md5.Sum - one-shot MD5; collision-broken."
 - id: go.crypto.sha1_new
   enabled: true
   language: go
@@ -73,7 +73,7 @@
         value := "value"
         sha1.New(target)
       }
-  description: "sha1.New — SHA-1 collisions are practical; unsafe for signatures."
+  description: "sha1.New - SHA-1 collisions are practical; unsafe for signatures."
 - id: go.crypto.sha1_sum
   enabled: true
   language: go
@@ -98,7 +98,7 @@
         value := "value"
         sha1.Sum(target)
       }
-  description: "sha1.Sum — one-shot SHA-1; collisions practical."
+  description: "sha1.Sum - one-shot SHA-1; collisions practical."
 - id: go.crypto.des_newcipher
   enabled: true
   language: go
@@ -123,7 +123,7 @@
         value := "value"
         des.NewCipher(target)
       }
-  description: "des.NewCipher — single-DES is broken (56-bit key)."
+  description: "des.NewCipher - single-DES is broken (56-bit key)."
 - id: go.crypto.des_newtriple
   enabled: true
   language: go
@@ -148,7 +148,7 @@
         value := "value"
         des.NewTripleDESCipher(target)
       }
-  description: "des.NewTripleDESCipher — 3DES is deprecated; sweet32."
+  description: "des.NewTripleDESCipher - 3DES is deprecated; sweet32."
 - id: go.crypto.rc4_newcipher
   enabled: true
   language: go
@@ -173,7 +173,7 @@
         value := "value"
         rc4.NewCipher(target)
       }
-  description: "rc4.NewCipher — RC4 is broken (biased keystream)."
+  description: "rc4.NewCipher - RC4 is broken (biased keystream)."
 - id: go.crypto.math_rand_intn
   enabled: true
   language: go
@@ -198,7 +198,7 @@
         value := "value"
         rand.Intn(target)
       }
-  description: "math/rand.Intn — non-cryptographic PRNG; use crypto/rand for tokens, IDs, passwords."
+  description: "math/rand.Intn - non-cryptographic PRNG; use crypto/rand for tokens, IDs, passwords."
 - id: go.crypto.math_rand_read
   enabled: true
   language: go
@@ -223,4 +223,4 @@
         value := "value"
         rand.Read(target)
       }
-  description: "math/rand.Read — non-cryptographic PRNG output; use crypto/rand.Read for secrets."
+  description: "math/rand.Read - non-cryptographic PRNG output; use crypto/rand.Read for secrets."

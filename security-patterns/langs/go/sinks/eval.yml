@@ -34,7 +34,7 @@
         starlark.ExecFile(nil, "safe.star", "x = 1", nil)
       }
     expect_no_match: true
-  description: "starlark.ExecFile(thread, filename, source, predeclared) — executes tainted Starlark source in-process."
+  description: "starlark.ExecFile(thread, filename, source, predeclared) - executes tainted Starlark source in-process."
 - id: go.eval.gopher_lua_dostring
   enabled: true
   language: go
@@ -73,7 +73,7 @@
       }
       var obj *lua.LState
     expect_no_match: true
-  description: "gopher-lua LState.DoString — runs tainted Lua; RCE inside the Lua sandbox (and escapes are common)."
+  description: "gopher-lua LState.DoString - runs tainted Lua; RCE inside the Lua sandbox (and escapes are common)."
 - id: go.eval.gopher_lua_dofile
   enabled: true
   language: go
@@ -112,7 +112,7 @@
       }
       var obj *lua.LState
     expect_no_match: true
-  description: "gopher-lua LState.DoFile — runs Lua from a tainted path."
+  description: "gopher-lua LState.DoFile - runs Lua from a tainted path."
 - id: go.eval.goja_runstring
   enabled: true
   language: go
@@ -151,7 +151,7 @@
       }
       var obj *goja.Runtime
     expect_no_match: true
-  description: "goja Runtime.RunString — evaluates tainted JavaScript in the goja interpreter."
+  description: "goja Runtime.RunString - evaluates tainted JavaScript in the goja interpreter."
 - id: go.eval.expr_compile
   enabled: true
   language: go
@@ -191,7 +191,7 @@
         expr.Compile("user.Name == 'alice'")
       }
     expect_no_match: true
-  description: "expr.Compile(tainted) — compiles a tainted expression; limited eval but still untrusted-code execution."
+  description: "expr.Compile(tainted) - compiles a tainted expression; limited eval but still untrusted-code execution."
 - id: go.eval.expr_eval
   enabled: true
   language: go
@@ -234,7 +234,7 @@
         expr.Eval("user.Name == 'alice'", nil)
       }
     expect_no_match: true
-  description: "expr.Eval(tainted, env) — one-shot evaluate of tainted expression. Merged collision aliases: go.eval.yaegi_eval, go.nosql.redis_eval."
+  description: "expr.Eval(tainted, env) - one-shot evaluate of tainted expression. Merged collision aliases: go.eval.yaegi_eval, go.nosql.redis_eval."
   aliases:
   - go.eval.yaegi_eval
   - go.nosql.redis_eval
@@ -276,7 +276,7 @@
         govaluate.NewEvaluableExpression("name == 'alice'")
       }
     expect_no_match: true
-  description: "govaluate.NewEvaluableExpression — tainted expression is interpreted; access to host funcs if registered."
+  description: "govaluate.NewEvaluableExpression - tainted expression is interpreted; access to host funcs if registered."
 - id: go.eval.tengo_newscript_compile
   enabled: true
   language: go
@@ -313,7 +313,7 @@
         tengo.NewScript([]byte("a := 1")).Compile()
       }
     expect_no_match: true
-  description: "tengo.NewScript(tainted_source) — compiles attacker-controlled Tengo script before execution."
+  description: "tengo.NewScript(tainted_source) - compiles attacker-controlled Tengo script before execution."
 - id: go.eval.anko_execute
   enabled: true
   language: go
@@ -349,7 +349,7 @@
         _, _ = vm.Execute(nil, nil, "println(1)")
       }
     expect_no_match: true
-  description: "anko vm.Execute(env, stmts, taintedSource) — executes attacker-controlled Anko script text. Merged collision aliases: go.template.text_template_execute_html."
+  description: "anko vm.Execute(env, stmts, taintedSource) - executes attacker-controlled Anko script text. Merged collision aliases: go.template.text_template_execute_html."
   aliases:
   - go.template.text_template_execute_html
 - id: go.eval.plugin_open
@@ -391,7 +391,7 @@
         plugin.Open("./plugins/safe.so")
       }
     expect_no_match: true
-  description: "plugin.Open(tainted .so) — loads an arbitrary Go plugin; init() of the .so runs as the host process = RCE."
+  description: "plugin.Open(tainted .so) - loads an arbitrary Go plugin; init() of the .so runs as the host process = RCE."
 - id: go.eval.reflect_call
   enabled: false
   disabled_reason:
@@ -405,4 +405,4 @@
     kind: call
     callee:
       regex: \.Call$
-  description: "Disabled — reflect.Value.Call; enable only when the method name is tainted."
+  description: "Disabled - reflect.Value.Call; enable only when the method name is tainted."

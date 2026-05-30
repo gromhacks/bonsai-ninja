@@ -15,7 +15,7 @@
         -export([test/1]).
         test(Input) ->
           init:get_plain_arguments(Input).
-  description: "init:get_plain_arguments/0 — command-line args."
+  description: "init:get_plain_arguments/0 - command-line args."
 
 - id: erlang.source.io_get_line
   enabled: true
@@ -33,7 +33,7 @@
         -export([test/1]).
         test(Input) ->
           io:get_line(Input).
-  description: "io:get_line/1 — stdin line."
+  description: "io:get_line/1 - stdin line."
 
 - id: erlang.source.os_getenv
   enabled: true
@@ -51,4 +51,4 @@
         -export([test/1]).
         test(Input) ->
           os:getenv(Input).
-  description: "os:getenv/1 — environment variable."
+  description: "os:getenv/1 - environment variable."

@@ -26,7 +26,7 @@
         printf("%s", "safe");
       }
     expect_no_match: true
-  description: "printf — tainted format string. Also covers merged aliases: c.info_disclosure.printf_secret."
+  description: "printf - tainted format string. Also covers merged aliases: c.info_disclosure.printf_secret."
 - id: c.format.fprintf_tainted
   aliases:
     - c.info_disclosure.fprintf_stderr_secret
@@ -55,7 +55,7 @@
         fprintf(stream, "%s", "safe");
       }
     expect_no_match: true
-  description: "fprintf(stream, tainted_fmt, ...) — attacker-controlled format string; %n writes arbitrary memory, %s reads it. Also covers merged aliases: c.info_disclosure.fprintf_stderr_secret."
+  description: "fprintf(stream, tainted_fmt, ...) - attacker-controlled format string; %n writes arbitrary memory, %s reads it. Also covers merged aliases: c.info_disclosure.fprintf_stderr_secret."
 - id: c.format.sprintf_tainted
   aliases:
     - c.memory.sprintf
@@ -88,7 +88,7 @@
         sprintf(buf, "%s", "safe");
       }
     expect_no_match: true
-  description: "sprintf — format injection + buffer overflow. Also covers merged aliases: c.memory.sprintf."
+  description: "sprintf - format injection + buffer overflow. Also covers merged aliases: c.memory.sprintf."
 - id: c.format.snprintf_tainted
   enabled: true
   language: c
@@ -146,7 +146,7 @@
         vprintf("%s");
       }
     expect_no_match: true
-  description: "vprintf(tainted_fmt, ap) — va_list variant of printf; tainted format = %n write / %s leak."
+  description: "vprintf(tainted_fmt, ap) - va_list variant of printf; tainted format = %n write / %s leak."
 - id: c.format.vfprintf_tainted
   enabled: true
   language: c
@@ -173,7 +173,7 @@
         vfprintf(stream, "%s");
       }
     expect_no_match: true
-  description: "vfprintf(stream, tainted_fmt, ap) — va_list fprintf variant; same format-string risk."
+  description: "vfprintf(stream, tainted_fmt, ap) - va_list fprintf variant; same format-string risk."
 - id: c.format.vsprintf_tainted
   aliases:
     - c.memory.vsprintf
@@ -206,7 +206,7 @@
         vsprintf(buf, "%s");
       }
     expect_no_match: true
-  description: "vsprintf(dst, tainted_fmt, ap) — va_list sprintf variant; format-string + unbounded copy. Also covers merged aliases: c.memory.vsprintf."
+  description: "vsprintf(dst, tainted_fmt, ap) - va_list sprintf variant; format-string + unbounded copy. Also covers merged aliases: c.memory.vsprintf."
 - id: c.format.vsnprintf_tainted
   enabled: true
   language: c
@@ -237,7 +237,7 @@
         vsnprintf(buf, 128, "%s");
       }
     expect_no_match: true
-  description: "vsnprintf(dst, n, tainted_fmt, ap) — bounded write but format string is still attacker-controlled."
+  description: "vsnprintf(dst, n, tainted_fmt, ap) - bounded write but format string is still attacker-controlled."
 - id: c.format.dprintf_tainted
   enabled: true
   language: c
@@ -264,7 +264,7 @@
         dprintf(fd, "%s", "safe");
       }
     expect_no_match: true
-  description: "POSIX dprintf(fd, tainted_fmt, ...) — formatted write to fd; tainted format yields %n/%s exploit."
+  description: "POSIX dprintf(fd, tainted_fmt, ...) - formatted write to fd; tainted format yields %n/%s exploit."
 - id: c.format.asprintf_tainted
   enabled: true
   language: c
@@ -291,7 +291,7 @@
         asprintf(out, "%s", "safe");
       }
     expect_no_match: true
-  description: "GNU asprintf(&dst, tainted_fmt, ...) — allocates and formats; tainted format string = format-string bug."
+  description: "GNU asprintf(&dst, tainted_fmt, ...) - allocates and formats; tainted format string = format-string bug."
 - id: c.format.warn_tainted
   enabled: true
   language: c
@@ -317,7 +317,7 @@
         warn("%s", "safe");
       }
     expect_no_match: true
-  description: "BSD warn(tainted_fmt, ...) — logs attacker-controlled format strings; `%n` / `%s` directives can crash or leak process memory."
+  description: "BSD warn(tainted_fmt, ...) - logs attacker-controlled format strings; `%n` / `%s` directives can crash or leak process memory."
 - id: c.format.syslog_tainted
   aliases:
     - c.info_disclosure.syslog_secret
@@ -346,4 +346,4 @@
         syslog(priority, "%s", "safe");
       }
     expect_no_match: true
-  description: "syslog(priority, tainted_fmt, ...) — format-string bug in logging path; attacker-controlled %n/%s can crash or leak memory. Also covers merged aliases: c.info_disclosure.syslog_secret."
+  description: "syslog(priority, tainted_fmt, ...) - format-string bug in logging path; attacker-controlled %n/%s can crash or leak memory. Also covers merged aliases: c.info_disclosure.syslog_secret."

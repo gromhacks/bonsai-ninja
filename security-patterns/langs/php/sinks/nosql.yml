@@ -33,7 +33,7 @@
         Collection::find(["status" => "active"]);
       }
     expect_no_match: true
-  description: 'MongoDB\Collection::find — flag tainted filter array. Merged collision aliases: php.nosql.mongo_collection_findone, php.nosql.mongo_collection_filter_value_object.'
+  description: 'MongoDB\Collection::find - flag tainted filter array. Merged collision aliases: php.nosql.mongo_collection_findone, php.nosql.mongo_collection_filter_value_object.'
   aliases:
   - php.nosql.mongo_collection_findone
   - php.nosql.mongo_collection_filter_value_object

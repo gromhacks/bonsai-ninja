@@ -20,7 +20,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->info(\"safe\");\n}\n"
     expect_no_match: true
-  description: "$logger->info(\"...\" . $tainted) \u2014 log-injection via concat (Monolog / PSR-3)."
+  description: "$logger->info(\"...\" . $tainted) - log-injection via concat (Monolog / PSR-3)."
 - id: php.log_injection.logger_warning_concat
   enabled: true
   language: php
@@ -43,7 +43,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->warning(\"safe\");\n}\n"
     expect_no_match: true
-  description: "$logger->warning \u2014 log-injection via concat."
+  description: "$logger->warning - log-injection via concat."
 - id: php.log_injection.logger_error_concat
   enabled: true
   language: php
@@ -66,7 +66,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->error(\"safe\");\n}\n"
     expect_no_match: true
-  description: "$logger->error \u2014 log-injection via concat."
+  description: "$logger->error - log-injection via concat."
 - id: php.log_injection.logger_critical_concat
   enabled: true
   language: php
@@ -89,4 +89,4 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->critical(\"safe\");\n}\n"
     expect_no_match: true
-  description: "$logger->critical \u2014 log-injection via concat."
+  description: "$logger->critical - log-injection via concat."

@@ -11,7 +11,7 @@
     kind: call
     callee:
       name: predicateWithFormat
-  description: "Disabled — canonical rule is objc.eval.nspredicate_format in eval.yml. NSPredicate +predicateWithFormat: with tainted format is predicate/DSL injection (a subset of code-injection)."
+  description: "Disabled - canonical rule is objc.eval.nspredicate_format in eval.yml. NSPredicate +predicateWithFormat: with tainted format is predicate/DSL injection (a subset of code-injection)."
 
 - id: objc.nosql.realm_objects_where
   enabled: true
@@ -37,7 +37,7 @@
       #import <Realm/Realm.h>
       void test(void) { [RLMRealm objectsWhere:@"name == 'safe'"]; }
     expect_no_match: true
-  description: "RLMRealm -objectsWhere: / -objectsWithPredicate: with tainted predicate string — Realm DSL injection. Constrained to Realm receivers."
+  description: "RLMRealm -objectsWhere: / -objectsWithPredicate: with tainted predicate string - Realm DSL injection. Constrained to Realm receivers."
 
 - id: objc.nosql.realm_filter_format
   enabled: true
@@ -63,7 +63,7 @@
       #import <Realm/Realm.h>
       void test(void) { [RLMResults filter:@"name == 'safe'"]; }
     expect_no_match: true
-  description: "Realm Results -filter: with tainted format string — Realm predicate injection. Constrained to Realm receivers; bare `filter` is too generic."
+  description: "Realm Results -filter: with tainted format string - Realm predicate injection. Constrained to Realm receivers; bare `filter` is too generic."
 
 - id: objc.nosql.core_data_fetch_request_predicate
   enabled: true
@@ -86,7 +86,7 @@
     code: |
       void test(void) { [NSFetchRequest setPredicate:@"name == 'safe'"]; }
     expect_no_match: true
-  description: "NSFetchRequest -setPredicate: with NSPredicate built from tainted format — Core Data predicate injection. Constrained to fetch request receivers."
+  description: "NSFetchRequest -setPredicate: with NSPredicate built from tainted format - Core Data predicate injection. Constrained to fetch request receivers."
 
 - id: objc.nosql.mongoc_find
   enabled: true
@@ -111,7 +111,7 @@
       #import <mongoc/mongoc.h>
       void test(void) { mongoc_collection_find_with_opts("{\"name\":\"safe\"}"); }
     expect_no_match: true
-  description: "libmongoc mongoc_collection_find(_with_opts) — tainted BSON filter permits NoSQL injection."
+  description: "libmongoc mongoc_collection_find(_with_opts) - tainted BSON filter permits NoSQL injection."
 
 - id: objc.nosql.couchbase_query
   enabled: true

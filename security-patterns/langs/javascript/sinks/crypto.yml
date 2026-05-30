@@ -24,7 +24,7 @@
       function demo(input, req, obj) {
         return crypto.createHash('md5');
       }
-  description: "crypto.createHash('md5') — broken hash. Merged aliases: javascript.crypto.createhash_sha1."
+  description: "crypto.createHash('md5') - broken hash. Merged aliases: javascript.crypto.createhash_sha1."
   aliases:
   - javascript.crypto.createhash_sha1
 - id: javascript.crypto.createcipher_des
@@ -50,7 +50,7 @@
       function demo(input, req, obj) {
         return crypto.createCipheriv('des');
       }
-  description: "crypto.createCipheriv('des', …). Merged aliases: javascript.crypto.createcipher_des_ede, javascript.crypto.createcipher_rc4, javascript.crypto.createcipher_aes128_ecb, javascript.crypto.createcipher_aes192_ecb, javascript.crypto.createcipher_aes256_ecb."
+  description: "crypto.createCipheriv('des', ...). Merged aliases: javascript.crypto.createcipher_des_ede, javascript.crypto.createcipher_rc4, javascript.crypto.createcipher_aes128_ecb, javascript.crypto.createcipher_aes192_ecb, javascript.crypto.createcipher_aes256_ecb."
   aliases:
   - javascript.crypto.createcipher_des_ede
   - javascript.crypto.createcipher_rc4
@@ -80,7 +80,7 @@
       function demo(input, req, obj) {
         return crypto.createCipher(input);
       }
-  description: "crypto.createCipher (no IV) — deprecated, predictable IVs."
+  description: "crypto.createCipher (no IV) - deprecated, predictable IVs."
 - id: javascript.crypto.deprecated_createdecipher
   enabled: true
   language: javascript
@@ -107,7 +107,7 @@
       }
     expect_match_text:
     - crypto.createDecipher
-  description: "crypto.createDecipher (no IV) — deprecated API derives predictable IVs from password material."
+  description: "crypto.createDecipher (no IV) - deprecated API derives predictable IVs from password material."
 - id: javascript.crypto.gcm_decipher_no_authtaglength
   enabled: true
   language: javascript
@@ -224,7 +224,7 @@
   match_examples:
   - name: math random
     code: "function demo(input, req, obj) {\n  return Math.random(input);\n}\n"
-  description: "Math.random — non-cryptographic; flag in security-sensitive paths. JS Math global has no canonical ecosystem package, so strict `['Math', 'random']` match only."
+  description: "Math.random - non-cryptographic; flag in security-sensitive paths. JS Math global has no canonical ecosystem package, so strict `['Math', 'random']` match only."
 - id: javascript.crypto.bcrypt_low_rounds
   enabled: true
   language: javascript
@@ -261,4 +261,4 @@
         return bcrypt.hash(password, 12);
       }
     expect_no_match: true
-  description: "bcrypt.hash(password, rounds) with rounds < 10 — too cheap to compute; use an adequate work factor."
+  description: "bcrypt.hash(password, rounds) with rounds < 10 - too cheap to compute; use an adequate work factor."

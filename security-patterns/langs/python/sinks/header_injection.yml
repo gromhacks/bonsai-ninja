@@ -30,7 +30,7 @@
       def example(user_input):
           return Headers.add('X-Name', 'safe')
     expect_no_match: true
-  description: "werkzeug/flask Headers.add — CRLF possible if value tainted."
+  description: "werkzeug/flask Headers.add - CRLF possible if value tainted."
 - id: python.header.werkzeug_headers_set
   enabled: true
   language: python
@@ -63,7 +63,7 @@
       def example(user_input):
           return Headers.set('X-Name', 'safe')
     expect_no_match: true
-  description: "Headers.set() — overwrite a response header with a tainted value; newline injection splits the response."
+  description: "Headers.set() - overwrite a response header with a tainted value; newline injection splits the response."
 - id: python.header.django_response_setitem
   enabled: false
   disabled_reason:
@@ -81,7 +81,7 @@
       attribute:
       - HttpResponse
       - __setitem__
-  description: "Disabled — `response[name] = value` is a subscript-assign; the tree-sitter adapter does not surface it as an `__setitem__` attribute call so this never fires. Use python.header.django_response_headers_setitem once subscript matching lands."
+  description: "Disabled - `response[name] = value` is a subscript-assign; the tree-sitter adapter does not surface it as an `__setitem__` attribute call so this never fires. Use python.header.django_response_headers_setitem once subscript matching lands."
 - id: python.header.fastapi_response_headers
   enabled: false
   disabled_reason:
@@ -97,7 +97,7 @@
     kind: write
     target:
       name: headers
-  description: "Disabled — matched any assignment to a variable called `headers`, which is ubiquitous across HTTP-client and server code. Re-enable once attribute-chain writes (`response.headers = ...`) are matchable."
+  description: "Disabled - matched any assignment to a variable called `headers`, which is ubiquitous across HTTP-client and server code. Re-enable once attribute-chain writes (`response.headers = ...`) are matchable."
 - id: python.header.starlette_response_set_cookie
   enabled: true
   language: python
@@ -129,7 +129,7 @@
       def example(user_input):
           return Response.set_cookie('sid', 'safe')
     expect_no_match: true
-  description: "Starlette Response.set_cookie — flag tainted value."
+  description: "Starlette Response.set_cookie - flag tainted value."
 - id: python.header.tornado_set_header
   enabled: true
   language: python
@@ -179,7 +179,7 @@
       attribute:
       - Response
       - headers
-  description: "Disabled — `response.headers[k] = v` is a read+subscript-assign, not an attribute call; this rule's match shape never fires."
+  description: "Disabled - `response.headers[k] = v` is a read+subscript-assign, not an attribute call; this rule's match shape never fires."
 - id: python.header.response_headers_location_write
   enabled: true
   language: python
@@ -215,7 +215,7 @@
           location = "/home"
           return location
     expect_no_match: true
-  description: "response.headers['Location'] = tainted — manual redirect/header assignment can produce response splitting or tainted Location redirects. Merged collision aliases: python.smuggle.set_dual_cl_te_headers."
+  description: "response.headers['Location'] = tainted - manual redirect/header assignment can produce response splitting or tainted Location redirects. Merged collision aliases: python.smuggle.set_dual_cl_te_headers."
   aliases:
   - python.smuggle.set_dual_cl_te_headers
 - id: python.header.response_headers_update
@@ -256,7 +256,7 @@
       def set_header(response, user_input):
           return response.headers.update('safe')
     expect_no_match: true
-  description: "response.headers.update({...}) — bulk response-header mutation with tainted values can inject CRLF or attacker-controlled redirect metadata."
+  description: "response.headers.update({...}) - bulk response-header mutation with tainted values can inject CRLF or attacker-controlled redirect metadata."
 - id: python.header.response_headers_add
   enabled: true
   language: python
@@ -299,7 +299,7 @@
       def set_header(response, user_input):
           return response.headers.add('X-Name', 'safe')
     expect_no_match: true
-  description: "response.headers.add/set(name, value) — framework header containers accept raw values that can split headers if CRLF-tainted."
+  description: "response.headers.add/set(name, value) - framework header containers accept raw values that can split headers if CRLF-tainted."
 - id: python.header.tornado_self_set_header
   enabled: true
   language: python
@@ -333,7 +333,7 @@
       def get(self, user_input):
           return self.set_header('X-Name', 'safe')
     expect_no_match: true
-  description: "Tornado RequestHandler.set_header(name, value) instance form — tainted values can produce response splitting."
+  description: "Tornado RequestHandler.set_header(name, value) instance form - tainted values can produce response splitting."
 - id: python.header.set_cookie_generic
   enabled: false
   disabled_reason:
@@ -347,4 +347,4 @@
     kind: call
     callee:
       name: set_cookie
-  description: "Disabled — generic set_cookie; many frameworks already validate."
+  description: "Disabled - generic set_cookie; many frameworks already validate."

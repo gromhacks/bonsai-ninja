@@ -23,7 +23,7 @@
       #import <JWTKit/JWTKit.h>
       void test(void) { [JWTBuilder decodeMessage:@"safe.token.value"]; }
     expect_no_match: true
-  description: "JWTKit -decodeMessage: / -decodePayload: without algorithm whitelist — permits alg:none or HS256/RS256 confusion."
+  description: "JWTKit -decodeMessage: / -decodePayload: without algorithm whitelist - permits alg:none or HS256/RS256 confusion."
 
 - id: objc.jwt.heimdall_decode
   enabled: true
@@ -49,7 +49,7 @@
       #import <Heimdall/Heimdall.h>
       void test(void) { [Heimdall validateJWT:@"safe.token.value"]; }
     expect_no_match: true
-  description: "Heimdall -validateJWT: — flag when no algorithm constraint supplied."
+  description: "Heimdall -validateJWT: - flag when no algorithm constraint supplied."
 
 - id: objc.jwt_jose_decode_unverified
   enabled: true
@@ -76,4 +76,4 @@
       #import <JOSESwift/JOSESwift.h>
       void test(void) { [JWT decodeClaimsSet:@"safe.token.value"]; }
     expect_no_match: true
-  description: "JOSE / JWT decodeClaimsSet-style helpers — decoding claims before signature verification can trust attacker-controlled JWT payloads."
+  description: "JOSE / JWT decodeClaimsSet-style helpers - decoding claims before signature verification can trust attacker-controlled JWT payloads."

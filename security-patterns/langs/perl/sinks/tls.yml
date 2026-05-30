@@ -63,7 +63,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         IO::Socket::SSL->new($input, $input, SSL_verify_mode => 0)
       }
-  description: "IO::Socket::SSL->new(SSL_verify_mode => 0) — disable cert verify."
+  description: "IO::Socket::SSL->new(SSL_verify_mode => 0) - disable cert verify."
 
 - id: perl.tls.http_tiny_verify_ssl_off
   enabled: true

@@ -24,7 +24,7 @@
         const char *query = arg;
         gpio_set_value(arg);
       }
-  description: "gpio_set_value — tainted pin/value drives a physical output."
+  description: "gpio_set_value - tainted pin/value drives a physical output."
 
   imports:
   - linux
@@ -51,7 +51,7 @@
         const char *query = arg;
         gpiod_line_set_value(arg);
       }
-  description: "gpiod_line_set_value — tainted line/value actuates GPIO-backed hardware."
+  description: "gpiod_line_set_value - tainted line/value actuates GPIO-backed hardware."
 
 - id: cpp.hardware.digitalwrite
   enabled: true
@@ -78,7 +78,7 @@
         const char *query = arg;
         digitalWrite(arg);
       }
-  description: "digitalWrite — tainted pin/value toggles a physical output."
+  description: "digitalWrite - tainted pin/value toggles a physical output."
 
   imports:
   - Arduino.h
@@ -108,7 +108,7 @@
         const char *query = arg;
         analogWrite(arg);
       }
-  description: "analogWrite — tainted PWM duty or pin selection drives an actuator."
+  description: "analogWrite - tainted PWM duty or pin selection drives an actuator."
 
   imports:
   - Arduino.h
@@ -138,7 +138,7 @@
         const char *query = arg;
         i2c_smbus_write_byte_data(arg);
       }
-  description: "i2c_smbus_write_byte_data — tainted register/value mutates an attached device over I2C."
+  description: "i2c_smbus_write_byte_data - tainted register/value mutates an attached device over I2C."
 
   imports:
   - linux
@@ -168,7 +168,7 @@
         const char *query = arg;
         i2c_smbus_write_word_data(arg);
       }
-  description: "i2c_smbus_write_word_data — tainted 16-bit write controls peripheral state."
+  description: "i2c_smbus_write_word_data - tainted 16-bit write controls peripheral state."
 
   imports:
   - linux
@@ -195,7 +195,7 @@
         const char *query = arg;
         wiringPiI2CWriteReg8(arg);
       }
-  description: "wiringPiI2CWriteReg8 — tainted register/value drives a chip-to-chip I2C peripheral."
+  description: "wiringPiI2CWriteReg8 - tainted register/value drives a chip-to-chip I2C peripheral."
 
 - id: cpp.hardware.wiringpi_i2c_write_reg16
   enabled: true
@@ -219,7 +219,7 @@
         const char *query = arg;
         wiringPiI2CWriteReg16(arg);
       }
-  description: "wiringPiI2CWriteReg16 — tainted 16-bit write mutates peripheral hardware state."
+  description: "wiringPiI2CWriteReg16 - tainted 16-bit write mutates peripheral hardware state."
 
 - id: cpp.hardware.serial_putchar
   enabled: true
@@ -243,7 +243,7 @@
         const char *query = arg;
         serialPutchar(arg);
       }
-  description: "serialPutchar — tainted byte is emitted onto a UART/serial link."
+  description: "serialPutchar - tainted byte is emitted onto a UART/serial link."
 
 - id: cpp.hardware.serialport_blocking_write
   enabled: true
@@ -267,7 +267,7 @@
         const char *query = arg;
         sp_blocking_write(arg);
       }
-  description: "sp_blocking_write — tainted bytes are transmitted to a serial-attached device."
+  description: "sp_blocking_write - tainted bytes are transmitted to a serial-attached device."
 
 - id: cpp.hardware.wiringpi_spi_data_rw
   enabled: true
@@ -291,4 +291,4 @@
         const char *query = arg;
         wiringPiSPIDataRW(arg);
       }
-  description: "wiringPiSPIDataRW — tainted SPI frame bytes are sent to an attached peripheral."
+  description: "wiringPiSPIDataRW - tainted SPI frame bytes are sent to an attached peripheral."

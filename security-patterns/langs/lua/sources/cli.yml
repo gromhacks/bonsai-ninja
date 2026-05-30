@@ -1,4 +1,4 @@
-# Lua CLI / env sources — trust: local.
+# Lua CLI / env sources - trust: local.
 - id: lua.source.cli_arg
   enabled: true
   language: lua
@@ -14,7 +14,7 @@
         function example(input, url, id, payload, request, params, user)
           local value = arg
         end
-  description: "Lua arg table — local CLI argv input."
+  description: "Lua arg table - local CLI argv input."
 
 - id: lua.source.os_getenv
   enabled: true
@@ -31,7 +31,7 @@
         function example(input, url, id, payload, request, params, user)
           os.getenv(input)
         end
-  description: "os.getenv — local environment variable input."
+  description: "os.getenv - local environment variable input."
 
 - id: lua.source.io_read
   enabled: true
@@ -48,4 +48,4 @@
         function example(input, url, id, payload, request, params, user)
           io.read(input)
         end
-  description: "io.read — local stdin input."
+  description: "io.read - local stdin input."

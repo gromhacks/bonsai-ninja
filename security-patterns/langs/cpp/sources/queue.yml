@@ -19,7 +19,7 @@
         const char *query = arg;
         rd_kafka_consumer_poll(arg);
       }
-  description: "librdkafka rd_kafka_consumer_poll — broker message payload."
+  description: "librdkafka rd_kafka_consumer_poll - broker message payload."
 - id: cpp.input.cppkafka_consume
   enabled: true
   language: cpp
@@ -38,7 +38,7 @@
         Consumer.poll();
       }
     expect_match_text: [Consumer.poll]
-  description: "cppkafka Consumer::poll — broker message payload; local receiver calls require semantic Consumer receiver-type facts."
+  description: "cppkafka Consumer::poll - broker message payload; local receiver calls require semantic Consumer receiver-type facts."
 - id: cpp.input.amqpcpp_message
   enabled: true
   language: cpp

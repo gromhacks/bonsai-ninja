@@ -21,4 +21,4 @@
         }
       }
   description: |-
-    @CrossOrigin(origins = ['*']) — Spring (Kotlin) allow-all CORS.
+    @CrossOrigin(origins = ['*']) - Spring (Kotlin) allow-all CORS.

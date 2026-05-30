@@ -25,7 +25,7 @@
     code: "import scalate._\n// uses scalate\nobject App {\n  def handle(input: String):\
       \ Unit = {\n    TemplateEngine.layout(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Scalate TemplateEngine.layout(tainted) \u2014 SSTI."
+  description: "Scalate TemplateEngine.layout(tainted) - SSTI."
 - id: scala.template.scalate_renderstring
   enabled: true
   language: scala
@@ -53,7 +53,7 @@
     code: "import scalate._\nobject App {\n  def handle(input: String): Unit = {\n\
       \    TemplateEngine.renderString(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Scalate TemplateEngine.renderString(tainted) \u2014 compiles & runs\
+  description: "Scalate TemplateEngine.renderString(tainted) - compiles & runs\
     \ string."
 - id: scala.template.velocity_evaluate
   enabled: true
@@ -84,7 +84,7 @@
       \ writer: Any, template: String): Unit = {\n    Velocity.evaluate(ctx, writer,\
       \ template, \"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Velocity.evaluate(tainted template) \u2014 RCE."
+  description: "Velocity.evaluate(tainted template) - RCE."
 - id: scala.template.freemarker_process
   enabled: false
   language: scala
@@ -104,7 +104,7 @@
   - name: generated shape example
     code: "import freemarker._\n// uses freemarker\nobject App {\n  def handle(input:\
       \ String): Unit = {\n    Template.process(\"{{\" + input)\n  }\n}\n"
-  description: "Freemarker Template.process \u2014 SSTI if template text is tainted."
+  description: "Freemarker Template.process - SSTI if template text is tainted."
   disabled_reason:
     code: over-broad
 - id: scala.template.freemarker_template_process_local
@@ -131,7 +131,7 @@
       \ Template {\n  def process(args: Any*): Unit = {}\n}\n"
     expect_match_text:
     - template.process
-  description: "Disabled \u2014 bare `template.process` overmatches any object named `template` with a `process` method; no canonical exists (scala.template.freemarker_process is also disabled). Re-enable when adapter supports receiver-type narrowing for FreeMarker Template instances."
+  description: "Disabled - bare `template.process` overmatches any object named `template` with a `process` method; no canonical exists (scala.template.freemarker_process is also disabled). Re-enable when adapter supports receiver-type narrowing for FreeMarker Template instances."
 - id: scala.template.spel_parseexpression
   enabled: true
   language: scala
@@ -160,7 +160,7 @@
     code: "import org.springframework.expression._\nobject App {\n  def handle(template: String):\
       \ Unit = {\n    SpelExpressionParser.parseExpression(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Spring SpEL parseExpression(template) \u2014 server-side template\
+  description: "Spring SpEL parseExpression(template) - server-side template\
     \ expression parsing from attacker-controlled text."
   imports:
   - org.springframework.expression
@@ -194,7 +194,7 @@
       \ String, ctx: Any): Any = {\n    TemplateEngine.process(\"layout :: safe\"\
       , ctx)\n  }\n}\n"
     expect_no_match: true
-  description: "Thymeleaf TemplateEngine.process(\"layout :: \" + fragment, ctx) \u2014\
+  description: "Thymeleaf TemplateEngine.process(\"layout :: \" + fragment, ctx) -\
     \ attacker-controlled fragment expressions can become server-side template injection."
 - id: scala.template.mustache_compile
   enabled: true
@@ -240,7 +240,7 @@
       attribute:
       - Twirl
       - format
-  description: "Disabled \u2014 Twirl templates are compiled at build time; only dynamic\
+  description: "Disabled - Twirl templates are compiled at build time; only dynamic\
     \ template loaders are risky."
 - id: scala.template.freemarker_autoesc_off
   enabled: true
@@ -263,4 +263,4 @@
     code: "import freemarker._\nobject App {\n  def handle(input: String): Unit =\
       \ {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\n\
       \  }\n}\n"
-  description: "FreeMarker (via Java interop) \u2014 autoescape disabled at config."
+  description: "FreeMarker (via Java interop) - autoescape disabled at config."

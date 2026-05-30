@@ -68,7 +68,7 @@
         }
       }
     expect_no_match: true
-  description: "MovedPermanently(tainted) — covers Play and http4s (same bare `MovedPermanently` name)."
+  description: "MovedPermanently(tainted) - covers Play and http4s (same bare `MovedPermanently` name)."
 - id: scala.open_redirect.akka_http_redirect
   enabled: true
   language: scala
@@ -160,4 +160,4 @@
     kind: call
     callee:
       name: MovedPermanently
-  description: "Disabled — merged into scala.open_redirect.play_movedpermanently (same bare `MovedPermanently` name)."
+  description: "Disabled - merged into scala.open_redirect.play_movedpermanently (same bare `MovedPermanently` name)."

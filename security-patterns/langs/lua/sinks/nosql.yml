@@ -27,7 +27,7 @@
         collection.find({ name = "alice" })
       end
     expect_no_match: true
-  description: "lua-resty-mongol collection:find(filter) — tainted filter table enables operator injection ($where / $ne)."
+  description: "lua-resty-mongol collection:find(filter) - tainted filter table enables operator injection ($where / $ne)."
 
 - id: lua.nosql.resty_mongol_find_one
   enabled: true
@@ -57,7 +57,7 @@
         collection.find_one({ name = "alice" })
       end
     expect_no_match: true
-  description: "lua-resty-mongol collection:find_one(filter) — tainted filter with $-operators."
+  description: "lua-resty-mongol collection:find_one(filter) - tainted filter with $-operators."
 
 - id: lua.nosql.mongorover_find
   enabled: false
@@ -73,7 +73,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]find$
-  description: "Subsumed by lua.nosql.resty_mongol_find — same shape; canonical rule covers all Lua MongoDB drivers."
+  description: "Subsumed by lua.nosql.resty_mongol_find - same shape; canonical rule covers all Lua MongoDB drivers."
 
 - id: lua.nosql.resty_redis_eval
   enabled: true
@@ -103,7 +103,7 @@
         red.eval("return 1")
       end
     expect_no_match: true
-  description: "lua-resty-redis red:eval(script, ...) — attacker-controlled Lua executed inside Redis."
+  description: "lua-resty-redis red:eval(script, ...) - attacker-controlled Lua executed inside Redis."
 
 - id: lua.nosql.resty_redis_evalsha
   enabled: true
@@ -133,7 +133,7 @@
         red.evalsha("0123456789abcdef")
       end
     expect_no_match: true
-  description: "lua-resty-redis red:evalsha(sha, ...) — runs cached script; tainted args still reach KEYS/ARGV."
+  description: "lua-resty-redis red:evalsha(sha, ...) - runs cached script; tainted args still reach KEYS/ARGV."
 
 - id: lua.nosql.redis_lua_eval
   enabled: false
@@ -149,7 +149,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]eval$
-  description: "Subsumed by lua.nosql.resty_redis_eval — same regex; canonical rule should add redis-lua to its packages list."
+  description: "Subsumed by lua.nosql.resty_redis_eval - same regex; canonical rule should add redis-lua to its packages list."
 
 - id: lua.nosql.cjson_encode_injection
   enabled: false
@@ -164,7 +164,7 @@
     kind: call
     callee:
       attribute: [cjson, encode]
-  description: "Disabled — cjson.encode is serialisation; only flag when output is embedded in a NoSQL query string."
+  description: "Disabled - cjson.encode is serialisation; only flag when output is embedded in a NoSQL query string."
 
 - id: lua.nosql.openresty_cosocket_redis_script
   enabled: false
@@ -179,4 +179,4 @@
     kind: call
     callee:
       attribute: [red, script_load]
-  description: "Disabled — script_load caches a script but does not execute it; the sink is eval/evalsha."
+  description: "Disabled - script_load caches a script but does not execute it; the sink is eval/evalsha."

@@ -99,7 +99,7 @@
 
       '
     expect_no_match: true
-  description: "URLSession.data(from:) async — suffix-match via `URLSession.data`."
+  description: "URLSession.data(from:) async - suffix-match via `URLSession.data`."
 - id: swift.ssrf.urlrequest_init
   enabled: false
   disabled_reason:
@@ -113,7 +113,7 @@
     kind: call
     callee:
       name: URLRequest
-  description: "Disabled — URLRequest(url:) bare init flags every URLRequest; enable with taint flow to dataTask."
+  description: "Disabled - URLRequest(url:) bare init flags every URLRequest; enable with taint flow to dataTask."
 - id: swift.ssrf.alamofire_request
   enabled: true
   language: swift

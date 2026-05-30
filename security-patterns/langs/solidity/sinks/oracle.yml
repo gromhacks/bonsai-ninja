@@ -13,7 +13,7 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { setPrice(input); } }
-  description: "Privileged price setter — must be authz-checked."
+  description: "Privileged price setter - must be authz-checked."
 - id: solidity.oracle.spot_price_lookup
   enabled: true
   language: solidity

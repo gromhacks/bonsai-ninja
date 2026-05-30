@@ -27,7 +27,7 @@
         find_by_sql("SELECT * FROM users")
       end
     expect_no_match: true
-  description: "ActiveRecord find_by_sql — raw SQL, no automatic binding."
+  description: "ActiveRecord find_by_sql - raw SQL, no automatic binding."
 
 - id: ruby.sqli.ar_select_all
   enabled: true
@@ -57,7 +57,7 @@
         select_all("SELECT * FROM users")
       end
     expect_no_match: true
-  description: "ActiveRecord connection.select_all — raw SQL."
+  description: "ActiveRecord connection.select_all - raw SQL."
 
 - id: ruby.sqli.ar_execute
   enabled: true
@@ -88,7 +88,7 @@
         connection.execute("SELECT * FROM users WHERE id = 1")
       end
     expect_no_match: true
-  description: "connection.execute — raw SQL (ActiveRecord / PG / SQLite3 / arbitrary driver)."
+  description: "connection.execute - raw SQL (ActiveRecord / PG / SQLite3 / arbitrary driver)."
 
 - id: ruby.sqli.ar_exec_query
   enabled: true
@@ -181,7 +181,7 @@
   description: "ActiveRecord connection.exec_delete."
 
 # .where(tainted_string) is dangerous; .where("col = ?", x) is safe.
-# This rule fires on ALL .where calls — rely on downstream taint-flow +
+# This rule fires on ALL .where calls - rely on downstream taint-flow +
 # arg-shape review to distinguish.
 - id: ruby.sqli.ar_where_string
   enabled: true
@@ -211,7 +211,7 @@
         where("id = 1")
       end
     expect_no_match: true
-  description: "ActiveRecord where(\"col = #{x}\") — tainted string fragment; safe when used with placeholder + bind array."
+  description: "ActiveRecord where(\"col = #{x}\") - tainted string fragment; safe when used with placeholder + bind array."
 
 - id: ruby.sqli.ar_order
   enabled: true
@@ -241,7 +241,7 @@
         order("created_at DESC")
       end
     expect_no_match: true
-  description: "ActiveRecord order — string form is unparameterized (columns come from user input in sort UIs)."
+  description: "ActiveRecord order - string form is unparameterized (columns come from user input in sort UIs)."
 
 - id: ruby.sqli.ar_group
   enabled: true
@@ -271,7 +271,7 @@
         group("account_id")
       end
     expect_no_match: true
-  description: "ActiveRecord group — string form is unparameterized."
+  description: "ActiveRecord group - string form is unparameterized."
 
 - id: ruby.sqli.ar_having
   enabled: true
@@ -301,7 +301,7 @@
         having("COUNT(*) > 1")
       end
     expect_no_match: true
-  description: "ActiveRecord having — string form is unparameterized."
+  description: "ActiveRecord having - string form is unparameterized."
 
 - id: ruby.sqli.ar_joins
   enabled: true
@@ -331,7 +331,7 @@
         joins("INNER JOIN accounts ON accounts.id = users.account_id")
       end
     expect_no_match: true
-  description: "ActiveRecord joins — string form is raw SQL."
+  description: "ActiveRecord joins - string form is raw SQL."
 
 - id: ruby.sqli.ar_from
   enabled: true
@@ -361,7 +361,7 @@
         from("users")
       end
     expect_no_match: true
-  description: "ActiveRecord from — string form is raw SQL."
+  description: "ActiveRecord from - string form is raw SQL."
 
 - id: ruby.sqli.ar_pluck
   enabled: false
@@ -376,7 +376,7 @@
     kind: call
     callee:
       name: pluck
-  description: "Disabled — pluck arg is column name, rarely tainted."
+  description: "Disabled - pluck arg is column name, rarely tainted."
 
 - id: ruby.sqli.sequel_run
   enabled: true
@@ -406,7 +406,7 @@
         DB.run("SELECT * FROM users WHERE id = 1")
       end
     expect_no_match: true
-  description: "Sequel DB.run — raw SQL."
+  description: "Sequel DB.run - raw SQL."
 
 - id: ruby.sqli.sequel_fetch
   enabled: true
@@ -436,7 +436,7 @@
         DB.fetch("SELECT * FROM users WHERE id = 1")
       end
     expect_no_match: true
-  description: "Sequel DB.fetch — raw SQL dataset."
+  description: "Sequel DB.fetch - raw SQL dataset."
 
 - id: ruby.sqli.sequel_dataset_with_sql
   enabled: true
@@ -496,7 +496,7 @@
         Sequel.lit("COUNT(*)")
       end
     expect_no_match: true
-  description: "Sequel.lit — bypasses parameterization."
+  description: "Sequel.lit - bypasses parameterization."
 
 - id: ruby.sqli.sequel_literal_alias
   enabled: true
@@ -526,7 +526,7 @@
         Sequel.literal("COUNT(*)")
       end
     expect_no_match: true
-  description: "Sequel.literal — bypasses parameterization."
+  description: "Sequel.literal - bypasses parameterization."
 
 - id: ruby.sqli.mysql2_query
   enabled: true
@@ -558,7 +558,7 @@
         client.query("SELECT * FROM users")
       end
     expect_no_match: true
-  description: "Mysql2::Client#query — raw SQL sent through a semantic Mysql2 client receiver."
+  description: "Mysql2::Client#query - raw SQL sent through a semantic Mysql2 client receiver."
 
 - id: ruby.sqli.pg_exec
   enabled: false
@@ -573,7 +573,7 @@
     kind: call
     callee:
       name: exec
-  description: "Disabled — bare `name: exec` collides with ruby.cmdi.kernel_exec (Kernel#exec = cmdi sink). Without receiver-type narrowing (PG::Connection vs Kernel) we cannot distinguish; Kernel#exec is the far more common dangerous call."
+  description: "Disabled - bare `name: exec` collides with ruby.cmdi.kernel_exec (Kernel#exec = cmdi sink). Without receiver-type narrowing (PG::Connection vs Kernel) we cannot distinguish; Kernel#exec is the far more common dangerous call."
 
 - id: ruby.sqli.pg_exec_params
   enabled: false
@@ -588,7 +588,7 @@
     kind: call
     callee:
       name: exec_params
-  description: "Disabled — exec_params takes a placeholder template + bind array; safe if used correctly."
+  description: "Disabled - exec_params takes a placeholder template + bind array; safe if used correctly."
 
 - id: ruby.sqli.sqlite3_execute
   enabled: false
@@ -604,7 +604,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by ruby.sqli.ar_execute — same shape; canonical rule should add sqlite3 to its packages list."
+  description: "Subsumed by ruby.sqli.ar_execute - same shape; canonical rule should add sqlite3 to its packages list."
 
 - id: ruby.sqli.sqlite3_execute_batch
   enabled: true

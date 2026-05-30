@@ -40,7 +40,7 @@
       void example(void) {
         char *x = env.environ;
       }
-  description: "environ global — process environment."
+  description: "environ global - process environment."
 - id: c.input.getenv
   enabled: true
   language: c
@@ -59,7 +59,7 @@
         char *fmt = arg;
         getenv(arg);
       }
-  description: "libc getenv — environment lookup including CGI variables (HTTP_*, QUERY_STRING)."
+  description: "libc getenv - environment lookup including CGI variables (HTTP_*, QUERY_STRING)."
 - id: c.input.fgets
   enabled: true
   language: c
@@ -79,7 +79,7 @@
         char buf[256];
         fgets(buf, sizeof(buf), stdin);
       }
-  description: "fgets — reads a line from stdin or file."
+  description: "fgets - reads a line from stdin or file."
 - id: c.input.gets_unsafe
   enabled: true
   language: c
@@ -99,7 +99,7 @@
         char buf[256];
         gets(buf);
       }
-  description: "gets — unbounded stdin read (also a memory sink)."
+  description: "gets - unbounded stdin read (also a memory sink)."
 - id: c.input.read
   enabled: false
   disabled_reason:
@@ -112,7 +112,7 @@
     kind: call
     callee:
       name: read
-  description: "Disabled — bare read(2) is ambiguous (matches C++ stream::read too); use recv/SSL_read for network."
+  description: "Disabled - bare read(2) is ambiguous (matches C++ stream::read too); use recv/SSL_read for network."
 - id: c.input.sscanf
   enabled: false
   disabled_reason:
@@ -125,7 +125,7 @@
     kind: call
     callee:
       name: sscanf
-  description: "Disabled — sscanf parses an in-memory buffer; taint comes from the buffer, not sscanf itself."
+  description: "Disabled - sscanf parses an in-memory buffer; taint comes from the buffer, not sscanf itself."
 - id: c.input.scanf
   enabled: true
   language: c
@@ -145,7 +145,7 @@
         char buf[256];
         scanf("%255s", buf);
       }
-  description: "scanf — reads from stdin."
+  description: "scanf - reads from stdin."
 - id: c.input.readline
   enabled: true
   language: c
@@ -166,7 +166,7 @@
         char *fmt = arg;
         readline(arg);
       }
-  description: "GNU readline(3) — interactive user input."
+  description: "GNU readline(3) - interactive user input."
 - id: c.input.getopt
   enabled: true
   language: c
@@ -185,7 +185,7 @@
         char *fmt = arg;
         getopt(arg);
       }
-  description: "getopt(3) — parses argv option flags; return value selects option, optarg holds the user-supplied value."
+  description: "getopt(3) - parses argv option flags; return value selects option, optarg holds the user-supplied value."
 - id: c.input.getopt_long
   enabled: true
   language: c
@@ -204,7 +204,7 @@
         char *fmt = arg;
         getopt_long(arg);
       }
-  description: "GNU getopt_long(3) — parses long-form CLI options; the value is read from optarg / argv."
+  description: "GNU getopt_long(3) - parses long-form CLI options; the value is read from optarg / argv."
 - id: c.input.optarg
   enabled: true
   language: c
@@ -222,7 +222,7 @@
       void example(void) {
         char *x = env.optarg;
       }
-  description: "optarg global — value of the most recent CLI option parsed by getopt; user-supplied."
+  description: "optarg global - value of the most recent CLI option parsed by getopt; user-supplied."
 - id: c.input.secure_getenv
   enabled: true
   language: c
@@ -241,7 +241,7 @@
         char *fmt = arg;
         secure_getenv(arg);
       }
-  description: "secure_getenv(3) — like getenv but returns NULL when AT_SECURE is set; value still attacker-influenced for non-suid runs."
+  description: "secure_getenv(3) - like getenv but returns NULL when AT_SECURE is set; value still attacker-influenced for non-suid runs."
 - id: c.input.getline
   enabled: true
   language: c
@@ -262,7 +262,7 @@
         unsigned long len = 0;
         getline(&line, &len, stdin);
       }
-  description: "POSIX getline(3) — reads a line from a stream into a heap buffer; stdin/file content is user-supplied."
+  description: "POSIX getline(3) - reads a line from a stream into a heap buffer; stdin/file content is user-supplied."
 - id: c.input.getpass
   enabled: true
   language: c
@@ -281,4 +281,4 @@
         char *fmt = arg;
         getpass(arg);
       }
-  description: "getpass(3) — reads a password from the controlling tty; user-supplied secret-like input."
+  description: "getpass(3) - reads a password from the controlling tty; user-supplied secret-like input."

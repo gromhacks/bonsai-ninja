@@ -22,7 +22,7 @@
       using AWSSDK.S3;
       class App { void Test() { AmazonS3Client.GetObjectAsync("reports"); } }
     expect_no_match: true
-  description: "AmazonS3Client.GetObjectAsync(bucket/key) — tainted selector can read arbitrary object data."
+  description: "AmazonS3Client.GetObjectAsync(bucket/key) - tainted selector can read arbitrary object data."
 
 - id: csharp.access.aws_s3_get_object_key
   enabled: true
@@ -48,7 +48,7 @@
       using AWSSDK.S3;
       class App { void Test() { AmazonS3Client.GetObjectAsync("reports", "safe.json"); } }
     expect_no_match: true
-  description: "AmazonS3Client.GetObjectAsync(bucket, taintedKey) — tainted selector can read arbitrary object data."
+  description: "AmazonS3Client.GetObjectAsync(bucket, taintedKey) - tainted selector can read arbitrary object data."
 
 - id: csharp.access.aws_s3_put_object
   enabled: true
@@ -74,7 +74,7 @@
       using AWSSDK.S3;
       class App { void Test() { AmazonS3Client.PutObjectAsync("reports"); } }
     expect_no_match: true
-  description: "AmazonS3Client.PutObjectAsync(bucket/key) — tainted selector can overwrite arbitrary object keys."
+  description: "AmazonS3Client.PutObjectAsync(bucket/key) - tainted selector can overwrite arbitrary object keys."
 
 - id: csharp.access.aws_s3_put_object_key
   enabled: true
@@ -100,7 +100,7 @@
       using AWSSDK.S3;
       class App { void Test() { AmazonS3Client.PutObjectAsync("reports", "safe.json"); } }
     expect_no_match: true
-  description: "AmazonS3Client.PutObjectAsync(bucket, taintedKey) — tainted selector can overwrite arbitrary object keys."
+  description: "AmazonS3Client.PutObjectAsync(bucket, taintedKey) - tainted selector can overwrite arbitrary object keys."
 
 - id: csharp.access.aws_secretsmanager_get_secret_value
   enabled: true
@@ -126,7 +126,7 @@
       using AWSSDK.SecretsManager;
       class App { void Test() { AmazonSecretsManagerClient.GetSecretValueAsync("prod/db/password"); } }
     expect_no_match: true
-  description: "AmazonSecretsManagerClient.GetSecretValueAsync — tainted secret id reads arbitrary secret material."
+  description: "AmazonSecretsManagerClient.GetSecretValueAsync - tainted secret id reads arbitrary secret material."
 
 - id: csharp.access.azure_blob_download_content
   enabled: false
@@ -146,7 +146,7 @@
     code: |
       using Azure.Storage.Blobs;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BlobClient.DownloadContentAsync(input); } }
-  description: "Disabled — BlobClient.DownloadContentAsync carries the container/blob selector in receiver state, not a call argument."
+  description: "Disabled - BlobClient.DownloadContentAsync carries the container/blob selector in receiver state, not a call argument."
 
 - id: csharp.access.azure_blob_upload
   enabled: false
@@ -166,7 +166,7 @@
     code: |
       using Azure.Storage.Blobs;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BlobClient.UploadAsync(input); } }
-  description: "Disabled — BlobClient.UploadAsync carries the container/blob selector in receiver state; the first argument is content, not the destination selector."
+  description: "Disabled - BlobClient.UploadAsync carries the container/blob selector in receiver state; the first argument is content, not the destination selector."
 
 - id: csharp.access.azure_keyvault_get_secret
   enabled: true
@@ -192,7 +192,7 @@
       using Azure.Security.KeyVault.Secrets;
       class App { void Test() { SecretClient.GetSecretAsync("prod-db-password"); } }
     expect_no_match: true
-  description: "SecretClient.GetSecretAsync — tainted secret name reads arbitrary Key Vault material."
+  description: "SecretClient.GetSecretAsync - tainted secret name reads arbitrary Key Vault material."
 
 - id: csharp.access.gcp_storage_download_object
   enabled: true
@@ -218,7 +218,7 @@
       using Google.Cloud.Storage.V1;
       class App { void Test() { StorageClient.DownloadObject("reports"); } }
     expect_no_match: true
-  description: "StorageClient.DownloadObject(bucket, object, ...) — tainted selector reads arbitrary GCS objects."
+  description: "StorageClient.DownloadObject(bucket, object, ...) - tainted selector reads arbitrary GCS objects."
 
 - id: csharp.access.gcp_storage_download_object_name
   enabled: true
@@ -244,7 +244,7 @@
       using Google.Cloud.Storage.V1;
       class App { void Test() { StorageClient.DownloadObject("reports", "safe.json"); } }
     expect_no_match: true
-  description: "StorageClient.DownloadObject(bucket, taintedObject, ...) — tainted selector reads arbitrary GCS objects."
+  description: "StorageClient.DownloadObject(bucket, taintedObject, ...) - tainted selector reads arbitrary GCS objects."
 
 - id: csharp.access.gcp_storage_upload_object
   enabled: true
@@ -270,7 +270,7 @@
       using Google.Cloud.Storage.V1;
       class App { void Test() { StorageClient.UploadObject("reports"); } }
     expect_no_match: true
-  description: "StorageClient.UploadObject(bucket, object, ...) — tainted selector writes attacker-chosen GCS objects."
+  description: "StorageClient.UploadObject(bucket, object, ...) - tainted selector writes attacker-chosen GCS objects."
 
 - id: csharp.access.gcp_storage_upload_object_name
   enabled: true
@@ -296,7 +296,7 @@
       using Google.Cloud.Storage.V1;
       class App { void Test() { StorageClient.UploadObject("reports", "safe.json"); } }
     expect_no_match: true
-  description: "StorageClient.UploadObject(bucket, taintedObject, ...) — tainted selector writes attacker-chosen GCS objects."
+  description: "StorageClient.UploadObject(bucket, taintedObject, ...) - tainted selector writes attacker-chosen GCS objects."
 
 - id: csharp.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -322,4 +322,4 @@
       using Google.Cloud.SecretManager.V1;
       class App { void Test() { SecretManagerServiceClient.AccessSecretVersion("projects/p/secrets/s/versions/latest"); } }
     expect_no_match: true
-  description: "SecretManagerServiceClient.AccessSecretVersion — tainted resource name reads arbitrary secret versions."
+  description: "SecretManagerServiceClient.AccessSecretVersion - tainted resource name reads arbitrary secret versions."

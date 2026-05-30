@@ -30,5 +30,5 @@
         return logger.info(username);
       }
     expect_no_match: true
-  description: "app.log.info/logger/slog with concatenated attacker text \u2014 control characters or forged prefixes can\
+  description: "app.log.info/logger/slog with concatenated attacker text - control characters or forged prefixes can\
     \ corrupt audit logs."

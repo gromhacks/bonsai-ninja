@@ -62,7 +62,7 @@
       function demo(input, req, obj) {
         return req.params;
       }
-  description: "Express req.params — path params."
+  description: "Express req.params - path params."
 
 - id: typescript.source.express_req_headers
   enabled: true
@@ -208,7 +208,7 @@
       function demo(input, req, obj) {
         return req.hostname;
       }
-  description: "Express req.hostname — derived from Host header."
+  description: "Express req.hostname - derived from Host header."
 
 - id: typescript.source.koa_ctx_request_body
   enabled: true
@@ -248,7 +248,7 @@
       function demo(input, req, obj) {
         return ctx.query;
       }
-  description: "Koa ctx.query — parsed query-string object from the request URL; attacker-controlled values."
+  description: "Koa ctx.query - parsed query-string object from the request URL; attacker-controlled values."
 
 - id: typescript.source.koa_ctx_params
   enabled: true
@@ -305,7 +305,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
-  description: "Disabled duplicate — typescript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
+  description: "Disabled duplicate - typescript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
 
 - id: typescript.source.fastify_request_body
   enabled: true
@@ -347,7 +347,7 @@
       function demo(input, req, obj) {
         return request.query;
       }
-  description: "request.query — covers Fastify and Hapi (same `[request, query]` attribute chain)."
+  description: "request.query - covers Fastify and Hapi (same `[request, query]` attribute chain)."
 
 - id: typescript.source.fastify_request_params
   enabled: true
@@ -368,7 +368,7 @@
       function demo(input, req, obj) {
         return request.params;
       }
-  description: "request.params — covers Fastify and Hapi (same `[request, params]` attribute chain)."
+  description: "request.params - covers Fastify and Hapi (same `[request, params]` attribute chain)."
 
 - id: typescript.source.fastify_request_headers
   enabled: true
@@ -422,7 +422,7 @@
         return request.headers.userAgent;
       }
     expect_match_text: [request.headers.userAgent]
-  description: "Disabled duplicate — bracket User-Agent reads are surfaced as the whole `req.headers` / `request.headers` object and are already covered by the framework header-object rules; dot `request.headers.userAgent` cannot be kept without colliding on the same example family."
+  description: "Disabled duplicate - bracket User-Agent reads are surfaced as the whole `req.headers` / `request.headers` object and are already covered by the framework header-object rules; dot `request.headers.userAgent` cannot be kept without colliding on the same example family."
 
 - id: typescript.source.nestjs_body_decorator
   enabled: true
@@ -457,7 +457,7 @@
         }
       }
     expect_match_text: [name]
-  description: "NestJS @Body() / @Body('field') parameter — request body DTO or selected body field."
+  description: "NestJS @Body() / @Body('field') parameter - request body DTO or selected body field."
 
 - id: typescript.source.nestjs_message_body_decorator
   enabled: true
@@ -481,7 +481,7 @@
         }
       }
     expect_match_text: [payload]
-  description: "NestJS @SubscribeMessage handler @MessageBody() parameter — websocket caller-controlled message payload."
+  description: "NestJS @SubscribeMessage handler @MessageBody() parameter - websocket caller-controlled message payload."
 
 - id: typescript.source.nestjs_query_decorator
   enabled: false
@@ -496,7 +496,7 @@
     kind: param
     target:
       name: Query
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: typescript.source.nestjs_param_decorator
   enabled: false
@@ -511,7 +511,7 @@
     kind: param
     target:
       name: Param
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: typescript.source.nestjs_headers_decorator
   enabled: false
@@ -527,7 +527,7 @@
     kind: param
     target:
       name: Headers
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: typescript.source.nestjs_session_decorator
   enabled: false
@@ -542,7 +542,7 @@
     kind: param
     target:
       name: Session
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: typescript.source.nestjs_req_decorator
   enabled: false
@@ -557,7 +557,7 @@
     kind: param
     target:
       name: Req
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: typescript.source.nestjs_ip_decorator
   enabled: false
@@ -572,7 +572,7 @@
     kind: param
     target:
       name: Ip
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: typescript.source.eventsource_message_data
   enabled: false
@@ -589,7 +589,7 @@
     kind: read
     target:
       attribute: [event, data]
-  description: "Disabled — SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by typescript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
+  description: "Disabled - SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by typescript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
 
 - id: typescript.source.nestjs_subscribe_message_body_decorator
   enabled: false
@@ -606,7 +606,7 @@
     kind: param
     target:
       annotation: MessageBody
-  description: "Subsumed by typescript.source.nestjs_message_body_decorator — same `@MessageBody()` decorator shape; the canonical rule already covers `@SubscribeMessage` handlers."
+  description: "Subsumed by typescript.source.nestjs_message_body_decorator - same `@MessageBody()` decorator shape; the canonical rule already covers `@SubscribeMessage` handlers."
 
 - id: typescript.source.graphql_resolver_args
   enabled: true
@@ -636,7 +636,7 @@
         return args;
       }
     expect_no_match: true
-  description: "GraphQL resolver `(parent, args, ...)` parameter — client-supplied field arguments. The zero-based index gate avoids tainting ordinary first-argument helpers named `args`."
+  description: "GraphQL resolver `(parent, args, ...)` parameter - client-supplied field arguments. The zero-based index gate avoids tainting ordinary first-argument helpers named `args`."
 
 - id: typescript.source.hapi_request_payload
   enabled: true
@@ -679,7 +679,7 @@
         return req.payload;
       }
     expect_match_text: [req.payload]
-  description: "Hapi req.payload — HTTP request body when the handler parameter is named `req`."
+  description: "Hapi req.payload - HTTP request body when the handler parameter is named `req`."
 
 - id: typescript.source.hapi_request_query
   enabled: false
@@ -694,7 +694,7 @@
     kind: read
     target:
       attribute: [request, query]
-  description: "Disabled — merged into typescript.source.fastify_request_query (same `[request, query]` attribute chain)."
+  description: "Disabled - merged into typescript.source.fastify_request_query (same `[request, query]` attribute chain)."
 
 - id: typescript.source.hapi_request_params
   enabled: false
@@ -709,7 +709,7 @@
     kind: read
     target:
       attribute: [request, params]
-  description: "Disabled — merged into typescript.source.fastify_request_params (same `[request, params]` attribute chain)."
+  description: "Disabled - merged into typescript.source.fastify_request_params (same `[request, params]` attribute chain)."
 
 - id: typescript.source.trpc_ctx_req
   enabled: true
@@ -729,7 +729,7 @@
       function demo(input, req, obj) {
         return ctx.req;
       }
-  description: "tRPC ctx.req — the raw request object (pre-zod)."
+  description: "tRPC ctx.req - the raw request object (pre-zod)."
 
 - id: typescript.source.websocket_message
   enabled: false
@@ -743,7 +743,7 @@
     kind: param
     target:
       name: message
-  description: "Disabled — WebSocket `on('message', msg => …)` uses callback param; bare `message` name matches every messaging lib. Enable in WS audits."
+  description: "Disabled - WebSocket `on('message', msg => ...)` uses callback param; bare `message` name matches every messaging lib. Enable in WS audits."
 
 - id: typescript.source.incoming_message_data
   enabled: false
@@ -758,7 +758,7 @@
     kind: read
     target:
       attribute: [IncomingMessage, headers]
-  description: "Disabled — `IncomingMessage` is a type, not a runtime identifier; real code reads `req.headers`. Use remote.express_req_headers instead."
+  description: "Disabled - `IncomingMessage` is a type, not a runtime identifier; real code reads `req.headers`. Use remote.express_req_headers instead."
 
 - id: typescript.source.deno_serve_request
   enabled: false
@@ -772,7 +772,7 @@
     kind: call
     callee:
       attribute: [Deno, serve]
-  description: "Disabled — Deno.serve() registers a handler; the tainted value is the handler's (req) parameter, not the call's return. Use a param-shape rule in Deno audits."
+  description: "Disabled - Deno.serve() registers a handler; the tainted value is the handler's (req) parameter, not the call's return. Use a param-shape rule in Deno audits."
 
 - id: typescript.source.window_location_hash
   enabled: true
@@ -796,7 +796,7 @@
         return window.location.hash;
       }
     expect_match_text: [window.location.hash]
-  description: "window.location.hash / location.hash — DOM-XSS source."
+  description: "window.location.hash / location.hash - DOM-XSS source."
 
 - id: typescript.source.window_location_search
   enabled: true
@@ -820,7 +820,7 @@
         return window.location.search;
       }
     expect_match_text: [window.location.search]
-  description: "window.location.search / location.search — browser query string."
+  description: "window.location.search / location.search - browser query string."
 
 - id: typescript.source.document_referrer
   enabled: true
@@ -838,7 +838,7 @@
         return document.referrer;
       }
     expect_match_text: [document.referrer]
-  description: "document.referrer — attacker can set via Referer header."
+  description: "document.referrer - attacker can set via Referer header."
 
 - id: typescript.source.postmessage_event
   enabled: true
@@ -855,7 +855,7 @@
       function demo(input, req, obj) {
         return event.data;
       }
-  description: "window.addEventListener('message', …) event.data — cross-origin postMessage."
+  description: "window.addEventListener('message', ...) event.data - cross-origin postMessage."
 
 - id: typescript.source.gcf_http_req
   enabled: false
@@ -869,7 +869,7 @@
     kind: param
     target:
       name: req
-  description: "Google Cloud Functions HTTP handler `req` param. Disabled — bare `req` matches every Express handler; enable in GCF audits."
+  description: "Google Cloud Functions HTTP handler `req` param. Disabled - bare `req` matches every Express handler; enable in GCF audits."
 
 - id: typescript.source.azure_function_context
   enabled: true
@@ -888,9 +888,9 @@
       function demo(input, req, obj) {
         return context.req;
       }
-  description: "Azure Functions context.req — HTTP request object (body/query/headers) from the Functions host."
+  description: "Azure Functions context.req - HTTP request object (body/query/headers) from the Functions host."
 
-# ── Modern TS frameworks (mirror JS additions) ──────────────────────────────
+# -- Modern TS frameworks (mirror JS additions) ------------------------------
 - id: typescript.source.hono_ctx_req_query
   enabled: false
   disabled_reason:
@@ -905,7 +905,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.query$"
-  description: "Disabled duplicate — current matching also emits `req.query`; typescript.source.express_req_query carries Hono package metadata for this adapter fact."
+  description: "Disabled duplicate - current matching also emits `req.query`; typescript.source.express_req_query carries Hono package metadata for this adapter fact."
 
 - id: typescript.source.hono_ctx_req_json
   enabled: true
@@ -926,7 +926,7 @@
       function demo(input, req, obj) {
         return c.req.json(input);
       }
-  description: "Hono c.req.json() — parsed JSON body."
+  description: "Hono c.req.json() - parsed JSON body."
 
 - id: typescript.source.hono_ctx_req_param
   enabled: true
@@ -947,7 +947,7 @@
       function demo(input, req, obj) {
         return c.req.param(input);
       }
-  description: "Hono c.req.param('name') — URL path parameter."
+  description: "Hono c.req.param('name') - URL path parameter."
 
 - id: typescript.source.trpc_input
   enabled: true
@@ -966,7 +966,7 @@
       function demo(input, req, obj) {
         return ctx.input;
       }
-  description: "tRPC procedure ctx.input — attacker-supplied procedure argument."
+  description: "tRPC procedure ctx.input - attacker-supplied procedure argument."
 
 - id: typescript.source.trpc_resolver_input_property
   enabled: false
@@ -989,7 +989,7 @@
         return opts.input;
       }
     expect_match_text: [opts.input]
-  description: "Disabled — without semantic resolver-parameter facts this collides with ctx.input; typescript.source.trpc_input covers the canonical tRPC input object."
+  description: "Disabled - without semantic resolver-parameter facts this collides with ctx.input; typescript.source.trpc_input covers the canonical tRPC input object."
 
 - id: typescript.source.adonis_request_input
   enabled: true
@@ -1014,7 +1014,7 @@
         return request.input("q");
       }
     expect_match_text: [request.input]
-  description: "AdonisJS request.input(name) — merged body/query/route input value controlled by the HTTP client."
+  description: "AdonisJS request.input(name) - merged body/query/route input value controlled by the HTTP client."
 
 - id: typescript.source.adonis_request_all
   enabled: true
@@ -1046,7 +1046,7 @@
         return request.only(["name"]);
       }
     expect_match_text: [request.only]
-  description: "AdonisJS request.all()/only()/except() — selected or complete client-controlled request input."
+  description: "AdonisJS request.all()/only()/except() - selected or complete client-controlled request input."
 
 - id: typescript.source.h3_get_query
   enabled: true
@@ -1071,7 +1071,7 @@
         return getQuery(event);
       });
     expect_match_text: [getQuery]
-  description: "h3 getQuery(event) — parsed request query object."
+  description: "h3 getQuery(event) - parsed request query object."
 
 - id: typescript.source.h3_read_body
   enabled: true
@@ -1096,7 +1096,7 @@
         return readBody(event);
       });
     expect_match_text: [readBody]
-  description: "h3 readBody(event) — parsed request body controlled by the HTTP client."
+  description: "h3 readBody(event) - parsed request body controlled by the HTTP client."
 
 - id: typescript.source.h3_event_req
   enabled: true
@@ -1119,7 +1119,7 @@
         return event.node.req;
       }
     expect_match_text: [event.node.req]
-  description: "h3 event.node.req / event.req — raw Node request object carrying HTTP body, headers, and URL."
+  description: "h3 event.node.req / event.req - raw Node request object carrying HTTP body, headers, and URL."
 
 - id: typescript.source.next_pages_req_body
   enabled: false
@@ -1136,7 +1136,7 @@
     kind: read
     target:
       attribute: [req, body]
-  description: "Disabled duplicate — same `req.body` shape is covered by typescript.source.express_req_body with Next.js package metadata merged."
+  description: "Disabled duplicate - same `req.body` shape is covered by typescript.source.express_req_body with Next.js package metadata merged."
 
 - id: typescript.source.sveltekit_event_url
   enabled: true
@@ -1157,7 +1157,7 @@
       function demo(input, req, obj) {
         return event.url;
       }
-  description: "SvelteKit event.url — URL object including searchParams."
+  description: "SvelteKit event.url - URL object including searchParams."
 
 - id: typescript.cloud.lambda_event
   enabled: false
@@ -1171,7 +1171,7 @@
     kind: param
     target:
       name: event
-  description: "Disabled — bare `event` parameter collides with h3/nitro event handlers; attribute-chain Lambda event body/header/query/path rules remain enabled."
+  description: "Disabled - bare `event` parameter collides with h3/nitro event handlers; attribute-chain Lambda event body/header/query/path rules remain enabled."
 
 # -- Additional JS/TS framework, browser, GraphQL, WS, and upload sources -----
 - id: typescript.source.express_req_header_getter
@@ -1204,7 +1204,7 @@
         return req.header("referer");
       }
     expect_match_text: [req.header]
-  description: "Express/Nest req.get()/req.header() — single request header value, attacker-controlled."
+  description: "Express/Nest req.get()/req.header() - single request header value, attacker-controlled."
 
 - id: typescript.source.express_signed_cookies
   enabled: true
@@ -1226,7 +1226,7 @@
         return req.signedCookies;
       }
     expect_match_text: [req.signedCookies]
-  description: "Express req.signedCookies — cookie names and values are client-controlled even when signatures are verified."
+  description: "Express req.signedCookies - cookie names and values are client-controlled even when signatures are verified."
 
 - id: typescript.source.koa_cookie_get
   enabled: true
@@ -1251,7 +1251,7 @@
         return ctx.cookies.get("sid");
       }
     expect_match_text: [ctx.cookies.get]
-  description: "Koa ctx.cookies.get(name) — single client-controlled cookie value."
+  description: "Koa ctx.cookies.get(name) - single client-controlled cookie value."
 
 - id: typescript.source.hapi_request_headers
   enabled: false
@@ -1269,7 +1269,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — same `request.headers` shape is covered by typescript.source.fastify_request_headers with Hapi package metadata merged."
+  description: "Disabled duplicate - same `request.headers` shape is covered by typescript.source.fastify_request_headers with Hapi package metadata merged."
 
 - id: typescript.source.hapi_request_state
   enabled: true
@@ -1292,7 +1292,7 @@
         return request.state;
       }
     expect_match_text: [request.state]
-  description: "Hapi request.state — parsed cookies from the request."
+  description: "Hapi request.state - parsed cookies from the request."
 
 - id: typescript.source.window_location_href
   enabled: true
@@ -1317,7 +1317,7 @@
         return window.location.href;
       }
     expect_match_text: [window.location.href]
-  description: "window.location.href — full browser URL, attacker-controlled via navigation."
+  description: "window.location.href - full browser URL, attacker-controlled via navigation."
 
 - id: typescript.source.document_url
   enabled: true
@@ -1342,7 +1342,7 @@
         return document.title;
       }
     expect_no_match: true
-  description: "document.URL — browser URL-derived field used as a DOM-XSS source."
+  description: "document.URL - browser URL-derived field used as a DOM-XSS source."
 
 - id: typescript.source.document_cookie
   enabled: true
@@ -1361,7 +1361,7 @@
         return document.cookie;
       }
     expect_match_text: [document.cookie]
-  description: "document.cookie — client-side cookie string that may be attacker-controlled after injection or subdomain compromise."
+  description: "document.cookie - client-side cookie string that may be attacker-controlled after injection or subdomain compromise."
 
 - id: typescript.source.window_location_origin_path
   enabled: true
@@ -1386,7 +1386,7 @@
         return window.location.host;
       }
     expect_match_text: [window.location.host]
-  description: "Browser location origin/path/host fields — attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
+  description: "Browser location origin/path/host fields - attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
 
 - id: typescript.source.localstorage_getitem
   enabled: true
@@ -1407,7 +1407,7 @@
         return localStorage.getItem("next");
       }
     expect_match_text: [localStorage.getItem]
-  description: "localStorage.getItem(key) — browser-persistent client storage that can carry attacker-controlled state into DOM sinks."
+  description: "localStorage.getItem(key) - browser-persistent client storage that can carry attacker-controlled state into DOM sinks."
 
 - id: typescript.source.sessionstorage_getitem
   enabled: true
@@ -1428,7 +1428,7 @@
         return sessionStorage.getItem("html");
       }
     expect_match_text: [sessionStorage.getItem]
-  description: "sessionStorage.getItem(key) — browser session storage that can carry attacker-controlled state into DOM sinks."
+  description: "sessionStorage.getItem(key) - browser session storage that can carry attacker-controlled state into DOM sinks."
 
 - id: typescript.source.websocket_structured_frame_data
   enabled: false
@@ -1452,7 +1452,7 @@
         return frame.data;
       }
     expect_match_text: [frame.data]
-  description: "Disabled — receiver-agnostic .data collides with event.data; enable only after adapter facts can distinguish WebSocket frame/packet payload objects."
+  description: "Disabled - receiver-agnostic .data collides with event.data; enable only after adapter facts can distinguish WebSocket frame/packet payload objects."
 
 - id: typescript.source.socketio_handshake
   enabled: true
@@ -1481,7 +1481,7 @@
         return socket.handshake.auth;
       }
     expect_match_text: [socket.handshake.auth]
-  description: "Socket.IO handshake query/header/auth objects — remote-controlled connection metadata."
+  description: "Socket.IO handshake query/header/auth objects - remote-controlled connection metadata."
 
 - id: typescript.source.graphql_args_field
   enabled: true
@@ -1532,7 +1532,7 @@
         return user.id;
       }
     expect_no_match: true
-  description: "GraphQL resolver args.<field> — attacker-controlled resolver arguments. Receiver name and second-parameter position are both required to avoid tainting unrelated helper objects."
+  description: "GraphQL resolver args.<field> - attacker-controlled resolver arguments. Receiver name and second-parameter position are both required to avoid tainting unrelated helper objects."
 
 - id: typescript.source.graphql_info_context_args
   enabled: true
@@ -1568,7 +1568,7 @@
         return info.context.args.q;
       }
     expect_match_text: [info.context.args.q]
-  description: "GraphQL info.context.args — framework-propagated resolver args exposed through GraphQL context."
+  description: "GraphQL info.context.args - framework-propagated resolver args exposed through GraphQL context."
 
 - id: typescript.source.next_request_body_methods
   enabled: true
@@ -1598,7 +1598,7 @@
         return request.formData();
       }
     expect_match_text: [request.formData]
-  description: "Fetch Request body readers used by Next.js App Router and Bun.serve — attacker-controlled request body payloads."
+  description: "Fetch Request body readers used by Next.js App Router and Bun.serve - attacker-controlled request body payloads."
 
 - id: typescript.source.next_request_url_headers
   enabled: true
@@ -1621,7 +1621,7 @@
         return request.url;
       }
     expect_match_text: [request.url]
-  description: "Fetch Request URL/cookies fields used by Next.js App Router and Bun.serve — attacker-controlled HTTP metadata. `request.headers` is the same adapter fact as Fastify `request.headers`; `request.nextUrl.searchParams` is covered by the query-specific rule."
+  description: "Fetch Request URL/cookies fields used by Next.js App Router and Bun.serve - attacker-controlled HTTP metadata. `request.headers` is the same adapter fact as Fastify `request.headers`; `request.nextUrl.searchParams` is covered by the query-specific rule."
 
 - id: typescript.source.next_searchparams
   enabled: true
@@ -1651,7 +1651,7 @@
         return nextUrl.searchParams;
       }
     expect_match_text: [nextUrl.searchParams]
-  description: "NextRequest.nextUrl.searchParams — parsed query-string values."
+  description: "NextRequest.nextUrl.searchParams - parsed query-string values."
 
 - id: typescript.source.multipart_file_originalname
   enabled: true
@@ -1680,4 +1680,4 @@
         return info.filename;
       }
     expect_match_text: [info.filename]
-  description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload — client-controlled names."
+  description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload - client-controlled names."

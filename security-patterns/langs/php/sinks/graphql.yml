@@ -34,7 +34,7 @@
         return GraphQL::executeQuery($schema, "{ viewer { id } }");
       }
     expect_no_match: true
-  description: GraphQL::executeQuery(schema, tainted_query) — dynamic documents reach resolver execution.
+  description: GraphQL::executeQuery(schema, tainted_query) - dynamic documents reach resolver execution.
   imports:
   - webonyx
   - webonyx/graphqlphp
@@ -77,7 +77,7 @@
         return $schema->execute("{ viewer { id } }");
       }
     expect_no_match: true
-  description: $schema->execute(tainted_query) — schema execution with attacker-controlled document or context.
+  description: $schema->execute(tainted_query) - schema execution with attacker-controlled document or context.
   imports:
   - webonyx
   - webonyx/graphqlphp
@@ -120,7 +120,7 @@
         return $server->executePsrRequest(new ServerRequest("POST", "/graphql"));
       }
     expect_no_match: true
-  description: StandardServer executePsrRequest(request) — request-provided GraphQL query, variables, and operation reach execution.
+  description: StandardServer executePsrRequest(request) - request-provided GraphQL query, variables, and operation reach execution.
   imports:
   - webonyx
   - webonyx/graphqlphp

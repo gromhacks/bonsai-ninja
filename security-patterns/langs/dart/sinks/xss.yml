@@ -74,7 +74,7 @@
 
       '
     expect_no_match: true
-  description: "document.write(taintedHtml) — writes unescaped attacker-controlled markup into the DOM."
+  description: "document.write(taintedHtml) - writes unescaped attacker-controlled markup into the DOM."
 - id: dart.xss.iframe_srcdoc
   enabled: true
   language: dart
@@ -115,7 +115,7 @@
     kind: new
     callee:
       name: Html
-  description: "Disabled \u2014 flutter_html Html widget; flag with tainted data argument."
+  description: "Disabled - flutter_html Html widget; flag with tainted data argument."
 - id: dart.xss.html_parse
   enabled: false
   disabled_reason:
@@ -131,7 +131,7 @@
     kind: call
     callee:
       name: parse
-  description: "Disabled \u2014 bare `parse` name is FP-prone (matches every parse()\
+  description: "Disabled - bare `parse` name is FP-prone (matches every parse()\
     \ across the codebase). Re-enable with import-scoped matching when adapter supports\
     \ it. The dangerous flow is package:html parse + downstream innerHtml/setInnerHtml\
     \ sink, which the existing XSS rules already catch."
@@ -173,7 +173,7 @@
 
       '
     expect_no_match: true
-  description: "package:html parseFragment(tainted) \u2014 fragment parser with un-escaped\
+  description: "package:html parseFragment(tainted) - fragment parser with un-escaped\
     \ DOM-build risk. `parseFragment` is a sufficiently distinctive name to scope\
     \ without import context."
   imports:

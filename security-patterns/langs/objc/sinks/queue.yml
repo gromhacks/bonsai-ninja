@@ -22,7 +22,7 @@
       #import <AWSSQS/AWSSQS.h>
       void test(void) { sendMessage(@"safe"); }
     expect_no_match: true
-  description: "AWSSQS sendMessage — tainted queue target/body injects arbitrary broker payloads."
+  description: "AWSSQS sendMessage - tainted queue target/body injects arbitrary broker payloads."
 
 - id: objc.queue.publish
   enabled: false
@@ -37,4 +37,4 @@
     kind: call
     callee:
       name: publish
-  description: "Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across Objective-C clients and app code."
+  description: "Disabled - cloud publish is real queue fanout, but bare `publish` is too generic across Objective-C clients and app code."

@@ -1,4 +1,4 @@
-# Rust TLS misconfiguration — disabling cert / hostname verification
+# Rust TLS misconfiguration - disabling cert / hostname verification
 # exposes the client to MITM.
 - id: rust.tls.danger_accept_invalid_certs
   enabled: true
@@ -21,7 +21,7 @@
           let query = "user";
           ClientBuilder::danger_accept_invalid_certs(target);
       }
-  description: "reqwest ClientBuilder::danger_accept_invalid_certs(true) — disables the TLS certificate chain check, enabling MITM with any self-signed cert."
+  description: "reqwest ClientBuilder::danger_accept_invalid_certs(true) - disables the TLS certificate chain check, enabling MITM with any self-signed cert."
 
 - id: rust.tls.danger_accept_invalid_hostnames
   enabled: true
@@ -44,7 +44,7 @@
           let query = "user";
           ClientBuilder::danger_accept_invalid_hostnames(target);
       }
-  description: "reqwest ClientBuilder::danger_accept_invalid_hostnames(true) — accepts any SAN/CN, MITM with any valid cert."
+  description: "reqwest ClientBuilder::danger_accept_invalid_hostnames(true) - accepts any SAN/CN, MITM with any valid cert."
 
 - id: rust.tls.rustls_dangerous_set_certificate_verifier
   enabled: true
@@ -67,7 +67,7 @@
           let query = "user";
           ClientConfig::dangerous(target);
       }
-  description: "rustls ClientConfig::dangerous() — sets a no-op certificate verifier (NoCertVerification pattern); completely disables the TLS trust anchor check."
+  description: "rustls ClientConfig::dangerous() - sets a no-op certificate verifier (NoCertVerification pattern); completely disables the TLS trust anchor check."
 
 - id: rust.tls.rustls_dangerous_config_set_verifier
   enabled: true
@@ -91,7 +91,7 @@
           DangerousClientConfig::set_certificate_verifier(target);
       }
     expect_match_text: [DangerousClientConfig::set_certificate_verifier]
-  description: "rustls DangerousClientConfig::set_certificate_verifier — custom verifier hook commonly used for no-op certificate validation."
+  description: "rustls DangerousClientConfig::set_certificate_verifier - custom verifier hook commonly used for no-op certificate validation."
 
 - id: rust.tls.openssl_verify_none
   enabled: true
@@ -114,7 +114,7 @@
           let query = "user";
           SslConnectorBuilder::set_verify(target);
       }
-  description: "openssl SslConnectorBuilder::set_verify — flag when argument is SslVerifyMode::NONE (disables peer cert verification)."
+  description: "openssl SslConnectorBuilder::set_verify - flag when argument is SslVerifyMode::NONE (disables peer cert verification)."
 
 - id: rust.tls.native_tls_danger
   enabled: true
@@ -139,6 +139,6 @@
           let query = "user";
           TlsConnectorBuilder::danger_accept_invalid_certs(target);
       }
-  description: "native-tls TlsConnectorBuilder::danger_accept_invalid_certs(true) — disables certificate chain validation, enabling MITM."
+  description: "native-tls TlsConnectorBuilder::danger_accept_invalid_certs(true) - disables certificate chain validation, enabling MITM."
   imports:
   - native_tls

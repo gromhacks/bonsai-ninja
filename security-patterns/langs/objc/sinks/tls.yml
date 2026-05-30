@@ -14,7 +14,7 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; URLSessionDidReceiveChallenge(input); }
-  description: "NSURLSessionDelegate URLSession:didReceiveChallenge: completionHandler returning NSURLSessionAuthChallengeUseCredential without SecTrustEvaluate — disables cert validation."
+  description: "NSURLSessionDelegate URLSession:didReceiveChallenge: completionHandler returning NSURLSessionAuthChallengeUseCredential without SecTrustEvaluate - disables cert validation."
 
 - id: objc.tls.challenge_use_credential
   enabled: true
@@ -31,7 +31,7 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; credentialForTrust(input); }
-  description: "NSURLCredential +credentialForTrust: invoked inside didReceiveChallenge: without prior SecTrustEvaluateWithError — accepts any server cert."
+  description: "NSURLCredential +credentialForTrust: invoked inside didReceiveChallenge: without prior SecTrustEvaluateWithError - accepts any server cert."
 
 - id: objc.tls.afnetworking_pinningmode_none
   enabled: true
@@ -50,7 +50,7 @@
     code: |
       #import <AFNetworking/AFNetworking.h>
       void test(id input) { id target = input; int amount = 1; SSLPinningMode = input; }
-  description: "AFSecurityPolicy.SSLPinningMode = AFSSLPinningModeNone — disables AFNetworking certificate pinning."
+  description: "AFSecurityPolicy.SSLPinningMode = AFSSLPinningModeNone - disables AFNetworking certificate pinning."
 
 - id: objc.tls.afnetworking_allow_invalid
   enabled: true
@@ -69,7 +69,7 @@
     code: |
       #import <AFNetworking/AFNetworking.h>
       void test(id input) { id target = input; int amount = 1; allowInvalidCertificates = input; }
-  description: "AFSecurityPolicy.allowInvalidCertificates = YES — accepts self-signed / expired certs."
+  description: "AFSecurityPolicy.allowInvalidCertificates = YES - accepts self-signed / expired certs."
 
 - id: objc.tls.afnetworking_validate_domain_no
   enabled: true
@@ -88,7 +88,7 @@
     code: |
       #import <AFNetworking/AFNetworking.h>
       void test(id input) { id target = input; int amount = 1; validatesDomainName = input; }
-  description: "AFSecurityPolicy.validatesDomainName = NO — skips hostname verification; any valid cert accepted."
+  description: "AFSecurityPolicy.validatesDomainName = NO - skips hostname verification; any valid cert accepted."
 
 - id: objc.tls.allow_arbitrary_loads
   enabled: false
@@ -102,4 +102,4 @@
     kind: write
     target:
       name: NSAllowsArbitraryLoads
-  description: "Disabled — Info.plist ATS setting; surface via plist scanner, not the code tree."
+  description: "Disabled - Info.plist ATS setting; surface via plist scanner, not the code tree."

@@ -22,7 +22,7 @@
           }
         }
       expect_match_text: [conn.commit]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.commit() — transaction-after-error race-pair; later writes on the same connection without a fresh begin run outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.commit() - transaction-after-error race-pair; later writes on the same connection without a fresh begin run outside the intended transaction window."
 - id: scala.race.connection_rollback
   enabled: true
   language: scala
@@ -45,4 +45,4 @@
           }
         }
       expect_match_text: [conn.rollback]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.rollback() — transaction-after-error race-pair; later statement.execute on the same connection persists writes the rollback was supposed to undo."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.rollback() - transaction-after-error race-pair; later statement.execute on the same connection persists writes the rollback was supposed to undo."

@@ -34,7 +34,7 @@
         end
       end
     expect_no_match: true
-  description: "HTTPoison.get/3 \u2014 tainted URL fetches attacker-chosen endpoints,\
+  description: "HTTPoison.get/3 - tainted URL fetches attacker-chosen endpoints,\
     \ including cloud metadata (169.254.169.254) and internal services."
   imports:
   - Httpoison
@@ -74,7 +74,7 @@
         end
       end
     expect_no_match: true
-  description: "HTTPoison.post/4 \u2014 tainted URL sends the request body to attacker-controlled\
+  description: "HTTPoison.post/4 - tainted URL sends the request body to attacker-controlled\
     \ host."
   imports:
   - Httpoison
@@ -109,7 +109,7 @@
         end
       end
     expect_no_match: true
-  description: "HTTPoison.request/5 \u2014 generic verb; tainted URL reaches arbitrary\
+  description: "HTTPoison.request/5 - generic verb; tainted URL reaches arbitrary\
     \ hosts."
   imports:
   - Httpoison
@@ -149,7 +149,7 @@
         end
       end
     expect_no_match: true
-  description: "Tesla.get/3 \u2014 tainted URL reaches arbitrary hosts (cloud metadata,\
+  description: "Tesla.get/3 - tainted URL reaches arbitrary hosts (cloud metadata,\
     \ internal svc) regardless of the configured adapter."
   imports:
   - Tesla
@@ -189,7 +189,7 @@
         end
       end
     expect_no_match: true
-  description: "Tesla.post/4 \u2014 tainted URL sends body to attacker-chosen host."
+  description: "Tesla.post/4 - tainted URL sends body to attacker-chosen host."
   imports:
   - Tesla
 - id: elixir.ssrf.tesla_request
@@ -223,7 +223,7 @@
         end
       end
     expect_no_match: true
-  description: "Tesla.request/2 \u2014 generic verb; tainted :url opt issues attacker-chosen\
+  description: "Tesla.request/2 - generic verb; tainted :url opt issues attacker-chosen\
     \ request."
   imports:
   - Tesla
@@ -258,7 +258,7 @@
         end
       end
     expect_no_match: true
-  description: "Finch.build/5 \u2014 tainted URL is baked into the %Finch.Request{};\
+  description: "Finch.build/5 - tainted URL is baked into the %Finch.Request{};\
     \ subsequent Finch.request/2 sends it."
   imports:
   - Finch
@@ -293,7 +293,7 @@
         end
       end
     expect_no_match: true
-  description: "Finch.request/3 \u2014 dispatches the request struct; the URL inside\
+  description: "Finch.request/3 - dispatches the request struct; the URL inside\
     \ is attacker-controlled if built from tainted data."
   imports:
   - Finch
@@ -333,7 +333,7 @@
         end
       end
     expect_no_match: true
-  description: "Req.get/2 \u2014 tainted URL reaches arbitrary hosts; Req follows\
+  description: "Req.get/2 - tainted URL reaches arbitrary hosts; Req follows\
     \ redirects by default so DNS rebinding / 302-to-metadata tricks apply."
   imports:
   - Req
@@ -372,7 +372,7 @@
         end
       end
     expect_no_match: true
-  description: "Disabled — Req.post/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
+  description: "Disabled - Req.post/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
   imports:
   - Req
 - id: elixir.ssrf.req_request
@@ -406,7 +406,7 @@
         end
       end
     expect_no_match: true
-  description: "Req.request/2 \u2014 generic verb; tainted `url:` opt reaches any\
+  description: "Req.request/2 - generic verb; tainted `url:` opt reaches any\
     \ host."
   imports:
   - Req
@@ -448,7 +448,7 @@
         end
       end
     expect_no_match: true
-  description: "Mint.HTTP.connect/4 \u2014 tainted host opens a TCP connection to\
+  description: "Mint.HTTP.connect/4 - tainted host opens a TCP connection to\
     \ attacker-chosen peer (pre-TLS)."
   imports:
   - Mint
@@ -490,7 +490,7 @@
         end
       end
     expect_no_match: true
-  description: "Mint.HTTP.request/5 \u2014 tainted path / host header allows attacker-directed\
+  description: "Mint.HTTP.request/5 - tainted path / host header allows attacker-directed\
     \ HTTP request over the connection."
   imports:
   - Mint
@@ -531,7 +531,7 @@
         end
       end
     expect_no_match: true
-  description: ":hackney.request/5 \u2014 tainted URL reaches arbitrary hosts (the\
+  description: ":hackney.request/5 - tainted URL reaches arbitrary hosts (the\
     \ Erlang HTTP client underlying many Elixir libs). Also covers merged aliases:\
     \ elixir.tls.hackney_insecure."
   imports:
@@ -562,7 +562,7 @@
         end
       end
     expect_no_match: true
-  description: "Erlang :httpc.request/1..4 \u2014 stdlib HTTP client; tainted URL\
+  description: "Erlang :httpc.request/1..4 - stdlib HTTP client; tainted URL\
     \ issues attacker-directed request."
 - id: elixir.ssrf.httpoison_put
   enabled: true
@@ -600,7 +600,7 @@
         end
       end
     expect_no_match: true
-  description: "HTTPoison.put/4 \u2014 tainted URL writes attacker-chosen body to\
+  description: "HTTPoison.put/4 - tainted URL writes attacker-chosen body to\
     \ attacker-chosen host."
   imports:
   - Httpoison
@@ -640,7 +640,7 @@
         end
       end
     expect_no_match: true
-  description: "HTTPoison.delete/3 \u2014 tainted URL issues DELETE against attacker-chosen\
+  description: "HTTPoison.delete/3 - tainted URL issues DELETE against attacker-chosen\
     \ endpoint."
   imports:
   - Httpoison
@@ -680,7 +680,7 @@
         end
       end
     expect_no_match: true
-  description: "Tesla.put/4 \u2014 tainted URL writes body to attacker-chosen host."
+  description: "Tesla.put/4 - tainted URL writes body to attacker-chosen host."
   imports:
   - Tesla
 - id: elixir.ssrf.tesla_delete
@@ -719,7 +719,7 @@
         end
       end
     expect_no_match: true
-  description: "Tesla.delete/3 \u2014 tainted URL issues DELETE against attacker-chosen\
+  description: "Tesla.delete/3 - tainted URL issues DELETE against attacker-chosen\
     \ endpoint."
   imports:
   - Tesla
@@ -758,7 +758,7 @@
         end
       end
     expect_no_match: true
-  description: "Disabled — Req.put/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
+  description: "Disabled - Req.put/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
   imports:
   - Req
 - id: elixir.ssrf.req_delete
@@ -797,7 +797,7 @@
         end
       end
     expect_no_match: true
-  description: "Req.delete/2 \u2014 tainted URL issues DELETE against attacker-chosen\
+  description: "Req.delete/2 - tainted URL issues DELETE against attacker-chosen\
     \ endpoint."
   imports:
   - Req

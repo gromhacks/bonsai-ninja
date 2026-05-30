@@ -17,7 +17,7 @@
           }
         }
       expect_match_text: [args]
-  description: "String[] args on Java main(...) — command-line arguments supplied by the local invoker."
+  description: "String[] args on Java main(...) - command-line arguments supplied by the local invoker."
 
 - id: java.source.system_getenv
   enabled: true
@@ -36,7 +36,7 @@
             System.getenv(input);
           }
         }
-  description: "System.getenv — environment variable (config trust)."
+  description: "System.getenv - environment variable (config trust)."
 
 - id: java.source.system_getproperty
   enabled: true
@@ -55,7 +55,7 @@
             System.getProperty(input);
           }
         }
-  description: "System.getProperty — JVM property (config trust)."
+  description: "System.getProperty - JVM property (config trust)."
 
 - id: java.source.console_readline
   enabled: true
@@ -76,7 +76,7 @@
           }
         }
       expect_match_text: [console.readLine]
-  description: "Console.readLine() on a console-named receiver — line supplied by the local user."
+  description: "Console.readLine() on a console-named receiver - line supplied by the local user."
 
 - id: java.source.console_readpassword
   enabled: true
@@ -97,7 +97,7 @@
           }
         }
       expect_match_text: [console.readPassword]
-  description: "Console.readPassword() on a console-named receiver — password supplied by the local user."
+  description: "Console.readPassword() on a console-named receiver - password supplied by the local user."
 
 - id: java.source.scanner_nextline
   enabled: true
@@ -118,7 +118,7 @@
           }
         }
       expect_match_text: [scanner.nextLine]
-  description: "Scanner.nextLine() on a scanner-named receiver — line supplied by a local input stream."
+  description: "Scanner.nextLine() on a scanner-named receiver - line supplied by a local input stream."
 
 - id: java.source.scanner_next
   enabled: true
@@ -139,7 +139,7 @@
           }
         }
       expect_match_text: [scanner.next]
-  description: "Scanner.next() on a scanner-named receiver — token supplied by a local input stream."
+  description: "Scanner.next() on a scanner-named receiver - token supplied by a local input stream."
 
 - id: java.source.bufferedreader_readline
   enabled: false
@@ -152,4 +152,4 @@
     kind: call
     callee:
       attribute: [BufferedReader, readLine]
-  description: "Disabled — BufferedReader.readLine is too generic; sources are better inferred from the wrapped stream (stdin vs file vs socket)."
+  description: "Disabled - BufferedReader.readLine is too generic; sources are better inferred from the wrapped stream (stdin vs file vs socket)."

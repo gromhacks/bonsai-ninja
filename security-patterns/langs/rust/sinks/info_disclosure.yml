@@ -30,7 +30,7 @@
           log::error("user={}", user);
       }
     expect_no_match: true
-  description: "log::error with secret-shaped data — credentials or tokens can leak to centralized logs."
+  description: "log::error with secret-shaped data - credentials or tokens can leak to centralized logs."
 
 - id: rust.info_disclosure.eprintln_error
   enabled: true
@@ -60,7 +60,7 @@
           eprintln("user: {}", user);
       }
     expect_no_match: true
-  description: "eprintln!(error/backtrace) — diagnostic internals can leak through stderr logs."
+  description: "eprintln!(error/backtrace) - diagnostic internals can leak through stderr logs."
 
 - id: rust.info_disclosure.actix_internal_server_error_body
   enabled: true
@@ -84,6 +84,6 @@
           HttpResponse::InternalServerError(err);
       }
     expect_match_text: [HttpResponse::InternalServerError]
-  description: "actix-web HttpResponse::InternalServerError(error text) — sends exception / stack details to clients."
+  description: "actix-web HttpResponse::InternalServerError(error text) - sends exception / stack details to clients."
   imports:
   - actix_web

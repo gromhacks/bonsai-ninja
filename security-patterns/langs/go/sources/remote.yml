@@ -26,7 +26,7 @@
         _ = header.Name
       }
     expect_match_text: [tr.Next]
-  description: "tar.Reader.Next() — returns archive-controlled header metadata. Taint the returned header so Zip Slip is reported only when header.Name reaches a path open/write sink."
+  description: "tar.Reader.Next() - returns archive-controlled header metadata. Taint the returned header so Zip Slip is reported only when header.Name reaches a path open/write sink."
 
 # --- net/http stdlib --------------------------------------------------
 - id: go.nethttp.request_param
@@ -46,7 +46,7 @@
     kind: param
     target:
       name: r
-  description: "Disabled — bare `r` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
+  description: "Disabled - bare `r` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
 - id: go.nethttp.request_named
   enabled: false
   disabled_reason:
@@ -60,7 +60,7 @@
     kind: param
     target:
       name: req
-  description: "Disabled — bare `req` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
+  description: "Disabled - bare `req` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
 - id: go.nethttp.form_value
   enabled: true
   language: go
@@ -91,7 +91,7 @@
         _ = c.FormValue("name")
       }
     expect_match_text: [c.FormValue]
-  description: "FormValue(key) — attacker-controlled form/query value. Covers net/http, echo, and fiber FormValue helpers (same call shape)."
+  description: "FormValue(key) - attacker-controlled form/query value. Covers net/http, echo, and fiber FormValue helpers (same call shape)."
 - id: go.nethttp.postform_value
   enabled: true
   language: go
@@ -113,7 +113,7 @@
         _ = req.PostFormValue("name")
       }
     expect_match_text: [req.PostFormValue]
-  description: "r.PostFormValue(key) — attacker-controlled POST form value."
+  description: "r.PostFormValue(key) - attacker-controlled POST form value."
 - id: go.nethttp.url_query
   enabled: false
   disabled_reason:
@@ -141,7 +141,7 @@
         value := "value"
         URL.Query(target)
       }
-  description: "Disabled — Query() exposes the url.Values container; go.nethttp.query_value_get models concrete string reads and avoids double-counting chained Query().Get expressions."
+  description: "Disabled - Query() exposes the url.Values container; go.nethttp.query_value_get models concrete string reads and avoids double-counting chained Query().Get expressions."
   imports:
   - net
 - id: go.nethttp.query_value_get
@@ -165,7 +165,7 @@
         _ = r.URL.Query().Get("next")
       }
     expect_match_text: [r.URL.Query().Get]
-  description: "r.URL.Query().Get(key) — attacker-controlled query parameter value."
+  description: "r.URL.Query().Get(key) - attacker-controlled query parameter value."
 - id: go.nethttp.header_get
   enabled: true
   language: go
@@ -189,7 +189,7 @@
         _ = r.Header.Get("X-Forwarded-Host")
       }
     expect_match_text: [r.Header.Get]
-  description: "r.Header.Get(name) — attacker-controlled request header."
+  description: "r.Header.Get(name) - attacker-controlled request header."
 - id: go.nethttp.cookie
   enabled: true
   language: go
@@ -213,7 +213,7 @@
         _, _ = req.Cookie("session")
       }
     expect_match_text: [req.Cookie]
-  description: "http.Request.Cookie(name) — attacker-controlled cookie value; narrowed by receiver type so framework cookie helpers own their own rules."
+  description: "http.Request.Cookie(name) - attacker-controlled cookie value; narrowed by receiver type so framework cookie helpers own their own rules."
 - id: go.nethttp.request_pathvalue
   enabled: true
   language: go
@@ -246,7 +246,7 @@
         _ = r.PathValue()
       }
     expect_no_match: true
-  description: "r.PathValue(name) — net/http ServeMux path wildcard value supplied by the remote HTTP client."
+  description: "r.PathValue(name) - net/http ServeMux path wildcard value supplied by the remote HTTP client."
 - id: go.nethttp.request_header_methods
   enabled: true
   language: go
@@ -279,7 +279,7 @@
         _ = r.Referer()
       }
     expect_match_text: [r.Referer]
-  description: "r.UserAgent() / r.Referer() — convenience accessors for attacker-controlled request header values."
+  description: "r.UserAgent() / r.Referer() - convenience accessors for attacker-controlled request header values."
 - id: go.nethttp.request_basicauth
   enabled: true
   language: go
@@ -305,7 +305,7 @@
         _, _ = user, pass
       }
     expect_match_text: [r.BasicAuth]
-  description: "r.BasicAuth() — username and password parsed from the attacker-controlled Authorization request header."
+  description: "r.BasicAuth() - username and password parsed from the attacker-controlled Authorization request header."
 - id: go.nethttp.multipart_form_file
   enabled: true
   language: go
@@ -337,7 +337,7 @@
         _, _ = req.MultipartReader()
       }
     expect_match_text: [req.MultipartReader]
-  description: "net/http multipart upload APIs — file parts, headers, and FileHeader.Filename are client-controlled."
+  description: "net/http multipart upload APIs - file parts, headers, and FileHeader.Filename are client-controlled."
 - id: go.multipart.fileheader_filename
   enabled: true
   language: go
@@ -359,7 +359,7 @@
         return fh.Filename
       }
     expect_match_text: [Filename]
-  description: "multipart.FileHeader.Filename — client-supplied upload filename; treat as tainted path/name input."
+  description: "multipart.FileHeader.Filename - client-supplied upload filename; treat as tainted path/name input."
 - id: go.nethttp.body_read
   enabled: false
   disabled_reason:
@@ -391,7 +391,7 @@
         _ = req.Body
       }
     expect_match_text: [req.Body]
-  description: "Disabled — Body reads expose the stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
+  description: "Disabled - Body reads expose the stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
 - id: go.nethttp.io_readall_request_body
   enabled: true
   language: go
@@ -447,7 +447,7 @@
   - name: net/http body readall negative constraint boundary
     code: "package main\nimport (\n  \"io\"\n  \"net/http\"\n)\nfunc handler(r *http.Request) {\n  _, _ = io.ReadAll()\n}\n"
     expect_no_match: true
-  description: "io.ReadAll over request Body — returned bytes are attacker-controlled request body content."
+  description: "io.ReadAll over request Body - returned bytes are attacker-controlled request body content."
 
 # --- mux / chi --------------------------------------------------------
 - id: go.gorilla.mux_vars
@@ -476,7 +476,7 @@
         _ = mux.Vars(r)
       }
     expect_match_text: [mux.Vars]
-  description: "mux.Vars(r) — map of attacker-controlled path parameters."
+  description: "mux.Vars(r) - map of attacker-controlled path parameters."
 - id: go.chi.urlparam
   enabled: true
   language: go
@@ -502,7 +502,7 @@
         _ = chi.URLParam(r, "id")
       }
     expect_match_text: [chi.URLParam]
-  description: "chi.URLParam(r, key) — attacker-controlled path parameter."
+  description: "chi.URLParam(r, key) - attacker-controlled path parameter."
 - id: go.chi.urlparam_from_context
   enabled: true
   language: go
@@ -529,7 +529,7 @@
         _ = chi.URLParamFromCtx(ctx, "id")
       }
     expect_match_text: [chi.URLParamFromCtx]
-  description: "chi.URLParamFromCtx(ctx, key) — attacker-controlled route parameter read from request context."
+  description: "chi.URLParamFromCtx(ctx, key) - attacker-controlled route parameter read from request context."
 
 # --- gin --------------------------------------------------------------
 - id: go.gin.context_query
@@ -556,7 +556,7 @@
         _ = c.Query("next")
       }
     expect_match_text: [c.Query]
-  description: "c.Query(key) — attacker-controlled query string. Covers gin and fiber (same call shape)."
+  description: "c.Query(key) - attacker-controlled query string. Covers gin and fiber (same call shape)."
 - id: go.gin.context_postform
   enabled: true
   language: go
@@ -581,7 +581,7 @@
         _ = c.PostForm("name")
       }
     expect_match_text: [c.PostForm]
-  description: "gin c.PostForm(key) — attacker-controlled form value."
+  description: "gin c.PostForm(key) - attacker-controlled form value."
 - id: go.gin.context_param
   enabled: true
   language: go
@@ -630,7 +630,7 @@
         _ = c.Param("id")
       }
     expect_match_text: [c.Param]
-  description: "c.Param/ctx.Param(key) — attacker-controlled path parameter. Covers gin, echo, iris, and buffalo context shapes."
+  description: "c.Param/ctx.Param(key) - attacker-controlled path parameter. Covers gin, echo, iris, and buffalo context shapes."
 - id: go.gin.context_getheader
   enabled: true
   language: go
@@ -663,7 +663,7 @@
         _ = ctx.GetHeader("X-Forwarded-Host")
       }
     expect_match_text: [ctx.GetHeader]
-  description: "gin/iris context GetHeader(name) — attacker-controlled request header."
+  description: "gin/iris context GetHeader(name) - attacker-controlled request header."
 - id: go.gin.context_cookie
   enabled: true
   language: go
@@ -713,7 +713,7 @@
         _ = ctx.Cookies("session")
       }
     expect_match_text: [ctx.Cookies]
-  description: "framework cookie helpers — attacker-controlled Cookie header values for gin, echo, and fiber contexts."
+  description: "framework cookie helpers - attacker-controlled Cookie header values for gin, echo, and fiber contexts."
 - id: go.gin.context_bind
   enabled: true
   language: go
@@ -783,7 +783,7 @@
         _ = c.Bind(dst)
       }
     expect_match_text: [c.Bind]
-  description: "framework context bind helpers — populate structs from attacker-controlled request body, query, form, XML, or YAML payloads."
+  description: "framework context bind helpers - populate structs from attacker-controlled request body, query, form, XML, or YAML payloads."
 - id: go.gin.context_query_collection
   enabled: true
   language: go
@@ -824,7 +824,7 @@
         _ = c.DefaultQuery("next", "/")
       }
     expect_match_text: [c.DefaultQuery]
-  description: "gin query/form collection helpers — attacker controls returned values."
+  description: "gin query/form collection helpers - attacker controls returned values."
 - id: go.gin.context_bindjson
   enabled: true
   language: go
@@ -849,7 +849,7 @@
         _ = c.BindJSON(dst)
       }
     expect_match_text: [c.BindJSON]
-  description: "gin c.BindJSON(&v) — binds attacker-controlled JSON into v."
+  description: "gin c.BindJSON(&v) - binds attacker-controlled JSON into v."
 - id: go.gin.context_shouldbindjson
   enabled: true
   language: go
@@ -874,7 +874,7 @@
         _ = ctx.ShouldBindJSON(dst)
       }
     expect_match_text: [ctx.ShouldBindJSON]
-  description: "gin c.ShouldBindJSON(&v) — binds attacker-controlled JSON request body into application data."
+  description: "gin c.ShouldBindJSON(&v) - binds attacker-controlled JSON request body into application data."
 - id: go.gin.context_getrawdata
   enabled: true
   language: go
@@ -899,7 +899,7 @@
         _, _ = c.GetRawData()
       }
     expect_match_text: [c.GetRawData]
-  description: "gin c.GetRawData() — raw request body."
+  description: "gin c.GetRawData() - raw request body."
 - id: go.gin_echo.context_formfile
   enabled: true
   language: go
@@ -932,7 +932,7 @@
         _, _ = c.FormFile("file")
       }
     expect_match_text: [c.FormFile]
-  description: "gin/echo Context.FormFile(name) — returned multipart FileHeader and filename metadata are controlled by the HTTP client."
+  description: "gin/echo Context.FormFile(name) - returned multipart FileHeader and filename metadata are controlled by the HTTP client."
 
 # --- echo -------------------------------------------------------------
 - id: go.echo.context_queryparam
@@ -957,7 +957,7 @@
         _ = c.QueryParam("next")
       }
     expect_match_text: [c.QueryParam]
-  description: "echo c.QueryParam(key) — attacker-controlled query parameter value."
+  description: "echo c.QueryParam(key) - attacker-controlled query parameter value."
 - id: go.echo.context_param
   enabled: false
   disabled_reason:
@@ -973,7 +973,7 @@
     kind: call
     callee:
       regex: "\\.Param$"
-  description: "Disabled — merged into go.gin.context_param (same `.Param$` regex; frameworks list now covers echo)."
+  description: "Disabled - merged into go.gin.context_param (same `.Param$` regex; frameworks list now covers echo)."
 - id: go.echo.context_formvalue
   enabled: false
   disabled_reason:
@@ -989,7 +989,7 @@
     kind: call
     callee:
       regex: "\\.FormValue$"
-  description: "Disabled — merged into go.nethttp.form_value (same `.FormValue$` regex; frameworks list now covers echo)."
+  description: "Disabled - merged into go.nethttp.form_value (same `.FormValue$` regex; frameworks list now covers echo)."
 - id: go.echo.context_bind
   enabled: false
   disabled_reason:
@@ -1024,7 +1024,7 @@
         _ = c.Bind(dst)
       }
     expect_match_text: [c.Bind]
-  description: "Disabled — duplicate `.Bind` call shape merged into go.gin.context_bind, whose framework list and examples now cover echo and buffalo."
+  description: "Disabled - duplicate `.Bind` call shape merged into go.gin.context_bind, whose framework list and examples now cover echo and buffalo."
 - id: go.echo.context_cookie
   enabled: false
   disabled_reason:
@@ -1059,7 +1059,7 @@
         _ = ctx.Cookies()
       }
     expect_match_text: [ctx.Cookies]
-  description: "Disabled — duplicate `.Cookie` / `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover echo."
+  description: "Disabled - duplicate `.Cookie` / `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover echo."
 - id: go.echo.context_cookie_value
   enabled: false
   disabled_reason:
@@ -1086,7 +1086,7 @@
         return c.Cookie("session").Value + cookie.Value
       }
     expect_match_text: ["c.Cookie(\"session\").Value"]
-  description: "Disabled — duplicate of the framework cookie source. The owning call source taints the returned *http.Cookie; modeling the chained `.Value` read separately double-counts every `c.Cookie(...).Value` expression."
+  description: "Disabled - duplicate of the framework cookie source. The owning call source taints the returned *http.Cookie; modeling the chained `.Value` read separately double-counts every `c.Cookie(...).Value` expression."
 - id: go.echo.context_request_surface
   enabled: true
   language: go
@@ -1111,7 +1111,7 @@
         _ = c.QueryParams()
       }
     expect_match_text: [c.QueryParams]
-  description: "echo query/form surface getters — expose attacker-controlled query and form values. Raw request/body access is owned by the dedicated request-body rules."
+  description: "echo query/form surface getters - expose attacker-controlled query and form values. Raw request/body access is owned by the dedicated request-body rules."
 
 - id: go.framework.request_header_get
   enabled: true
@@ -1146,7 +1146,7 @@
         _ = ctx.Request.Header.Get("X-Forwarded-Host")
       }
     expect_match_text: ["ctx.Request.Header.Get"]
-  description: "Framework context request header accessors — client-controlled request headers reached through wrapped net/http requests."
+  description: "Framework context request header accessors - client-controlled request headers reached through wrapped net/http requests."
 - id: go.echo.context_request_body
   enabled: false
   disabled_reason:
@@ -1179,7 +1179,7 @@
         _ = ctx.Request().Body
       }
     expect_match_text: ["ctx.Request().Body"]
-  description: "Disabled — Request().Body reads expose the wrapped stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
+  description: "Disabled - Request().Body reads expose the wrapped stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
 
 # --- iris -------------------------------------------------------------
 - id: go.iris.context_urlparam
@@ -1214,7 +1214,7 @@
         _ = ctx.URLParamDefault("next", "/")
       }
     expect_match_text: [ctx.URLParamDefault]
-  description: "iris ctx.URLParam* helpers — attacker-controlled query parameter values and typed query wrappers."
+  description: "iris ctx.URLParam* helpers - attacker-controlled query parameter values and typed query wrappers."
 
 - id: go.iris.context_body_readers
   enabled: true
@@ -1248,7 +1248,7 @@
         _ = ctx.ReadJSON(dst)
       }
     expect_match_text: [ctx.ReadJSON]
-  description: "iris request body readers — raw or decoded body content supplied by the HTTP caller."
+  description: "iris request body readers - raw or decoded body content supplied by the HTTP caller."
 
 - id: go.iris.context_form_values
   enabled: true
@@ -1274,7 +1274,7 @@
         _ = ctx.PostValue("name")
       }
     expect_match_text: [ctx.PostValue]
-  description: "iris form value helpers — attacker-controlled form fields."
+  description: "iris form value helpers - attacker-controlled form fields."
 
 # --- beego ------------------------------------------------------------
 - id: go.beego.controller_getstring
@@ -1303,7 +1303,7 @@
         _ = c.GetString("name")
       }
     expect_match_text: [c.GetString]
-  description: "beego Controller.GetString(key) — attacker-controlled query or form value."
+  description: "beego Controller.GetString(key) - attacker-controlled query or form value."
 
 - id: go.beego.controller_getfile
   enabled: true
@@ -1331,7 +1331,7 @@
         _, _, _ = c.GetFile("upload")
       }
     expect_match_text: [c.GetFile]
-  description: "beego Controller.GetFile(field) — attacker-controlled uploaded file and client-supplied file metadata."
+  description: "beego Controller.GetFile(field) - attacker-controlled uploaded file and client-supplied file metadata."
 
 - id: go.beego.ctx_input_body
   enabled: true
@@ -1358,7 +1358,7 @@
         return c.Ctx.Input.Body
       }
     expect_match_text: [c.Ctx.Input.Body]
-  description: "beego c.Ctx.Input.Body — raw attacker-controlled request body bytes."
+  description: "beego c.Ctx.Input.Body - raw attacker-controlled request body bytes."
 
 # --- fiber ------------------------------------------------------------
 - id: go.fiber.context_query
@@ -1376,7 +1376,7 @@
     kind: call
     callee:
       regex: "\\.Query$"
-  description: "Disabled — merged into go.gin.context_query (same `.Query$` regex; frameworks list now covers fiber)."
+  description: "Disabled - merged into go.gin.context_query (same `.Query$` regex; frameworks list now covers fiber)."
 - id: go.fiber.context_params
   enabled: true
   language: go
@@ -1399,7 +1399,7 @@
         _ = c.Params("id")
       }
     expect_match_text: [c.Params]
-  description: "fiber c.Params(key) — attacker-controlled route path parameter."
+  description: "fiber c.Params(key) - attacker-controlled route path parameter."
 - id: go.fiber.context_body
   enabled: true
   language: go
@@ -1422,7 +1422,7 @@
         _ = c.Body()
       }
     expect_match_text: [c.Body]
-  description: "fiber c.Body() — raw attacker-controlled request body bytes."
+  description: "fiber c.Body() - raw attacker-controlled request body bytes."
 - id: go.fiber.context_bodyparser
   enabled: true
   language: go
@@ -1445,7 +1445,7 @@
         _ = c.BodyParser(dst)
       }
     expect_match_text: [c.BodyParser]
-  description: "fiber c.BodyParser(&v) — parses attacker-controlled request body into application data."
+  description: "fiber c.BodyParser(&v) - parses attacker-controlled request body into application data."
 - id: go.fiber.context_cookies
   enabled: false
   disabled_reason:
@@ -1473,7 +1473,7 @@
         value := "value"
         obj.Cookies(target)
       }
-  description: "Disabled — duplicate `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover fiber."
+  description: "Disabled - duplicate `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover fiber."
   imports:
   - github
   - github.com
@@ -1511,7 +1511,7 @@
         _ = ctx.GetReqHeaders()
       }
     expect_match_text: [ctx.GetReqHeaders]
-  description: "fiber request-header helpers — attacker controls header values."
+  description: "fiber request-header helpers - attacker controls header values."
 - id: go.fiber.context_form
   enabled: true
   language: go
@@ -1545,7 +1545,7 @@
         _, _ = ctx.MultipartForm()
       }
     expect_match_text: [ctx.MultipartForm]
-  description: "fiber form-file, query parser, and upload helpers — attacker-controlled body/form/file data. FormValue is owned by the shared go.nethttp.form_value call-shape rule."
+  description: "fiber form-file, query parser, and upload helpers - attacker-controlled body/form/file data. FormValue is owned by the shared go.nethttp.form_value call-shape rule."
 
 # --- fasthttp ---------------------------------------------------------
 - id: go.fasthttp.queryargs
@@ -1569,7 +1569,7 @@
         _ = ctx.QueryArgs()
       }
     expect_match_text: [ctx.QueryArgs]
-  description: "fasthttp RequestCtx.QueryArgs() — attacker-controlled query."
+  description: "fasthttp RequestCtx.QueryArgs() - attacker-controlled query."
 - id: go.fasthttp.postargs
   enabled: true
   language: go
@@ -1591,7 +1591,7 @@
         _ = ctx.PostArgs()
       }
     expect_match_text: [ctx.PostArgs]
-  description: "fasthttp RequestCtx.PostArgs() — attacker-controlled POST form values."
+  description: "fasthttp RequestCtx.PostArgs() - attacker-controlled POST form values."
 
 - id: go.websocket.conn_readmessage
   enabled: true
@@ -1614,7 +1614,7 @@
         _, _, _ = conn.ReadMessage()
       }
     expect_match_text: [conn.ReadMessage]
-  description: "WebSocket Conn.ReadMessage() — attacker-controlled client frame."
+  description: "WebSocket Conn.ReadMessage() - attacker-controlled client frame."
 - id: go.websocket.conn_nextreader
   enabled: true
   language: go
@@ -1638,7 +1638,7 @@
         _, _, _ = conn.NextReader()
       }
     expect_match_text: [conn.NextReader]
-  description: "gorilla/websocket Conn.NextReader() — returns a reader for an attacker-controlled frame."
+  description: "gorilla/websocket Conn.NextReader() - returns a reader for an attacker-controlled frame."
 - id: go.websocket.nhooyr_read
   enabled: true
   language: go
@@ -1663,7 +1663,7 @@
         _, _, _ = c.Read(ctx)
       }
     expect_match_text: [c.Read]
-  description: "nhooyr websocket Conn.Read(ctx) — attacker-controlled frame bytes."
+  description: "nhooyr websocket Conn.Read(ctx) - attacker-controlled frame bytes."
 - id: go.websocket.nhooyr_wsjson_read
   enabled: true
   language: go
@@ -1687,7 +1687,7 @@
         _ = wsjson.Read(ctx, c, out)
       }
     expect_match_text: [wsjson.Read]
-  description: "wsjson.Read(ctx, conn, &out) — decodes attacker-controlled websocket JSON into application data."
+  description: "wsjson.Read(ctx, conn, &out) - decodes attacker-controlled websocket JSON into application data."
 
 # --- GraphQL ----------------------------------------------------------
 - id: go.graphql.resolveparams_args
@@ -1727,7 +1727,7 @@
         return rp.Args
       }
     expect_no_match: true
-  description: "graphql ResolveParams.Args — resolver arguments supplied by the client query. The receiver type gate avoids depending on local variable names."
+  description: "graphql ResolveParams.Args - resolver arguments supplied by the client query. The receiver type gate avoids depending on local variable names."
 
 - id: go.graphql.gqlgen_fieldcontext_args
   enabled: true
@@ -1754,4 +1754,4 @@
         return fc.Args["id"]
       }
     expect_match_text: [fc.Args]
-  description: "gqlgen graphql.FieldContext.Args — resolver argument map supplied by the client query. Direct generated resolver method parameters are not type-constrained enough for a safe global param rule."
+  description: "gqlgen graphql.FieldContext.Args - resolver argument map supplied by the client query. Direct generated resolver method parameters are not type-constrained enough for a safe global param rule."

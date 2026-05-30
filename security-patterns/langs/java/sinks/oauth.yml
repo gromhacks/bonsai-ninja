@@ -22,5 +22,5 @@
           OAuth2AuthorizationRequest.additionalParameters(input);
         }
       }
-  description: "Spring OAuth2AuthorizationRequest without state parameter — review for state-CSRF."
+  description: "Spring OAuth2AuthorizationRequest without state parameter - review for state-CSRF."
 

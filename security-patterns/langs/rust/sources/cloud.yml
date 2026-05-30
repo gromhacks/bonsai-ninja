@@ -14,7 +14,7 @@
     kind: param
     target:
       name: event
-  description: "Disabled — `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Rust callbacks."
+  description: "Disabled - `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Rust callbacks."
 - id: rust.aws.lambda_handler_event
   enabled: true
   language: rust
@@ -35,4 +35,4 @@
           LambdaEvent::payload();
       }
     expect_match_text: ["LambdaEvent::payload"]
-  description: "lambda_runtime LambdaEvent::payload — AWS Lambda event payload; local receiver calls require semantic LambdaEvent receiver-type facts."
+  description: "lambda_runtime LambdaEvent::payload - AWS Lambda event payload; local receiver calls require semantic LambdaEvent receiver-type facts."

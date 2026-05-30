@@ -37,7 +37,7 @@
       def example(user_input):
           return collection.find('safe')
     expect_no_match: true
-  description: "pymongo collection.find — tainted filter interpolation. Merged collision aliases: python.nosql.pymongo_find_one, python.nosql.pymongo_find_filter_value_object, python.nosql.mongo_find_one_credential_object, python.nosql.motor_collection_find, python.nosql.motor_collection_find_one, python.nosql.motor_find_filter_value_object."
+  description: "pymongo collection.find - tainted filter interpolation. Merged collision aliases: python.nosql.pymongo_find_one, python.nosql.pymongo_find_filter_value_object, python.nosql.mongo_find_one_credential_object, python.nosql.motor_collection_find, python.nosql.motor_collection_find_one, python.nosql.motor_find_filter_value_object."
   aliases:
   - python.nosql.pymongo_find_filter_value_object
   - python.nosql.motor_collection_find
@@ -81,7 +81,7 @@
       def example(collection, user_input):
           return collection.find_one('safe')
     expect_no_match: true
-  description: "pymongo/motor find_one(filter) — tainted filter values can be operator-typed objects such as {'$ne': ''}. Merged aliases: python.nosql.mongo_find_one_credential_object, python.nosql.motor_collection_find_one."
+  description: "pymongo/motor find_one(filter) - tainted filter values can be operator-typed objects such as {'$ne': ''}. Merged aliases: python.nosql.mongo_find_one_credential_object, python.nosql.motor_collection_find_one."
   aliases:
   - python.nosql.mongo_find_one_credential_object
   - python.nosql.motor_collection_find_one
@@ -116,7 +116,7 @@
       def example(user_input):
           return collection.aggregate('safe')
     expect_no_match: true
-  description: "pymongo aggregate pipeline — flag tainted $where / $expr."
+  description: "pymongo aggregate pipeline - flag tainted $where / $expr."
 - id: python.nosql.pymongo_update
   enabled: true
   language: python
@@ -178,7 +178,7 @@
       def example():
           return collection.update_many({"active": False}, {"$set": {"active": True}})
     expect_no_match: true
-  description: "pymongo update_many(filter, tainted update) — attacker-controlled update documents can inject operators."
+  description: "pymongo update_many(filter, tainted update) - attacker-controlled update documents can inject operators."
 - id: python.nosql.pymongo_delete
   enabled: true
   language: python
@@ -242,7 +242,7 @@
       def example(user_input):
           return database.command('safe')
     expect_no_match: true
-  description: "pymongo Database.command — arbitrary command document."
+  description: "pymongo Database.command - arbitrary command document."
 - id: python.nosql.pymongo_eval
   enabled: true
   language: python
@@ -275,7 +275,7 @@
       def example(user_input):
           return database.eval('safe')
     expect_no_match: true
-  description: "Legacy Database.eval — server-side JS execution."
+  description: "Legacy Database.eval - server-side JS execution."
 - id: python.nosql.motor_aggregate
   enabled: true
   language: python
@@ -325,7 +325,7 @@
       attribute:
       - QuerySet
       - filter
-  description: "Disabled — mongoengine filter is type-bounded; flag only with __raw__."
+  description: "Disabled - mongoengine filter is type-bounded; flag only with __raw__."
 - id: python.nosql.mongoengine_raw
   enabled: false
   disabled_reason:
@@ -343,7 +343,7 @@
       attribute:
       - QuerySet
       - __raw__
-  description: "Disabled — MongoEngine `__raw__` is a keyword argument, not a callee; re-enable once keyword-argument presence constraints land."
+  description: "Disabled - MongoEngine `__raw__` is a keyword argument, not a callee; re-enable once keyword-argument presence constraints land."
 - id: python.nosql.redis_eval
   enabled: true
   language: python
@@ -375,7 +375,7 @@
       def example(user_input):
           return redis.eval('safe')
     expect_no_match: true
-  description: "redis-py Redis.eval — Lua script injection."
+  description: "redis-py Redis.eval - Lua script injection."
 - id: python.nosql.redis_evalsha
   enabled: true
   language: python
@@ -406,7 +406,7 @@
       def example():
           return redis.evalsha("0123456789abcdef", 1, "key")
     expect_no_match: true
-  description: "redis-py Redis.evalsha(tainted sha, ...) — attacker selects which cached Lua script executes."
+  description: "redis-py Redis.evalsha(tainted sha, ...) - attacker selects which cached Lua script executes."
 - id: python.nosql.redis_execute_command
   enabled: false
   disabled_reason:
@@ -424,7 +424,7 @@
       attribute:
       - redis
       - execute_command
-  description: "Disabled — execute_command is generic; flag with EVAL/SCRIPT constraint."
+  description: "Disabled - execute_command is generic; flag with EVAL/SCRIPT constraint."
 - id: python.nosql.cassandra_execute
   enabled: false
   disabled_reason:
@@ -442,7 +442,7 @@
       attribute:
       - Session
       - execute
-  description: "Disabled duplicate — Cassandra Session.execute is indistinguishable from SQLAlchemy Session.execute in v1 matching; keep cql-specific rule disabled until receiver typing exists."
+  description: "Disabled duplicate - Cassandra Session.execute is indistinguishable from SQLAlchemy Session.execute in v1 matching; keep cql-specific rule disabled until receiver typing exists."
 - id: python.nosql.elasticsearch_search
   enabled: true
   language: python
@@ -538,7 +538,7 @@
       def example(user_input):
           return Session.run('safe')
     expect_no_match: true
-  description: "neo4j Session.run — flag string-built Cypher."
+  description: "neo4j Session.run - flag string-built Cypher."
 - id: python.nosql.boto3_dynamodb_scan
   enabled: false
   disabled_reason:
@@ -556,4 +556,4 @@
       attribute:
       - Table
       - scan
-  description: "Disabled — DynamoDB scan filter expressions are usually safe; flag only when string-built FilterExpression."
+  description: "Disabled - DynamoDB scan filter expressions are usually safe; flag only when string-built FilterExpression."

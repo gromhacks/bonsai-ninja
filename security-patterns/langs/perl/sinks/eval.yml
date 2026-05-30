@@ -1,10 +1,10 @@
 # Perl code-injection sinks (eval / do).
 #
 # DOCUMENTED FRAGILE BARE-NAME RULE (kept on purpose):
-#   perl.eval.builtin_eval — `eval` is a real Perl builtin (perlfunc).
+#   perl.eval.builtin_eval - `eval` is a real Perl builtin (perlfunc).
 #
 # `eval EXPR` compiles+runs the string as Perl code. `eval { BLOCK }` is
-# Perl's exception-catching form and is safe — it shares the keyword name
+# Perl's exception-catching form and is safe - it shares the keyword name
 # but takes a block, not a string. There is no `use Foo;` to gate on; the
 # bare-name match is the correct shape. The pack-audit "bare-name without
 # packages" warning on perl.eval.builtin_eval is expected and intentional.
@@ -43,7 +43,7 @@
         eval("1 + 1")
       }
     expect_no_match: true
-  description: "eval EXPR — Perl builtin; compiles and runs the string argument as Perl. Tainted string = RCE. `eval { BLOCK }` form is safe but shares the keyword; taint-flow + max_args filters."
+  description: "eval EXPR - Perl builtin; compiles and runs the string argument as Perl. Tainted string = RCE. `eval { BLOCK }` form is safe but shares the keyword; taint-flow + max_args filters."
 
 - id: perl.eval.do_file
   enabled: false
@@ -65,7 +65,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         do $input
       }
-  description: "Disabled duplicate — current Perl adapter surfaces this with the same call shape as perl.eval.builtin_eval; keep the canonical eval rule enabled until the adapter exposes `do EXPR` distinctly."
+  description: "Disabled duplicate - current Perl adapter surfaces this with the same call shape as perl.eval.builtin_eval; keep the canonical eval rule enabled until the adapter exposes `do EXPR` distinctly."
 
 # Distinct ID for the scalar-form `eval $expr` shape. The canonical
 # perl.eval.builtin_eval rule covers this too; this entry is kept so
@@ -91,4 +91,4 @@
         my ($input, $url, $id, $payload, $request) = @_;
         eval($payload)
       }
-  description: "Disabled duplicate — current adapter emits eval($scalar) with the same call shape as perl.eval.builtin_eval; keep builtin_eval as the canonical Perl eval sink."
+  description: "Disabled duplicate - current adapter emits eval($scalar) with the same call shape as perl.eval.builtin_eval; keep builtin_eval as the canonical Perl eval sink."

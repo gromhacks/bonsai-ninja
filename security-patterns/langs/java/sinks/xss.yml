@@ -88,7 +88,7 @@
         }
       }
     expect_no_match: true
-  description: "HttpServletResponse.getWriter().println(tainted) — reflected output written directly to the response body."
+  description: "HttpServletResponse.getWriter().println(tainted) - reflected output written directly to the response body."
 
 - id: java.xss.response_outputstream_print
   enabled: true
@@ -240,7 +240,7 @@
         }
       }
     expect_no_match: true
-  description: "ResponseEntity.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "ResponseEntity.ok(raw HTML concat) - reflected HTML response built from attacker-controlled text."
   imports:
   - org.springframework.http
 - id: java.xss.spring_responseentity_body_html_concat
@@ -281,7 +281,7 @@
         }
       }
     expect_no_match: true
-  description: "ResponseEntity.body(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "ResponseEntity.body(raw HTML concat) - reflected HTML response built from attacker-controlled text."
   imports:
   - org.springframework.http
 - id: java.xss.webflux_serverresponse_bodyvalue_html_concat
@@ -322,7 +322,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: java.xss.jaxrs_response_ok_text_html
   enabled: true
   language: java
@@ -363,7 +363,7 @@
         }
       }
     expect_no_match: true
-  description: "JAX-RS Response.ok(body, TEXT_HTML) — raw HTML response body built from attacker-controlled text. Merged aliases: java.xss.jaxrs_response_ok_html_concat."
+  description: "JAX-RS Response.ok(body, TEXT_HTML) - raw HTML response body built from attacker-controlled text. Merged aliases: java.xss.jaxrs_response_ok_html_concat."
   aliases:
   - java.xss.jaxrs_response_ok_html_concat
 - id: java.xss.play_results_ok_html_concat
@@ -405,7 +405,7 @@
         }
       }
     expect_no_match: true
-  description: "Play Results.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Play Results.ok(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: java.xss.micronaut_httpresponse_ok_html_concat
   enabled: true
   language: java
@@ -444,7 +444,7 @@
         }
       }
     expect_no_match: true
-  description: "Micronaut HttpResponse.ok(raw HTML concat) — reflected HTML response body built from attacker-controlled text."
+  description: "Micronaut HttpResponse.ok(raw HTML concat) - reflected HTML response body built from attacker-controlled text."
 - id: java.xss.vertx_response_end_html_concat
   enabled: true
   language: java
@@ -484,7 +484,7 @@
         }
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.end(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  description: "Vert.x HttpServerResponse.end(raw HTML concat) - reflected HTML response built from attacker-controlled text."
 - id: java.xss.wicket_label_escape_disabled
   enabled: true
   language: java
@@ -515,7 +515,7 @@
       }
     expect_match_text:
     - label.setEscapeModelStrings
-  description: "Wicket Label.setEscapeModelStrings(false) — disables HTML escaping for label model text."
+  description: "Wicket Label.setEscapeModelStrings(false) - disables HTML escaping for label model text."
 - id: java.xss.printwriter_write
   enabled: false
   disabled_reason:
@@ -531,7 +531,7 @@
       attribute:
       - PrintWriter
       - write
-  description: "Disabled — only matches static qualified form; ServletResponse covers web flow via getWriter().write."
+  description: "Disabled - only matches static qualified form; ServletResponse covers web flow via getWriter().write."
 - id: java.xss.printwriter_println
   enabled: false
   disabled_reason:
@@ -547,7 +547,7 @@
       attribute:
       - PrintWriter
       - println
-  description: "Disabled — see printwriter_write; use response_writer_println."
+  description: "Disabled - see printwriter_write; use response_writer_println."
 - id: java.xss.printwriter_print
   enabled: false
   disabled_reason:
@@ -563,7 +563,7 @@
       attribute:
       - PrintWriter
       - print
-  description: "Disabled — see printwriter_write; use response_writer_print."
+  description: "Disabled - see printwriter_write; use response_writer_print."
 - id: java.xss.jsp_out_println
   enabled: false
   disabled_reason:
@@ -579,7 +579,7 @@
       attribute:
       - out
       - println
-  description: "Disabled — `out.println` matches every logger or PrintStream variable named `out`; too broad."
+  description: "Disabled - `out.println` matches every logger or PrintStream variable named `out`; too broad."
 - id: java.xss.spring_modelandview_addobject
   enabled: false
   disabled_reason:
@@ -597,7 +597,7 @@
       attribute:
       - ModelAndView
       - addObject
-  description: "Disabled — Spring ModelAndView values are escaped by default templates; flag with template-engine analysis."
+  description: "Disabled - Spring ModelAndView values are escaped by default templates; flag with template-engine analysis."
 - id: java.xss.thymeleaf_unescaped
   enabled: false
   disabled_reason:
@@ -613,7 +613,7 @@
     kind: write
     target:
       name: th:utext
-  description: "Disabled — th:utext attr write; surface via template scanner, not call-match."
+  description: "Disabled - th:utext attr write; surface via template scanner, not call-match."
 - id: java.xss.struts_textparser
   enabled: false
   disabled_reason:
@@ -631,7 +631,7 @@
       attribute:
       - TextParseUtil
       - translateVariables
-  description: "Disabled — Struts2 TextParseUtil; flag with OGNL scope."
+  description: "Disabled - Struts2 TextParseUtil; flag with OGNL scope."
 - id: java.xss.gwt_html_settext
   enabled: true
   language: java
@@ -675,4 +675,4 @@
         void setHTML(Object... args) {}
       }
     expect_no_match: true
-  description: "GWT HTML.setHTML(tainted) — inserts raw attacker-controlled HTML into a widget."
+  description: "GWT HTML.setHTML(tainted) - inserts raw attacker-controlled HTML into a widget."

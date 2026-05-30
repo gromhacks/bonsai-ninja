@@ -15,7 +15,7 @@
           my ($input, $url, $id, $payload, $request) = @_;
           my $value = $ARGV[0];
         }
-  description: "@ARGV — command-line arguments."
+  description: "@ARGV - command-line arguments."
 
 - id: perl.source.stdin
   enabled: true
@@ -33,4 +33,4 @@
           my ($input, $url, $id, $payload, $request) = @_;
           my $value = $STDIN;
         }
-  description: "STDIN — local interactive input."
+  description: "STDIN - local interactive input."

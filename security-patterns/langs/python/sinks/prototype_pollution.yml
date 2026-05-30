@@ -1,6 +1,6 @@
 # python prototype_pollution sinks.
 
-# Prototype-pollution sinks (round 3 — cross-language).
+# Prototype-pollution sinks (round 3 - cross-language).
 - id: python.proto_pollution.dict_update_body
   enabled: true
   language: python
@@ -24,7 +24,7 @@
       def example(user_input):
           return dict.update('safe', 'requestpayloadbody')
     expect_no_match: true
-  description: 'target.update(request.json) — bulk-merges attacker JSON into a target dict; class-level dunder keys (__class__) can shadow attributes when reflection follows.'
+  description: 'target.update(request.json) - bulk-merges attacker JSON into a target dict; class-level dunder keys (__class__) can shadow attributes when reflection follows.'
 - id: python.proto_pollution.deepmerge_merge_body
   enabled: true
   language: python
@@ -51,4 +51,4 @@
       def example():
           return deepmerge.always_merger({"safe": True})
     expect_no_match: true
-  description: 'deepmerge.always_merger.merge(target, attacker_dict) — recursive deep merge.'
+  description: 'deepmerge.always_merger.merge(target, attacker_dict) - recursive deep merge.'

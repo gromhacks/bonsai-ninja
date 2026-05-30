@@ -1,6 +1,6 @@
 # go race / TOCTOU sinks (T501).
 
-# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# TOCTOU check sites - pair with subsequent open/chmod use-sites
 # in source order to identify the race window.
 - id: go.toctou.os_stat
   enabled: true
@@ -47,7 +47,7 @@
           value := "value"
           os.Lstat(target)
         }
-  description: "os.Lstat(path) — check; same TOCTOU shape."
+  description: "os.Lstat(path) - check; same TOCTOU shape."
 - id: go.race.mutex_unlock
   enabled: true
   language: go
@@ -69,7 +69,7 @@
           mu.Unlock()
         }
       expect_match_text: [mu.Unlock]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). sync.Mutex.Unlock() / RWMutex.Unlock() — subsequent guarded-region reads/writes without a re-Lock are racy (CWE-833)."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). sync.Mutex.Unlock() / RWMutex.Unlock() - subsequent guarded-region reads/writes without a re-Lock are racy (CWE-833)."
 - id: go.race.tx_commit
   enabled: true
   language: go
@@ -91,7 +91,7 @@
           tx.Commit()
         }
       expect_match_text: [tx.Commit]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). database/sql Tx.Commit() — transaction-after-error race-pair; subsequent tx.Exec/tx.Query calls on the same handle return ErrTxDone or run outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). database/sql Tx.Commit() - transaction-after-error race-pair; subsequent tx.Exec/tx.Query calls on the same handle return ErrTxDone or run outside the intended transaction window."
 - id: go.race.tx_rollback
   enabled: true
   language: go
@@ -113,4 +113,4 @@
           tx.Rollback()
         }
       expect_match_text: [tx.Rollback]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). database/sql Tx.Rollback() — transaction-after-error race-pair; later tx.Exec on the same handle returns ErrTxDone."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). database/sql Tx.Rollback() - transaction-after-error race-pair; later tx.Exec on the same handle returns ErrTxDone."

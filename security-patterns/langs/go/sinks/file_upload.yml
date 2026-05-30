@@ -23,7 +23,7 @@
       func example(obj holder) {
         _ = obj.Filename
       }
-  description: "Disabled — FileHeader.Filename is already modeled as a remote source in go.multipart.fileheader_filename. Treating the field read itself as a file-upload sink double-counts filepath.Join/upload flows; disk-write APIs and framework Save* calls remain the sinks."
+  description: "Disabled - FileHeader.Filename is already modeled as a remote source in go.multipart.fileheader_filename. Treating the field read itself as a file-upload sink double-counts filepath.Join/upload flows; disk-write APIs and framework Save* calls remain the sinks."
 
   imports:
   - mime
@@ -60,7 +60,7 @@
         obj.SaveUploadedFile(file, "/srv/uploads/avatar.png")
       }
     expect_no_match: true
-  description: "gin Context.SaveUploadedFile(file, dst) — if dst is built from header.Filename, path-traversal + unrestricted upload."
+  description: "gin Context.SaveUploadedFile(file, dst) - if dst is built from header.Filename, path-traversal + unrestricted upload."
 
 - id: go.upload.echo_formfile
   enabled: false
@@ -88,7 +88,7 @@
         value := "value"
         obj.FormFile(target)
       }
-  description: "Disabled — echo Context.FormFile returns client-controlled multipart metadata and is modeled as go.gin_echo.context_formfile. The sink is the later write using FileHeader.Filename."
+  description: "Disabled - echo Context.FormFile returns client-controlled multipart metadata and is modeled as go.gin_echo.context_formfile. The sink is the later write using FileHeader.Filename."
 
 - id: go.upload.fiber_savefile
   enabled: true
@@ -123,4 +123,4 @@
         obj.SaveFile(file, "/srv/uploads/avatar.png")
       }
     expect_no_match: true
-  description: "fiber Ctx.SaveFile(fileheader, path) — tainted path + client filename = traversal / unrestricted upload."
+  description: "fiber Ctx.SaveFile(fileheader, path) - tainted path + client filename = traversal / unrestricted upload."

@@ -40,4 +40,4 @@
           .body(String::from("hi"));
       }
     expect_no_match: true
-  description: "lettre Message builder `.subject(value)` — CR/LF in subject injects MIME headers."
+  description: "lettre Message builder `.subject(value)` - CR/LF in subject injects MIME headers."

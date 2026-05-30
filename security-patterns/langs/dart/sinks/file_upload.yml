@@ -108,4 +108,4 @@
     kind: call
     callee:
       attribute: [FilePicker, platform]
-  description: "Disabled — FilePicker is user-initiated; flag only if result.path flows to server upload."
+  description: "Disabled - FilePicker is user-initiated; flag only if result.path flows to server upload."

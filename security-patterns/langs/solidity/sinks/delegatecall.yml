@@ -1,8 +1,8 @@
-# delegatecall family — proxy-hijack / arbitrary-storage-write sinks.
+# delegatecall family - proxy-hijack / arbitrary-storage-write sinks.
 #
 # delegatecall executes the target's bytecode in THIS contract's
 # storage and msg context. A tainted target address gives the attacker
-# arbitrary write access to every storage slot — including the
+# arbitrary write access to every storage slot - including the
 # implementation-pointer slot in EIP-1967 proxies (proxy hijack), the
 # owner slot, and the balance accounting. Severity is `critical`
 # regardless of payload because target-control alone is fatal.
@@ -28,7 +28,7 @@
         pragma solidity ^0.8.0;
         contract App { function test() public { address(0).delegatecall(""); } }
       expect_no_match: true
-  description: "delegatecall(target, data) executes target's code in THIS contract's storage/context — a tainted target gains full write access to state, owner slot, implementation slot, and balance (arbitrary takeover / proxy hijack)."
+  description: "delegatecall(target, data) executes target's code in THIS contract's storage/context - a tainted target gains full write access to state, owner slot, implementation slot, and balance (arbitrary takeover / proxy hijack)."
 - id: solidity.delegatecall.callcode_legacy
   enabled: true
   language: solidity
@@ -51,7 +51,7 @@
         pragma solidity ^0.8.0;
         contract App { function test() public { address(0).callcode(""); } }
       expect_no_match: true
-  description: "Deprecated `callcode` — same hazards as delegatecall (pre-0.5 alias)."
+  description: "Deprecated `callcode` - same hazards as delegatecall (pre-0.5 alias)."
 - id: solidity.delegatecall.assembly_opcode
   enabled: false
   disabled_reason:
@@ -65,9 +65,9 @@
     kind: call
     callee:
       name: delegatecall
-  description: "Disabled — placeholder for inline-assembly `delegatecall(gas, addr, in, insize, out, outsize)` opcode. Solidity inline-assembly bodies use the same identifier `delegatecall`, so the v1 matcher already fires on the assembly form via solidity.delegatecall.unrestricted. Re-enable as a distinct rule once the adapter exposes assembly-block context so we can split severity/remediation."
+  description: "Disabled - placeholder for inline-assembly `delegatecall(gas, addr, in, insize, out, outsize)` opcode. Solidity inline-assembly bodies use the same identifier `delegatecall`, so the v1 matcher already fires on the assembly form via solidity.delegatecall.unrestricted. Re-enable as a distinct rule once the adapter exposes assembly-block context so we can split severity/remediation."
 
-# `address(this).call(<calldata-derived bytes>)` — selector dispatch
+# `address(this).call(<calldata-derived bytes>)` - selector dispatch
 # off attacker-controlled bytes is code injection (CWE-94 family):
 # the contract's own functions get invoked with attacker-chosen
 # selector + args, bypassing public ABI guards. Distinct from
@@ -90,4 +90,4 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { this.call(input); } }
-  description: "Disabled duplicate — current matcher facts cannot exclude `this.call(...)` from the generic low-level `.call(...)` reentrancy sink. Re-enable once receiver-negative constraints or Solidity receiver typing can split self-dispatch from arbitrary address calls."
+  description: "Disabled duplicate - current matcher facts cannot exclude `this.call(...)` from the generic low-level `.call(...)` reentrancy sink. Re-enable once receiver-negative constraints or Solidity receiver typing can split self-dispatch from arbitrary address calls."

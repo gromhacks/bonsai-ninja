@@ -11,7 +11,7 @@
     kind: param
     target:
       name: FunctionHandler
-  description: "Disabled — `FunctionHandler` is the delegate/type name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `FunctionHandler` is the delegate/type name; `kind: param` only matches parameter identifiers."
 
 - id: csharp.source.azure_function_http_trigger
   enabled: false
@@ -25,7 +25,7 @@
     kind: param
     target:
       name: HttpTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure [HttpTrigger] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not Azure [HttpTrigger] attributes."
 
 - id: csharp.source.azure_function_blob_trigger
   enabled: false
@@ -39,7 +39,7 @@
     kind: param
     target:
       name: BlobTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure [BlobTrigger] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not Azure [BlobTrigger] attributes."
 
 - id: csharp.source.azure_function_eventhub_trigger
   enabled: false
@@ -53,7 +53,7 @@
     kind: param
     target:
       name: EventHubTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure [EventHubTrigger] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not Azure [EventHubTrigger] attributes."
 
 - id: csharp.source.gcf_function
   enabled: false
@@ -67,4 +67,4 @@
     kind: param
     target:
       name: IHttpFunction
-  description: "Disabled — `IHttpFunction` is an interface name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `IHttpFunction` is an interface name; `kind: param` only matches parameter identifiers."

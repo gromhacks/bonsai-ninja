@@ -20,7 +20,7 @@
       -export([test/1]).
       test(Input) ->
         cow_multipart:form_data(Input).
-  description: "Disabled until state/return-value tracking exists — cow_multipart:form_data returns a client-supplied filename, but the sink is the later filesystem write using that returned name."
+  description: "Disabled until state/return-value tracking exists - cow_multipart:form_data returns a client-supplied filename, but the sink is the later filesystem write using that returned name."
 
 - id: erlang.upload_file_write_client_filename
   enabled: false
@@ -53,7 +53,7 @@
       test() ->
         file:write_file("uploads/avatar.png", <<"upload">>).
     expect_no_match: true
-  description: "Disabled duplicate — covered by erlang.path.file_write_file, which carries this rule id as an alias to preserve upload-finding attribution while avoiding duplicate match shapes."
+  description: "Disabled duplicate - covered by erlang.path.file_write_file, which carries this rule id as an alias to preserve upload-finding attribution while avoiding duplicate match shapes."
 
 - id: erlang.upload_file_copy_client_filename
   enabled: true
@@ -83,4 +83,4 @@
       test(Upload) ->
         file:copy(Upload, "uploads/avatar.png").
     expect_no_match: true
-  description: "file:copy(upload, filename) — copying multipart content to a client-named destination can overwrite arbitrary files."
+  description: "file:copy(upload, filename) - copying multipart content to a client-named destination can overwrite arbitrary files."

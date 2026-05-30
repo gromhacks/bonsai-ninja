@@ -14,7 +14,7 @@
     - name: declared shape
       code: |
         func test() { let input = "x"; let amount = 1; CC_MD5(input) }
-  description: "CC_MD5 — MD5 is broken."
+  description: "CC_MD5 - MD5 is broken."
 - id: swift.crypto.cc_md2
   enabled: true
   language: swift
@@ -30,7 +30,7 @@
     - name: declared shape
       code: |
         func test() { let input = "x"; let amount = 1; CC_MD2(input) }
-  description: "CC_MD2 — broken."
+  description: "CC_MD2 - broken."
 - id: swift.crypto.cc_md4
   enabled: true
   language: swift
@@ -46,7 +46,7 @@
     - name: declared shape
       code: |
         func test() { let input = "x"; let amount = 1; CC_MD4(input) }
-  description: "CC_MD4 — broken."
+  description: "CC_MD4 - broken."
 - id: swift.crypto.cc_sha1
   enabled: true
   language: swift
@@ -62,7 +62,7 @@
     - name: declared shape
       code: |
         func test() { let input = "x"; let amount = 1; CC_SHA1(input) }
-  description: "CC_SHA1 — deprecated for security."
+  description: "CC_SHA1 - deprecated for security."
 - id: swift.crypto.crypto_kit_insecure_md5
   enabled: true
   language: swift
@@ -110,7 +110,7 @@
     - name: declared shape
       code: |
         func test() { let input = "x"; let amount = 1; CCCrypt(input) }
-  description: "CommonCrypto CCCrypt — flag kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2 as weak."
+  description: "CommonCrypto CCCrypt - flag kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2 as weak."
 - id: swift.crypto.arc4_random
   enabled: false
   disabled_reason:
@@ -123,7 +123,7 @@
     kind: call
     callee:
       name: arc4random
-  description: "Disabled — arc4random on Darwin is a CSPRNG; not a vuln."
+  description: "Disabled - arc4random on Darwin is a CSPRNG; not a vuln."
 - id: swift.crypto.int_random_security
   enabled: false
   disabled_reason:
@@ -136,7 +136,7 @@
     kind: call
     callee:
       name: random
-  description: "Disabled — bare `.random()` matches every Swift random; use context (security token/session-id) to enable."
+  description: "Disabled - bare `.random()` matches every Swift random; use context (security token/session-id) to enable."
 - id: swift.crypto.non_constant_time_compare
   enabled: false
   disabled_reason:
@@ -149,4 +149,4 @@
     kind: call
     callee:
       name: isEqual
-  description: "Disabled — bare `isEqual` MAC/hash compare matches every NSObject equality; enable with receiver narrowing to HashedAuthenticationCode / Data."
+  description: "Disabled - bare `isEqual` MAC/hash compare matches every NSObject equality; enable with receiver narrowing to HashedAuthenticationCode / Data."

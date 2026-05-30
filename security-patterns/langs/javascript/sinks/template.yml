@@ -56,7 +56,7 @@
     code: "const _u = require(\"ejs\");\nfunction demo() {\n  return ejs.compile(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "ejs.compile(tainted) \u2014 full SSTI to RCE in default config. Merged\
+  description: "ejs.compile(tainted) - full SSTI to RCE in default config. Merged\
     \ aliases: javascript.template.ejs_compile_template_variable."
   aliases:
   - javascript.template.ejs_compile_template_variable
@@ -117,7 +117,7 @@
     code: "const handlebars = require(\"handlebars\");\nfunction render() {\n  return\
       \ handlebars.compile(\"Hello user\");\n}\n"
     expect_no_match: true
-  description: "handlebars.compile(tainted) — lowercase module binding for Handlebars template compilation."
+  description: "handlebars.compile(tainted) - lowercase module binding for Handlebars template compilation."
 - id: javascript.template.hbs_compile
   enabled: true
   language: javascript
@@ -147,7 +147,7 @@
     code: "const hbs = require(\"hbs\");\nfunction render() {\n  return hbs.compile(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "hbs.compile(tainted) \u2014 hbs exposes Handlebars template compilation;\
+  description: "hbs.compile(tainted) - hbs exposes Handlebars template compilation;\
     \ attacker-controlled template source is SSTI."
 - id: javascript.template.handlebars_safestring
   enabled: true
@@ -175,7 +175,7 @@
     code: "const _u = require(\"handlebars\");\nfunction demo() {\n  return new Handlebars.SafeString(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "new Handlebars.SafeString(tainted) \u2014 bypasses escape."
+  description: "new Handlebars.SafeString(tainted) - bypasses escape."
 - id: javascript.template.pug_compile
   enabled: true
   language: javascript
@@ -203,7 +203,7 @@
     code: "const _u = require(\"pug\");\nfunction demo() {\n  return pug.compile(\"\
       p Hello user\");\n}\n"
     expect_no_match: true
-  description: "pug.compile(tainted) \u2014 Jade/Pug SSTI."
+  description: "pug.compile(tainted) - Jade/Pug SSTI."
 - id: javascript.template.pug_render
   enabled: true
   language: javascript
@@ -291,7 +291,7 @@
     code: "const _u = require(\"nunjucks\");\nfunction demo(nunjucks) {\n  return\
       \ nunjucks.compile(\"Hello user\");\n}\n"
     expect_no_match: true
-  description: "nunjucks.compile(tainted) \u2014 compiles attacker-controlled template\
+  description: "nunjucks.compile(tainted) - compiles attacker-controlled template\
     \ source."
 - id: javascript.template.nunjucks_render_template_source
   enabled: true
@@ -327,7 +327,7 @@
       \ nunjucks.render(\"safe.html\", {});\n}\n"
     expect_no_match: true
   description: "nunjucks.render(templateSource, data) with variable or constructed\
-    \ template names/source \u2014 audit for attacker-controlled template selection\
+    \ template names/source - audit for attacker-controlled template selection\
     \ or SSTI."
 - id: javascript.template.dot_template
   enabled: true
@@ -374,7 +374,7 @@
       attribute:
       - Mustache
       - render
-  description: "Disabled \u2014 Mustache is logic-less; not SSTI-to-RCE."
+  description: "Disabled - Mustache is logic-less; not SSTI-to-RCE."
 - id: javascript.template.lodash_template
   enabled: true
   language: javascript
@@ -403,7 +403,7 @@
     code: "const _u = require(\"lodash\");\nfunction demo(_) {\n  return _.template(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "_.template(tainted) \u2014 lodash/underscore templates `with`-scope\
+  description: "_.template(tainted) - lodash/underscore templates `with`-scope\
     \ + `<% %>` evaluate arbitrary JS."
 - id: javascript.template.lodash_template_call
   enabled: true
@@ -432,7 +432,7 @@
     code: "const _u = require(\"lodash\");\nfunction demo() {\n  return lodash.template(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "lodash.template(tainted) \u2014 same JS-evaluation hazard as the `_`\
+  description: "lodash.template(tainted) - same JS-evaluation hazard as the `_`\
     \ alias form."
 - id: javascript.template.consolidate_render
   enabled: false
@@ -449,7 +449,7 @@
     kind: call
     callee:
       name: render
-  description: "Disabled \u2014 generic render; flag with engine-specific constraint."
+  description: "Disabled - generic render; flag with engine-specific constraint."
 - id: javascript.template.swig_render
   enabled: true
   language: javascript
@@ -477,7 +477,7 @@
     code: "const _u = require(\"swig\");\nfunction demo() {\n  return swig.render(\"\
       Hello user\", {});\n}\n"
     expect_no_match: true
-  description: "swig.render(tainted, \u2026) \u2014 Swig is abandoned; tainted template\
+  description: "swig.render(tainted, ...) - Swig is abandoned; tainted template\
     \ source executes arbitrary expressions."
 - id: javascript.template.swig_compile
   enabled: true
@@ -507,7 +507,7 @@
     code: "const _u = require(\"swig\");\nfunction demo() {\n  return swig.compile(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "swig.compile(tainted) \u2014 full SSTI to RCE in default config."
+  description: "swig.compile(tainted) - full SSTI to RCE in default config."
 - id: javascript.template.swig_renderfile
   enabled: true
   language: javascript
@@ -535,7 +535,7 @@
     code: "const _u = require(\"swig\");\nfunction demo() {\n  return swig.renderFile(\"\
       home.html\", {});\n}\n"
     expect_no_match: true
-  description: "swig.renderFile(taintedPath, ctx) \u2014 tainted file path lets attacker\
+  description: "swig.renderFile(taintedPath, ctx) - tainted file path lets attacker\
     \ pick arbitrary template (path-traversal + SSTI compound)."
 - id: javascript.template.dust_compile
   enabled: true
@@ -564,7 +564,7 @@
     code: "const _u = require(\"dustjs-linkedin\");\nfunction demo() {\n  return dust.compile(\"\
       Hello user\");\n}\n"
     expect_no_match: true
-  description: "dust.compile(tainted) \u2014 Dust template compilation from attacker\
+  description: "dust.compile(tainted) - Dust template compilation from attacker\
     \ source."
 - id: javascript.template.liquid_parseandrender
   enabled: true
@@ -592,7 +592,7 @@
     code: "const _u = require(\"liquidjs\");\nfunction demo() {\n  return Liquid.parseAndRender(\"\
       Hello user\", {});\n}\n"
     expect_no_match: true
-  description: "liquidjs Liquid.parseAndRender(tainted) \u2014 LiquidJS evaluates\
+  description: "liquidjs Liquid.parseAndRender(tainted) - LiquidJS evaluates\
     \ template tags; tainted source = SSTI."
 - id: javascript.template.eta_render
   enabled: true
@@ -620,7 +620,7 @@
     code: "const _u = require(\"eta\");\nfunction demo() {\n  return Eta.render(\"\
       Hello user\", {});\n}\n"
     expect_no_match: true
-  description: "Eta.render(tainted, ctx) \u2014 Eta is an EJS-style engine; tainted\
+  description: "Eta.render(tainted, ctx) - Eta is an EJS-style engine; tainted\
     \ template source = SSTI to RCE."
 - id: javascript.template.markojs_load
   enabled: false
@@ -639,7 +639,7 @@
       attribute:
       - marko
       - load
-  description: "Disabled \u2014 Marko load takes a path; only dangerous when path\
+  description: "Disabled - Marko load takes a path; only dangerous when path\
     \ is tainted. Enable with source-proximity."
 - id: javascript.template.swig_setdefaults_autoescape_off
   enabled: true
@@ -661,7 +661,7 @@
   - name: swig setdefaults autoescape off
     code: "const _u = require(\"swig\");\nfunction demo(input, req, obj) {\n  return\
       \ swig.setDefaults(input, { autoescape: false });\n}\n"
-  description: "swig.setDefaults({autoescape: false}) \u2014 global autoescape off;\
+  description: "swig.setDefaults({autoescape: false}) - global autoescape off;\
     \ NodeGoat tutorial XSS."
 - id: javascript.template.handlebars_safe_string
   enabled: false
@@ -680,7 +680,7 @@
       attribute:
       - Handlebars
       - SafeString
-  description: "Disabled duplicate \u2014 same Handlebars.SafeString match shape is\
+  description: "Disabled duplicate - same Handlebars.SafeString match shape is\
     \ covered by javascript.template.handlebars_safestring."
 - id: javascript.template.nunjucks_configure_autoescape_off
   enabled: true
@@ -702,7 +702,7 @@
   - name: nunjucks configure autoescape off
     code: "const _u = require(\"nunjucks\");\nfunction demo(input, req, obj) {\n \
       \ return nunjucks.configure(input, { autoescape: false });\n}\n"
-  description: "nunjucks.configure(path, {autoescape: false}) \u2014 autoescape disabled."
+  description: "nunjucks.configure(path, {autoescape: false}) - autoescape disabled."
 
 - id: javascript.template.nunjucks_environment_renderstring
   enabled: true
@@ -740,7 +740,7 @@
       }
       demo({ renderString: () => null });
     expect_no_match: true
-  description: "nunjucks Environment instance .renderString(tainted) \u2014 local nunjucks Environment receivers also reach SSTI when rendering attacker-controlled source."
+  description: "nunjucks Environment instance .renderString(tainted) - local nunjucks Environment receivers also reach SSTI when rendering attacker-controlled source."
 
 - id: javascript.template.pug_compile_file
   enabled: true
@@ -777,4 +777,4 @@
         return pug.compileFile("views/profile.pug");
       }
     expect_no_match: true
-  description: "pug.compileFile(taintedPath) \u2014 attacker-controlled file path lets the user pick an arbitrary template (path-traversal + SSTI compound)."
+  description: "pug.compileFile(taintedPath) - attacker-controlled file path lets the user pick an arbitrary template (path-traversal + SSTI compound)."

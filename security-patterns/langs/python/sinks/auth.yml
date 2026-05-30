@@ -11,4 +11,4 @@
     kind: call
     callee:
       name: check_password
-  description: "Disabled — Django check_password is safe with supported hashers; flag only custom hashers that use weak schemes."
+  description: "Disabled - Django check_password is safe with supported hashers; flag only custom hashers that use weak schemes."

@@ -12,7 +12,7 @@
     kind: call
     callee:
       name: xmlReadMemory
-  description: "Disabled — canonical rule is c.xxe.libxml2_xml_read_memory in xxe.yml. libxml2 readers are XXE, not deserialization."
+  description: "Disabled - canonical rule is c.xxe.libxml2_xml_read_memory in xxe.yml. libxml2 readers are XXE, not deserialization."
 
 - id: c.deser.libxml2_xmlreadfile
   enabled: false
@@ -27,7 +27,7 @@
     kind: call
     callee:
       name: xmlReadFile
-  description: "Disabled — canonical rule is c.xxe.libxml2_xml_read_file in xxe.yml."
+  description: "Disabled - canonical rule is c.xxe.libxml2_xml_read_file in xxe.yml."
 
 - id: c.deser.libxml2_xmlparsefile
   enabled: false
@@ -42,7 +42,7 @@
     kind: call
     callee:
       name: xmlParseFile
-  description: "Disabled — canonical rule is c.xxe.libxml2_xml_parse_file in xxe.yml."
+  description: "Disabled - canonical rule is c.xxe.libxml2_xml_parse_file in xxe.yml."
 
 - id: c.deser.protobuf_c_unpack
   enabled: false
@@ -57,7 +57,7 @@
     kind: call
     callee:
       name: protobuf_c_message_unpack
-  description: "Disabled — protobuf is type-bounded."
+  description: "Disabled - protobuf is type-bounded."
 
 - id: c.deser.cjson_parse
   enabled: false
@@ -72,4 +72,4 @@
     kind: call
     callee:
       name: cJSON_Parse
-  description: "Disabled — cJSON_Parse is type-bounded."
+  description: "Disabled - cJSON_Parse is type-bounded."

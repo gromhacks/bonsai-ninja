@@ -60,7 +60,7 @@
         return child_process.execSync("whoami");
       }
     expect_no_match: true
-  description: child_process.execSync — same /bin/sh interpolation hazard as exec, synchronous.
+  description: child_process.execSync - same /bin/sh interpolation hazard as exec, synchronous.
 
 - id: javascript.cmdi.child_process_exec_imported
   enabled: true
@@ -92,7 +92,7 @@
         return exec("whoami");
       }
     expect_no_match: true
-  description: "Destructured/aliased exec from child_process — shell-interprets its first argument."
+  description: "Destructured/aliased exec from child_process - shell-interprets its first argument."
 
 - id: javascript.cmdi.child_process_exec_sync_imported
   enabled: true
@@ -124,7 +124,7 @@
         return execSync("whoami");
       }
     expect_no_match: true
-  description: "Destructured/aliased execSync from child_process — same shell-interpreting command sink as child_process.execSync."
+  description: "Destructured/aliased execSync from child_process - same shell-interpreting command sink as child_process.execSync."
 
 - id: javascript.cmdi.child_process_spawn_shell
   enabled: true
@@ -190,7 +190,7 @@
         return child_process.spawn("sh", ["-c", "whoami"], { shell: true });
       }
     expect_no_match: true
-  description: "child_process.spawn(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+  description: "child_process.spawn(cmd, taintedArgs, {shell: true}) - tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.child_process_spawn_sync_shell
   enabled: true
@@ -222,7 +222,7 @@
         return child_process.spawnSync("ls", { shell: true });
       }
     expect_no_match: true
-  description: "child_process.spawnSync({shell: true}) — same shell-injection risk as spawn."
+  description: "child_process.spawnSync({shell: true}) - same shell-injection risk as spawn."
 
 - id: javascript.cmdi.child_process_spawn_sync_shell_args
   enabled: true
@@ -254,7 +254,7 @@
         return child_process.spawnSync("sh", ["-c", "whoami"], { shell: true });
       }
     expect_no_match: true
-  description: "child_process.spawnSync(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+  description: "child_process.spawnSync(cmd, taintedArgs, {shell: true}) - tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.child_process_spawn_sync_imported_shell
   enabled: true
@@ -287,7 +287,7 @@
         return spawnSync("ls", { shell: true });
       }
     expect_no_match: true
-  description: "Destructured/aliased spawnSync(..., {shell: true}) from child_process — shell interpolation reintroduced."
+  description: "Destructured/aliased spawnSync(..., {shell: true}) from child_process - shell interpolation reintroduced."
 
 - id: javascript.cmdi.child_process_spawn_sync_imported_shell_args
   enabled: true
@@ -320,7 +320,7 @@
         return spawnSync("sh", ["-c", "whoami"], { shell: true });
       }
     expect_no_match: true
-  description: "Destructured/aliased spawnSync(cmd, taintedArgs, {shell: true}) from child_process — tainted argv is interpreted by the shell."
+  description: "Destructured/aliased spawnSync(cmd, taintedArgs, {shell: true}) from child_process - tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.child_process_execfile_shell
   enabled: true
@@ -351,7 +351,7 @@
         return child_process.execFile("sh", ["-c", "whoami"], { shell: true });
       }
     expect_no_match: true
-  description: "child_process.execFile(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+  description: "child_process.execFile(cmd, taintedArgs, {shell: true}) - tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.child_process_execfile
   enabled: true
@@ -381,7 +381,7 @@
         return child_process.execFile("node");
       }
     expect_no_match: true
-  description: "child_process.execFile — tainted binary path = arbitrary exec."
+  description: "child_process.execFile - tainted binary path = arbitrary exec."
 
 - id: javascript.cmdi.child_process_execfile_imported
   enabled: true
@@ -412,7 +412,7 @@
         return execFile("node");
       }
     expect_no_match: true
-  description: "Destructured/aliased execFile from child_process — tainted binary path = arbitrary exec."
+  description: "Destructured/aliased execFile from child_process - tainted binary path = arbitrary exec."
 
 - id: javascript.cmdi.child_process_execfile_sync
   enabled: true
@@ -442,7 +442,7 @@
         return child_process.execFileSync("node");
       }
     expect_no_match: true
-  description: "child_process.execFileSync — tainted binary path = arbitrary exec."
+  description: "child_process.execFileSync - tainted binary path = arbitrary exec."
 
 - id: javascript.cmdi.child_process_execfile_sync_imported
   enabled: true
@@ -473,7 +473,7 @@
         return execFileSync("node");
       }
     expect_no_match: true
-  description: "Destructured/aliased execFileSync from child_process — tainted binary path = arbitrary exec."
+  description: "Destructured/aliased execFileSync from child_process - tainted binary path = arbitrary exec."
 
 - id: javascript.cmdi.fork
   enabled: true
@@ -503,7 +503,7 @@
         return child_process.fork("./worker.js");
       }
     expect_no_match: true
-  description: "child_process.fork(taintedModulePath) — attacker-controlled Node module path is arbitrary code execution."
+  description: "child_process.fork(taintedModulePath) - attacker-controlled Node module path is arbitrary code execution."
 
 - id: javascript.cmdi.shelljs_exec
   enabled: true
@@ -548,7 +548,7 @@
     kind: call
     callee:
       name: execa
-  description: "Disabled — execa(cmd, [args]) is argv-style by default; flag only the {shell: true} form."
+  description: "Disabled - execa(cmd, [args]) is argv-style by default; flag only the {shell: true} form."
 
 - id: javascript.cmdi.execa_shell
   enabled: true
@@ -579,7 +579,7 @@
         return execa("ls", { shell: true });
       }
     expect_no_match: true
-  description: "execa(..., {shell: true}) — shell interpolation reinstated."
+  description: "execa(..., {shell: true}) - shell interpolation reinstated."
 
 - id: javascript.cmdi.execa_command
   enabled: true
@@ -609,7 +609,7 @@
         return execa.command("ls -la");
       }
     expect_no_match: true
-  description: execa.command parses the single-string command through a shell — tainted input injects.
+  description: execa.command parses the single-string command through a shell - tainted input injects.
 
 - id: javascript.cmdi.execa_command_sync
   enabled: true
@@ -639,7 +639,7 @@
         return execa.commandSync("ls -la");
       }
     expect_no_match: true
-  description: execa.commandSync — same string-parsing hazard as command.
+  description: execa.commandSync - same string-parsing hazard as command.
 
 - id: javascript.cmdi.nodepty_spawn
   enabled: true
@@ -669,7 +669,7 @@
         return pty.spawn("bash");
       }
     expect_no_match: true
-  description: node-pty spawn runs an interactive shell — tainted command or args can control a live terminal.
+  description: node-pty spawn runs an interactive shell - tainted command or args can control a live terminal.
 
 - id: javascript.cmdi.cross_spawn
   enabled: false
@@ -684,7 +684,7 @@
     kind: call
     callee:
       regex: "^spawn$"
-  description: "Disabled — cross-spawn default is argv-style; flag only with {shell: true} constraint."
+  description: "Disabled - cross-spawn default is argv-style; flag only with {shell: true} constraint."
 
 - id: javascript.cmdi.cross_spawn_shell
   enabled: true
@@ -715,7 +715,7 @@
         return crossSpawn("ls", input, { shell: true });
       }
     expect_no_match: true
-  description: "cross-spawn alias crossSpawn({shell: true}) — shell-interpreted command execution. The bare `spawn(...)` form collides with child_process.spawn in v1 matching."
+  description: "cross-spawn alias crossSpawn({shell: true}) - shell-interpreted command execution. The bare `spawn(...)` form collides with child_process.spawn in v1 matching."
 
 - id: javascript.cmdi.cross_spawn_shell_args
   enabled: true
@@ -746,7 +746,7 @@
         return crossSpawn("sh", ["-c", "whoami"], { shell: true });
       }
     expect_no_match: true
-  description: "cross-spawn crossSpawn(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+  description: "cross-spawn crossSpawn(cmd, taintedArgs, {shell: true}) - tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.deno_command
   enabled: true
@@ -773,7 +773,7 @@
         return new Deno.Command("deno");
       }
     expect_no_match: true
-  description: "new Deno.Command(cmd, {args}) — tainted args or cmd launches arbitrary process."
+  description: "new Deno.Command(cmd, {args}) - tainted args or cmd launches arbitrary process."
 
 - id: javascript.cmdi.deno_run
   enabled: true
@@ -800,7 +800,7 @@
         return Deno.run({ cmd: ["deno", "--version"] });
       }
     expect_no_match: true
-  description: "Deno.run (legacy) — subprocess execution."
+  description: "Deno.run (legacy) - subprocess execution."
 
 - id: javascript.cmdi.bun_spawn
   enabled: true
@@ -827,7 +827,7 @@
         return Bun.spawn(["bun", "--version"]);
       }
     expect_no_match: true
-  description: "Bun.spawn — tainted executable path or argv launches arbitrary process. Bun runtime global has no canonical ecosystem package, so strict `['Bun', 'spawn']` match only."
+  description: "Bun.spawn - tainted executable path or argv launches arbitrary process. Bun runtime global has no canonical ecosystem package, so strict `['Bun', 'spawn']` match only."
 
 - id: javascript.cmdi.zx_dollar
   enabled: false
@@ -842,4 +842,4 @@
     kind: call
     callee:
       name: $
-  description: "Disabled — zx $`...` tagged template; bare `$` name is too ambiguous to enable globally."
+  description: "Disabled - zx $`...` tagged template; bare `$` name is too ambiguous to enable globally."

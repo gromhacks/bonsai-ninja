@@ -13,4 +13,4 @@
     kind: param
     target:
       name: handleRequest
-  description: "Disabled — `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."

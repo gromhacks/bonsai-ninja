@@ -103,7 +103,7 @@
       attribute:
       - urllib3
       - disable_warnings
-  description: "Disabled — disable_warnings is a smell, not a vuln; flag manually."
+  description: "Disabled - disable_warnings is a smell, not a vuln; flag manually."
 - id: python.tls.pyopenssl_verify_off
   enabled: true
   language: python
@@ -136,4 +136,4 @@
       def configure(ctx):
           ctx.set_verify(SSL.VERIFY_PEER, callback)
     expect_no_match: true
-  description: "OpenSSL.SSL.Context.set_verify(VERIFY_NONE, ...) — disables certificate verification."
+  description: "OpenSSL.SSL.Context.set_verify(VERIFY_NONE, ...) - disables certificate verification."

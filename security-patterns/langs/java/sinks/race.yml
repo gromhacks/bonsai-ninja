@@ -1,6 +1,6 @@
 # java race / TOCTOU sinks (T501).
 
-# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# TOCTOU check sites - pair with subsequent open/chmod use-sites
 # in source order to identify the race window.
 - id: java.toctou.files_exists
   enabled: true
@@ -21,7 +21,7 @@
             Files.exists(input);
           }
         }
-  description: "java.nio.file.Files.exists(path) — check site preceding Files.newBufferedReader is TOCTOU."
+  description: "java.nio.file.Files.exists(path) - check site preceding Files.newBufferedReader is TOCTOU."
 - id: java.toctou.file_canread
   enabled: true
   language: java
@@ -41,7 +41,7 @@
             File.canRead(input);
           }
         }
-  description: "java.io.File.canRead() — check site for TOCTOU."
+  description: "java.io.File.canRead() - check site for TOCTOU."
 - id: java.race.connection_commit_audit
   enabled: true
   language: java
@@ -64,7 +64,7 @@
           }
         }
       expect_match_text: [conn.commit]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.commit() — TOCTOU / transaction-after-error race-pair; a later prepared-statement execute or read on the same connection without a fresh begin runs outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.commit() - TOCTOU / transaction-after-error race-pair; a later prepared-statement execute or read on the same connection without a fresh begin runs outside the intended transaction window."
 - id: java.race.connection_rollback_audit
   enabled: true
   language: java
@@ -87,4 +87,4 @@
           }
         }
       expect_match_text: [conn.rollback]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.rollback() — transaction-after-error race-pair; subsequent statement.execute on the same connection persists writes the rollback was supposed to undo."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.rollback() - transaction-after-error race-pair; subsequent statement.execute on the same connection persists writes the rollback was supposed to undo."

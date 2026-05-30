@@ -31,7 +31,7 @@
         end
       end
     expect_no_match: true
-  description: ":erlang.binary_to_term/2 with [:safe] — still requires structural validation of attacker-controlled terms. Also covers merged aliases: elixir.deser.binary_to_term_unsafe_arity1, elixir.deser.binary_to_term_unsafe_opts."
+  description: ":erlang.binary_to_term/2 with [:safe] - still requires structural validation of attacker-controlled terms. Also covers merged aliases: elixir.deser.binary_to_term_unsafe_arity1, elixir.deser.binary_to_term_unsafe_opts."
 
 - id: elixir.deser.term_to_binary_untrusted
   enabled: false
@@ -45,7 +45,7 @@
     kind: call
     callee:
       regex: "^:erlang\\.term_to_binary$"
-  description: "Disabled — :erlang.term_to_binary is the encode direction and is not a sink on its own; kept for visibility when auditing round-trip flows that stash attacker data in caches."
+  description: "Disabled - :erlang.term_to_binary is the encode direction and is not a sink on its own; kept for visibility when auditing round-trip flows that stash attacker data in caches."
 
 - id: elixir.deser.erlport_decode
   enabled: true
@@ -79,7 +79,7 @@
         end
       end
     expect_no_match: true
-  description: ":erlport.decode/1 — decodes Python/Ruby pickles received over the bridge; unsafe if the peer is attacker-influenced."
+  description: ":erlport.decode/1 - decodes Python/Ruby pickles received over the bridge; unsafe if the peer is attacker-influenced."
 
   imports:
   - Erlport
@@ -115,6 +115,6 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Session.COOKIE.get — when `:signing_salt` / `:encryption_salt` are weak or reused, attacker-crafted cookies get decoded into Elixir terms."
+  description: "Plug.Session.COOKIE.get - when `:signing_salt` / `:encryption_salt` are weak or reused, attacker-crafted cookies get decoded into Elixir terms."
   imports:
   - Plug

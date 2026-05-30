@@ -26,4 +26,4 @@
         return mail("a@x", "subject", "body", "From: noreply@example.com");
       }
     expect_no_match: true
-  description: "PHP `mail($to, $subject, $message, $additional_headers)` — CR/LF in `$additional_headers` injects new headers (CC/BCC/MIME)."
+  description: "PHP `mail($to, $subject, $message, $additional_headers)` - CR/LF in `$additional_headers` injects new headers (CC/BCC/MIME)."

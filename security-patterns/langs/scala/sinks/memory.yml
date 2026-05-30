@@ -3,7 +3,7 @@
 # the block is the audit-interesting shape. These rules fire on the
 # *use-after-transition* call (read / get / etc.) and gate on the
 # adapter-emitted lifecycle state via the `requires_state` engine
-# constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+# constraint (P6 - see docs/contributing/analysis-roadmap.mdx).
 
 - id: scala.memory.closeable_close
   enabled: true
@@ -40,7 +40,7 @@
         }
       }
     expect_no_match: true
-  description: "Use-after-close — `<Closeable>.read()` on a stream whose preceding `.close()` released the underlying resource. Subsequent reads throw IOException at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state, so explicit-close-then-reuse is flagged while RAII `Using.resource { }` blocks stay silent."
+  description: "Use-after-close - `<Closeable>.read()` on a stream whose preceding `.close()` released the underlying resource. Subsequent reads throw IOException at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state, so explicit-close-then-reuse is flagged while RAII `Using.resource { }` blocks stay silent."
 - id: scala.memory.future_cancel
   enabled: true
   language: scala
@@ -76,7 +76,7 @@
         }
       }
     expect_no_match: true
-  description: "Use-after-cancel — `Future.get()` on a future whose preceding `.cancel()` invalidated the result. The awaited value is stale and the call throws CancellationException (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+  description: "Use-after-cancel - `Future.get()` on a future whose preceding `.cancel()` invalidated the result. The awaited value is stale and the call throws CancellationException (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
 - id: scala.memory.lock_unlock
   enabled: true
   language: scala
@@ -98,4 +98,4 @@
         }
       }
     expect_match_text: [lock.unlock]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. <Lock>.unlock() — subsequent guarded-region reads/writes without re-locking are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. <Lock>.unlock() - subsequent guarded-region reads/writes without re-locking are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

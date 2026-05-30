@@ -25,7 +25,7 @@
       import 'package:dart_core/dart_core.dart';
       void test() { RegExp(r"^[a-z]+$"); }
     expect_no_match: true
-  description: "RegExp(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "RegExp(tainted_pattern) - attacker-controlled regular expressions can trigger catastrophic backtracking."
   imports:
   - dart_core
   - dart_core/dart_core.dart

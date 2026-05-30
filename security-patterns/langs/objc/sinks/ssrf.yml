@@ -20,7 +20,7 @@
     code: |
       void test(void) { URLWithString(@"https://safe.example"); }
     expect_no_match: true
-  description: "NSURL +URLWithString: with tainted string — any subsequent HTTP fetch hits attacker-chosen host."
+  description: "NSURL +URLWithString: with tainted string - any subsequent HTTP fetch hits attacker-chosen host."
 
 - id: objc.ssrf.nsurlsession_data_task
   enabled: true
@@ -43,7 +43,7 @@
     code: |
       void test(void) { dataTaskWithRequest(@"https://safe.example"); }
     expect_no_match: true
-  description: "NSURLSession -dataTask/-downloadTask/-streamTask — outbound HTTP(S) to tainted URL."
+  description: "NSURLSession -dataTask/-downloadTask/-streamTask - outbound HTTP(S) to tainted URL."
 
 - id: objc.ssrf.nsurlconnection
   enabled: true
@@ -66,7 +66,7 @@
     code: |
       void test(void) { sendSynchronousRequest(@"https://safe.example"); }
     expect_no_match: true
-  description: "NSURLConnection (deprecated) +sendSynchronousRequest: / +sendAsynchronousRequest: / +connectionWithRequest: — outbound HTTP to tainted request."
+  description: "NSURLConnection (deprecated) +sendSynchronousRequest: / +sendAsynchronousRequest: / +connectionWithRequest: - outbound HTTP to tainted request."
 
 - id: objc.ssrf.afnetworking_http
   enabled: true
@@ -115,7 +115,7 @@
     code: |
       void test(void) { CFURLCreateWithString(NULL, CFSTR("https://safe.example"), NULL); }
     expect_no_match: true
-  description: "CoreFoundation CFURLCreateWithString / CFURLCreateWithBytes — tainted string yields attacker-chosen URL (SSRF) or file:// path (path injection). Pair with downstream URL-load sinks."
+  description: "CoreFoundation CFURLCreateWithString / CFURLCreateWithBytes - tainted string yields attacker-chosen URL (SSRF) or file:// path (path injection). Pair with downstream URL-load sinks."
 
 - id: objc.ssrf.nsmutableurlrequest_set_url
   enabled: true
@@ -138,7 +138,7 @@
     code: |
       void test(void) { NSMutableURLRequest.URL = @"https://safe.example"; }
     expect_no_match: true
-  description: "NSMutableURLRequest .URL / .HTTPBody / .HTTPBodyStream assignment with tainted value — controls outbound request target/body. Constrained to URL-request receivers."
+  description: "NSMutableURLRequest .URL / .HTTPBody / .HTTPBodyStream assignment with tainted value - controls outbound request target/body. Constrained to URL-request receivers."
 
 - id: objc.ssrf.webview_load_request
   enabled: true
@@ -161,7 +161,7 @@
     code: |
       void test(void) { [UIWebView loadRequest:@"https://safe.example"]; }
     expect_no_match: true
-  description: "UIWebView / WKWebView -loadRequest: — navigates the webview to a tainted URL request (SSRF on file:// / https:// / about:blank). Constrained to webview receivers."
+  description: "UIWebView / WKWebView -loadRequest: - navigates the webview to a tainted URL request (SSRF on file:// / https:// / about:blank). Constrained to webview receivers."
 
 - id: objc.ssrf.webview_load_file_url
   enabled: true
@@ -186,4 +186,4 @@
         webview_load_file_url("safe");
       }
     expect_no_match: true
-  description: "WKWebView -loadFileURL:allowingReadAccessToURL: — file:// load with tainted path can read arbitrary sandbox files when allowingReadAccessToURL is broad. Constrained to webview receivers."
+  description: "WKWebView -loadFileURL:allowingReadAccessToURL: - file:// load with tainted path can read arbitrary sandbox files when allowingReadAccessToURL is broad. Constrained to webview receivers."

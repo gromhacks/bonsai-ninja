@@ -21,7 +21,7 @@
       \ {\n  client.CreateChatCompletion(ctx, req)\n}\n"
     expect_match_text:
     - client.CreateChatCompletion
-  description: "client.CreateChatCompletion(ctx, request) \u2014 tainted prompt/tool\
+  description: "client.CreateChatCompletion(ctx, request) - tainted prompt/tool\
     \ content reaches an LLM instruction surface."
 - id: go.llm.anthropic_messages_new
   enabled: true
@@ -47,7 +47,7 @@
       \ {\n  client.Messages.New(ctx, params)\n}\n"
     expect_match_text:
     - client.Messages.New
-  description: "client.Messages.New(ctx, params) \u2014 tainted prompt content can\
+  description: "client.Messages.New(ctx, params) - tainted prompt content can\
     \ steer model output or tool calls."
 - id: go.llm.bedrock_invoke_model
   enabled: true
@@ -72,5 +72,5 @@
       \ *bedrockruntime.InvokeModelInput) {\n  bedrock.InvokeModel(ctx, input)\n}\n"
     expect_match_text:
     - bedrock.InvokeModel
-  description: "bedrock.InvokeModel(ctx, input) \u2014 tainted model body reaches\
+  description: "bedrock.InvokeModel(ctx, input) - tainted model body reaches\
     \ a foundation-model execution surface."

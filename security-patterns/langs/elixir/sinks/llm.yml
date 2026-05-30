@@ -35,7 +35,7 @@
         end
       end
     expect_no_match: true
-  description: "OpenAI.chat_completion — tainted prompt content reaches an LLM instruction / tool surface."
+  description: "OpenAI.chat_completion - tainted prompt content reaches an LLM instruction / tool surface."
 
 - id: elixir.llm.anthropic_messages_create
   enabled: true
@@ -71,7 +71,7 @@
         end
       end
     expect_no_match: true
-  description: "Anthropic.Messages.create — tainted prompt content reaches Claude."
+  description: "Anthropic.Messages.create - tainted prompt content reaches Claude."
 
   imports:
   - Anthropic
@@ -108,6 +108,6 @@
         end
       end
     expect_no_match: true
-  description: "ExAws.Bedrock.invoke_model — tainted request body steers the underlying foundation model."
+  description: "ExAws.Bedrock.invoke_model - tainted request body steers the underlying foundation model."
   imports:
   - Ex_aws_bedrock

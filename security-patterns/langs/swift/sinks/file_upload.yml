@@ -24,7 +24,7 @@
     code: |
       func test() { writeFile("safe", "safe") }
     expect_no_match: true
-  description: "Vapor Request.fileio.writeFile(_:at:) — flag if filename/path tainted."
+  description: "Vapor Request.fileio.writeFile(_:at:) - flag if filename/path tainted."
 
 - id: swift.upload.vapor_fileio_collectfile
   enabled: true
@@ -51,7 +51,7 @@
     code: |
       func test() { collectFile("safe") }
     expect_no_match: true
-  description: "Vapor Request.fileio.collectFile(at:) — reads file; flag if path tainted."
+  description: "Vapor Request.fileio.collectFile(at:) - reads file; flag if path tainted."
 
 - id: swift.upload.urlsession_uploadtask
   enabled: true
@@ -74,7 +74,7 @@
     code: |
       func test() { uploadTask("safe") }
     expect_no_match: true
-  description: "URLSession.uploadTask — flag if URL/path tainted."
+  description: "URLSession.uploadTask - flag if URL/path tainted."
 
 - id: swift.upload.multipart_file_write
   enabled: false
@@ -89,4 +89,4 @@
     kind: read
     target:
       name: filename
-  description: "Disabled — Multipart File.filename read is ubiquitous; enable with taint flow to path sink."
+  description: "Disabled - Multipart File.filename read is ubiquitous; enable with taint flow to path sink."

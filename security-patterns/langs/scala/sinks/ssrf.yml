@@ -19,7 +19,7 @@
   - name: url open connection
     code: "import java.net._\nobject App {\n  def handle(input: String): Unit = {\n\
       \    URL.openConnection(input)\n  }\n}\n"
-  description: "Disabled — URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+  description: "Disabled - URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: scala.ssrf.apache_httpget_ctor
   enabled: true
   language: scala
@@ -47,7 +47,7 @@
       \ Any = {\n    new HttpGet(\"https://example.test/\")\n  }\n}\nclass HttpGet(args:\
       \ Any*)\n"
     expect_no_match: true
-  description: "Apache HttpClient HttpGet(url) \u2014 request target controlled by\
+  description: "Apache HttpClient HttpGet(url) - request target controlled by\
     \ attacker input."
 - id: scala.ssrf.apache_httpclient_execute
   enabled: true
@@ -77,7 +77,7 @@
       object App {\n  def handle(request: HttpGet): Unit = {\n    HttpClient.execute(\"\
       safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Apache HttpClient.execute(HttpGet) \u2014 dispatches a request whose\
+  description: "Apache HttpClient.execute(HttpGet) - dispatches a request whose\
     \ target may be attacker-controlled."
 - id: scala.ssrf.resttemplate_exchange
   enabled: true
@@ -107,7 +107,7 @@
       object App {\n  def handle(url: String): Unit = {\n    RestTemplate.exchange(\"\
       https://example.test/\")\n  }\n}\n"
     expect_no_match: true
-  description: "Spring RestTemplate.exchange(url, ...) \u2014 server-side request\
+  description: "Spring RestTemplate.exchange(url, ...) - server-side request\
     \ to attacker-controlled URL."
 - id: scala.ssrf.webclient_uri
   enabled: true
@@ -136,7 +136,7 @@
       \  def handle(url: String): Unit = {\n    WebClient.uri(\"https://example.test/\"\
       )\n  }\n}\n"
     expect_no_match: true
-  description: "Spring WebClient.uri(url) \u2014 reactive server-side request target\
+  description: "Spring WebClient.uri(url) - reactive server-side request target\
     \ controlled by attacker input."
 - id: scala.ssrf.webclient_retrieve
   enabled: false
@@ -160,7 +160,7 @@
       \  }\n}\nclass RequestSpec {\n  def retrieve(args: Any*): Any = null\n}\n"
     expect_match_text:
     - requestSpec.retrieve
-  description: "Disabled — WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
+  description: "Disabled - WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
 - id: scala.ssrf.akka_http_single_request
   enabled: true
   language: scala
@@ -219,7 +219,7 @@
       \ def handle(input: String): Unit = {\n    HttpRequest.apply(\"safe\")\n  }\n\
       }\n"
     expect_no_match: true
-  description: "HttpRequest(uri = tainted) \u2014 constructs SSRF request; chain to\
+  description: "HttpRequest(uri = tainted) - constructs SSRF request; chain to\
     \ singleRequest."
 - id: scala.ssrf.sttp_send
   enabled: false
@@ -240,7 +240,7 @@
   - name: generated shape example
     code: "import sttp._\nobject App {\n  def handle(input: String): Unit = {\n  \
       \  basicRequest.send(input)\n  }\n}\n"
-  description: "sttp basicRequest.get(uri).send() \u2014 fires HTTP request to attacker\
+  description: "sttp basicRequest.get(uri).send() - fires HTTP request to attacker\
     \ URL."
   disabled_reason:
     code: over-broad
@@ -263,7 +263,7 @@
   - name: generated shape example
     code: "import sttp._\nobject App {\n  def handle(input: String): Unit = {\n  \
       \  quickRequest.send(input)\n  }\n}\n"
-  description: "sttp quickRequest.get(uri).send() \u2014 dispatches GET to tainted\
+  description: "sttp quickRequest.get(uri).send() - dispatches GET to tainted\
     \ URI; SSRF to internal services."
   disabled_reason:
     code: over-broad
@@ -295,7 +295,7 @@
     code: "import play.api.libs.ws._\nobject App {\n  def handle(input: String): Unit = {\n\
       \    WSClient.url(\"https://example.test/\")\n  }\n}\n"
     expect_no_match: true
-  description: "Play WSClient.url(tainted) \u2014 builds WSRequest; downstream .get/.post\
+  description: "Play WSClient.url(tainted) - builds WSRequest; downstream .get/.post\
     \ fire."
   imports:
   - play.api.libs.ws
@@ -325,7 +325,7 @@
     code: "import http4s._\n// uses http4s\nobject App {\n  def handle(input: String):\
       \ Unit = {\n    Client.expect(\"https://example.test/\")\n  }\n}\n"
     expect_no_match: true
-  description: "http4s Client.expect[T](uri) \u2014 fires HTTP request to tainted\
+  description: "http4s Client.expect[T](uri) - fires HTTP request to tainted\
     \ URI; SSRF (CWE-918)."
 - id: scala.ssrf.http4s_client_run
   enabled: true
@@ -353,7 +353,7 @@
     code: "import http4s._\nobject App {\n  def handle(input: String): Unit = {\n\
       \    Client.run(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "http4s Client.run(Request(uri)) \u2014 dispatches tainted request\
+  description: "http4s Client.run(Request(uri)) - dispatches tainted request\
     \ URI; classic SSRF vector."
 - id: scala.ssrf.http4s_client_fetch
   enabled: true
@@ -381,7 +381,7 @@
     code: "import http4s._\n// uses http4s\nobject App {\n  def handle(input: String):\
       \ Unit = {\n    Client.fetch(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "http4s Client.fetch(req)(handler) \u2014 executes tainted request;\
+  description: "http4s Client.fetch(req)(handler) - executes tainted request;\
     \ SSRF if req URI is user-controlled."
 - id: scala.ssrf.source_from_url
   enabled: true
@@ -411,7 +411,7 @@
     code: "// uses: scala-stdlib\nimport scala.io.Source\nobject App {\n  def fetch(url:\
       \ String): Unit = {\n    Source.fromURL(\"https://example.test/\")\n  }\n}\n"
     expect_no_match: true
-  description: "scala.io.Source.fromURL(tainted) \u2014 server-side fetch of attacker-controlled\
+  description: "scala.io.Source.fromURL(tainted) - server-side fetch of attacker-controlled\
     \ URL."
   imports:
   - scala.io.Source
@@ -445,7 +445,7 @@
       \ java.net.URI): Unit = {\n    Source.fromURI(\"https://example.test/\")\n \
       \ }\n}\n"
     expect_no_match: true
-  description: "scala.io.Source.fromURI(tainted) \u2014 server-side fetch of attacker-controlled\
+  description: "scala.io.Source.fromURI(tainted) - server-side fetch of attacker-controlled\
     \ URI."
   imports:
   - scala.io.Source
@@ -476,7 +476,7 @@
     code: "// uses: scalaj-http\nimport scalaj.http.Http\nobject App {\n  def fetch(url:\
       \ String): Unit = {\n    Http(\"https://example.test/\")\n  }\n}\n"
     expect_no_match: true
-  description: "scalaj-http Http(tainted URL) \u2014 constructs an outbound HTTP request\
+  description: "scalaj-http Http(tainted URL) - constructs an outbound HTTP request\
     \ target controlled by attacker input."
   imports:
   - scalaj
@@ -496,5 +496,5 @@
     kind: call
     callee:
       name: url
-  description: "Disabled \u2014 dispatch `url(tainted)` too ambiguous (ubiquitous\
+  description: "Disabled - dispatch `url(tainted)` too ambiguous (ubiquitous\
     \ `url` name); rely on HTTP singleRequest/expect."

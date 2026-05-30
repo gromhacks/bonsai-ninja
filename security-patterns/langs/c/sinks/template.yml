@@ -11,7 +11,7 @@
     kind: call
     callee:
       name: snprintf
-  description: "Disabled — format index varies; covered by format.yml."
+  description: "Disabled - format index varies; covered by format.yml."
 
 - id: c.template.mustach_mem
   enabled: true
@@ -73,7 +73,7 @@
         mustach_file("safe");
       }
     expect_no_match: true
-  description: "mustach_file — flag tainted path."
+  description: "mustach_file - flag tainted path."
 
 - id: c.template.mustach_render
   enabled: true
@@ -103,7 +103,7 @@
         mustach("safe");
       }
     expect_no_match: true
-  description: "mustach(tainted template) — rendering attacker-controlled template source can expose SSTI-like template expansion behavior."
+  description: "mustach(tainted template) - rendering attacker-controlled template source can expose SSTI-like template expansion behavior."
 
 - id: c.template.jsmn_parse
   enabled: false
@@ -118,7 +118,7 @@
     kind: call
     callee:
       name: jsmn_parse
-  description: "Disabled — jsmn is a JSON parser, not template."
+  description: "Disabled - jsmn is a JSON parser, not template."
 
 - id: c.template.libcurl_escape
   enabled: false
@@ -132,4 +132,4 @@
     kind: call
     callee:
       name: curl_easy_escape
-  description: "Disabled — curl_easy_escape sanitises URL, not template."
+  description: "Disabled - curl_easy_escape sanitises URL, not template."

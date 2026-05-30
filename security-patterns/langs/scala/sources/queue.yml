@@ -19,7 +19,7 @@
         def handle(record: String): Unit = {
         }
       }
-  description: "Alpakka Kafka ConsumerRecord — attacker-controlled message payload."
+  description: "Alpakka Kafka ConsumerRecord - attacker-controlled message payload."
 
   imports:
   - com

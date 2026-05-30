@@ -26,7 +26,7 @@
         return new GetObjectCommand({ Bucket: "app", Key: "reports/fixed.csv" });
       }
     expect_no_match: true
-  description: "new GetObjectCommand({Bucket, Key}) — tainted selector reads arbitrary S3 objects."
+  description: "new GetObjectCommand({Bucket, Key}) - tainted selector reads arbitrary S3 objects."
 
 - id: typescript.access.aws_put_object_command
   enabled: true
@@ -56,7 +56,7 @@
         return new PutObjectCommand({ Bucket: "app", Key: "reports/fixed.csv" });
       }
     expect_no_match: true
-  description: "new PutObjectCommand({Bucket, Key}) — tainted selector overwrites attacker-chosen S3 objects."
+  description: "new PutObjectCommand({Bucket, Key}) - tainted selector overwrites attacker-chosen S3 objects."
 
 - id: typescript.access.aws_get_secret_value_command
   enabled: true
@@ -86,7 +86,7 @@
         return new GetSecretValueCommand({ SecretId: "app/prod/db" });
       }
     expect_no_match: true
-  description: "new GetSecretValueCommand({SecretId}) — tainted secret id reads arbitrary secret material."
+  description: "new GetSecretValueCommand({SecretId}) - tainted secret id reads arbitrary secret material."
 
 - id: typescript.access.aws_invoke_command
   enabled: true
@@ -116,7 +116,7 @@
         return new InvokeCommand({ FunctionName: "fixed-worker" });
       }
     expect_no_match: true
-  description: "new InvokeCommand({FunctionName, Payload}) — tainted function selector invokes arbitrary Lambda targets."
+  description: "new InvokeCommand({FunctionName, Payload}) - tainted function selector invokes arbitrary Lambda targets."
 
 - id: typescript.access.azure_blob_download
   enabled: false
@@ -138,7 +138,7 @@
       function demo(input, req, obj) {
         return blobClient.downloadToBuffer(input);
       }
-  description: "Disabled — BlobClient.downloadToBuffer() reads from the receiver-selected blob; selector taint belongs on BlobClient construction."
+  description: "Disabled - BlobClient.downloadToBuffer() reads from the receiver-selected blob; selector taint belongs on BlobClient construction."
 
 - id: typescript.access.azure_blob_upload
   enabled: false
@@ -160,7 +160,7 @@
       function demo(input, req, obj) {
         return blobClient.uploadData(input);
       }
-  description: "Disabled — BlobClient.uploadData(data) uploads bytes to an already-selected blob client. The storage target is receiver construction, not this data argument."
+  description: "Disabled - BlobClient.uploadData(data) uploads bytes to an already-selected blob client. The storage target is receiver construction, not this data argument."
 
 - id: typescript.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -190,4 +190,4 @@
         return secretClient.accessSecretVersion({ name: "projects/app/secrets/db/versions/latest" });
       }
     expect_no_match: true
-  description: "SecretManagerServiceClient.accessSecretVersion — tainted resource name reads arbitrary secret versions."
+  description: "SecretManagerServiceClient.accessSecretVersion - tainted resource name reads arbitrary secret versions."

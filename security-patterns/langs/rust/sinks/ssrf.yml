@@ -26,7 +26,7 @@
           reqwest::get("https://example.com/status");
       }
     expect_no_match: true
-  description: "reqwest::get(url) — top-level fetch; tainted URL reaches internal network or attacker-chosen host."
+  description: "reqwest::get(url) - top-level fetch; tainted URL reaches internal network or attacker-chosen host."
 - id: rust.ssrf.reqwest_client_get
   enabled: true
   language: rust
@@ -55,7 +55,7 @@
           Client::get("https://example.com/status");
       }
     expect_no_match: true
-  description: "Client::get(url) — covers reqwest and hyper (same `[Client, get]` attribute chain). Tainted URL = SSRF."
+  description: "Client::get(url) - covers reqwest and hyper (same `[Client, get]` attribute chain). Tainted URL = SSRF."
 - id: rust.ssrf.reqwest_client_post
   enabled: true
   language: rust
@@ -84,7 +84,7 @@
           Client::post("https://example.com/submit");
       }
     expect_no_match: true
-  description: "reqwest::Client::post(url) — tainted URL = SSRF."
+  description: "reqwest::Client::post(url) - tainted URL = SSRF."
 - id: rust.ssrf.reqwest_client_request
   enabled: true
   language: rust
@@ -113,7 +113,7 @@
           Client::request(Method::GET, "https://example.com/status");
       }
     expect_no_match: true
-  description: "Client::request(...) — covers reqwest and hyper (same `[Client, request]` attribute chain). Tainted URL = SSRF."
+  description: "Client::request(...) - covers reqwest and hyper (same `[Client, request]` attribute chain). Tainted URL = SSRF."
 - id: rust.ssrf.hyper_client_get
   enabled: false
   disabled_reason:
@@ -127,7 +127,7 @@
     kind: call
     callee:
       attribute: [Client, get]
-  description: "Disabled — merged into rust.ssrf.reqwest_client_get (same `[Client, get]` attribute chain)."
+  description: "Disabled - merged into rust.ssrf.reqwest_client_get (same `[Client, get]` attribute chain)."
 - id: rust.ssrf.hyper_client_request
   enabled: false
   disabled_reason:
@@ -141,7 +141,7 @@
     kind: call
     callee:
       attribute: [Client, request]
-  description: "Disabled — merged into rust.ssrf.reqwest_client_request (same `[Client, request]` attribute chain)."
+  description: "Disabled - merged into rust.ssrf.reqwest_client_request (same `[Client, request]` attribute chain)."
 - id: rust.ssrf.ureq_get
   enabled: true
   language: rust
@@ -170,7 +170,7 @@
           ureq::get("https://example.com/status");
       }
     expect_no_match: true
-  description: "ureq::get(url) — blocking HTTP client; tainted URL = SSRF (no redirect-to-metadata-service check by default)."
+  description: "ureq::get(url) - blocking HTTP client; tainted URL = SSRF (no redirect-to-metadata-service check by default)."
 - id: rust.ssrf.surf_get
   enabled: true
   language: rust
@@ -199,7 +199,7 @@
           surf::get("https://example.com/status");
       }
     expect_no_match: true
-  description: "surf::get(url) — async HTTP client; tainted URL reaches arbitrary host / internal network."
+  description: "surf::get(url) - async HTTP client; tainted URL reaches arbitrary host / internal network."
 - id: rust.ssrf.isahc_get
   enabled: true
   language: rust
@@ -228,7 +228,7 @@
           isahc::get("https://example.com/status");
       }
     expect_no_match: true
-  description: "isahc::get(url) — tainted URL reaches arbitrary host."
+  description: "isahc::get(url) - tainted URL reaches arbitrary host."
 - id: rust.ssrf.awc_client_get
   enabled: true
   language: rust
@@ -257,7 +257,7 @@
           awc::Client::get("https://example.com/status");
       }
     expect_no_match: true
-  description: "awc (actix-web client) Client::get(url) — tainted URL = SSRF."
+  description: "awc (actix-web client) Client::get(url) - tainted URL = SSRF."
 - id: rust.ssrf.curl_easy_url
   enabled: true
   language: rust
@@ -286,4 +286,4 @@
           Easy::url("https://example.com/status");
       }
     expect_no_match: true
-  description: "curl::easy::Easy::url(tainted) — sets libcurl request URL."
+  description: "curl::easy::Easy::url(tainted) - sets libcurl request URL."

@@ -26,7 +26,7 @@
         io.open("data/report.txt")
       end
     expect_no_match: true
-  description: "io.open(path, mode) — reads/writes arbitrary filesystem path when tainted. Also covers merged aliases: lua.upload_io_open_client_filename."
+  description: "io.open(path, mode) - reads/writes arbitrary filesystem path when tainted. Also covers merged aliases: lua.upload_io_open_client_filename."
 
 - id: lua.path.io_lines
   enabled: true
@@ -53,7 +53,7 @@
         io.lines("data/report.txt")
       end
     expect_no_match: true
-  description: "io.lines(path) — reads an arbitrary path line-by-line."
+  description: "io.lines(path) - reads an arbitrary path line-by-line."
 
 - id: lua.path.os_remove
   enabled: true
@@ -80,7 +80,7 @@
         os.remove("tmp/session.lock")
       end
     expect_no_match: true
-  description: "os.remove(path) — deletes arbitrary filesystem path when tainted."
+  description: "os.remove(path) - deletes arbitrary filesystem path when tainted."
 
 - id: lua.path.os_rename_source
   enabled: true
@@ -107,7 +107,7 @@
         os.rename("tmp/in.dat", "tmp/out.dat")
       end
     expect_no_match: true
-  description: "os.rename(old, new) — attacker-controlled source path enables traversal."
+  description: "os.rename(old, new) - attacker-controlled source path enables traversal."
 - id: lua.path.os_rename_dest
   enabled: true
   language: lua
@@ -133,7 +133,7 @@
         os.rename("tmp/in.dat", "tmp/out.dat")
       end
     expect_no_match: true
-  description: "os.rename(old, new) — attacker-controlled destination path enables overwrite."
+  description: "os.rename(old, new) - attacker-controlled destination path enables overwrite."
 
 - id: lua.path.lfs_attributes
   enabled: false
@@ -148,7 +148,7 @@
     kind: call
     callee:
       attribute: [lfs, attributes]
-  description: "Disabled — lfs.attributes leaks filesystem metadata; enable with sensitive-path narrowing."
+  description: "Disabled - lfs.attributes leaks filesystem metadata; enable with sensitive-path narrowing."
 
 - id: lua.path.lfs_rmdir
   enabled: true
@@ -178,7 +178,7 @@
         lfs.rmdir("tmp/cache")
       end
     expect_no_match: true
-  description: "lfs.rmdir(path) — deletes arbitrary directory when tainted."
+  description: "lfs.rmdir(path) - deletes arbitrary directory when tainted."
 
 - id: lua.path.lfs_mkdir
   enabled: true
@@ -208,7 +208,7 @@
         lfs.mkdir("tmp/cache")
       end
     expect_no_match: true
-  description: "lfs.mkdir(path) — creates directories at attacker-controlled location."
+  description: "lfs.mkdir(path) - creates directories at attacker-controlled location."
 
 - id: lua.path.lfs_dir
   enabled: true
@@ -238,7 +238,7 @@
         lfs.dir("tmp/cache")
       end
     expect_no_match: true
-  description: "lfs.dir(path) — lists arbitrary directory contents."
+  description: "lfs.dir(path) - lists arbitrary directory contents."
 
 - id: lua.path.luv_fs_open
   enabled: true
@@ -268,7 +268,7 @@
         uv.fs_open("data/report.txt")
       end
     expect_no_match: true
-  description: "libuv uv.fs_open (lua-luv) — opens arbitrary path."
+  description: "libuv uv.fs_open (lua-luv) - opens arbitrary path."
 
 - id: lua.path.luv_fs_unlink
   enabled: true
@@ -298,7 +298,7 @@
         uv.fs_unlink("tmp/session.lock")
       end
     expect_no_match: true
-  description: "libuv uv.fs_unlink — deletes arbitrary path."
+  description: "libuv uv.fs_unlink - deletes arbitrary path."
 
 - id: lua.path.luv_fs_rename_source
   enabled: true
@@ -328,7 +328,7 @@
         uv.fs_rename("tmp/in.dat", "tmp/out.dat")
       end
     expect_no_match: true
-  description: "libuv uv.fs_rename — tainted source path moves arbitrary files."
+  description: "libuv uv.fs_rename - tainted source path moves arbitrary files."
 - id: lua.path.luv_fs_rename_dest
   enabled: true
   language: lua
@@ -357,4 +357,4 @@
         uv.fs_rename("tmp/in.dat", "tmp/out.dat")
       end
     expect_no_match: true
-  description: "libuv uv.fs_rename — tainted destination path overwrites arbitrary files."
+  description: "libuv uv.fs_rename - tainted destination path overwrites arbitrary files."

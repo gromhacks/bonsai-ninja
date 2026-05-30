@@ -18,7 +18,7 @@
           ObjectInputStream.readObject(input)
         }
       }
-  description: "Disabled — ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
+  description: "Disabled - ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
 
 - id: kotlin.deser.xstream_fromxml
   enabled: true
@@ -52,7 +52,7 @@
       }
       }
     expect_no_match: true
-  description: XStream.fromXML — CVE-2021-39140 family.
+  description: XStream.fromXML - CVE-2021-39140 family.
 - id: kotlin.deser.jackson_enable_default_typing
   enabled: true
   language: kotlin
@@ -74,7 +74,7 @@
           ObjectMapper.enableDefaultTyping(input)
         }
       }
-  description: Jackson enableDefaultTyping — gadget-chain RCE.
+  description: Jackson enableDefaultTyping - gadget-chain RCE.
 - id: kotlin.deser.xmldecoder
   enabled: false
   disabled_reason:
@@ -95,7 +95,7 @@
           XMLDecoder.readObject(input)
         }
       }
-  description: "Disabled — XMLDecoder.readObject() executes XML supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
+  description: "Disabled - XMLDecoder.readObject() executes XML supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
 - id: kotlin.deser.snake_yaml
   enabled: true
   language: kotlin
@@ -128,7 +128,7 @@
       }
       }
     expect_no_match: true
-  description: SnakeYAML Yaml.load — constructor chain RCE.
+  description: SnakeYAML Yaml.load - constructor chain RCE.
 - id: kotlin.deser.kryo_readclassandobject
   enabled: true
   language: kotlin
@@ -161,7 +161,7 @@
       }
       }
     expect_no_match: true
-  description: Kryo readClassAndObject — unsafe with untrusted input.
+  description: Kryo readClassAndObject - unsafe with untrusted input.
 - id: kotlin.deser.hessian_readobject
   enabled: false
   disabled_reason:
@@ -184,7 +184,7 @@
           HessianInput.readObject(input)
         }
       }
-  description: "Disabled — HessianInput.readObject() has no payload argument; needs receiver state showing the HessianInput wraps untrusted bytes."
+  description: "Disabled - HessianInput.readObject() has no payload argument; needs receiver state showing the HessianInput wraps untrusted bytes."
 - id: kotlin.deser.jackson_readvalue
   enabled: true
   language: kotlin
@@ -217,7 +217,7 @@
       }
       }
     expect_no_match: true
-  description: "ObjectMapper.readValue — RCE when polymorphic default typing enabled."
+  description: "ObjectMapper.readValue - RCE when polymorphic default typing enabled."
 - id: kotlin.deser.kotlinx_decodefromstring
   enabled: false
   disabled_reason:
@@ -231,7 +231,7 @@
     kind: call
     callee:
       attribute: [Json, decodeFromString]
-  description: "Disabled — kotlinx.serialization Json.decodeFromString is safe for typed @Serializable classes; only dangerous with polymorphism/open classes."
+  description: "Disabled - kotlinx.serialization Json.decodeFromString is safe for typed @Serializable classes; only dangerous with polymorphism/open classes."
 
 - id: kotlin.deser.kotlinx_polymorphic_decode
   enabled: true
@@ -267,7 +267,7 @@
         }
       }
     expect_no_match: true
-  description: "kotlinx.serialization PolymorphicSerializer.deserialize — class discriminator is attacker-controlled; can instantiate any registered subclass."
+  description: "kotlinx.serialization PolymorphicSerializer.deserialize - class discriminator is attacker-controlled; can instantiate any registered subclass."
 
   imports:
   - org
@@ -297,7 +297,7 @@
         fun activateDefaultTyping(vararg args: Any?) {}
       }
     expect_match_text: [mapper.activateDefaultTyping]
-  description: "Jackson ObjectMapper.activateDefaultTyping(...) — enables polymorphic deserialization; dangerous with permissive subtype validators or untrusted JSON."
+  description: "Jackson ObjectMapper.activateDefaultTyping(...) - enables polymorphic deserialization; dangerous with permissive subtype validators or untrusted JSON."
 
 - id: kotlin.deser.jackson_enabledefaulttyping_with_as
   enabled: true
@@ -320,7 +320,7 @@
           ObjectMapper.enableDefaultTypingAsProperty(input)
         }
       }
-  description: "Jackson ObjectMapper.enableDefaultTypingAsProperty — same gadget-chain RCE surface as enableDefaultTyping."
+  description: "Jackson ObjectMapper.enableDefaultTypingAsProperty - same gadget-chain RCE surface as enableDefaultTyping."
 
 - id: kotlin.deser.msgpack_messagepack_read
   enabled: true
@@ -355,7 +355,7 @@
       }
       }
     expect_no_match: true
-  description: "msgpack-java MessagePack.read(...) — deserializes untrusted MessagePack bytes into application objects."
+  description: "msgpack-java MessagePack.read(...) - deserializes untrusted MessagePack bytes into application objects."
 
 - id: kotlin.deser.msgpack_unpacker_read
   enabled: true
@@ -390,7 +390,7 @@
       }
       }
     expect_no_match: true
-  description: "msgpack-java Unpacker.read(...) — typed object materialization from attacker-controlled MessagePack bytes."
+  description: "msgpack-java Unpacker.read(...) - typed object materialization from attacker-controlled MessagePack bytes."
 
 - id: kotlin.deser.msgpack_messageunpacker_unpackvalue
   enabled: true
@@ -425,7 +425,7 @@
       }
       }
     expect_no_match: true
-  description: "msgpack-core MessageUnpacker.unpackValue(...) — parses attacker-controlled MessagePack payloads for downstream object mapping."
+  description: "msgpack-core MessageUnpacker.unpackValue(...) - parses attacker-controlled MessagePack payloads for downstream object mapping."
 
 - id: kotlin.deser.poi_xssfworkbook_stream
   enabled: false
@@ -452,6 +452,6 @@
       }
       class XSSFWorkbook(vararg args: Any?)
     expect_match_text: [XSSFWorkbook]
-  description: "Disabled — Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  description: "Disabled - Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
   imports:
   - org

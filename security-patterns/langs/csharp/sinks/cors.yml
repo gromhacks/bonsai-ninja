@@ -17,4 +17,4 @@
       using Microsoft.AspNetCore.Cors;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AllowAnyOrigin(input); } }
   description: |-
-    ASP.NET Core CORS policy.AllowAnyOrigin() — wildcard allow-all.
+    ASP.NET Core CORS policy.AllowAnyOrigin() - wildcard allow-all.

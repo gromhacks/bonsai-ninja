@@ -20,7 +20,7 @@
   - name: arg tainted literal negative
     code: "class App {\n  void handle(String input) throws Exception {\n    ScriptEngine.eval(\"safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "javax.script ScriptEngine.eval — Nashorn / Rhino / GraalJS RCE."
+  description: "javax.script ScriptEngine.eval - Nashorn / Rhino / GraalJS RCE."
 - id: java.eval.compiledscript_eval
   enabled: false
   disabled_reason:
@@ -36,7 +36,7 @@
       attribute:
       - CompiledScript
       - eval
-  description: "Disabled — CompiledScript.eval() executes code compiled earlier; needs receiver state from a tainted compile step, not an eval argument."
+  description: "Disabled - CompiledScript.eval() executes code compiled earlier; needs receiver state from a tainted compile step, not an eval argument."
 - id: java.eval.scriptengine_manager_getengine
   enabled: false
   disabled_reason:
@@ -52,7 +52,7 @@
       attribute:
       - ScriptEngineManager
       - getEngineByName
-  description: "Disabled — factory alone is informational; flag ScriptEngine.eval instead."
+  description: "Disabled - factory alone is informational; flag ScriptEngine.eval instead."
 - id: java.eval.beanshell_eval
   enabled: true
   language: java
@@ -179,7 +179,7 @@
       attribute:
       - Method
       - invoke
-  description: "Disabled — reflection.Method.invoke; dangerous only when method-name tainted."
+  description: "Disabled - reflection.Method.invoke; dangerous only when method-name tainted."
 - id: java.eval.class_forname
   enabled: true
   language: java
@@ -207,7 +207,7 @@
         }
       }
     expect_no_match: true
-  description: "Class.forName(tainted) — arbitrary class load."
+  description: "Class.forName(tainted) - arbitrary class load."
 - id: java.eval.classloader_loadclass
   enabled: true
   language: java
@@ -400,7 +400,7 @@
           SpelExpressionParser.parseExpression(input);
         }
       }
-  description: "Disabled duplicate — SpEL template parsing is classified by canonical java.template.spel_parseexpression as SSTI CWE-1336."
+  description: "Disabled duplicate - SpEL template parsing is classified by canonical java.template.spel_parseexpression as SSTI CWE-1336."
   imports:
   - org
 - id: java.eval.spel_parser_parse
@@ -429,7 +429,7 @@
           ExpressionParser.parseExpression(input);
         }
       }
-  description: "Disabled duplicate — SpEL template parsing is classified by canonical java.template.spel_parseexpression as SSTI CWE-1336."
+  description: "Disabled duplicate - SpEL template parsing is classified by canonical java.template.spel_parseexpression as SSTI CWE-1336."
   imports:
   - org
 - id: java.eval.spel_parseexpression_instance
@@ -462,7 +462,7 @@
       }
     expect_match_text:
     - parser.parseExpression
-  description: "Disabled broad duplicate — canonical java.template.spel_parseexpression classifies parser.parseExpression(template) as SSTI CWE-1336."
+  description: "Disabled broad duplicate - canonical java.template.spel_parseexpression classifies parser.parseExpression(template) as SSTI CWE-1336."
   imports:
   - org
 - id: java.eval.ognl_getvalue
@@ -504,7 +504,7 @@
         }
       }
     expect_no_match: true
-  description: "OGNL Ognl.getValue — Struts2 RCE family. Merged collision aliases: java.template.spel_getvalue."
+  description: "OGNL Ognl.getValue - Struts2 RCE family. Merged collision aliases: java.template.spel_getvalue."
   aliases:
   - java.template.spel_getvalue
 - id: java.eval.ognl_parseexpression
@@ -739,7 +739,7 @@
         }
       }
     expect_no_match: true
-  description: "GroovyShell.run(tainted script) — compiles and executes caller-controlled Groovy code."
+  description: "GroovyShell.run(tainted script) - compiles and executes caller-controlled Groovy code."
 - id: java.eval.groovy_eval_me
   enabled: true
   language: java
@@ -778,4 +778,4 @@
         }
       }
     expect_no_match: true
-  description: "groovy.util.Eval.me(tainted expression) — evaluates caller-controlled Groovy code."
+  description: "groovy.util.Eval.me(tainted expression) - evaluates caller-controlled Groovy code."

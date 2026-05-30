@@ -23,7 +23,7 @@
       import SwiftJWT // SwiftJWT
       func test() { JWT.decode("eyJhbGciOiJIUzI1NiJ9.safe.sig") }
     expect_no_match: true
-  description: "JWT.decode — covers SwiftJWT and JWTDecode.swift (same `[JWT, decode]`
+  description: "JWT.decode - covers SwiftJWT and JWTDecode.swift (same `[JWT, decode]`
     attribute chain). Flag with non-pinned / missing verifier."
 
 - id: swift.jwt.jwtkit_verifier_unverified
@@ -43,7 +43,7 @@
     code: |
       import JWTKit
       func test() { let input = "x"; let amount = 1; JWTSigners.unverified(input) }
-  description: "JWTKit JWTSigners.unverified — explicit no-verify."
+  description: "JWTKit JWTSigners.unverified - explicit no-verify."
 
 - id: swift.jwt.jose_swift_unverified
   enabled: true
@@ -69,7 +69,7 @@
       import JOSESwift
       func test() { JWS("eyJhbGciOiJIUzI1NiJ9.safe.sig") }
     expect_no_match: true
-  description: "JOSESwift JWS(compactSerialization:) — flag if not subsequently verified."
+  description: "JOSESwift JWS(compactSerialization:) - flag if not subsequently verified."
 
 - id: swift.jwt.jwtdecode_decode
   enabled: false
@@ -84,7 +84,7 @@
     kind: call
     callee:
       attribute: [JWT, decode]
-  description: "Disabled — merged into swift.jwt.swiftjwt_decode (same `[JWT, decode]`
+  description: "Disabled - merged into swift.jwt.swiftjwt_decode (same `[JWT, decode]`
     attribute chain)."
 
 - id: swift.jwt.jwtkit_verify_none
@@ -111,4 +111,4 @@
       import JWTKit
       func test() { unsafeDecode("eyJhbGciOiJub25lIn0.safe.") }
     expect_no_match: true
-  description: "JWTKit unsafeDecode — skips signature verification."
+  description: "JWTKit unsafeDecode - skips signature verification."

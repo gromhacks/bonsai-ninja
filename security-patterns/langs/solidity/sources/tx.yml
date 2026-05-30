@@ -5,12 +5,12 @@
 # `msg.value`, `msg.data`, `msg.sig`, `tx.origin`, `tx.gasprice` reach
 # the dataflow facts as `read target: name=<field>` because the v1
 # adapter does not yet emit a chained attribute fact for the implicit
-# `msg`/`tx` magic globals (they are not declared variables — they are
+# `msg`/`tx` magic globals (they are not declared variables - they are
 # language built-ins). Bare-name reads against `sender`, `origin`,
 # `gasprice` are safe: those identifiers are effectively reserved for
 # the magic globals in idiomatic Solidity. Bare-name reads against
-# `value`, `data`, `sig` are NOT safe — they collide with ordinary
-# parameters/locals — and are therefore disabled by default.
+# `value`, `data`, `sig` are NOT safe - they collide with ordinary
+# parameters/locals - and are therefore disabled by default.
 - id: solidity.msg.sender
   enabled: true
   language: solidity
@@ -26,7 +26,7 @@
     code: |
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(msg.sender); } }
-  description: "msg.sender — the EOA/contract that made the current call. Authorised input for authz comparisons but tainted for identity-derived logic."
+  description: "msg.sender - the EOA/contract that made the current call. Authorised input for authz comparisons but tainted for identity-derived logic."
 - id: solidity.msg.value
   enabled: false
   disabled_reason:
@@ -39,7 +39,7 @@
     kind: read
     target:
       name: value
-  description: "Disabled — FP-prone. Bare name 'value' fires on every variable named value in Solidity (ERC20 transfer args etc). Re-enable with attribute chain [msg, value]."
+  description: "Disabled - FP-prone. Bare name 'value' fires on every variable named value in Solidity (ERC20 transfer args etc). Re-enable with attribute chain [msg, value]."
 - id: solidity.msg.data
   enabled: false
   disabled_reason:
@@ -52,7 +52,7 @@
     kind: read
     target:
       name: data
-  description: "Disabled — FP-prone. Bare name 'data' fires on every variable named data. Re-enable with attribute chain [msg, data]."
+  description: "Disabled - FP-prone. Bare name 'data' fires on every variable named data. Re-enable with attribute chain [msg, data]."
 - id: solidity.msg.sig
   enabled: false
   disabled_reason:
@@ -64,7 +64,7 @@
     kind: read
     target:
       name: sig
-  description: "Disabled — msg.sig is the 4-byte selector; only interesting with target-fn analysis and overlaps with field name `sig` on signature structs."
+  description: "Disabled - msg.sig is the 4-byte selector; only interesting with target-fn analysis and overlaps with field name `sig` on signature structs."
 - id: solidity.tx.origin
   enabled: true
   language: solidity
@@ -79,7 +79,7 @@
     code: |
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(tx.origin); } }
-  description: "tx.origin — the original external EOA. Auth-bypass-prone: phishing contract relays a victim call so msg.sender != tx.origin, and tx.origin == victim. Never use for authorisation; flag any flow into a require/comparison."
+  description: "tx.origin - the original external EOA. Auth-bypass-prone: phishing contract relays a victim call so msg.sender != tx.origin, and tx.origin == victim. Never use for authorisation; flag any flow into a require/comparison."
 - id: solidity.tx.gasprice
   enabled: true
   language: solidity
@@ -94,7 +94,7 @@
     code: |
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(tx.gasprice); } }
-  description: "tx.gasprice — caller-supplied gas price; unsafe for ordering/fee logic."
+  description: "tx.gasprice - caller-supplied gas price; unsafe for ordering/fee logic."
 - id: solidity.openzeppelin.context_msg_sender
   enabled: true
   language: solidity
@@ -112,7 +112,7 @@
       pragma solidity ^0.8.0;
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { _msgSender(input); } }
-  description: "OZ Context._msgSender() — EIP-2771 meta-tx-aware msg.sender wrapper; tainted equivalently to msg.sender, plus the trusted-forwarder edge."
+  description: "OZ Context._msgSender() - EIP-2771 meta-tx-aware msg.sender wrapper; tainted equivalently to msg.sender, plus the trusted-forwarder edge."
 - id: solidity.openzeppelin.context_msg_data
   enabled: true
   language: solidity
@@ -130,4 +130,4 @@
       pragma solidity ^0.8.0;
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { _msgData(input); } }
-  description: "OZ Context._msgData() — EIP-2771 meta-tx-aware msg.data wrapper."
+  description: "OZ Context._msgData() - EIP-2771 meta-tx-aware msg.data wrapper."

@@ -36,7 +36,7 @@
         tmpl.Parse("Hello {{ .Name }}")
       }
     expect_no_match: true
-  description: "text/template Template.Parse(tainted) — SSTI; template with .Funcs gives RCE. Merged collision aliases: go.template.raymond_parse."
+  description: "text/template Template.Parse(tainted) - SSTI; template with .Funcs gives RCE. Merged collision aliases: go.template.raymond_parse."
   aliases:
   - go.template.raymond_parse
 - id: go.template.text_template_parsefiles
@@ -78,7 +78,7 @@
         template.ParseFiles("views/index.tmpl")
       }
     expect_no_match: true
-  description: "template.ParseFiles(tainted path) — loads attacker-picked template file; combines path-traversal + SSTI."
+  description: "template.ParseFiles(tainted path) - loads attacker-picked template file; combines path-traversal + SSTI."
 - id: go.template.text_template_new_parse
   enabled: false
   disabled_reason:
@@ -108,7 +108,7 @@
         value := "value"
         template.New("{{ user }}")
       }
-  description: "Disabled — text/template.New(name) alone does not parse attacker-controlled template source. Re-enable only with multi-call correlation that proves a later Parse/ParseFiles consumes tainted template content."
+  description: "Disabled - text/template.New(name) alone does not parse attacker-controlled template source. Re-enable only with multi-call correlation that proves a later Parse/ParseFiles consumes tainted template content."
 - id: go.template.html_template_parsefiles
   enabled: true
   language: go
@@ -147,7 +147,7 @@
         htmltemplate.ParseFiles("views/index.tmpl")
       }
     expect_no_match: true
-  description: "html/template ParseFiles(tainted path) — tainted template source selection."
+  description: "html/template ParseFiles(tainted path) - tainted template source selection."
 - id: go.template.html_template_html
   enabled: false
   disabled_reason:
@@ -165,7 +165,7 @@
       attribute:
       - template
       - HTML
-  description: "Disabled duplicate — template.HTML trust-type conversion is classified in sinks/xss.yml as go.xss.html_template_html."
+  description: "Disabled duplicate - template.HTML trust-type conversion is classified in sinks/xss.yml as go.xss.html_template_html."
 - id: go.template.html_template_jsstr
   enabled: false
   disabled_reason:
@@ -183,7 +183,7 @@
       attribute:
       - template
       - JSStr
-  description: "Disabled duplicate — template.JSStr trust-type conversion is classified in sinks/xss.yml as go.xss.template_jsstr."
+  description: "Disabled duplicate - template.JSStr trust-type conversion is classified in sinks/xss.yml as go.xss.template_jsstr."
 - id: go.template.html_template_url
   enabled: true
   language: go
@@ -222,7 +222,7 @@
         template.URL("/safe")
       }
     expect_no_match: true
-  description: "html/template template.URL(tainted) — cast bypasses URL-context escaping; open-redirect / javascript: XSS."
+  description: "html/template template.URL(tainted) - cast bypasses URL-context escaping; open-redirect / javascript: XSS."
 - id: go.template.pongo2_fromstring
   enabled: true
   language: go
@@ -261,7 +261,7 @@
         pongo2.FromString("Hello {{ user }}")
       }
     expect_no_match: true
-  description: "pongo2.FromString(tainted) — Jinja-like SSTI; RCE via template sandbox escapes."
+  description: "pongo2.FromString(tainted) - Jinja-like SSTI; RCE via template sandbox escapes."
 - id: go.template.text_template_used_for_html
   enabled: false
   disabled_reason:
@@ -279,4 +279,4 @@
       attribute:
       - text/template
       - New
-  description: "text/template renders attacker input without HTML escaping. Use html/template for any web response. (High-FP — flag with care.)"
+  description: "text/template renders attacker input without HTML escaping. Use html/template for any web response. (High-FP - flag with care.)"

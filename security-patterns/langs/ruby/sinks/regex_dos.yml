@@ -26,4 +26,4 @@
         Regexp.new("^[a-z]+$")
       end
     expect_no_match: true
-  description: "Regexp.new(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "Regexp.new(tainted_pattern) - attacker-controlled regular expressions can trigger catastrophic backtracking."

@@ -1,7 +1,7 @@
 # Go deserialization sinks. gob can instantiate arbitrary registered
 # types from a tainted stream (gadget chain). YAML on tainted bytes is
 # dangerous because custom UnmarshalYAML implementations can run code.
-# JSON/XML/TOML/msgpack are type-bounded by default — kept disabled.
+# JSON/XML/TOML/msgpack are type-bounded by default - kept disabled.
 - id: go.deser.gob_newdecoder
   enabled: true
   language: go
@@ -41,7 +41,7 @@
         gob.NewDecoder(strings.NewReader("safe"))
       }
     expect_no_match: true
-  description: "encoding/gob.NewDecoder(tainted reader) — any registered concrete type can be instantiated; real gadget-chain risk."
+  description: "encoding/gob.NewDecoder(tainted reader) - any registered concrete type can be instantiated; real gadget-chain risk."
 
 - id: go.deser.gob_decoder_decode
   enabled: false
@@ -56,7 +56,7 @@
     kind: call
     callee:
       regex: "\\.Decode$"
-  description: "Disabled — Decoder.Decode(out) has no tainted data argument; needs receiver state from gob.NewDecoder(tainted reader)."
+  description: "Disabled - Decoder.Decode(out) has no tainted data argument; needs receiver state from gob.NewDecoder(tainted reader)."
 
 - id: go.deser.yaml_unmarshal
   enabled: true
@@ -93,7 +93,7 @@
         yaml.Unmarshal([]byte("name: alice"), &out)
       }
     expect_no_match: true
-  description: "yaml.Unmarshal(tainted, …) — custom UnmarshalYAML methods on the target type execute attacker-chosen logic."
+  description: "yaml.Unmarshal(tainted, ...) - custom UnmarshalYAML methods on the target type execute attacker-chosen logic."
 
 - id: go.deser.yaml_unmarshalstrict
   enabled: true
@@ -130,7 +130,7 @@
         yaml.UnmarshalStrict([]byte("name: alice"), &out)
       }
     expect_no_match: true
-  description: "yaml.UnmarshalStrict(tainted, …) — same exposure as Unmarshal; strictness does not prevent UnmarshalYAML execution."
+  description: "yaml.UnmarshalStrict(tainted, ...) - same exposure as Unmarshal; strictness does not prevent UnmarshalYAML execution."
 
 - id: go.deser.json_unmarshal
   enabled: false
@@ -145,7 +145,7 @@
     kind: call
     callee:
       attribute: [json, Unmarshal]
-  description: "Disabled — json.Unmarshal is type-bounded; enable when target has a risky custom UnmarshalJSON."
+  description: "Disabled - json.Unmarshal is type-bounded; enable when target has a risky custom UnmarshalJSON."
 
 - id: go.deser.xml_unmarshal
   enabled: false
@@ -160,7 +160,7 @@
     kind: call
     callee:
       attribute: [xml, Unmarshal]
-  description: "Disabled — encoding/xml is generally type-bounded; XXE is handled under sinks/xxe.yml."
+  description: "Disabled - encoding/xml is generally type-bounded; XXE is handled under sinks/xxe.yml."
 
 - id: go.deser.toml_unmarshal
   enabled: false
@@ -175,7 +175,7 @@
     kind: call
     callee:
       attribute: [toml, Unmarshal]
-  description: "Disabled — TOML is type-bounded."
+  description: "Disabled - TOML is type-bounded."
 
 - id: go.deser.msgpack_unmarshal
   enabled: false
@@ -190,4 +190,4 @@
     kind: call
     callee:
       attribute: [msgpack, Unmarshal]
-  description: "Disabled — msgpack is type-bounded."
+  description: "Disabled - msgpack is type-bounded."

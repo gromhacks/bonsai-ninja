@@ -11,7 +11,7 @@
     kind: call
     callee:
       name: handle
-  description: "Disabled — too broad (handle is ubiquitous); enable with ShouldQueue class constraint."
+  description: "Disabled - too broad (handle is ubiquitous); enable with ShouldQueue class constraint."
 
 - id: php.source.pheanstalk_reserve
   enabled: false
@@ -25,7 +25,7 @@
     kind: call
     callee:
       attribute: [Pheanstalk, reserve]
-  description: "Disabled — adapters index local receivers like `$pheanstalk->reserve()`, not Pheanstalk type facts; a bare `reserve` fallback would match unrelated APIs."
+  description: "Disabled - adapters index local receivers like `$pheanstalk->reserve()`, not Pheanstalk type facts; a bare `reserve` fallback would match unrelated APIs."
 
 - id: php.source.pheanstalk_watch
   enabled: false
@@ -39,7 +39,7 @@
     kind: call
     callee:
       attribute: [Pheanstalk, watch]
-  description: "Disabled — watch selects a tube; reserve is the source."
+  description: "Disabled - watch selects a tube; reserve is the source."
 
 - id: php.source.amqp_envelope_get_body
   enabled: false
@@ -53,7 +53,7 @@
     kind: call
     callee:
       attribute: [AMQPEnvelope, getBody]
-  description: "Disabled — adapters index local receivers like `$message->getBody()`, not AMQPEnvelope type facts; a bare `getBody` fallback would match unrelated APIs."
+  description: "Disabled - adapters index local receivers like `$message->getBody()`, not AMQPEnvelope type facts; a bare `getBody` fallback would match unrelated APIs."
 
 - id: php.source.sqs_message_body
   enabled: false
@@ -67,4 +67,4 @@
     kind: call
     callee:
       attribute: [Message, getBody]
-  description: "Disabled — adapters index local receivers like `$message->getBody()`, not SQS Message type facts; a bare `getBody` fallback would match unrelated APIs."
+  description: "Disabled - adapters index local receivers like `$message->getBody()`, not SQS Message type facts; a bare `getBody` fallback would match unrelated APIs."

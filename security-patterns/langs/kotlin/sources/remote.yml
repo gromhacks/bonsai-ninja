@@ -1,6 +1,6 @@
 # Kotlin HTTP / RPC / cross-app request sources.
 #
-# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# -- Adapter coverage notes (audited 2026-04) ---------------------------------
 # Many Kotlin/JVM source surfaces are property accesses (Ktor
 # `call.parameters`, `call.request.queryParameters`, `call.request.headers`,
 # `call.request.cookies`, `PartData.originalFileName`) and JVM annotation
@@ -51,7 +51,7 @@
         fun handle(@RequestParam value: String) {
         }
       }
-  description: "Spring @RequestParam annotated parameter — query/form value bound from the HTTP request."
+  description: "Spring @RequestParam annotated parameter - query/form value bound from the HTTP request."
 
   imports:
   - org.springframework.web
@@ -75,7 +75,7 @@
         fun handle(@RequestBody value: String) {
         }
       }
-  description: "Spring @RequestBody annotated parameter — request body payload bound to the handler."
+  description: "Spring @RequestBody annotated parameter - request body payload bound to the handler."
 
   imports:
   - org.springframework.web
@@ -99,7 +99,7 @@
         fun handle(@RequestPart value: String) {
         }
       }
-  description: "Spring @RequestPart annotated parameter — multipart part supplied by the client."
+  description: "Spring @RequestPart annotated parameter - multipart part supplied by the client."
 
   imports:
   - org.springframework.web
@@ -123,7 +123,7 @@
         fun handle(@PathVariable value: String) {
         }
       }
-  description: "Spring @PathVariable annotated parameter — URL path segment supplied by the client."
+  description: "Spring @PathVariable annotated parameter - URL path segment supplied by the client."
 
   imports:
   - org.springframework.web
@@ -147,7 +147,7 @@
         fun handle(@RequestHeader value: String) {
         }
       }
-  description: "Spring @RequestHeader annotated parameter — client-supplied HTTP header."
+  description: "Spring @RequestHeader annotated parameter - client-supplied HTTP header."
 
   imports:
   - org.springframework.web
@@ -171,7 +171,7 @@
         fun handle(@CookieValue value: String) {
         }
       }
-  description: "Spring @CookieValue annotated parameter — client-supplied cookie value."
+  description: "Spring @CookieValue annotated parameter - client-supplied cookie value."
 
   imports:
   - org.springframework.web
@@ -194,7 +194,7 @@
         fun handle(@MatrixVariable value: String) {
         }
       }
-  description: "Spring @MatrixVariable annotated parameter — matrix URI variable supplied by the client."
+  description: "Spring @MatrixVariable annotated parameter - matrix URI variable supplied by the client."
 
   imports:
   - org.springframework.web
@@ -217,7 +217,7 @@
         fun handle(@ModelAttribute value: String) {
         }
       }
-  description: "Spring @ModelAttribute annotated parameter — request values bound onto a model object."
+  description: "Spring @ModelAttribute annotated parameter - request values bound onto a model object."
 
   imports:
   - org.springframework.web
@@ -234,7 +234,7 @@
     kind: call
     callee:
       attribute: [MultipartFile, getName]
-  description: "Disabled — `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
+  description: "Disabled - `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
 
 - id: kotlin.source.jaxrs_query_param
   enabled: true
@@ -256,7 +256,7 @@
         fun handle(@QueryParam value: String) {
         }
       }
-  description: "JAX-RS @QueryParam annotated parameter — query value bound from the HTTP request."
+  description: "JAX-RS @QueryParam annotated parameter - query value bound from the HTTP request."
 
 - id: kotlin.source.jaxrs_path_param
   enabled: true
@@ -278,7 +278,7 @@
         fun handle(@PathParam value: String) {
         }
       }
-  description: "JAX-RS @PathParam annotated parameter — path value bound from the HTTP request."
+  description: "JAX-RS @PathParam annotated parameter - path value bound from the HTTP request."
 
 - id: kotlin.source.jaxrs_header_param
   enabled: true
@@ -300,7 +300,7 @@
         fun handle(@HeaderParam value: String) {
         }
       }
-  description: "JAX-RS @HeaderParam annotated parameter — client-supplied HTTP header."
+  description: "JAX-RS @HeaderParam annotated parameter - client-supplied HTTP header."
 
 - id: kotlin.source.jaxrs_form_param
   enabled: true
@@ -322,7 +322,7 @@
         fun handle(@FormParam value: String) {
         }
       }
-  description: "JAX-RS @FormParam annotated parameter — form value bound from the HTTP request."
+  description: "JAX-RS @FormParam annotated parameter - form value bound from the HTTP request."
 
 - id: kotlin.source.jaxrs_cookie_param
   enabled: true
@@ -344,7 +344,7 @@
         fun handle(@CookieParam value: String) {
         }
       }
-  description: "JAX-RS @CookieParam annotated parameter — client-supplied cookie value."
+  description: "JAX-RS @CookieParam annotated parameter - client-supplied cookie value."
 
 - id: kotlin.source.jaxrs_matrix_param
   enabled: true
@@ -375,7 +375,7 @@
         }
       }
     expect_no_match: true
-  description: "JAX-RS @MatrixParam annotated parameter — matrix URI value supplied by the HTTP request."
+  description: "JAX-RS @MatrixParam annotated parameter - matrix URI value supplied by the HTTP request."
 
 - id: kotlin.source.jaxrs_bean_param
   enabled: true
@@ -406,7 +406,7 @@
         }
       }
     expect_no_match: true
-  description: "JAX-RS @BeanParam annotated parameter — request values bound into a bean."
+  description: "JAX-RS @BeanParam annotated parameter - request values bound into a bean."
 
 - id: kotlin.source.servlet_getparameter
   enabled: true
@@ -501,7 +501,7 @@
         }
       }
     expect_match_text: [request.getParameterNames]
-  description: "HttpServletRequest.getParameterNames() — attacker-controlled query/form parameter names."
+  description: "HttpServletRequest.getParameterNames() - attacker-controlled query/form parameter names."
 
 - id: kotlin.source.servlet_getheader
   enabled: true
@@ -620,7 +620,7 @@
         fun getValue(): String = ""
       }
     expect_match_text: [cookie.getValue]
-  description: "javax.servlet.http.Cookie.getValue() — cookie value from an HTTP request; covers elements produced by request.getCookies()."
+  description: "javax.servlet.http.Cookie.getValue() - cookie value from an HTTP request; covers elements produced by request.getCookies()."
 
 - id: kotlin.source.servlet_cookie_getname
   enabled: true
@@ -645,7 +645,7 @@
         fun getName(): String = ""
       }
     expect_match_text: [theCookie.getName]
-  description: "javax.servlet.http.Cookie.getName() — attacker-chosen cookie name from an HTTP request."
+  description: "javax.servlet.http.Cookie.getName() - attacker-chosen cookie name from an HTTP request."
 
 - id: kotlin.source.servlet_getinputstream
   enabled: true
@@ -668,7 +668,7 @@
           request.getInputStream()
         }
       }
-  description: "HttpServletRequest.getInputStream — raw body."
+  description: "HttpServletRequest.getInputStream - raw body."
 
 - id: kotlin.source.servlet_getreader
   enabled: true
@@ -814,7 +814,7 @@
         fun getAttribute(vararg args: Any?): Any? = null
       }
     expect_match_text: [session.getAttribute]
-  description: "HttpSession.getAttribute(name) — session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
+  description: "HttpSession.getAttribute(name) - session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
 
 - id: kotlin.source.servlet_part_getsubmittedfilename
   enabled: true
@@ -841,7 +841,7 @@
         fun getSubmittedFileName(): String
       }
     expect_match_text: [part.getSubmittedFileName]
-  description: "Servlet Part.getSubmittedFileName() — client-supplied multipart filename from a package-scoped local receiver call."
+  description: "Servlet Part.getSubmittedFileName() - client-supplied multipart filename from a package-scoped local receiver call."
 
   imports:
   - jakarta.servlet.http
@@ -866,7 +866,7 @@
           call.receive(input)
         }
       }
-  description: "Ktor `call.receive<T>()` — decoded request body from the HTTP caller."
+  description: "Ktor `call.receive<T>()` - decoded request body from the HTTP caller."
 
 - id: kotlin.source.ktor_call_receive_multipart
   enabled: true
@@ -889,7 +889,7 @@
           call.receiveMultipart(input)
         }
       }
-  description: "Ktor `call.receiveMultipart()` — multipart request body from the HTTP caller."
+  description: "Ktor `call.receiveMultipart()` - multipart request body from the HTTP caller."
 
 - id: kotlin.source.ktor_call_receive_channel
   enabled: true
@@ -911,7 +911,7 @@
           call.receiveChannel(input)
         }
       }
-  description: "Ktor `call.receiveChannel()` — raw request byte channel."
+  description: "Ktor `call.receiveChannel()` - raw request byte channel."
 
 - id: kotlin.source.ktor_call_parameters
   enabled: true
@@ -934,7 +934,7 @@
           val out = ApplicationCall.parameters["x"]
         }
       }
-  description: "Ktor call.parameters property read — path/query parameters from the remote request."
+  description: "Ktor call.parameters property read - path/query parameters from the remote request."
 
 - id: kotlin.source.ktor_request_query_parameters
   enabled: true
@@ -957,7 +957,7 @@
           val out = request.queryParameters["x"]
         }
       }
-  description: "Ktor call.request.queryParameters property read — query-string parameters from the remote request."
+  description: "Ktor call.request.queryParameters property read - query-string parameters from the remote request."
 
 - id: kotlin.source.ktor_request_headers
   enabled: true
@@ -980,7 +980,7 @@
           val out = request.headers["x"]
         }
       }
-  description: "Ktor call.request.headers property read — client-supplied HTTP headers."
+  description: "Ktor call.request.headers property read - client-supplied HTTP headers."
 
 - id: kotlin.source.ktor_request_cookies
   enabled: true
@@ -1003,7 +1003,7 @@
           val out = request.cookies["x"]
         }
       }
-  description: "Ktor call.request.cookies property read — client-supplied cookie values."
+  description: "Ktor call.request.cookies property read - client-supplied cookie values."
 
 - id: kotlin.source.ktor_receivetext
   enabled: true
@@ -1074,7 +1074,7 @@
         fun getOriginalFilename(): String
       }
     expect_match_text: [file.getOriginalFilename]
-  description: "Spring MultipartFile.getOriginalFilename() — client-supplied upload filename from a package-scoped local receiver call."
+  description: "Spring MultipartFile.getOriginalFilename() - client-supplied upload filename from a package-scoped local receiver call."
 
   imports:
   - org.springframework.web.multipart
@@ -1099,7 +1099,7 @@
           val out = PartData.originalFileName["x"]
         }
       }
-  description: "Ktor PartData.originalFileName property read — client-supplied upload filename."
+  description: "Ktor PartData.originalFileName property read - client-supplied upload filename."
 
 - id: kotlin.source.android_getintent_getdata
   enabled: false
@@ -1113,7 +1113,7 @@
     kind: call
     callee:
       attribute: [Intent, getData]
-  description: "Disabled — `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
+  description: "Disabled - `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
 
 - id: kotlin.source.android_getintent_getparcelableextra
   enabled: true
@@ -1140,7 +1140,7 @@
         fun getParcelableExtra(vararg args: Any?): Any? = null
       }
     expect_match_text: [intent.getParcelableExtra]
-  description: "Android Intent.getParcelableExtra(...) — package-scoped IPC extra read from a local intent receiver."
+  description: "Android Intent.getParcelableExtra(...) - package-scoped IPC extra read from a local intent receiver."
 
 - id: kotlin.source.android_getintent_getserializableextra
   enabled: true
@@ -1167,7 +1167,7 @@
         fun getSerializableExtra(vararg args: Any?): Any? = null
       }
     expect_match_text: [intent.getSerializableExtra]
-  description: "Android Intent.getSerializableExtra(...) — package-scoped cross-app Serializable extra read."
+  description: "Android Intent.getSerializableExtra(...) - package-scoped cross-app Serializable extra read."
 
 - id: kotlin.source.android_getintent_getbooleanextra
   enabled: true
@@ -1194,7 +1194,7 @@
         fun getBooleanExtra(vararg args: Any?): Boolean = false
       }
     expect_match_text: [intent.getBooleanExtra]
-  description: "Android Intent.getBooleanExtra(...) — package-scoped cross-app boolean extra read."
+  description: "Android Intent.getBooleanExtra(...) - package-scoped cross-app boolean extra read."
 
 - id: kotlin.source.android_getintent_getintextra
   enabled: true
@@ -1221,7 +1221,7 @@
         fun getIntExtra(vararg args: Any?): Int = 0
       }
     expect_match_text: [intent.getIntExtra]
-  description: "Android Intent.getIntExtra(...) — package-scoped cross-app integer extra read."
+  description: "Android Intent.getIntExtra(...) - package-scoped cross-app integer extra read."
 
 - id: kotlin.source.android_getintent_getdatastring
   enabled: true
@@ -1249,7 +1249,7 @@
         fun getDataString(): String = ""
       }
     expect_match_text: [intent.getDataString]
-  description: "Android Intent.getDataString() — package-scoped cross-app URI string read."
+  description: "Android Intent.getDataString() - package-scoped cross-app URI string read."
 
 - id: kotlin.source.android_uri_getqueryparameter
   enabled: true
@@ -1269,7 +1269,7 @@
           Uri.getQueryParameter(input)
         }
       }
-  description: "Android Uri.getQueryParameter(name) — pulls attacker-controlled query value out of a deep-link/intent URI."
+  description: "Android Uri.getQueryParameter(name) - pulls attacker-controlled query value out of a deep-link/intent URI."
 
 - id: kotlin.source.ktor_call_principal
   enabled: true
@@ -1291,7 +1291,7 @@
           val out = call.principal["x"]
         }
       }
-  description: "Ktor call.principal property read — authenticated principal payload such as JWT claims."
+  description: "Ktor call.principal property read - authenticated principal payload such as JWT claims."
 
 - id: kotlin.source.kafka_consumer_poll
   enabled: true
@@ -1313,7 +1313,7 @@
           KafkaConsumer.poll(input)
         }
       }
-  description: "KafkaConsumer.poll(timeout) — returns ConsumerRecords; payload originates from broker peer and is attacker-influenced."
+  description: "KafkaConsumer.poll(timeout) - returns ConsumerRecords; payload originates from broker peer and is attacker-influenced."
 
   imports:
   - org.apache.kafka.clients.consumer
@@ -1330,7 +1330,7 @@
     kind: call
     callee:
       attribute: [Channel, receive]
-  description: "Disabled — Kotlin coroutine Channel.receive is process-local in most uses; only a remote source when the producer side is a network socket bridge. Adapter cannot distinguish today."
+  description: "Disabled - Kotlin coroutine Channel.receive is process-local in most uses; only a remote source when the producer side is a network socket bridge. Adapter cannot distinguish today."
 
 - id: kotlin.source.grpc_oncall_request
   enabled: false
@@ -1344,7 +1344,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled — gRPC service-impl methods take a `request` param, but bare-name `request` overmatches Spring/Ktor handlers and ordinary helpers; needs annotation/receiver-type signal the adapter does not yet surface."
+  description: "Disabled - gRPC service-impl methods take a `request` param, but bare-name `request` overmatches Spring/Ktor handlers and ordinary helpers; needs annotation/receiver-type signal the adapter does not yet surface."
 
 - id: kotlin.source.graphql_datafetching_environment_getargument
   enabled: true
@@ -1372,7 +1372,7 @@
         fun getArgument(vararg args: Any?): Any? = null
       }
     expect_match_text: [env.getArgument]
-  description: "graphql-java DataFetchingEnvironment.getArgument(name) — resolver argument supplied by the GraphQL caller."
+  description: "graphql-java DataFetchingEnvironment.getArgument(name) - resolver argument supplied by the GraphQL caller."
 
   imports:
   - com
@@ -1403,7 +1403,7 @@
         fun getArguments(vararg args: Any?): Any? = null
       }
     expect_match_text: [environment.getArguments]
-  description: "graphql-java DataFetchingEnvironment.getArguments() — map of caller-controlled resolver arguments."
+  description: "graphql-java DataFetchingEnvironment.getArguments() - map of caller-controlled resolver arguments."
 
   imports:
   - com
@@ -1428,7 +1428,7 @@
           return id
         }
       }
-  description: "Spring GraphQL @Argument annotated resolver parameter — value supplied by the GraphQL caller."
+  description: "Spring GraphQL @Argument annotated resolver parameter - value supplied by the GraphQL caller."
 
 - id: kotlin.source.micronaut_queryvalue
   enabled: true
@@ -1450,7 +1450,7 @@
         fun handle(@QueryValue value: String) {
         }
       }
-  description: "Micronaut @QueryValue annotated parameter — query value bound from the HTTP request."
+  description: "Micronaut @QueryValue annotated parameter - query value bound from the HTTP request."
 
 - id: kotlin.source.micronaut_body
   enabled: true
@@ -1472,7 +1472,7 @@
         fun handle(@Body value: String) {
         }
       }
-  description: "Micronaut @Body annotated parameter — request body supplied by the HTTP caller."
+  description: "Micronaut @Body annotated parameter - request body supplied by the HTTP caller."
 
 - id: kotlin.source.websocket_message_payload_text
   enabled: true
@@ -1500,4 +1500,4 @@
         fun getPayloadAsText(vararg args: Any?): String = ""
       }
     expect_match_text: [message.getPayloadAsText]
-  description: "Spring WebSocketMessage.getPayloadAsText() — text frame payload supplied by the websocket peer."
+  description: "Spring WebSocketMessage.getPayloadAsText() - text frame payload supplied by the websocket peer."

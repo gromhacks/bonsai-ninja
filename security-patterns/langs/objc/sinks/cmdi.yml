@@ -20,7 +20,7 @@
   - name: arg tainted literal negative
     code: "void test(id input) { id target = input; int amount = 1; system(\"safe\"); }\n"
     expect_no_match: true
-  description: "libc system() — spawns /bin/sh -c; tainted argument yields shell-metacharacter injection."
+  description: "libc system() - spawns /bin/sh -c; tainted argument yields shell-metacharacter injection."
 
 - id: objc.cmdi.popen
   enabled: true
@@ -43,7 +43,7 @@
     code: |
       void test(void) { popen("safe", "r"); }
     expect_no_match: true
-  description: "libc popen() — shell-backed pipe; tainted command string is parsed by /bin/sh."
+  description: "libc popen() - shell-backed pipe; tainted command string is parsed by /bin/sh."
 
 - id: objc.cmdi.execvp
   enabled: true
@@ -66,7 +66,7 @@
     code: |
       void test(id input) { execvp("safe", input); }
     expect_no_match: true
-  description: "libc execvp() — PATH-resolved exec; tainted argv[0] can select arbitrary binary."
+  description: "libc execvp() - PATH-resolved exec; tainted argv[0] can select arbitrary binary."
 
 - id: objc.cmdi.exec_family
   enabled: true
@@ -91,7 +91,7 @@
         exec_family("safe");
       }
     expect_no_match: true
-  description: "libc exec family — tainted program path or argv is executed directly."
+  description: "libc exec family - tainted program path or argv is executed directly."
 
 - id: objc.cmdi.nstask_launch
   enabled: true
@@ -114,7 +114,7 @@
     code: |
       void test(void) { launchedTaskWithLaunchPath(@"/bin/echo"); }
     expect_no_match: true
-  description: "NSTask +launchedTaskWithLaunchPath:arguments: / -launchAndReturnError: — spawns child process with tainted argv/path."
+  description: "NSTask +launchedTaskWithLaunchPath:arguments: / -launchAndReturnError: - spawns child process with tainted argv/path."
 
 - id: objc.cmdi.nstask_launch_bare
   enabled: false
@@ -132,7 +132,7 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; [NSTask launch:input]; }
-  description: "Disabled — bare `launch` has no command argument and needs receiver-state evidence from prior NSTask setters before it can be reported semantically."
+  description: "Disabled - bare `launch` has no command argument and needs receiver-state evidence from prior NSTask setters before it can be reported semantically."
 
 - id: objc.cmdi.nstask_setters
   enabled: true
@@ -158,7 +158,7 @@
       #import <Foundation/Foundation.h>
       void test(id input) { id launchPath = input; }
     expect_no_match: true
-  description: "NSTask .launchPath / .arguments / .executableURL — tainted values feed subsequent -launch call. Constrained to NSTask receivers to avoid collisions."
+  description: "NSTask .launchPath / .arguments / .executableURL - tainted values feed subsequent -launch call. Constrained to NSTask receivers to avoid collisions."
 
 - id: objc.cmdi.posix_spawn
   enabled: true
@@ -183,7 +183,7 @@
         posix_spawn("safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn / posix_spawnp — direct exec of tainted path/argv."
+  description: "posix_spawn / posix_spawnp - direct exec of tainted path/argv."
 
 # Explicit `launchPath = "/bin/sh"; arguments = ["-c", concat]` shape.
 # The receiver-narrowed `objc.cmdi.nstask_setters` rule already fires
@@ -206,4 +206,4 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; NSTask.launchPath = @"/bin/sh"; }
-  description: "Disabled duplicate — objc.cmdi.nstask_setters already reports NSTask launchPath assignments; keep the shell-path shape documented until multi-assignment correlation can distinguish launchPath + arguments."
+  description: "Disabled duplicate - objc.cmdi.nstask_setters already reports NSTask launchPath assignments; keep the shell-path shape documented until multi-assignment correlation can distinguish launchPath + arguments."

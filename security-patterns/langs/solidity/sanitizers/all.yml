@@ -14,7 +14,7 @@
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { require(input); } }
     expect_match_text: [require]
-  description: "require(cond, reason) — revert-on-false guard; canonical authz / precondition / input-validation sanitizer. Includes the inline `require(msg.sender == owner, …)` pattern used by hand-rolled access control. `top_level: true` keeps it on the Solidity statement form and rejects unrelated `obj.require(...)` member calls that share the verb."
+  description: "require(cond, reason) - revert-on-false guard; canonical authz / precondition / input-validation sanitizer. Includes the inline `require(msg.sender == owner, ...)` pattern used by hand-rolled access control. `top_level: true` keeps it on the Solidity statement form and rejects unrelated `obj.require(...)` member calls that share the verb."
 - id: solidity.sanitizer.assert
   enabled: true
   language: solidity
@@ -29,7 +29,7 @@
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { assert(input); } }
     expect_match_text: [assert]
-  description: "assert(cond) — invariant check; reverts with Panic(0x01). Treat as validation for taint purposes."
+  description: "assert(cond) - invariant check; reverts with Panic(0x01). Treat as validation for taint purposes."
 - id: solidity.sanitizer.openzeppelin_safe_transfer
   enabled: true
   language: solidity
@@ -46,7 +46,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { safeTransfer(input); } }
     expect_match_text: [safeTransfer]
-  description: "OZ SafeERC20.safeTransfer — wraps ERC20 transfer with return-value check; neutralises unchecked-return / silent-failure risk."
+  description: "OZ SafeERC20.safeTransfer - wraps ERC20 transfer with return-value check; neutralises unchecked-return / silent-failure risk."
 - id: solidity.sanitizer.openzeppelin_safe_transfer_from
   enabled: true
   language: solidity
@@ -63,7 +63,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { safeTransferFrom(input); } }
     expect_match_text: [safeTransferFrom]
-  description: "OZ SafeERC20.safeTransferFrom — checked transferFrom; neutralises unchecked-return on ERC20 pulls."
+  description: "OZ SafeERC20.safeTransferFrom - checked transferFrom; neutralises unchecked-return on ERC20 pulls."
 - id: solidity.sanitizer.openzeppelin_address_send_value
   enabled: true
   language: solidity
@@ -80,7 +80,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { sendValue(input); } }
     expect_match_text: [sendValue]
-  description: "OZ Address.sendValue — forwards all gas, reverts on failure; safer than .transfer()/.send() for ETH payouts."
+  description: "OZ Address.sendValue - forwards all gas, reverts on failure; safer than .transfer()/.send() for ETH payouts."
 - id: solidity.sanitizer.openzeppelin_reentrancy_guard
   enabled: true
   language: solidity
@@ -97,7 +97,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { nonReentrant(input); } }
     expect_match_text: [nonReentrant]
-  description: "OZ ReentrancyGuard nonReentrant modifier — single-entry lock; neutralises reentrancy on the guarded function."
+  description: "OZ ReentrancyGuard nonReentrant modifier - single-entry lock; neutralises reentrancy on the guarded function."
 - id: solidity.sanitizer.openzeppelin_only_owner
   enabled: true
   language: solidity
@@ -114,7 +114,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { onlyOwner(input); } }
     expect_match_text: [onlyOwner]
-  description: "OZ Ownable.onlyOwner modifier — restricts call to the contract owner; canonical authz guard. Equivalent to inline `require(msg.sender == owner)`."
+  description: "OZ Ownable.onlyOwner modifier - restricts call to the contract owner; canonical authz guard. Equivalent to inline `require(msg.sender == owner)`."
 - id: solidity.sanitizer.openzeppelin_access_control
   enabled: true
   language: solidity
@@ -131,7 +131,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { onlyRole(input); } }
     expect_match_text: [onlyRole]
-  description: "OZ AccessControl.onlyRole(ROLE) modifier — role-based authz guard."
+  description: "OZ AccessControl.onlyRole(ROLE) modifier - role-based authz guard."
 - id: solidity.sanitizer.openzeppelin_when_not_paused
   enabled: true
   language: solidity
@@ -148,7 +148,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { whenNotPaused(input); } }
     expect_match_text: [whenNotPaused]
-  description: "OZ Pausable.whenNotPaused modifier — circuit-breaker; neutralises reachability of the guarded function while the contract is paused. Treat as a kill-switch sanitizer for incident-response paths."
+  description: "OZ Pausable.whenNotPaused modifier - circuit-breaker; neutralises reachability of the guarded function while the contract is paused. Treat as a kill-switch sanitizer for incident-response paths."
 - id: solidity.sanitizer.openzeppelin_ecdsa_recover
   enabled: true
   language: solidity
@@ -165,7 +165,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { recover(input); } }
     expect_match_text: [recover]
-  description: "OZ ECDSA.recover — wraps ecrecover with non-zero check, low-s malleability check, and v normalisation. Neutralises the signature-replay/zero-address surface that raw ecrecover exposes."
+  description: "OZ ECDSA.recover - wraps ecrecover with non-zero check, low-s malleability check, and v normalisation. Neutralises the signature-replay/zero-address surface that raw ecrecover exposes."
 - id: solidity.sanitizer.openzeppelin_ecdsa_try_recover
   enabled: true
   language: solidity
@@ -182,7 +182,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(bytes32 digest, bytes memory sig) public { tryRecover(digest, sig); } }
     expect_match_text: [tryRecover]
-  description: "OZ ECDSA.tryRecover — signature recovery with explicit RecoverError, low-s malleability checks, and v normalization."
+  description: "OZ ECDSA.tryRecover - signature recovery with explicit RecoverError, low-s malleability checks, and v normalization."
 - id: solidity.sanitizer.openzeppelin_signature_checker
   enabled: true
   language: solidity
@@ -199,7 +199,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(address signer, bytes32 digest, bytes memory sig) public { isValidSignatureNow(signer, digest, sig); } }
     expect_match_text: [isValidSignatureNow]
-  description: "OZ SignatureChecker.isValidSignatureNow — validates both ECDSA signatures and ERC-1271 contract signatures before accepting signed authorization."
+  description: "OZ SignatureChecker.isValidSignatureNow - validates both ECDSA signatures and ERC-1271 contract signatures before accepting signed authorization."
 - id: solidity.sanitizer.openzeppelin_has_role
   enabled: true
   language: solidity
@@ -216,7 +216,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(bytes32 role, address account) public { hasRole(role, account); } }
     expect_match_text: [hasRole]
-  description: "OZ AccessControl.hasRole(role, account) — role membership guard commonly used inside require(...) authorization checks."
+  description: "OZ AccessControl.hasRole(role, account) - role membership guard commonly used inside require(...) authorization checks."
 - id: solidity.sanitizer.openzeppelin_check_role
   enabled: true
   language: solidity
@@ -233,7 +233,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(bytes32 role, address account) public { _checkRole(role, account); } }
     expect_match_text: [_checkRole]
-  description: "OZ AccessControl._checkRole — reverts unless account has role; internal authorization guard used by modifiers and custom checks."
+  description: "OZ AccessControl._checkRole - reverts unless account has role; internal authorization guard used by modifiers and custom checks."
 - id: solidity.sanitizer.openzeppelin_address_is_contract
   enabled: false
   disabled_reason:
@@ -245,7 +245,7 @@
     kind: call
     callee:
       name: isContract
-  description: "Disabled by default — OZ Address.isContract is commonly relied on as a sanitizer but returns FALSE for an address that calls during its own constructor (EIP-150 caveat). Enabling it as a sanitizer would silence true positives where attackers exploit the constructor-bypass. Re-enable only inside flows where constructor-time call is structurally impossible."
+  description: "Disabled by default - OZ Address.isContract is commonly relied on as a sanitizer but returns FALSE for an address that calls during its own constructor (EIP-150 caveat). Enabling it as a sanitizer would silence true positives where attackers exploit the constructor-bypass. Re-enable only inside flows where constructor-time call is structurally impossible."
 - id: solidity.sanitizer.safemath_add
   enabled: false
   disabled_reason:
@@ -257,7 +257,7 @@
     kind: call
     callee:
       name: add
-  description: "Disabled — bare add overmatches unrelated arithmetic/helpers; SafeMath is also obsolete for Solidity >=0.8 checked arithmetic."
+  description: "Disabled - bare add overmatches unrelated arithmetic/helpers; SafeMath is also obsolete for Solidity >=0.8 checked arithmetic."
 - id: solidity.sanitizer.safemath_sub
   enabled: true
   language: solidity
@@ -274,7 +274,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { sub(input); } }
     expect_match_text: [sub]
-  description: "OpenZeppelin SafeMath.sub — underflow-checked subtraction (pre-0.8); neutralises integer-underflow taint."
+  description: "OpenZeppelin SafeMath.sub - underflow-checked subtraction (pre-0.8); neutralises integer-underflow taint."
 - id: solidity.sanitizer.safemath_mul
   enabled: true
   language: solidity
@@ -291,7 +291,7 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { mul(input); } }
     expect_match_text: [mul]
-  description: "OpenZeppelin SafeMath.mul — overflow-checked multiplication (pre-0.8); neutralises integer-overflow taint."
+  description: "OpenZeppelin SafeMath.mul - overflow-checked multiplication (pre-0.8); neutralises integer-overflow taint."
 - id: solidity.sanitizer.safemath_div
   enabled: true
   language: solidity
@@ -308,4 +308,4 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { div(input); } }
     expect_match_text: [div]
-  description: "OpenZeppelin SafeMath.div — division with zero-check (pre-0.8); neutralises div-by-zero taint."
+  description: "OpenZeppelin SafeMath.div - division with zero-check (pre-0.8); neutralises div-by-zero taint."

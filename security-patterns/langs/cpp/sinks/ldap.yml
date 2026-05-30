@@ -23,7 +23,7 @@
         ldap_search_ext_s("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_ext_s(ld, base, scope, filter, ...) — tainted filter allows injection."
+  description: "OpenLDAP ldap_search_ext_s(ld, base, scope, filter, ...) - tainted filter allows injection."
 - id: cpp.ldap.ldap_search_s
   enabled: true
   language: cpp
@@ -49,7 +49,7 @@
         ldap_search_s("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_s — legacy sync search with tainted filter."
+  description: "OpenLDAP ldap_search_s - legacy sync search with tainted filter."
 - id: cpp.ldap.ldap_search_ext
   enabled: true
   language: cpp
@@ -75,7 +75,7 @@
         ldap_search_ext("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_ext — async variant with tainted filter."
+  description: "OpenLDAP ldap_search_ext - async variant with tainted filter."
 - id: cpp.ldap.ldapcpp_search
   enabled: true
   language: cpp
@@ -109,4 +109,4 @@
         LDAPAsynConnection::search("ou=People", 2, "(uid=safe)");
       }
     expect_no_match: true
-  description: "LDAPAsynConnection::search(base, scope, tainted_filter) — ldap-cpp wrapper."
+  description: "LDAPAsynConnection::search(base, scope, tainted_filter) - ldap-cpp wrapper."

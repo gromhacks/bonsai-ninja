@@ -22,7 +22,7 @@
     code: |
       func test(input: String) { NSLog("user=\(input)") }
     expect_no_match: true
-  description: "NSLog with secret-shaped data — values are copied into device / server logs."
+  description: "NSLog with secret-shaped data - values are copied into device / server logs."
 
 - id: swift.info_disclosure.vapor_abort_reason
   enabled: true
@@ -43,7 +43,7 @@
       import Vapor // vapor
       func test(error: Error) { _ = Abort(.internalServerError, reason: error.localizedDescription) }
     expect_match_text: [Abort]
-  description: "Vapor Abort(reason: error.localizedDescription) — reflects exception text in HTTP error responses."
+  description: "Vapor Abort(reason: error.localizedDescription) - reflects exception text in HTTP error responses."
 
 - id: swift.info_disclosure.debug_print_error
   enabled: true
@@ -68,4 +68,4 @@
     code: |
       func test(input: String) { debugPrint("user=\(input)") }
     expect_no_match: true
-  description: "debugPrint(error/stack) — debug diagnostics can disclose internals in production logs."
+  description: "debugPrint(error/stack) - debug diagnostics can disclose internals in production logs."

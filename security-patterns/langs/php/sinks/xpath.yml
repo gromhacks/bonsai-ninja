@@ -18,7 +18,7 @@
     kind: call
     callee:
       attribute: [DOMXPath, query]
-  description: "DOMXPath::query — disabled pending PHP built-in class recognition."
+  description: "DOMXPath::query - disabled pending PHP built-in class recognition."
 
 - id: php.xpath.domxpath_evaluate
   enabled: false
@@ -32,4 +32,4 @@
     kind: call
     callee:
       attribute: [DOMXPath, evaluate]
-  description: "DOMXPath::evaluate — disabled pending PHP built-in class recognition."
+  description: "DOMXPath::evaluate - disabled pending PHP built-in class recognition."

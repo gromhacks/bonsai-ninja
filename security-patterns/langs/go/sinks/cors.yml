@@ -24,7 +24,7 @@
         cors.Default(target)
       }
   description: |-
-    gin-contrib/cors cors.Default() — allows all origins.
+    gin-contrib/cors cors.Default() - allows all origins.
 - id: go.cors.gorilla_handlers_allow_origin_wildcard
   enabled: true
   language: go
@@ -50,4 +50,4 @@
         handlers.AllowedOrigins("*")
       }
   description: |-
-    gorilla/handlers.AllowedOrigins([]string{'*'}) — wildcard.
+    gorilla/handlers.AllowedOrigins([]string{'*'}) - wildcard.
