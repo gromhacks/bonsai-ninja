@@ -26,7 +26,7 @@
           simplexml_load_string("<root/>");
         }
       expect_no_match: true
-  description: "simplexml_load_string — flag if LIBXML_NOENT or LIBXML_DTDLOAD set."
+  description: "simplexml_load_string - flag if LIBXML_NOENT or LIBXML_DTDLOAD set."
 
 - id: php.xxe.simplexml_load_file
   enabled: true
@@ -84,7 +84,7 @@
           DOMDocument::load("config/feed.xml");
         }
       expect_no_match: true
-  description: "DOMDocument::load — file-based loader."
+  description: "DOMDocument::load - file-based loader."
 
 - id: php.xxe.domdocument_loadxml
   enabled: true
@@ -127,7 +127,7 @@
     kind: call
     callee:
       attribute: [DOMDocument, loadHTML]
-  description: "Disabled — HTML loader doesn't honor DTDs."
+  description: "Disabled - HTML loader doesn't honor DTDs."
 
 - id: php.xxe.xmlreader_open
   enabled: true
@@ -205,7 +205,7 @@
         function example($input, $url, $id, $payload, $request) {
           xml_parser_create($input);
         }
-  description: "xml_parser_create — expat (no DTD by default); paired with xml_parse feeds tainted XML."
+  description: "xml_parser_create - expat (no DTD by default); paired with xml_parse feeds tainted XML."
 
 - id: php.xxe.xml_parse
   enabled: true
@@ -234,7 +234,7 @@
           xml_parse($parser, "<root/>");
         }
       expect_no_match: true
-  description: "xml_parse — expat parse on tainted XML; if options enable external entities, XXE applies."
+  description: "xml_parse - expat parse on tainted XML; if options enable external entities, XXE applies."
 
 - id: php.xxe.soapclient_constructor
   enabled: true
@@ -263,4 +263,4 @@
           new SoapClient("service.wsdl");
         }
       expect_no_match: true
-  description: "SoapClient — uses libxml internally."
+  description: "SoapClient - uses libxml internally."

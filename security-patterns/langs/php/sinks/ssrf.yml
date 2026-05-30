@@ -14,7 +14,7 @@
   match_examples:
   - name: php.ssrf.curl_exec example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  curl_exec($input);\n}\n"
-  description: "Disabled — curl_exec() dispatches URL stored on the curl handle; php.ssrf.curl_setopt_url carries the tainted URL argument."
+  description: "Disabled - curl_exec() dispatches URL stored on the curl handle; php.ssrf.curl_setopt_url carries the tainted URL argument."
 - id: php.ssrf.curl_setopt_url
   enabled: true
   language: php
@@ -63,7 +63,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"https://example.com/report\", \"r\");\n}\n"
     expect_no_match: true
-  description: fopen with URL — also path-traversal.
+  description: fopen with URL - also path-traversal.
 - id: php.ssrf.file_get_contents_url
   enabled: true
   language: php
@@ -84,7 +84,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents(\"https://example.com/report\");\n}\n"
     expect_no_match: true
-  description: file_get_contents URL — duplicate of path rule but flagged for SSRF too.
+  description: file_get_contents URL - duplicate of path rule but flagged for SSRF too.
 - id: php.ssrf.fsockopen
   enabled: true
   language: php
@@ -105,7 +105,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fsockopen(\"example.com\", 443);\n}\n"
     expect_no_match: true
-  description: fsockopen() — direct socket to tainted host.
+  description: fsockopen() - direct socket to tainted host.
 - id: php.ssrf.stream_socket_client
   enabled: true
   language: php
@@ -444,7 +444,7 @@
     kind: call
     callee:
       name: simplexml_load_file
-  description: Disabled — canonical rule is php.xxe.simplexml_load_file in xxe.yml (XXE is the classic bug class for these loaders).
+  description: Disabled - canonical rule is php.xxe.simplexml_load_file in xxe.yml (XXE is the classic bug class for these loaders).
 - id: php.ssrf.dom_load_file_url
   enabled: false
   disabled_reason:
@@ -460,7 +460,7 @@
       attribute:
       - DOMDocument
       - load
-  description: Disabled — canonical rule is php.xxe.domdocument_load in xxe.yml.
+  description: Disabled - canonical rule is php.xxe.domdocument_load in xxe.yml.
 - id: php.ssrf.get_headers
   enabled: true
   language: php
@@ -481,7 +481,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  get_headers(\"https://example.com/api\");\n}\n"
     expect_no_match: true
-  description: get_headers(tainted) — HEAD request to arbitrary URL.
+  description: get_headers(tainted) - HEAD request to arbitrary URL.
 - id: php.ssrf.gethostbyname
   enabled: true
   language: php
@@ -502,7 +502,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  gethostbyname(\"example.com\");\n}\n"
     expect_no_match: true
-  description: gethostbyname(tainted) — DNS lookup on tainted host; SSRF reconnaissance.
+  description: gethostbyname(tainted) - DNS lookup on tainted host; SSRF reconnaissance.
 - id: php.ssrf.symfony_httpclient_create
   enabled: false
   disabled_reason:
@@ -520,4 +520,4 @@
       attribute:
       - HttpClient
       - create
-  description: Disabled — factory; actual fetch is HttpClient::request.
+  description: Disabled - factory; actual fetch is HttpClient::request.

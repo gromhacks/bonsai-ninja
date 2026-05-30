@@ -29,7 +29,7 @@
       test(Conn, Collection) ->
         mongo:find(Conn, Collection, #{}).
     expect_no_match: true
-  description: "mongodb-erlang mongo:find — tainted selector map (e.g. $where operator) enables query injection/auth bypass."
+  description: "mongodb-erlang mongo:find - tainted selector map (e.g. $where operator) enables query injection/auth bypass."
 
 - id: erlang.nosql.eredis_q
   enabled: true
@@ -61,7 +61,7 @@
       test(Client) ->
         eredis:q(Client, ["GET", "key"]).
     expect_no_match: true
-  description: "eredis:q — tainted command list enables Redis command injection; EVAL path is Lua RCE-adjacent."
+  description: "eredis:q - tainted command list enables Redis command injection; EVAL path is Lua RCE-adjacent."
 
 - id: erlang.nosql_mongoc_aggregate
   enabled: true
@@ -94,7 +94,7 @@
       test(Conn, Collection) ->
         mongo:aggregate(Conn, Collection, []).
     expect_no_match: true
-  description: "mongodb-erlang mongo:aggregate — tainted aggregation pipeline can inject operators such as $lookup / $where and bypass authorization logic."
+  description: "mongodb-erlang mongo:aggregate - tainted aggregation pipeline can inject operators such as $lookup / $where and bypass authorization logic."
 - id: erlang.nosql.mnesia_select_matchspec
   enabled: true
   language: erlang
@@ -122,7 +122,7 @@
       test(Table) ->
         mnesia:select(Table, [{{'$1'}, [], ['$1']}]).
     expect_no_match: true
-  description: "mnesia:select(Table, tainted_match_spec) — attacker-controlled match specs can bypass intended filters or force expensive table scans."
+  description: "mnesia:select(Table, tainted_match_spec) - attacker-controlled match specs can bypass intended filters or force expensive table scans."
 - id: erlang.nosql.mnesia_match_object
   enabled: true
   language: erlang
@@ -150,4 +150,4 @@
       test() ->
         mnesia:match_object({users, '_', '_'}).
     expect_no_match: true
-  description: "mnesia:match_object(tainted_pattern) — attacker-controlled term patterns can bypass application-level query restrictions."
+  description: "mnesia:match_object(tainted_pattern) - attacker-controlled term patterns can bypass application-level query restrictions."

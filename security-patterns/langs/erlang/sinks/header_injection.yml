@@ -29,7 +29,7 @@
       test(Req) ->
         cowboy_req:set_resp_header(<<"x-name">>, <<"safe">>, Req).
     expect_no_match: true
-  description: "cowboy_req:set_resp_header — tainted value with embedded \\r\\n splits response and injects headers/body."
+  description: "cowboy_req:set_resp_header - tainted value with embedded \\r\\n splits response and injects headers/body."
 
 - id: erlang.header.cowboy_set_resp_cookie_name
   enabled: true
@@ -61,7 +61,7 @@
       test(Req) ->
         cowboy_req:set_resp_cookie(<<"sid">>, <<"ok">>, Req).
     expect_no_match: true
-  description: "cowboy_req:set_resp_cookie — tainted cookie name can inject cookie attributes or CRLF."
+  description: "cowboy_req:set_resp_cookie - tainted cookie name can inject cookie attributes or CRLF."
 - id: erlang.header.cowboy_set_resp_cookie_value
   enabled: true
   language: erlang
@@ -92,4 +92,4 @@
       test(Req) ->
         cowboy_req:set_resp_cookie(<<"sid">>, <<"ok">>, Req).
     expect_no_match: true
-  description: "cowboy_req:set_resp_cookie — tainted cookie value can inject cookie attributes or CRLF."
+  description: "cowboy_req:set_resp_cookie - tainted cookie value can inject cookie attributes or CRLF."

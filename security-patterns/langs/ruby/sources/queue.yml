@@ -1,6 +1,6 @@
 # Ruby background-job / queue sources. Payloads come from another process,
-# often JSON-decoded (Sidekiq/ActiveJob) — deserialization-adjacent.
-# trust: service — upstream producer.
+# often JSON-decoded (Sidekiq/ActiveJob) - deserialization-adjacent.
+# trust: service - upstream producer.
 - id: ruby.source.sidekiq_perform_args
   enabled: false
   disabled_reason:
@@ -13,7 +13,7 @@
     kind: param
     target:
       name: perform
-  description: "Disabled — `perform` is the worker method name, not the job-argument parameter identifier."
+  description: "Disabled - `perform` is the worker method name, not the job-argument parameter identifier."
 
 - id: ruby.source.activejob_perform_args
   enabled: false
@@ -27,7 +27,7 @@
     kind: param
     target:
       name: perform
-  description: "Disabled — bare `param name: perform` is FP-prone (`perform` is the worker method name, not the job-argument parameter identifier); no canonical exists. Re-enable when adapter supports class-scoped ActiveJob `perform` method-arg matching."
+  description: "Disabled - bare `param name: perform` is FP-prone (`perform` is the worker method name, not the job-argument parameter identifier); no canonical exists. Re-enable when adapter supports class-scoped ActiveJob `perform` method-arg matching."
 
 - id: ruby.source.shoryuke_message_body
   enabled: true
@@ -48,7 +48,7 @@
       def example(input, url, id, item, req_obj, options)
         message.body(input)
       end
-  description: "Shoryuken worker message.body(payload) — SQS payload accessor invoked with at least one argument. min_args:1 disambiguates from the 0-arg `request.body` Rails getter."
+  description: "Shoryuken worker message.body(payload) - SQS payload accessor invoked with at least one argument. min_args:1 disambiguates from the 0-arg `request.body` Rails getter."
 
 - id: ruby.source.delayed_job_payload
   enabled: true
@@ -67,7 +67,7 @@
       def example(input, url, id, item, req_obj, options)
         payload_object(input)
       end
-  description: "Delayed::Job payload_object — YAML-deserialised job instance."
+  description: "Delayed::Job payload_object - YAML-deserialised job instance."
 
 - id: ruby.source.karafka_payload
   enabled: true
@@ -86,7 +86,7 @@
       def example(input, url, id, item, req_obj, options)
         message.payload(input)
       end
-  description: "Karafka consumer message.payload — Kafka record body."
+  description: "Karafka consumer message.payload - Kafka record body."
 
 - id: ruby.source.resque_perform_args
   enabled: false
@@ -100,7 +100,7 @@
     kind: param
     target:
       name: perform
-  description: "Disabled — Resque worker .perform args carry attacker-influenced JSON; bare `param name: perform` overmatches helper methods. Enable only with class-context narrowing."
+  description: "Disabled - Resque worker .perform args carry attacker-influenced JSON; bare `param name: perform` overmatches helper methods. Enable only with class-context narrowing."
 
 - id: ruby.source.sneakers_deserialize
   enabled: true
@@ -119,4 +119,4 @@
       def example(input, url, id, item, req_obj, options)
         Sneakers.parse_to(input)
       end
-  description: "Sneakers worker deserialize hook — RabbitMQ payload."
+  description: "Sneakers worker deserialize hook - RabbitMQ payload."

@@ -29,7 +29,7 @@
           let _x = PreEscaped("<b>safe</b>");
       }
     expect_no_match: true
-  description: "maud PreEscaped(tainted) — bypasses HTML escape."
+  description: "maud PreEscaped(tainted) - bypasses HTML escape."
 
 - id: rust.xss.axum_html_response
   enabled: true
@@ -61,7 +61,7 @@
           let _x = response::Html("<p>safe</p>");
       }
     expect_no_match: true
-  description: "axum::response::Html(tainted) — marks string as text/html response; no escape."
+  description: "axum::response::Html(tainted) - marks string as text/html response; no escape."
 - id: rust.xss.askama_html_unsafe
   enabled: true
   language: rust
@@ -90,7 +90,7 @@
           askama::filters::safe("<b>safe</b>");
       }
     expect_no_match: true
-  description: "askama::filters::safe(tainted) — explicit call bypassing auto-escape."
+  description: "askama::filters::safe(tainted) - explicit call bypassing auto-escape."
 
 - id: rust.xss.rocket_rawhtml
   enabled: true
@@ -122,7 +122,7 @@
           let _x = content::RawHtml("<p>safe</p>");
       }
     expect_no_match: true
-  description: "rocket::response::content::RawHtml(tainted) — wraps raw HTML response body; skips escaping."
+  description: "rocket::response::content::RawHtml(tainted) - wraps raw HTML response body; skips escaping."
 
 - id: rust.xss.warp_html
   enabled: true
@@ -152,7 +152,7 @@
           reply::html("<p>safe</p>");
       }
     expect_no_match: true
-  description: "warp reply::html(tainted) — wraps body in a text/html response; no escaping applied."
+  description: "warp reply::html(tainted) - wraps body in a text/html response; no escaping applied."
 
 - id: rust.xss.actix_response_body_html
   enabled: false
@@ -178,6 +178,6 @@
           let query = "user";
           HttpResponseBuilder::content_type(target);
       }
-  description: "Disabled — content_type(\"text/html\") only sets response state; the tainted body is supplied by a later builder call, so this requires receiver-state tracking."
+  description: "Disabled - content_type(\"text/html\") only sets response state; the tainted body is supplied by a later builder call, so this requires receiver-state tracking."
   imports:
   - actix_web

@@ -20,7 +20,7 @@
         recv(fd, buf, sizeof(buf), 0);
       }
     expect_match_text: [recv]
-  description: "recv(fd, buf, len, flags) — remote bytes taint the caller-supplied buffer argument."
+  description: "recv(fd, buf, len, flags) - remote bytes taint the caller-supplied buffer argument."
 - id: c.input.recvfrom
   enabled: true
   language: c
@@ -42,7 +42,7 @@
         recvfrom(fd, buf, sizeof(buf), 0, 0, 0);
       }
     expect_match_text: [recvfrom]
-  description: "recvfrom(fd, buf, len, flags, ...) — remote datagram bytes taint the caller-supplied buffer argument."
+  description: "recvfrom(fd, buf, len, flags, ...) - remote datagram bytes taint the caller-supplied buffer argument."
 - id: c.input.recvmsg
   enabled: true
   language: c
@@ -63,7 +63,7 @@
         recvmsg(fd, msg, 0);
       }
     expect_match_text: [recvmsg]
-  description: "recvmsg(fd, msg, flags) — remote bytes taint the caller-supplied message/iov buffer state."
+  description: "recvmsg(fd, msg, flags) - remote bytes taint the caller-supplied message/iov buffer state."
 - id: c.input.ssl_read
   enabled: true
   language: c
@@ -86,7 +86,7 @@
         SSL_read(ssl, buf, sizeof(buf));
       }
     expect_match_text: [SSL_read]
-  description: "SSL_read(ssl, buf, len) — TLS peer bytes taint the caller-supplied buffer argument."
+  description: "SSL_read(ssl, buf, len) - TLS peer bytes taint the caller-supplied buffer argument."
 - id: c.input.mhd_lookup_connection_value
   enabled: true
   language: c
@@ -107,7 +107,7 @@
         char *fmt = arg;
         MHD_lookup_connection_value(arg);
       }
-  description: "libmicrohttpd MHD_lookup_connection_value — pulls query/form/cookie/header value straight from the HTTP client."
+  description: "libmicrohttpd MHD_lookup_connection_value - pulls query/form/cookie/header value straight from the HTTP client."
 - id: c.input.mg_get_http_var
   enabled: true
   language: c
@@ -128,7 +128,7 @@
         char *fmt = arg;
         mg_get_http_var(arg);
       }
-  description: "mongoose mg_get_http_var — extracts a query-string parameter; attacker-controlled."
+  description: "mongoose mg_get_http_var - extracts a query-string parameter; attacker-controlled."
 
 - id: c.input.mg_http_get_var
   enabled: true
@@ -149,7 +149,7 @@
         char *arg = "tainted";
         mg_http_get_var(arg);
       }
-  description: "Mongoose mg_http_get_var — extracts query/form variable value from an HTTP message."
+  description: "Mongoose mg_http_get_var - extracts query/form variable value from an HTTP message."
 
 - id: c.input.mg_http_get_header
   enabled: true
@@ -170,7 +170,7 @@
         char *arg = "tainted";
         mg_http_get_header(arg);
       }
-  description: "Mongoose mg_http_get_header — returns a client-supplied HTTP header value."
+  description: "Mongoose mg_http_get_header - returns a client-supplied HTTP header value."
 
 # TLS / SSL record header fields parsed from a peer-controlled record.
 # The Heartbleed (CVE-2014-0160) shape: a 16-bit length pulled from
@@ -194,11 +194,11 @@
       int example(int argc, char **payload_length) {
         return argc;
       }
-  description: "TLS / DTLS record-header length / type fields parsed from a peer-controlled record (Heartbleed CVE-2014-0160 shape — `payload_length` flows from heartbeat request to memcpy). Scoped by openssl/libssl/gnutls/mbedtls package context."
+  description: "TLS / DTLS record-header length / type fields parsed from a peer-controlled record (Heartbleed CVE-2014-0160 shape - `payload_length` flows from heartbeat request to memcpy). Scoped by openssl/libssl/gnutls/mbedtls package context."
 
 # Generic untrusted-input parameter for shell-handling / path-handling
 # C entry points. Names are deliberately narrow (the more aggressive
-# wider list — user/arg/cmd/name/path/host/url/query/body — caused
+# wider list - user/arg/cmd/name/path/host/url/query/body - caused
 # the c mega_flow fixture to report duplicate findings on construct-
 # coverage param names). Tightened to obviously-untrusted nouns:
 # `user_input`, `untrusted`, `attacker_input` plus the specific
@@ -216,4 +216,4 @@
     kind: param
     target:
       regex: "^(user_input|untrusted|attacker_input|tainted)$"
-  description: "Disabled by default — narrow audit hint for C entry-point fns whose param name explicitly states the value is attacker-controlled. The broader `user`/`cmd`/`path`/`host` variant collides with mega_flow construct-coverage param names; enable per-project."
+  description: "Disabled by default - narrow audit hint for C entry-point fns whose param name explicitly states the value is attacker-controlled. The broader `user`/`cmd`/`path`/`host` variant collides with mega_flow construct-coverage param names; enable per-project."

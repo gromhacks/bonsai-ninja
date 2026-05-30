@@ -181,7 +181,7 @@
       }
       }
     expect_no_match: true
-  description: "Files.delete with tainted Path — attacker-controlled paths let the attacker delete arbitrary files."
+  description: "Files.delete with tainted Path - attacker-controlled paths let the attacker delete arbitrary files."
 - id: kotlin.path.files_delete_if_exists
   enabled: true
   language: kotlin
@@ -528,7 +528,7 @@
       }
       class File(vararg args: Any?)
     expect_no_match: true
-  description: "new java.io.File(parent, tainted_child) — tainted child path can escape the intended parent."
+  description: "new java.io.File(parent, tainted_child) - tainted child path can escape the intended parent."
 - id: kotlin.path.file_readtext
   enabled: true
   language: kotlin
@@ -569,7 +569,7 @@
         }
       }
     expect_no_match: true
-  description: "Kotlin File.readText extension — reads path-targeted content."
+  description: "Kotlin File.readText extension - reads path-targeted content."
 - id: kotlin.path.file_writetext
   enabled: true
   language: kotlin
@@ -606,7 +606,7 @@
       }
       }
     expect_no_match: true
-  description: "Kotlin File.writeText extension — writes to path-targeted file."
+  description: "Kotlin File.writeText extension - writes to path-targeted file."
 - id: kotlin.path.file_copyto
   enabled: true
   language: kotlin
@@ -643,7 +643,7 @@
       }
       }
     expect_no_match: true
-  description: "Kotlin File.copyTo — destination path traversal."
+  description: "Kotlin File.copyTo - destination path traversal."
 - id: kotlin.path.file_renameto
   enabled: true
   language: kotlin
@@ -707,7 +707,7 @@
       }
       }
     expect_no_match: true
-  description: "java.nio.file.Paths.get(tainted) — path resolution without normalize/startsWith check. Merged collision aliases: kotlin.ssrf.play_wsrequest_get, kotlin.ssrf.ktor_httpclient_get, kotlin.ssrf.fuel_http_get."
+  description: "java.nio.file.Paths.get(tainted) - path resolution without normalize/startsWith check. Merged collision aliases: kotlin.ssrf.play_wsrequest_get, kotlin.ssrf.ktor_httpclient_get, kotlin.ssrf.fuel_http_get."
   aliases:
   - kotlin.ssrf.play_wsrequest_get
   - kotlin.ssrf.ktor_httpclient_get
@@ -999,7 +999,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    ZipInputStream.getNextEntry(input)\n  }\n}\n"
-  description: "Disabled — ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
+  description: "Disabled - ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
 - id: kotlin.path.file_readbytes
   enabled: true
   language: kotlin
@@ -1034,7 +1034,7 @@
       }
       }
     expect_no_match: true
-  description: "File(...).readBytes() — kotlin.io extension reads file at the (potentially tainted) path."
+  description: "File(...).readBytes() - kotlin.io extension reads file at the (potentially tainted) path."
   imports:
   - kotlin
 - id: kotlin.path.file_readlines
@@ -1071,7 +1071,7 @@
       }
       }
     expect_no_match: true
-  description: "File(...).readLines([charset]) — same exposure as readBytes."
+  description: "File(...).readLines([charset]) - same exposure as readBytes."
   imports:
   - kotlin
 - id: kotlin.path.file_inputstream_method
@@ -1108,6 +1108,6 @@
       }
       }
     expect_no_match: true
-  description: "File(...).inputStream() — opens a FileInputStream at the tainted path. Distinct from kotlin.path.file_input_stream which matches `new FileInputStream(...)`."
+  description: "File(...).inputStream() - opens a FileInputStream at the tainted path. Distinct from kotlin.path.file_input_stream which matches `new FileInputStream(...)`."
   imports:
   - kotlin

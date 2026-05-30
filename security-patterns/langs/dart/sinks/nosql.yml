@@ -151,7 +151,7 @@
       import 'package:mongo_dart/mongo_dart.dart';
       void test() { collection.update({"id": 1}, {"safe": true}); }
     expect_no_match: true
-  description: "mongo_dart DbCollection.update(selector, tainted update) — attacker-controlled update documents can inject operators."
+  description: "mongo_dart DbCollection.update(selector, tainted update) - attacker-controlled update documents can inject operators."
   imports:
   - mongo_dart/mongo_dart.dart
 - id: dart.nosql.mongo_dart_remove
@@ -214,7 +214,7 @@
       import 'package:redis/redis.dart';
       void test() { redis.eval("return 1"); }
     expect_no_match: true
-  description: "redis package Redis.eval — Lua injection."
+  description: "redis package Redis.eval - Lua injection."
 
   imports:
   - redis/redis.dart
@@ -231,7 +231,7 @@
     kind: call
     callee:
       attribute: [collection, where]
-  description: "Disabled — Firestore where() is type-bounded; flag with tainted field path."
+  description: "Disabled - Firestore where() is type-bounded; flag with tainted field path."
 
 - id: dart.nosql.realm_query_string
   enabled: true
@@ -261,6 +261,6 @@
       import 'package:realm/realm.dart';
       void test() { realm.query("name == $0"); }
     expect_no_match: true
-  description: "Realm .query(String rqlFilter) — RQL injection when filter is concatenated with user input instead of using $0/$1 placeholders."
+  description: "Realm .query(String rqlFilter) - RQL injection when filter is concatenated with user input instead of using $0/$1 placeholders."
   imports:
   - realm/realm.dart

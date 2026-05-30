@@ -17,4 +17,4 @@
       -export([handle/1]).
       handle(Event) ->
         Event.
-  description: "AWS Lambda Erlang custom-runtime handler(Event, Context) — Event is caller-controlled."
+  description: "AWS Lambda Erlang custom-runtime handler(Event, Context) - Event is caller-controlled."

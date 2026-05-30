@@ -101,7 +101,7 @@
       using MongoDB.Driver;
       class App { void Test() { IMongoDatabase.RunCommand("{ ping: 1 }"); } }
     expect_no_match: true
-  description: "MongoDB IMongoDatabase.RunCommand — arbitrary BSON command."
+  description: "MongoDB IMongoDatabase.RunCommand - arbitrary BSON command."
 
 - id: csharp.nosql.bsondocument_parse
   enabled: true
@@ -127,7 +127,7 @@
       using MongoDB.Bson;
       class App { void Test() { BsonDocument.Parse("{ status: 'active' }"); } }
     expect_no_match: true
-  description: "BsonDocument.Parse(tainted JSON) — feeds Find filter."
+  description: "BsonDocument.Parse(tainted JSON) - feeds Find filter."
 
 - id: csharp.nosql.cosmos_query_with_string
   enabled: true
@@ -153,7 +153,7 @@
       using Microsoft.Azure.Cosmos;
       class App { void Test() { Container.GetItemQueryIterator("select * from c"); } }
     expect_no_match: true
-  description: "Cosmos Container.GetItemQueryIterator(string SQL) — flag string overload."
+  description: "Cosmos Container.GetItemQueryIterator(string SQL) - flag string overload."
 
 - id: csharp.nosql.ravendb_advanced_rawquery
   enabled: true
@@ -205,4 +205,4 @@
       using StackExchange.Redis;
       class App { void Test() { IDatabase.ScriptEvaluate("return 1"); } }
     expect_no_match: true
-  description: "StackExchange.Redis IDatabase.ScriptEvaluate — Lua injection."
+  description: "StackExchange.Redis IDatabase.ScriptEvaluate - Lua injection."

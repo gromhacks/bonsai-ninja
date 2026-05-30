@@ -33,7 +33,7 @@
         return knex.raw("SELECT * FROM users WHERE id = ?", [input]);
       }
     expect_no_match: true
-  description: "knex.raw interpolates the string directly into the query — always unsafe on tainted input."
+  description: "knex.raw interpolates the string directly into the query - always unsafe on tainted input."
 - id: javascript.sqli.prisma_query_raw_unsafe
   enabled: true
   language: javascript
@@ -64,7 +64,7 @@
         return PrismaClient.$queryRawUnsafe("SELECT * FROM users WHERE id = ?", input);
       }
     expect_no_match: true
-  description: "Prisma $queryRawUnsafe disables the tagged-template protection — tainted input is injected."
+  description: "Prisma $queryRawUnsafe disables the tagged-template protection - tainted input is injected."
 - id: javascript.sqli.prisma_executerawunsafe
   enabled: true
   language: javascript
@@ -95,7 +95,7 @@
         return PrismaClient.$executeRawUnsafe("UPDATE users SET seen = true WHERE id = ?", input);
       }
     expect_no_match: true
-  description: "Prisma $executeRawUnsafe — same unsafe raw path as $queryRawUnsafe."
+  description: "Prisma $executeRawUnsafe - same unsafe raw path as $queryRawUnsafe."
 - id: javascript.sqli.sqlite3_run
   enabled: true
   language: javascript
@@ -128,7 +128,7 @@
         return db.run("SELECT * FROM users WHERE id = ?", input);
       }
     expect_no_match: true
-  description: "sqlite3 db.run with a concatenated SQL string — use the param-array form."
+  description: "sqlite3 db.run with a concatenated SQL string - use the param-array form."
 - id: javascript.sqli.sqlite3_exec
   enabled: true
   language: javascript
@@ -162,7 +162,7 @@
         return db.exec("VACUUM");
       }
     expect_no_match: true
-  description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string — no binding support."
+  description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string - no binding support."
 - id: javascript.sqli.better_sqlite3_exec
   enabled: false
   disabled_reason:
@@ -180,7 +180,7 @@
       attribute:
       - db
       - exec
-  description: "Disabled duplicate — same db.exec shape is covered by javascript.sqli.sqlite3_exec with both package names."
+  description: "Disabled duplicate - same db.exec shape is covered by javascript.sqli.sqlite3_exec with both package names."
 - id: javascript.sqli.method_query_concat
   enabled: true
   language: javascript
@@ -210,7 +210,7 @@
         return conn.query("SELECT * FROM users WHERE id = ?", [input]);
       }
     expect_no_match: true
-  description: "<recv>.query(sql) where arg has a SQL keyword AND concat / template-literal marker — driver-agnostic SQL-injection sink for `conn.query(...)`, `db.query(...)`, and `client.query(...)` shapes the package-anchored rules miss. Merged aliases: javascript.sqli.method_query_sql_variable."
+  description: "<recv>.query(sql) where arg has a SQL keyword AND concat / template-literal marker - driver-agnostic SQL-injection sink for `conn.query(...)`, `db.query(...)`, and `client.query(...)` shapes the package-anchored rules miss. Merged aliases: javascript.sqli.method_query_sql_variable."
   aliases:
   - javascript.sqli.method_query_sql_variable
   - javascript.sqli.mysql_query
@@ -266,7 +266,7 @@
         return conn.execute("SELECT * FROM users WHERE id = ?", [input]);
       }
     expect_no_match: true
-  description: "<recv>.execute(sql) — same shape as `query`, used by mysql2 prepared statements + several ORMs. Merged collision aliases: javascript.graphql.schema_execute, javascript.nosql.cassandra_execute, javascript.sqli.mysql_execute, javascript.sqli.mysql_execute_db, javascript.sqli.mysql2_pool_execute."
+  description: "<recv>.execute(sql) - same shape as `query`, used by mysql2 prepared statements + several ORMs. Merged collision aliases: javascript.graphql.schema_execute, javascript.nosql.cassandra_execute, javascript.sqli.mysql_execute, javascript.sqli.mysql_execute_db, javascript.sqli.mysql2_pool_execute."
   aliases:
   - javascript.graphql.schema_execute
   - javascript.nosql.cassandra_execute
@@ -329,7 +329,7 @@
         return prisma.$queryRawUnsafe("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: "Prisma client instance $queryRawUnsafe — raw SQL string execution with no tagged-template parameterization."
+  description: "Prisma client instance $queryRawUnsafe - raw SQL string execution with no tagged-template parameterization."
 - id: javascript.sqli.prisma_instance_execute_raw_unsafe
   enabled: true
   language: javascript
@@ -380,7 +380,7 @@
         return prisma.$executeRawUnsafe("UPDATE users SET seen = true WHERE id = 1");
       }
     expect_no_match: true
-  description: "Prisma client instance $executeRawUnsafe — unsafe raw SQL execution path."
+  description: "Prisma client instance $executeRawUnsafe - unsafe raw SQL execution path."
 - id: javascript.sqli.prisma_raw_fragment
   enabled: true
   language: javascript
@@ -454,4 +454,4 @@
         return Database.rawQuery("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: "Database.rawQuery(sql) — framework database facade raw SQL execution with string-built SQL."
+  description: "Database.rawQuery(sql) - framework database facade raw SQL execution with string-built SQL."

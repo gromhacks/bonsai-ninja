@@ -34,7 +34,7 @@
         }
       }
     expect_no_match: true
-  description: "JNDI InitialDirContext.search \u2014 tainted filter string splices\
+  description: "JNDI InitialDirContext.search - tainted filter string splices\
     \ into LDAP query, enabling LDAP injection (CWE-90)."
 - id: scala.ldap.initial_dir_context_lookup
   enabled: true
@@ -65,7 +65,7 @@
       \ App {\n  def handle(input: String): Unit = {\n    InitialDirContext.lookup(\"\
       safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "InitialDirContext.lookup \u2014 JNDI lookup vector."
+  description: "InitialDirContext.lookup - JNDI lookup vector."
 - id: scala.ldap.dircontext_search
   enabled: true
   language: scala
@@ -102,7 +102,7 @@
         }
       }
     expect_no_match: true
-  description: "javax.naming.directory.DirContext.search \u2014 tainted filter enables\
+  description: "javax.naming.directory.DirContext.search - tainted filter enables\
     \ LDAP injection; only filterExpr+filterArgs overload is safe."
 - id: scala.ldap.unboundid_search
   enabled: true
@@ -140,7 +140,7 @@
         }
       }
     expect_no_match: true
-  description: "unboundid-ldapsdk LDAPConnection.search \u2014 tainted filter enables\
+  description: "unboundid-ldapsdk LDAPConnection.search - tainted filter enables\
     \ LDAP injection unless built via Filter.create*()."
   imports:
   - com.unboundid.ldap.sdk
@@ -172,7 +172,7 @@
       \ handle(input: String): Unit = {\n    LDAPConnection.modify(\"uid=alice,dc=example,dc=com\"\
       )\n  }\n}\n"
     expect_no_match: true
-  description: "unboundid-ldapsdk LDAPConnection.modify \u2014 tainted DN/attribute\
+  description: "unboundid-ldapsdk LDAPConnection.modify - tainted DN/attribute\
     \ enables LDAP-injection / unauthorized mutation."
   imports:
   - com.unboundid.ldap.sdk

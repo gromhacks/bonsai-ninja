@@ -34,4 +34,4 @@
           log::info("user={}", user);
       }
     expect_no_match: true
-  description: 'log::info!("... {user} ...\n") — newline in user text forges log entries.'
+  description: 'log::info!("... {user} ...\n") - newline in user text forges log entries.'

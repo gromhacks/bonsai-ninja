@@ -27,7 +27,7 @@
           LdapConn::search("ou=people,dc=example,dc=com", Scope::Subtree, "(uid=safe)", vec!["cn"]);
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::search — flag tainted filter."
+  description: "ldap3 LdapConn::search - flag tainted filter."
 
 - id: rust.ldap.ldap3_streaming_search
   enabled: true
@@ -57,7 +57,7 @@
           LdapConn::streaming_search("ou=people,dc=example,dc=com", Scope::Subtree, "(uid=safe)", vec!["cn"]);
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::streaming_search — streaming variant of search; same filter-injection exposure."
+  description: "ldap3 LdapConn::streaming_search - streaming variant of search; same filter-injection exposure."
 
 - id: rust.ldap.ldap3_modify
   enabled: true
@@ -88,7 +88,7 @@
           LdapConn::modify("safe");
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::modify — tainted DN / attribute values enable directory tampering."
+  description: "ldap3 LdapConn::modify - tainted DN / attribute values enable directory tampering."
 
 - id: rust.ldap.ldap3_modify_attrs
   enabled: true
@@ -117,7 +117,7 @@
           LdapConn::modify("safe", "safe");
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::modify(dn, mods) — tainted modifications can alter unintended directory attributes."
+  description: "ldap3 LdapConn::modify(dn, mods) - tainted modifications can alter unintended directory attributes."
 
 - id: rust.ldap.ldap3_add
   enabled: true
@@ -148,7 +148,7 @@
           LdapConn::add("safe");
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::add — tainted DN / attributes enable unauthorized directory insert (create rogue user)."
+  description: "ldap3 LdapConn::add - tainted DN / attributes enable unauthorized directory insert (create rogue user)."
 
 - id: rust.ldap.ldap3_add_attrs
   enabled: true
@@ -177,7 +177,7 @@
           LdapConn::add("safe", "safe");
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::add(dn, attrs) — tainted attributes can create rogue directory entries."
+  description: "ldap3 LdapConn::add(dn, attrs) - tainted attributes can create rogue directory entries."
 
 - id: rust.ldap.ldap3_delete
   enabled: true
@@ -207,4 +207,4 @@
           LdapConn::delete("uid=safe,ou=people,dc=example,dc=com");
       }
     expect_no_match: true
-  description: "ldap3 LdapConn::delete — tainted DN enables arbitrary directory-object deletion (privileged operation)."
+  description: "ldap3 LdapConn::delete - tainted DN enables arbitrary directory-object deletion (privileged operation)."

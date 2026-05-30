@@ -19,7 +19,7 @@
             System.argv(input)
           end
         end
-  description: "System.argv/0 — command-line arguments passed to the VM; whoever launched the BEAM controls these."
+  description: "System.argv/0 - command-line arguments passed to the VM; whoever launched the BEAM controls these."
 
 - id: elixir.cli.io_gets
   enabled: true
@@ -39,7 +39,7 @@
             IO.gets(input)
           end
         end
-  description: "IO.gets/1 — interactive stdin line (blocking read)."
+  description: "IO.gets/1 - interactive stdin line (blocking read)."
 
 - id: elixir.cli.io_read
   enabled: true
@@ -59,7 +59,7 @@
             IO.read(input)
           end
         end
-  description: "IO.read/2 — reads from a device (stdin by default)."
+  description: "IO.read/2 - reads from a device (stdin by default)."
 
 - id: elixir.cli.mix_task_args
   enabled: false
@@ -74,7 +74,7 @@
     kind: param
     target:
       name: args
-  description: "Disabled duplicate — bare `param name: args` is covered by elixir.absinthe.resolver_args; System.argv/0 remains the precise CLI source."
+  description: "Disabled duplicate - bare `param name: args` is covered by elixir.absinthe.resolver_args; System.argv/0 remains the precise CLI source."
 
 - id: elixir.config.system_get_env
   enabled: true
@@ -94,7 +94,7 @@
             System.get_env(input)
           end
         end
-  description: "System.get_env/1,2 — process environment variable; config-trust (same process set it, but still external input)."
+  description: "System.get_env/1,2 - process environment variable; config-trust (same process set it, but still external input)."
 
 - id: elixir.config.application_get_env
   enabled: true
@@ -114,7 +114,7 @@
             Application.get_env(input)
           end
         end
-  description: "Application.get_env/3 — Elixir app config (config/*.exs + runtime.exs); origin is releases/deployers."
+  description: "Application.get_env/3 - Elixir app config (config/*.exs + runtime.exs); origin is releases/deployers."
 
 - id: elixir.config.application_fetch_env
   enabled: true
@@ -134,4 +134,4 @@
             Application.fetch_env!(input)
           end
         end
-  description: "Application.fetch_env!/2 — same origin as get_env/3 but raises on missing."
+  description: "Application.fetch_env!/2 - same origin as get_env/3 but raises on missing."

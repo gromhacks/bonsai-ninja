@@ -20,7 +20,7 @@
     code: |
       void test(sqlite3 *db) { sqlite3_exec(db, "SELECT 1", NULL, NULL, NULL); }
     expect_no_match: true
-  description: "sqlite3_exec — runs concatenated SQL; no placeholders possible so tainted input is always injection."
+  description: "sqlite3_exec - runs concatenated SQL; no placeholders possible so tainted input is always injection."
 
 - id: objc.sqli.sqlite3_prepare_v2
   enabled: true
@@ -43,7 +43,7 @@
     code: |
       void test(sqlite3 *db) { sqlite3_prepare_v2(db, "SELECT 1", -1, NULL, NULL); }
     expect_no_match: true
-  description: "sqlite3_prepare(_v2/_v3) — SQL text argument must not be built with stringWithFormat: / string concatenation."
+  description: "sqlite3_prepare(_v2/_v3) - SQL text argument must not be built with stringWithFormat: / string concatenation."
 
 - id: objc.sqli.sqlite3_get_table
   enabled: true
@@ -66,7 +66,7 @@
     code: |
       void test(sqlite3 *db) { sqlite3_get_table(db, "SELECT 1", NULL, NULL, NULL, NULL); }
     expect_no_match: true
-  description: "sqlite3_get_table — executes concatenated SQL like sqlite3_exec; deprecated but still present."
+  description: "sqlite3_get_table - executes concatenated SQL like sqlite3_exec; deprecated but still present."
 
 - id: objc.sqli.fmdb_executequery
   enabled: true
@@ -144,4 +144,4 @@
       #import <fmdb/fmdb.h>
       void test(void) { [FMDatabase executeStatements:@"CREATE TABLE safe(id INTEGER)"]; }
     expect_no_match: true
-  description: "FMDB -executeStatements: — runs multiple semicolon-separated statements; no parameter form exists, so tainted input is always injection."
+  description: "FMDB -executeStatements: - runs multiple semicolon-separated statements; no parameter form exists, so tainted input is always injection."

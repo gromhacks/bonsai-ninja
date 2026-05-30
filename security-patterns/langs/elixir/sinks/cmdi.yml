@@ -30,7 +30,7 @@
         end
       end
     expect_no_match: true
-  description: "System.cmd(tainted_cmd, args) — attacker-controlled executable paths can spawn unintended programs. Shell-command strings passed through `sh -c` are covered by elixir.cmdi.system_cmd_shell_args."
+  description: "System.cmd(tainted_cmd, args) - attacker-controlled executable paths can spawn unintended programs. Shell-command strings passed through `sh -c` are covered by elixir.cmdi.system_cmd_shell_args."
 
 - id: elixir.cmdi.system_cmd_shell_args
   enabled: true
@@ -75,7 +75,7 @@
         end
       end
     expect_no_match: true
-  description: "System.cmd(\"sh\", [\"-c\", tainted]) — shell-command string is interpreted by /bin/sh."
+  description: "System.cmd(\"sh\", [\"-c\", tainted]) - shell-command string is interpreted by /bin/sh."
 
 - id: elixir.cmdi.system_shell
   enabled: true
@@ -109,7 +109,7 @@
         end
       end
     expect_no_match: true
-  description: "System.shell/2 — entire argument is interpreted by /bin/sh -c; no argv splitting, no escaping."
+  description: "System.shell/2 - entire argument is interpreted by /bin/sh -c; no argv splitting, no escaping."
 
 - id: elixir.cmdi.os_cmd
   enabled: true
@@ -140,7 +140,7 @@
         end
       end
     expect_no_match: true
-  description: "Erlang :os.cmd/1 — runs the binary string through /bin/sh without any escaping; classic shell metacharacter injection."
+  description: "Erlang :os.cmd/1 - runs the binary string through /bin/sh without any escaping; classic shell metacharacter injection."
 
 - id: elixir.cmdi.port_open_spawn
   enabled: true
@@ -171,7 +171,7 @@
         end
       end
     expect_no_match: true
-  description: "Port.open({:spawn, cmd}, _) — :spawn mode runs the command via /bin/sh. Prefer {:spawn_executable, path} with explicit args."
+  description: "Port.open({:spawn, cmd}, _) - :spawn mode runs the command via /bin/sh. Prefer {:spawn_executable, path} with explicit args."
 
 - id: elixir.cmdi.erlang_open_port
   enabled: true
@@ -202,7 +202,7 @@
         end
       end
     expect_no_match: true
-  description: "Erlang :erlang.open_port({:spawn, cmd}, _) — same shell-interpreted spawn as Port.open; tainted cmd runs attacker binary."
+  description: "Erlang :erlang.open_port({:spawn, cmd}, _) - same shell-interpreted spawn as Port.open; tainted cmd runs attacker binary."
 
 - id: elixir.cmdi.exexec_run
   enabled: true
@@ -236,7 +236,7 @@
         end
       end
     expect_no_match: true
-  description: "Exexec.run/2 — wraps erlexec; tainted cmd string is handed to a shell invocation."
+  description: "Exexec.run/2 - wraps erlexec; tainted cmd string is handed to a shell invocation."
 
   imports:
   - Exexec
@@ -272,7 +272,7 @@
         end
       end
     expect_no_match: true
-  description: "MuonTrap.cmd/3 — runs external process; tainted cmd string executes attacker binary (MuonTrap adds supervision, not argument escaping)."
+  description: "MuonTrap.cmd/3 - runs external process; tainted cmd string executes attacker binary (MuonTrap adds supervision, not argument escaping)."
 
   imports:
   - Muontrap
@@ -308,7 +308,7 @@
         end
       end
     expect_no_match: true
-  description: "Porcelain.exec/3 — tainted cmd executes attacker binary; `shell/2` variant runs via /bin/sh."
+  description: "Porcelain.exec/3 - tainted cmd executes attacker binary; `shell/2` variant runs via /bin/sh."
 
   imports:
   - Porcelain
@@ -345,7 +345,7 @@
         end
       end
     expect_no_match: true
-  description: "Porcelain.shell/2 — runs argument through /bin/sh -c; classic shell injection if the string is tainted."
+  description: "Porcelain.shell/2 - runs argument through /bin/sh -c; classic shell injection if the string is tainted."
 
   imports:
   - Porcelain
@@ -381,6 +381,6 @@
         end
       end
     expect_no_match: true
-  description: "Rambo.run/2 — Elixir external-process wrapper; tainted cmd list element executes attacker binary."
+  description: "Rambo.run/2 - Elixir external-process wrapper; tainted cmd list element executes attacker binary."
   imports:
   - Rambo

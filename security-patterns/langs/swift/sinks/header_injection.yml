@@ -27,7 +27,7 @@
       import Vapor // vapor
       func test() { replaceOrAdd(name: "X-Name", value: "safe") }
     expect_no_match: true
-  description: "Vapor Response.headers.replaceOrAdd(name:value: tainted) — CRLF risk if value unchecked."
+  description: "Vapor Response.headers.replaceOrAdd(name:value: tainted) - CRLF risk if value unchecked."
 - id: swift.header.vapor_response_headers_replace_or_add_name
   enabled: true
   language: swift
@@ -54,7 +54,7 @@
       import Vapor // vapor
       func test() { replaceOrAdd(name: "X-Name", value: "safe") }
     expect_no_match: true
-  description: "Vapor Response.headers.replaceOrAdd(name:value:) — tainted header names can corrupt response headers."
+  description: "Vapor Response.headers.replaceOrAdd(name:value:) - tainted header names can corrupt response headers."
 
 - id: swift.header.vapor_response_headers_add
   enabled: true
@@ -84,7 +84,7 @@
       import Vapor // vapor
       func test() { headers.add(name: "X-Name", value: "safe") }
     expect_no_match: true
-  description: "Vapor Response.headers.add(name:value:). Suffix-match via `headers.add` — reduces FP vs bare `add`."
+  description: "Vapor Response.headers.add(name:value:). Suffix-match via `headers.add` - reduces FP vs bare `add`."
 - id: swift.header.vapor_response_headers_add_name
   enabled: true
   language: swift
@@ -111,7 +111,7 @@
       import Vapor // vapor
       func test() { headers.add(name: "X-Name", value: "safe") }
     expect_no_match: true
-  description: "Vapor Response.headers.add(name:value:) — tainted header names can corrupt response headers."
+  description: "Vapor Response.headers.add(name:value:) - tainted header names can corrupt response headers."
 
 - id: swift.header.urlrequest_addvalue
   enabled: true
@@ -134,7 +134,7 @@
     code: |
       func test() { addValue("safe", forHTTPHeaderField: "X-Name") }
     expect_no_match: true
-  description: "URLRequest.addValue(_:forHTTPHeaderField:) — outbound CRLF."
+  description: "URLRequest.addValue(_:forHTTPHeaderField:) - outbound CRLF."
 
 - id: swift.header.urlrequest_setvalue
   enabled: true
@@ -157,7 +157,7 @@
     code: |
       func test() { setValue("safe", forHTTPHeaderField: "X-Name") }
     expect_no_match: true
-  description: "URLRequest.setValue(_:forHTTPHeaderField:) — outbound CRLF. Note: `setValue` also exists on NSDictionary."
+  description: "URLRequest.setValue(_:forHTTPHeaderField:) - outbound CRLF. Note: `setValue` also exists on NSDictionary."
 
 - id: swift.header.urlrequest_allhttpheaderfields
   enabled: true

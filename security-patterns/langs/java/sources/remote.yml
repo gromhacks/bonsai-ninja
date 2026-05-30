@@ -1,6 +1,6 @@
 # Java HTTP / Servlet / JAX-RS / Spring remote input sources.
 #
-# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# -- Adapter coverage notes (audited 2026-04) ---------------------------------
 # Most modern Java web frameworks bind HTTP input to method parameters via
 # annotations: Spring MVC (@RequestParam, @RequestBody, @PathVariable,
 # @RequestHeader, @CookieValue, @RequestPart, @MatrixVariable,
@@ -53,7 +53,7 @@
         }
       }
     expect_match_text: [value]
-  description: "Spring @RequestParam annotated parameter — query/form value bound from the HTTP request, including raw String values that can flow to XSS sinks."
+  description: "Spring @RequestParam annotated parameter - query/form value bound from the HTTP request, including raw String values that can flow to XSS sinks."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -77,7 +77,7 @@
         void handle(@RequestBody String value) {
         }
       }
-  description: "Spring @RequestBody annotated parameter — request body payload bound to the handler."
+  description: "Spring @RequestBody annotated parameter - request body payload bound to the handler."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -110,7 +110,7 @@
       }
       class MultipartFile {}
     expect_match_text: [file]
-  description: "Spring @RequestPart annotated parameter — multipart part or MultipartFile supplied by the client."
+  description: "Spring @RequestPart annotated parameter - multipart part or MultipartFile supplied by the client."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -134,7 +134,7 @@
         void handle(@PathVariable String value) {
         }
       }
-  description: "Spring @PathVariable annotated parameter — URL path segment supplied by the client."
+  description: "Spring @PathVariable annotated parameter - URL path segment supplied by the client."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -158,7 +158,7 @@
         void handle(@RequestHeader String value) {
         }
       }
-  description: "Spring @RequestHeader annotated parameter — client-supplied HTTP header."
+  description: "Spring @RequestHeader annotated parameter - client-supplied HTTP header."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -182,7 +182,7 @@
         void handle(@CookieValue String value) {
         }
       }
-  description: "Spring @CookieValue annotated parameter — client-supplied cookie value."
+  description: "Spring @CookieValue annotated parameter - client-supplied cookie value."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -205,7 +205,7 @@
         void handle(@MatrixVariable String value) {
         }
       }
-  description: "Spring @MatrixVariable annotated parameter — matrix URI variable supplied by the client."
+  description: "Spring @MatrixVariable annotated parameter - matrix URI variable supplied by the client."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -228,7 +228,7 @@
         void handle(@ModelAttribute String value) {
         }
       }
-  description: "Spring @ModelAttribute annotated parameter — request values bound onto a model object."
+  description: "Spring @ModelAttribute annotated parameter - request values bound onto a model object."
 
   imports:
   - org.springframework.web.bind.annotation
@@ -257,7 +257,7 @@
         String getOriginalFilename();
       }
     expect_match_text: [file.getOriginalFilename]
-  description: "Spring MultipartFile.getOriginalFilename() — client-supplied upload filename from a package-scoped local receiver call."
+  description: "Spring MultipartFile.getOriginalFilename() - client-supplied upload filename from a package-scoped local receiver call."
 
   imports:
   - org.springframework.web.multipart
@@ -274,7 +274,7 @@
     kind: call
     callee:
       attribute: [MultipartFile, getName]
-  description: "Disabled — `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
+  description: "Disabled - `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
 
 - id: java.source.servlet_getparameter
   enabled: true
@@ -345,7 +345,7 @@
           request.getParameterNames();
         }
       }
-  description: "HttpServletRequest.getParameterNames() — attacker-controlled query/form parameter names."
+  description: "HttpServletRequest.getParameterNames() - attacker-controlled query/form parameter names."
 
 - id: java.source.servlet_getparametermap
   enabled: true
@@ -485,7 +485,7 @@
           theCookie.getValue();
         }
       }
-  description: "Cookie.getValue() on a request-cookie variable — attacker-controlled cookie value."
+  description: "Cookie.getValue() on a request-cookie variable - attacker-controlled cookie value."
 
 - id: java.source.cookie_getname
   enabled: true
@@ -508,7 +508,7 @@
           theCookie.getName();
         }
       }
-  description: "Cookie.getName() on a request-cookie variable — attacker-controlled cookie name."
+  description: "Cookie.getName() on a request-cookie variable - attacker-controlled cookie name."
 
 - id: java.source.servlet_getinputstream
   enabled: true
@@ -531,7 +531,7 @@
           request.getInputStream();
         }
       }
-  description: "HttpServletRequest.getInputStream — raw body."
+  description: "HttpServletRequest.getInputStream - raw body."
 
 - id: java.source.servlet_getreader
   enabled: true
@@ -671,7 +671,7 @@
           request.getSession().getAttribute("user");
         }
       }
-  description: "HttpServletRequest.getSession().getAttribute(name) — session data previously influenced by the remote client."
+  description: "HttpServletRequest.getSession().getAttribute(name) - session data previously influenced by the remote client."
 
 - id: java.source.servlet_part_getsubmittedfilename
   enabled: true
@@ -698,7 +698,7 @@
         String getSubmittedFileName();
       }
     expect_match_text: [part.getSubmittedFileName]
-  description: "Servlet Part.getSubmittedFileName() — client-supplied multipart filename from a package-scoped local receiver call."
+  description: "Servlet Part.getSubmittedFileName() - client-supplied multipart filename from a package-scoped local receiver call."
 
   imports:
   - jakarta.servlet.http
@@ -724,7 +724,7 @@
         }
       }
     expect_match_text: [value]
-  description: "JAX-RS / Quarkus @QueryParam annotated parameter — query value bound from the HTTP request."
+  description: "JAX-RS / Quarkus @QueryParam annotated parameter - query value bound from the HTTP request."
 
 - id: java.source.jaxrs_pathparam
   enabled: true
@@ -746,7 +746,7 @@
         void handle(@PathParam String value) {
         }
       }
-  description: "JAX-RS / Quarkus @PathParam annotated parameter — path value bound from the HTTP request."
+  description: "JAX-RS / Quarkus @PathParam annotated parameter - path value bound from the HTTP request."
 
 - id: java.source.jaxrs_headerparam
   enabled: true
@@ -768,7 +768,7 @@
         void handle(@HeaderParam String value) {
         }
       }
-  description: "JAX-RS / Quarkus @HeaderParam annotated parameter — client-supplied header."
+  description: "JAX-RS / Quarkus @HeaderParam annotated parameter - client-supplied header."
 
 - id: java.source.jaxrs_formparam
   enabled: true
@@ -790,7 +790,7 @@
         void handle(@FormParam String value) {
         }
       }
-  description: "JAX-RS / Quarkus @FormParam annotated parameter — form body value bound from the HTTP request."
+  description: "JAX-RS / Quarkus @FormParam annotated parameter - form body value bound from the HTTP request."
 
 - id: java.source.jaxrs_cookieparam
   enabled: true
@@ -812,7 +812,7 @@
         void handle(@CookieParam String value) {
         }
       }
-  description: "JAX-RS / Quarkus @CookieParam annotated parameter — client-supplied cookie."
+  description: "JAX-RS / Quarkus @CookieParam annotated parameter - client-supplied cookie."
 
 - id: java.source.jaxrs_matrixparam
   enabled: true
@@ -833,7 +833,7 @@
         void handle(@MatrixParam String value) {
         }
       }
-  description: "JAX-RS / Quarkus @MatrixParam annotated parameter — matrix URI value supplied by the HTTP request."
+  description: "JAX-RS / Quarkus @MatrixParam annotated parameter - matrix URI value supplied by the HTTP request."
 
 - id: java.source.jaxrs_beanparam
   enabled: true
@@ -854,7 +854,7 @@
         void handle(@BeanParam String value) {
         }
       }
-  description: "JAX-RS / Quarkus @BeanParam annotated parameter — request parameters bound into a bean."
+  description: "JAX-RS / Quarkus @BeanParam annotated parameter - request parameters bound into a bean."
 
 - id: java.source.jaxrs_quarkus_body_param
   enabled: true
@@ -886,7 +886,7 @@
       }
       class Map {}
     expect_match_text: [requestBody]
-  description: "JAX-RS / Quarkus entity body parameter convention — unannotated String or Map body supplied by the HTTP request."
+  description: "JAX-RS / Quarkus entity body parameter convention - unannotated String or Map body supplied by the HTTP request."
 
 - id: java.source.azure_http_trigger
   enabled: true
@@ -918,7 +918,7 @@
         }
       }
     expect_no_match: true
-  description: "Azure Functions @HttpTrigger annotated parameter — HTTP request envelope supplied by the remote caller."
+  description: "Azure Functions @HttpTrigger annotated parameter - HTTP request envelope supplied by the remote caller."
 
 - id: java.source.gcf_http_function_service
   enabled: false
@@ -932,7 +932,7 @@
     kind: param
     target:
       name: service
-  description: "Disabled — `service` is the handler method name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `service` is the handler method name; `kind: param` only matches parameter identifiers."
 
 - id: java.source.websocket_onmessage
   enabled: false
@@ -947,7 +947,7 @@
     kind: param
     target:
       name: OnMessage
-  description: "Disabled — matcher only sees parameter identifiers, not @OnMessage annotations."
+  description: "Disabled - matcher only sees parameter identifiers, not @OnMessage annotations."
 
 - id: java.source.android_intent_getdata
   enabled: false
@@ -962,7 +962,7 @@
     kind: call
     callee:
       attribute: [Intent, getData]
-  description: "Disabled — `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
+  description: "Disabled - `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
 
 - id: java.source.spring_httpentity_getbody
   enabled: true
@@ -985,7 +985,7 @@
           return httpEntity.getBody();
         }
       }
-  description: "Spring HttpEntity / RequestEntity getBody() — request body via Spring's typed entity wrapper."
+  description: "Spring HttpEntity / RequestEntity getBody() - request body via Spring's typed entity wrapper."
 
   imports:
   - org.springframework.http
@@ -1010,7 +1010,7 @@
           return uriInfo.getQueryParameters();
         }
       }
-  description: "JAX-RS UriInfo.getQueryParameters — returns multivalued query params from the request URI."
+  description: "JAX-RS UriInfo.getQueryParameters - returns multivalued query params from the request URI."
 
 - id: java.source.jaxrs_uriinfo_getpathparameters
   enabled: true
@@ -1033,7 +1033,7 @@
           return uriInfo.getPathParameters();
         }
       }
-  description: "JAX-RS UriInfo.getPathParameters — returns matched @Path template variables."
+  description: "JAX-RS UriInfo.getPathParameters - returns matched @Path template variables."
 
 - id: java.source.jaxrs_httpheaders_getrequestheader
   enabled: true
@@ -1056,7 +1056,7 @@
           return headers.getRequestHeader(input);
         }
       }
-  description: "JAX-RS HttpHeaders.getRequestHeader — single-valued header lookup."
+  description: "JAX-RS HttpHeaders.getRequestHeader - single-valued header lookup."
 
 - id: java.source.jaxrs_httpheaders_getcookies
   enabled: true
@@ -1079,7 +1079,7 @@
           return headers.getCookies();
         }
       }
-  description: "JAX-RS HttpHeaders.getCookies — request cookie map."
+  description: "JAX-RS HttpHeaders.getCookies - request cookie map."
 
 - id: java.source.jaxrs_containerrequestcontext_getentitystream
   enabled: true
@@ -1108,7 +1108,7 @@
         Object getEntityStream(Object... args) { return null; }
       }
     expect_match_text: [requestContext.getEntityStream]
-  description: "JAX-RS ContainerRequestContext.getEntityStream() — request body stream accessed from an injected @Context request context."
+  description: "JAX-RS ContainerRequestContext.getEntityStream() - request body stream accessed from an injected @Context request context."
 
 - id: java.source.grpc_request_getter
   enabled: false
@@ -1122,7 +1122,7 @@
     kind: call
     callee:
       attribute: [ServerCall, getRequest]
-  description: "Disabled — gRPC ServerCall.getRequest pattern is rare; most generated stubs surface the request as a method parameter (see grpc_service_request)."
+  description: "Disabled - gRPC ServerCall.getRequest pattern is rare; most generated stubs surface the request as a method parameter (see grpc_service_request)."
 
 - id: java.source.grpc_service_request_param
   enabled: false
@@ -1136,7 +1136,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled — generated gRPC stubs name the request parameter `request`, but bare-name param matching overmatches every method with a parameter called `request`. Enable per-project once a `@GrpcService` annotation pivot is available."
+  description: "Disabled - generated gRPC stubs name the request parameter `request`, but bare-name param matching overmatches every method with a parameter called `request`. Enable per-project once a `@GrpcService` annotation pivot is available."
 
 - id: java.source.grpc_streamobserver_value
   enabled: true
@@ -1157,7 +1157,7 @@
           responseObserver.onNext(input);
         }
       }
-  description: "gRPC StreamObserver.onNext — when the value being forwarded is derived from a peer-supplied request message."
+  description: "gRPC StreamObserver.onNext - when the value being forwarded is derived from a peer-supplied request message."
 
 - id: java.source.netty_fullhttprequest_content
   enabled: true
@@ -1180,11 +1180,11 @@
           return request.content();
         }
       }
-  description: "Netty FullHttpRequest.content() — raw request body buffer."
+  description: "Netty FullHttpRequest.content() - raw request body buffer."
 
 # Generic untrusted-bytes parameter for deserialization-style entry
 # points. The typical shape is `void deserialize(byte[] data)` /
-# `Object readObject(byte[] payload)` — the byte-array param is the
+# `Object readObject(byte[] payload)` - the byte-array param is the
 # wire/cache/queue blob. Bare-name match overmatches, but the deser
 # sinks (ObjectInputStream.readObject, Kryo, XMLDecoder,
 # jackson-databind default typing) are the second gate.
@@ -1233,7 +1233,7 @@
         Object getArgument(Object... args) { return null; }
       }
     expect_match_text: [env.getArgument]
-  description: "graphql-java DataFetchingEnvironment.getArgument(name) — resolver argument supplied by the GraphQL caller."
+  description: "graphql-java DataFetchingEnvironment.getArgument(name) - resolver argument supplied by the GraphQL caller."
 
   imports:
   - graphql.schema
@@ -1264,7 +1264,7 @@
         Object getArguments(Object... args) { return null; }
       }
     expect_match_text: [environment.getArguments]
-  description: "graphql-java DataFetchingEnvironment.getArguments() — map of caller-controlled resolver arguments."
+  description: "graphql-java DataFetchingEnvironment.getArguments() - map of caller-controlled resolver arguments."
 
   imports:
   - graphql.schema
@@ -1289,7 +1289,7 @@
           return id;
         }
       }
-  description: "Spring GraphQL @Argument annotated resolver parameter — value supplied by the GraphQL caller."
+  description: "Spring GraphQL @Argument annotated resolver parameter - value supplied by the GraphQL caller."
 
 - id: java.source.micronaut_queryvalue
   enabled: true
@@ -1311,7 +1311,7 @@
         void handle(@QueryValue String value) {
         }
       }
-  description: "Micronaut @QueryValue annotated parameter — query value bound from the HTTP request."
+  description: "Micronaut @QueryValue annotated parameter - query value bound from the HTTP request."
 
 - id: java.source.micronaut_body
   enabled: true
@@ -1342,7 +1342,7 @@
       }
       class Map {}
     expect_match_text: [body]
-  description: "Micronaut @Body annotated parameter — request body supplied by the HTTP caller."
+  description: "Micronaut @Body annotated parameter - request body supplied by the HTTP caller."
 
 - id: java.source.micronaut_header
   enabled: true
@@ -1364,7 +1364,7 @@
         void handle(@Header String value) {
         }
       }
-  description: "Micronaut @Header annotated parameter — client-supplied HTTP header."
+  description: "Micronaut @Header annotated parameter - client-supplied HTTP header."
 
 - id: java.source.spring_webflux_serverrequest_queryparam
   enabled: true
@@ -1393,7 +1393,7 @@
         Object queryParam(Object... args) { return null; }
       }
     expect_match_text: [request.queryParam]
-  description: "Spring WebFlux ServerRequest.queryParam(name) — query-string value from a functional endpoint."
+  description: "Spring WebFlux ServerRequest.queryParam(name) - query-string value from a functional endpoint."
 
 - id: java.source.spring_webflux_serverrequest_pathvariable
   enabled: true
@@ -1422,7 +1422,7 @@
         Object pathVariable(Object... args) { return null; }
       }
     expect_match_text: [serverRequest.pathVariable]
-  description: "Spring WebFlux ServerRequest.pathVariable(name) — path segment from a functional endpoint."
+  description: "Spring WebFlux ServerRequest.pathVariable(name) - path segment from a functional endpoint."
 
 - id: java.source.spring_webflux_serverrequest_bodytomono
   enabled: true
@@ -1451,7 +1451,7 @@
         Object bodyToMono(Object... args) { return null; }
       }
     expect_match_text: [request.bodyToMono]
-  description: "Spring WebFlux ServerRequest.bodyToMono(...) — request body decoded by a functional endpoint."
+  description: "Spring WebFlux ServerRequest.bodyToMono(...) - request body decoded by a functional endpoint."
 
 - id: java.source.vertx_request_getparam
   enabled: true
@@ -1480,7 +1480,7 @@
         Object getParam(Object... args) { return null; }
       }
     expect_match_text: [request.getParam]
-  description: "Vert.x HttpServerRequest.getParam(name) — query/form parameter supplied by the HTTP caller."
+  description: "Vert.x HttpServerRequest.getParam(name) - query/form parameter supplied by the HTTP caller."
 
 - id: java.source.vertx_routingcontext_request_getparam
   enabled: true
@@ -1534,7 +1534,7 @@
         Object getParam(Object... args) { return null; }
       }
     expect_no_match: true
-  description: "Vert.x RoutingContext.request().getParam(name) — query/form parameter from the current HTTP request."
+  description: "Vert.x RoutingContext.request().getParam(name) - query/form parameter from the current HTTP request."
 
 - id: java.source.vertx_request_getheader
   enabled: true
@@ -1563,7 +1563,7 @@
         Object getHeader(Object... args) { return null; }
       }
     expect_match_text: [req.getHeader]
-  description: "Vert.x HttpServerRequest.getHeader(name) — client-supplied header."
+  description: "Vert.x HttpServerRequest.getHeader(name) - client-supplied header."
 
 - id: java.source.vertx_routingcontext_getbodyasjson
   enabled: true
@@ -1598,7 +1598,7 @@
         }
       }
     expect_no_match: true
-  description: "Vert.x RoutingContext.getBodyAsJson() — parsed JSON request body for the current HTTP request."
+  description: "Vert.x RoutingContext.getBodyAsJson() - parsed JSON request body for the current HTTP request."
 
 - id: java.source.vertx_json_body_getstring
   enabled: true
@@ -1627,7 +1627,7 @@
         Object getString(Object... args) { return null; }
       }
     expect_match_text: [body.getString]
-  description: "Vert.x JsonObject body.getString(name) — JSON request body field."
+  description: "Vert.x JsonObject body.getString(name) - JSON request body field."
 
 - id: java.source.vertx_json_body_getvalue
   enabled: true
@@ -1656,7 +1656,7 @@
         Object getValue(Object... args) { return null; }
       }
     expect_match_text: [jsonBody.getValue]
-  description: "Vert.x JsonObject body.getValue(name) — JSON request body field."
+  description: "Vert.x JsonObject body.getValue(name) - JSON request body field."
 
 - id: java.source.wicket_pageparameters_get
   enabled: true
@@ -1685,7 +1685,7 @@
         Object get(Object... args) { return null; }
       }
     expect_match_text: [pageParameters.get]
-  description: "Apache Wicket PageParameters.get(name) — request page parameter value."
+  description: "Apache Wicket PageParameters.get(name) - request page parameter value."
 
 - id: java.source.wicket_stringvalue_tooptionalstring
   enabled: true
@@ -1714,7 +1714,7 @@
         Object toOptionalString(Object... args) { return null; }
       }
     expect_match_text: [value.toOptionalString]
-  description: "Apache Wicket StringValue.toOptionalString() — string form of a PageParameters value."
+  description: "Apache Wicket StringValue.toOptionalString() - string form of a PageParameters value."
 
 - id: java.source.helidon_queryparams_first
   enabled: true
@@ -1743,7 +1743,7 @@
         Object first(Object... args) { return null; }
       }
     expect_match_text: [queryParams.first]
-  description: "Helidon request queryParams().first(name) — query parameter supplied by the HTTP caller."
+  description: "Helidon request queryParams().first(name) - query parameter supplied by the HTTP caller."
 
 - id: java.source.play_request_body_asjson
   enabled: true
@@ -1772,7 +1772,7 @@
         Object asJson(Object... args) { return null; }
       }
     expect_match_text: [body.asJson]
-  description: "Play Framework request body().asJson() — JSON body supplied by the HTTP caller."
+  description: "Play Framework request body().asJson() - JSON body supplied by the HTTP caller."
 
 - id: java.source.play_jsonnode_astext
   enabled: true
@@ -1801,7 +1801,7 @@
         Object asText(Object... args) { return null; }
       }
     expect_match_text: [node.asText]
-  description: "Play Framework req.body().asJson().path(...).asText() — JSON field text supplied by the HTTP caller."
+  description: "Play Framework req.body().asJson().path(...).asText() - JSON field text supplied by the HTTP caller."
 
 - id: java.source.websocket_message_payload_text
   enabled: true
@@ -1829,7 +1829,7 @@
         String getPayloadAsText(Object... args) { return ""; }
       }
     expect_match_text: [message.getPayloadAsText]
-  description: "Spring WebSocketMessage.getPayloadAsText() — text frame payload supplied by the websocket peer."
+  description: "Spring WebSocketMessage.getPayloadAsText() - text frame payload supplied by the websocket peer."
 
 - id: java.source.websocket_message_payload
   enabled: true
@@ -1857,7 +1857,7 @@
         Object getPayload(Object... args) { return null; }
       }
     expect_match_text: [msg.getPayload]
-  description: "Spring WebSocketMessage.getPayload() — raw websocket frame payload supplied by the peer."
+  description: "Spring WebSocketMessage.getPayload() - raw websocket frame payload supplied by the peer."
 
 - id: java.source.slf4j_mdc_get
   enabled: true
@@ -1926,7 +1926,7 @@
         Object getNativeHeader(Object... args) { return null; }
       }
     expect_match_text: [headers.getNativeHeader]
-  description: "Spring Messaging StompHeaderAccessor.getNativeHeader(name) — STOMP/WebSocket headers supplied by the remote peer, gated by Spring messaging imports."
+  description: "Spring Messaging StompHeaderAccessor.getNativeHeader(name) - STOMP/WebSocket headers supplied by the remote peer, gated by Spring messaging imports."
 
 - id: java.source.sse_event_data
   enabled: true
@@ -1954,4 +1954,4 @@
         Object getData(Object... args) { return null; }
       }
     expect_match_text: [event.getData]
-  description: "Jakarta/JAX-RS InboundSseEvent.getData() — Server-Sent Event payload received from a remote SSE producer."
+  description: "Jakarta/JAX-RS InboundSseEvent.getData() - Server-Sent Event payload received from a remote SSE producer."

@@ -25,7 +25,7 @@
         os.execute("safe")
       end
     expect_no_match: true
-  description: "os.execute(cmd) — runs cmd via /bin/sh -c; tainted string yields shell injection."
+  description: "os.execute(cmd) - runs cmd via /bin/sh -c; tainted string yields shell injection."
 
 - id: lua.cmdi.io_popen
   enabled: true
@@ -53,7 +53,7 @@
         io.popen("uptime")
       end
     expect_no_match: true
-  description: "io.popen(cmd) — opens a pipe to a shell subprocess; tainted cmd is injectable."
+  description: "io.popen(cmd) - opens a pipe to a shell subprocess; tainted cmd is injectable."
 
 - id: lua.cmdi.posix_spawn
   enabled: true
@@ -83,7 +83,7 @@
         posix.spawn("/bin/true")
       end
     expect_no_match: true
-  description: "luaposix posix.spawn — forks and execs; tainted argv/path becomes arbitrary process."
+  description: "luaposix posix.spawn - forks and execs; tainted argv/path becomes arbitrary process."
 
 - id: lua.cmdi.posix_exec
   enabled: true
@@ -113,7 +113,7 @@
         posix.exec("/bin/true")
       end
     expect_no_match: true
-  description: "luaposix posix.exec — replaces current process image with tainted program/argv."
+  description: "luaposix posix.exec - replaces current process image with tainted program/argv."
 
 - id: lua.cmdi.posix_execp
   enabled: true
@@ -143,7 +143,7 @@
         posix.execp("true")
       end
     expect_no_match: true
-  description: "luaposix posix.execp — PATH-resolved exec; tainted program/argv is RCE."
+  description: "luaposix posix.execp - PATH-resolved exec; tainted program/argv is RCE."
 
 - id: lua.cmdi.luv_spawn
   enabled: true
@@ -173,7 +173,7 @@
         uv.spawn("true")
       end
     expect_no_match: true
-  description: "libuv uv.spawn (lua-luv / luvit) — tainted file/args spawns arbitrary process."
+  description: "libuv uv.spawn (lua-luv / luvit) - tainted file/args spawns arbitrary process."
 
 - id: lua.cmdi.luvit_process_spawn
   enabled: true
@@ -203,4 +203,4 @@
         process.spawn("true")
       end
     expect_no_match: true
-  description: "luvit process.spawn — wrapper around uv.spawn; tainted argv is RCE."
+  description: "luvit process.spawn - wrapper around uv.spawn; tainted argv is RCE."

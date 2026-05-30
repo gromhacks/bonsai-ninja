@@ -26,7 +26,7 @@
       test() ->
         xmerl_scan:file("priv/feed.xml").
     expect_no_match: true
-  description: "xmerl_scan:file — resolves external DTD entities by default; attacker DTD → file read / SSRF."
+  description: "xmerl_scan:file - resolves external DTD entities by default; attacker DTD -> file read / SSRF."
 
 - id: erlang.xxe.xmerl_scan_string
   enabled: true
@@ -55,7 +55,7 @@
       test() ->
         xmerl_scan:string("<root/>").
     expect_no_match: true
-  description: "xmerl_scan:string — same external-entity surface as xmerl_scan:file."
+  description: "xmerl_scan:string - same external-entity surface as xmerl_scan:file."
 
 - id: erlang.xxe.erlsom_simple_form
   enabled: true
@@ -87,7 +87,7 @@
       test() ->
         erlsom:simple_form("<root/>").
     expect_no_match: true
-  description: "erlsom:simple_form — SAX parser that honors external entities unless explicitly disabled."
+  description: "erlsom:simple_form - SAX parser that honors external entities unless explicitly disabled."
 
 - id: erlang.xxe.erlsom_scan
   enabled: true
@@ -119,7 +119,7 @@
       test() ->
         erlsom:scan("<root/>").
     expect_no_match: true
-  description: "erlsom:scan — same XXE surface as simple_form."
+  description: "erlsom:scan - same XXE surface as simple_form."
 
 - id: erlang.xxe.xmerl_sax_parser
   enabled: true
@@ -148,4 +148,4 @@
       test() ->
         xmerl_sax_parser:file("priv/feed.xml").
     expect_no_match: true
-  description: "xmerl_sax_parser — SAX API also resolves external entities without {external,none}."
+  description: "xmerl_sax_parser - SAX API also resolves external entities without {external,none}."

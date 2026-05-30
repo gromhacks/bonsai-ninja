@@ -19,7 +19,7 @@
           ObjectInputStream.readObject(input)
         }
       }
-  description: "Disabled — ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
+  description: "Disabled - ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
 
 - id: scala.deser.kryo_readobject
   enabled: true
@@ -53,7 +53,7 @@
         }
       }
     expect_no_match: true
-  description: "Kryo readClassAndObject — class registration bypass risk."
+  description: "Kryo readClassAndObject - class registration bypass risk."
 
 - id: scala.deser.kryo_readobject_typed
   enabled: true
@@ -121,7 +121,7 @@
         }
       }
     expect_no_match: true
-  description: "SnakeYAML Yaml.load — instantiates arbitrary classes via YAML tags."
+  description: "SnakeYAML Yaml.load - instantiates arbitrary classes via YAML tags."
 
 - id: scala.deser.snake_yaml_load_all
   enabled: true
@@ -155,7 +155,7 @@
         }
       }
     expect_no_match: true
-  description: "SnakeYAML Yaml.loadAll — same risk as load."
+  description: "SnakeYAML Yaml.loadAll - same risk as load."
 
 - id: scala.deser.xstream_fromxml
   enabled: true
@@ -189,7 +189,7 @@
         }
       }
     expect_no_match: true
-  description: "XStream.fromXML — gadget chain RCE unless whitelist configured."
+  description: "XStream.fromXML - gadget chain RCE unless whitelist configured."
 
 - id: scala.deser.jackson_readvalue
   enabled: true
@@ -223,7 +223,7 @@
         }
       }
     expect_no_match: true
-  description: "Jackson ObjectMapper.readValue — dangerous with enableDefaultTyping / @JsonTypeInfo."
+  description: "Jackson ObjectMapper.readValue - dangerous with enableDefaultTyping / @JsonTypeInfo."
 
 - id: scala.deser.jackson_enable_default_typing
   enabled: true
@@ -246,7 +246,7 @@
           ObjectMapper.enableDefaultTyping(input)
         }
       }
-  description: "Jackson enableDefaultTyping — reopens polymorphic gadget RCE."
+  description: "Jackson enableDefaultTyping - reopens polymorphic gadget RCE."
 
 - id: scala.deser.scala_pickling_unpickle
   enabled: true
@@ -280,7 +280,7 @@
         }
       }
     expect_no_match: true
-  description: "scala-pickling .unpickle[T] — instantiates classes from attacker-supplied pickled bytes; gadget potential."
+  description: "scala-pickling .unpickle[T] - instantiates classes from attacker-supplied pickled bytes; gadget potential."
 
 - id: scala.deser.jackson_activate_default_typing
   enabled: true
@@ -303,7 +303,7 @@
           ObjectMapper.activateDefaultTyping(input)
         }
       }
-  description: "Jackson 2.10+ activateDefaultTyping(ptv) — same polymorphic gadget RCE class as the deprecated enableDefaultTyping."
+  description: "Jackson 2.10+ activateDefaultTyping(ptv) - same polymorphic gadget RCE class as the deprecated enableDefaultTyping."
 
 - id: scala.deser.spray_json_unmarshal_unsafe
   enabled: false
@@ -318,7 +318,7 @@
     kind: call
     callee:
       attribute: [JsonReader, read]
-  description: "Disabled — spray-json is generally safe (static typeclass format); enable only with polymorphic discriminator."
+  description: "Disabled - spray-json is generally safe (static typeclass format); enable only with polymorphic discriminator."
 
 - id: scala.deser.poi_xssfworkbook_stream
   enabled: false
@@ -345,6 +345,6 @@
       }
       class XSSFWorkbook(args: Any*)
     expect_match_text: [XSSFWorkbook]
-  description: "Disabled — Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  description: "Disabled - Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
   imports:
   - org

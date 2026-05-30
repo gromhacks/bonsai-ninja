@@ -83,7 +83,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    Random(input)\n  }\n}\nclass Random(vararg args: Any?)\n"
-  description: "new java.util.Random — non-cryptographic."
+  description: "new java.util.Random - non-cryptographic."
 - id: kotlin.crypto.math_random
   enabled: true
   language: kotlin
@@ -101,7 +101,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    Math.random(input)\n  }\n}\n"
-  description: "java.lang.Math.random() — non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
+  description: "java.lang.Math.random() - non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
 - id: kotlin.crypto.bouncycastle_des
   enabled: true
   language: kotlin
@@ -146,7 +146,7 @@
       attribute:
       - KeyPairGenerator
       - initialize
-  description: "Disabled — flag only on key sizes < 2048 (RSA) / < 256 (EC)."
+  description: "Disabled - flag only on key sizes < 2048 (RSA) / < 256 (EC)."
 - id: kotlin.crypto.kotlin_random_nextbytes
   enabled: true
   language: kotlin
@@ -173,7 +173,7 @@
           Random.nextBytes(input)
         }
       }
-  description: "kotlin.random.Random.nextBytes — not cryptographically secure; use java.security.SecureRandom for keys/tokens/IVs."
+  description: "kotlin.random.Random.nextBytes - not cryptographically secure; use java.security.SecureRandom for keys/tokens/IVs."
 
 - id: kotlin.crypto.java_random_nextint
   enabled: true
@@ -196,7 +196,7 @@
           Random.nextInt()
         }
       }
-  description: "java.util.Random.nextInt — non-cryptographic PRNG output; use SecureRandom for secrets, tokens, nonces, and keys."
+  description: "java.util.Random.nextInt - non-cryptographic PRNG output; use SecureRandom for secrets, tokens, nonces, and keys."
 
 - id: kotlin.crypto.java_random_nextlong
   enabled: true
@@ -219,7 +219,7 @@
           Random.nextLong()
         }
       }
-  description: "java.util.Random.nextLong — non-cryptographic PRNG output; use SecureRandom for security-sensitive randomness."
+  description: "java.util.Random.nextLong - non-cryptographic PRNG output; use SecureRandom for security-sensitive randomness."
 
 - id: kotlin.crypto.java_random_nextdouble
   enabled: true
@@ -242,7 +242,7 @@
           Random.nextDouble()
         }
       }
-  description: "java.util.Random.nextDouble — non-cryptographic PRNG output; do not use for security tokens or key material."
+  description: "java.util.Random.nextDouble - non-cryptographic PRNG output; do not use for security tokens or key material."
 
 - id: kotlin.crypto.java_random_nextfloat
   enabled: true
@@ -265,4 +265,4 @@
           Random.nextFloat()
         }
       }
-  description: "java.util.Random.nextFloat — non-cryptographic PRNG output; use SecureRandom for security-sensitive randomness."
+  description: "java.util.Random.nextFloat - non-cryptographic PRNG output; use SecureRandom for security-sensitive randomness."

@@ -21,7 +21,7 @@
     code: |
       class App { void Test() { BinaryFormatter.Deserialize("safe"); } }
     expect_no_match: true
-  description: "BinaryFormatter.Deserialize — gadget-chain RCE; deprecated in .NET 5+."
+  description: "BinaryFormatter.Deserialize - gadget-chain RCE; deprecated in .NET 5+."
 
 - id: csharp.deser.binaryformatter_new
   enabled: true
@@ -39,7 +39,7 @@
     code: |
       class BinaryFormatter { public BinaryFormatter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new BinaryFormatter(input); } }
     expect_match_text: [BinaryFormatter]
-  description: "new BinaryFormatter — dangerous formatter API even before the Deserialize call; do not process untrusted data with it."
+  description: "new BinaryFormatter - dangerous formatter API even before the Deserialize call; do not process untrusted data with it."
 
 - id: csharp.deser.formatter_deserialize
   enabled: true
@@ -62,7 +62,7 @@
     code: |
       class App { void Test() { Formatter.Deserialize("safe"); } }
     expect_no_match: true
-  description: "IFormatter.Deserialize — same family as BinaryFormatter."
+  description: "IFormatter.Deserialize - same family as BinaryFormatter."
 
 - id: csharp.deser.netdatacontract_deserialize
   enabled: true
@@ -85,7 +85,7 @@
     code: |
       class App { void Test() { NetDataContractSerializer.Deserialize("safe"); } }
     expect_no_match: true
-  description: "NetDataContractSerializer.Deserialize — type-info on the wire."
+  description: "NetDataContractSerializer.Deserialize - type-info on the wire."
 
 - id: csharp.deser.netdatacontract_new
   enabled: true
@@ -103,7 +103,7 @@
     code: |
       class NetDataContractSerializer { public NetDataContractSerializer(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new NetDataContractSerializer(input); } }
     expect_match_text: [NetDataContractSerializer]
-  description: "new NetDataContractSerializer — serializes CLR type metadata and is unsafe for untrusted payloads."
+  description: "new NetDataContractSerializer - serializes CLR type metadata and is unsafe for untrusted payloads."
 
 - id: csharp.deser.soap_deserialize
   enabled: true
@@ -144,7 +144,7 @@
     code: |
       class SoapFormatter { public SoapFormatter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SoapFormatter(input); } }
     expect_match_text: [SoapFormatter]
-  description: "new SoapFormatter — legacy formatter with gadget-chain deserialization risk."
+  description: "new SoapFormatter - legacy formatter with gadget-chain deserialization risk."
 
 - id: csharp.deser.losformatter_deserialize
   enabled: true
@@ -167,7 +167,7 @@
     code: |
       class App { void Test() { LosFormatter.Deserialize("safe"); } }
     expect_no_match: true
-  description: "LosFormatter.Deserialize — ASP.NET ViewState path."
+  description: "LosFormatter.Deserialize - ASP.NET ViewState path."
 
 - id: csharp.deser.losformatter_new
   enabled: true
@@ -185,7 +185,7 @@
     code: |
       class LosFormatter { public LosFormatter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new LosFormatter(input); } }
     expect_match_text: [LosFormatter]
-  description: "new LosFormatter — ASP.NET ViewState formatter; unsafe for untrusted state when MAC/signing is weak or disabled."
+  description: "new LosFormatter - ASP.NET ViewState formatter; unsafe for untrusted state when MAC/signing is weak or disabled."
 
 - id: csharp.deser.objectstateformatter_deserialize
   enabled: true
@@ -231,7 +231,7 @@
     code: |
       class App { void Test() { JavaScriptSerializer.Deserialize("{\"name\":\"safe\"}"); } }
     expect_no_match: true
-  description: "JavaScriptSerializer.Deserialize — risky with custom resolver."
+  description: "JavaScriptSerializer.Deserialize - risky with custom resolver."
 
 - id: csharp.deser.jsonconvert_type_name_handling
   enabled: true
@@ -250,7 +250,7 @@
     code: |
       using Newtonsoft.Json;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TypeNameHandling = input; } }
-  description: "JsonSerializerSettings.TypeNameHandling != None — gadget-chain RCE."
+  description: "JsonSerializerSettings.TypeNameHandling != None - gadget-chain RCE."
 
 - id: csharp.deser.jsonconvert_deserialize_types
   enabled: false
@@ -265,7 +265,7 @@
     kind: call
     callee:
       attribute: [JsonConvert, DeserializeObject]
-  description: "Disabled — DeserializeObject is safe unless TypeNameHandling set."
+  description: "Disabled - DeserializeObject is safe unless TypeNameHandling set."
 
 - id: csharp.deser.xmlserializer_deserialize_dynamictype
   enabled: false
@@ -279,7 +279,7 @@
     kind: call
     callee:
       attribute: [XmlSerializer, Deserialize]
-  description: "Disabled — XmlSerializer is safe unless type-resolver tainted."
+  description: "Disabled - XmlSerializer is safe unless type-resolver tainted."
 
 - id: csharp.deser.datacontractjson_deserialize
   enabled: false
@@ -293,7 +293,7 @@
     kind: call
     callee:
       attribute: [DataContractJsonSerializer, ReadObject]
-  description: "Disabled — DataContractJsonSerializer is type-bounded."
+  description: "Disabled - DataContractJsonSerializer is type-bounded."
 
 - id: csharp.deser.yamldotnet_deserialize_object
   enabled: true
@@ -319,7 +319,7 @@
       using YamlDotNet;
       class App { void Test() { Deserializer.Deserialize("name: safe"); } }
     expect_no_match: true
-  description: "YamlDotNet Deserializer.Deserialize — flag with WithTagMapping unsafe types."
+  description: "YamlDotNet Deserializer.Deserialize - flag with WithTagMapping unsafe types."
 
 - id: csharp.deser.formatterservices_getsafeuninitialized
   enabled: true
@@ -342,7 +342,7 @@
     code: |
       class App { void Test() { FormatterServices.GetSafeUninitializedObject("System.String"); } }
     expect_no_match: true
-  description: "FormatterServices.GetSafeUninitializedObject — bypasses ctors; gadget building block when type name is tainted."
+  description: "FormatterServices.GetSafeUninitializedObject - bypasses ctors; gadget building block when type name is tainted."
 
 - id: csharp.deser.binaryformatter_unsafedeserialize
   enabled: true
@@ -365,7 +365,7 @@
     code: |
       class App { void Test() { BinaryFormatter.UnsafeDeserialize("safe"); } }
     expect_no_match: true
-  description: "BinaryFormatter.UnsafeDeserialize — same gadget surface as Deserialize; explicitly unsafe variant."
+  description: "BinaryFormatter.UnsafeDeserialize - same gadget surface as Deserialize; explicitly unsafe variant."
 
 - id: csharp.deser.messagepack_typeless
   enabled: true
@@ -384,7 +384,7 @@
     code: |
       using MessagePack;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TypelessContractlessStandardResolver.Instance(input); } }
-  description: "MessagePack TypelessContractlessStandardResolver.Instance — embeds type info on the wire (typeless), enabling gadget chains."
+  description: "MessagePack TypelessContractlessStandardResolver.Instance - embeds type info on the wire (typeless), enabling gadget chains."
 
 - id: csharp.deser.messagepack_typeless_deserialize
   enabled: true
@@ -410,7 +410,7 @@
       using MessagePack;
       class App { void Test() { MessagePackSerializer.Typeless(new byte[] {}); } }
     expect_no_match: true
-  description: "MessagePackSerializer.Typeless — typeless API path used to deserialize attacker bytes into arbitrary types."
+  description: "MessagePackSerializer.Typeless - typeless API path used to deserialize attacker bytes into arbitrary types."
 
 - id: csharp.deser.servicestack_text_deserialize
   enabled: false
@@ -425,7 +425,7 @@
     kind: call
     callee:
       attribute: [JsonSerializer, DeserializeFromString]
-  description: "Disabled — ServiceStack.Text JsonSerializer.DeserializeFromString is type-bounded; flag only when target type uses runtime type discrimination."
+  description: "Disabled - ServiceStack.Text JsonSerializer.DeserializeFromString is type-bounded; flag only when target type uses runtime type discrimination."
 
 - id: csharp.deser.fastjson_toobject
   enabled: true
@@ -451,7 +451,7 @@
       using fastJSON;
       class App { void Test() { JSON.ToObject("{\"name\":\"safe\"}"); } }
     expect_no_match: true
-  description: "fastJSON JSON.ToObject — uses $type metadata by default (UseExtensions=true), enabling gadget instantiation."
+  description: "fastJSON JSON.ToObject - uses $type metadata by default (UseExtensions=true), enabling gadget instantiation."
 
 - id: csharp.deser.jsonconvert_deserialize_with_typename
   enabled: false
@@ -466,7 +466,7 @@
     kind: call
     callee:
       attribute: [JsonSerializer, Deserialize]
-  description: "Disabled — JsonSerializer.Deserialize is safe unless TypeNameHandling != None on the configured serializer; flag with constraint."
+  description: "Disabled - JsonSerializer.Deserialize is safe unless TypeNameHandling != None on the configured serializer; flag with constraint."
 
 - id: csharp.deser.objectstateformatter_deserialize_string
   enabled: true
@@ -489,7 +489,7 @@
     code: |
       class App { void Test() { ObjectStateFormatter.DeserializeWithAssert("safe"); } }
     expect_no_match: true
-  description: "ObjectStateFormatter.DeserializeWithAssert — ViewState parsing path; gadget RCE when MAC is disabled or key leaked."
+  description: "ObjectStateFormatter.DeserializeWithAssert - ViewState parsing path; gadget RCE when MAC is disabled or key leaked."
 
 # Historical alias retained disabled; the canonical BinaryFormatter rule owns
 # this exact/typed receiver surface under the strict matcher.
@@ -510,4 +510,4 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BinaryFormatter.Deserialize(input); } }
-  description: "Disabled — duplicate of csharp.deser.binaryformatter_deserialize under strict exact/typed receiver matching."
+  description: "Disabled - duplicate of csharp.deser.binaryformatter_deserialize under strict exact/typed receiver matching."

@@ -27,7 +27,7 @@
         ngx.redirect("/dashboard")
       end
     expect_no_match: true
-  description: "ngx.redirect(tainted_url) — 302 to attacker host; phishing / OAuth code-theft."
+  description: "ngx.redirect(tainted_url) - 302 to attacker host; phishing / OAuth code-theft."
 
 - id: lua.open_redirect.lapis_redirect_to
   enabled: true
@@ -57,7 +57,7 @@
         redirect_to("/profile")
       end
     expect_no_match: true
-  description: "Lapis self:redirect_to(url) — 302 to tainted URL without host allowlist."
+  description: "Lapis self:redirect_to(url) - 302 to tainted URL without host allowlist."
 
 - id: lua.open_redirect.lapis_build_url
   enabled: false
@@ -72,4 +72,4 @@
     kind: call
     callee:
       name: build_url
-  description: "Disabled — lapis build_url; only a redirect sink if passed to redirect_to."
+  description: "Disabled - lapis build_url; only a redirect sink if passed to redirect_to."

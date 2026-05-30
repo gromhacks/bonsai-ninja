@@ -61,7 +61,7 @@
         return ev.search("(uid=alice)");
       }
     expect_no_match: true
-  description: "ldapjs ev.search(filter) — tainted LDAP filter expression."
+  description: "ldapjs ev.search(filter) - tainted LDAP filter expression."
 
 - id: javascript.ldap.ldapjs_modify
   enabled: true
@@ -166,7 +166,7 @@
     kind: call
     callee:
       attribute: [ad, authenticate]
-  description: "Disabled — authenticate is auth, not injection; flag DN-injection only."
+  description: "Disabled - authenticate is auth, not injection; flag DN-injection only."
 
 - id: javascript.ldap.activedirectory_find_user
   enabled: true

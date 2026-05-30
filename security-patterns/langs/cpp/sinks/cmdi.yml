@@ -19,7 +19,7 @@
   - name: literal command negative
     code: "void example() {\n  system(\"safe\");\n}\n"
     expect_no_match: true
-  description: "libc system(cmd) — shell-interpreted command."
+  description: "libc system(cmd) - shell-interpreted command."
 - id: cpp.cmdi.std_system
   enabled: true
   language: cpp
@@ -45,7 +45,7 @@
         std::system("safe");
       }
     expect_no_match: true
-  description: "std::system(cmd) — shell-interpreted command."
+  description: "std::system(cmd) - shell-interpreted command."
 - id: cpp.cmdi.popen
   enabled: true
   language: cpp
@@ -66,7 +66,7 @@
   - name: literal command negative
     code: "void example() {\n  popen(\"safe\");\n}\n"
     expect_no_match: true
-  description: "popen(cmd, mode) — shell-interpreted."
+  description: "popen(cmd, mode) - shell-interpreted."
 - id: cpp.cmdi.execvp
   enabled: true
   language: cpp
@@ -87,7 +87,7 @@
   - name: literal program negative
     code: "void example() {\n  execvp(\"safe\");\n}\n"
     expect_no_match: true
-  description: "execvp — resolves program via PATH; program name taint = code-exec."
+  description: "execvp - resolves program via PATH; program name taint = code-exec."
 - id: cpp.cmdi.execvp_argv
   enabled: true
   language: cpp
@@ -108,7 +108,7 @@
   - name: literal execvp argv vector negative
     code: "void example() {\n  char *args[] = {\"git\", \"status\", 0};\n  execvp(\"git\", args);\n}\n"
     expect_no_match: true
-  description: "execvp(file, argv) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+  description: "execvp(file, argv) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: cpp.cmdi.execve
   enabled: true
   language: cpp
@@ -132,7 +132,7 @@
         execve("safe");
       }
     expect_no_match: true
-  description: "execve — direct exec; program path taint = code-exec."
+  description: "execve - direct exec; program path taint = code-exec."
 - id: cpp.cmdi.execve_argv
   enabled: true
   language: cpp
@@ -159,7 +159,7 @@
         execve("safe", "safe");
       }
     expect_no_match: true
-  description: "execve(path, argv, envp) — tainted argv can pass attacker-controlled flags or subcommands."
+  description: "execve(path, argv, envp) - tainted argv can pass attacker-controlled flags or subcommands."
 - id: cpp.cmdi.execve_envp
   enabled: true
   language: cpp
@@ -186,7 +186,7 @@
         execve("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "execve(path, argv, envp) — tainted envp can influence loader/search behavior."
+  description: "execve(path, argv, envp) - tainted envp can influence loader/search behavior."
 - id: cpp.cmdi.execl
   enabled: true
   language: cpp
@@ -210,7 +210,7 @@
         execl("safe");
       }
     expect_no_match: true
-  description: "execl family (execl/execle/execlp/execv/execvp) — argv list executed directly; a tainted program path or argv element runs arbitrary binaries."
+  description: "execl family (execl/execle/execlp/execv/execvp) - argv list executed directly; a tainted program path or argv element runs arbitrary binaries."
 - id: cpp.cmdi.execlp
   enabled: true
   language: cpp
@@ -234,7 +234,7 @@
         execlp("safe");
       }
     expect_no_match: true
-  description: "execlp — PATH lookup."
+  description: "execlp - PATH lookup."
 - id: cpp.cmdi.boost_process_system
   enabled: true
   language: cpp
@@ -262,7 +262,7 @@
         process::system("safe");
       }
     expect_no_match: true
-  description: "boost::process::system — use argv-list form, not shell string."
+  description: "boost::process::system - use argv-list form, not shell string."
   imports:
   - boost/process.hpp
   - boost
@@ -294,7 +294,7 @@
         process::spawn("/usr/bin/true");
       }
     expect_no_match: true
-  description: "boost::process::spawn — flag string command-line form."
+  description: "boost::process::spawn - flag string command-line form."
   imports:
   - boost/process.hpp
   - boost
@@ -323,7 +323,7 @@
         auto *x = new child("safe");
       }
     expect_no_match: true
-  description: "boost::process::child(cmd) — flag string command-line form."
+  description: "boost::process::child(cmd) - flag string command-line form."
   imports:
   - boost/process.hpp
   - boost
@@ -354,7 +354,7 @@
         QProcess::start("safe");
       }
     expect_no_match: true
-  description: "Qt QProcess::start(cmdString) — single-string form is parsed as shell args."
+  description: "Qt QProcess::start(cmdString) - single-string form is parsed as shell args."
   imports:
   - QtCore
   - QtCore/Qt
@@ -385,7 +385,7 @@
         QProcess::startCommand("safe");
       }
     expect_no_match: true
-  description: "Qt QProcess::startCommand — parses full command string."
+  description: "Qt QProcess::startCommand - parses full command string."
   imports:
   - QtCore
   - QtCore/Qt
@@ -417,7 +417,7 @@
         QProcess::execute("/usr/bin/true");
       }
     expect_no_match: true
-  description: "Qt QProcess::execute — static exec; flag string form."
+  description: "Qt QProcess::execute - static exec; flag string form."
   imports:
   - QtCore
   - QtCore/Qt
@@ -448,7 +448,7 @@
         QProcess::startDetached("safe");
       }
     expect_no_match: true
-  description: "Qt QProcess::startDetached — static spawn; flag string form."
+  description: "Qt QProcess::startDetached - static spawn; flag string form."
   imports:
   - QtCore
   - QtCore/Qt
@@ -479,7 +479,7 @@
         Process::launch("safe");
       }
     expect_no_match: true
-  description: "Poco::Process::launch(cmd, args) — flag when args contain tainted tokens."
+  description: "Poco::Process::launch(cmd, args) - flag when args contain tainted tokens."
 - id: cpp.cmdi.poco_process_launch_args
   enabled: true
   language: cpp
@@ -511,7 +511,7 @@
         Process::launch("safe", "safe");
       }
     expect_no_match: true
-  description: "Poco::Process::launch(cmd, args) — tainted args reach the child process."
+  description: "Poco::Process::launch(cmd, args) - tainted args reach the child process."
 - id: cpp.cmdi.execv
   enabled: true
   language: cpp
@@ -535,7 +535,7 @@
         execv("safe");
       }
     expect_no_match: true
-  description: "execv(path, argv) — direct exec; tainted path or argv element runs arbitrary binaries."
+  description: "execv(path, argv) - direct exec; tainted path or argv element runs arbitrary binaries."
 - id: cpp.cmdi.execv_argv
   enabled: true
   language: cpp
@@ -562,7 +562,7 @@
         execv("safe", "safe");
       }
     expect_no_match: true
-  description: "execv(path, argv) — tainted argv can pass attacker-controlled flags or subcommands."
+  description: "execv(path, argv) - tainted argv can pass attacker-controlled flags or subcommands."
 - id: cpp.cmdi.execle
   enabled: true
   language: cpp
@@ -586,7 +586,7 @@
         execle("safe");
       }
     expect_no_match: true
-  description: "execle — direct exec with custom envp; tainted path/argv = code-exec."
+  description: "execle - direct exec with custom envp; tainted path/argv = code-exec."
 - id: cpp.cmdi.posix_spawn
   enabled: true
   language: cpp
@@ -610,7 +610,7 @@
         posix_spawn("safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn(pid, path, ...) — tainted path/argv runs arbitrary binaries."
+  description: "posix_spawn(pid, path, ...) - tainted path/argv runs arbitrary binaries."
 - id: cpp.cmdi.posix_spawn_argv
   enabled: true
   language: cpp
@@ -637,7 +637,7 @@
         posix_spawn("safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted argv reaches the spawned process."
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) - tainted argv reaches the spawned process."
 - id: cpp.cmdi.posix_spawn_envp
   enabled: true
   language: cpp
@@ -664,7 +664,7 @@
         posix_spawn("safe", "safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) - tainted envp reaches the spawned process."
 - id: cpp.cmdi.posix_spawnp
   enabled: true
   language: cpp
@@ -688,7 +688,7 @@
         posix_spawnp("safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawnp — PATH lookup; tainted name = arbitrary binary."
+  description: "posix_spawnp - PATH lookup; tainted name = arbitrary binary."
 - id: cpp.cmdi.posix_spawnp_argv
   enabled: true
   language: cpp
@@ -715,7 +715,7 @@
         posix_spawnp("safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted argv reaches the spawned process."
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) - tainted argv reaches the spawned process."
 - id: cpp.cmdi.posix_spawnp_envp
   enabled: true
   language: cpp
@@ -742,7 +742,7 @@
         posix_spawnp("safe", "safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) - tainted envp reaches the spawned process."
 - id: cpp.cmdi.boost_process_v2_process
   enabled: true
   language: cpp
@@ -771,7 +771,7 @@
         auto *x = new process_v2::process("/usr/bin/true");
       }
     expect_no_match: true
-  description: "Boost.Process v2 process(...) — modern API; tainted exe path or args = code-exec."
+  description: "Boost.Process v2 process(...) - modern API; tainted exe path or args = code-exec."
   imports:
   - boost/process.hpp
   - boost
@@ -802,7 +802,7 @@
         process::shell("safe");
       }
     expect_no_match: true
-  description: "boost::process::shell — explicit shell invocation; tainted args interpreted by /bin/sh."
+  description: "boost::process::shell - explicit shell invocation; tainted args interpreted by /bin/sh."
   imports:
   - boost/process.hpp
   - boost
@@ -823,4 +823,4 @@
       attribute:
       - io_context
       - post
-  description: "Disabled — boost::asio::io_context::post(callback) is a generic dispatch; flag manually if the callback closes over tainted command/script bytes (audit only)."
+  description: "Disabled - boost::asio::io_context::post(callback) is a generic dispatch; flag manually if the callback closes over tainted command/script bytes (audit only)."

@@ -27,7 +27,7 @@
         Environment::render("{{ user }}");
       }
     expect_no_match: true
-  description: "inja Environment::render(tainted_template, data) — tainted template source = SSTI."
+  description: "inja Environment::render(tainted_template, data) - tainted template source = SSTI."
 - id: cpp.template.inja_render_file
   enabled: true
   language: cpp
@@ -56,7 +56,7 @@
         Environment::render_file("safe");
       }
     expect_no_match: true
-  description: "inja Environment::render_file(tainted_path, data) — tainted template path."
+  description: "inja Environment::render_file(tainted_path, data) - tainted template path."
 - id: cpp.template.drogon_view_response
   enabled: true
   language: cpp
@@ -84,4 +84,4 @@
         HttpResponse::newHttpViewResponse("safe");
       }
     expect_no_match: true
-  description: "Drogon HttpResponse::newHttpViewResponse(tainted_view_name, ...) — attacker picks which CSP view to render."
+  description: "Drogon HttpResponse::newHttpViewResponse(tainted_view_name, ...) - attacker picks which CSP view to render."

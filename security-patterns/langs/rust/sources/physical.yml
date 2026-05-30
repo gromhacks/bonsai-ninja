@@ -21,7 +21,7 @@
           let query = "user";
           obj.is_high(target);
       }
-  description: "InputPin::is_high — digital GPIO state from attached hardware."
+  description: "InputPin::is_high - digital GPIO state from attached hardware."
 
   imports:
   - embedded_hal
@@ -47,7 +47,7 @@
           let query = "user";
           obj.is_low(target);
       }
-  description: "InputPin::is_low — digital GPIO state from attached hardware."
+  description: "InputPin::is_low - digital GPIO state from attached hardware."
 
   imports:
   - embedded_hal
@@ -71,7 +71,7 @@
           let query = "user";
           obj.poll_interrupt(target);
       }
-  description: "poll_interrupt — GPIO edge event from external hardware."
+  description: "poll_interrupt - GPIO edge event from external hardware."
 
 - id: rust.physical.smbus_read_byte_data
   enabled: true
@@ -93,7 +93,7 @@
           let query = "user";
           obj.smbus_read_byte_data(target);
       }
-  description: "smbus_read_byte_data — device register read over I2C/SMBus."
+  description: "smbus_read_byte_data - device register read over I2C/SMBus."
 
 - id: rust.physical.smbus_read_word_data
   enabled: true
@@ -115,7 +115,7 @@
           let query = "user";
           obj.smbus_read_word_data(target);
       }
-  description: "smbus_read_word_data — 16-bit register read from an attached peripheral."
+  description: "smbus_read_word_data - 16-bit register read from an attached peripheral."
 
 - id: rust.physical.transfer_in_place
   enabled: true
@@ -139,6 +139,6 @@
           let query = "user";
           obj.transfer_in_place(target);
       }
-  description: "transfer_in_place — full-duplex SPI exchange reads peripheral response bytes."
+  description: "transfer_in_place - full-duplex SPI exchange reads peripheral response bytes."
   imports:
   - embedded_hal

@@ -22,7 +22,7 @@
           let query = "user";
           obj.set_high(target);
       }
-  description: "set_high — tainted control flow drives a digital output high."
+  description: "set_high - tainted control flow drives a digital output high."
 
   imports:
   - embedded_hal
@@ -49,7 +49,7 @@
           let query = "user";
           obj.set_low(target);
       }
-  description: "set_low — tainted control flow drives a digital output low."
+  description: "set_low - tainted control flow drives a digital output low."
 
   imports:
   - embedded_hal
@@ -82,7 +82,7 @@
           obj.set_duty_cycle(0.5);
       }
     expect_no_match: true
-  description: "set_duty_cycle — tainted PWM value actuates attached hardware."
+  description: "set_duty_cycle - tainted PWM value actuates attached hardware."
 
 - id: rust.hardware.smbus_write_byte_data
   enabled: true
@@ -105,7 +105,7 @@
           let query = "user";
           obj.smbus_write_byte_data(target);
       }
-  description: "smbus_write_byte_data — tainted register/value mutates an attached I2C/SMBus device."
+  description: "smbus_write_byte_data - tainted register/value mutates an attached I2C/SMBus device."
 
 - id: rust.hardware.smbus_write_word_data
   enabled: true
@@ -128,7 +128,7 @@
           let query = "user";
           obj.smbus_write_word_data(target);
       }
-  description: "smbus_write_word_data — tainted 16-bit register write controls peripheral state."
+  description: "smbus_write_word_data - tainted 16-bit register write controls peripheral state."
 
 - id: rust.hardware.transfer_in_place
   enabled: true
@@ -164,6 +164,6 @@
           obj.transfer_in_place(safe);
       }
     expect_no_match: true
-  description: "transfer_in_place — tainted SPI frame bytes are sent to an attached peripheral."
+  description: "transfer_in_place - tainted SPI frame bytes are sent to an attached peripheral."
   imports:
   - embedded_hal

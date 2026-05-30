@@ -1,5 +1,5 @@
 # Ruby TLS misconfiguration.
-# NOTE: `kind: write` rules here match assignment TARGET names only — the
+# NOTE: `kind: write` rules here match assignment TARGET names only - the
 # assigned RHS value is not checked by the current engine (writes don't carry
 # args). So these rules fire on ANY assignment to a matching target name.
 # We keep the names specific enough that the noise is tolerable.
@@ -20,7 +20,7 @@
       def example(input, url, id, payload, request, params)
         verify_mode = false
       end
-  description: "verify_mode = OpenSSL::SSL::VERIFY_NONE — disables peer verification."
+  description: "verify_mode = OpenSSL::SSL::VERIFY_NONE - disables peer verification."
 
 - id: ruby.tls.httparty_verify_ssl
   enabled: true
@@ -41,7 +41,7 @@
       def example(input, url, id, payload, request, params)
         verify_ssl = false
       end
-  description: "verify_ssl = false — covers HTTParty and RestClient (same `write target name: verify_ssl` shape)."
+  description: "verify_ssl = false - covers HTTParty and RestClient (same `write target name: verify_ssl` shape)."
 
 - id: ruby.tls.rest_client_verify_ssl
   enabled: false
@@ -56,7 +56,7 @@
     kind: write
     target:
       name: verify_ssl
-  description: "Disabled — merged into ruby.tls.httparty_verify_ssl (same `write target name: verify_ssl` shape)."
+  description: "Disabled - merged into ruby.tls.httparty_verify_ssl (same `write target name: verify_ssl` shape)."
 
 # Faraday pattern is `faraday.ssl.verify = false` or `ssl: { verify: false }`.
 # Bare `verify =` would match any method / DSL that assigns a field called
@@ -74,7 +74,7 @@
     kind: write
     target:
       name: verify
-  description: "Disabled — bare `verify =` is ambiguous; Faraday-specific verify: hash is better flagged by LLM review."
+  description: "Disabled - bare `verify =` is ambiguous; Faraday-specific verify: hash is better flagged by LLM review."
 
 - id: ruby.tls.typhoeus_ssl_verifypeer
   enabled: true

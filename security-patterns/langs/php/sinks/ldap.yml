@@ -39,7 +39,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_list($ldap, $base, \"(objectClass=person)\");\n}\n"
     expect_no_match: true
-  description: ldap_list() — one-level LDAP search; tainted filter string allows LDAP injection and information disclosure.
+  description: ldap_list() - one-level LDAP search; tainted filter string allows LDAP injection and information disclosure.
 - id: php.ldap.ldap_read
   enabled: true
   language: php
@@ -60,7 +60,7 @@
   - name: php.ldap.ldap_read filter literal negative
     code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_read($ldap, $base, \"(objectClass=*)\");\n}\n"
     expect_no_match: true
-  description: "ldap_read($ldap, $base, tainted_filter) — tainted filter allows LDAP injection."
+  description: "ldap_read($ldap, $base, tainted_filter) - tainted filter allows LDAP injection."
 - id: php.ldap.ldap_modify
   enabled: true
   language: php
@@ -81,7 +81,7 @@
   - name: php.ldap.ldap_modify dn literal negative
     code: "<?php\nfunction example($ldap, $input, $entry, $url, $id, $payload, $request) {\n  ldap_modify($ldap, \"uid=alice,dc=example,dc=com\", $entry);\n}\n"
     expect_no_match: true
-  description: "ldap_modify($ldap, tainted_dn, entry) — tainted DN allows unauthorized directory writes."
+  description: "ldap_modify($ldap, tainted_dn, entry) - tainted DN allows unauthorized directory writes."
 - id: php.ldap.ldap_add
   enabled: true
   language: php
@@ -102,7 +102,7 @@
   - name: php.ldap.ldap_add dn literal negative
     code: "<?php\nfunction example($ldap, $input, $entry, $url, $id, $payload, $request) {\n  ldap_add($ldap, \"uid=alice,dc=example,dc=com\", $entry);\n}\n"
     expect_no_match: true
-  description: "ldap_add($ldap, tainted_dn, entry) — unescaped user input in the DN enables arbitrary-entry creation."
+  description: "ldap_add($ldap, tainted_dn, entry) - unescaped user input in the DN enables arbitrary-entry creation."
 - id: php.ldap.ldap_delete
   enabled: true
   language: php
@@ -123,7 +123,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($ldap, $input, $url, $id, $payload, $request) {\n  ldap_delete($ldap, \"uid=alice,dc=example,dc=com\");\n}\n"
     expect_no_match: true
-  description: ldap_delete() — tainted DN lets the attacker delete arbitrary LDAP entries.
+  description: ldap_delete() - tainted DN lets the attacker delete arbitrary LDAP entries.
 - id: php.ldap.ldap_bind
   enabled: false
   disabled_reason:
@@ -137,7 +137,7 @@
     kind: call
     callee:
       name: ldap_bind
-  description: Disabled — bind is auth; flag DN-injection with constraint.
+  description: Disabled - bind is auth; flag DN-injection with constraint.
 - id: php.ldap.symfony_ldap_search
   enabled: true
   language: php
@@ -173,7 +173,7 @@
         Ldap::query("dc=example,dc=com", "(uid=alice)");
       }
     expect_no_match: true
-  description: Symfony Ldap component Ldap::query — flag tainted DSL.
+  description: Symfony Ldap component Ldap::query - flag tainted DSL.
   imports:
   - symfony\ldap
   - symfony

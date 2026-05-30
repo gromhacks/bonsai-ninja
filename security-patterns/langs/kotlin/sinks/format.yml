@@ -24,4 +24,4 @@
         return String.format("%s", "safe")
       }
     expect_no_match: true
-  description: "String.format(tainted_fmt, ...) — attacker-controlled format string."
+  description: "String.format(tainted_fmt, ...) - attacker-controlled format string."

@@ -22,7 +22,7 @@
       attribute:
       - flask
       - render_template_string
-  description: "Disabled duplicate — flask.render_template_string is classified as SSTI in python.template.flask_render_template_string; that finding is the higher-severity root cause."
+  description: "Disabled duplicate - flask.render_template_string is classified as SSTI in python.template.flask_render_template_string; that finding is the higher-severity root cause."
 - id: python.xss.markupsafe_markup
   enabled: true
   language: python
@@ -56,7 +56,7 @@
       def example(user_input):
           return markupsafe.Markup('safe')
     expect_no_match: true
-  description: "Markup() declares content safe — tainted input yields XSS."
+  description: "Markup() declares content safe - tainted input yields XSS."
 - id: python.xss.django_mark_safe
   enabled: true
   language: python
@@ -90,7 +90,7 @@
       def example(user_input):
           return mark_safe('safe')
     expect_no_match: true
-  description: "django.utils.safestring.mark_safe(tainted) — marks the string as exempt from auto-escape, re-introducing XSS."
+  description: "django.utils.safestring.mark_safe(tainted) - marks the string as exempt from auto-escape, re-introducing XSS."
 - id: python.xss.django_format_html
   enabled: true
   language: python
@@ -115,7 +115,7 @@
       def example(user_input):
           return format_html('safe')
     expect_no_match: true
-  description: "django.utils.html.format_html — args are HTML-escaped, but a tainted format string itself is interpolated raw and yields XSS."
+  description: "django.utils.html.format_html - args are HTML-escaped, but a tainted format string itself is interpolated raw and yields XSS."
 - id: python.xss.django_safestring
   enabled: true
   language: python

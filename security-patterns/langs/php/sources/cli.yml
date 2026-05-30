@@ -10,7 +10,7 @@
   match_examples:
   - name: php.source.argv example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $argv;;\n}\n"
-  description: $argv — CLI arguments.
+  description: $argv - CLI arguments.
 - id: php.source.argc_read
   enabled: false
   disabled_reason:
@@ -22,7 +22,7 @@
     kind: read
     target:
       name: argc
-  description: Disabled — argc is a count, not a string source.
+  description: Disabled - argc is a count, not a string source.
 - id: php.source.stdin_fopen
   enabled: true
   language: php
@@ -42,7 +42,7 @@
   - name: php.source.stdin_fopen example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen();\n}\n"
     expect_no_match: true
-  description: fopen('php://stdin', 'r') — reads CLI stdin.
+  description: fopen('php://stdin', 'r') - reads CLI stdin.
 - id: php.source.stdin_file_get_contents
   enabled: true
   language: php
@@ -74,7 +74,7 @@
     kind: call
     callee:
       name: getenv
-  description: Disabled — env vars only matter when crossing trust boundary.
+  description: Disabled - env vars only matter when crossing trust boundary.
 - id: php.source.env_super
   enabled: false
   disabled_reason:
@@ -86,7 +86,7 @@
     kind: read
     target:
       name: _ENV
-  description: Disabled — $_ENV is local trust.
+  description: Disabled - $_ENV is local trust.
 - id: php.source.readline
   enabled: true
   language: php
@@ -99,7 +99,7 @@
   match_examples:
   - name: php.source.readline example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  readline($input);\n}\n"
-  description: readline() — interactive CLI input.
+  description: readline() - interactive CLI input.
 - id: php.source.symfony_console_input_get_argument
   enabled: true
   language: php
@@ -122,7 +122,7 @@
       function example($input, $url, $id, $payload, $request) {
         $input->getArgument($input);
       }
-  description: Symfony Console $input->getArgument — CLI-supplied argument.
+  description: Symfony Console $input->getArgument - CLI-supplied argument.
   imports:
   - symfony\console
   - symfony

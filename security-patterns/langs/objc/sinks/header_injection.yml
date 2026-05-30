@@ -20,7 +20,7 @@
       code: |
         void test(void) { [NSMutableURLRequest setValue:@"safe"]; }
       expect_no_match: true
-  description: "NSMutableURLRequest -setValue:forHTTPHeaderField: with tainted value — CR/LF permits header splitting / request smuggling. Constrained to URL-request receivers."
+  description: "NSMutableURLRequest -setValue:forHTTPHeaderField: with tainted value - CR/LF permits header splitting / request smuggling. Constrained to URL-request receivers."
 
 - id: objc.header.nsmutableurlrequest_addvalue
   enabled: true
@@ -43,7 +43,7 @@
       code: |
         void test(void) { [NSMutableURLRequest addValue:@"safe"]; }
       expect_no_match: true
-  description: "NSMutableURLRequest -addValue:forHTTPHeaderField: — same CR/LF injection risk as setValue:forHTTPHeaderField:."
+  description: "NSMutableURLRequest -addValue:forHTTPHeaderField: - same CR/LF injection risk as setValue:forHTTPHeaderField:."
 
 - id: objc.header.set_all_http_headers
   enabled: true
@@ -66,4 +66,4 @@
       code: |
         void test(void) { [NSMutableURLRequest setAllHTTPHeaderFields:@{@"X-Safe": @"ok"}]; }
       expect_no_match: true
-  description: "NSMutableURLRequest -setAllHTTPHeaderFields: — tainted dict values allow bulk header injection."
+  description: "NSMutableURLRequest -setAllHTTPHeaderFields: - tainted dict values allow bulk header injection."

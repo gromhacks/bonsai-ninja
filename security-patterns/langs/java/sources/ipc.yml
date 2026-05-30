@@ -24,4 +24,4 @@
         String getStringExtra(Object... args) { return ""; }
       }
     expect_match_text: [intent.getStringExtra]
-  description: "Android Intent.getStringExtra(...) — package-scoped IPC extra read from a local intent receiver."
+  description: "Android Intent.getStringExtra(...) - package-scoped IPC extra read from a local intent receiver."

@@ -41,7 +41,7 @@
         return serialize.unserialize("{\"ok\":true}");
       }
     expect_no_match: true
-  description: node-serialize.unserialize — evaluates embedded function bodies; RCE on tainted input.
+  description: node-serialize.unserialize - evaluates embedded function bodies; RCE on tainted input.
 
 - id: javascript.deser.serialize_javascript_deserialize
   enabled: false
@@ -56,7 +56,7 @@
     kind: call
     callee:
       name: deserialize
-  description: "Disabled — bare `deserialize(...)` fires on every ORM/queue/worker `.deserialize` call; enable with receiver narrowing to the serialize-javascript module."
+  description: "Disabled - bare `deserialize(...)` fires on every ORM/queue/worker `.deserialize` call; enable with receiver narrowing to the serialize-javascript module."
 
 - id: javascript.deser.funcster_deepdeserialize
   enabled: true
@@ -86,7 +86,7 @@
         return funcster.deepDeserialize("{}");
       }
     expect_no_match: true
-  description: funcster deepDeserialize — rebuilds functions from source; RCE on tainted input.
+  description: funcster deepDeserialize - rebuilds functions from source; RCE on tainted input.
 
 - id: javascript.deser.cryo_parse
   enabled: true
@@ -116,7 +116,7 @@
         return cryo.parse("{}");
       }
     expect_no_match: true
-  description: cryo.parse — reconstructs functions via eval; RCE on tainted input.
+  description: cryo.parse - reconstructs functions via eval; RCE on tainted input.
 
 - id: javascript.deser.js_yaml_load
   enabled: true
@@ -147,7 +147,7 @@
         return yaml.load("name: demo");
       }
     expect_no_match: true
-  description: js-yaml.load uses DEFAULT_SCHEMA which resolves arbitrary tags — use safeLoad/FAILSAFE_SCHEMA on tainted input.
+  description: js-yaml.load uses DEFAULT_SCHEMA which resolves arbitrary tags - use safeLoad/FAILSAFE_SCHEMA on tainted input.
 
 - id: javascript.deser.yaml_load_namespace
   enabled: true
@@ -179,7 +179,7 @@
         return YAML.load("name: demo");
       }
     expect_no_match: true
-  description: "YAML.load(tainted) — namespace-imported YAML loaders can construct unsafe objects/tags from untrusted YAML."
+  description: "YAML.load(tainted) - namespace-imported YAML loaders can construct unsafe objects/tags from untrusted YAML."
 
 - id: javascript.deser.js_yaml_loadall
   enabled: true
@@ -210,7 +210,7 @@
         return yaml.loadAll("name: demo");
       }
     expect_no_match: true
-  description: js-yaml.loadAll — same DEFAULT_SCHEMA hazard as load, applied to multi-doc YAML.
+  description: js-yaml.loadAll - same DEFAULT_SCHEMA hazard as load, applied to multi-doc YAML.
 
 - id: javascript.deser.plist_parse
   enabled: true
@@ -240,7 +240,7 @@
         return plist.parse("<plist><dict/></plist>");
       }
     expect_no_match: true
-  description: plist.parse — historical XML-entity resolution hazards on tainted input.
+  description: plist.parse - historical XML-entity resolution hazards on tainted input.
 
 - id: javascript.deser.bson_deserialize
   enabled: true
@@ -270,7 +270,7 @@
         return bson.deserialize(Buffer.from([]));
       }
     expect_no_match: true
-  description: bson.deserialize — untrusted BSON can instantiate JS types with custom __proto__; flag when input crosses a trust boundary.
+  description: bson.deserialize - untrusted BSON can instantiate JS types with custom __proto__; flag when input crosses a trust boundary.
 
 - id: javascript.deser.v8_deserialize
   enabled: true
@@ -300,7 +300,7 @@
         return v8.deserialize(Buffer.from([]));
       }
     expect_no_match: true
-  description: v8.deserialize — accepts the internal V8 serialisation format; never safe on cross-trust input.
+  description: v8.deserialize - accepts the internal V8 serialisation format; never safe on cross-trust input.
 
 - id: javascript.deser.serialize_to_js_deserialize
   enabled: true
@@ -339,7 +339,7 @@
         return serializeToJs.deserialize("{\"ok\":true}");
       }
     expect_no_match: true
-  description: "serialize-to-js .deserialize — reconstructs JavaScript values/functions from strings; unsafe on tainted input."
+  description: "serialize-to-js .deserialize - reconstructs JavaScript values/functions from strings; unsafe on tainted input."
 
 - id: javascript.deser.msgpack_decode_unpack
   enabled: true
@@ -378,4 +378,4 @@
         return msgpack.decode(Buffer.from([]));
       }
     expect_no_match: true
-  description: "MessagePack decode/unpack/deserialize APIs — untrusted binary frames can materialize unexpected object graphs and prototype-bearing keys."
+  description: "MessagePack decode/unpack/deserialize APIs - untrusted binary frames can materialize unexpected object graphs and prototype-bearing keys."

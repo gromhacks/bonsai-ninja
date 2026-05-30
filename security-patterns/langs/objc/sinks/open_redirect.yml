@@ -20,4 +20,4 @@
       code: |
         void test(void) { [UIApplication openURL:@"myapp://home"]; }
       expect_no_match: true
-  description: "[UIApplication.sharedApplication openURL:] / -[UIApplication openURL:options:completionHandler:] / [NSWorkspace openURL:] — redirects into attacker-chosen URL scheme (http/custom-scheme phishing). Constrained to app/workspace receivers; bare openURL: is too ubiquitous."
+  description: "[UIApplication.sharedApplication openURL:] / -[UIApplication openURL:options:completionHandler:] / [NSWorkspace openURL:] - redirects into attacker-chosen URL scheme (http/custom-scheme phishing). Constrained to app/workspace receivers; bare openURL: is too ubiquitous."

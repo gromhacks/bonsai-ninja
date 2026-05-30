@@ -65,7 +65,7 @@
         }
       }
     expect_match_text: [Encode.forHtml]
-  description: "OWASP Java Encoder Encode.forHtml — context-aware HTML body encoder; canonical XSS fix."
+  description: "OWASP Java Encoder Encode.forHtml - context-aware HTML body encoder; canonical XSS fix."
 
 - id: scala.sanitizer.owasp_encoder_js
   enabled: true
@@ -86,7 +86,7 @@
         }
       }
     expect_match_text: [Encode.forJavaScript]
-  description: "OWASP Encoder Encode.forJavaScript — escapes data for inclusion inside a <script> or JS string literal."
+  description: "OWASP Encoder Encode.forJavaScript - escapes data for inclusion inside a <script> or JS string literal."
 
 - id: scala.sanitizer.twirl_html_escape
   enabled: true
@@ -107,7 +107,7 @@
         }
       }
     expect_match_text: [HtmlFormat.escape]
-  description: "Play Twirl HtmlFormat.escape replaces &, <, >, \", ' with HTML entities — canonical XSS sanitiser used by
+  description: "Play Twirl HtmlFormat.escape replaces &, <, >, \", ' with HTML entities - canonical XSS sanitiser used by
     @-expressions."
 
 - id: scala.sanitizer.jsoup_clean
@@ -129,7 +129,7 @@
         }
       }
     expect_match_text: [Jsoup.clean]
-  description: "Jsoup.clean(html, whitelist) strips tags/attributes outside the whitelist — HTML sanitization for rich-text
+  description: "Jsoup.clean(html, whitelist) strips tags/attributes outside the whitelist - HTML sanitization for rich-text
     output."
 
 # --- Constant-time comparison ----------------------------------------
@@ -172,7 +172,7 @@
         }
       }
     expect_match_text: [BCrypt.checkpw]
-  description: "BCrypt.checkpw(plaintext, hash) — constant-time password verification; treats the plaintext as bounded-comparison-only,
+  description: "BCrypt.checkpw(plaintext, hash) - constant-time password verification; treats the plaintext as bounded-comparison-only,
     neutralising injection-style misuse."
 
 - id: scala.sanitizer.argon2_verify
@@ -194,7 +194,7 @@
         }
       }
     expect_match_text: [Argon2.verify]
-  description: "Argon2.verify(hash, plaintext) — constant-time password verification; bounded comparison sanitises plaintext
+  description: "Argon2.verify(hash, plaintext) - constant-time password verification; bounded comparison sanitises plaintext
     side."
 
 # --- SQL parameter binding -------------------------------------------
@@ -255,7 +255,7 @@
         }
       }
     expect_match_text: [SQL.on]
-  description: "Anorm SQL(...).on(namedParams) binds placeholders via JDBC prepared-statement parameters — safe against SQLi."
+  description: "Anorm SQL(...).on(namedParams) binds placeholders via JDBC prepared-statement parameters - safe against SQLi."
 
 # --- Numeric coercion ------------------------------------------------
 - id: scala.sanitizer.integer_parseint
@@ -313,7 +313,7 @@
         }
       }
     expect_match_text: [toInt]
-  description: "Scala String.toInt implicit throws on non-numeric input — coerces attacker strings to a bounded Int."
+  description: "Scala String.toInt implicit throws on non-numeric input - coerces attacker strings to a bounded Int."
 
 - id: scala.sanitizer.string_tolong
   enabled: true
@@ -332,7 +332,7 @@
         }
       }
     expect_match_text: [toLong]
-  description: "Scala String.toLong implicit throws on non-numeric input — coerces attacker strings to a bounded Long."
+  description: "Scala String.toLong implicit throws on non-numeric input - coerces attacker strings to a bounded Long."
 
 - id: scala.sanitizer.uuid_fromstring
   enabled: true
@@ -365,7 +365,7 @@
     kind: call
     callee:
       attribute: [Path, normalize]
-  description: "Disabled — java.nio.file.Path.normalize collapses .. segments but still requires a trusted-root containment
+  description: "Disabled - java.nio.file.Path.normalize collapses .. segments but still requires a trusted-root containment
     check."
 
 - id: scala.sanitizer.path_startswith
@@ -378,12 +378,12 @@
     kind: call
     callee:
       attribute: [Path, startsWith]
-  description: "Disabled — startsWith is only a sanitizer on normalized Path values with a trusted-root argument; v1 matching
+  description: "Disabled - startsWith is only a sanitizer on normalized Path values with a trusted-root argument; v1 matching
     cannot prove receiver type."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: scala.passthrough.urldecoder_decode
@@ -405,7 +405,7 @@
         }
       }
     expect_match_text: [URLDecoder.decode]
-  description: "java.net.URLDecoder.decode(s, charset) — preserves taint (Scala via Java interop)."
+  description: "java.net.URLDecoder.decode(s, charset) - preserves taint (Scala via Java interop)."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -429,7 +429,7 @@
         }
       }
     expect_match_text: [CSRFFilter]
-  description: "Play Framework CSRFFilter — global CSRF enforcement."
+  description: "Play Framework CSRFFilter - global CSRF enforcement."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -539,7 +539,7 @@
     code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith(\"/\") && !next.startsWith(\"http://\"\
       )\n  }\n}\n"
     expect_no_match: true
-  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
+  description: "Disabled duplicate - the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
     //\") shape in scala.sanitizer.same_origin_path_startswith_slash."
 
 - id: scala.sanitizer.allowlist_contains
@@ -562,7 +562,7 @@
         }
       }
     expect_match_text: [allowed.contains]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
     allowlist membership check on explicitly allowlist-named receivers."
 
   disabled_reason:
@@ -587,7 +587,7 @@
         }
       }
     expect_match_text: [allowed.getOrElse]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrElse
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrElse
     on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
   disabled_reason:
@@ -612,7 +612,7 @@
         }
       }
     expect_match_text: [AllowedRole.withName]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Scala Enumeration.withName
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Scala Enumeration.withName
     on narrowly named allowlist enums rejects values outside the enum domain."
 
   disabled_reason:

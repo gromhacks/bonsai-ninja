@@ -28,7 +28,7 @@
     code: "require \"jwt\"\ndef example(\"safe\", url, id, payload, request, params)\n\
       \  JWT.decode(\"safe\", \"safe\", false)\nend\n"
     expect_no_match: true
-  description: "JWT.decode(token, key, false) — signature verification disabled. Merged
+  description: "JWT.decode(token, key, false) - signature verification disabled. Merged
     aliases: ruby.jwt.decode_alg_none, ruby.jwt.decode_no_keyword_verify, ruby.jwt.decode_algorithms_none_array,
     ruby.jwt.alg_confusion."
   aliases:
@@ -97,7 +97,7 @@
     code: "require \"json-jwt\"\ndef example(\"safe\", url, id, payload, request,
       params)\n  JSON::JWT.decode(\"safe\")\nend\n"
     expect_no_match: true
-  description: "json-jwt JSON::JWT.decode — flag if no subsequent .verify!."
+  description: "json-jwt JSON::JWT.decode - flag if no subsequent .verify!."
 - id: ruby.jwt.devise_jwt_decode
   enabled: false
   disabled_reason:
@@ -115,4 +115,4 @@
       attribute:
       - Devise::JWT
       - decode
-  description: "Disabled — Devise::JWT has default config."
+  description: "Disabled - Devise::JWT has default config."

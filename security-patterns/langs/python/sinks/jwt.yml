@@ -33,7 +33,7 @@
       def example(user_input):
           return jwt.decode('safe', verify=False)
     expect_no_match: true
-  description: "jwt.decode(verify=False) — accepts any token. Merged aliases: python.jwt.pyjwt_decode_algorithms_none, python.jwt.pyjwt_decode_options_verify_signature_false, python.jwt.alg_confusion."
+  description: "jwt.decode(verify=False) - accepts any token. Merged aliases: python.jwt.pyjwt_decode_algorithms_none, python.jwt.pyjwt_decode_options_verify_signature_false, python.jwt.alg_confusion."
   aliases:
   - python.jwt.pyjwt_decode_algorithms_none
   - python.jwt.pyjwt_decode_options_verify_signature_false
@@ -55,7 +55,7 @@
       attribute:
       - jwt
       - get_unverified_header
-  description: "Disabled — get_unverified_header is informational; flag downstream trust of its claims."
+  description: "Disabled - get_unverified_header is informational; flag downstream trust of its claims."
 - id: python.jwt.python_jose_decode_no_verify
   enabled: true
   language: python
@@ -121,7 +121,7 @@
       def example(user_input):
           return jwt.get_unverified_claims('safe')
     expect_no_match: true
-  description: "python-jose get_unverified_claims — unsigned claims trusted."
+  description: "python-jose get_unverified_claims - unsigned claims trusted."
   imports:
   - jose
 - id: python.jwt.authlib_decode
@@ -155,7 +155,7 @@
       def example(user_input):
           return JsonWebToken.decode('safe')
     expect_no_match: true
-  description: "authlib JsonWebToken.decode — flag if no algorithm whitelist."
+  description: "authlib JsonWebToken.decode - flag if no algorithm whitelist."
 - id: python.jwt.django_simple_jwt_token_check
   enabled: false
   disabled_reason:
@@ -173,7 +173,7 @@
       attribute:
       - Token
       - verify
-  description: "Disabled — DRF SimpleJWT verify is normally safe; flag config drift."
+  description: "Disabled - DRF SimpleJWT verify is normally safe; flag config drift."
 
 - id: python.jwt.pyjwt_decode_alg_none
   enabled: true
@@ -204,4 +204,4 @@
       def example(token, key):
           return jwt.decode(token, key, algorithms=["HS256"])
     expect_no_match: true
-  description: 'jwt.decode(..., algorithms=["none"]) — accepts unsigned tokens; classic alg-none OAuth/OIDC bypass.'
+  description: 'jwt.decode(..., algorithms=["none"]) - accepts unsigned tokens; classic alg-none OAuth/OIDC bypass.'

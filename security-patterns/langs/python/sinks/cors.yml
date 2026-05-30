@@ -18,7 +18,7 @@
       import flask_cors
       def example(user_input):
           return CORS(user_input, origins="*")
-  description: Flask-CORS(origins='*') — open CORS.
+  description: Flask-CORS(origins='*') - open CORS.
 
 - id: python.cors.starlette_cors_wildcard_origin
   enabled: true
@@ -41,4 +41,4 @@
       def example(app):
           return CORSMiddleware(app, allow_origins=["*"])
     expect_match_text: [CORSMiddleware]
-  description: "Starlette/FastAPI CORSMiddleware(allow_origins=['*']) — open CORS policy."
+  description: "Starlette/FastAPI CORSMiddleware(allow_origins=['*']) - open CORS policy."

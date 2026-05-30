@@ -28,4 +28,4 @@
       test() ->
         re:compile("^[a-z]+$").
     expect_no_match: true
-  description: "re:compile(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "re:compile(tainted_pattern) - attacker-controlled regular expressions can trigger catastrophic backtracking."

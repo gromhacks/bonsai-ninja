@@ -33,7 +33,7 @@
         getObject(["Bucket" => "reports", "Key" => "public.json"]);
       }
     expect_no_match: true
-  description: AWS SDK for PHP getObject — tainted bucket/key selector reads arbitrary object data.
+  description: AWS SDK for PHP getObject - tainted bucket/key selector reads arbitrary object data.
   imports:
   - aws
   - aws/awssdkphp
@@ -73,7 +73,7 @@
         putObject(["Bucket" => "reports", "Key" => "public.json", "Body" => "safe"]);
       }
     expect_no_match: true
-  description: AWS SDK for PHP putObject — tainted bucket/key selector overwrites attacker-chosen object keys.
+  description: AWS SDK for PHP putObject - tainted bucket/key selector overwrites attacker-chosen object keys.
   imports:
   - aws
   - aws/awssdkphp
@@ -112,7 +112,7 @@
         getSecretValue(["SecretId" => "app/prod/db"]);
       }
     expect_no_match: true
-  description: AWS SDK for PHP getSecretValue — tainted secret id reads arbitrary secret material.
+  description: AWS SDK for PHP getSecretValue - tainted secret id reads arbitrary secret material.
   imports:
   - aws
   - aws/awssdkphp
@@ -151,7 +151,7 @@
         accessSecretVersion("projects/app/secrets/db/versions/latest");
       }
     expect_no_match: true
-  description: GCP Secret Manager accessSecretVersion — tainted resource name reads arbitrary secret versions.
+  description: GCP Secret Manager accessSecretVersion - tainted resource name reads arbitrary secret versions.
   imports:
   - google/cloudsecretmanager
   - google
@@ -181,4 +181,4 @@
       }
     expect_match_text:
     - add_action
-  description: WordPress wp_ajax/wp_ajax_nopriv hook registration — audit callback authorization checks such as current_user_can().
+  description: WordPress wp_ajax/wp_ajax_nopriv hook registration - audit callback authorization checks such as current_user_can().

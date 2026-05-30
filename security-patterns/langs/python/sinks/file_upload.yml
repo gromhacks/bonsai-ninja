@@ -26,7 +26,7 @@
       def example(user_input):
           return FileStorage.save('safe')
     expect_no_match: true
-  description: "werkzeug FileStorage.save — flag if destination is tainted (filename)."
+  description: "werkzeug FileStorage.save - flag if destination is tainted (filename)."
 
 - id: python.upload.django_default_storage_save
   enabled: true
@@ -113,7 +113,7 @@
       def example(user_input):
           return FileField.save('safe')
     expect_no_match: true
-  description: "aiohttp multipart FileField.save — flag when destination path is derived from the client-supplied filename."
+  description: "aiohttp multipart FileField.save - flag when destination path is derived from the client-supplied filename."
 
 - id: python.upload.shutil_copyfileobj_upload
   enabled: false
@@ -128,4 +128,4 @@
     kind: call
     callee:
       attribute: [shutil, copyfileobj]
-  description: "Disabled — shutil.copyfileobj is generic; flag only when the destination path is tainted."
+  description: "Disabled - shutil.copyfileobj is generic; flag only when the destination path is tainted."

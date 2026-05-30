@@ -233,7 +233,7 @@
       }
       }
     expect_no_match: true
-  description: "ResponseEntity.header(name, tainted) — CRLF response header injection. Merged aliases: kotlin.header.spring_responseentity_content_disposition, kotlin.open_redirect.spring_responseentity_header_location."
+  description: "ResponseEntity.header(name, tainted) - CRLF response header injection. Merged aliases: kotlin.header.spring_responseentity_content_disposition, kotlin.open_redirect.spring_responseentity_header_location."
   aliases:
   - kotlin.header.spring_responseentity_content_disposition
   - kotlin.open_redirect.spring_responseentity_header_location
@@ -280,7 +280,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.header(name, tainted) — CRLF response header injection. Merged aliases: kotlin.open_redirect.webflux_serverresponse_header_location."
+  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection. Merged aliases: kotlin.open_redirect.webflux_serverresponse_header_location."
   aliases:
   - kotlin.open_redirect.webflux_serverresponse_header_location
 - id: kotlin.header.vertx_response_putheader
@@ -326,6 +326,6 @@
       fun putHeader(vararg args: Any?) {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.putHeader(name, tainted) — CRLF response header injection. Merged aliases: kotlin.open_redirect.vertx_response_putheader_location."
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection. Merged aliases: kotlin.open_redirect.vertx_response_putheader_location."
   aliases:
   - kotlin.open_redirect.vertx_response_putheader_location

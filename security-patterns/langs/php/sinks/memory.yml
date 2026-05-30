@@ -1,8 +1,8 @@
 # PHP memory-safety / lifecycle audit-pair sites.
-# These rules fire on the *transition site* — the PHP adapter rejects
+# These rules fire on the *transition site* - the PHP adapter rejects
 # `$`-prefixed binding names from the lifecycle lattice, so the
 # `requires_state` engine constraint (P6) cannot gate the use site
-# until the adapter normalises `$fp` → `fp` for the binding key.
+# until the adapter normalises `$fp` -> `fp` for the binding key.
 
 - id: php.memory.fclose
   enabled: true
@@ -22,4 +22,4 @@
           fclose($fp);
       }
     expect_match_text: [fclose]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. fclose($fp) — later fread/fwrite on the same handle returns false (use-after-close, CWE-416). The PHP adapter doesn't yet strip the `$` prefix from the lifecycle binding key, so this rule cannot gate via `requires_state` and stays a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. fclose($fp) - later fread/fwrite on the same handle returns false (use-after-close, CWE-416). The PHP adapter doesn't yet strip the `$` prefix from the lifecycle binding key, so this rule cannot gate via `requires_state` and stays a transition-site audit-pair."

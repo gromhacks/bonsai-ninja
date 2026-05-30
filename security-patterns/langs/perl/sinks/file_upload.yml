@@ -21,7 +21,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         upload($input)
       }
-  description: "Disabled — upload('field') returns client-controlled filename/handle state; report the later file-write sink until return-state tracking exists."
+  description: "Disabled - upload('field') returns client-controlled filename/handle state; report the later file-write sink until return-state tracking exists."
 
 - id: perl.upload.mojo_upload_filename
   enabled: false
@@ -44,7 +44,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         filename($input)
       }
-  description: "Disabled — filename() returns client-controlled state; report the later file-write sink until return-state tracking exists."
+  description: "Disabled - filename() returns client-controlled state; report the later file-write sink until return-state tracking exists."
 
 - id: perl.upload.dancer2_upload
   enabled: false
@@ -59,4 +59,4 @@
     kind: call
     callee:
       name: upload
-  description: "Disabled — merged into perl.upload.cgi_upload_filename (same bare `upload` name)."
+  description: "Disabled - merged into perl.upload.cgi_upload_filename (same bare `upload` name)."

@@ -68,7 +68,7 @@
         }
       }
     expect_no_match: true
-  description: "Scala `s.!!` captures stdout — scala.sys.process shell execution."
+  description: "Scala `s.!!` captures stdout - scala.sys.process shell execution."
 - id: scala.cmdi.process_apply_string
   enabled: true
   language: scala
@@ -96,7 +96,7 @@
   - name: arg tainted literal negative
     code: "import scala.sys.process._\n// uses scala.sys.process\nobject App {\n  def handle(input: String): Unit = {\n    Process.apply(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "scala.sys.process.Process(s) — constructs a ProcessBuilder from a string; any tainted arg becomes a shell token when run via `.!`/`.!!`."
+  description: "scala.sys.process.Process(s) - constructs a ProcessBuilder from a string; any tainted arg becomes a shell token when run via `.!`/`.!!`."
 - id: scala.cmdi.runtime_exec
   enabled: true
   language: scala
@@ -121,7 +121,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Runtime.getRuntime.exec(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "Runtime.getRuntime().exec(cmd) — JVM process execution via Java interop."
+  description: "Runtime.getRuntime().exec(cmd) - JVM process execution via Java interop."
 - id: scala.cmdi.processbuilder_command
   enabled: true
   language: scala
@@ -153,7 +153,7 @@
         }
       }
     expect_no_match: true
-  description: "java.lang.ProcessBuilder.command(cmd) — tainted command tokens execute directly; no shell escaping performed."
+  description: "java.lang.ProcessBuilder.command(cmd) - tainted command tokens execute directly; no shell escaping performed."
 - id: scala.cmdi.processbuilder_new
   enabled: true
   language: scala
@@ -185,7 +185,7 @@
       }
       class ProcessBuilder(args: Any*)
     expect_no_match: true
-  description: "new java.lang.ProcessBuilder(cmd, ...) constructor — cmd is the tainted sink."
+  description: "new java.lang.ProcessBuilder(cmd, ...) constructor - cmd is the tainted sink."
 - id: scala.cmdi.os_proc_call
   enabled: true
   language: scala
@@ -218,7 +218,7 @@
         }
       }
     expect_no_match: true
-  description: "os-lib os.proc(cmd).call() — executes cmd; tainted argv tokens run without shell escaping."
+  description: "os-lib os.proc(cmd).call() - executes cmd; tainted argv tokens run without shell escaping."
   imports:
   - com.lihaoyi.oslib
   - com

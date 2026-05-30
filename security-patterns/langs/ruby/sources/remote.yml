@@ -1,5 +1,5 @@
 # Ruby HTTP / RPC / external sources. Rails, Sinatra, Grape, Hanami, Rack, Roda.
-# trust: remote — network-reachable, attacker-controlled.
+# trust: remote - network-reachable, attacker-controlled.
 
 # `params` is implicit-receiver in every Rack-based controller (Rails,
 # Sinatra, Grape, Hanami, Roda). A single rule avoids duplicate firing.
@@ -22,7 +22,7 @@
       def example(input, url, id, item, req_obj, options)
         params(input)
       end
-  description: "Controller/action `params` — HTTP request parameters (Rails, Sinatra, Grape, Hanami, Roda)."
+  description: "Controller/action `params` - HTTP request parameters (Rails, Sinatra, Grape, Hanami, Roda)."
 
 - id: ruby.source.params_read
   enabled: true
@@ -43,7 +43,7 @@
         value = params["name"]
       end
     expect_match_text: [params]
-  description: "Controller/action params hash read — covers `params[:id]` / `params[\"id\"]` source use where the adapter emits a read rather than a call."
+  description: "Controller/action params hash read - covers `params[:id]` / `params[\"id\"]` source use where the adapter emits a read rather than a call."
 
 - id: ruby.source.rails_request_body
   enabled: true
@@ -64,7 +64,7 @@
       def example(input, url, id, item, req_obj, options)
         request.body()
       end
-  description: "Rails/Sinatra request.body — raw HTTP body IO. Property-style getter (no args); `max_args: 0` rejects unrelated `request.body(...)` setter/builder decoys."
+  description: "Rails/Sinatra request.body - raw HTTP body IO. Property-style getter (no args); `max_args: 0` rejects unrelated `request.body(...)` setter/builder decoys."
 
 - id: ruby.source.rails_request_raw_post
   enabled: true
@@ -85,7 +85,7 @@
       def example(input, url, id, item, req_obj, options)
         request.raw_post()
       end
-  description: "Rails request.raw_post — raw request body as String. Property-style getter (no args)."
+  description: "Rails request.raw_post - raw request body as String. Property-style getter (no args)."
 
 - id: ruby.source.rails_request_query_parameters
   enabled: true
@@ -148,7 +148,7 @@
       def example(input, url, id, item, req_obj, options)
         request.headers()
       end
-  description: "Rails request.headers — attacker-controlled when crossing trust boundary. Property-style getter (no args)."
+  description: "Rails request.headers - attacker-controlled when crossing trust boundary. Property-style getter (no args)."
 
 - id: ruby.source.rails_cookies
   enabled: true
@@ -167,7 +167,7 @@
       def example(input, url, id, item, req_obj, options)
         cookies(input)
       end
-  description: "Rails cookies — client-controlled."
+  description: "Rails cookies - client-controlled."
 
 - id: ruby.source.rails_session
   enabled: false
@@ -181,7 +181,7 @@
     kind: call
     callee:
       name: session
-  description: "Disabled — Rails session is integrity-protected (signed cookie/encrypted store) by default."
+  description: "Disabled - Rails session is integrity-protected (signed cookie/encrypted store) by default."
 
 - id: ruby.source.rack_request_params
   enabled: true
@@ -221,7 +221,7 @@
       end
   description: "Rack env QUERY_STRING read."
 
-# UploadedFile.original_filename is client-controlled metadata — it is a
+# UploadedFile.original_filename is client-controlled metadata - it is a
 # SOURCE, not a sink. Keeps taint through path-construction into file sinks.
 - id: ruby.source.rails_uploaded_file_filename
   enabled: true
@@ -240,7 +240,7 @@
       def example(input, url, id, item, req_obj, options)
         original_filename(input)
       end
-  description: "ActionDispatch::Http::UploadedFile#original_filename — client-controlled filename."
+  description: "ActionDispatch::Http::UploadedFile#original_filename - client-controlled filename."
 
 - id: ruby.source.actioncable_receive
   enabled: false
@@ -254,7 +254,7 @@
     kind: param
     target:
       name: data
-  description: "Disabled — bare `data` param matches ordinary helper methods; needs class/context-aware ActionCable receive matching."
+  description: "Disabled - bare `data` param matches ordinary helper methods; needs class/context-aware ActionCable receive matching."
 
 - id: ruby.source.graphql_resolver_args
   enabled: true
@@ -285,7 +285,7 @@
         args
       end
     expect_no_match: true
-  description: "graphql-ruby resolver `resolve(args)` parameter — GraphQL caller-supplied arguments. Scoped to the resolver method name so ordinary helper parameters named args stay clean."
+  description: "graphql-ruby resolver `resolve(args)` parameter - GraphQL caller-supplied arguments. Scoped to the resolver method name so ordinary helper parameters named args stay clean."
 
 - id: ruby.source.hanami_request_params
   enabled: true
@@ -306,7 +306,7 @@
       def example(input, url, id, item, req_obj, options)
         request.params()
       end
-  description: "Hanami action request.params — HTTP parameters via Hanami request object. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+  description: "Hanami action request.params - HTTP parameters via Hanami request object. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
 # Generic untrusted-blob parameter for YAML.load / Marshal.load /
 # Oj.load deserialization-style entry points. The canonical shape is

@@ -29,7 +29,7 @@
       test(Conn) ->
         eldap:search(Conn, [{base, "dc=example,dc=com"}]).
     expect_no_match: true
-  description: "eldap:search — tainted filter term (e.g. {equalityMatch, ...}) enables LDAP injection/ACL bypass."
+  description: "eldap:search - tainted filter term (e.g. {equalityMatch, ...}) enables LDAP injection/ACL bypass."
 
 - id: erlang.ldap.eldap_modify_dn
   enabled: true
@@ -61,7 +61,7 @@
       test(Conn) ->
         eldap:modify(Conn, "uid=alice,dc=example,dc=com", [{add, "mail", ["a@example.com"]}]).
     expect_no_match: true
-  description: "eldap:modify — tainted DN modifies unintended directory entries."
+  description: "eldap:modify - tainted DN modifies unintended directory entries."
 - id: erlang.ldap.eldap_modify_changes
   enabled: true
   language: erlang
@@ -92,7 +92,7 @@
       test(Conn) ->
         eldap:modify(Conn, "uid=alice,dc=example,dc=com", [{add, "mail", ["a@example.com"]}]).
     expect_no_match: true
-  description: "eldap:modify — tainted modification list changes unintended attributes."
+  description: "eldap:modify - tainted modification list changes unintended attributes."
 
 - id: erlang.ldap.eldap_add_dn
   enabled: true
@@ -124,7 +124,7 @@
       test(Conn) ->
         eldap:add(Conn, "uid=alice,dc=example,dc=com", [{"cn", ["alice"]}]).
     expect_no_match: true
-  description: "eldap:add — tainted DN creates unauthorized directory entries."
+  description: "eldap:add - tainted DN creates unauthorized directory entries."
 - id: erlang.ldap.eldap_add_attributes
   enabled: true
   language: erlang
@@ -155,7 +155,7 @@
       test(Conn) ->
         eldap:add(Conn, "uid=alice,dc=example,dc=com", [{"cn", ["alice"]}]).
     expect_no_match: true
-  description: "eldap:add — tainted attributes create unauthorized directory entries."
+  description: "eldap:add - tainted attributes create unauthorized directory entries."
 
 - id: erlang.ldap.eldap_delete
   enabled: true
@@ -187,4 +187,4 @@
       test(Conn) ->
         eldap:delete(Conn, "uid=alice,dc=example,dc=com").
     expect_no_match: true
-  description: "eldap:delete — tainted DN deletes arbitrary directory entries (destructive)."
+  description: "eldap:delete - tainted DN deletes arbitrary directory entries (destructive)."

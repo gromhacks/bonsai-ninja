@@ -27,7 +27,7 @@
         }
       }
     expect_no_match: true
-  description: 'MessageDigest.getInstance("MD5"/"MD4"/"MD2") — collision-broken hash.'
+  description: 'MessageDigest.getInstance("MD5"/"MD4"/"MD2") - collision-broken hash.'
 
 - id: java.crypto.cipher_des
   enabled: true
@@ -58,7 +58,7 @@
         }
       }
     expect_no_match: true
-  description: 'Cipher.getInstance("DES"/"DESede"/"3DES") — obsolete block cipher family.'
+  description: 'Cipher.getInstance("DES"/"DESede"/"3DES") - obsolete block cipher family.'
   aliases:
   - java.crypto.cipher_des_cbc
   - java.crypto.cipher_3des
@@ -98,7 +98,7 @@
         }
       }
     expect_no_match: true
-  description: 'Cipher.getInstance("*/ECB/*") — ECB mode leaks plaintext structure.'
+  description: 'Cipher.getInstance("*/ECB/*") - ECB mode leaks plaintext structure.'
 
 - id: java.crypto.cipher_rc4
   enabled: true
@@ -135,7 +135,7 @@
         }
       }
     expect_no_match: true
-  description: 'Cipher.getInstance("RC4"/"ARCFOUR") — RC4 stream cipher is cryptographically broken.'
+  description: 'Cipher.getInstance("RC4"/"ARCFOUR") - RC4 stream cipher is cryptographically broken.'
 
 - id: java.crypto.cipher_dynamic_algorithm
   enabled: true
@@ -175,7 +175,7 @@
         }
       }
     expect_no_match: true
-  description: "Cipher.getInstance(dynamicAlgorithm) — algorithm is not a literal known-safe authenticated mode."
+  description: "Cipher.getInstance(dynamicAlgorithm) - algorithm is not a literal known-safe authenticated mode."
 
 - id: java.crypto.random_next
   enabled: true
@@ -207,7 +207,7 @@
         }
       }
     expect_match_text: [random.nextInt]
-  description: "java.util.Random next* output — non-cryptographic PRNG used where unpredictable values are required."
+  description: "java.util.Random next* output - non-cryptographic PRNG used where unpredictable values are required."
 
 - id: java.crypto.random_ctor
   enabled: true
@@ -233,7 +233,7 @@
         }
       }
     expect_match_text: [java.util.Random]
-  description: "new java.util.Random — non-cryptographic."
+  description: "new java.util.Random - non-cryptographic."
 
 - id: java.crypto.math_random
   enabled: true
@@ -252,7 +252,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Math.random();\n  }\n}\n"
-  description: "Math.random() — non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
+  description: "Math.random() - non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
 - id: java.crypto.bouncycastle_des
   enabled: true
   language: java
@@ -292,7 +292,7 @@
       attribute:
       - KeyPairGenerator
       - initialize
-  description: "Disabled — flag only on key sizes < 2048 (RSA) / < 256 (EC)."
+  description: "Disabled - flag only on key sizes < 2048 (RSA) / < 256 (EC)."
 - id: java.crypto.mac_hmacmd5
   enabled: true
   language: java
@@ -310,7 +310,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Mac.getInstance(\"HmacMD5\");\n  }\n}\n"
-  description: "Mac.getInstance(\"HmacMD5\") — MD5-based MAC."
+  description: "Mac.getInstance(\"HmacMD5\") - MD5-based MAC."
 - id: java.crypto.pbkdf2_sha1
   enabled: true
   language: java
@@ -329,7 +329,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\");\n  }\n}\n"
-  description: "SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\") — prefer SHA-256/512."
+  description: "SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\") - prefer SHA-256/512."
 - id: java.crypto.keygenerator_low_bits
   enabled: true
   language: java
@@ -371,4 +371,4 @@
         void init(Object... args) {}
       }
     expect_no_match: true
-  description: "KeyGenerator.init(bits) with a literal key size below 128 bits — cryptographically weak symmetric key strength."
+  description: "KeyGenerator.init(bits) with a literal key size below 128 bits - cryptographically weak symmetric key strength."

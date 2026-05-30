@@ -34,4 +34,4 @@
         }
       }
     expect_no_match: true
-  description: "Spring DataBinder.bind(request, target) — binds every form field unless setAllowedFields/setDisallowedFields narrows."
+  description: "Spring DataBinder.bind(request, target) - binds every form field unless setAllowedFields/setDisallowedFields narrows."

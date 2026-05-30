@@ -23,7 +23,7 @@
   - name: arg tainted literal negative
     code: "import os\ndef example(user_input):\n    return os.system(\"safe\")\n"
     expect_no_match: true
-  description: "os.system \u2014 runs the whole string through /bin/sh -c; any tainted\
+  description: "os.system - runs the whole string through /bin/sh -c; any tainted\
     \ component is command injection."
 - id: python.cmdi.os_popen
   enabled: true
@@ -49,7 +49,7 @@
   - name: os popen literal negative
     code: "import os\n\ndef example(user_input):\n    return os.popen('safe')\n"
     expect_no_match: true
-  description: "os.popen \u2014 opens a pipe to /bin/sh -c <cmd>; tainted cmd = shell\
+  description: "os.popen - opens a pipe to /bin/sh -c <cmd>; tainted cmd = shell\
     \ injection."
 - id: python.cmdi.os_execv
   enabled: true
@@ -75,7 +75,7 @@
   - name: os execv literal negative
     code: "import os\ndef example(user_input):\n    return os.execv('/bin/echo')\n"
     expect_no_match: true
-  description: "os.execv \u2014 replaces the current process with a tainted program\
+  description: "os.execv - replaces the current process with a tainted program\
     \ path / argv."
 - id: python.cmdi.os_execve
   enabled: true
@@ -101,7 +101,7 @@
   - name: os execve literal negative
     code: "import os\ndef example(user_input):\n    return os.execve('/bin/echo')\n"
     expect_no_match: true
-  description: "os.execve \u2014 exec with tainted program path / argv / env."
+  description: "os.execve - exec with tainted program path / argv / env."
 - id: python.cmdi.os_execvp
   enabled: true
   language: python
@@ -126,7 +126,7 @@
   - name: os execvp literal negative
     code: "import os\ndef example(user_input):\n    return os.execvp('echo')\n"
     expect_no_match: true
-  description: "os.execvp \u2014 exec searching $PATH with tainted program name."
+  description: "os.execvp - exec searching $PATH with tainted program name."
 - id: python.cmdi.os_execl
   enabled: true
   language: python
@@ -151,7 +151,7 @@
   - name: os execl literal negative
     code: "import os\ndef example(user_input):\n    return os.execl('/bin/echo')\n"
     expect_no_match: true
-  description: "os.execl \u2014 exec with tainted program path; first tainted arg\
+  description: "os.execl - exec with tainted program path; first tainted arg\
     \ is the binary."
 - id: python.cmdi.os_execlp
   enabled: true
@@ -177,7 +177,7 @@
   - name: os execlp literal negative
     code: "import os\ndef example(user_input):\n    return os.execlp('echo')\n"
     expect_no_match: true
-  description: "os.execlp \u2014 $PATH-searching variant of execl."
+  description: "os.execlp - $PATH-searching variant of execl."
 - id: python.cmdi.os_execlpe
   enabled: true
   language: python
@@ -202,7 +202,7 @@
   - name: os execlpe literal negative
     code: "import os\ndef example(user_input):\n    return os.execlpe('echo')\n"
     expect_no_match: true
-  description: "os.execlpe \u2014 $PATH-searching execl variant with tainted env."
+  description: "os.execlpe - $PATH-searching execl variant with tainted env."
 - id: python.cmdi.os_spawn
   enabled: true
   language: python
@@ -227,7 +227,7 @@
   - name: os spawnl literal negative
     code: "import os\ndef example(user_input):\n    return os.spawnl(os.P_NOWAIT, '/bin/echo')\n"
     expect_no_match: true
-  description: "os.spawnl \u2014 spawns a tainted program path; first tainted arg\
+  description: "os.spawnl - spawns a tainted program path; first tainted arg\
     \ is the binary."
 - id: python.cmdi.os_spawnv
   enabled: true
@@ -253,7 +253,7 @@
   - name: os spawnv literal negative
     code: "import os\ndef example(user_input):\n    return os.spawnv(os.P_NOWAIT, '/bin/echo', ['echo'])\n"
     expect_no_match: true
-  description: "os.spawnv \u2014 spawns a tainted program path / argv."
+  description: "os.spawnv - spawns a tainted program path / argv."
 - id: python.cmdi.os_spawnvp
   enabled: true
   language: python
@@ -278,7 +278,7 @@
   - name: os spawnvp literal negative
     code: "import os\ndef example(user_input):\n    return os.spawnvp(os.P_NOWAIT, 'echo', ['echo'])\n"
     expect_no_match: true
-  description: "os.spawnvp \u2014 $PATH-searching spawn with tainted program name."
+  description: "os.spawnvp - $PATH-searching spawn with tainted program name."
 - id: python.cmdi.posix_spawn
   enabled: true
   language: python
@@ -303,7 +303,7 @@
   - name: posix spawn literal negative
     code: "import os\ndef example(user_input):\n    return os.posix_spawn('/bin/echo')\n"
     expect_no_match: true
-  description: "os.posix_spawn \u2014 POSIX-spawn with tainted executable path / argv."
+  description: "os.posix_spawn - POSIX-spawn with tainted executable path / argv."
 - id: python.cmdi.posix_spawnp
   enabled: true
   language: python
@@ -328,7 +328,7 @@
   - name: posix spawnp literal negative
     code: "import os\ndef example(user_input):\n    return os.posix_spawnp('echo')\n"
     expect_no_match: true
-  description: "os.posix_spawnp \u2014 $PATH-searching posix_spawn."
+  description: "os.posix_spawnp - $PATH-searching posix_spawn."
 - id: python.cmdi.subprocess_run_shell
   enabled: true
   language: python
@@ -501,7 +501,7 @@
   - name: subprocess getoutput literal negative
     code: "import subprocess\n\ndef example(user_input):\n    return subprocess.getoutput('safe')\n"
     expect_no_match: true
-  description: "subprocess.getoutput \u2014 always runs the command string under /bin/sh\
+  description: "subprocess.getoutput - always runs the command string under /bin/sh\
     \ -c; no shell=False option exists."
 - id: python.cmdi.subprocess_getstatusoutput
   enabled: true
@@ -527,7 +527,7 @@
   - name: subprocess getstatusoutput literal negative
     code: "import subprocess\n\ndef example(user_input):\n    return subprocess.getstatusoutput('safe')\n"
     expect_no_match: true
-  description: "subprocess.getstatusoutput \u2014 always shell-evaluated like getoutput."
+  description: "subprocess.getstatusoutput - always shell-evaluated like getoutput."
 - id: python.cmdi.asyncio_subprocess_shell
   enabled: true
   language: python
@@ -552,7 +552,7 @@
   - name: asyncio subprocess shell literal negative
     code: "import asyncio\ndef example(user_input):\n    return loop.subprocess_shell('safe')\n"
     expect_no_match: true
-  description: "EventLoop.subprocess_shell \u2014 runs command string under the shell."
+  description: "EventLoop.subprocess_shell - runs command string under the shell."
 - id: python.cmdi.os_startfile
   enabled: true
   language: python
@@ -577,7 +577,7 @@
   - name: os startfile literal negative
     code: "import os\n\ndef example(user_input):\n    return os.startfile('safe')\n"
     expect_no_match: true
-  description: "os.startfile (Windows) \u2014 shell-invokes associated handler; tainted\
+  description: "os.startfile (Windows) - shell-invokes associated handler; tainted\
     \ path can trigger arbitrary program launch."
 - id: python.cmdi.commands_getoutput
   enabled: true
@@ -628,7 +628,7 @@
   - name: commands getstatusoutput literal negative
     code: "import commands\n\ndef example(user_input):\n    return commands.getstatusoutput('safe')\n"
     expect_no_match: true
-  description: "Python 2 commands.getstatusoutput \u2014 legacy shell wrapper."
+  description: "Python 2 commands.getstatusoutput - legacy shell wrapper."
 - id: python.cmdi.asyncio_create_subprocess_shell
   enabled: true
   language: python
@@ -651,7 +651,7 @@
   - name: asyncio create subprocess shell literal negative
     code: "def example(user_input):\n    return asyncio.create_subprocess_shell('safe')\n"
     expect_no_match: true
-  description: "asyncio.create_subprocess_shell \u2014 runs the command string via\
+  description: "asyncio.create_subprocess_shell - runs the command string via\
     \ /bin/sh -c."
 - id: python.cmdi.fabric_run
   enabled: true
@@ -677,7 +677,7 @@
   - name: fabric run literal negative
     code: "import fabric\n\ndef example(user_input):\n    return Connection.run('safe')\n"
     expect_no_match: true
-  description: "Fabric Connection.run \u2014 remote shell. `min_args: 1` rejects 0-arg\
+  description: "Fabric Connection.run - remote shell. `min_args: 1` rejects 0-arg\
     \ `Connection.run()` decoys (signature is `run(command, **kwargs)`)."
 - id: python.cmdi.fabric_local
   enabled: true
@@ -703,7 +703,7 @@
   - name: fabric local literal negative
     code: "import fabric\n\ndef example(user_input):\n    return fabric.local('safe')\n"
     expect_no_match: true
-  description: "Fabric local() \u2014 runs the command locally through a shell."
+  description: "Fabric local() - runs the command locally through a shell."
 - id: python.cmdi.fabric_sudo
   enabled: true
   language: python
@@ -728,7 +728,7 @@
   - name: fabric sudo literal negative
     code: "import fabric\n\ndef example(user_input):\n    return Connection.sudo('safe')\n"
     expect_no_match: true
-  description: "Fabric Connection.sudo \u2014 remote shell command as root. `min_args:\
+  description: "Fabric Connection.sudo - remote shell command as root. `min_args:\
     \ 1` rejects 0-arg decoys (signature is `sudo(command, **kwargs)`)."
 - id: python.cmdi.invoke_run
   enabled: true
@@ -754,7 +754,7 @@
   - name: invoke run literal negative
     code: "import invoke\n\ndef example(user_input):\n    return invoke.run('safe')\n"
     expect_no_match: true
-  description: "invoke.run \u2014 shell-wraps the command string."
+  description: "invoke.run - shell-wraps the command string."
 - id: python.cmdi.invoke_context_run
   enabled: true
   language: python
@@ -779,7 +779,7 @@
   - name: invoke context run literal negative
     code: "import invoke\n\ndef example(user_input):\n    return Context.run('safe')\n"
     expect_no_match: true
-  description: "invoke Context.run \u2014 shell-wraps the command string inside a\
+  description: "invoke Context.run - shell-wraps the command string inside a\
     \ task. `min_args: 1` rejects 0-arg `Context.run()` decoys."
 - id: python.cmdi.plumbum_local
   enabled: false
@@ -798,7 +798,7 @@
       attribute:
       - local
       - __getitem__
-  description: "Disabled \u2014 plumbum local[cmd] is a subscript expression; tree-sitter\
+  description: "Disabled - plumbum local[cmd] is a subscript expression; tree-sitter\
     \ does not surface it as an attribute call so this never fires. Re-enable once\
     \ subscript matching lands."
 - id: python.cmdi.pexpect_spawn
@@ -825,7 +825,7 @@
   - name: pexpect spawn literal negative
     code: "import pexpect\n\ndef example(user_input):\n    return pexpect.spawn('safe')\n"
     expect_no_match: true
-  description: "pexpect.spawn(tainted cmd) \u2014 spawns a shell-interpreted command."
+  description: "pexpect.spawn(tainted cmd) - spawns a shell-interpreted command."
 - id: python.cmdi.pexpect_run
   enabled: true
   language: python
@@ -850,7 +850,7 @@
   - name: pexpect run literal negative
     code: "import pexpect\n\ndef example(user_input):\n    return pexpect.run('safe')\n"
     expect_no_match: true
-  description: "pexpect.run \u2014 wraps pexpect.spawn + expect; tainted cmd is shell\
+  description: "pexpect.run - wraps pexpect.spawn + expect; tainted cmd is shell\
     \ injection."
 - id: python.cmdi.sh_module
   enabled: false
@@ -867,7 +867,7 @@
     kind: call
     callee:
       name: sh
-  description: "Disabled \u2014 sh.<cmd>(arg) is by-arg, not shell."
+  description: "Disabled - sh.<cmd>(arg) is by-arg, not shell."
 - id: python.cmdi.paramiko_exec_command
   enabled: true
   language: python
@@ -892,7 +892,7 @@
   - name: paramiko exec command literal negative
     code: "import paramiko\n\ndef example(user_input):\n    return SSHClient.exec_command('safe')\n"
     expect_no_match: true
-  description: "paramiko SSHClient.exec_command \u2014 remote shell."
+  description: "paramiko SSHClient.exec_command - remote shell."
 - id: python.cmdi.asyncssh_run
   enabled: true
   language: python
@@ -917,7 +917,7 @@
   - name: asyncssh run literal negative
     code: "import asyncssh\n\ndef example(user_input):\n    return SSHClientConnection.run('safe')\n"
     expect_no_match: true
-  description: "asyncssh SSHClientConnection.run \u2014 remote shell command over\
+  description: "asyncssh SSHClientConnection.run - remote shell command over\
     \ SSH."
 - id: python.cmdi.spur_run
   enabled: true
@@ -943,7 +943,7 @@
   - name: spur run literal negative
     code: "import spur\n\ndef example(user_input):\n    return SshShell.run('safe')\n"
     expect_no_match: true
-  description: "spur SshShell.run \u2014 remote shell command over SSH."
+  description: "spur SshShell.run - remote shell command over SSH."
 - id: python.cmdi.docker_exec_run
   enabled: true
   language: python
@@ -968,7 +968,7 @@
   - name: docker exec run literal negative
     code: "import docker\n\ndef example(user_input):\n    return Container.exec_run('safe')\n"
     expect_no_match: true
-  description: "docker Container.exec_run \u2014 runs cmd inside container."
+  description: "docker Container.exec_run - runs cmd inside container."
 - id: python.cmdi.kubernetes_exec
   enabled: true
   language: python
@@ -993,7 +993,7 @@
   - name: kubernetes exec literal command negative
     code: "import kubernetes\ndef example(user_input):\n    return stream.stream(api.connect_get_namespaced_pod_exec, 'pod', 'default', command='id')\n"
     expect_no_match: true
-  description: "kubernetes.stream.stream(..., command=tainted) — executes attacker-controlled command inside a pod."
+  description: "kubernetes.stream.stream(..., command=tainted) - executes attacker-controlled command inside a pod."
 - id: python.cmdi.ansible_runner
   enabled: true
   language: python
@@ -1018,5 +1018,5 @@
   - name: ansible runner literal negative
     code: "import ansible_runner\n\ndef example(user_input):\n    return ansible_runner.run('safe_playbook.yml')\n"
     expect_no_match: true
-  description: "ansible_runner.run \u2014 executes ad-hoc Ansible modules; tainted\
+  description: "ansible_runner.run - executes ad-hoc Ansible modules; tainted\
     \ module / args = remote code exec across inventory."

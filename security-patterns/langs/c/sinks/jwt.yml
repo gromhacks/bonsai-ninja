@@ -26,7 +26,7 @@
     code: "#include <libjwt/jwt.h>\nvoid example(void) {\n  char *arg = \"tainted\"\
       ;\n  char *fmt = arg;\n  jwt_decode(arg);\n}\n"
     expect_no_match: true
-  description: "libjwt jwt_decode — flag if jwt_set_alg not pinned."
+  description: "libjwt jwt_decode - flag if jwt_set_alg not pinned."
 
 - id: c.jwt.libjwt_new_with_string
   enabled: false
@@ -41,7 +41,7 @@
     kind: call
     callee:
       name: jwt_new
-  description: "Disabled — jwt_new creates token; flag with alg=none only."
+  description: "Disabled - jwt_new creates token; flag with alg=none only."
 
 - id: c.jwt.cjose_jws_verify
   enabled: false
@@ -65,8 +65,8 @@
         char *fmt = arg;
         cjose_jws_verify(arg);
       }
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. cjose cjose_jws_verify — flag if
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. cjose cjose_jws_verify - flag if
     alg whitelist missing."
 
 - id: c.jwt.l8w8jwt_decode
@@ -120,5 +120,5 @@
         char *fmt = arg;
         jose_jws_ver(arg);
       }
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
     configuration, not just the broad API shape. libjose jose_jws_ver."

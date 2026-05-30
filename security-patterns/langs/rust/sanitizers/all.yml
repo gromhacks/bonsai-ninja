@@ -22,7 +22,7 @@
           utf8_percent_encode(target);
       }
     expect_match_text: [utf8_percent_encode]
-  description: "percent_encoding::utf8_percent_encode — URL-encodes tainted input before embedding in URLs / query strings."
+  description: "percent_encoding::utf8_percent_encode - URL-encodes tainted input before embedding in URLs / query strings."
   imports:
   - percent_encoding
 - id: rust.sanitizer.htmlescape_encode
@@ -44,7 +44,7 @@
           htmlescape::encode_minimal(target);
       }
     expect_match_text: ["htmlescape::encode_minimal"]
-  description: "htmlescape::encode_minimal — HTML-encodes `<>&\"'` before rendering into HTML context."
+  description: "htmlescape::encode_minimal - HTML-encodes `<>&\"'` before rendering into HTML context."
 - id: rust.sanitizer.ammonia_clean
   enabled: true
   language: rust
@@ -64,7 +64,7 @@
           ammonia.clean(target);
       }
     expect_match_text: [ammonia.clean]
-  description: "ammonia::clean — allowlist-based HTML sanitizer; strips script/onclick and other dangerous tags."
+  description: "ammonia::clean - allowlist-based HTML sanitizer; strips script/onclick and other dangerous tags."
 - id: rust.sanitizer.constant_time_eq
   enabled: true
   language: rust
@@ -84,7 +84,7 @@
           constant_time_eq::constant_time_eq(target);
       }
     expect_match_text: ["constant_time_eq::constant_time_eq"]
-  description: "constant_time_eq::constant_time_eq — timing-safe byte compare; defuses remote timing oracles on secret compares."
+  description: "constant_time_eq::constant_time_eq - timing-safe byte compare; defuses remote timing oracles on secret compares."
 - id: rust.sanitizer.subtle_constant_time
   enabled: true
   language: rust
@@ -104,7 +104,7 @@
           ConstantTimeEq::ct_eq(target);
       }
     expect_match_text: ["ConstantTimeEq::ct_eq"]
-  description: "subtle::ConstantTimeEq::ct_eq — timing-safe compare using the subtle crate's trait."
+  description: "subtle::ConstantTimeEq::ct_eq - timing-safe compare using the subtle crate's trait."
 - id: rust.sanitizer.argon2_verify
   enabled: true
   language: rust
@@ -124,7 +124,7 @@
           Argon2::verify_password(target);
       }
     expect_match_text: ["Argon2::verify_password"]
-  description: "argon2 verify_password — constant-time password hash compare; use instead of raw == on hashes."
+  description: "argon2 verify_password - constant-time password hash compare; use instead of raw == on hashes."
 - id: rust.sanitizer.bcrypt_verify
   enabled: true
   language: rust
@@ -144,7 +144,7 @@
           bcrypt.verify(target);
       }
     expect_match_text: [bcrypt.verify]
-  description: "bcrypt::verify — constant-time password hash compare."
+  description: "bcrypt::verify - constant-time password hash compare."
 - id: rust.sanitizer.os_rng
   enabled: true
   language: rust
@@ -164,7 +164,7 @@
           OsRng(target);
       }
     expect_match_text: [OsRng]
-  description: "rand::rngs::OsRng — OS-backed CSPRNG; safe for crypto (replaces the non-CSPRNG thread_rng / rand::random)."
+  description: "rand::rngs::OsRng - OS-backed CSPRNG; safe for crypto (replaces the non-CSPRNG thread_rng / rand::random)."
 - id: rust.sanitizer.html_escape_encode
   enabled: true
   language: rust
@@ -184,7 +184,7 @@
           html_escape::encode_text(target);
       }
     expect_match_text: ["html_escape::encode_text"]
-  description: "html_escape::encode_text — HTML-encodes tainted text before inserting into HTML body context."
+  description: "html_escape::encode_text - HTML-encodes tainted text before inserting into HTML body context."
 - id: rust.sanitizer.html_escape_encode_safe
   enabled: true
   language: rust
@@ -204,7 +204,7 @@
           html_escape::encode_safe(target);
       }
     expect_match_text: ["html_escape::encode_safe"]
-  description: "html_escape::encode_safe — full HTML entity encode; broader than encode_text."
+  description: "html_escape::encode_safe - full HTML entity encode; broader than encode_text."
 - id: rust.sanitizer.ldap3_escape
   enabled: true
   language: rust
@@ -224,7 +224,7 @@
           ldap_escape(target);
       }
     expect_match_text: [ldap_escape]
-  description: "ldap3 ldap_escape — escapes LDAP filter metachars (`*()\\\\` etc.) preventing filter injection."
+  description: "ldap3 ldap_escape - escapes LDAP filter metachars (`*()\\\\` etc.) preventing filter injection."
 - id: rust.sanitizer.shell_escape_escape
   enabled: true
   language: rust
@@ -242,7 +242,7 @@
           shell_escape::escape(input.into());
       }
     expect_match_text: ["shell_escape::escape"]
-  description: "shell_escape::escape — POSIX shell argument escaping before interpolating into a shell command string."
+  description: "shell_escape::escape - POSIX shell argument escaping before interpolating into a shell command string."
 - id: rust.sanitizer.canonicalize
   enabled: false
   disabled_reason:
@@ -254,7 +254,7 @@
     kind: call
     callee:
       attribute: [fs, canonicalize]
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
     traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
     must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
     Marking these as sanitizers produced false negatives on attacker-controlled paths."
@@ -277,7 +277,7 @@
           Path::strip_prefix(target);
       }
     expect_match_text: ["Path::strip_prefix"]
-  description: "Path::strip_prefix(root) — enforces that a canonicalised path stays under an allowed root directory."
+  description: "Path::strip_prefix(root) - enforces that a canonicalised path stays under an allowed root directory."
 - id: rust.sanitizer.uuid_parse_str
   enabled: true
   language: rust
@@ -297,7 +297,7 @@
           Uuid::parse_str(target);
       }
     expect_match_text: ["Uuid::parse_str"]
-  description: "uuid::Uuid::parse_str — rejects non-UUID input; safe to embed in paths / SQL."
+  description: "uuid::Uuid::parse_str - rejects non-UUID input; safe to embed in paths / SQL."
 - id: rust.sanitizer.i32_from_str
   enabled: true
   language: rust
@@ -317,7 +317,7 @@
           i32::from_str(target);
       }
     expect_match_text: ["i32::from_str"]
-  description: "i32::from_str — parsed integer; narrows string to numeric domain."
+  description: "i32::from_str - parsed integer; narrows string to numeric domain."
 - id: rust.sanitizer.u64_from_str
   enabled: true
   language: rust
@@ -337,7 +337,7 @@
           u64::from_str(target);
       }
     expect_match_text: ["u64::from_str"]
-  description: "u64::from_str — parsed integer; narrows string to numeric domain."
+  description: "u64::from_str - parsed integer; narrows string to numeric domain."
 - id: rust.sanitizer.jwt_decode_with_validation
   enabled: false
   disabled_reason:
@@ -349,7 +349,7 @@
     kind: call
     callee:
       attribute: [jsonwebtoken, decode]
-  description: "Disabled — same `[jsonwebtoken, decode]` attribute chain as rust.jwt.jsonwebtoken_decode sink. Without structural
+  description: "Disabled - same `[jsonwebtoken, decode]` attribute chain as rust.jwt.jsonwebtoken_decode sink. Without structural
     inspection of the Validation struct we cannot tell strict from permissive configs; defaulting to the sink (flag everywhere
     and let the analyst verify Validation) is safer."
 - id: rust.sanitizer.v_htmlescape_escape
@@ -371,7 +371,7 @@
           v_htmlescape::escape(target);
       }
     expect_match_text: ["v_htmlescape::escape"]
-  description: "v_htmlescape::escape — SIMD-accelerated HTML entity encode for tainted text before rendering."
+  description: "v_htmlescape::escape - SIMD-accelerated HTML entity encode for tainted text before rendering."
 - id: rust.sanitizer.urlencoding_encode
   enabled: true
   language: rust
@@ -391,7 +391,7 @@
           urlencoding::encode(target);
       }
     expect_match_text: ["urlencoding::encode"]
-  description: "urlencoding::encode — percent-encodes a string for inclusion in URL components; defuses URL/redirect injection."
+  description: "urlencoding::encode - percent-encodes a string for inclusion in URL components; defuses URL/redirect injection."
 - id: rust.sanitizer.sqlx_query_macro
   enabled: true
   language: rust
@@ -411,7 +411,7 @@
           sqlx::query!(target);
       }
     expect_match_text: ["sqlx::query!"]
-  description: "sqlx::query!() macro — compile-time-checked SQL with bound parameters; the macro form is structurally safe
+  description: "sqlx::query!() macro - compile-time-checked SQL with bound parameters; the macro form is structurally safe
     (cannot accept a runtime string), so values flowing through it are sanitized for SQLi."
 - id: rust.sanitizer.sqlx_query_as_macro
   enabled: true
@@ -432,7 +432,7 @@
           sqlx::query_as!(target);
       }
     expect_match_text: ["sqlx::query_as!"]
-  description: "sqlx::query_as!() macro — compile-time-checked typed query with bound parameters; safe counterpart to the
+  description: "sqlx::query_as!() macro - compile-time-checked typed query with bound parameters; safe counterpart to the
     sqlx::query_as function form."
 - id: rust.sanitizer.ring_constant_time_verify
   enabled: true
@@ -453,7 +453,7 @@
           constant_time::verify_slices_are_equal(target);
       }
     expect_match_text: ["constant_time::verify_slices_are_equal"]
-  description: "ring::constant_time::verify_slices_are_equal — timing-safe slice compare; defuses timing oracles on MAC /
+  description: "ring::constant_time::verify_slices_are_equal - timing-safe slice compare; defuses timing oracles on MAC /
     token compares."
 
 - id: rust.sanitizer.str_starts_with_same_origin
@@ -480,7 +480,7 @@
   - name: starts_with local path negative constraint boundary
     code: "use std::process::Command;\nfn example(target: &str) {\n    target.starts_with();\n}\n"
     expect_no_match: true
-  description: "str::starts_with(\"/...\") — same-origin redirect/path guard for slash-rooted local paths."
+  description: "str::starts_with(\"/...\") - same-origin redirect/path guard for slash-rooted local paths."
 
 - id: rust.sanitizer.allowlist_contains
   enabled: false
@@ -499,8 +499,8 @@
           allowed.contains(input);
       }
     expect_match_text: [allowed.contains]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Allowlist-named
-    HashSet/BTreeSet/HashMap membership check — validates a value against a finite set or map of accepted keys."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Allowlist-named
+    HashSet/BTreeSet/HashMap membership check - validates a value against a finite set or map of accepted keys."
 
   disabled_reason:
     code: over-broad
@@ -521,7 +521,7 @@
           query_as.bind(input);
       }
     expect_match_text: [query_as.bind]
-  description: "sqlx query/query_as builder `.bind(value)` — binds a value to a placeholder instead of concatenating it into
+  description: "sqlx query/query_as builder `.bind(value)` - binds a value to a placeholder instead of concatenating it into
     SQL."
 - id: rust.sanitizer.secrecy_secret_new
   enabled: false
@@ -534,7 +534,7 @@
     kind: new
     callee:
       attribute: [secrecy, Secret]
-  description: "Disabled — `Secret::new` wraps a value in a zeroising container that blocks accidental Debug / serialise leaks,
+  description: "Disabled - `Secret::new` wraps a value in a zeroising container that blocks accidental Debug / serialise leaks,
     but the underlying bytes still flow to sinks via expose_secret(). Treating the wrap as a sanitizer would hide real flows;
     enable only for leak-surface (logging/serialisation) audits."
 - id: rust.sanitizer.regex_escape
@@ -556,12 +556,12 @@
           regex::escape(target);
       }
     expect_match_text: ["regex::escape"]
-  description: "regex::escape — escapes regex metacharacters so a tainted literal cannot inject alternation / quantifier patterns
+  description: "regex::escape - escapes regex metacharacters so a tainted literal cannot inject alternation / quantifier patterns
     into a compiled Regex (defuses ReDoS-by-injection)."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: rust.passthrough.percent_decode_str
@@ -583,7 +583,7 @@
           percent_encoding::percent_decode_str(target);
       }
     expect_match_text: ["percent_encoding::percent_decode_str"]
-  description: "percent_encoding::percent_decode_str(s) — preserves taint."
+  description: "percent_encoding::percent_decode_str(s) - preserves taint."
 - id: rust.passthrough.urlencoding_decode
   enabled: true
   language: rust
@@ -603,7 +603,7 @@
           urlencoding::decode(target);
       }
     expect_match_text: ["urlencoding::decode"]
-  description: "urlencoding::decode(s) — preserves taint."
+  description: "urlencoding::decode(s) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -627,7 +627,7 @@
           CsrfLayer::new(target);
       }
     expect_match_text: ["CsrfLayer::new"]
-  description: "tower-csrf CsrfLayer::new — middleware-layer CSRF enforcement for axum/tower."
+  description: "tower-csrf CsrfLayer::new - middleware-layer CSRF enforcement for axum/tower."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -649,7 +649,7 @@
           Mutex::lock(target);
       }
     expect_match_text: ["Mutex::lock"]
-  description: "std::sync::Mutex::lock() — RAII guard; the returned MutexGuard releases at drop."
+  description: "std::sync::Mutex::lock() - RAII guard; the returned MutexGuard releases at drop."
 - id: rust.lock.rwlock_read
   enabled: true
   language: rust
@@ -667,7 +667,7 @@
           RwLock::read(target);
       }
     expect_match_text: ["RwLock::read"]
-  description: "std::sync::RwLock::read() — read-side guard."
+  description: "std::sync::RwLock::read() - read-side guard."
 - id: rust.lock.rwlock_write
   enabled: true
   language: rust
@@ -685,7 +685,7 @@
           RwLock::write(target);
       }
     expect_match_text: ["RwLock::write"]
-  description: "std::sync::RwLock::write() — write-side guard."
+  description: "std::sync::RwLock::write() - write-side guard."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer
@@ -736,4 +736,4 @@
           GovernorLayer::new(target);
       }
     expect_match_text: ["GovernorLayer::new"]
-  description: 'tower-governor GovernorLayer — rate-limit middleware for axum/tower stacks.'
+  description: 'tower-governor GovernorLayer - rate-limit middleware for axum/tower stacks.'

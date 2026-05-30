@@ -20,7 +20,7 @@
     code: |
       void test(void) { predicateWithFormat(@"name == 'safe'"); }
     expect_no_match: true
-  description: "NSPredicate +predicateWithFormat: with tainted format — KVC key paths / SELF evaluation allow arbitrary object access."
+  description: "NSPredicate +predicateWithFormat: with tainted format - KVC key paths / SELF evaluation allow arbitrary object access."
 
 - id: objc.eval.nsexpression_format
   enabled: true
@@ -43,7 +43,7 @@
     code: |
       void test(void) { expressionWithFormat(@"1 + 1"); }
     expect_no_match: true
-  description: "NSExpression +expressionWithFormat: — tainted format allows FUNCTION() invocation of arbitrary selectors."
+  description: "NSExpression +expressionWithFormat: - tainted format allows FUNCTION() invocation of arbitrary selectors."
 
 - id: objc.eval.evaluate_javascript
   enabled: true
@@ -66,7 +66,7 @@
     code: |
       void test(void) { [WKWebView evaluateJavaScript:@"1 + 1"]; }
     expect_no_match: true
-  description: "WKWebView -evaluateJavaScript:completionHandler: with tainted JS — executes in webview origin. Constrained to WKWebView receivers."
+  description: "WKWebView -evaluateJavaScript:completionHandler: with tainted JS - executes in webview origin. Constrained to WKWebView receivers."
 
 - id: objc.eval.jscontext_evaluatescript
   enabled: true
@@ -89,7 +89,7 @@
     code: |
       void test(void) { [JSContext evaluateScript:@"1 + 1"]; }
     expect_no_match: true
-  description: "JavaScriptCore JSContext -evaluateScript: — executes arbitrary JS in-process. Constrained to JSContext receivers."
+  description: "JavaScriptCore JSContext -evaluateScript: - executes arbitrary JS in-process. Constrained to JSContext receivers."
 
 - id: objc.eval.nsinvocation_set_selector
   enabled: true
@@ -135,7 +135,7 @@
     code: |
       void test(void) { NSSelectorFromString(@"description"); }
     expect_no_match: true
-  description: "NSSelectorFromString(tainted) — constructs selector from attacker string; used with -performSelector: yields arbitrary method dispatch."
+  description: "NSSelectorFromString(tainted) - constructs selector from attacker string; used with -performSelector: yields arbitrary method dispatch."
 
 - id: objc.eval.stringwithformat
   enabled: true
@@ -158,7 +158,7 @@
     code: |
       void test(id input) { stringWithFormat(@"%@", input); }
     expect_no_match: true
-  description: "NSString +stringWithFormat: / -initWithFormat: / +localizedStringWithFormat: — when the FORMAT argument is tainted (not the value args), `%@` / `%n` / `%s` parses attacker-controlled conversions; commonly observed downstream of SQL/HTML/JS string assembly."
+  description: "NSString +stringWithFormat: / -initWithFormat: / +localizedStringWithFormat: - when the FORMAT argument is tainted (not the value args), `%@` / `%n` / `%s` parses attacker-controlled conversions; commonly observed downstream of SQL/HTML/JS string assembly."
 
 - id: objc.eval.nslog_format
   aliases:
@@ -185,4 +185,4 @@
         nslog_format("safe");
       }
     expect_no_match: true
-  description: "NSLog / os_log with tainted format string — log injection (CWE-117) and format-string conversion abuse (CWE-134). Sink emits when the format-string slot is tainted. Also covers merged aliases: objc.info_disclosure.nslog_secret."
+  description: "NSLog / os_log with tainted format string - log injection (CWE-117) and format-string conversion abuse (CWE-134). Sink emits when the format-string slot is tainted. Also covers merged aliases: objc.info_disclosure.nslog_secret."

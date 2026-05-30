@@ -17,7 +17,7 @@
       import RPi.GPIO
       def example(user_input):
           return GPIO.output(user_input)
-  description: "RPi.GPIO GPIO.output(pin, value) — tainted pin/value drives a physical output."
+  description: "RPi.GPIO GPIO.output(pin, value) - tainted pin/value drives a physical output."
 
 - id: python.hardware.smbus_write_byte
   enabled: true
@@ -37,7 +37,7 @@
       import smbus
       def example(user_input):
           return write_byte(user_input)
-  description: "SMBus write_byte — tainted bytes are sent to an I2C/SMBus device."
+  description: "SMBus write_byte - tainted bytes are sent to an I2C/SMBus device."
 
 - id: python.hardware.smbus_write_byte_data
   enabled: true
@@ -57,7 +57,7 @@
       import smbus
       def example(user_input):
           return write_byte_data(user_input)
-  description: "SMBus write_byte_data — tainted register/value mutates an attached peripheral."
+  description: "SMBus write_byte_data - tainted register/value mutates an attached peripheral."
 
 - id: python.hardware.smbus_write_word_data
   enabled: true
@@ -77,7 +77,7 @@
       import smbus
       def example(user_input):
           return write_word_data(user_input)
-  description: "SMBus write_word_data — tainted 16-bit register write controls hardware state."
+  description: "SMBus write_word_data - tainted 16-bit register write controls hardware state."
 
 - id: python.hardware.smbus_write_i2c_block_data
   enabled: true
@@ -97,7 +97,7 @@
       import smbus
       def example(user_input):
           return write_i2c_block_data(user_input)
-  description: "SMBus write_i2c_block_data — tainted block payload is sent to a peripheral over I2C."
+  description: "SMBus write_i2c_block_data - tainted block payload is sent to a peripheral over I2C."
 
 - id: python.hardware.spidev_writebytes
   enabled: true
@@ -127,7 +127,7 @@
       def example(user_input):
           return writebytes('safe')
     expect_no_match: true
-  description: "spidev writebytes — tainted SPI frame bytes are sent to external hardware."
+  description: "spidev writebytes - tainted SPI frame bytes are sent to external hardware."
 
 - id: python.hardware.spidev_xfer2
   enabled: true
@@ -157,7 +157,7 @@
       def example(user_input):
           return xfer2('safe')
     expect_no_match: true
-  description: "spidev xfer2 — tainted full-duplex SPI transfer bytes drive a peripheral."
+  description: "spidev xfer2 - tainted full-duplex SPI transfer bytes drive a peripheral."
 
 - id: python.hardware.pyserial_write
   enabled: true
@@ -187,7 +187,7 @@
       def example(user_input):
           return serial.write('safe')
     expect_no_match: true
-  description: "serial.write(...) — tainted bytes are transmitted to a UART/serial-attached device."
+  description: "serial.write(...) - tainted bytes are transmitted to a UART/serial-attached device."
 
 - id: python.hardware.pigpio_set_pwm_dutycycle
   enabled: true
@@ -207,7 +207,7 @@
       import pigpio
       def example(user_input):
           return set_PWM_dutycycle(user_input)
-  description: "pigpio set_PWM_dutycycle — tainted duty cycle or pin selection drives PWM hardware."
+  description: "pigpio set_PWM_dutycycle - tainted duty cycle or pin selection drives PWM hardware."
 
 - id: python.hardware.pigpio_set_servo_pulsewidth
   enabled: true
@@ -227,4 +227,4 @@
       import pigpio
       def example(user_input):
           return set_servo_pulsewidth(user_input)
-  description: "pigpio set_servo_pulsewidth — tainted pulse width commands a physical servo/actuator."
+  description: "pigpio set_servo_pulsewidth - tainted pulse width commands a physical servo/actuator."

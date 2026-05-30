@@ -28,7 +28,7 @@
         MHD_create_response_from_buffer("safe", "safe");
       }
     expect_no_match: true
-  description: "MHD_create_response_from_buffer — flag with text/html Content-Type."
+  description: "MHD_create_response_from_buffer - flag with text/html Content-Type."
 
 - id: c.xss.mongoose_http_reply
   aliases:
@@ -92,7 +92,7 @@
         mg_printf("safe");
       }
     expect_no_match: true
-  description: "mongoose mg_printf — flag with HTTP body context."
+  description: "mongoose mg_printf - flag with HTTP body context."
 
 - id: c.xss.civetweb_printf
   enabled: true
@@ -154,4 +154,4 @@
         FCGI_printf("%s", "safe");
       }
     expect_no_match: true
-  description: "FCGI_printf(..., tainted) — writes attacker-controlled bytes into a FastCGI HTTP response body; dangerous when the response is HTML."
+  description: "FCGI_printf(..., tainted) - writes attacker-controlled bytes into a FastCGI HTTP response body; dangerous when the response is HTML."

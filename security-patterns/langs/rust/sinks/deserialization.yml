@@ -27,7 +27,7 @@
           serde_yaml::from_str("name: safe");
       }
     expect_no_match: true
-  description: "serde_yaml::from_str — YAML supports tagged types (`!!tag:yaml.org,2002:...`) and billion-laughs-style alias expansion; DoS risk even with typed deserialize."
+  description: "serde_yaml::from_str - YAML supports tagged types (`!!tag:yaml.org,2002:...`) and billion-laughs-style alias expansion; DoS risk even with typed deserialize."
 
 - id: rust.deser.serde_yaml_from_slice
   enabled: true
@@ -57,7 +57,7 @@
           serde_yaml::from_slice(b"name: safe");
       }
     expect_no_match: true
-  description: "serde_yaml::from_slice — same YAML alias / tag exposure as from_str."
+  description: "serde_yaml::from_slice - same YAML alias / tag exposure as from_str."
 
 - id: rust.deser.serde_yaml_from_reader
   enabled: true
@@ -87,7 +87,7 @@
           serde_yaml::from_reader(std::io::Cursor::new(b"name: safe".to_vec()));
       }
     expect_no_match: true
-  description: "serde_yaml::from_reader — same YAML alias / tag exposure; additionally allows unbounded input via Reader."
+  description: "serde_yaml::from_reader - same YAML alias / tag exposure; additionally allows unbounded input via Reader."
 
 - id: rust.deser.bincode_deserialize
   enabled: false
@@ -102,7 +102,7 @@
     kind: call
     callee:
       attribute: [bincode, deserialize]
-  description: "Disabled — bincode is type-bounded."
+  description: "Disabled - bincode is type-bounded."
 
 - id: rust.deser.rmp_serde_from_slice
   enabled: false
@@ -117,7 +117,7 @@
     kind: call
     callee:
       attribute: [rmp_serde, from_slice]
-  description: "Disabled — MessagePack is type-bounded."
+  description: "Disabled - MessagePack is type-bounded."
 
 - id: rust.deser.serde_pickle_from_slice
   enabled: true
@@ -151,7 +151,7 @@
           serde_pickle::from_slice(b"safe");
       }
     expect_no_match: true
-  description: "serde_pickle::from_slice — parses Python pickle format; supports arbitrary class construction via REDUCE opcode = RCE."
+  description: "serde_pickle::from_slice - parses Python pickle format; supports arbitrary class construction via REDUCE opcode = RCE."
 
   imports:
   - serde_pickle
@@ -168,7 +168,7 @@
     kind: call
     callee:
       attribute: [ciborium, de, from_reader]
-  description: "Disabled — CBOR is type-bounded."
+  description: "Disabled - CBOR is type-bounded."
 
 - id: rust.deser.ron_from_str
   enabled: false
@@ -183,4 +183,4 @@
     kind: call
     callee:
       attribute: [ron, from_str]
-  description: "Disabled — RON has no type tags."
+  description: "Disabled - RON has no type tags."

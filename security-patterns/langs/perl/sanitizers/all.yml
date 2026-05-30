@@ -23,7 +23,7 @@
         encode_entities($input)
       }
     expect_match_text: ["encode_entities"]
-  description: "HTML::Entities::encode_entities — HTML-encodes <, >, &, quotes; neutralises reflected XSS in text nodes."
+  description: "HTML::Entities::encode_entities - HTML-encodes <, >, &, quotes; neutralises reflected XSS in text nodes."
 
 - id: perl.sanitizer.cgi_escape_html
   enabled: true
@@ -43,7 +43,7 @@
         escapeHTML($input)
       }
     expect_match_text: ["escapeHTML"]
-  description: "CGI::escapeHTML — HTML-encodes user input for safe insertion into HTML templates."
+  description: "CGI::escapeHTML - HTML-encodes user input for safe insertion into HTML templates."
 
 - id: perl.sanitizer.html_scrubber
   enabled: true
@@ -63,7 +63,7 @@
         scrub($input)
       }
     expect_match_text: ["scrub"]
-  description: "HTML::Scrubber scrub — allow-lists tags/attributes, strips the rest; safe HTML fragment."
+  description: "HTML::Scrubber scrub - allow-lists tags/attributes, strips the rest; safe HTML fragment."
 
 # -- URLs ------------------------------------------------------------
 - id: perl.sanitizer.uri_escape
@@ -84,7 +84,7 @@
         uri_escape($input)
       }
     expect_match_text: ["uri_escape"]
-  description: "URI::Escape::uri_escape — percent-encodes reserved URL chars, preventing param-smuggling / redirect injection."
+  description: "URI::Escape::uri_escape - percent-encodes reserved URL chars, preventing param-smuggling / redirect injection."
 
 - id: perl.sanitizer.uri_escape_utf8
   enabled: true
@@ -104,7 +104,7 @@
         uri_escape_utf8($input)
       }
     expect_match_text: ["uri_escape_utf8"]
-  description: "URI::Escape::uri_escape_utf8 — UTF-8-aware percent-encoding for URL components."
+  description: "URI::Escape::uri_escape_utf8 - UTF-8-aware percent-encoding for URL components."
 
 # -- SQL -------------------------------------------------------------
 # DBI prepare with `?` placeholders is the canonical SQL-parameter
@@ -134,7 +134,7 @@
   - name: perl.sanitizer.dbi_prepare_placeholder example negative constraint boundary
     code: "use DBI;\nsub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  prepare()\n}\n"
     expect_no_match: true
-  description: "DBI $dbh->prepare with `?` placeholder — placeholders bind values out-of-band so any tainted bind value cannot
+  description: "DBI $dbh->prepare with `?` placeholder - placeholders bind values out-of-band so any tainted bind value cannot
     escape its slot. Only fires when the SQL literal contains a `?`, so raw concat into prepare still falls through to the
     SQLi sink."
 
@@ -149,7 +149,7 @@
     kind: call
     callee:
       name: execute
-  description: "Disabled — bare `execute` overmatches unrelated method calls; sanitization fact already attached at the prepare(?)
+  description: "Disabled - bare `execute` overmatches unrelated method calls; sanitization fact already attached at the prepare(?)
     site above."
 
 - id: perl.sanitizer.dbi_quote
@@ -163,7 +163,7 @@
     kind: call
     callee:
       name: quote
-  description: "Disabled — bare `quote` overmatches and DBI quote is only an escape helper; prefer prepare(?) placeholders."
+  description: "Disabled - bare `quote` overmatches and DBI quote is only an escape helper; prefer prepare(?) placeholders."
 
 # -- Path ------------------------------------------------------------
 # Heuristic untaint: `if ($input =~ m/^([\w-]+)$/) { $clean = $1 }`. The
@@ -191,7 +191,7 @@
   - name: perl.sanitizer.taint_untaint_regex_capture example negative constraint boundary
     code: "sub example {\n  m();\n}\n"
     expect_no_match: true
-  description: "Taint-mode untaint via anchored regex capture (m/^([...])$/ then $1) — the canonical Perl idiom for laundering
+  description: "Taint-mode untaint via anchored regex capture (m/^([...])$/ then $1) - the canonical Perl idiom for laundering
     tainted strings under -T. Heuristic: matches anchored single-capture patterns. Only sanitises when the captured group
     is what flows on."
 
@@ -206,7 +206,7 @@
     kind: call
     callee:
       name: canonpath
-  description: "Disabled — File::Spec->canonpath collapses redundant separators/.. segments but still needs a trusted-root
+  description: "Disabled - File::Spec->canonpath collapses redundant separators/.. segments but still needs a trusted-root
     prefix check."
 
 - id: perl.sanitizer.cwd_abs_path
@@ -220,7 +220,7 @@
     kind: call
     callee:
       name: abs_path
-  description: "Disabled — Cwd::abs_path resolves symlinks/relative segments but still requires a trusted-root containment
+  description: "Disabled - Cwd::abs_path resolves symlinks/relative segments but still requires a trusted-root containment
     check."
 
 # -- Numeric coerce --------------------------------------------------
@@ -242,12 +242,12 @@
         looks_like_number($input)
       }
     expect_match_text: ["looks_like_number"]
-  description: "Scalar::Util::looks_like_number — validates numeric syntax; pair with `+ 0` coerce to strip injection payloads
+  description: "Scalar::Util::looks_like_number - validates numeric syntax; pair with `+ 0` coerce to strip injection payloads
     before use."
 
 # -- Validation / schema --------------------------------------------
 # JSON::PP::decode_json acts as a validation gate when paired with a
-# schema check downstream — at minimum it forces the input to be valid
+# schema check downstream - at minimum it forces the input to be valid
 # JSON and types the resulting structure (string/number/bool/array/hash),
 # blocking shell/SQL/eval string-shape injection through the bytestream.
 - id: perl.sanitizer.json_pp_decode_json
@@ -268,7 +268,7 @@
         decode_json($input)
       }
     expect_match_text: ["decode_json"]
-  description: "decode_json (JSON / JSON::PP / JSON::XS / Cpanel::JSON::XS) — parses bytes into typed scalars/refs; rejects
+  description: "decode_json (JSON / JSON::PP / JSON::XS / Cpanel::JSON::XS) - parses bytes into typed scalars/refs; rejects
     malformed input. Acts as a validation gate when callers schema-check the result."
 
 # -- Constant-time / auth -------------------------------------------
@@ -290,7 +290,7 @@
         secure_compare($input)
       }
     expect_match_text: ["secure_compare"]
-  description: "secure_compare from Bytes::Random::Secure / Plack::Util — constant-time byte compare; blocks timing oracles
+  description: "secure_compare from Bytes::Random::Secure / Plack::Util - constant-time byte compare; blocks timing oracles
     on HMAC/token equality."
 
 - id: perl.sanitizer.plack_util_secure_compare
@@ -313,7 +313,7 @@
         secure_compare($input)
       }
     expect_match_text: ["secure_compare"]
-  description: "Disabled duplicate — perl.sanitizer.bytes_random_secure_compare carries the same `secure_compare` call shape
+  description: "Disabled duplicate - perl.sanitizer.bytes_random_secure_compare carries the same `secure_compare` call shape
     and includes Plack::Util package metadata."
 
 - id: perl.sanitizer.crypt_bcrypt_check
@@ -334,7 +334,7 @@
         bcrypt_check($input)
       }
     expect_match_text: ["bcrypt_check"]
-  description: "Crypt::Bcrypt::bcrypt_check — constant-time password verification against a bcrypt hash."
+  description: "Crypt::Bcrypt::bcrypt_check - constant-time password verification against a bcrypt hash."
 
 - id: perl.sanitizer.crypt_eksblowfish_bcrypt
   enabled: true
@@ -354,7 +354,7 @@
         bcrypt($input)
       }
     expect_match_text: ["bcrypt"]
-  description: "Crypt::Eksblowfish::Bcrypt::bcrypt — verify-by-recompute idiom (bcrypt($pw, $stored_hash) eq $stored_hash).
+  description: "Crypt::Eksblowfish::Bcrypt::bcrypt - verify-by-recompute idiom (bcrypt($pw, $stored_hash) eq $stored_hash).
     Constant-time when paired with secure_compare; safe password-verify primitive."
 
 # -- LDAP ------------------------------------------------------------
@@ -376,7 +376,7 @@
         escape_filter_value($input)
       }
     expect_match_text: ["escape_filter_value"]
-  description: "Net::LDAP::Util::escape_filter_value — RFC-4515 escape of filter metachars; blocks LDAP injection."
+  description: "Net::LDAP::Util::escape_filter_value - RFC-4515 escape of filter metachars; blocks LDAP injection."
 
 - id: perl.sanitizer.net_ldap_dn_escape
   enabled: true
@@ -396,7 +396,7 @@
         escape_dn_value($input)
       }
     expect_match_text: ["escape_dn_value"]
-  description: "Net::LDAP::Util::escape_dn_value — RFC-4514 escape of DN components; blocks DN-injection."
+  description: "Net::LDAP::Util::escape_dn_value - RFC-4514 escape of DN components; blocks DN-injection."
 
 # -- Shell -----------------------------------------------------------
 - id: perl.sanitizer.string_shellquote
@@ -417,7 +417,7 @@
         shell_quote($input)
       }
     expect_match_text: ["shell_quote"]
-  description: "String::ShellQuote::shell_quote — POSIX-sh quoting of argv tokens; safe only when the result is passed to
+  description: "String::ShellQuote::shell_quote - POSIX-sh quoting of argv tokens; safe only when the result is passed to
     a shell pipeline (not exec-list)."
 
 # -- XXE -------------------------------------------------------------
@@ -439,7 +439,7 @@
         no_network($input)
       }
     expect_match_text: ["no_network"]
-  description: "XML::LibXML $parser->no_network(1) — blocks external DTD/entity fetches, the XXE attack channel."
+  description: "XML::LibXML $parser->no_network(1) - blocks external DTD/entity fetches, the XXE attack channel."
 
 - id: perl.sanitizer.xml_libxml_expand_entities_off
   enabled: true
@@ -459,7 +459,7 @@
         expand_entities($input)
       }
     expect_match_text: ["expand_entities"]
-  description: "XML::LibXML $parser->expand_entities(0) — disables entity expansion; required for safe parsing of untrusted
+  description: "XML::LibXML $parser->expand_entities(0) - disables entity expansion; required for safe parsing of untrusted
     XML."
 
 # -- Validation ------------------------------------------------------
@@ -481,7 +481,7 @@
         is_public_ipv4($input)
       }
     expect_match_text: ["is_public_ipv4"]
-  description: "Data::Validate::IP::is_public_ipv4 — rejects RFC-1918/loopback/link-local ranges; SSRF allow-list primitive."
+  description: "Data::Validate::IP::is_public_ipv4 - rejects RFC-1918/loopback/link-local ranges; SSRF allow-list primitive."
 
 - id: perl.sanitizer.data_validate_uri
   enabled: true
@@ -501,7 +501,7 @@
         is_web_uri($input)
       }
     expect_match_text: ["is_web_uri"]
-  description: "Data::Validate::URI::is_web_uri — validates HTTP/HTTPS URI shape before use."
+  description: "Data::Validate::URI::is_web_uri - validates HTTP/HTTPS URI shape before use."
 
 # -- Audit-derived validation / binding sanitizers -----------------------------
 - id: perl.sanitizer.same_origin_path_regex
@@ -525,7 +525,7 @@
   - name: perl.sanitizer.same_origin_path_regex example negative constraint boundary
     code: "sub example {\n  m();\n}\n"
     expect_no_match: true
-  description: "m{^/} — same-origin redirect/path guard for root-relative targets."
+  description: "m{^/} - same-origin redirect/path guard for root-relative targets."
 
 - id: perl.sanitizer.list_util_any_allowlist
   enabled: false
@@ -550,8 +550,8 @@
   - name: perl.sanitizer.list_util_any_allowlist example negative constraint boundary
     code: "sub example {\n  List::Util::any();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    List::Util::any { $_ eq $value } @ALLOWED_* — explicit enum/set allowlist membership check."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    List::Util::any { $_ eq $value } @ALLOWED_* - explicit enum/set allowlist membership check."
 
   disabled_reason:
     code: over-broad
@@ -565,7 +565,7 @@
     kind: call
     callee:
       name: exists
-  description: "Disabled — Perl `exists $allowed{$value}` is the desired hash allowlist shape, but the current adapter does
+  description: "Disabled - Perl `exists $allowed{$value}` is the desired hash allowlist shape, but the current adapter does
     not emit `exists` as a call/read fact."
 
 - id: perl.sanitizer.regex_full_string_shape
@@ -592,7 +592,7 @@
   - name: perl.sanitizer.regex_full_string_shape example negative constraint boundary
     code: "sub example {\n  m();\n}\n"
     expect_no_match: true
-  description: "Anchored m// validator — full-string shape check for UUIDs, slugs, emails, and similar bounded formats."
+  description: "Anchored m// validator - full-string shape check for UUIDs, slugs, emails, and similar bounded formats."
 
 - id: perl.sanitizer.dbi_execute_bound_values
   enabled: true
@@ -614,7 +614,7 @@
         $sth->execute($id);
       }
     expect_match_text: [sth->execute]
-  description: "DBI statement execute($value, ...) — binds values to placeholders from a prepared statement."
+  description: "DBI statement execute($value, ...) - binds values to placeholders from a prepared statement."
 
 - id: perl.sanitizer.substitution_char_allowlist
   enabled: false
@@ -628,12 +628,12 @@
       name: s
   constraints:
   - any_arg_matches_regex: "\\[\\^"
-  description: "Disabled — Perl `s/[^safe]//g` is the desired char-allowlist strip shape, but the current adapter does not
+  description: "Disabled - Perl `s/[^safe]//g` is the desired char-allowlist strip shape, but the current adapter does not
     emit substitution operators as call facts."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: perl.passthrough.uri_unescape
@@ -654,7 +654,7 @@
         uri_unescape($input)
       }
     expect_match_text: ["uri_unescape"]
-  description: "URI::Escape::uri_unescape($s) — preserves taint."
+  description: "URI::Escape::uri_unescape($s) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -677,7 +677,7 @@
         csrf_check($input)
       }
     expect_match_text: ["csrf_check"]
-  description: "CGI::Application::Plugin::CSRF csrf_check — CSRF token verification."
+  description: "CGI::Application::Plugin::CSRF csrf_check - CSRF token verification."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer

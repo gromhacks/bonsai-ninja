@@ -21,7 +21,7 @@
         _, _ = cmd.StdoutPipe()
       }
     expect_match_text: [cmd.StdoutPipe]
-  description: "exec.Cmd.StdoutPipe() — subprocess stdout; receiver-agnostic method regex gated to os/exec and zero arguments."
+  description: "exec.Cmd.StdoutPipe() - subprocess stdout; receiver-agnostic method regex gated to os/exec and zero arguments."
 
 - id: go.ipc.cmd_stderrpipe
   enabled: true
@@ -45,4 +45,4 @@
         _, _ = cmd.StderrPipe()
       }
     expect_match_text: [cmd.StderrPipe]
-  description: "exec.Cmd.StderrPipe() — subprocess stderr; receiver-agnostic method regex gated to os/exec and zero arguments."
+  description: "exec.Cmd.StderrPipe() - subprocess stderr; receiver-agnostic method regex gated to os/exec and zero arguments."

@@ -28,7 +28,7 @@
       ;\n  const char *fmt = arg;\n  const char *query = arg;\n  jwt::decode(arg);\n\
       }\n"
     expect_no_match: true
-  description: "jwt::decode (jwt-cpp / cpp-jwt) — flag when verify() is not called
+  description: "jwt::decode (jwt-cpp / cpp-jwt) - flag when verify() is not called
     on returned token."
 
 - id: cpp.jwt.jwtcpp_verifier_algnone
@@ -53,7 +53,7 @@
         const char *query = arg;
         algorithm::none(arg);
       }
-  description: "jwt::algorithm::none — accepts unsigned tokens (alg=none attack)."
+  description: "jwt::algorithm::none - accepts unsigned tokens (alg=none attack)."
 
 - id: cpp.jwt.l8w8jwt_decode
   enabled: true
@@ -84,4 +84,4 @@
       ;\n  const char *fmt = arg;\n  const char *query = arg;\n  l8w8jwt_decode(arg);\n\
       }\n"
     expect_no_match: true
-  description: "l8w8jwt_decode — verify alg allow-list is supplied in params."
+  description: "l8w8jwt_decode - verify alg allow-list is supplied in params."

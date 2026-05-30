@@ -1,5 +1,5 @@
 # Rust memory-safety sinks. Unsafe-block raw-pointer operations and
-# transmutes — tainted offsets / lengths reach memory primitives that
+# transmutes - tainted offsets / lengths reach memory primitives that
 # bypass the borrow checker.
 - id: rust.memory.ptr_read
   enabled: true
@@ -22,7 +22,7 @@
           let query = "user";
           ptr::read(target);
       }
-  description: "std::ptr::read(src) — reads from a raw pointer; tainted offset/pointer = out-of-bounds read or use-after-free in unsafe blocks."
+  description: "std::ptr::read(src) - reads from a raw pointer; tainted offset/pointer = out-of-bounds read or use-after-free in unsafe blocks."
 - id: rust.memory.ptr_write
   enabled: true
   language: rust
@@ -44,7 +44,7 @@
           let query = "user";
           ptr::write(target);
       }
-  description: "std::ptr::write(dst, val) — writes to a raw pointer; tainted destination = arbitrary memory write inside unsafe."
+  description: "std::ptr::write(dst, val) - writes to a raw pointer; tainted destination = arbitrary memory write inside unsafe."
 - id: rust.memory.ptr_copy_nonoverlapping
   enabled: true
   language: rust
@@ -66,7 +66,7 @@
           let query = "user";
           ptr::copy_nonoverlapping(target);
       }
-  description: "ptr::copy_nonoverlapping(src, dst, count) — memcpy primitive; tainted count or pointers cause buffer overflow."
+  description: "ptr::copy_nonoverlapping(src, dst, count) - memcpy primitive; tainted count or pointers cause buffer overflow."
 - id: rust.memory.ptr_copy
   enabled: true
   language: rust
@@ -88,7 +88,7 @@
           let query = "user";
           ptr::copy(target);
       }
-  description: "ptr::copy(src, dst, count) — memmove primitive; same exposure as copy_nonoverlapping."
+  description: "ptr::copy(src, dst, count) - memmove primitive; same exposure as copy_nonoverlapping."
 - id: rust.memory.slice_from_raw_parts
   enabled: true
   language: rust
@@ -110,7 +110,7 @@
           let query = "user";
           slice::from_raw_parts(target);
       }
-  description: "std::slice::from_raw_parts(data, len) — synthesises a slice from raw pointer + length; tainted len = out-of-bounds reads when the slice is later indexed."
+  description: "std::slice::from_raw_parts(data, len) - synthesises a slice from raw pointer + length; tainted len = out-of-bounds reads when the slice is later indexed."
 - id: rust.memory.slice_from_raw_parts_mut
   enabled: true
   language: rust
@@ -132,7 +132,7 @@
           let query = "user";
           slice::from_raw_parts_mut(target);
       }
-  description: "slice::from_raw_parts_mut — mutable slice from raw pointer + length; tainted len enables arbitrary writes."
+  description: "slice::from_raw_parts_mut - mutable slice from raw pointer + length; tainted len enables arbitrary writes."
 - id: rust.memory.transmute
   enabled: true
   language: rust
@@ -154,7 +154,7 @@
           let query = "user";
           mem::transmute(target);
       }
-  description: "std::mem::transmute — reinterprets bytes as another type; tainted bytes can forge invalid references / fat-pointer metadata."
+  description: "std::mem::transmute - reinterprets bytes as another type; tainted bytes can forge invalid references / fat-pointer metadata."
 - id: rust.memory.ptr_offset
   enabled: false
   disabled_reason:
@@ -169,7 +169,7 @@
     kind: call
     callee:
       name: offset
-  description: "Disabled — bare `offset` overmatches Vec/Iterator helpers; enable for unsafe-block audits where the receiver is known to be a raw pointer."
+  description: "Disabled - bare `offset` overmatches Vec/Iterator helpers; enable for unsafe-block audits where the receiver is known to be a raw pointer."
 
 # Double-drop on `ManuallyDrop` is a documented unsoundness shape:
 # `ManuallyDrop::drop(&mut x)` runs Drop manually, and a second call
@@ -196,4 +196,4 @@
           let query = "user";
           ManuallyDrop::drop(target);
       }
-  description: "ManuallyDrop::drop(&mut x) — manually runs Drop. Two calls on the same value double-free (CWE-415); the engine surfaces both sites for audit pairing."
+  description: "ManuallyDrop::drop(&mut x) - manually runs Drop. Two calls on the same value double-free (CWE-415); the engine surfaces both sites for audit pairing."

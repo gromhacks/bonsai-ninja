@@ -32,7 +32,7 @@
         sendMessage(["QueueUrl" => "https://sqs.example/queue", "MessageBody" => "safe"]);
       }
     expect_no_match: true
-  description: AWS SDK for PHP sendMessage — tainted queue target/body injects arbitrary broker payloads.
+  description: AWS SDK for PHP sendMessage - tainted queue target/body injects arbitrary broker payloads.
   imports:
   - aws
   - aws/awssdkphp
@@ -53,4 +53,4 @@
     kind: call
     callee:
       name: publish
-  description: Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across PHP clients and app code.
+  description: Disabled - cloud publish is real queue fanout, but bare `publish` is too generic across PHP clients and app code.

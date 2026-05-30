@@ -29,7 +29,7 @@
         S3Client::GetObject("reports/fixed.csv");
       }
     expect_no_match: true
-  description: "AWS SDK C++ S3Client::GetObject — tainted bucket/key selector reads arbitrary object data."
+  description: "AWS SDK C++ S3Client::GetObject - tainted bucket/key selector reads arbitrary object data."
 
 - id: cpp.access.aws_s3_put_object
   enabled: true
@@ -62,7 +62,7 @@
         S3Client::PutObject("reports/fixed.csv");
       }
     expect_no_match: true
-  description: "AWS SDK C++ S3Client::PutObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+  description: "AWS SDK C++ S3Client::PutObject - tainted bucket/key selector overwrites attacker-chosen object keys."
 
 - id: cpp.access.aws_secretsmanager_get_secret_value
   enabled: true
@@ -95,7 +95,7 @@
         SecretsManagerClient::GetSecretValue("app/prod/db");
       }
     expect_no_match: true
-  description: "AWS SDK C++ SecretsManagerClient::GetSecretValue — tainted secret id reads arbitrary secret material."
+  description: "AWS SDK C++ SecretsManagerClient::GetSecretValue - tainted secret id reads arbitrary secret material."
 
 - id: cpp.access.azure_blob_download
   enabled: true
@@ -128,7 +128,7 @@
         BlobClient::DownloadTo("/var/app/export/report.csv");
       }
     expect_no_match: true
-  description: "Azure BlobClient::DownloadTo — tainted blob selector reads arbitrary object data."
+  description: "Azure BlobClient::DownloadTo - tainted blob selector reads arbitrary object data."
 
 - id: cpp.access.azure_blob_upload
   enabled: true
@@ -160,7 +160,7 @@
         BlockBlobClient::UploadFrom("/var/app/export/report.csv");
       }
     expect_no_match: true
-  description: "Azure BlockBlobClient::UploadFrom(path) — tainted local file paths can upload arbitrary local files to cloud storage."
+  description: "Azure BlockBlobClient::UploadFrom(path) - tainted local file paths can upload arbitrary local files to cloud storage."
 
 - id: cpp.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -193,4 +193,4 @@
         SecretManagerServiceClient::AccessSecretVersion("projects/app/secrets/db/versions/latest");
       }
     expect_no_match: true
-  description: "google-cloud-cpp SecretManagerServiceClient::AccessSecretVersion — tainted resource name reads arbitrary secret versions."
+  description: "google-cloud-cpp SecretManagerServiceClient::AccessSecretVersion - tainted resource name reads arbitrary secret versions."

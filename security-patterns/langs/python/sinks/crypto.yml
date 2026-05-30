@@ -17,7 +17,7 @@
       import hashlib
       def example(user_input):
           return hashlib.md5(user_input)
-  description: "hashlib.md5 — broken hash."
+  description: "hashlib.md5 - broken hash."
 
 - id: python.crypto.hashlib_sha1
   enabled: true
@@ -37,7 +37,7 @@
       import hashlib
       def example(user_input):
           return hashlib.sha1(user_input)
-  description: "hashlib.sha1 — collision-vulnerable."
+  description: "hashlib.sha1 - collision-vulnerable."
 
 - id: python.crypto.hashlib_new_md4
   enabled: true
@@ -78,7 +78,7 @@
       from Crypto.Cipher import DES
       def example(user_input):
           return DES.new(user_input)
-  description: "DES.new — broken cipher."
+  description: "DES.new - broken cipher."
 
 - id: python.crypto.pycryptodome_des3
   enabled: true
@@ -98,7 +98,7 @@
       from Crypto.Cipher import DES3
       def example(user_input):
           return DES3.new(user_input)
-  description: "DES3.new — deprecated for new designs."
+  description: "DES3.new - deprecated for new designs."
 
 - id: python.crypto.pycryptodome_arc4
   enabled: true
@@ -118,7 +118,7 @@
       from Crypto.Cipher import ARC4
       def example(user_input):
           return ARC4.new(user_input)
-  description: "ARC4.new (RC4) — broken stream cipher."
+  description: "ARC4.new (RC4) - broken stream cipher."
 
 - id: python.crypto.pycryptodome_blowfish
   enabled: true
@@ -138,7 +138,7 @@
       from Crypto.Cipher import Blowfish
       def example(user_input):
           return Blowfish.new(user_input)
-  description: "Blowfish.new — small block size, deprecated."
+  description: "Blowfish.new - small block size, deprecated."
 
 - id: python.crypto.pycryptodome_aes_ecb
   enabled: true
@@ -158,7 +158,7 @@
       from Crypto.Cipher import AES
       def example(user_input):
           return AES.new(user_input, AES.MODE_ECB)
-  description: "AES.new(..., MODE_ECB) — leaks block patterns."
+  description: "AES.new(..., MODE_ECB) - leaks block patterns."
 
 - id: python.crypto.cryptography_des_cbc
   enabled: true
@@ -181,7 +181,7 @@
 
       def example(user_input):
           return algorithms.TripleDES(user_input)
-  description: "cryptography algorithms.TripleDES — deprecated."
+  description: "cryptography algorithms.TripleDES - deprecated."
 
 - id: python.crypto.cryptography_blowfish
   enabled: true
@@ -291,7 +291,7 @@
     code: |
       def example(user_input):
           return random.random(user_input)
-  description: "random.random — not crypto-secure."
+  description: "random.random - not crypto-secure."
 
 - id: python.crypto.weak_random_int
   enabled: true
@@ -327,7 +327,7 @@
     code: |
       def example(user_input):
           return random.choice(user_input)
-  description: "random.choice — not for cryptographic selection."
+  description: "random.choice - not for cryptographic selection."
 
 - id: python.crypto.weak_random_uniform
   enabled: true
@@ -363,7 +363,7 @@
     code: |
       def example(user_input):
           return random.sample(user_input)
-  description: "random.sample() — non-cryptographic PRNG; predictable and unsafe for tokens / secrets."
+  description: "random.sample() - non-cryptographic PRNG; predictable and unsafe for tokens / secrets."
 
 - id: python.crypto.bcrypt_low_rounds
   enabled: true
@@ -392,7 +392,7 @@
       def hash_pw(pw):
           return bcrypt.hashpw(pw, bcrypt.gensalt(12))
     expect_no_match: true
-  description: "bcrypt.gensalt(rounds) with rounds < 10 — too cheap to compute, attackers can brute-force the hash. Use 10-12 for typical hardware."
+  description: "bcrypt.gensalt(rounds) with rounds < 10 - too cheap to compute, attackers can brute-force the hash. Use 10-12 for typical hardware."
 
 - id: python.crypto.passlib_md5_crypt
   enabled: true
@@ -412,7 +412,7 @@
       import passlib
       def example(user_input):
           return md5_crypt.hash(user_input)
-  description: "passlib md5_crypt — broken."
+  description: "passlib md5_crypt - broken."
 
 - id: python.crypto.cryptography_constant_time_eq_missing
   enabled: false
@@ -427,7 +427,7 @@
     kind: call
     callee:
       name: __eq__
-  description: "Disabled — flag custom comparators that should use hmac.compare_digest."
+  description: "Disabled - flag custom comparators that should use hmac.compare_digest."
 - id: python.crypto.rsa_weak_key_size
   enabled: true
   language: python
@@ -455,4 +455,4 @@
       def gen():
           return rsa.generate_private_key(public_exponent=65537, key_size=2048)
     expect_no_match: true
-  description: "rsa.generate_private_key(key_size=1024) — RSA below 2048 bits is broken in 2026. Use 2048+ (3072 for long-lived keys)."
+  description: "rsa.generate_private_key(key_size=1024) - RSA below 2048 bits is broken in 2026. Use 2048+ (3072 for long-lived keys)."

@@ -33,7 +33,7 @@
           HttpResponseBuilder::insert_header("safe");
       }
     expect_no_match: true
-  description: "actix-web HttpResponseBuilder::insert_header((name, tainted)) — tainted header value = CRLF-injection / response-splitting (newlines inject new headers / body)."
+  description: "actix-web HttpResponseBuilder::insert_header((name, tainted)) - tainted header value = CRLF-injection / response-splitting (newlines inject new headers / body)."
   imports:
   - actix_web
 - id: rust.header.actix_response_append
@@ -71,7 +71,7 @@
           HttpResponseBuilder::append_header("safe");
       }
     expect_no_match: true
-  description: "actix-web HttpResponseBuilder::append_header((name, tainted)) — same exposure as insert_header; tainted value enables CRLF injection."
+  description: "actix-web HttpResponseBuilder::append_header((name, tainted)) - same exposure as insert_header; tainted value enables CRLF injection."
   imports:
   - actix_web
 - id: rust.header.axum_headers_insert
@@ -108,7 +108,7 @@
           HeaderMap::insert("X-Trace", "safe");
       }
     expect_no_match: true
-  description: "http HeaderMap::insert(name, tainted) — used by axum / hyper response builders; tainted value = CRLF header-injection. Merged collision aliases: rust.smuggle.headers_insert_dual."
+  description: "http HeaderMap::insert(name, tainted) - used by axum / hyper response builders; tainted value = CRLF header-injection. Merged collision aliases: rust.smuggle.headers_insert_dual."
   aliases:
   - rust.smuggle.headers_insert_dual
 - id: rust.header.axum_headers_append
@@ -144,7 +144,7 @@
           HeaderMap::append("X-Trace", "safe");
       }
     expect_no_match: true
-  description: "http HeaderMap::append — adds additional header value; same CRLF-injection risk as HeaderMap::insert."
+  description: "http HeaderMap::append - adds additional header value; same CRLF-injection risk as HeaderMap::insert."
 - id: rust.header.rocket_set_header
   enabled: true
   language: rust
@@ -178,7 +178,7 @@
           Response::set_header("safe");
       }
     expect_no_match: true
-  description: "rocket Response::set_header — tainted header value enables CRLF-injection / response-splitting."
+  description: "rocket Response::set_header - tainted header value enables CRLF-injection / response-splitting."
 - id: rust.header.warp_with_header
   enabled: true
   language: rust
@@ -211,4 +211,4 @@
           reply::with_header(reply, "X-Trace", "safe");
       }
     expect_no_match: true
-  description: "warp reply::with_header — tainted header value = CRLF-injection."
+  description: "warp reply::with_header - tainted header value = CRLF-injection."

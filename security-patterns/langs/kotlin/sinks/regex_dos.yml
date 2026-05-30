@@ -30,7 +30,7 @@
       }
       }
     expect_no_match: true
-  description: "Regex(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "Regex(tainted_pattern) - attacker-controlled regular expressions can trigger catastrophic backtracking."
 
   imports:
   - kotlin
@@ -68,4 +68,4 @@
       }
       }
     expect_no_match: true
-  description: "Pattern.compile(tainted_pattern) — JVM regex compilation from user data can trigger ReDoS."
+  description: "Pattern.compile(tainted_pattern) - JVM regex compilation from user data can trigger ReDoS."

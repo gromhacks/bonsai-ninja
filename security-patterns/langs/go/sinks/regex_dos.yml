@@ -32,7 +32,7 @@
         regexp.Compile(`^[a-z]+$`)
       }
     expect_no_match: true
-  description: "regexp.Compile(tainted_pattern) — attacker-controlled regular expressions can consume excessive CPU."
+  description: "regexp.Compile(tainted_pattern) - attacker-controlled regular expressions can consume excessive CPU."
 
 - id: go.redos.regexp_must_compile
   enabled: true
@@ -68,4 +68,4 @@
         regexp.MustCompile(`^[a-z]+$`)
       }
     expect_no_match: true
-  description: "regexp.MustCompile(tainted_pattern) — attacker-controlled regular expressions can consume excessive CPU or panic."
+  description: "regexp.MustCompile(tainted_pattern) - attacker-controlled regular expressions can consume excessive CPU or panic."

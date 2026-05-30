@@ -30,7 +30,7 @@
         redirect_to("/dashboard")
       end
     expect_no_match: true
-  description: "redirect_to(tainted) — Rails / Hanami controller action."
+  description: "redirect_to(tainted) - Rails / Hanami controller action."
 
 - id: ruby.open_redirect.rails_redirect_back
   enabled: true
@@ -60,7 +60,7 @@
         redirect_back("/dashboard")
       end
     expect_no_match: true
-  description: "redirect_back — flag tainted fallback_location."
+  description: "redirect_back - flag tainted fallback_location."
 
 - id: ruby.open_redirect.rails_redirect_back_or_to
   enabled: true
@@ -90,7 +90,7 @@
         redirect_back_or_to("/dashboard")
       end
     expect_no_match: true
-  description: "redirect_back_or_to — flag tainted fallback."
+  description: "redirect_back_or_to - flag tainted fallback."
 
 - id: ruby.open_redirect.redirect
   enabled: true
@@ -120,4 +120,4 @@
         redirect("/dashboard")
       end
     expect_no_match: true
-  description: "redirect(tainted) — Sinatra / Grape helper."
+  description: "redirect(tainted) - Sinatra / Grape helper."

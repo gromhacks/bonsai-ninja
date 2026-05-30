@@ -21,7 +21,7 @@
         }
       }
   description: |-
-    @CrossOrigin(origins = "*") — Spring controller-level allow-all CORS.
+    @CrossOrigin(origins = "*") - Spring controller-level allow-all CORS.
 - id: java.cors.cors_config_addallowedorigin_wildcard
   enabled: true
   language: java
@@ -44,4 +44,4 @@
         }
       }
   description: |-
-    CorsConfiguration.addAllowedOrigin('*') — Spring filter-chain allow-all CORS.
+    CorsConfiguration.addAllowedOrigin('*') - Spring filter-chain allow-all CORS.

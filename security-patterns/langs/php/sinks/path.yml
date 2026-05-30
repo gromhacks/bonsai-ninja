@@ -4,7 +4,7 @@
 #   `copy` is a real PHP built-in global (filesystem function); there is no
 #   stdlib method `Foo::copy` that would shadow it. `top_level: true` filters
 #   out userland `$collection->copy(...)` decoys. Fragile per pack-audit but
-#   intentional — copy() with a tainted source or destination is a real LFI /
+#   intentional - copy() with a tainted source or destination is a real LFI /
 #   arbitrary-write primitive. Do not scope by package.
 - id: php.path.fopen
   enabled: false
@@ -18,7 +18,7 @@
     kind: call
     callee:
       name: fopen
-  description: "Disabled — canonical rule is php.ssrf.fopen_url in ssrf.yml. Same call shape; SSRF is strictly worse reach than LFI, so keep the single higher-severity rule."
+  description: "Disabled - canonical rule is php.ssrf.fopen_url in ssrf.yml. Same call shape; SSRF is strictly worse reach than LFI, so keep the single higher-severity rule."
 
 - id: php.path.file_get_contents
   enabled: false
@@ -32,7 +32,7 @@
     kind: call
     callee:
       name: file_get_contents
-  description: "Disabled — canonical rule is php.ssrf.file_get_contents_url in ssrf.yml (SSRF strictly supersedes LFI when URL wrappers are in play)."
+  description: "Disabled - canonical rule is php.ssrf.file_get_contents_url in ssrf.yml (SSRF strictly supersedes LFI when URL wrappers are in play)."
 
 - id: php.path.file_put_contents
   enabled: true
@@ -90,7 +90,7 @@
           readfile("public/report.txt");
         }
       expect_no_match: true
-  description: "readfile() — writes file contents to output; tainted path reads and discloses arbitrary files."
+  description: "readfile() - writes file contents to output; tainted path reads and discloses arbitrary files."
 
 - id: php.path.file
   enabled: true
@@ -119,7 +119,7 @@
           file("public/report.txt");
         }
       expect_no_match: true
-  description: "file() — read into array."
+  description: "file() - read into array."
 
 - id: php.path.fread
   enabled: false
@@ -133,7 +133,7 @@
     kind: call
     callee:
       name: fread
-  description: "Disabled — fread takes a handle; the path was already opened."
+  description: "Disabled - fread takes a handle; the path was already opened."
 
 - id: php.path.copy
   enabled: true
@@ -162,7 +162,7 @@
           copy("public/report.txt", "cache/report.txt");
         }
       expect_no_match: true
-  description: "copy(tainted_source, dest) — attacker-controlled source paths can read arbitrary files."
+  description: "copy(tainted_source, dest) - attacker-controlled source paths can read arbitrary files."
 
 - id: php.path.copy_dest
   enabled: true
@@ -191,7 +191,7 @@
           copy("public/report.txt", "cache/report.txt");
         }
       expect_no_match: true
-  description: "copy(source, tainted_dest) — attacker-controlled destination paths can overwrite configuration or session data."
+  description: "copy(source, tainted_dest) - attacker-controlled destination paths can overwrite configuration or session data."
 
 - id: php.path.rename
   enabled: true
@@ -220,7 +220,7 @@
           rename("public/report.txt", "cache/report.txt");
         }
       expect_no_match: true
-  description: "rename(tainted_source, dest) — attacker-controlled source paths can move arbitrary files."
+  description: "rename(tainted_source, dest) - attacker-controlled source paths can move arbitrary files."
 
 - id: php.path.rename_dest
   enabled: true
@@ -249,7 +249,7 @@
           rename("public/report.txt", "cache/report.txt");
         }
       expect_no_match: true
-  description: "rename(source, tainted_dest) — attacker-controlled destination paths can clobber arbitrary filesystem targets."
+  description: "rename(source, tainted_dest) - attacker-controlled destination paths can clobber arbitrary filesystem targets."
 
 - id: php.path.unlink
   enabled: true
@@ -278,7 +278,7 @@
           unlink("cache/report.txt");
         }
       expect_no_match: true
-  description: "unlink() with tainted path — attacker-controlled paths let the attacker delete arbitrary files on disk (session stores, config, uploaded content)."
+  description: "unlink() with tainted path - attacker-controlled paths let the attacker delete arbitrary files on disk (session stores, config, uploaded content)."
 
 - id: php.path.rmdir
   enabled: true
@@ -307,7 +307,7 @@
           rmdir("cache/tmp");
         }
       expect_no_match: true
-  description: "rmdir() with tainted path — attacker-controlled paths can remove arbitrary directories including application data dirs."
+  description: "rmdir() with tainted path - attacker-controlled paths can remove arbitrary directories including application data dirs."
 
 - id: php.path.mkdir
   enabled: true
@@ -336,7 +336,7 @@
           mkdir("cache/tmp");
         }
       expect_no_match: true
-  description: "mkdir() with tainted path — attacker-controlled paths can create directories outside the intended root, enabling further path-traversal exploits."
+  description: "mkdir() with tainted path - attacker-controlled paths can create directories outside the intended root, enabling further path-traversal exploits."
 
 - id: php.path.glob
   enabled: false
@@ -350,7 +350,7 @@
     kind: call
     callee:
       name: glob
-  description: "Disabled — glob() patterns rarely tainted."
+  description: "Disabled - glob() patterns rarely tainted."
 
 - id: php.path.splfileinfo_new
   enabled: true
@@ -379,7 +379,7 @@
           new SplFileInfo("public/report.txt");
         }
       expect_no_match: true
-  description: "new SplFileInfo(tainted) — path accessor; downstream reads propagate traversal."
+  description: "new SplFileInfo(tainted) - path accessor; downstream reads propagate traversal."
 
 - id: php.path.splfileobject_new
   enabled: true
@@ -408,7 +408,7 @@
           new SplFileObject("public/report.txt");
         }
       expect_no_match: true
-  description: "new SplFileObject(tainted) — opens file at tainted path."
+  description: "new SplFileObject(tainted) - opens file at tainted path."
 
 - id: php.path.ziparchive_extract_to
   enabled: true
@@ -437,7 +437,7 @@
           ZipArchive::extractTo("var/extracted");
         }
       expect_no_match: true
-  description: "ZipArchive::extractTo — zip-slip when archive entries contain ../ and destination not validated."
+  description: "ZipArchive::extractTo - zip-slip when archive entries contain ../ and destination not validated."
 
 - id: php.path.phar_archive_extract_to
   enabled: true
@@ -467,7 +467,7 @@
           PharData::extractTo("var/extracted");
         }
       expect_no_match: true
-  description: "PharData::extractTo — tar/zip extraction with attacker-controlled archive; zip-slip risk."
+  description: "PharData::extractTo - tar/zip extraction with attacker-controlled archive; zip-slip risk."
 
 - id: php.path.move_uploaded_file
   enabled: false
@@ -481,7 +481,7 @@
     kind: call
     callee:
       name: move_uploaded_file
-  description: "Disabled — canonical rule is php.upload.move_uploaded_file_tainted_dest in file_upload.yml."
+  description: "Disabled - canonical rule is php.upload.move_uploaded_file_tainted_dest in file_upload.yml."
 
 - id: php.path.include
   enabled: false
@@ -495,7 +495,7 @@
     kind: call
     callee:
       name: include
-  description: "Disabled — canonical rule is php.eval.include_tainted in eval.yml. include/require always EXECUTE the included file, so code-injection is strictly stronger than LFI."
+  description: "Disabled - canonical rule is php.eval.include_tainted in eval.yml. include/require always EXECUTE the included file, so code-injection is strictly stronger than LFI."
 
 - id: php.path.include_once
   enabled: false
@@ -509,7 +509,7 @@
     kind: call
     callee:
       name: include_once
-  description: "Disabled — canonical rule is php.eval.include_once_tainted in eval.yml (code execution supersedes LFI)."
+  description: "Disabled - canonical rule is php.eval.include_once_tainted in eval.yml (code execution supersedes LFI)."
 
 - id: php.path.require
   enabled: false
@@ -523,7 +523,7 @@
     kind: call
     callee:
       name: require
-  description: "Disabled — canonical rule is php.eval.require_tainted in eval.yml (code execution supersedes LFI)."
+  description: "Disabled - canonical rule is php.eval.require_tainted in eval.yml (code execution supersedes LFI)."
 
 - id: php.path.require_once
   enabled: false
@@ -537,4 +537,4 @@
     kind: call
     callee:
       name: require_once
-  description: "Disabled — canonical rule is php.eval.require_once_tainted in eval.yml (code execution supersedes LFI)."
+  description: "Disabled - canonical rule is php.eval.require_once_tainted in eval.yml (code execution supersedes LFI)."

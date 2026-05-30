@@ -19,7 +19,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  system(\"safe\");\n}\n"
     expect_no_match: true
-  description: system() — runs command via shell.
+  description: system() - runs command via shell.
 - id: php.cmdi.exec
   enabled: true
   language: php
@@ -49,7 +49,7 @@
         exec("safe");
       }
     expect_no_match: true
-  description: 'exec() — PHP builtin shell command execution; attacker-controlled argv concatenation lets the attacker execute arbitrary commands as the web-server user.'
+  description: 'exec() - PHP builtin shell command execution; attacker-controlled argv concatenation lets the attacker execute arbitrary commands as the web-server user.'
 - id: php.cmdi.shell_exec
   enabled: true
   language: php
@@ -71,7 +71,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  shell_exec(\"safe\");\n}\n"
     expect_no_match: true
-  description: shell_exec() — runs argv through /bin/sh; tainted argv executes arbitrary shell commands.
+  description: shell_exec() - runs argv through /bin/sh; tainted argv executes arbitrary shell commands.
 - id: php.cmdi.passthru
   enabled: true
   language: php
@@ -93,7 +93,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  passthru(\"safe\");\n}\n"
     expect_no_match: true
-  description: passthru() — runs argv through /bin/sh and writes output directly to stdout; tainted argv executes arbitrary shell commands.
+  description: passthru() - runs argv through /bin/sh and writes output directly to stdout; tainted argv executes arbitrary shell commands.
 - id: php.cmdi.proc_open
   enabled: true
   language: php
@@ -115,7 +115,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  proc_open(\"safe\");\n}\n"
     expect_no_match: true
-  description: proc_open() — flag if first arg is a string (uses shell).
+  description: proc_open() - flag if first arg is a string (uses shell).
 - id: php.cmdi.popen
   enabled: true
   language: php
@@ -137,7 +137,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  popen(\"safe\", \"r\");\n}\n"
     expect_no_match: true
-  description: popen() — runs command via shell.
+  description: popen() - runs command via shell.
 - id: php.cmdi.pcntl_exec
   enabled: true
   language: php
@@ -159,7 +159,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pcntl_exec(\"/usr/bin/id\");\n}\n"
     expect_no_match: true
-  description: pcntl_exec() — direct execve, no shell, but path can be tainted.
+  description: pcntl_exec() - direct execve, no shell, but path can be tainted.
 - id: php.cmdi.symfony_process_from_shell_commandline
   enabled: true
   language: php
@@ -196,7 +196,7 @@
         Process::fromShellCommandline("php bin/console cache:clear");
       }
     expect_no_match: true
-  description: Symfony Process::fromShellCommandline — explicitly shell-evaluated.
+  description: Symfony Process::fromShellCommandline - explicitly shell-evaluated.
   imports:
   - symfony\process
   - symfony
@@ -216,7 +216,7 @@
     kind: new
     callee:
       name: Process
-  description: Disabled — Process(array) is safe; flag only when string command.
+  description: Disabled - Process(array) is safe; flag only when string command.
 - id: php.cmdi.backtick_exec
   enabled: false
   disabled_reason:
@@ -231,7 +231,7 @@
     kind: call
     callee:
       name: shell_exec
-  description: Disabled duplicate — backtick `cmd` desugars to shell_exec; covered above.
+  description: Disabled duplicate - backtick `cmd` desugars to shell_exec; covered above.
 - id: php.cmdi.laravel_artisan_call
   enabled: true
   language: php
@@ -269,7 +269,7 @@
         Artisan::call("cache:clear");
       }
     expect_no_match: true
-  description: Laravel Artisan::call — flag tainted command signature.
+  description: Laravel Artisan::call - flag tainted command signature.
   imports:
   - laravel\framework
   - laravel
@@ -295,7 +295,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mb_send_mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', '-f noreply@example.com');\n}\n"
     expect_no_match: true
-  description: mb_send_mail — 5th arg (additional_params) goes to sendmail shell; tainted -> RCE.
+  description: mb_send_mail - 5th arg (additional_params) goes to sendmail shell; tainted -> RCE.
 - id: php.cmdi.mail_additional_params
   enabled: true
   language: php
@@ -318,7 +318,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', '-f noreply@example.com');\n}\n"
     expect_no_match: true
-  description: mail() — 5th arg additional_params goes to sendmail shell.
+  description: mail() - 5th arg additional_params goes to sendmail shell.
 - id: php.cmdi.symfony_process_run
   enabled: false
   disabled_reason:
@@ -337,4 +337,4 @@
       attribute:
       - Process
       - run
-  description: Disabled — Process::run is safe with array cmd; flag when constructed via fromShellCommandline.
+  description: Disabled - Process::run is safe with array cmd; flag when constructed via fromShellCommandline.

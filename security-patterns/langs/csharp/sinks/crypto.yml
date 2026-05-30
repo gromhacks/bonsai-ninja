@@ -14,7 +14,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MD5.Create(input); } }
-  description: "MD5.Create — broken hash."
+  description: "MD5.Create - broken hash."
 
 - id: csharp.crypto.md5_new
   enabled: true
@@ -48,7 +48,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SHA1.Create(input); } }
-  description: "SHA1.Create — broken hash function; use SHA-256 or stronger for integrity / HMAC."
+  description: "SHA1.Create - broken hash function; use SHA-256 or stronger for integrity / HMAC."
 
 - id: csharp.crypto.sha1_new
   enabled: true
@@ -82,7 +82,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DES.Create(input); } }
-  description: "DES.Create — broken cipher."
+  description: "DES.Create - broken cipher."
 
 - id: csharp.crypto.des_new
   enabled: true
@@ -116,7 +116,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TripleDES.Create(input); } }
-  description: "TripleDES.Create — deprecated for new designs."
+  description: "TripleDES.Create - deprecated for new designs."
 
 - id: csharp.crypto.rc2
   enabled: true
@@ -133,7 +133,7 @@
   - name: declared shape
     code: |
       class RC2CryptoServiceProvider { public RC2CryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new RC2CryptoServiceProvider(input); } }
-  description: "RC2 — broken stream cipher."
+  description: "RC2 - broken stream cipher."
 
 - id: csharp.crypto.aes_ecb_mode
   enabled: true
@@ -150,7 +150,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Mode = input; } }
-  description: "Aes.Mode = CipherMode.ECB — leaks block patterns."
+  description: "Aes.Mode = CipherMode.ECB - leaks block patterns."
 
 - id: csharp.crypto.padding_zeros
   enabled: false
@@ -164,7 +164,7 @@
     kind: write
     target:
       name: Padding
-  description: "Disabled — flag only when Padding=Zeros (constraint TBD)."
+  description: "Disabled - flag only when Padding=Zeros (constraint TBD)."
 
 - id: csharp.crypto.random_ctor
   enabled: true
@@ -182,7 +182,7 @@
     code: |
       class Random { public Random(dynamic seed = null) { } }
       class App { void Test() { var result = new Random(); } }
-  description: "new System.Random — non-cryptographic PRNG; use RandomNumberGenerator for secrets, tokens, nonces, and keys."
+  description: "new System.Random - non-cryptographic PRNG; use RandomNumberGenerator for secrets, tokens, nonces, and keys."
 
 - id: csharp.crypto.rfc2898_low_iters
   enabled: true
@@ -217,7 +217,7 @@
         }
       }
     expect_no_match: true
-  description: "new Rfc2898DeriveBytes(..., iterations) with iterations < 100000 — weak PBKDF2 work factor."
+  description: "new Rfc2898DeriveBytes(..., iterations) with iterations < 100000 - weak PBKDF2 work factor."
 
 - id: csharp.crypto.bouncycastle_des
   enabled: true
@@ -253,7 +253,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MD5.HashData(input); } }
-  description: "MD5.HashData — one-shot static hash; broken function."
+  description: "MD5.HashData - one-shot static hash; broken function."
 
 - id: csharp.crypto.sha1_hashdata
   enabled: true
@@ -270,7 +270,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SHA1.HashData(input); } }
-  description: "SHA1.HashData — one-shot static hash; broken function."
+  description: "SHA1.HashData - one-shot static hash; broken function."
 
 - id: csharp.crypto.hmac_md5_new
   enabled: true
@@ -287,7 +287,7 @@
   - name: declared shape
     code: |
       class HMACMD5 { public HMACMD5(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new HMACMD5(input); } }
-  description: "new HMACMD5 — MD5-keyed HMAC; weak."
+  description: "new HMACMD5 - MD5-keyed HMAC; weak."
 
 - id: csharp.crypto.hmac_sha1_new
   enabled: true
@@ -304,7 +304,7 @@
   - name: declared shape
     code: |
       class HMACSHA1 { public HMACSHA1(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new HMACSHA1(input); } }
-  description: "new HMACSHA1 — SHA-1-based HMAC; prefer HMACSHA256 or stronger."
+  description: "new HMACSHA1 - SHA-1-based HMAC; prefer HMACSHA256 or stronger."
 - id: csharp.crypto.rsa_pkcs1_key_exchange_formatter
   enabled: true
   language: csharp
@@ -321,7 +321,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RSAPKCS1KeyExchangeFormatter.CreateKeyExchange(input); } }
     expect_match_text: [RSAPKCS1KeyExchangeFormatter.CreateKeyExchange]
-  description: "RSAPKCS1KeyExchangeFormatter.CreateKeyExchange — PKCS#1 v1.5 RSA encryption padding; use OAEP."
+  description: "RSAPKCS1KeyExchangeFormatter.CreateKeyExchange - PKCS#1 v1.5 RSA encryption padding; use OAEP."
 - id: csharp.crypto.rsa_pkcs1_key_exchange_deformatter
   enabled: true
   language: csharp
@@ -338,7 +338,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange(input); } }
     expect_match_text: [RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange]
-  description: "RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange — PKCS#1 v1.5 RSA decryption padding; use OAEP."
+  description: "RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange - PKCS#1 v1.5 RSA decryption padding; use OAEP."
 
 - id: csharp.crypto.hmac_ripemd160_new
   enabled: true
@@ -355,7 +355,7 @@
   - name: declared shape
     code: |
       class HMACRIPEMD160 { public HMACRIPEMD160(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new HMACRIPEMD160(input); } }
-  description: "new HMACRIPEMD160 — non-standard, weak HMAC."
+  description: "new HMACRIPEMD160 - non-standard, weak HMAC."
 
 - id: csharp.crypto.tripledes_new
   enabled: true
@@ -372,7 +372,7 @@
   - name: declared shape
     code: |
       class TripleDESCryptoServiceProvider { public TripleDESCryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new TripleDESCryptoServiceProvider(input); } }
-  description: "new TripleDESCryptoServiceProvider — deprecated for new designs."
+  description: "new TripleDESCryptoServiceProvider - deprecated for new designs."
 
 - id: csharp.crypto.bouncycastle_rc4
   enabled: true
@@ -391,7 +391,7 @@
     code: |
       using BouncyCastle;
       class App { void Test() { dynamic input = "x"; var result = new BouncyCastle.RC4Engine(input); } }
-  description: "BouncyCastle RC4Engine — broken stream cipher."
+  description: "BouncyCastle RC4Engine - broken stream cipher."
 
 - id: csharp.crypto.random_next_seeded
   enabled: true
@@ -408,7 +408,7 @@
   - name: system random next
     code: |
       class App { void Test() { Random.Next(); } }
-  description: "System.Random.Next — non-cryptographic PRNG output; use RandomNumberGenerator for security-sensitive randomness."
+  description: "System.Random.Next - non-cryptographic PRNG output; use RandomNumberGenerator for security-sensitive randomness."
 
 - id: csharp.crypto.random_nextbytes
   enabled: true
@@ -425,7 +425,7 @@
   - name: system random next bytes
     code: |
       class App { void Test(byte[] bytes) { Random.NextBytes(bytes); } }
-  description: "System.Random.NextBytes — non-cryptographic byte stream; use RandomNumberGenerator.Fill for secrets, tokens, nonces, and keys."
+  description: "System.Random.NextBytes - non-cryptographic byte stream; use RandomNumberGenerator.Fill for secrets, tokens, nonces, and keys."
 
 - id: csharp.crypto.random_nextdouble
   enabled: true
@@ -442,4 +442,4 @@
   - name: system random next double
     code: |
       class App { void Test() { Random.NextDouble(); } }
-  description: "System.Random.NextDouble — non-cryptographic PRNG output; do not use for security-sensitive random values."
+  description: "System.Random.NextDouble - non-cryptographic PRNG output; do not use for security-sensitive random values."

@@ -19,7 +19,7 @@
       function demo(input, req, obj) {
         return cors(input, { origin: "*", credentials: true });
       }
-  description: "cors with wildcard origin + credentials true — TS via @types/cors."
+  description: "cors with wildcard origin + credentials true - TS via @types/cors."
 - id: typescript.cors.nest_enablecors_default
   enabled: true
   language: typescript

@@ -1,7 +1,7 @@
 # Ruby memory-safety / lifecycle audit-pair sites.
 # These rules fire on the *use-after-transition* call (read / write)
 # and gate on the adapter-emitted lifecycle state via the
-# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+# `requires_state` engine constraint (P6 - see docs/contributing/analysis-roadmap.mdx).
 
 - id: ruby.memory.io_close
   enabled: true
@@ -31,7 +31,7 @@
         io.read
       end
     expect_no_match: true
-  description: "Use-after-close — `IO#read` on a handle whose preceding `.close` released the underlying file descriptor. Subsequent reads raise IOError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+  description: "Use-after-close - `IO#read` on a handle whose preceding `.close` released the underlying file descriptor. Subsequent reads raise IOError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
 - id: ruby.memory.file_close
   enabled: true
   language: ruby
@@ -60,7 +60,7 @@
         f.write 'payload'
       end
     expect_no_match: true
-  description: "Use-after-close — `File#write` on a handle whose preceding `.close` released the underlying file. Subsequent writes raise IOError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+  description: "Use-after-close - `File#write` on a handle whose preceding `.close` released the underlying file. Subsequent writes raise IOError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
 - id: ruby.memory.mutex_unlock
   enabled: true
   language: ruby
@@ -78,4 +78,4 @@
         Mutex.unlock(mutex)
       end
     expect_match_text: [Mutex.unlock]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Mutex#unlock — subsequent guarded-region reads/writes without a re-lock are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Mutex#unlock - subsequent guarded-region reads/writes without a re-lock are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

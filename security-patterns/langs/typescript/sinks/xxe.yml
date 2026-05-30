@@ -35,7 +35,7 @@
         return libxmljs.parseXml("<root/>");
       }
     expect_no_match: true
-  description: "libxmljs.parseXml — flag if `noent: true` (enables entity expansion). Merged aliases: typescript.xxe.libxmljs_parser_default_entities_resolve."
+  description: "libxmljs.parseXml - flag if `noent: true` (enables entity expansion). Merged aliases: typescript.xxe.libxmljs_parser_default_entities_resolve."
   aliases:
   - typescript.xxe.libxmljs_parser_default_entities_resolve
 - id: typescript.xxe.libxmljs_parsexmlstring
@@ -91,7 +91,7 @@
     kind: new
     callee:
       name: DOMParser
-  description: "Disabled — `new DOMParser()` matches the browser's native DOMParser (safe). Re-enable with an import-anchored constraint once supported."
+  description: "Disabled - `new DOMParser()` matches the browser's native DOMParser (safe). Re-enable with an import-anchored constraint once supported."
 - id: typescript.xxe.xml2js_parsestring
   enabled: false
   disabled_reason:
@@ -109,7 +109,7 @@
       attribute:
       - xml2js
       - parseString
-  description: "Disabled — xml2js uses sax-js internally and does not resolve external entities by default."
+  description: "Disabled - xml2js uses sax-js internally and does not resolve external entities by default."
 - id: typescript.xxe.fast_xml_parser
   enabled: false
   disabled_reason:
@@ -125,7 +125,7 @@
     kind: new
     callee:
       name: XMLParser
-  description: "Disabled — fast-xml-parser doesn't resolve external entities."
+  description: "Disabled - fast-xml-parser doesn't resolve external entities."
 - id: typescript.xxe.fast_xml_parser_entities_enabled
   enabled: true
   language: typescript
@@ -153,7 +153,7 @@
       }
     expect_match_text:
     - XMLParser
-  description: "fast-xml-parser with entity processing enabled — audit tainted XML for entity expansion and unsafe downstream interpretation."
+  description: "fast-xml-parser with entity processing enabled - audit tainted XML for entity expansion and unsafe downstream interpretation."
 - id: typescript.xxe.parse_xml_resolve_entities
   enabled: true
   language: typescript
@@ -187,7 +187,7 @@
         return parseXml("<root/>", { resolveEntities: true });
       }
     expect_no_match: true
-  description: "parse-xml/libxml-style parser call with entity resolution enabled — tainted XML can trigger XXE file reads or SSRF."
+  description: "parse-xml/libxml-style parser call with entity resolution enabled - tainted XML can trigger XXE file reads or SSRF."
 - id: typescript.xxe.libxmljs_loadxml
   enabled: true
   language: typescript
@@ -221,7 +221,7 @@
         return libxmljs.loadXml("<root/>");
       }
     expect_no_match: true
-  description: "libxmljs/libxmljs2 loadXml — XML parser entrypoint; unsafe on tainted XML when entity expansion or network access is enabled. Merged aliases: typescript.xxe.libxmljs_loadxml_unsafe_options."
+  description: "libxmljs/libxmljs2 loadXml - XML parser entrypoint; unsafe on tainted XML when entity expansion or network access is enabled. Merged aliases: typescript.xxe.libxmljs_loadxml_unsafe_options."
   aliases:
   - typescript.xxe.libxmljs_loadxml_unsafe_options
 - id: typescript.xxe.xml2json_tojson
@@ -257,7 +257,7 @@
         return xml2json.toJson("<root/>");
       }
     expect_no_match: true
-  description: "xml2json.toJson(tainted XML) — XML parser path with historical XXE risk."
+  description: "xml2json.toJson(tainted XML) - XML parser path with historical XXE risk."
 - id: typescript.xxe.node_expat_parse_write
   enabled: true
   language: typescript
@@ -297,7 +297,7 @@
         return expatParser.parse("<root/>");
       }
     expect_no_match: true
-  description: "node-expat Parser.parse/write on tainted XML — XML entity expansion risk."
+  description: "node-expat Parser.parse/write on tainted XML - XML entity expansion risk."
 - id: typescript.xxe.libxmljs2_unsafe_options
   enabled: true
   language: typescript
@@ -337,4 +337,4 @@
         return libxmljs2.parseXml("<root/>", { noent: true });
       }
     expect_no_match: true
-  description: "libxmljs2 parse/load with noent/dtdload/nonet-unsafe options — explicitly enables XXE file-read or SSRF behavior."
+  description: "libxmljs2 parse/load with noent/dtdload/nonet-unsafe options - explicitly enables XXE file-read or SSRF behavior."

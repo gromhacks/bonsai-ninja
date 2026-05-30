@@ -24,7 +24,7 @@
     code: "const _u = require(\"got\");\nfunction demo(input, req, obj) {\n  return\
       \ got(\"https://example.com\");\n}\n"
     expect_no_match: true
-  description: "got(url) \u2014 top-level got() call with tainted URL."
+  description: "got(url) - top-level got() call with tainted URL."
 - id: typescript.ssrf.axios
   enabled: true
   language: typescript
@@ -51,7 +51,7 @@
     code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
       \ axios(\"https://example.com\");\n}\n"
     expect_no_match: true
-  description: "axios(url) \u2014 top-level axios() with tainted URL."
+  description: "axios(url) - top-level axios() with tainted URL."
 - id: typescript.ssrf.axios_get
   enabled: true
   language: typescript
@@ -157,7 +157,7 @@
     code: "const _u = require(\"node-fetch\");\nfunction demo(input, req, obj) {\n\
       \  return fetch(\"https://example.com\");\n}\n"
     expect_no_match: true
-  description: "fetch(tainted URL) \u2014 global fetch or node-fetch."
+  description: "fetch(tainted URL) - global fetch or node-fetch."
 - id: typescript.ssrf.http_request
   enabled: true
   language: typescript
@@ -284,7 +284,7 @@
     kind: call
     callee:
       name: request
-  description: "Disabled \u2014 bare `request` name is too ambiguous (many libs export\
+  description: "Disabled - bare `request` name is too ambiguous (many libs export\
     \ `request`); use an import-anchored variant if needed."
 - id: typescript.ssrf.superagent_get
   enabled: true
@@ -418,7 +418,7 @@
     code: "const _u = require(\"needle\");\nfunction demo(input, req, obj) {\n  return\
       \ needle(\"get\", \"https://example.com\");\n}\n"
     expect_no_match: true
-  description: "needle(method, url) \u2014 tainted URL enables SSRF."
+  description: "needle(method, url) - tainted URL enables SSRF."
 - id: typescript.ssrf.ky
   enabled: true
   language: typescript
@@ -445,7 +445,7 @@
     code: "const _u = require(\"ky\");\nfunction demo(input, req, obj) {\n  return\
       \ ky.get(\"https://example.com\");\n}\n"
     expect_no_match: true
-  description: "ky.get(tainted URL) \u2014 fetch-based SSRF."
+  description: "ky.get(tainted URL) - fetch-based SSRF."
 - id: typescript.ssrf.ky_post
   enabled: true
   language: typescript
@@ -472,4 +472,4 @@
     code: "const _u = require(\"ky\");\nfunction demo(input, req, obj) {\n  return\
       \ ky.post(\"https://example.com\");\n}\n"
     expect_no_match: true
-  description: "ky.post(tainted URL) \u2014 fetch-based SSRF."
+  description: "ky.post(tainted URL) - fetch-based SSRF."

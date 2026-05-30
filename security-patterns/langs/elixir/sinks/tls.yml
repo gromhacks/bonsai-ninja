@@ -3,7 +3,7 @@
 # inspects the immediate kw list, so `keyword_arg_equals` hits the
 # top-level (Tesla.client insecure: true, :ssl.connect verify:
 # :verify_none). Nested kw lists (HTTPoison `ssl: [verify: :verify_none]`)
-# cannot be inspected in v1 — those rules stay disabled to avoid
+# cannot be inspected in v1 - those rules stay disabled to avoid
 # firing on every HTTP call.
 - id: elixir.tls.ssl_connect_verify_none
   enabled: true
@@ -24,7 +24,7 @@
           :ssl.connect(input, verify: :verify_none)
         end
       end
-  description: "Erlang :ssl.connect(_, verify: :verify_none) — peer certificate is not validated; MITM trivial."
+  description: "Erlang :ssl.connect(_, verify: :verify_none) - peer certificate is not validated; MITM trivial."
 
 - id: elixir.tls.tesla_insecure_adapter
   enabled: true
@@ -48,7 +48,7 @@
           Tesla.client(input, insecure: true)
         end
       end
-  description: "Tesla.client(_, insecure: true) — Hackney adapter with cert validation disabled; MITM trivial."
+  description: "Tesla.client(_, insecure: true) - Hackney adapter with cert validation disabled; MITM trivial."
 
   imports:
   - Tesla
@@ -65,7 +65,7 @@
     kind: call
     callee:
       attribute: [HTTPoison, get]
-  description: "Disabled — HTTPoison.get with ssl: [verify: :verify_none] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."
+  description: "Disabled - HTTPoison.get with ssl: [verify: :verify_none] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."
 
 - id: elixir.tls.finch_no_verify
   enabled: false
@@ -80,4 +80,4 @@
     kind: call
     callee:
       attribute: [Finch, build]
-  description: "Disabled — Finch.build with conn_opts: [transport_opts: [verify: :verify_none]] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."
+  description: "Disabled - Finch.build with conn_opts: [transport_opts: [verify: :verify_none]] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."

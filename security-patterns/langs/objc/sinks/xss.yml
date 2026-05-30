@@ -23,7 +23,7 @@
     code: |
       void test(void) { [UIWebView loadHTMLString:@"<p>safe</p>"]; }
     expect_no_match: true
-  description: "UIWebView (deprecated, removed iOS 12+) / WKWebView -loadHTMLString:baseURL: with tainted HTML \u2014 script\
+  description: "UIWebView (deprecated, removed iOS 12+) / WKWebView -loadHTMLString:baseURL: with tainted HTML - script\
     \ executes in webview origin. The baseURL controls the SOP origin (file:// vs https://app/), so a tainted baseURL widens\
     \ the blast radius. Constrained to webview receivers. Merged collision aliases: objc.xss.wkwebview_loadhtml_concat."
   aliases:
@@ -51,7 +51,7 @@
     code: |
       void test(void) { [UIWebView loadData:@"safe"]; }
     expect_no_match: true
-  description: "WKWebView -loadData:MIMEType:characterEncodingName:baseURL: \u2014 same XSS surface as loadHTMLString when\
+  description: "WKWebView -loadData:MIMEType:characterEncodingName:baseURL: - same XSS surface as loadHTMLString when\
     \ MIMEType is text/html and data is tainted. Constrained to webview receivers."
 - id: objc.xss.wkwebview_evaluatejavascript
   enabled: false
@@ -67,7 +67,7 @@
     kind: call
     callee:
       name: evaluateJavaScript
-  description: "Disabled \u2014 canonical rule is objc.eval.evaluate_javascript in eval.yml. evaluateJavaScript:completionHandler:\
+  description: "Disabled - canonical rule is objc.eval.evaluate_javascript in eval.yml. evaluateJavaScript:completionHandler:\
     \ is code-injection, not pure XSS."
 - id: objc.xss.webview_stringbyevaluatingjs
   enabled: true
@@ -93,7 +93,7 @@
     code: |
       void test(void) { stringByEvaluatingJavaScriptFromString(@"1 + 1"); }
     expect_no_match: true
-  description: "UIWebView -stringByEvaluatingJavaScriptFromString: (deprecated) \u2014 runs tainted JS synchronously in webview\
+  description: "UIWebView -stringByEvaluatingJavaScriptFromString: (deprecated) - runs tainted JS synchronously in webview\
     \ origin."
 - id: objc.xss.nsattributedstring_inithtml
   enabled: true
@@ -118,7 +118,7 @@
     code: |
       void test(void) { [NSAttributedString initWithHTML:@"<p>safe</p>"]; }
     expect_no_match: true
-  description: "NSAttributedString -initWithHTML:documentAttributes: \u2014 parses HTML and may fetch remote subresources\
+  description: "NSAttributedString -initWithHTML:documentAttributes: - parses HTML and may fetch remote subresources\
     \ (NSHTMLTextDocumentType). Constrained to attributed string receivers."
 - id: objc.xss.nsattributedstring_initdata
   enabled: false
@@ -133,5 +133,5 @@
     kind: call
     callee:
       name: initWithData
-  description: "Disabled \u2014 NSAttributedString -initWithData:options:documentAttributes:error: renders HTML only when\
+  description: "Disabled - NSAttributedString -initWithData:options:documentAttributes:error: renders HTML only when\
     \ NSHTMLTextDocumentType option set; cannot observe dict keys."

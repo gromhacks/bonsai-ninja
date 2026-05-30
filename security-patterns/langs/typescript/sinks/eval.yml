@@ -24,7 +24,7 @@
         return eval("1 + 1");
       }
     expect_no_match: true
-  description: "eval() — the JS global eval identifier executes tainted strings as code."
+  description: "eval() - the JS global eval identifier executes tainted strings as code."
 
 - id: typescript.eval.function_constructor
   enabled: false
@@ -38,7 +38,7 @@
     kind: new
     callee:
       name: Function
-  description: "Disabled duplicate — adapter also emits new Function(...) as the call-form Function fact, covered by typescript.eval.function_constructor_call."
+  description: "Disabled duplicate - adapter also emits new Function(...) as the call-form Function fact, covered by typescript.eval.function_constructor_call."
 
 - id: typescript.eval.function_constructor_call
   aliases: [typescript.eval.function_constructor]
@@ -76,7 +76,7 @@
   - name: arg tainted literal negative
     code: "function demo(input, req, obj) {\n  return new Function(\"safe\");\n}\n"
     expect_no_match: true
-  description: "Function('...' + body) / Function(body) — call-form Function constructor compiles attacker-controlled source."
+  description: "Function('...' + body) / Function(body) - call-form Function constructor compiles attacker-controlled source."
 
 - id: typescript.eval.settimeout_string
   enabled: false
@@ -90,7 +90,7 @@
     kind: call
     callee:
       name: setTimeout
-  description: "Disabled — setTimeout is overwhelmingly called with a callback; only the rare string form is eval'd. Re-enable with a first-arg string constraint."
+  description: "Disabled - setTimeout is overwhelmingly called with a callback; only the rare string form is eval'd. Re-enable with a first-arg string constraint."
 
 - id: typescript.eval.setinterval_string
   enabled: false
@@ -104,7 +104,7 @@
     kind: call
     callee:
       name: setInterval
-  description: "Disabled — same reasoning as setTimeout_string."
+  description: "Disabled - same reasoning as setTimeout_string."
 
 - id: typescript.eval.setimmediate_string
   enabled: false
@@ -118,7 +118,7 @@
     kind: call
     callee:
       name: setImmediate
-  description: "Disabled — Node setImmediate only takes a callback; historically no string-form eval."
+  description: "Disabled - Node setImmediate only takes a callback; historically no string-form eval."
 
 - id: typescript.eval.execscript
   enabled: false
@@ -132,7 +132,7 @@
     kind: call
     callee:
       name: execScript
-  description: "Disabled — IE-only legacy; removed from modern runtimes."
+  description: "Disabled - IE-only legacy; removed from modern runtimes."
 
 - id: typescript.eval.vm_runinthiscontext
   enabled: true
@@ -161,7 +161,7 @@
         return vm.runInThisContext("1 + 1");
       }
     expect_no_match: true
-  description: "Node vm.runInThisContext(tainted) — compiles & runs arbitrary JS."
+  description: "Node vm.runInThisContext(tainted) - compiles & runs arbitrary JS."
 
 - id: typescript.eval.vm_runinnewcontext
   enabled: true
@@ -326,7 +326,7 @@
     kind: call
     callee:
       name: import
-  description: "Disabled — `import(x)` is a language form, rarely surfaced as an identifier call; use module-resolution analysis instead."
+  description: "Disabled - `import(x)` is a language form, rarely surfaced as an identifier call; use module-resolution analysis instead."
 
 - id: typescript.eval.require_dynamic
   enabled: true
@@ -353,7 +353,7 @@
         return require("express");
       }
     expect_no_match: true
-  description: "require(tainted) — attacker-controlled CommonJS module specifier can load unintended code or files."
+  description: "require(tainted) - attacker-controlled CommonJS module specifier can load unintended code or files."
 
 # Reflection-based dynamic invocation (T406). Tag
 # code-injection so reviewer enumerates with `security sinks
@@ -384,4 +384,4 @@
         return Reflect.apply(Math.max, null, [1, 2]);
       }
     expect_no_match: true
-  description: "Reflect.apply (TS) — same as JS. JS Reflect global has no canonical ecosystem package, so strict `['Reflect', 'apply']` match only."
+  description: "Reflect.apply (TS) - same as JS. JS Reflect global has no canonical ecosystem package, so strict `['Reflect', 'apply']` match only."

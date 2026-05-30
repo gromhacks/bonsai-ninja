@@ -29,7 +29,7 @@
         return knex.raw("SELECT 1", "SELECT * FROM users WHERE id = " + input);
       }
     expect_no_match: true
-  description: "knex.raw(tainted) — template-interpolated SQL."
+  description: "knex.raw(tainted) - template-interpolated SQL."
 - id: typescript.sqli.prisma_query_raw_unsafe
   enabled: true
   language: typescript
@@ -69,7 +69,7 @@
         return prisma.$queryRawUnsafe("SELECT 1", "SELECT * FROM users WHERE id = " + input);
       }
     expect_no_match: true
-  description: "Prisma prisma.$queryRawUnsafe — string-built SQL."
+  description: "Prisma prisma.$queryRawUnsafe - string-built SQL."
 - id: typescript.sqli.prisma_executerawunsafe
   enabled: true
   language: typescript
@@ -109,7 +109,7 @@
         return prisma.$executeRawUnsafe("SELECT 1", "SELECT * FROM users WHERE id = " + input);
       }
     expect_no_match: true
-  description: "Prisma prisma.$executeRawUnsafe — string-built SQL."
+  description: "Prisma prisma.$executeRawUnsafe - string-built SQL."
 - id: typescript.sqli.prisma_query_raw
   enabled: false
   disabled_reason:
@@ -127,7 +127,7 @@
       attribute:
       - prisma
       - $queryRaw
-  description: "Disabled — prisma.$queryRaw uses tagged templates (parameterised); only dangerous if tainted Prisma.sql is spliced as raw."
+  description: "Disabled - prisma.$queryRaw uses tagged templates (parameterised); only dangerous if tainted Prisma.sql is spliced as raw."
 - id: typescript.sqli.better_sqlite3_prepare
   enabled: false
   disabled_reason:
@@ -145,7 +145,7 @@
       attribute:
       - db
       - prepare
-  description: "Disabled — db.prepare is parameterised; only dangerous if tainted string interpolation forms the SQL."
+  description: "Disabled - db.prepare is parameterised; only dangerous if tainted string interpolation forms the SQL."
 - id: typescript.sqli.sqlite3_run
   enabled: true
   language: typescript
@@ -177,7 +177,7 @@
         return db.run("SELECT 1");
       }
     expect_no_match: true
-  description: "sqlite3 db.run with a concatenated SQL string — use the param-array form."
+  description: "sqlite3 db.run with a concatenated SQL string - use the param-array form."
 - id: typescript.sqli.sqlite3_exec
   enabled: true
   language: typescript
@@ -210,7 +210,7 @@
         return db.exec("SELECT 1");
       }
     expect_no_match: true
-  description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string — no binding support."
+  description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string - no binding support."
 - id: typescript.sqli.better_sqlite3_exec
   enabled: false
   disabled_reason:
@@ -228,7 +228,7 @@
       attribute:
       - db
       - exec
-  description: "Disabled duplicate — same db.exec shape is covered by typescript.sqli.sqlite3_exec with both package names."
+  description: "Disabled duplicate - same db.exec shape is covered by typescript.sqli.sqlite3_exec with both package names."
 - id: typescript.sqli.method_query_concat
   enabled: true
   language: typescript
@@ -256,7 +256,7 @@
         return conn.query("SELECT 1");
       }
     expect_no_match: true
-  description: "<recv>.query(sql) — package-anchored SQL-injection sink for database clients and ORMs that share the standard query verb. Merged aliases: typescript.sqli.method_query_sql_variable."
+  description: "<recv>.query(sql) - package-anchored SQL-injection sink for database clients and ORMs that share the standard query verb. Merged aliases: typescript.sqli.method_query_sql_variable."
   aliases:
   - typescript.sqli.method_query_sql_variable
   - typescript.nosql.typeorm_query
@@ -308,7 +308,7 @@
         return conn.execute("SELECT 1");
       }
     expect_no_match: true
-  description: "<recv>.execute(sql) — same shape as `query`. Merged collision aliases: typescript.graphql.schema_execute, typescript.nosql.cassandra_execute, typescript.sqli.mysql_execute, typescript.sqli.mysql_execute_db."
+  description: "<recv>.execute(sql) - same shape as `query`. Merged collision aliases: typescript.graphql.schema_execute, typescript.nosql.cassandra_execute, typescript.sqli.mysql_execute, typescript.sqli.mysql_execute_db."
   aliases:
   - typescript.graphql.schema_execute
   - typescript.nosql.cassandra_execute
@@ -367,7 +367,7 @@
         return PrismaClient.$queryRawUnsafe("SELECT 1");
       }
     expect_no_match: true
-  description: "PrismaClient.$queryRawUnsafe — static/typed client shape for unsafe raw SQL strings."
+  description: "PrismaClient.$queryRawUnsafe - static/typed client shape for unsafe raw SQL strings."
 - id: typescript.sqli.prisma_client_execute_raw_unsafe
   enabled: true
   language: typescript
@@ -417,7 +417,7 @@
         return PrismaClient.$executeRawUnsafe("SELECT 1");
       }
     expect_no_match: true
-  description: "PrismaClient.$executeRawUnsafe — unsafe raw SQL execution path."
+  description: "PrismaClient.$executeRawUnsafe - unsafe raw SQL execution path."
 - id: typescript.sqli.prisma_raw_fragment
   enabled: true
   language: typescript
@@ -489,4 +489,4 @@
         return Database.rawQuery("SELECT 1");
       }
     expect_no_match: true
-  description: "Database.rawQuery(sql) — framework database facade raw SQL execution with string-built SQL."
+  description: "Database.rawQuery(sql) - framework database facade raw SQL execution with string-built SQL."

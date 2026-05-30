@@ -28,7 +28,7 @@
         }
       }
     expect_no_match: true
-  description: "SAXParser.parse — disable external entities."
+  description: "SAXParser.parse - disable external entities."
 
 - id: java.xxe.saxparserfactory_newinstance
   enabled: true
@@ -49,7 +49,7 @@
           SAXParserFactory.newInstance(input);
         }
       }
-  description: "SAXParserFactory.newInstance — flag if XMLConstants.FEATURE_SECURE_PROCESSING off."
+  description: "SAXParserFactory.newInstance - flag if XMLConstants.FEATURE_SECURE_PROCESSING off."
 
 - id: java.xxe.documentbuilder_parse
   enabled: true
@@ -118,7 +118,7 @@
         }
       }
     expect_no_match: true
-  description: "DocumentBuilder local receiver parse(...) — import-gated XML parse of tainted input while receiver-type facts are still adapter-dependent."
+  description: "DocumentBuilder local receiver parse(...) - import-gated XML parse of tainted input while receiver-type facts are still adapter-dependent."
 
   imports:
   - javax.xml.parsers
@@ -142,7 +142,7 @@
           DocumentBuilderFactory.newInstance(input);
         }
       }
-  description: "DocumentBuilderFactory.newInstance — flag without disallow-doctype-decl."
+  description: "DocumentBuilderFactory.newInstance - flag without disallow-doctype-decl."
 
 - id: java.xxe.xmlinputfactory_createreader
   enabled: true
@@ -173,7 +173,7 @@
         }
       }
     expect_no_match: true
-  description: "XMLInputFactory.createXMLStreamReader — flag if SUPPORT_DTD on."
+  description: "XMLInputFactory.createXMLStreamReader - flag if SUPPORT_DTD on."
 
 - id: java.xxe.xmlinputfactory_createevent
   enabled: true
@@ -235,7 +235,7 @@
         }
       }
     expect_no_match: true
-  description: "Transformer.transform — flag without ACCESS_EXTERNAL_DTD/STYLESHEET disabled."
+  description: "Transformer.transform - flag without ACCESS_EXTERNAL_DTD/STYLESHEET disabled."
 
 - id: java.xxe.schemafactory_newschema
   enabled: true
@@ -280,7 +280,7 @@
     kind: call
     callee:
       attribute: [XPath, evaluate]
-  description: "Disabled — XPath itself doesn't fetch entities; flag with XML source."
+  description: "Disabled - XPath itself doesn't fetch entities; flag with XML source."
 
 - id: java.xxe.unmarshaller_unmarshal
   enabled: true
@@ -311,7 +311,7 @@
         }
       }
     expect_no_match: true
-  description: "JAXB Unmarshaller.unmarshal — wraps SAX parser; same XXE rules apply."
+  description: "JAXB Unmarshaller.unmarshal - wraps SAX parser; same XXE rules apply."
 
 - id: java.xxe.dom4j_saxreader_read
   enabled: true
@@ -418,4 +418,4 @@
         }
       }
     expect_no_match: true
-  description: "Apache POI XSSFWorkbook(InputStream) — parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."
+  description: "Apache POI XSSFWorkbook(InputStream) - parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."

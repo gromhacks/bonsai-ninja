@@ -15,7 +15,7 @@
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    DirContext.search(\"\
       (uid=\" + input);\n  }\n}\n"
-  description: "JNDI DirContext.search \u2014 filter interpolation into an LDAP query\
+  description: "JNDI DirContext.search - filter interpolation into an LDAP query\
     \ is LDAP injection; attackers bypass auth checks or enumerate directory entries."
   disabled_reason:
     code: over-broad
@@ -36,7 +36,7 @@
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    InitialDirContext.search(\"\
       (uid=\" + input);\n  }\n}\n"
-  description: "JNDI InitialDirContext.search \u2014 sync LDAP lookup; tainted filter\
+  description: "JNDI InitialDirContext.search - sync LDAP lookup; tainted filter\
     \ allows LDAP injection."
   disabled_reason:
     code: over-broad
@@ -57,7 +57,7 @@
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    InitialLdapContext.search(\"\
       (uid=\" + input);\n  }\n}\n"
-  description: "JNDI InitialLdapContext.search \u2014 LDAP v3 lookup; tainted filter\
+  description: "JNDI InitialLdapContext.search - LDAP v3 lookup; tainted filter\
     \ allows LDAP injection."
   disabled_reason:
     code: over-broad
@@ -80,7 +80,7 @@
   - name: generated shape example
     code: "import org.springframework.ldap.*;\nclass App {\n  void handle(String input)\
       \ throws Exception {\n    LdapTemplate.search(\"(uid=\" + input);\n  }\n}\n"
-  description: "Spring LdapTemplate.search \u2014 framework-level LDAP search; tainted\
+  description: "Spring LdapTemplate.search - framework-level LDAP search; tainted\
     \ filter string allows attacker to rewrite the query predicate."
   disabled_reason:
     code: over-broad
@@ -111,7 +111,7 @@
       \ throws Exception {\n    LdapTemplate.bind(\"uid=alice,dc=example,dc=com\"\
       );\n  }\n}\n"
     expect_no_match: true
-  description: "Spring LdapTemplate.bind \u2014 tainted DN lets the attacker write\
+  description: "Spring LdapTemplate.bind - tainted DN lets the attacker write\
     \ to arbitrary directory entries."
 - id: java.ldap.spring_ldap_template_authenticate
   enabled: true
@@ -142,7 +142,7 @@
       \ throws Exception {\n    LdapTemplate.authenticate(\"uid=alice,dc=example,dc=com\"\
       );\n  }\n}\n"
     expect_no_match: true
-  description: "Spring LdapTemplate.authenticate \u2014 tainted filter can bypass\
+  description: "Spring LdapTemplate.authenticate - tainted filter can bypass\
     \ auth by matching unintended entries (e.g. `uid=*` substring injection)."
 - id: java.ldap.spring_ldap_template_modify_attributes
   enabled: true
@@ -172,7 +172,7 @@
       \ throws Exception {\n    LdapTemplate.modifyAttributes(\"uid=alice,dc=example,dc=com\"\
       );\n  }\n}\n"
     expect_no_match: true
-  description: "Spring LdapTemplate.modifyAttributes \u2014 tainted DN or attribute\
+  description: "Spring LdapTemplate.modifyAttributes - tainted DN or attribute\
     \ values allow arbitrary directory writes."
 - id: java.ldap.unboundid_search
   enabled: false
@@ -193,7 +193,7 @@
   - name: generated shape example
     code: "import com.unboundid.ldap.*;\nclass App {\n  void handle(String input)\
       \ throws Exception {\n    LDAPConnection.search(\"(uid=\" + input);\n  }\n}\n"
-  description: "UnboundID LDAPConnection.search \u2014 tainted filter parameter allows\
+  description: "UnboundID LDAPConnection.search - tainted filter parameter allows\
     \ LDAP injection against the directory."
   disabled_reason:
     code: over-broad
@@ -225,7 +225,7 @@
       \ throws Exception {\n    LDAPConnection.bind(\"uid=alice,dc=example,dc=com\"\
       );\n  }\n}\n"
     expect_no_match: true
-  description: "UnboundID LDAPConnection.bind \u2014 tainted DN allows auth bypass\
+  description: "UnboundID LDAPConnection.bind - tainted DN allows auth bypass\
     \ via DN injection."
 - id: java.ldap.jndi_search_filter_compose
   enabled: false
@@ -240,7 +240,7 @@
     kind: call
     callee:
       name: getFilterFormatString
-  description: "Disabled \u2014 audit-only; flag any caller of a string-based filter\
+  description: "Disabled - audit-only; flag any caller of a string-based filter\
     \ composer so reviewers can verify escape discipline."
 - id: java.ldap.apache_dir_search
   enabled: false
@@ -261,7 +261,7 @@
   - name: generated shape example
     code: "import org.apache.directory.*;\nclass App {\n  void handle(String input)\
       \ throws Exception {\n    LdapConnection.search(\"(uid=\" + input);\n  }\n}\n"
-  description: "Apache Directory LdapConnection.search \u2014 tainted filter allows\
+  description: "Apache Directory LdapConnection.search - tainted filter allows\
     \ LDAP injection."
   disabled_reason:
     code: over-broad

@@ -48,7 +48,7 @@
         open("/srv/files/readme.txt", 0);
       }
     expect_no_match: true
-  description: "POSIX open(2) with tainted path — attacker-controlled paths can read or create arbitrary files on disk."
+  description: "POSIX open(2) with tainted path - attacker-controlled paths can read or create arbitrary files on disk."
 - id: c.path.openat
   enabled: true
   language: c
@@ -72,7 +72,7 @@
         openat("safe", "safe");
       }
     expect_no_match: true
-  description: "openat — fdsafe but tainted path still risky."
+  description: "openat - fdsafe but tainted path still risky."
 - id: c.path.unlink
   enabled: true
   language: c
@@ -117,7 +117,7 @@
   - name: literal rename source negative
     code: "void example(void) {\n  rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "rename(2) with tainted source or destination path — attacker-controlled paths can move files outside the intended directory or overwrite arbitrary targets."
+  description: "rename(2) with tainted source or destination path - attacker-controlled paths can move files outside the intended directory or overwrite arbitrary targets."
 - id: c.path.rename_dest
   enabled: true
   language: c
@@ -138,7 +138,7 @@
   - name: literal rename destination negative
     code: "void example(void) {\n  rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "rename(2) with tainted destination path — attacker-controlled paths can overwrite arbitrary targets."
+  description: "rename(2) with tainted destination path - attacker-controlled paths can overwrite arbitrary targets."
 - id: c.path.access
   enabled: false
   disabled_reason:
@@ -155,7 +155,7 @@
   match_examples:
   - name: generated direct match
     code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  access(arg);\n}\n"
-  description: "Disabled — duplicate of c.toctou.access_check; access(2) is modeled as the TOCTOU check site."
+  description: "Disabled - duplicate of c.toctou.access_check; access(2) is modeled as the TOCTOU check site."
 - id: c.path.chmod
   enabled: true
   language: c
@@ -203,7 +203,7 @@
         chown("safe");
       }
     expect_no_match: true
-  description: "chown(2) with tainted path — attacker-controlled paths can change ownership of arbitrary files via TOCTOU or symlink races."
+  description: "chown(2) with tainted path - attacker-controlled paths can change ownership of arbitrary files via TOCTOU or symlink races."
 - id: c.path.symlink
   enabled: true
   language: c
@@ -228,7 +228,7 @@
         symlink("safe");
       }
     expect_no_match: true
-  description: "symlink — link-target may be attacker-chosen."
+  description: "symlink - link-target may be attacker-chosen."
 - id: c.path.symlink_linkpath
   enabled: true
   language: c
@@ -256,7 +256,7 @@
         symlink("safe", "safe");
       }
     expect_no_match: true
-  description: "symlink(target, linkpath) — tainted link paths can create links outside the intended directory."
+  description: "symlink(target, linkpath) - tainted link paths can create links outside the intended directory."
 - id: c.path.link
   enabled: true
   language: c
@@ -281,7 +281,7 @@
         link("safe");
       }
     expect_no_match: true
-  description: "link(2) — hardlink creation with tainted path."
+  description: "link(2) - hardlink creation with tainted path."
 - id: c.path.link_newpath
   enabled: true
   language: c
@@ -309,7 +309,7 @@
         link("safe", "safe");
       }
     expect_no_match: true
-  description: "link(oldpath, newpath) — tainted destination paths can create hard links outside the intended directory."
+  description: "link(oldpath, newpath) - tainted destination paths can create hard links outside the intended directory."
 - id: c.path.creat
   enabled: true
   language: c
@@ -333,7 +333,7 @@
         creat("safe");
       }
     expect_no_match: true
-  description: "creat(2) — create file at tainted path."
+  description: "creat(2) - create file at tainted path."
 - id: c.path.mkdir
   enabled: true
   language: c
@@ -405,7 +405,7 @@
         remove("safe");
       }
     expect_no_match: true
-  description: "remove(3) — delete tainted path."
+  description: "remove(3) - delete tainted path."
 - id: c.path.stat
   enabled: false
   disabled_reason:
@@ -419,7 +419,7 @@
     kind: call
     callee:
       name: stat
-  description: "Disabled — stat on tainted path is info-leak only; too noisy."
+  description: "Disabled - stat on tainted path is info-leak only; too noisy."
 - id: c.path.unlinkat
   enabled: true
   language: c
@@ -443,7 +443,7 @@
         unlinkat("safe", "safe");
       }
     expect_no_match: true
-  description: "unlinkat(dirfd, tainted_path, ...) — delete relative to dirfd; tainted path can still escape via .. when dirfd is broad."
+  description: "unlinkat(dirfd, tainted_path, ...) - delete relative to dirfd; tainted path can still escape via .. when dirfd is broad."
 - id: c.path.freopen
   enabled: true
   language: c
@@ -467,7 +467,7 @@
         freopen("safe");
       }
     expect_no_match: true
-  description: "freopen(tainted_path, mode, stream) — re-binds an existing FILE* to an attacker-chosen path."
+  description: "freopen(tainted_path, mode, stream) - re-binds an existing FILE* to an attacker-chosen path."
 - id: c.path.fopen64
   enabled: true
   language: c
@@ -491,7 +491,7 @@
         fopen64("safe");
       }
     expect_no_match: true
-  description: "glibc fopen64 — large-file variant of fopen; same traversal exposure."
+  description: "glibc fopen64 - large-file variant of fopen; same traversal exposure."
 - id: c.path.opendir
   enabled: true
   language: c
@@ -515,7 +515,7 @@
         opendir("safe");
       }
     expect_no_match: true
-  description: "opendir(tainted_path) — attacker-controlled directory enumeration."
+  description: "opendir(tainted_path) - attacker-controlled directory enumeration."
 - id: c.path.win_create_file_a
   enabled: true
   language: c
@@ -541,7 +541,7 @@
         CreateFileA("safe");
       }
     expect_no_match: true
-  description: "Win32 CreateFileA(tainted_path, ...) — opens or creates a file at attacker-controlled path."
+  description: "Win32 CreateFileA(tainted_path, ...) - opens or creates a file at attacker-controlled path."
   imports:
   - windows
   - windows.h
@@ -570,7 +570,7 @@
         CreateFileW("safe");
       }
     expect_no_match: true
-  description: "Win32 CreateFileW(tainted_path, ...) — UTF-16 variant; same traversal risk."
+  description: "Win32 CreateFileW(tainted_path, ...) - UTF-16 variant; same traversal risk."
   imports:
   - windows
   - windows.h
@@ -599,7 +599,7 @@
         DeleteFileA("safe");
       }
     expect_no_match: true
-  description: "Win32 DeleteFileA(tainted_path) — delete file at attacker-controlled path."
+  description: "Win32 DeleteFileA(tainted_path) - delete file at attacker-controlled path."
   imports:
   - windows
   - windows.h
@@ -628,7 +628,7 @@
         DeleteFileW("safe");
       }
     expect_no_match: true
-  description: "Win32 DeleteFileW(tainted_path) — UTF-16 variant; delete arbitrary file."
+  description: "Win32 DeleteFileW(tainted_path) - UTF-16 variant; delete arbitrary file."
   imports:
   - windows
   - windows.h
@@ -650,7 +650,7 @@
   match_examples:
   - name: generated direct match
     code: "#include <libarchive/archive.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  archive_read_extract(arg);\n}\n"
-  description: "Disabled — archive_read_extract uses the pathname stored in the archive entry; accurate Zip Slip matching needs entry/receiver-state tracking, so the call-only rule is over-broad."
+  description: "Disabled - archive_read_extract uses the pathname stored in the archive entry; accurate Zip Slip matching needs entry/receiver-state tracking, so the call-only rule is over-broad."
 - id: c.path.archive_entry_pathname
   enabled: false
   disabled_reason:
@@ -666,4 +666,4 @@
     kind: call
     callee:
       name: archive_entry_pathname
-  description: "Disabled — informational marker for libarchive entry pathname read; pair with archive_read_extract sink for the actual Zip Slip site."
+  description: "Disabled - informational marker for libarchive entry pathname read; pair with archive_read_extract sink for the actual Zip Slip site."

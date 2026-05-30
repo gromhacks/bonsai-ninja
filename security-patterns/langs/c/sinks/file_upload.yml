@@ -21,7 +21,7 @@
         char *fmt = arg;
         MHD_create_post_processor(arg);
       }
-  description: "Disabled — MHD_create_post_processor installs multipart parsing callbacks; it is not itself a file-write sink. Model callback filename arguments as remote sources when callback adapter facts are available."
+  description: "Disabled - MHD_create_post_processor installs multipart parsing callbacks; it is not itself a file-write sink. Model callback filename arguments as remote sources when callback adapter facts are available."
 
 - id: c.upload.civetweb_form_data_handler
   enabled: false
@@ -45,7 +45,7 @@
         char *fmt = arg;
         mg_handle_form_request(arg);
       }
-  description: "Disabled — mg_handle_form_request dispatches multipart/form callbacks; it is not itself a write sink. Flag downstream writes using callback-provided filenames instead."
+  description: "Disabled - mg_handle_form_request dispatches multipart/form callbacks; it is not itself a write sink. Flag downstream writes using callback-provided filenames instead."
 
 - id: c.upload.mongoose_mg_http_upload
   enabled: true
@@ -76,7 +76,7 @@
         mg_http_upload("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "mongoose mg_http_upload — flag tainted destination."
+  description: "mongoose mg_http_upload - flag tainted destination."
 
 - id: c.upload.fopen_uploaded_path
   enabled: false
@@ -90,4 +90,4 @@
     kind: call
     callee:
       name: fopen
-  description: "Disabled — generic fopen, covered by path-traversal."
+  description: "Disabled - generic fopen, covered by path-traversal."

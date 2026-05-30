@@ -59,7 +59,7 @@
         MHD_add_response_header("safe", "safe");
       }
     expect_no_match: true
-  description: "MHD_add_response_header(response, name, value) — tainted header names can corrupt response headers."
+  description: "MHD_add_response_header(response, name, value) - tainted header names can corrupt response headers."
 
 - id: c.header.mhd_add_response_footer
   enabled: true
@@ -150,7 +150,7 @@
         mg_response_header_add("safe", "safe");
       }
     expect_no_match: true
-  description: "mg_response_header_add(..., name, value) — tainted header names can corrupt response headers."
+  description: "mg_response_header_add(..., name, value) - tainted header names can corrupt response headers."
 
 - id: c.header.mongoose_send_header
   enabled: true
@@ -210,7 +210,7 @@
         mg_send_header("safe", "safe");
       }
     expect_no_match: true
-  description: "mg_send_header(conn, name, value) — tainted header names can corrupt response headers."
+  description: "mg_send_header(conn, name, value) - tainted header names can corrupt response headers."
 
 - id: c.header.mongoose_printf_header
   enabled: false
@@ -225,4 +225,4 @@
     kind: call
     callee:
       name: mg_printf
-  description: "Disabled — generic mg_printf; flag when format string emits headers."
+  description: "Disabled - generic mg_printf; flag when format string emits headers."

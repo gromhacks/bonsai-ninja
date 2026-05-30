@@ -1,6 +1,6 @@
-# Lua cloud / serverless sources — trust: service.
+# Lua cloud / serverless sources - trust: service.
 # AWS Lambda custom runtime (Lua) handler receives an event table.
-# Typical pattern: function handler(event, context) — event.body is attacker-controlled.
+# Typical pattern: function handler(event, context) - event.body is attacker-controlled.
 # Lua adapter cannot pin handler signature; rely on the http-input sources invoked
 # inside handler bodies. Keep disabled stub for canonical coverage.
 - id: lua.source.lambda_event
@@ -14,4 +14,4 @@
     kind: read
     target:
       name: event
-  description: "Disabled — AWS Lambda Lua custom runtime handler event table (too broad without handler narrowing)."
+  description: "Disabled - AWS Lambda Lua custom runtime handler event table (too broad without handler narrowing)."

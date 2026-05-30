@@ -24,7 +24,7 @@
         system("safe");
       }
     expect_no_match: true
-  description: "libc system() — passes the string to /bin/sh -c; any attacker metacharacter (;|`$()) runs arbitrary commands."
+  description: "libc system() - passes the string to /bin/sh -c; any attacker metacharacter (;|`$()) runs arbitrary commands."
 - id: c.cmdi.popen
   enabled: true
   language: c
@@ -50,7 +50,7 @@
         popen("safe");
       }
     expect_no_match: true
-  description: "popen() — wraps fork+exec of /bin/sh -c; same shell-injection surface as system()."
+  description: "popen() - wraps fork+exec of /bin/sh -c; same shell-injection surface as system()."
 - id: c.cmdi.execl
   enabled: true
   language: c
@@ -78,7 +78,7 @@
         execl("safe");
       }
     expect_no_match: true
-  description: "execl(path, arg0, ...) — tainted path runs an attacker-chosen binary."
+  description: "execl(path, arg0, ...) - tainted path runs an attacker-chosen binary."
 - id: c.cmdi.execlp
   enabled: true
   language: c
@@ -106,7 +106,7 @@
         execlp("safe");
       }
     expect_no_match: true
-  description: "execlp(file, ...) — PATH-resolves the program name; tainted file can pick up an attacker binary from $PATH."
+  description: "execlp(file, ...) - PATH-resolves the program name; tainted file can pick up an attacker binary from $PATH."
 - id: c.cmdi.execv
   enabled: true
   language: c
@@ -134,7 +134,7 @@
         execv("safe");
       }
     expect_no_match: true
-  description: "execv(path, argv) — tainted path or argv lets attacker choose the binary / flags."
+  description: "execv(path, argv) - tainted path or argv lets attacker choose the binary / flags."
 - id: c.cmdi.execv_argv
   enabled: true
   language: c
@@ -160,7 +160,7 @@
         execv("safe", "safe");
       }
     expect_no_match: true
-  description: "execv(path, argv) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+  description: "execv(path, argv) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: c.cmdi.execvp
   enabled: true
   language: c
@@ -186,7 +186,7 @@
         execvp("safe");
       }
     expect_no_match: true
-  description: "execvp(file, argv) — PATH-resolved; tainted file hijacks via $PATH, tainted argv passes attacker flags."
+  description: "execvp(file, argv) - PATH-resolved; tainted file hijacks via $PATH, tainted argv passes attacker flags."
 - id: c.cmdi.execvp_argv
   enabled: true
   language: c
@@ -213,7 +213,7 @@
         execvp("git", args);
       }
     expect_no_match: true
-  description: "execvp(file, argv) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+  description: "execvp(file, argv) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: c.cmdi.execve
   enabled: true
   language: c
@@ -241,7 +241,7 @@
         execve("safe");
       }
     expect_no_match: true
-  description: "execve(path, argv, envp) — tainted path = arbitrary binary; tainted envp can also set LD_PRELOAD etc."
+  description: "execve(path, argv, envp) - tainted path = arbitrary binary; tainted envp can also set LD_PRELOAD etc."
 - id: c.cmdi.execve_argv
   enabled: true
   language: c
@@ -267,7 +267,7 @@
         execve("safe", "safe");
       }
     expect_no_match: true
-  description: "execve(path, argv, envp) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+  description: "execve(path, argv, envp) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: c.cmdi.execve_envp
   enabled: true
   language: c
@@ -293,7 +293,7 @@
         execve("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "execve(path, argv, envp) — tainted envp can influence loader/search behavior such as LD_PRELOAD or PATH."
+  description: "execve(path, argv, envp) - tainted envp can influence loader/search behavior such as LD_PRELOAD or PATH."
 - id: c.cmdi.posix_spawn
   enabled: true
   language: c
@@ -321,7 +321,7 @@
         posix_spawn("safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn — spawns process with argv list."
+  description: "posix_spawn - spawns process with argv list."
 - id: c.cmdi.posix_spawn_argv
   enabled: true
   language: c
@@ -347,7 +347,7 @@
         posix_spawn("safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted argv reaches the spawned process."
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) - tainted argv reaches the spawned process."
 - id: c.cmdi.posix_spawn_envp
   enabled: true
   language: c
@@ -373,7 +373,7 @@
         posix_spawn("safe", "safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) - tainted envp reaches the spawned process."
 - id: c.cmdi.posix_spawnp
   enabled: true
   language: c
@@ -401,7 +401,7 @@
         posix_spawnp("safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawnp — PATH-resolved spawn."
+  description: "posix_spawnp - PATH-resolved spawn."
 - id: c.cmdi.posix_spawnp_argv
   enabled: true
   language: c
@@ -427,7 +427,7 @@
         posix_spawnp("safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted argv reaches the PATH-resolved process."
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) - tainted argv reaches the PATH-resolved process."
 - id: c.cmdi.posix_spawnp_envp
   enabled: true
   language: c
@@ -453,7 +453,7 @@
         posix_spawnp("safe", "safe", "safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) - tainted envp reaches the spawned process."
 - id: c.cmdi.wordexp
   enabled: true
   language: c
@@ -481,7 +481,7 @@
         wordexp("safe");
       }
     expect_no_match: true
-  description: "wordexp — performs shell word expansion on a string (command substitution)."
+  description: "wordexp - performs shell word expansion on a string (command substitution)."
 - id: c.cmdi.execle
   enabled: true
   language: c
@@ -509,7 +509,7 @@
         execle("safe");
       }
     expect_no_match: true
-  description: "execle — exec with caller-supplied environment."
+  description: "execle - exec with caller-supplied environment."
 - id: c.cmdi.g_spawn_command_line_async
   enabled: true
   language: c
@@ -539,7 +539,7 @@
         g_spawn_command_line_async("safe");
       }
     expect_no_match: true
-  description: "GLib g_spawn_command_line_async — shell-parsed command string."
+  description: "GLib g_spawn_command_line_async - shell-parsed command string."
 - id: c.cmdi.g_spawn_command_line_sync
   enabled: true
   language: c
@@ -569,7 +569,7 @@
         g_spawn_command_line_sync("safe");
       }
     expect_no_match: true
-  description: "GLib g_spawn_command_line_sync — shell-parsed command string."
+  description: "GLib g_spawn_command_line_sync - shell-parsed command string."
 - id: c.cmdi.win_create_process_a
   enabled: true
   language: c
@@ -602,7 +602,7 @@
         CreateProcessA("safe", "safe");
       }
     expect_no_match: true
-  description: "Win32 CreateProcessA(NULL, tainted_cmdline, ...) — Windows command-line is parsed by the child; tainted lpCommandLine = arbitrary process exec."
+  description: "Win32 CreateProcessA(NULL, tainted_cmdline, ...) - Windows command-line is parsed by the child; tainted lpCommandLine = arbitrary process exec."
   imports:
   - windows
   - windows.h
@@ -633,7 +633,7 @@
         CreateProcessA("safe");
       }
     expect_no_match: true
-  description: "CreateProcessA(lpApplicationName, lpCommandLine, ...) — tainted application name selects the executable."
+  description: "CreateProcessA(lpApplicationName, lpCommandLine, ...) - tainted application name selects the executable."
   imports:
   - windows
   - windows.h
@@ -669,7 +669,7 @@
         CreateProcessW("safe", "safe");
       }
     expect_no_match: true
-  description: "Win32 CreateProcessW — UTF-16 variant; same command-line injection surface as CreateProcessA."
+  description: "Win32 CreateProcessW - UTF-16 variant; same command-line injection surface as CreateProcessA."
   imports:
   - windows
   - windows.h
@@ -700,7 +700,7 @@
         CreateProcessW("safe");
       }
     expect_no_match: true
-  description: "CreateProcessW(lpApplicationName, lpCommandLine, ...) — tainted application name selects the executable."
+  description: "CreateProcessW(lpApplicationName, lpCommandLine, ...) - tainted application name selects the executable."
   imports:
   - windows
   - windows.h
@@ -736,7 +736,7 @@
         ShellExecuteA("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "Win32 ShellExecuteA(hwnd, verb, tainted_file, params, dir, show) — invokes the shell handler for the given file/URL; tainted file or params runs arbitrary command."
+  description: "Win32 ShellExecuteA(hwnd, verb, tainted_file, params, dir, show) - invokes the shell handler for the given file/URL; tainted file or params runs arbitrary command."
   imports:
   - shellapi.h
   - shellapi
@@ -767,7 +767,7 @@
         ShellExecuteA("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "ShellExecuteA(..., lpFile, lpParameters, ...) — tainted parameters influence the shell-handled command."
+  description: "ShellExecuteA(..., lpFile, lpParameters, ...) - tainted parameters influence the shell-handled command."
   imports:
   - shellapi.h
   - shellapi
@@ -803,7 +803,7 @@
         ShellExecuteW("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "Win32 ShellExecuteW — UTF-16 variant; same shell-handler injection."
+  description: "Win32 ShellExecuteW - UTF-16 variant; same shell-handler injection."
   imports:
   - shellapi.h
   - shellapi
@@ -834,7 +834,7 @@
         ShellExecuteW("safe", "safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "ShellExecuteW(..., lpFile, lpParameters, ...) — tainted parameters influence the shell-handled command."
+  description: "ShellExecuteW(..., lpFile, lpParameters, ...) - tainted parameters influence the shell-handled command."
   imports:
   - shellapi.h
   - shellapi
@@ -863,7 +863,7 @@
         char *fmt = arg;
         ShellExecuteExA(arg);
       }
-  description: "Disabled — ShellExecuteExA stores lpFile/lpParameters inside SHELLEXECUTEINFO; accurate matching needs struct-field tracking, so the call-only rule is over-broad."
+  description: "Disabled - ShellExecuteExA stores lpFile/lpParameters inside SHELLEXECUTEINFO; accurate matching needs struct-field tracking, so the call-only rule is over-broad."
   imports:
   - shellapi.h
   - shellapi
@@ -899,7 +899,7 @@
         WinExec("safe");
       }
     expect_no_match: true
-  description: "Win32 WinExec(tainted_cmdline, show) — legacy command-line exec; deprecated but still in use."
+  description: "Win32 WinExec(tainted_cmdline, show) - legacy command-line exec; deprecated but still in use."
   imports:
   - windows
   - windows.h
@@ -930,7 +930,7 @@
         fexecve("safe", "safe");
       }
     expect_no_match: true
-  description: "fexecve(fd, argv, envp) — exec from an open fd; tainted fd / argv runs attacker-chosen binary."
+  description: "fexecve(fd, argv, envp) - exec from an open fd; tainted fd / argv runs attacker-chosen binary."
 - id: c.cmdi.fexecve_envp
   enabled: true
   language: c
@@ -956,7 +956,7 @@
         fexecve("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "fexecve(fd, argv, envp) — tainted envp reaches the spawned process."
+  description: "fexecve(fd, argv, envp) - tainted envp reaches the spawned process."
 - id: c.cmdi.fork_exec
   enabled: false
   disabled_reason:
@@ -969,4 +969,4 @@
     kind: call
     callee:
       name: fork
-  description: "Disabled — fork by itself is fine; flag with adjacent execve."
+  description: "Disabled - fork by itself is fine; flag with adjacent execve."

@@ -11,7 +11,7 @@
     kind: call
     callee:
       name: header
-  description: 'Disabled — header("Location: $url") is the canonical sink, but constraint requires literal-prefix detection.'
+  description: 'Disabled - header("Location: $url") is the canonical sink, but constraint requires literal-prefix detection.'
 - id: php.open_redirect.symfony_redirect
   enabled: true
   language: php
@@ -125,7 +125,7 @@
         Redirect::away("https://example.com/signed-out");
       }
     expect_no_match: true
-  description: Laravel Redirect::away(tainted) — explicit external redirect.
+  description: Laravel Redirect::away(tainted) - explicit external redirect.
   imports:
   - illuminate\routing
   - illuminate
@@ -162,7 +162,7 @@
         wp_redirect("/wp-admin/");
       }
     expect_no_match: true
-  description: WordPress wp_redirect — flag if not wp_safe_redirect.
+  description: WordPress wp_redirect - flag if not wp_safe_redirect.
 - id: php.open_redirect.wp_safe_redirect
   enabled: false
   disabled_reason:
@@ -178,7 +178,7 @@
     kind: call
     callee:
       name: wp_safe_redirect
-  description: Disabled — wp_safe_redirect enforces allowlist.
+  description: Disabled - wp_safe_redirect enforces allowlist.
 - id: php.open_redirect.laravel_redirect_helper
   enabled: false
   disabled_reason:
@@ -194,4 +194,4 @@
     kind: call
     callee:
       name: redirect
-  description: Disabled — bare redirect() collides with non-Laravel helpers such as Guzzle redirect middleware tests; enable only with Laravel package/import gating.
+  description: Disabled - bare redirect() collides with non-Laravel helpers such as Guzzle redirect middleware tests; enable only with Laravel package/import gating.

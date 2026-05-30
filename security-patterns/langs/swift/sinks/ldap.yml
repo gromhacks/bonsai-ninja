@@ -20,7 +20,7 @@
     code: |
       func test(input: String) { ldap_search_ext_s(ld, input, 0, "(uid=safe)", nil, 0, nil, nil, nil, 0, nil) }
     expect_no_match: true
-  description: "OpenLDAP ldap_search_ext_s — tainted filter."
+  description: "OpenLDAP ldap_search_ext_s - tainted filter."
 
 - id: swift.ldap.ldap_search_s
   enabled: true

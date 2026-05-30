@@ -21,4 +21,4 @@
         }
       }
   description: |-
-    Akka HTTP CorsSettings allowedOrigins HttpOriginMatcher.* — allow-all CORS.
+    Akka HTTP CorsSettings allowedOrigins HttpOriginMatcher.* - allow-all CORS.

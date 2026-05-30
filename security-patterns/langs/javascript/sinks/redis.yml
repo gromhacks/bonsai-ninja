@@ -26,7 +26,7 @@
         return redis.eval("return 1");
       }
     expect_no_match: true
-  description: redis.eval — Lua script injection when the script or keys/args are tainted.
+  description: redis.eval - Lua script injection when the script or keys/args are tainted.
 
 - id: javascript.redis.ioredis_eval
   enabled: true
@@ -56,7 +56,7 @@
         return ioredis.eval("return 1");
       }
     expect_no_match: true
-  description: ioredis.eval — same Lua injection hazard as node-redis.
+  description: ioredis.eval - same Lua injection hazard as node-redis.
 
 - id: javascript.redis.client_eval
   enabled: true
@@ -86,7 +86,7 @@
         return client.eval("return 1");
       }
     expect_no_match: true
-  description: "redis/ioredis client.eval — Lua script injection on tainted script body. `min_args: 1` rejects 0-arg `client.eval()` decoys (the script body is required)."
+  description: "redis/ioredis client.eval - Lua script injection on tainted script body. `min_args: 1` rejects 0-arg `client.eval()` decoys (the script body is required)."
 
 - id: javascript.redis.client_evalsha
   enabled: false
@@ -101,4 +101,4 @@
     kind: call
     callee:
       attribute: [client, evalsha]
-  description: "Disabled — evalsha runs a pre-loaded script by hash; only dangerous if the hash itself is attacker-controlled."
+  description: "Disabled - evalsha runs a pre-loaded script by hash; only dangerous if the hash itself is attacker-controlled."

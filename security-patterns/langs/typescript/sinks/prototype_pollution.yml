@@ -33,7 +33,7 @@
         return Object.assign(target, { safe: true });
       }
     expect_no_match: true
-  description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
+  description: "Object.assign(target, source) - shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
 
 - id: typescript.proto_pollution.lodash_merge
   enabled: false
@@ -49,7 +49,7 @@
     kind: call
     callee:
       attribute: [_, merge]
-  description: "Disabled — `_.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape."
+  description: "Disabled - `_.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape."
 - id: typescript.proto_pollution.lodash_set
   enabled: true
   language: typescript
@@ -92,7 +92,7 @@
         return _.set({}, "safe.path", "safe");
       }
     expect_no_match: true
-  description: "_.set(obj, attacker_path, value) — path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
+  description: "_.set(obj, attacker_path, value) - path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
 
 - id: typescript.proto_pollution.lodash_setwith
   enabled: true
@@ -122,9 +122,9 @@
         return _.setWith({}, "safe.path", "safe");
       }
     expect_no_match: true
-  description: "_.setWith(obj, attacker_path, value) — customizer variant of lodash path-based prototype pollution."
+  description: "_.setWith(obj, attacker_path, value) - customizer variant of lodash path-based prototype pollution."
 
-# Hand-rolled recursive merge `target[key] = source[key]` — the
+# Hand-rolled recursive merge `target[key] = source[key]` - the
 # canonical homemade prototype-pollution vector. The engine
 # surfaces the index-write site; constraint requires the rhs to be
 # a same-key index read (`[key]` on both sides). Tainted source
@@ -165,7 +165,7 @@
         target.safe = "safe";
       }
     expect_no_match: true
-  description: "Recursive merge `target[key] = source[key]` — homemade deep-merge vector. Without `__proto__` / `constructor` / `prototype` filtering, attacker-controlled source object pollutes Object.prototype."
+  description: "Recursive merge `target[key] = source[key]` - homemade deep-merge vector. Without `__proto__` / `constructor` / `prototype` filtering, attacker-controlled source object pollutes Object.prototype."
 
 - id: typescript.proto_pollution.recursive_deep_merge
   enabled: true
@@ -195,7 +195,7 @@
         return recursiveDeepMerge({}, {});
       }
     expect_no_match: true
-  description: "recursive-deep-merge(target, attacker_obj) — recursive merge APIs can honor __proto__/constructor.prototype keys and pollute Object.prototype."
+  description: "recursive-deep-merge(target, attacker_obj) - recursive merge APIs can honor __proto__/constructor.prototype keys and pollute Object.prototype."
 
 - id: typescript.proto_pollution.recursive_deep_merge_method
   enabled: false
@@ -211,7 +211,7 @@
     kind: call
     callee:
       attribute: [recursiveDeepMerge, merge]
-  description: "Disabled — `recursiveDeepMerge.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
+  description: "Disabled - `recursiveDeepMerge.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
 
 - id: typescript.proto_pollution.deepmerge_package
   enabled: true
@@ -248,7 +248,7 @@
         return deepmerge({}, {});
       }
     expect_no_match: true
-  description: "Deep recursive merge package calls — audit tainted objects for __proto__/constructor/prototype keys before merging."
+  description: "Deep recursive merge package calls - audit tainted objects for __proto__/constructor/prototype keys before merging."
 
 - id: typescript.proto_pollution.lodash_namespace_merge_variants
   enabled: true
@@ -285,4 +285,4 @@
         return lodash.merge({}, {});
       }
     expect_no_match: true
-  description: "lodash merge/defaultsDeep variants and lodash.merge package default export — recursive merge prototype-pollution sinks."
+  description: "lodash merge/defaultsDeep variants and lodash.merge package default export - recursive merge prototype-pollution sinks."

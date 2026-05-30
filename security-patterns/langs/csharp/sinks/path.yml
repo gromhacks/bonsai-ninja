@@ -43,7 +43,7 @@
     code: |
       class App { void Test() { File.Create("data/safe.txt"); } }
     expect_no_match: true
-  description: "File.Create with tainted path — attacker-controlled paths can create arbitrary files (overwriting existing content)."
+  description: "File.Create with tainted path - attacker-controlled paths can create arbitrary files (overwriting existing content)."
 
 - id: csharp.path.file_readalltext
   enabled: true
@@ -204,7 +204,7 @@
     code: |
       class App { void Test() { File.Delete("data/safe.txt"); } }
     expect_no_match: true
-  description: "File.Delete with tainted path — attacker-controlled paths let the attacker delete arbitrary files on disk."
+  description: "File.Delete with tainted path - attacker-controlled paths let the attacker delete arbitrary files on disk."
 
 - id: csharp.path.file_copy
   enabled: true
@@ -227,7 +227,7 @@
     code: |
       class App { void Test() { File.Copy("safe.txt", "copy.txt"); } }
     expect_no_match: true
-  description: "File.Copy(tainted_source, dest) — attacker-controlled source paths can copy arbitrary files."
+  description: "File.Copy(tainted_source, dest) - attacker-controlled source paths can copy arbitrary files."
 
 - id: csharp.path.file_copy_dest
   enabled: true
@@ -250,7 +250,7 @@
     code: |
       class App { void Test() { File.Copy("safe.txt", "copy.txt"); } }
     expect_no_match: true
-  description: "File.Copy(source, tainted_dest) — attacker-controlled destination paths can overwrite arbitrary files."
+  description: "File.Copy(source, tainted_dest) - attacker-controlled destination paths can overwrite arbitrary files."
 
 - id: csharp.path.file_move
   enabled: true
@@ -273,7 +273,7 @@
     code: |
       class App { void Test() { File.Move("safe.txt", "moved.txt"); } }
     expect_no_match: true
-  description: "File.Move(tainted_source, dest) — attacker-controlled source paths can move arbitrary files."
+  description: "File.Move(tainted_source, dest) - attacker-controlled source paths can move arbitrary files."
 
 - id: csharp.path.file_move_dest
   enabled: true
@@ -296,7 +296,7 @@
     code: |
       class App { void Test() { File.Move("safe.txt", "moved.txt"); } }
     expect_no_match: true
-  description: "File.Move(source, tainted_dest) — attacker-controlled destination paths can relocate files outside the intended directory."
+  description: "File.Move(source, tainted_dest) - attacker-controlled destination paths can relocate files outside the intended directory."
 
 - id: csharp.path.directory_delete
   enabled: true
@@ -452,7 +452,7 @@
     kind: call
     callee:
       name: File
-  description: "Disabled — bare File collides with System.IO.File; overload-dependent. Enable only with strict controller-context constraint."
+  description: "Disabled - bare File collides with System.IO.File; overload-dependent. Enable only with strict controller-context constraint."
 
 - id: csharp.path.zipfile_extract_to_directory
   enabled: true
@@ -475,7 +475,7 @@
     code: |
       class App { void Test() { ZipFile.ExtractToDirectory("safe.zip", "extract"); } }
     expect_no_match: true
-  description: "ZipFile.ExtractToDirectory(archive, tainted_dest) — attacker-controlled extraction root can write outside the intended directory."
+  description: "ZipFile.ExtractToDirectory(archive, tainted_dest) - attacker-controlled extraction root can write outside the intended directory."
 
 - id: csharp.path.zip_archive_entry_extract
   enabled: true
@@ -498,7 +498,7 @@
     code: |
       class App { void Test() { dynamic entry = null; ZipFileExtensions.ExtractToFile(entry, "extract/file.txt"); } }
     expect_no_match: true
-  description: "ZipArchiveEntry.ExtractToFile(entry, tainted_dest) — attacker-controlled destination file can overwrite arbitrary paths."
+  description: "ZipArchiveEntry.ExtractToFile(entry, tainted_dest) - attacker-controlled destination file can overwrite arbitrary paths."
 
 - id: csharp.path.file_openread
   enabled: true
@@ -636,7 +636,7 @@
     code: |
       class App { void Test() { Directory.Move("safe-dir", "moved-dir"); } }
     expect_no_match: true
-  description: "Directory.Move(tainted_source, dest) — attacker-controlled source paths can move arbitrary directories."
+  description: "Directory.Move(tainted_source, dest) - attacker-controlled source paths can move arbitrary directories."
 
 - id: csharp.path.directory_move_dest
   enabled: true
@@ -659,7 +659,7 @@
     code: |
       class App { void Test() { Directory.Move("safe-dir", "moved-dir"); } }
     expect_no_match: true
-  description: "Directory.Move(source, tainted_dest) — attacker-controlled destination paths can relocate directories outside the intended root."
+  description: "Directory.Move(source, tainted_dest) - attacker-controlled destination paths can relocate directories outside the intended root."
 
 - id: csharp.path.directory_get_files
   enabled: true
@@ -682,7 +682,7 @@
     code: |
       class App { void Test() { Directory.GetFiles("data/safe"); } }
     expect_no_match: true
-  description: "Directory.GetFiles(tainted path) — directory enumeration with attacker-controlled root."
+  description: "Directory.GetFiles(tainted path) - directory enumeration with attacker-controlled root."
 
 - id: csharp.path.fileinfo_ctor
   enabled: true
@@ -705,7 +705,7 @@
     code: |
       class FileInfo { public FileInfo(string input) { } } class App { void Test() { var result = new FileInfo("data/safe.txt"); } }
     expect_no_match: true
-  description: "new FileInfo(tainted path) — wraps arbitrary file."
+  description: "new FileInfo(tainted path) - wraps arbitrary file."
 
 - id: csharp.path.directoryinfo_ctor
   enabled: true

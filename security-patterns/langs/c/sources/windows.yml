@@ -25,7 +25,7 @@
         char *fmt = arg;
         GetEnvironmentVariableA(arg);
       }
-  description: "Win32 GetEnvironmentVariableA — process environment lookup; same trust profile as getenv()."
+  description: "Win32 GetEnvironmentVariableA - process environment lookup; same trust profile as getenv()."
   imports:
   - windows
   - windows.h
@@ -52,7 +52,7 @@
         char *fmt = arg;
         GetEnvironmentVariableW(arg);
       }
-  description: "Win32 GetEnvironmentVariableW — UTF-16 environment lookup; attacker-influenced."
+  description: "Win32 GetEnvironmentVariableW - UTF-16 environment lookup; attacker-influenced."
   imports:
   - windows
   - windows.h
@@ -79,7 +79,7 @@
         char *fmt = arg;
         GetCommandLineA(arg);
       }
-  description: "Win32 GetCommandLineA — full process command line as a single string."
+  description: "Win32 GetCommandLineA - full process command line as a single string."
   imports:
   - windows
   - windows.h
@@ -106,7 +106,7 @@
         char *fmt = arg;
         GetCommandLineW(arg);
       }
-  description: "Win32 GetCommandLineW — UTF-16 process command line."
+  description: "Win32 GetCommandLineW - UTF-16 process command line."
   imports:
   - windows
   - windows.h
@@ -133,7 +133,7 @@
         char *fmt = arg;
         RegQueryValueExA(arg);
       }
-  description: "Win32 RegQueryValueExA — reads a registry value; HKCU and per-machine writable hives are attacker-influenced."
+  description: "Win32 RegQueryValueExA - reads a registry value; HKCU and per-machine writable hives are attacker-influenced."
   imports:
   - winreg.h
   - winreg
@@ -162,7 +162,7 @@
         char *fmt = arg;
         RegQueryValueExW(arg);
       }
-  description: "Win32 RegQueryValueExW — UTF-16 registry value read."
+  description: "Win32 RegQueryValueExW - UTF-16 registry value read."
   imports:
   - winreg.h
   - winreg
@@ -191,7 +191,7 @@
         char *fmt = arg;
         RegGetValueA(arg);
       }
-  description: "Win32 RegGetValueA — typed registry value read; attacker-influenced for writable hives."
+  description: "Win32 RegGetValueA - typed registry value read; attacker-influenced for writable hives."
   imports:
   - winreg.h
   - winreg
@@ -220,7 +220,7 @@
         char *fmt = arg;
         RegGetValueW(arg);
       }
-  description: "Win32 RegGetValueW — UTF-16 typed registry value read."
+  description: "Win32 RegGetValueW - UTF-16 typed registry value read."
   imports:
   - winreg.h
   - winreg
@@ -248,7 +248,7 @@
         WSARecv(s, buffers, 1, read, flags, 0, 0);
       }
     expect_match_text: [WSARecv]
-  description: "WSARecv(socket, buffers, ...) — network bytes taint the caller-supplied WSABUF array."
+  description: "WSARecv(socket, buffers, ...) - network bytes taint the caller-supplied WSABUF array."
 - id: c.input.win_recv
   enabled: false
   disabled_reason:
@@ -273,4 +273,4 @@
         recv(s, buf, sizeof(buf), 0);
       }
     expect_match_text: [recv]
-  description: "Disabled duplicate — Winsock recv(socket, buf, len, flags) has the same call shape as c.input.recv, which now models the output buffer precisely."
+  description: "Disabled duplicate - Winsock recv(socket, buf, len, flags) has the same call shape as c.input.recv, which now models the output buffer precisely."

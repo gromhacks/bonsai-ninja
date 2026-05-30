@@ -27,7 +27,7 @@
       @end
       void test(id input) { id target = input; int amount = 1; [Repository initWithData:input]; }
     expect_no_match: true
-  description: "[[NSXMLParser alloc] initWithData:] — parses tainted XML; default allows external entities unless -setShouldResolveExternalEntities:NO is set."
+  description: "[[NSXMLParser alloc] initWithData:] - parses tainted XML; default allows external entities unless -setShouldResolveExternalEntities:NO is set."
 
 - id: objc.xxe.nsxmlparser_initwithstream
   enabled: true
@@ -50,7 +50,7 @@
     code: |
       void test(void) { [NSXMLParser initWithStream:@"safe"]; }
     expect_no_match: true
-  description: "NSXMLParser -initWithStream: — streaming XML parse; same external-entity risk as initWithData:."
+  description: "NSXMLParser -initWithStream: - streaming XML parse; same external-entity risk as initWithData:."
 
 - id: objc.xxe.nsxmlparser_initwithcontentsofurl
   enabled: true
@@ -73,7 +73,7 @@
     code: |
       void test(void) { [NSXMLParser initWithContentsOfURL:@"https://safe.example/feed.xml"]; }
     expect_no_match: true
-  description: "NSXMLParser -initWithContentsOfURL: — fetches and parses remote XML; both XXE and SSRF."
+  description: "NSXMLParser -initWithContentsOfURL: - fetches and parses remote XML; both XXE and SSRF."
 
 - id: objc.xxe.nsxmldocument_initwithcontentsofurl
   enabled: true
@@ -96,7 +96,7 @@
     code: |
       void test(void) { [NSXMLDocument initWithContentsOfURL:@"https://safe.example/feed.xml"]; }
     expect_no_match: true
-  description: "NSXMLDocument -initWithContentsOfURL: — fetches and parses remote XML; both XXE and SSRF."
+  description: "NSXMLDocument -initWithContentsOfURL: - fetches and parses remote XML; both XXE and SSRF."
 
 - id: objc.xxe.shouldresolveexternalentities_yes
   enabled: true
@@ -118,7 +118,7 @@
     code: |
       void test(id input) { id shouldResolveExternalEntities = input; }
     expect_no_match: true
-  description: "NSXMLParser.shouldResolveExternalEntities = YES — explicitly enables external entity resolution (XXE)."
+  description: "NSXMLParser.shouldResolveExternalEntities = YES - explicitly enables external entity resolution (XXE)."
 
 - id: objc.xxe.nsxmldocument_initwithxmlstring
   enabled: true
@@ -141,7 +141,7 @@
     code: |
       void test(void) { [NSXMLDocument initWithXMLString:@"<root/>"]; }
     expect_no_match: true
-  description: "NSXMLDocument -initWithXMLString:options: — parses tainted XML; if options include NSXMLNodeLoadExternalEntitiesAlways allows XXE."
+  description: "NSXMLDocument -initWithXMLString:options: - parses tainted XML; if options include NSXMLNodeLoadExternalEntitiesAlways allows XXE."
 
 - id: objc.xxe.libxml2_xmlread
   enabled: true
@@ -166,4 +166,4 @@
         libxml2_xmlread("safe");
       }
     expect_no_match: true
-  description: "libxml2 xmlRead*/xmlParse* — tainted XML parsed with default options allows DTD-based XXE (XML_PARSE_NOENT)."
+  description: "libxml2 xmlRead*/xmlParse* - tainted XML parsed with default options allows DTD-based XXE (XML_PARSE_NOENT)."

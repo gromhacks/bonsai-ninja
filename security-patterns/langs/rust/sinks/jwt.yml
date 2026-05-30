@@ -27,7 +27,7 @@
           jsonwebtoken::decode_header("header.payload.signature");
       }
     expect_no_match: true
-  description: "jsonwebtoken::decode_header — returns the JWT header (kid, alg) without
+  description: "jsonwebtoken::decode_header - returns the JWT header (kid, alg) without
     signature verification; using the result for routing / key-lookup without later
     validating the signature = auth bypass."
 
@@ -59,7 +59,7 @@
           jsonwebtoken::dangerous_insecure_decode("header.payload.signature");
       }
     expect_no_match: true
-  description: "jsonwebtoken::dangerous_insecure_decode — documented escape hatch
+  description: "jsonwebtoken::dangerous_insecure_decode - documented escape hatch
     that skips signature verification entirely; tainted JWT = auth bypass / forged
     claims."
 
@@ -84,7 +84,7 @@
           let query = "user";
           Validation::insecure_disable_signature_validation(target);
       }
-  description: "jsonwebtoken Validation::insecure_disable_signature_validation — explicitly
+  description: "jsonwebtoken Validation::insecure_disable_signature_validation - explicitly
     turns off signature check."
 
 - id: rust.jwt.jsonwebtoken_decode
@@ -116,7 +116,7 @@
           jsonwebtoken::decode("safe");
       }
     expect_no_match: true
-  description: "jsonwebtoken::decode — audit the Validation struct for disabled checks,
+  description: "jsonwebtoken::decode - audit the Validation struct for disabled checks,
     alg=none, or mixed HMAC/RSA algorithm lists that enable alg-confusion."
 
 - id: rust.jwt.josekit_decode
@@ -147,5 +147,5 @@
           JwtPayload::deserialize("header.payload.signature");
       }
     expect_no_match: true
-  description: "josekit JwtPayload::deserialize — parses the JWT claims; flag if no
+  description: "josekit JwtPayload::deserialize - parses the JWT claims; flag if no
     upstream verify (JwsVerifier / JweDecrypter) is invoked on the same token."

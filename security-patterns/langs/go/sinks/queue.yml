@@ -33,7 +33,7 @@
         obj.SendMessage("safe")
       }
     expect_no_match: true
-  description: "Cloud queue SendMessage — tainted queue target/body injects arbitrary broker payloads."
+  description: "Cloud queue SendMessage - tainted queue target/body injects arbitrary broker payloads."
 
 - id: go.queue.send_messages
   enabled: true
@@ -70,7 +70,7 @@
         obj.SendMessages("safe")
       }
     expect_no_match: true
-  description: "Service Bus SendMessages — tainted entity path/payload injects arbitrary broker payloads."
+  description: "Service Bus SendMessages - tainted entity path/payload injects arbitrary broker payloads."
 
 - id: go.queue.publish
   enabled: false
@@ -85,4 +85,4 @@
     kind: call
     callee:
       regex: "\\.Publish$"
-  description: "Disabled — cloud pub/sub publish is real queue fanout, but bare `.Publish` is too generic across Go clients and app code."
+  description: "Disabled - cloud pub/sub publish is real queue fanout, but bare `.Publish` is too generic across Go clients and app code."

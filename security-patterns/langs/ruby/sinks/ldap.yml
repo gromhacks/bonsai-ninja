@@ -13,7 +13,7 @@
     kind: call
     callee:
       name: search
-  description: "Disabled \u2014 bare `search` matches too many method families (AR search,\
+  description: "Disabled - bare `search` matches too many method families (AR search,\
     \ Elasticsearch search, etc.); enable only with Net::LDAP receiver typing or LDAP-specific\
     \ filter kwarg constraints."
 - id: ruby.ldap.net_ldap_bind_as
@@ -40,7 +40,7 @@
     code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
       \  bind_as(filter: \"(uid=alice)\")\nend\n"
     expect_no_match: true
-  description: "Net::LDAP#bind_as \u2014 flag tainted :filter."
+  description: "Net::LDAP#bind_as - flag tainted :filter."
 - id: ruby.ldap.ldap_filter_construct
   enabled: true
   language: ruby
@@ -67,7 +67,7 @@
     code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
       \  Net::LDAP::Filter.construct(\"(uid=alice)\")\nend\n"
     expect_no_match: true
-  description: "Net::LDAP::Filter.construct(string) \u2014 string form unparameterized."
+  description: "Net::LDAP::Filter.construct(string) - string form unparameterized."
 - id: ruby.ldap.ldap_filter_from_rfc2254
   enabled: true
   language: ruby

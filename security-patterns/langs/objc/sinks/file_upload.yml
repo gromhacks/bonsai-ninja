@@ -15,7 +15,7 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; uploadTaskWithRequest(input); }
-  description: "Disabled — Objective-C selector/argument facts need to distinguish uploadTaskWithRequest:fromFile: before this can model the local-file path sink accurately."
+  description: "Disabled - Objective-C selector/argument facts need to distinguish uploadTaskWithRequest:fromFile: before this can model the local-file path sink accurately."
 
 - id: objc.upload.afnetworking_multipart
   enabled: true
@@ -42,4 +42,4 @@
         afnetworking_multipart("safe");
       }
     expect_no_match: true
-  description: "AFHTTPBodyPart / AFMultipartFormData -appendPartWithFileURL:name:fileName:... with tainted filename/URL — arbitrary file upload."
+  description: "AFHTTPBodyPart / AFMultipartFormData -appendPartWithFileURL:name:fileName:... with tainted filename/URL - arbitrary file upload."

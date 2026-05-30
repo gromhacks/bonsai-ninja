@@ -14,7 +14,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; CC_MD5(input); }
-  description: "CommonCrypto CC_MD5 — MD5 is collision-broken; unsafe for signatures/integrity."
+  description: "CommonCrypto CC_MD5 - MD5 is collision-broken; unsafe for signatures/integrity."
 
 - id: objc.crypto.cc_md2_md4
   enabled: true
@@ -31,7 +31,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; CC_MD2(input); }
-  description: "CommonCrypto CC_MD2 / CC_MD4 — pre-MD5 hashes; entirely broken."
+  description: "CommonCrypto CC_MD2 / CC_MD4 - pre-MD5 hashes; entirely broken."
 
 - id: objc.crypto.cc_sha1
   enabled: true
@@ -48,7 +48,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; CC_SHA1(input); }
-  description: "CommonCrypto CC_SHA1 — deprecated for cryptographic use (collisions demonstrated)."
+  description: "CommonCrypto CC_SHA1 - deprecated for cryptographic use (collisions demonstrated)."
 
 - id: objc.crypto.cccrypt_weak
   enabled: true
@@ -65,7 +65,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; CCCrypt(input); }
-  description: "CommonCrypto CCCrypt — flag when algorithm is kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2 or options include kCCOptionECBMode."
+  description: "CommonCrypto CCCrypt - flag when algorithm is kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2 or options include kCCOptionECBMode."
 
 - id: objc.crypto.cccryptor_create
   enabled: true
@@ -82,7 +82,7 @@
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; CCCryptorCreate(input); }
-  description: "CommonCrypto CCCryptorCreate / CCCryptorCreateWithMode — flag weak algs (DES/3DES/RC4/RC2) or ECB mode."
+  description: "CommonCrypto CCCryptorCreate / CCCryptorCreateWithMode - flag weak algs (DES/3DES/RC4/RC2) or ECB mode."
 
 - id: objc.crypto.arc4random_uniform
   enabled: false
@@ -96,4 +96,4 @@
     kind: call
     callee:
       name: arc4random
-  description: "Disabled — arc4random on Darwin is a CSPRNG; not a vulnerability by itself."
+  description: "Disabled - arc4random on Darwin is a CSPRNG; not a vulnerability by itself."

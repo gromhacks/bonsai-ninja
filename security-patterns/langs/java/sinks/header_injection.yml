@@ -35,7 +35,7 @@
         }
       }
     expect_no_match: true
-  description: "HttpServletResponse.setHeader — flag tainted value (CRLF). Merged aliases: java.header.content_disposition_setheader, java.open_redirect.servlet_response_setheader_location."
+  description: "HttpServletResponse.setHeader - flag tainted value (CRLF). Merged aliases: java.header.content_disposition_setheader, java.open_redirect.servlet_response_setheader_location."
   aliases:
   - java.header.content_disposition_setheader
   - java.open_redirect.servlet_response_setheader_location
@@ -115,7 +115,7 @@
         }
       }
     expect_no_match: true
-  description: "HttpServletResponse.addCookie — flag tainted Cookie name/value."
+  description: "HttpServletResponse.addCookie - flag tainted Cookie name/value."
 
 - id: java.header.spring_response_entity_header
   enabled: true
@@ -222,7 +222,7 @@
         }
       }
     expect_no_match: true
-  description: "Cookie.setValue — flag tainted value."
+  description: "Cookie.setValue - flag tainted value."
 - id: java.header.spring_responseentity_header
   enabled: true
   language: java
@@ -270,7 +270,7 @@
         }
       }
     expect_no_match: true
-  description: "ResponseEntity.header(name, tainted) — CRLF response header injection. Merged aliases: java.header.spring_responseentity_content_disposition, java.open_redirect.spring_responseentity_header_location."
+  description: "ResponseEntity.header(name, tainted) - CRLF response header injection. Merged aliases: java.header.spring_responseentity_content_disposition, java.open_redirect.spring_responseentity_header_location."
   aliases:
   - java.header.spring_responseentity_content_disposition
   - java.open_redirect.spring_responseentity_header_location
@@ -323,7 +323,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring WebFlux ServerResponse.header(name, tainted) — CRLF response header injection. Merged aliases: java.open_redirect.webflux_serverresponse_header_location."
+  description: "Spring WebFlux ServerResponse.header(name, tainted) - CRLF response header injection. Merged aliases: java.open_redirect.webflux_serverresponse_header_location."
   aliases:
   - java.open_redirect.webflux_serverresponse_header_location
 - id: java.header.vertx_response_putheader
@@ -380,6 +380,6 @@
         void putHeader(Object... args) {}
       }
     expect_no_match: true
-  description: "Vert.x HttpServerResponse.putHeader(name, tainted) — CRLF response header injection. Merged aliases: java.open_redirect.vertx_response_putheader_location."
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) - CRLF response header injection. Merged aliases: java.open_redirect.vertx_response_putheader_location."
   aliases:
   - java.open_redirect.vertx_response_putheader_location

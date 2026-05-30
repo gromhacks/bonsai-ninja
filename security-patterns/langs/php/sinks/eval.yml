@@ -30,7 +30,7 @@
         eval("return 1;");
       }
     expect_no_match: true
-  description: 'eval() — arbitrary PHP code. Merged collision aliases: php.nosql.redis_eval.'
+  description: 'eval() - arbitrary PHP code. Merged collision aliases: php.nosql.redis_eval.'
   aliases:
   - php.nosql.redis_eval
   packages:
@@ -58,7 +58,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  assert(\"1 === 1\");\n}\n"
     expect_no_match: true
-  description: assert(string) — pre-PHP-8 evaluates as code.
+  description: assert(string) - pre-PHP-8 evaluates as code.
 - id: php.eval.create_function
   enabled: true
   language: php
@@ -79,7 +79,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  create_function('$x', 'return $x;');\n}\n"
     expect_no_match: true
-  description: create_function — removed in PHP 8 but legacy code persists.
+  description: create_function - removed in PHP 8 but legacy code persists.
 - id: php.eval.preg_replace_e
   enabled: true
   language: php
@@ -100,7 +100,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  preg_replace(\"/x/e\", \"safe\", \"x\");\n}\n"
     expect_no_match: true
-  description: preg_replace() with /e (PREG_REPLACE_EVAL) modifier — replacement string is eval()'d as PHP code. Removed in PHP 7 but still appears in legacy code paths and PHP <7 deployments. Constraint matches a quoted regex literal whose trailing modifier flags include `e`.
+  description: preg_replace() with /e (PREG_REPLACE_EVAL) modifier - replacement string is eval()'d as PHP code. Removed in PHP 7 but still appears in legacy code paths and PHP <7 deployments. Constraint matches a quoted regex literal whose trailing modifier flags include `e`.
 - id: php.eval.preg_replace_callback
   enabled: false
   disabled_reason:
@@ -114,7 +114,7 @@
     kind: call
     callee:
       name: preg_replace_callback
-  description: Disabled — callback variant is safe unless callback tainted.
+  description: Disabled - callback variant is safe unless callback tainted.
 - id: php.eval.include_tainted
   enabled: true
   language: php
@@ -136,7 +136,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  include \"safe.php\";\n}\n"
     expect_no_match: true
-  description: 'include(tainted) — LFI/RFI = RCE. Limitation: PHP parses include/require as include_expression AST nodes, not function calls; adapter must surface these as calls for this rule to fire. `top_level: true` excludes any `$obj->include(...)` userland method decoys.'
+  description: 'include(tainted) - LFI/RFI = RCE. Limitation: PHP parses include/require as include_expression AST nodes, not function calls; adapter must surface these as calls for this rule to fire. `top_level: true` excludes any `$obj->include(...)` userland method decoys.'
 - id: php.eval.include_once_tainted
   enabled: true
   language: php
@@ -216,7 +216,7 @@
     kind: call
     callee:
       name: call_user_func
-  description: Disabled — benign unless callable tainted.
+  description: Disabled - benign unless callable tainted.
 - id: php.eval.call_user_func_array
   enabled: false
   disabled_reason:
@@ -230,7 +230,7 @@
     kind: call
     callee:
       name: call_user_func_array
-  description: Disabled — benign unless callable tainted.
+  description: Disabled - benign unless callable tainted.
 - id: php.eval.usort_callback
   enabled: false
   disabled_reason:
@@ -244,7 +244,7 @@
     kind: call
     callee:
       name: usort
-  description: Disabled — flag only when comparator callable is tainted.
+  description: Disabled - flag only when comparator callable is tainted.
 - id: php.eval.array_map_callback
   enabled: false
   disabled_reason:
@@ -258,7 +258,7 @@
     kind: call
     callee:
       name: array_map
-  description: Disabled — flag only when callback is tainted.
+  description: Disabled - flag only when callback is tainted.
 - id: php.eval.array_filter_callback
   enabled: false
   disabled_reason:
@@ -272,7 +272,7 @@
     kind: call
     callee:
       name: array_filter
-  description: Disabled — flag only when callback tainted.
+  description: Disabled - flag only when callback tainted.
 - id: php.eval.call_user_func_dynamic
   enabled: true
   language: php
@@ -293,7 +293,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  call_user_func('strlen', 'safe');\n}\n"
     expect_no_match: true
-  description: call_user_func($callback, $args) — when $callback is attacker-controlled, arbitrary function invoke.
+  description: call_user_func($callback, $args) - when $callback is attacker-controlled, arbitrary function invoke.
 - id: php.eval.call_user_func_array_dynamic
   enabled: true
   language: php
@@ -314,4 +314,4 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  call_user_func_array('strlen', ['safe']);\n}\n"
     expect_no_match: true
-  description: call_user_func_array — same as call_user_func with array args.
+  description: call_user_func_array - same as call_user_func with array args.

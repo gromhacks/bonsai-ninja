@@ -53,7 +53,7 @@
       attribute:
       - TemplateEngine
       - process
-  description: "Disabled duplicate \u2014 folded into kotlin.template.thymeleaf_processstring\
+  description: "Disabled duplicate - folded into kotlin.template.thymeleaf_processstring\
     \ with fragment-expression examples."
 - id: kotlin.template.thymeleaf_string_resolver
   enabled: true
@@ -74,7 +74,7 @@
   - name: generated shape example
     code: "import org.thymeleaf.StringTemplateResolver\nclass App {\n  fun handle(input: String) {\n  \
       \  StringTemplateResolver(input)\n  }\n}\nclass StringTemplateResolver(vararg args: Any?)\n"
-  description: "new StringTemplateResolver \u2014 flag template source as tainted."
+  description: "new StringTemplateResolver - flag template source as tainted."
 - id: kotlin.template.freemarker_template_ctor
   enabled: true
   language: kotlin
@@ -102,7 +102,7 @@
       \ {\n    Template(\"name\", \"safe\", cfg)\n  }\n}\nclass Template(vararg args:\
       \ Any?)\n"
     expect_no_match: true
-  description: "new freemarker.template.Template(\"name\", tainted) \u2014 source\
+  description: "new freemarker.template.Template(\"name\", tainted) - source\
     \ string is template."
 - id: kotlin.template.velocity_evaluate
   enabled: true
@@ -189,7 +189,7 @@
   - name: generated shape example
     code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
       \  fun handle(input: String) {\n    Template.merge(\"{{\" + input)\n  }\n}\n"
-  description: "Disabled — Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
+  description: "Disabled - Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
   imports:
   - org.apache.velocity
 - id: kotlin.template.spel_parseexpression
@@ -218,7 +218,7 @@
     code: "import org.springframework.expression.*\nclass App {\nfun render(template: String): Any?\
       \ {\n  return SpelExpressionParser.parseExpression(\"safe\")\n}\n}\n"
     expect_no_match: true
-  description: "Spring SpEL parseExpression(template) \u2014 server-side template\
+  description: "Spring SpEL parseExpression(template) - server-side template\
     \ expression parsing from attacker-controlled text."
   imports:
   - org.springframework.expression
@@ -370,7 +370,7 @@
       attribute:
       - DefaultMustacheFactory
       - compile
-  description: "Disabled \u2014 Mustache is logic-less."
+  description: "Disabled - Mustache is logic-less."
 - id: kotlin.template.freemarker_autoesc_off
   enabled: true
   language: kotlin
@@ -391,4 +391,4 @@
   - name: generated shape example
     code: "import freemarker.*\nclass App {\n  fun handle(input: String) {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\n\
       \  }\n}\n"
-  description: "FreeMarker (via Java interop) \u2014 autoescape disabled at config."
+  description: "FreeMarker (via Java interop) - autoescape disabled at config."

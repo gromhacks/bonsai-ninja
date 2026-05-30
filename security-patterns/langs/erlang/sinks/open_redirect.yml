@@ -1,14 +1,14 @@
 # Erlang open-redirect (CWE-601).
 #
 # Why this family is sparse:
-#   The dominant Erlang web stack (cowboy) has no dedicated redirect helper —
+#   The dominant Erlang web stack (cowboy) has no dedicated redirect helper -
 #   redirects are issued via cowboy_req:reply(302, #{<<"location">> => Url}, Req),
 #   the same call used for every other status. The adapter strips arity, so
 #   `^cowboy_req:reply` cannot be narrowed to "reply with Location header"
 #   without map-key constraint support. We keep that broad rule disabled
 #   (see cowboy_reply_location below) to avoid flagging every 200 OK.
 #
-#   Frameworks/libraries that DO expose explicit redirect helpers — Yaws's
+#   Frameworks/libraries that DO expose explicit redirect helpers - Yaws's
 #   {redirect, Url} return tuple is matched server-side (not via a callable);
 #   Nova exposes nova:redirect/1; ChicagoBoss exposes cb_controller:redirect.
 #   Those are flagged precisely below.
@@ -25,7 +25,7 @@
     kind: call
     callee:
       regex: "^cowboy_req:reply"
-  description: "Disabled — must inspect status code and Location header map; bare cowboy_req:reply matches normal 200 responses."
+  description: "Disabled - must inspect status code and Location header map; bare cowboy_req:reply matches normal 200 responses."
 
 - id: erlang.open_redirect.nova_redirect
   enabled: true
@@ -57,7 +57,7 @@
       test() ->
         nova:redirect("/home").
     expect_no_match: true
-  description: "nova:redirect/1 — Nova framework explicit 302 helper; tainted URL → phishing/SSO bypass."
+  description: "nova:redirect/1 - Nova framework explicit 302 helper; tainted URL -> phishing/SSO bypass."
 
 - id: erlang.open_redirect.cb_controller_redirect
   enabled: true
@@ -89,7 +89,7 @@
       test() ->
         cb_controller:redirect("/home").
     expect_no_match: true
-  description: "ChicagoBoss cb_controller:redirect — explicit 302/303 helper; tainted Location enables open-redirect to attacker host."
+  description: "ChicagoBoss cb_controller:redirect - explicit 302/303 helper; tainted Location enables open-redirect to attacker host."
 
 - id: erlang.open_redirect.yaws_api_redirect
   enabled: true
@@ -121,7 +121,7 @@
       test() ->
         yaws_api:redirect("/home").
     expect_no_match: true
-  description: "yaws_api:redirect/1 — Yaws helper that builds a {redirect, Url} response; tainted URL is an open-redirect."
+  description: "yaws_api:redirect/1 - Yaws helper that builds a {redirect, Url} response; tainted URL is an open-redirect."
 
 - id: erlang.open_redirect.mochiweb_redirect
   enabled: true
@@ -153,4 +153,4 @@
       test() ->
         mochiweb_response:respond_redirect("/home").
     expect_no_match: true
-  description: "mochiweb_response:respond_redirect — explicit redirect responder; tainted target → open-redirect."
+  description: "mochiweb_response:respond_redirect - explicit redirect responder; tainted target -> open-redirect."

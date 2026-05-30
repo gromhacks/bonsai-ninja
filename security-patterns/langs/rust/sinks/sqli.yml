@@ -26,7 +26,7 @@
           sqlx::query("select * from users where id = $1");
       }
     expect_no_match: true
-  description: "sqlx::query — function form accepts a runtime string; tainted SQL bypasses the `query!` macro's compile-time check."
+  description: "sqlx::query - function form accepts a runtime string; tainted SQL bypasses the `query!` macro's compile-time check."
 - id: rust.sqli.sqlx_query_as
   enabled: true
   language: rust
@@ -55,7 +55,7 @@
           sqlx::query_as("select * from users where id = $1");
       }
     expect_no_match: true
-  description: "sqlx::query_as — function form with runtime SQL string; same exposure as sqlx::query."
+  description: "sqlx::query_as - function form with runtime SQL string; same exposure as sqlx::query."
 - id: rust.sqli.sqlx_query_scalar
   enabled: true
   language: rust
@@ -84,7 +84,7 @@
           sqlx::query_scalar("select count(*) from users");
       }
     expect_no_match: true
-  description: "sqlx::query_scalar — runtime SQL returning a single column."
+  description: "sqlx::query_scalar - runtime SQL returning a single column."
 - id: rust.sqli.sqlx_query_unchecked
   enabled: true
   language: rust
@@ -113,7 +113,7 @@
           sqlx::query_unchecked("select * from users where id = $1");
       }
     expect_no_match: true
-  description: "sqlx::query_unchecked — explicitly skips compile-time verification; tainted SQL = injection."
+  description: "sqlx::query_unchecked - explicitly skips compile-time verification; tainted SQL = injection."
 - id: rust.sqli.diesel_sql_query
   enabled: true
   language: rust
@@ -142,7 +142,7 @@
           diesel::sql_query("select * from users where id = $1");
       }
     expect_no_match: true
-  description: "diesel::sql_query — raw SQL escape hatch; bypasses diesel's typed query DSL, tainted string = injection (use .bind() parameters instead)."
+  description: "diesel::sql_query - raw SQL escape hatch; bypasses diesel's typed query DSL, tainted string = injection (use .bind() parameters instead)."
 - id: rust.sqli.tokio_postgres_query
   enabled: true
   language: rust
@@ -175,7 +175,7 @@
           Client::query("select * from users where id = $1", &[]);
       }
     expect_no_match: true
-  description: "tokio-postgres / postgres Client::query — accepts runtime SQL string; flag when the SQL itself is built from tainted input (parameterised `$1, $2` values are safe). Typed-receiver sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects 0-arg decoys."
+  description: "tokio-postgres / postgres Client::query - accepts runtime SQL string; flag when the SQL itself is built from tainted input (parameterised `$1, $2` values are safe). Typed-receiver sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects 0-arg decoys."
   imports:
   - tokio_postgres
 - id: rust.sqli.rusqlite_execute
@@ -206,7 +206,7 @@
           Connection::execute("select * from users where id = ?1", []);
       }
     expect_no_match: true
-  description: "rusqlite Connection::execute — prepared-statement API; flag when the SQL string itself is built from tainted input (params are safe). Typed-receiver sqli; `min_args: 1` rejects 0-arg decoys."
+  description: "rusqlite Connection::execute - prepared-statement API; flag when the SQL string itself is built from tainted input (params are safe). Typed-receiver sqli; `min_args: 1` rejects 0-arg decoys."
 - id: rust.sqli.rusqlite_prepare
   enabled: true
   language: rust
@@ -237,7 +237,7 @@
           conn.prepare("select * from users where id = ?1");
       }
     expect_no_match: true
-  description: "rusqlite Connection::prepare with a tainted SQL string — placeholders protect values, but the SQL program itself must not be user-controlled."
+  description: "rusqlite Connection::prepare with a tainted SQL string - placeholders protect values, but the SQL program itself must not be user-controlled."
 - id: rust.sqli.rusqlite_execute_batch
   enabled: true
   language: rust
@@ -266,7 +266,7 @@
           Connection::execute_batch("vacuum");
       }
     expect_no_match: true
-  description: "rusqlite Connection::execute_batch — runs multi-statement SQL with no parameter binding; tainted input = injection. Signature: `execute_batch(&str)` — exactly 1 arg; bounds reject same-name decoys."
+  description: "rusqlite Connection::execute_batch - runs multi-statement SQL with no parameter binding; tainted input = injection. Signature: `execute_batch(&str)` - exactly 1 arg; bounds reject same-name decoys."
 - id: rust.sqli.mysql_async_query
   enabled: true
   language: rust
@@ -295,7 +295,7 @@
           Conn::query("select * from users where id = ?");
       }
     expect_no_match: true
-  description: "mysql_async / mysql Conn::query — runtime SQL string; tainted query = injection (use exec/prep with parameters). Typed-receiver sqli; `min_args: 1` rejects 0-arg decoys."
+  description: "mysql_async / mysql Conn::query - runtime SQL string; tainted query = injection (use exec/prep with parameters). Typed-receiver sqli; `min_args: 1` rejects 0-arg decoys."
 - id: rust.sqli.mysql_query_first
   enabled: true
   language: rust
@@ -324,7 +324,7 @@
           Pool::query_first("select * from users where id = ?");
       }
     expect_no_match: true
-  description: "mysql::Pool::query_first — runtime SQL returning one row; tainted query = injection."
+  description: "mysql::Pool::query_first - runtime SQL returning one row; tainted query = injection."
 - id: rust.sqli.sea_orm_statement_from_string
   enabled: true
   language: rust
@@ -357,7 +357,7 @@
           Statement::from_string(DbBackend::Postgres, "select * from users");
       }
     expect_no_match: true
-  description: "sea_orm::Statement::from_string — wraps a runtime SQL string with no binding; tainted input = injection (use from_sql_and_values for params)."
+  description: "sea_orm::Statement::from_string - wraps a runtime SQL string with no binding; tainted input = injection (use from_sql_and_values for params)."
   imports:
   - sea_orm
 - id: rust.sqli.sea_orm_statement_from_sql_and_values
@@ -389,4 +389,4 @@
           Statement::from_sql_and_values(db, "SELECT * FROM users WHERE id = ?", vec![value]);
       }
     expect_no_match: true
-  description: "Statement::from_sql_and_values(db, tainted_sql, values) — bindings are safe, but a tainted SQL string at construction time is still raw dynamic SQL."
+  description: "Statement::from_sql_and_values(db, tainted_sql, values) - bindings are safe, but a tainted SQL string at construction time is still raw dynamic SQL."

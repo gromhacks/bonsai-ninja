@@ -24,7 +24,7 @@
           fun getStringExtra(vararg args: Any?): String = ""
         }
       expect_match_text: [intent.getStringExtra]
-  description: "Android Intent.getStringExtra(...) — package-scoped IPC extra read from a local intent receiver."
+  description: "Android Intent.getStringExtra(...) - package-scoped IPC extra read from a local intent receiver."
 
 - id: kotlin.source.android_getintent_getextras
   enabled: false
@@ -37,4 +37,4 @@
     kind: call
     callee:
       attribute: [Intent, getExtras]
-  description: "Disabled — `getExtras` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
+  description: "Disabled - `getExtras` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."

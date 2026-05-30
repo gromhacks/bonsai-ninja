@@ -33,7 +33,7 @@
         _, _ = os.Open("/srv/files/readme.txt")
       }
     expect_no_match: true
-  description: "os.Open(tainted path) — reads an attacker-chosen file; classic traversal when joined with ../."
+  description: "os.Open(tainted path) - reads an attacker-chosen file; classic traversal when joined with ../."
 - id: go.path.os_openfile
   enabled: true
   language: go
@@ -67,7 +67,7 @@
         _, _ = os.OpenFile("/srv/files/readme.txt", os.O_RDONLY, 0)
       }
     expect_no_match: true
-  description: "os.OpenFile(tainted path, flags, mode) — tainted path + O_CREATE enables arbitrary write."
+  description: "os.OpenFile(tainted path, flags, mode) - tainted path + O_CREATE enables arbitrary write."
 - id: go.path.os_readfile
   enabled: true
   language: go
@@ -101,7 +101,7 @@
         _, _ = os.ReadFile("/srv/files/readme.txt")
       }
     expect_no_match: true
-  description: "os.ReadFile(tainted path) — reads attacker-chosen file."
+  description: "os.ReadFile(tainted path) - reads attacker-chosen file."
 - id: go.path.os_create
   enabled: true
   language: go
@@ -135,7 +135,7 @@
         _, _ = os.Create("/srv/files/output.txt")
       }
     expect_no_match: true
-  description: "os.Create(tainted path) — truncates/creates at attacker-chosen location, including filepath.Join(base, archive entry name) Zip Slip extraction paths."
+  description: "os.Create(tainted path) - truncates/creates at attacker-chosen location, including filepath.Join(base, archive entry name) Zip Slip extraction paths."
 
 - id: go.path.os_remove
   enabled: true
@@ -170,7 +170,7 @@
         os.Remove("/srv/files/output.txt")
       }
     expect_no_match: true
-  description: "os.Remove(tainted path) — deletes attacker-chosen file."
+  description: "os.Remove(tainted path) - deletes attacker-chosen file."
 - id: go.path.os_remove_all
   enabled: true
   language: go
@@ -204,7 +204,7 @@
         os.RemoveAll("/srv/files/tmp")
       }
     expect_no_match: true
-  description: "os.RemoveAll(tainted path) — recursive delete; traversal can wipe arbitrary directories."
+  description: "os.RemoveAll(tainted path) - recursive delete; traversal can wipe arbitrary directories."
 - id: go.path.os_rename
   enabled: true
   language: go
@@ -238,7 +238,7 @@
         os.Rename("/srv/files/input.txt", "/srv/files/output.txt")
       }
     expect_no_match: true
-  description: "os.Rename(oldpath, newpath) — tainted either side = move attacker-chosen file."
+  description: "os.Rename(oldpath, newpath) - tainted either side = move attacker-chosen file."
 - id: go.path.os_rename_newpath
   enabled: true
   language: go
@@ -272,7 +272,7 @@
         os.Rename("/srv/files/input.txt", "/srv/files/output.txt")
       }
     expect_no_match: true
-  description: "os.Rename(oldpath, newpath) — tainted destination path can overwrite or move files outside the intended directory."
+  description: "os.Rename(oldpath, newpath) - tainted destination path can overwrite or move files outside the intended directory."
 - id: go.path.os_writefile
   enabled: true
   language: go
@@ -306,7 +306,7 @@
         os.WriteFile("/srv/files/output.txt", []byte("ok"), 0600)
       }
     expect_no_match: true
-  description: "os.WriteFile(tainted path, data, mode) — writes at attacker-chosen location."
+  description: "os.WriteFile(tainted path, data, mode) - writes at attacker-chosen location."
 - id: go.path.os_mkdirall
   enabled: true
   language: go
@@ -340,7 +340,7 @@
         os.MkdirAll("/srv/files/tmp", 0755)
       }
     expect_no_match: true
-  description: "os.MkdirAll(tainted path, mode) — creates nested directories at attacker-chosen location."
+  description: "os.MkdirAll(tainted path, mode) - creates nested directories at attacker-chosen location."
 - id: go.path.os_mkdir
   enabled: true
   language: go
@@ -374,7 +374,7 @@
         os.Mkdir("/srv/files/tmp", 0755)
       }
     expect_no_match: true
-  description: "os.Mkdir(tainted path, mode) — creates a directory at attacker-chosen location."
+  description: "os.Mkdir(tainted path, mode) - creates a directory at attacker-chosen location."
 - id: go.path.ioutil_readfile
   enabled: true
   language: go
@@ -408,7 +408,7 @@
         ioutil.ReadFile("/srv/files/readme.txt")
       }
     expect_no_match: true
-  description: "ioutil.ReadFile(tainted path) — legacy alias of os.ReadFile."
+  description: "ioutil.ReadFile(tainted path) - legacy alias of os.ReadFile."
 - id: go.path.ioutil_writefile
   enabled: true
   language: go
@@ -442,7 +442,7 @@
         ioutil.WriteFile("/srv/files/output.txt", []byte("ok"), 0600)
       }
     expect_no_match: true
-  description: "ioutil.WriteFile(tainted path, …) — legacy alias of os.WriteFile."
+  description: "ioutil.WriteFile(tainted path, ...) - legacy alias of os.WriteFile."
 - id: go.path.http_servefile
   enabled: true
   language: go
@@ -476,7 +476,7 @@
         http.ServeFile(nil, nil, "/srv/files/readme.txt")
       }
     expect_no_match: true
-  description: "http.ServeFile(w, r, tainted path) — serves attacker-chosen file from disk."
+  description: "http.ServeFile(w, r, tainted path) - serves attacker-chosen file from disk."
 - id: go.path.http_fileserver
   enabled: true
   language: go
@@ -509,7 +509,7 @@
         http.FileServer(http.Dir("/srv/public"))
       }
     expect_no_match: true
-  description: "http.FileServer(http.Dir(tainted)) — serves everything under a directory; attacker-chosen root = full traversal of that subtree."
+  description: "http.FileServer(http.Dir(tainted)) - serves everything under a directory; attacker-chosen root = full traversal of that subtree."
 - id: go.path.filepath_walk
   enabled: true
   language: go
@@ -542,7 +542,7 @@
         _ = filepath.Walk("/srv/files", nil)
       }
     expect_no_match: true
-  description: "filepath.Walk(tainted_root, ...) — recursively enumerates an attacker-chosen directory tree; traversal-sensitive when the root comes from a request or archive entry."
+  description: "filepath.Walk(tainted_root, ...) - recursively enumerates an attacker-chosen directory tree; traversal-sensitive when the root comes from a request or archive entry."
 - id: go.path.filepath_join
   enabled: true
   language: go
@@ -611,7 +611,7 @@
         return filepath.Join("/srv/files", "readme.txt")
       }
     expect_no_match: true
-  description: "filepath.Join(base, tainted...) — Join does NOT prevent traversal; an attacker segment containing '..' escapes `base`. Tainted segments here are a real path-traversal sink unless followed by a containment check (e.g. strings.HasPrefix on the cleaned result against a fixed root)."
+  description: "filepath.Join(base, tainted...) - Join does NOT prevent traversal; an attacker segment containing '..' escapes `base`. Tainted segments here are a real path-traversal sink unless followed by a containment check (e.g. strings.HasPrefix on the cleaned result against a fixed root)."
 - id: go.path.path_join
   enabled: true
   language: go
@@ -644,7 +644,7 @@
         path.Join("/safe", "asset.png")
       }
     expect_no_match: true
-  description: "path.Join(base, tainted...) — same traversal exposure as filepath.Join; '..' segments are not stripped by Join alone."
+  description: "path.Join(base, tainted...) - same traversal exposure as filepath.Join; '..' segments are not stripped by Join alone."
 
 # Archive extraction (Zip Slip class). The destination path is built
 # from the entry's name field; the library trusts the archive to
@@ -675,7 +675,7 @@
         _, _ = tr.Next()
       }
     expect_match_text: [tr.Next]
-  description: "Disabled sink duplicate — tar.Reader.Next() returns an attacker-controlled header and is modeled as source go.archive.tar_reader_next_header; the actual Zip Slip sink is the later path open/write using header.Name."
+  description: "Disabled sink duplicate - tar.Reader.Next() returns an attacker-controlled header and is modeled as source go.archive.tar_reader_next_header; the actual Zip Slip sink is the later path open/write using header.Name."
 - id: go.path.zip_reader_open
   enabled: false
   disabled_reason:
@@ -701,4 +701,4 @@
         value := "value"
         zip.OpenReader(target)
       }
-  description: "Disabled — zip.OpenReader returns an archive reader, not a vulnerable path operation. Re-enable as a source model when adapter facts can taint per-entry File.Name values precisely; the Zip Slip sink is the later path open/write."
+  description: "Disabled - zip.OpenReader returns an archive reader, not a vulnerable path operation. Re-enable as a source model when adapter facts can taint per-entry File.Name values precisely; the Zip Slip sink is the later path open/write."

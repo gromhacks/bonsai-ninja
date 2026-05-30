@@ -37,7 +37,7 @@
         }
       }
     expect_no_match: true
-  description: "MongoCollection.find — flag tainted Bson filter. Merged collision aliases: java.nosql.mongo_find_local_document, java.nosql.spring_mongo_template_find, java.ldap.spring_ldap_template_find."
+  description: "MongoCollection.find - flag tainted Bson filter. Merged collision aliases: java.nosql.mongo_find_local_document, java.nosql.spring_mongo_template_find, java.ldap.spring_ldap_template_find."
   aliases:
   - java.nosql.mongo_find_local_document
   - java.nosql.spring_mongo_template_find
@@ -81,7 +81,7 @@
         }
       }
     expect_no_match: true
-  description: "Legacy Mongo DBCollection.findOne(callerFilter) — caller-controlled selector values can carry operator objects such as $ne or $where."
+  description: "Legacy Mongo DBCollection.findOne(callerFilter) - caller-controlled selector values can carry operator objects such as $ne or $where."
 - id: java.nosql.mongo_aggregate
   enabled: true
   language: java
@@ -155,7 +155,7 @@
         }
       }
     expect_no_match: true
-  description: "MongoDatabase.runCommand — arbitrary BSON command."
+  description: "MongoDatabase.runCommand - arbitrary BSON command."
 - id: java.nosql.mongo_eval
   enabled: true
   language: java
@@ -193,7 +193,7 @@
         }
       }
     expect_no_match: true
-  description: "Legacy DB.eval — server-side JS."
+  description: "Legacy DB.eval - server-side JS."
 - id: java.nosql.bson_document_parse
   enabled: true
   language: java
@@ -230,7 +230,7 @@
         }
       }
     expect_no_match: true
-  description: "Document.parse(tainted JSON) — feeds Find filter."
+  description: "Document.parse(tainted JSON) - feeds Find filter."
 - id: java.nosql.basicdbobject_where_ctor
   enabled: true
   language: java
@@ -274,7 +274,7 @@
         BasicDBObject(Object... args) {}
       }
     expect_no_match: true
-  description: "new BasicDBObject(\"$where\", script) — MongoDB server-side JavaScript predicate; attacker-controlled script is NoSQL injection. Merged aliases: java.nosql.basicdbobject_operator_ctor."
+  description: "new BasicDBObject(\"$where\", script) - MongoDB server-side JavaScript predicate; attacker-controlled script is NoSQL injection. Merged aliases: java.nosql.basicdbobject_operator_ctor."
   aliases:
   - java.nosql.basicdbobject_operator_ctor
 - id: java.nosql.spring_data_mongo_query
@@ -314,7 +314,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring Data new BasicQuery(jsonString) — tainted JSON."
+  description: "Spring Data new BasicQuery(jsonString) - tainted JSON."
   imports:
   - org.springframework.data.mongodb
 - id: java.nosql.spring_mongo_template_criteria_is
@@ -358,7 +358,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring Data Mongo Criteria.is(operator object) — caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
+  description: "Spring Data Mongo Criteria.is(operator object) - caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
   imports:
   - org.springframework.data.mongodb
 - id: java.nosql.bson_document_from_map
@@ -400,7 +400,7 @@
         }
       }
     expect_no_match: true
-  description: "new Document(callerMap) — MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
+  description: "new Document(callerMap) - MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
 - id: java.nosql.cassandra_session_execute
   enabled: false
   disabled_reason:
@@ -418,7 +418,7 @@
       attribute:
       - Session
       - execute
-  description: "Disabled — [Session, execute] clashes with jOOQ/WebSocket/Hibernate Session; use datastax CqlSession rule below."
+  description: "Disabled - [Session, execute] clashes with jOOQ/WebSocket/Hibernate Session; use datastax CqlSession rule below."
 - id: java.nosql.elasticsearch_search
   enabled: true
   language: java
@@ -455,7 +455,7 @@
         }
       }
     expect_no_match: true
-  description: "Elasticsearch RestHighLevelClient.search — flag tainted DSL JSON."
+  description: "Elasticsearch RestHighLevelClient.search - flag tainted DSL JSON."
 - id: java.nosql.neo4j_run
   enabled: true
   language: java
@@ -492,7 +492,7 @@
         }
       }
     expect_no_match: true
-  description: "Neo4j Session.run — flag string-built Cypher."
+  description: "Neo4j Session.run - flag string-built Cypher."
   imports:
   - org.neo4j.driver
 - id: java.nosql.jedis_eval
@@ -531,7 +531,7 @@
         }
       }
     expect_no_match: true
-  description: "Jedis.eval — Lua script injection."
+  description: "Jedis.eval - Lua script injection."
 - id: java.nosql.lettuce_eval
   enabled: true
   language: java

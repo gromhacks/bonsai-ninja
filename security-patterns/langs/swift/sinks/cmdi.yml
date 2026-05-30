@@ -20,7 +20,7 @@
     code: |
       func test() { launch("safe") }
     expect_no_match: true
-  description: "Process / NSTask launch (deprecated) — subprocess execution. May FP on AppKit/SwiftUI launch() — rare."
+  description: "Process / NSTask launch (deprecated) - subprocess execution. May FP on AppKit/SwiftUI launch() - rare."
 - id: swift.cmdi.process_run
   enabled: true
   language: swift
@@ -42,7 +42,7 @@
     code: |
       func test() { process.run("whoami") }
     expect_no_match: true
-  description: "Process.run() / task.run() — Foundation subprocess execution. Kept narrow through the Process-shaped call target and tainted command argument."
+  description: "Process.run() / task.run() - Foundation subprocess execution. Kept narrow through the Process-shaped call target and tainted command argument."
 - id: swift.cmdi.system_libc
   enabled: true
   language: swift
@@ -64,7 +64,7 @@
     code: |
       func test() { system("whoami") }
     expect_no_match: true
-  description: "libc system() — runs command via /bin/sh; tainted argv executes arbitrary shell commands."
+  description: "libc system() - runs command via /bin/sh; tainted argv executes arbitrary shell commands."
 - id: swift.cmdi.popen
   enabled: true
   language: swift
@@ -86,7 +86,7 @@
     code: |
       func test() { popen("whoami", "r") }
     expect_no_match: true
-  description: "popen() — C-bridge shell pipeline."
+  description: "popen() - C-bridge shell pipeline."
 - id: swift.cmdi.execl_family
   enabled: true
   language: swift
@@ -159,7 +159,7 @@
         let launchPath = input
       }
     expect_no_match: true
-  description: "Process.launchPath = tainted — path to executable."
+  description: "Process.launchPath = tainted - path to executable."
 - id: swift.cmdi.executableurl_write
   enabled: true
   language: swift
@@ -188,7 +188,7 @@
         let executableURL = input
       }
     expect_no_match: true
-  description: "Process.executableURL = tainted — Swift-preferred variant."
+  description: "Process.executableURL = tainted - Swift-preferred variant."
 - id: swift.cmdi.arguments_write
   enabled: true
   language: swift
@@ -217,4 +217,4 @@
         let arguments = [input]
       }
     expect_no_match: true
-  description: "Process.arguments = [tainted] — argv injection."
+  description: "Process.arguments = [tainted] - argv injection."

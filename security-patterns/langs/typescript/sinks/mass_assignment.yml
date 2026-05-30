@@ -20,4 +20,4 @@
       function demo(input, req, obj) {
         return Document.set(input, req.body);
       }
-  description: "Mongoose Document.set(req.body) — TS via @types/mongoose."
+  description: "Mongoose Document.set(req.body) - TS via @types/mongoose."

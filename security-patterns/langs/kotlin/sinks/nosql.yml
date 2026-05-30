@@ -36,7 +36,7 @@
       }
       }
     expect_no_match: true
-  description: "MongoCollection.find — flag tainted Bson filter. Merged collision aliases: kotlin.nosql.mongo_find_local_document, kotlin.ldap.spring_ldap_template_find."
+  description: "MongoCollection.find - flag tainted Bson filter. Merged collision aliases: kotlin.nosql.mongo_find_local_document, kotlin.ldap.spring_ldap_template_find."
   aliases:
   - kotlin.nosql.mongo_find_local_document
   - kotlin.ldap.spring_ldap_template_find
@@ -115,7 +115,7 @@
       }
       }
     expect_no_match: true
-  description: "MongoDatabase.runCommand — arbitrary BSON command."
+  description: "MongoDatabase.runCommand - arbitrary BSON command."
 - id: kotlin.nosql.mongo_eval
   enabled: true
   language: kotlin
@@ -153,7 +153,7 @@
       }
       }
     expect_no_match: true
-  description: "Legacy DB.eval — server-side JS."
+  description: "Legacy DB.eval - server-side JS."
 - id: kotlin.nosql.bson_document_parse
   enabled: true
   language: kotlin
@@ -192,7 +192,7 @@
       }
       }
     expect_no_match: true
-  description: "Document.parse(tainted JSON) — feeds Find filter."
+  description: "Document.parse(tainted JSON) - feeds Find filter."
 - id: kotlin.nosql.bson_document_from_map
   enabled: true
   language: kotlin
@@ -231,7 +231,7 @@
       }
       class Document(vararg args: Any?)
     expect_no_match: true
-  description: "Document(callerMap) — MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
+  description: "Document(callerMap) - MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
 - id: kotlin.nosql.basicdbobject_operator_ctor
   enabled: true
   language: kotlin
@@ -270,7 +270,7 @@
       }
       class BasicDBObject(vararg args: Any?)
     expect_no_match: true
-  description: "BasicDBObject(\"$ne\", value) and related operator keys — caller-controlled operator objects can bypass intended equality checks."
+  description: "BasicDBObject(\"$ne\", value) and related operator keys - caller-controlled operator objects can bypass intended equality checks."
 - id: kotlin.nosql.spring_mongo_template_criteria_is
   enabled: true
   language: kotlin
@@ -309,7 +309,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring Data Mongo Criteria.is(operator object) — caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
+  description: "Spring Data Mongo Criteria.is(operator object) - caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
   imports:
   - org.springframework.data.mongodb
 - id: kotlin.nosql.spring_data_mongo_query
@@ -348,7 +348,7 @@
       }
       class BasicQuery(vararg args: Any?)
     expect_no_match: true
-  description: "Spring Data new BasicQuery(jsonString) — tainted JSON."
+  description: "Spring Data new BasicQuery(jsonString) - tainted JSON."
   imports:
   - org.springframework.data.mongodb
 - id: kotlin.nosql.cassandra_session_execute
@@ -389,7 +389,7 @@
       }
       }
     expect_no_match: true
-  description: "Cassandra Session.execute — flag string-built CQL."
+  description: "Cassandra Session.execute - flag string-built CQL."
   imports:
   - com.datastax.driver.core
 - id: kotlin.nosql.cqlsession_execute
@@ -469,7 +469,7 @@
       }
       }
     expect_no_match: true
-  description: "Elasticsearch RestHighLevelClient.search — flag tainted DSL JSON."
+  description: "Elasticsearch RestHighLevelClient.search - flag tainted DSL JSON."
 - id: kotlin.nosql.neo4j_run
   enabled: true
   language: kotlin
@@ -506,7 +506,7 @@
       }
       }
     expect_no_match: true
-  description: "Neo4j Session.run — flag string-built Cypher."
+  description: "Neo4j Session.run - flag string-built Cypher."
   imports:
   - org.neo4j.driver
 - id: kotlin.nosql.jedis_eval
@@ -545,7 +545,7 @@
       }
       }
     expect_no_match: true
-  description: "Jedis.eval — Lua script injection."
+  description: "Jedis.eval - Lua script injection."
 - id: kotlin.nosql.lettuce_eval
   enabled: true
   language: kotlin

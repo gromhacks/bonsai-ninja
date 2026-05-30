@@ -20,7 +20,7 @@
       def example(input, url, id, payload, request, params)
         html_safe(input)
       end
-  description: "Disabled — html_safe marks the receiver string safe; needs receiver-taint tracking."
+  description: "Disabled - html_safe marks the receiver string safe; needs receiver-taint tracking."
 - id: ruby.xss.raw
   enabled: true
   language: ruby
@@ -67,7 +67,7 @@
     kind: call
     callee:
       name: sanitize
-  description: "Disabled — sanitize is normally safe; flag only on tainted config."
+  description: "Disabled - sanitize is normally safe; flag only on tainted config."
 - id: ruby.xss.concat
   enabled: false
   disabled_reason:
@@ -83,7 +83,7 @@
     kind: call
     callee:
       name: concat
-  description: "Disabled — concat is widely used and not always XSS-relevant."
+  description: "Disabled - concat is widely used and not always XSS-relevant."
 - id: ruby.xss.content_tag
   enabled: false
   disabled_reason:
@@ -99,7 +99,7 @@
     kind: call
     callee:
       name: content_tag
-  description: "Disabled — content_tag escapes by default."
+  description: "Disabled - content_tag escapes by default."
 - id: ruby.xss.javascript_tag
   enabled: true
   language: ruby
@@ -146,7 +146,7 @@
     kind: call
     callee:
       name: link_to
-  description: "Disabled — link_to escapes by default."
+  description: "Disabled - link_to escapes by default."
 - id: ruby.xss.haml_preserve
   enabled: true
   language: ruby
@@ -177,7 +177,7 @@
         preserve("<p>Hello</p>")
       end
     expect_no_match: true
-  description: "Haml#preserve — emits raw HTML."
+  description: "Haml#preserve - emits raw HTML."
 - id: ruby.xss.slim_html_safe
   enabled: false
   disabled_reason:
@@ -193,7 +193,7 @@
     kind: call
     callee:
       name: html_escape
-  description: "Disabled — Slim html_escape is a sanitizer (opposite of XSS risk)."
+  description: "Disabled - Slim html_escape is a sanitizer (opposite of XSS risk)."
 - id: ruby.xss.safe_concat
   enabled: true
   language: ruby
@@ -224,7 +224,7 @@
         safe_concat("<p>Hello</p>")
       end
     expect_no_match: true
-  description: "ActionView::Helpers#safe_concat — appends tainted content without escaping."
+  description: "ActionView::Helpers#safe_concat - appends tainted content without escaping."
 - id: ruby.xss.sinatra_body_html_concat
   enabled: true
   language: ruby

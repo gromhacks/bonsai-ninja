@@ -43,7 +43,7 @@
         return graphql.graphql({ schema, source: "{ viewer { id } }" });
       }
     expect_no_match: true
-  description: "graphql.graphql(source: tainted) — dynamic GraphQL documents can drive resolver-side injection or schema probing."
+  description: "graphql.graphql(source: tainted) - dynamic GraphQL documents can drive resolver-side injection or schema probing."
 - id: typescript.graphql.graphql_sync_execute
   enabled: true
   language: typescript
@@ -90,7 +90,7 @@
         return graphql.graphqlSync({ schema, source: "{ viewer { id } }" });
       }
     expect_no_match: true
-  description: "graphql.graphqlSync(source: tainted) — synchronous dynamic GraphQL execution with attacker-controlled documents."
+  description: "graphql.graphqlSync(source: tainted) - synchronous dynamic GraphQL execution with attacker-controlled documents."
 - id: typescript.graphql.graphiql_debug_handler
   enabled: true
   language: typescript
@@ -115,7 +115,7 @@
       }
     expect_match_text:
     - graphiqlExpress
-  description: "graphiqlExpress debug UI — exposes interactive GraphQL execution and introspection entry points."
+  description: "graphiqlExpress debug UI - exposes interactive GraphQL execution and introspection entry points."
 - id: typescript.graphql.express_graphql_dispatch
   enabled: true
   language: typescript
@@ -141,7 +141,7 @@
       }
     expect_match_text:
     - graphqlHTTP
-  description: "express-graphql graphqlHTTP({schema/rootValue/context}) — resolver dispatch surface fed by HTTP GraphQL arguments."
+  description: "express-graphql graphqlHTTP({schema/rootValue/context}) - resolver dispatch surface fed by HTTP GraphQL arguments."
 - id: typescript.graphql.apollo_server_resolvers
   enabled: true
   language: typescript
@@ -167,7 +167,7 @@
       }
     expect_match_text:
     - ApolloServer
-  description: "ApolloServer({resolvers}) — GraphQL resolver dispatch surface where args/context become attacker-controlled resolver inputs."
+  description: "ApolloServer({resolvers}) - GraphQL resolver dispatch surface where args/context become attacker-controlled resolver inputs."
 - id: typescript.graphql.yoga_create_dispatch
   enabled: true
   language: typescript
@@ -191,7 +191,7 @@
       }
     expect_match_text:
     - createYoga
-  description: "graphql-yoga createYoga({schema/context}) — HTTP GraphQL dispatch surface exposing resolver args and context."
+  description: "graphql-yoga createYoga({schema/context}) - HTTP GraphQL dispatch surface exposing resolver args and context."
 
 - id: typescript.graphql.graphql_request_send
   enabled: true
@@ -232,7 +232,7 @@
         return httpClient.request(input);
       }
     expect_no_match: true
-  description: "graphql-request GraphQLClient.request(tainted_query) — sends attacker-controlled GraphQL document to a remote endpoint, enabling injection or schema probing."
+  description: "graphql-request GraphQLClient.request(tainted_query) - sends attacker-controlled GraphQL document to a remote endpoint, enabling injection or schema probing."
 
 - id: typescript.graphql.apollo_client_query
   enabled: true
@@ -274,7 +274,7 @@
         return sqlClient.query({ query: input });
       }
     expect_no_match: true
-  description: "Apollo Client.query({query: tainted}) — sends attacker-controlled document to the GraphQL endpoint; resolver-side injection or introspection probing."
+  description: "Apollo Client.query({query: tainted}) - sends attacker-controlled document to the GraphQL endpoint; resolver-side injection or introspection probing."
 
 - id: typescript.graphql.graphql_parse
   enabled: true
@@ -306,4 +306,4 @@
         return graphql.parse("{ viewer { id } }");
       }
     expect_no_match: true
-  description: "graphql.parse(tainted_source) — attacker-controlled source produces a Document AST that downstream code may execute or persist as a registered operation."
+  description: "graphql.parse(tainted_source) - attacker-controlled source produces a Document AST that downstream code may execute or persist as a registered operation."

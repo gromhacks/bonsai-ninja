@@ -34,7 +34,7 @@
         Environment::createTemplate("Hello user");
       }
     expect_no_match: true
-  description: Twig Environment::createTemplate(tainted) — full SSTI.
+  description: Twig Environment::createTemplate(tainted) - full SSTI.
   imports:
   - twig\twig
   - twig
@@ -55,7 +55,7 @@
       attribute:
       - Environment
       - render
-  description: Disabled — Environment::render takes a template name, not source.
+  description: Disabled - Environment::render takes a template name, not source.
 - id: php.template.smarty_fetch
   enabled: true
   language: php
@@ -190,7 +190,7 @@
       attribute:
       - Blade
       - render
-  description: Disabled — Blade::render needs tainted-source check (constraint TBD).
+  description: Disabled - Blade::render needs tainted-source check (constraint TBD).
 - id: php.template.twig_environment_autoescape_off
   enabled: true
   language: php
@@ -216,7 +216,7 @@
       function example($input, $url, $id, $payload, $request) {
         new Twig\Environment(['autoescape' => false]);
       }
-  description: new Twig\Environment($loader, ['autoescape' => false]) — global autoescape off.
+  description: new Twig\Environment($loader, ['autoescape' => false]) - global autoescape off.
 - id: php.template.smarty_escape_html_off
   enabled: true
   language: php
@@ -242,7 +242,7 @@
       function example($input, $url, $id, $payload, $request) {
         $smarty->escape_html = false;;
       }
-  description: $smarty->escape_html = false — disables HTML autoescape on output.
+  description: $smarty->escape_html = false - disables HTML autoescape on output.
 
 - id: php.template.twig_environment_array_loader
   enabled: true
@@ -284,7 +284,7 @@
         new Twig\Loader\ArrayLoader(['index' => 'Hello {{ name }}']);
       }
     expect_no_match: true
-  description: "new Twig\\Loader\\ArrayLoader([name => tainted_source]) — registers attacker-controlled template source; downstream Environment::render(name) compiles and executes it as Twig."
+  description: "new Twig\\Loader\\ArrayLoader([name => tainted_source]) - registers attacker-controlled template source; downstream Environment::render(name) compiles and executes it as Twig."
 
 - id: php.template.latte_render_to_string
   enabled: true
@@ -323,4 +323,4 @@
         Engine::renderToString("account.latte");
       }
     expect_no_match: true
-  description: "Latte Engine::renderToString(tainted) — same SSTI exposure as ::render with the result returned as a string instead of streamed."
+  description: "Latte Engine::renderToString(tainted) - same SSTI exposure as ::render with the result returned as a string instead of streamed."

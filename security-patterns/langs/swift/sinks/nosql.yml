@@ -20,7 +20,7 @@
     code: |
       func test() { predicateWithFormat("name == 'safe'") }
     expect_no_match: true
-  description: "NSPredicate.predicateWithFormat — Realm/CoreData filter injection."
+  description: "NSPredicate.predicateWithFormat - Realm/CoreData filter injection."
 
 - id: swift.nosql.nspredicate_init_format
   enabled: false
@@ -34,7 +34,7 @@
     kind: call
     callee:
       name: NSPredicate
-  description: "Disabled — duplicates swift.eval.nspredicate_format (same `NSPredicate(format:)` call site). Kept here for explicit nosql family coverage."
+  description: "Disabled - duplicates swift.eval.nspredicate_format (same `NSPredicate(format:)` call site). Kept here for explicit nosql family coverage."
 
 - id: swift.nosql.realm_objects_filter_string
   enabled: false
@@ -49,7 +49,7 @@
     kind: call
     callee:
       name: filter
-  description: "Disabled — bare `.filter` matches every Swift Array/String filter; needs receiver narrowing to Results<>."
+  description: "Disabled - bare `.filter` matches every Swift Array/String filter; needs receiver narrowing to Results<>."
 
 - id: swift.nosql.realm_filter_string
   enabled: false
@@ -64,7 +64,7 @@
     kind: call
     callee:
       name: filter
-  description: "Disabled — duplicate of realm_objects_filter_string; same overbroad `.filter` shape."
+  description: "Disabled - duplicate of realm_objects_filter_string; same overbroad `.filter` shape."
 
 - id: swift.nosql.coredata_fetch_predicate
   enabled: true
@@ -134,4 +134,4 @@
     kind: call
     callee:
       name: executeQuery
-  description: "Disabled — covered by sqli."
+  description: "Disabled - covered by sqli."

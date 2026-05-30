@@ -21,8 +21,8 @@
           Joken.decode_and_verify(input)
         end
       end
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. Joken.decode_and_verify/3 — verifies
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Joken.decode_and_verify/3 - verifies
     against the configured default_signer; weak secret, alg=none, or an HS256 signer
     set from env without strength checks accepts forged tokens."
 
@@ -51,8 +51,8 @@
           Joken.verify(input)
         end
       end
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. Joken.verify/3 — explicit signer
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Joken.verify/3 - explicit signer
     supplied; misconfigured signer (alg=none, shared weak secret) accepts forged tokens."
 
   imports:
@@ -84,7 +84,7 @@
     code: "alias Joken\ndefmodule App do\n  def test(\"safe\") do\n    Joken.peek_claims(\"\
       safe\")\n  end\nend\n"
     expect_no_match: true
-  description: "Joken.peek_claims/1 — returns JWT claims without any signature check;
+  description: "Joken.peek_claims/1 - returns JWT claims without any signature check;
     trusting the output for authorisation is an auth bypass."
 
   imports:
@@ -116,7 +116,7 @@
     code: "alias Joken\ndefmodule App do\n  def test(\"safe\") do\n    Joken.peek_header(\"\
       safe\")\n  end\nend\n"
     expect_no_match: true
-  description: "Joken.peek_header/1 — attacker-controlled JWT header (alg, kid); never
+  description: "Joken.peek_header/1 - attacker-controlled JWT header (alg, kid); never
     drive verification decisions from these values (kid-confusion, alg=none)."
 
   imports:
@@ -143,8 +143,8 @@
           Guardian.decode_and_verify(input)
         end
       end
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. Guardian.decode_and_verify/3 — weak
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Guardian.decode_and_verify/3 - weak
     `secret_key` / permissive `allowed_algos` (includes :none or :HS256 with short
     secret) accepts forged tokens."
 
@@ -172,8 +172,8 @@
           :jose_jwt.verify(input)
         end
       end
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. Erlang :jose_jwt.verify/2 — caller
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Erlang :jose_jwt.verify/2 - caller
     must supply the JWK and whitelist algorithms; default behaviour trivially accepts
     alg=none."
 
@@ -202,8 +202,8 @@
           JOSE.JWT.verify(input)
         end
       end
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. JOSE.JWT.verify/2 — Elixir wrapper
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. JOSE.JWT.verify/2 - Elixir wrapper
     over :jose_jwt; same alg-whitelist footgun."
 
   imports:
@@ -235,11 +235,11 @@
     code: "alias Jose\ndefmodule App do\n  def test(\"safe\") do\n    JOSE.JWT.peek_payload(\"\
       safe\")\n  end\nend\n"
     expect_no_match: true
-  description: "JOSE.JWT.peek_payload/1 — returns claims without any signature check;
+  description: "JOSE.JWT.peek_payload/1 - returns claims without any signature check;
     trusting these is auth bypass."
 
 # JWT alg-confusion (T400). HMAC verify with an RSA public
-# key — when both HS* and RS* algorithms are allowed in the
+# key - when both HS* and RS* algorithms are allowed in the
 # verifier's algorithm list, an attacker can sign their own
 # token with the public key as the HMAC secret. Detect by
 # matching the algorithm-list shape at the verify call.
@@ -267,8 +267,8 @@
           Joken.verify_and_validate("HS256RS256")
         end
       end
-  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
     configuration, not just the broad API shape. Joken verify_and_validate with mixed
-    HMAC+RSA algorithms — alg-confusion vector."
+    HMAC+RSA algorithms - alg-confusion vector."
   imports:
   - Joken

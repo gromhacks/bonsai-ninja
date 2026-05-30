@@ -60,7 +60,7 @@
         const char *query = arg;
         getenv(arg);
       }
-  description: "libc getenv — environment is attacker-influenced in shared hosts."
+  description: "libc getenv - environment is attacker-influenced in shared hosts."
 - id: cpp.input.secure_getenv
   enabled: true
   language: cpp
@@ -79,7 +79,7 @@
         const char *query = arg;
         secure_getenv(arg);
       }
-  description: "glibc secure_getenv — still attacker-influenced."
+  description: "glibc secure_getenv - still attacker-influenced."
 - id: cpp.input.getline
   enabled: true
   language: cpp
@@ -98,7 +98,7 @@
         const char *query = arg;
         getline(arg);
       }
-  description: "getline — stdin / file line."
+  description: "getline - stdin / file line."
 - id: cpp.input.fgets
   enabled: true
   language: cpp
@@ -117,7 +117,7 @@
         const char *query = arg;
         fgets(arg);
       }
-  description: "fgets — stdin / file line."
+  description: "fgets - stdin / file line."
 - id: cpp.input.sscanf
   enabled: true
   language: cpp
@@ -137,7 +137,7 @@
         const char *query = arg;
         sscanf(arg);
       }
-  description: "sscanf — parses external string into variables."
+  description: "sscanf - parses external string into variables."
 - id: cpp.input.qt_qcoreapplication_arguments
   enabled: true
   language: cpp
@@ -160,7 +160,7 @@
         const char *query = arg;
         QCoreApplication::arguments(arg);
       }
-  description: "Qt QCoreApplication::arguments — CLI args."
+  description: "Qt QCoreApplication::arguments - CLI args."
   imports:
   - QtCore
   - QtCore/Qt
@@ -184,7 +184,7 @@
         const char *query = arg;
         variables_map::operator[](arg);
       }
-  description: "Boost.ProgramOptions variables_map access — CLI args."
+  description: "Boost.ProgramOptions variables_map access - CLI args."
 
 - id: cpp.input.absl_parse_command_line
   enabled: true
@@ -207,7 +207,7 @@
         const char *query = arg;
         absl::ParseCommandLine(arg);
       }
-  description: "absl::ParseCommandLine(argc, argv) — returns positional args from argv."
+  description: "absl::ParseCommandLine(argc, argv) - returns positional args from argv."
 
 - id: cpp.input.absl_get_flag
   enabled: true
@@ -230,7 +230,7 @@
         const char *query = arg;
         absl::GetFlag(arg);
       }
-  description: "absl::GetFlag(FLAGS_x) — returns CLI-supplied flag value."
+  description: "absl::GetFlag(FLAGS_x) - returns CLI-supplied flag value."
 
 - id: cpp.input.qt_serialport_readall
   enabled: true
@@ -256,7 +256,7 @@
         const char *query = arg;
         QSerialPort::readAll(arg);
       }
-  description: "Qt QSerialPort::readAll — bytes from a connected serial device."
+  description: "Qt QSerialPort::readAll - bytes from a connected serial device."
   imports:
   - QtCore
   - QtCore/Qt

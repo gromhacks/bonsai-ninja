@@ -11,7 +11,7 @@
     kind: read
     target:
       name: timestamp
-  description: "Disabled — duplicate of solidity.block.timestamp source (same `read name: timestamp` shape). The source rule already fires; the analyst will see block.timestamp flowing into entropy-consuming code in the flow report."
+  description: "Disabled - duplicate of solidity.block.timestamp source (same `read name: timestamp` shape). The source rule already fires; the analyst will see block.timestamp flowing into entropy-consuming code in the flow report."
 - id: solidity.randomness.now
   enabled: true
   language: solidity
@@ -50,7 +50,7 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { blockhash(input); } }
-  description: "blockhash(n) as entropy — returns 0 for blocks > 256 old; predictable within recent window."
+  description: "blockhash(n) as entropy - returns 0 for blocks > 256 old; predictable within recent window."
 - id: solidity.randomness.block_difficulty
   enabled: false
   disabled_reason:
@@ -64,7 +64,7 @@
     kind: read
     target:
       name: difficulty
-  description: "Disabled — duplicate of solidity.block.difficulty source (same `read name: difficulty` shape). The source rule already fires."
+  description: "Disabled - duplicate of solidity.block.difficulty source (same `read name: difficulty` shape). The source rule already fires."
 - id: solidity.randomness.block_number_modulo
   enabled: false
   disabled_reason:
@@ -77,4 +77,4 @@
     kind: read
     target:
       name: number
-  description: "Disabled — `.number` is too ubiquitous a field name; re-enable once block.number-specific read detection (with %-modulus pattern) is available."
+  description: "Disabled - `.number` is too ubiquitous a field name; re-enable once block.number-specific read detection (with %-modulus pattern) is available."

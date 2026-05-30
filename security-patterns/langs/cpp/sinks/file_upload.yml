@@ -1,4 +1,4 @@
-# C++ file-upload sinks — client-controlled filenames reaching the filesystem.
+# C++ file-upload sinks - client-controlled filenames reaching the filesystem.
 - id: cpp.upload.cpphttplib_multipart
   enabled: false
   disabled_reason:
@@ -24,7 +24,7 @@
         const char *query = arg;
         Request::get_file_value(arg);
       }
-  description: "Disabled — get_file_value returns client-controlled multipart metadata and is modeled as cpp.source.cpphttplib_file_value. The sink is the later filesystem write."
+  description: "Disabled - get_file_value returns client-controlled multipart metadata and is modeled as cpp.source.cpphttplib_file_value. The sink is the later filesystem write."
 
   imports:
   - httplib.h
@@ -53,7 +53,7 @@
         const char *query = arg;
         HttpFile::getFileName(arg);
       }
-  description: "Disabled — HttpFile::getFileName is a client-controlled filename source, not a write sink. Downstream save/open rules carry the vulnerability."
+  description: "Disabled - HttpFile::getFileName is a client-controlled filename source, not a write sink. Downstream save/open rules carry the vulnerability."
 
 - id: cpp.upload.drogon_save
   enabled: true
@@ -85,7 +85,7 @@
         HttpFile::save("safe");
       }
     expect_no_match: true
-  description: "Drogon HttpFile::save / saveAs — writes uploaded bytes to disk; flag when filename is unsanitised."
+  description: "Drogon HttpFile::save / saveAs - writes uploaded bytes to disk; flag when filename is unsanitised."
 
 - id: cpp.upload.drogon_save_as
   enabled: true
@@ -117,7 +117,7 @@
         HttpFile::saveAs("safe");
       }
     expect_no_match: true
-  description: "Drogon HttpFile::saveAs(path) — tainted path writes arbitrary file."
+  description: "Drogon HttpFile::saveAs(path) - tainted path writes arbitrary file."
 
 - id: cpp.upload.poco_partstore
   enabled: false
@@ -141,4 +141,4 @@
         const char *arg = "tainted";
         auto *x = new PartHandler(arg);
       }
-  description: "Disabled — PartHandler receives uploaded part metadata but is not a filesystem sink. Model its callback filename as a source once subclass/callback facts are available."
+  description: "Disabled - PartHandler receives uploaded part metadata but is not a filesystem sink. Model its callback filename as a source once subclass/callback facts are available."

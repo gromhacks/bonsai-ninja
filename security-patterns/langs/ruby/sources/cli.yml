@@ -1,4 +1,4 @@
-# Ruby CLI / environment sources. trust: local — attacker with shell access.
+# Ruby CLI / environment sources. trust: local - attacker with shell access.
 # Disabled by default; enable for CLI-tool audits.
 - id: ruby.source.argv
   enabled: false
@@ -11,7 +11,7 @@
     kind: read
     target:
       name: ARGV
-  description: "Disabled — ARGV is CLI input; enable for CLI / bin script audits."
+  description: "Disabled - ARGV is CLI input; enable for CLI / bin script audits."
 
 - id: ruby.source.stdin_gets
   enabled: true
@@ -28,7 +28,7 @@
         def example(input, url, id, item, req_obj, options)
           gets(input)
         end
-  description: "Kernel#gets / STDIN.gets — reads one tainted line from stdin."
+  description: "Kernel#gets / STDIN.gets - reads one tainted line from stdin."
 
 - id: ruby.source.stdin_read
   enabled: false
@@ -41,7 +41,7 @@
     kind: call
     callee:
       attribute: [STDIN, read]
-  description: "Disabled — STDIN.read."
+  description: "Disabled - STDIN.read."
 
 - id: ruby.source.env_read
   enabled: false
@@ -54,4 +54,4 @@
     kind: read
     target:
       name: ENV
-  description: "Disabled by default — flag only when crossing trust boundary."
+  description: "Disabled by default - flag only when crossing trust boundary."

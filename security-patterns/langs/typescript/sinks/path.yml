@@ -27,7 +27,7 @@
         return fs.readFile("/tmp/safe.txt");
       }
     expect_no_match: true
-  description: fs.readFile — tainted path enables traversal.
+  description: fs.readFile - tainted path enables traversal.
 
 - id: typescript.path.fs_readfile_sync
   enabled: true
@@ -87,7 +87,7 @@
         return fs.writeFile("/tmp/safe.txt");
       }
     expect_no_match: true
-  description: "fs.writeFile with tainted path — attacker-controlled paths create / overwrite arbitrary files on disk."
+  description: "fs.writeFile with tainted path - attacker-controlled paths create / overwrite arbitrary files on disk."
 
 - id: typescript.path.fs_writefile_sync
   enabled: true
@@ -145,7 +145,7 @@
         return fs.appendFile("/tmp/safe.txt");
       }
     expect_no_match: true
-  description: "fs.appendFile with tainted path — attacker-controlled paths append content to arbitrary files (log tampering, auth-bypass)."
+  description: "fs.appendFile with tainted path - attacker-controlled paths append content to arbitrary files (log tampering, auth-bypass)."
 
 - id: typescript.path.fs_unlink
   enabled: true
@@ -174,7 +174,7 @@
         return fs.unlink("/tmp/safe.txt");
       }
     expect_no_match: true
-  description: fs.unlink — tainted path = arbitrary file delete.
+  description: fs.unlink - tainted path = arbitrary file delete.
 
 - id: typescript.path.fs_rename
   enabled: true
@@ -203,7 +203,7 @@
         return fs.rename("/tmp/source.txt", "/tmp/final.txt");
       }
     expect_no_match: true
-  description: fs.rename(oldPath, newPath) — tainted source path enables arbitrary-file move.
+  description: fs.rename(oldPath, newPath) - tainted source path enables arbitrary-file move.
 
 - id: typescript.path.fs_rename_destination
   enabled: true
@@ -232,7 +232,7 @@
         return fs.rename("/tmp/source.txt", "/tmp/final.txt");
       }
     expect_no_match: true
-  description: fs.rename(oldPath, newPath) — tainted destination path enables arbitrary-file move/overwrite.
+  description: fs.rename(oldPath, newPath) - tainted destination path enables arbitrary-file move/overwrite.
 
 - id: typescript.path.fs_open
   enabled: true
@@ -261,7 +261,7 @@
         return fs.open("/tmp/safe.txt");
       }
     expect_no_match: true
-  description: fs.open — tainted path enables arbitrary-file access.
+  description: fs.open - tainted path enables arbitrary-file access.
 
 - id: typescript.path.fs_mkdir
   enabled: true
@@ -290,7 +290,7 @@
         return fs.mkdir("/tmp/safe-dir");
       }
     expect_no_match: true
-  description: fs.mkdir — tainted path can create directories in sensitive locations.
+  description: fs.mkdir - tainted path can create directories in sensitive locations.
 
 - id: typescript.path.fs_createwritestream
   enabled: true
@@ -465,7 +465,7 @@
         return fs.copyFile("/tmp/source.txt", "/tmp/copy.txt");
       }
     expect_no_match: true
-  description: fs.copyFile(src, dest) — tainted source path enables arbitrary-file copy.
+  description: fs.copyFile(src, dest) - tainted source path enables arbitrary-file copy.
 
 - id: typescript.path.fs_copyfile_destination
   enabled: true
@@ -494,7 +494,7 @@
         return fs.copyFile("/tmp/source.txt", "/tmp/copy.txt");
       }
     expect_no_match: true
-  description: fs.copyFile(src, dest) — tainted destination path enables arbitrary-file overwrite.
+  description: fs.copyFile(src, dest) - tainted destination path enables arbitrary-file overwrite.
 
 - id: typescript.path.express_sendfile
   enabled: true
@@ -581,7 +581,7 @@
         return extract("/tmp/archive.zip");
       }
     expect_no_match: true
-  description: extract-zip archive path — tainted archive can contain zip-slip entries.
+  description: extract-zip archive path - tainted archive can contain zip-slip entries.
 
 - id: typescript.path.adm_zip_extractallto
   enabled: true
@@ -610,7 +610,7 @@
         return zip.extractAllTo("/tmp/uploads");
       }
     expect_no_match: true
-  description: adm-zip extractAllTo(targetPath) — tainted extraction target enables arbitrary-file writes.
+  description: adm-zip extractAllTo(targetPath) - tainted extraction target enables arbitrary-file writes.
 
 - id: typescript.path.tar_extract
   enabled: true
@@ -639,7 +639,7 @@
         return tar.extract("/tmp/archive.tgz");
       }
     expect_no_match: true
-  description: tar.extract archive path — tainted archive can write outside cwd (tar-slip).
+  description: tar.extract archive path - tainted archive can write outside cwd (tar-slip).
 
 - id: typescript.path.fs_readdir
   enabled: false
@@ -654,7 +654,7 @@
     kind: call
     callee:
       attribute: [fs, readdir]
-  description: "Disabled — readdir often legitimate listing."
+  description: "Disabled - readdir often legitimate listing."
 
 - id: typescript.path.path_join
   enabled: false
@@ -669,4 +669,4 @@
     kind: call
     callee:
       attribute: [path, join]
-  description: "Disabled — path.join is too common; needs traversal-aware analysis."
+  description: "Disabled - path.join is too common; needs traversal-aware analysis."

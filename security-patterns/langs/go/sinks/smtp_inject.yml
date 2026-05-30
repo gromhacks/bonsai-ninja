@@ -32,4 +32,4 @@
         return smtp.SendMail("localhost:25", nil, "from@x", []string{"to@x"}, msg)
       }
     expect_no_match: true
-  description: "net/smtp SendMail(addr, auth, from, to, msg) — CR/LF in `msg` injects extra headers/recipients."
+  description: "net/smtp SendMail(addr, auth, from, to, msg) - CR/LF in `msg` injects extra headers/recipients."

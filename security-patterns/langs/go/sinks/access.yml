@@ -31,7 +31,7 @@
         obj.GetObject("reports/fixed.csv")
       }
     expect_no_match: true
-  description: "S3 GetObject — tainted bucket/key selector reads arbitrary object data."
+  description: "S3 GetObject - tainted bucket/key selector reads arbitrary object data."
 
 - id: go.access.aws_s3_put_object
   enabled: true
@@ -66,7 +66,7 @@
         obj.PutObject("reports/fixed.csv")
       }
     expect_no_match: true
-  description: "S3 PutObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+  description: "S3 PutObject - tainted bucket/key selector overwrites attacker-chosen object keys."
 
 - id: go.access.aws_secretsmanager_get_secret_value
   enabled: true
@@ -101,7 +101,7 @@
         obj.GetSecretValue("app/prod/db")
       }
     expect_no_match: true
-  description: "Secrets Manager GetSecretValue — tainted secret id reads arbitrary secret material."
+  description: "Secrets Manager GetSecretValue - tainted secret id reads arbitrary secret material."
 
 - id: go.access.azure_blob_download_buffer
   enabled: true
@@ -136,7 +136,7 @@
         obj.DownloadBuffer("/var/app/export/report.csv")
       }
     expect_no_match: true
-  description: "Azure blob DownloadBuffer — tainted blob selector reads arbitrary object data."
+  description: "Azure blob DownloadBuffer - tainted blob selector reads arbitrary object data."
 
 - id: go.access.azure_blob_upload_buffer
   enabled: false
@@ -163,7 +163,7 @@
         value := "value"
         obj.UploadBuffer(target)
       }
-  description: "Disabled — UploadBuffer uploads bytes to an already-selected blob client; the object/container selector lives on the receiver construction, not the data argument."
+  description: "Disabled - UploadBuffer uploads bytes to an already-selected blob client; the object/container selector lives on the receiver construction, not the data argument."
 
 - id: go.access.gcp_storage_new_reader
   enabled: false
@@ -190,7 +190,7 @@
         value := "value"
         ObjectHandle.NewReader(target)
       }
-  description: "Disabled — ObjectHandle.NewReader(ctx) reads the receiver-selected object; the object selector is constructed earlier, not passed in this call."
+  description: "Disabled - ObjectHandle.NewReader(ctx) reads the receiver-selected object; the object selector is constructed earlier, not passed in this call."
 
 - id: go.access.gcp_storage_new_writer
   enabled: false
@@ -217,7 +217,7 @@
         value := "value"
         ObjectHandle.NewWriter(target)
       }
-  description: "Disabled — ObjectHandle.NewWriter(ctx) writes the receiver-selected object; the object selector is constructed earlier, not passed in this call."
+  description: "Disabled - ObjectHandle.NewWriter(ctx) writes the receiver-selected object; the object selector is constructed earlier, not passed in this call."
 
 - id: go.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -252,4 +252,4 @@
         obj.AccessSecretVersion("projects/app/secrets/db/versions/latest")
       }
     expect_no_match: true
-  description: "Secret Manager AccessSecretVersion — tainted resource name reads arbitrary secret versions."
+  description: "Secret Manager AccessSecretVersion - tainted resource name reads arbitrary secret versions."

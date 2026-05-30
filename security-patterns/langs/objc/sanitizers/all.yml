@@ -18,7 +18,7 @@
         snprintf(buf, 128, "%s", "safe");
       }
     expect_match_text: [snprintf]
-  description: "snprintf — bounded format; configured as a clean output overwrite only when value-bearing inputs are clean."
+  description: "snprintf - bounded format; configured as a clean output overwrite only when value-bearing inputs are clean."
 
 - id: objc.sanitizer.adding_percent_encoding
   enabled: true
@@ -33,7 +33,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; stringByAddingPercentEncodingWithAllowedCharacters(input); }
     expect_match_text: [stringByAddingPercentEncodingWithAllowedCharacters]
-  description: "NSString -stringByAddingPercentEncodingWithAllowedCharacters: — percent-encodes for URL path/query components;
+  description: "NSString -stringByAddingPercentEncodingWithAllowedCharacters: - percent-encodes for URL path/query components;
     neutralizes URL-injection."
 
 - id: objc.sanitizer.nsurlcomponents_build
@@ -49,7 +49,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; componentsWithString(input); }
     expect_match_text: [componentsWithString]
-  description: "NSURLComponents / NSURLQueryItem builders — structured URL assembly that escapes path/query components per
+  description: "NSURLComponents / NSURLQueryItem builders - structured URL assembly that escapes path/query components per
     RFC 3986; safer than +URLWithString: on a concatenated string."
 
 - id: objc.sanitizer.sqlite3_bind
@@ -65,7 +65,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; sqlite3_bind_text(input); }
     expect_match_text: [sqlite3_bind_text]
-  description: "sqlite3_bind_* family — parameterized binding for prepared statements; values cannot be interpreted as SQL."
+  description: "sqlite3_bind_* family - parameterized binding for prepared statements; values cannot be interpreted as SQL."
 
 - id: objc.sanitizer.fmdb_arguments_array
   enabled: true
@@ -82,7 +82,7 @@
       #import <fmdb/fmdb.h>
       void test(id input) { id target = input; int amount = 1; executeQueryWithFormat(input); }
     expect_match_text: [executeQueryWithFormat]
-  description: "FMDB parameterized forms (-executeUpdate:withArgumentsInArray:, -executeQueryWithFormat:) — binds values as
+  description: "FMDB parameterized forms (-executeUpdate:withArgumentsInArray:, -executeQueryWithFormat:) - binds values as
     SQLite parameters."
 
 - id: objc.sanitizer.gtm_string_escape_html
@@ -98,7 +98,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; gtm_stringByEscapingForHTML(input); }
     expect_match_text: [gtm_stringByEscapingForHTML]
-  description: "GTMStringAdditions -gtm_stringByEscapingForHTML — HTML-entity escapes `<`/`>`/`&`/`\"`."
+  description: "GTMStringAdditions -gtm_stringByEscapingForHTML - HTML-entity escapes `<`/`>`/`&`/`\"`."
 
 - id: objc.sanitizer.sec_random_copy_bytes
   enabled: true
@@ -113,7 +113,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; SecRandomCopyBytes(input); }
     expect_match_text: [SecRandomCopyBytes]
-  description: "SecRandomCopyBytes — Darwin CSPRNG; use instead of rand()/arc4random_uniform for keys/tokens."
+  description: "SecRandomCopyBytes - Darwin CSPRNG; use instead of rand()/arc4random_uniform for keys/tokens."
 
 - id: objc.sanitizer.commoncrypto_constant_compare
   enabled: true
@@ -128,7 +128,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCHmacVerify(input); }
     expect_match_text: [CCHmacVerify]
-  description: "Constant-time comparison helper (CCHmacVerify / timingsafe_bcmp / timingsafe_memcmp) — avoids MAC/HMAC timing
+  description: "Constant-time comparison helper (CCHmacVerify / timingsafe_bcmp / timingsafe_memcmp) - avoids MAC/HMAC timing
     oracles. Replaces memcmp on CC_SHA256/CC_SHA512 digest pairs."
 
 - id: objc.sanitizer.cccryptor_create_with_mode
@@ -144,7 +144,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCCryptorCreateWithMode(input); }
     expect_match_text: [CCCryptorCreateWithMode]
-  description: "CommonCrypto CCCryptorCreateWithMode — explicit mode/IV selection (CBC/GCM); use over CCCrypt's positional
+  description: "CommonCrypto CCCryptorCreateWithMode - explicit mode/IV selection (CBC/GCM); use over CCCrypt's positional
     defaults to avoid silent ECB. Sanitizer effect requires a non-ECB mode literal at the call site (rule fires regardless;
     pair with weak-crypto detector)."
 
@@ -161,7 +161,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCCryptorUpdate(input); }
     expect_match_text: [CCCryptorUpdate]
-  description: "CommonCrypto CCCryptorUpdate / CCCryptorFinal — bounds-checked block updates over CCCryptorRef; safer than
+  description: "CommonCrypto CCCryptorUpdate / CCCryptorFinal - bounds-checked block updates over CCCryptorRef; safer than
     CCCrypt one-shot when input length isn't statically known."
 
 - id: objc.sanitizer.cc_keyderivation_pbkdf
@@ -177,7 +177,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCKeyDerivationPBKDF(input); }
     expect_match_text: [CCKeyDerivationPBKDF]
-  description: "CommonCrypto CCKeyDerivationPBKDF — PBKDF2 password stretching; neutralizes raw-password-as-key crypto antipattern."
+  description: "CommonCrypto CCKeyDerivationPBKDF - PBKDF2 password stretching; neutralizes raw-password-as-key crypto antipattern."
 
 - id: objc.sanitizer.plist_secure_coding
   enabled: true
@@ -192,7 +192,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; [NSKeyedUnarchiver unarchivedObjectOfClass:input fromData:input error:nil]; }
     expect_match_text: [NSKeyedUnarchiver.unarchivedObjectOfClass]
-  description: "NSKeyedUnarchiver +unarchivedObjectOfClass:fromData:error: / +unarchivedObjectOfClasses:fromData:error: —
+  description: "NSKeyedUnarchiver +unarchivedObjectOfClass:fromData:error: / +unarchivedObjectOfClasses:fromData:error: -
     secure-coding-enforced decode that requires the target class to conform to NSSecureCoding; neutralizes class-substitution
     RCE."
 
@@ -211,7 +211,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; NSKeyedUnarchiver.requiresSecureCoding = input; }
     expect_match_text: [NSKeyedUnarchiver.requiresSecureCoding]
-  description: "NSKeyedUnarchiver .requiresSecureCoding = YES — forces NSSecureCoding enforcement on legacy unarchive paths.
+  description: "NSKeyedUnarchiver .requiresSecureCoding = YES - forces NSSecureCoding enforcement on legacy unarchive paths.
     Sanitizer effect on insecure-deserialization sinks earlier on the same path."
 
 - id: objc.sanitizer.nsnumber_integervalue
@@ -227,7 +227,7 @@
     code: |
       void test(id input) { id target = input; int amount = 1; integerValue(input); }
     expect_match_text: [integerValue]
-  description: "NSString/NSScanner numeric coercion — converts tainted text to integer/double/bool, neutralizing SQL/command
+  description: "NSString/NSScanner numeric coercion - converts tainted text to integer/double/bool, neutralizing SQL/command
     injection when value is reserialized as a number."
 
 - id: objc.sanitizer.has_prefix_same_origin
@@ -248,7 +248,7 @@
   - name: NSString hasPrefix local path negative constraint boundary
     code: "void example() {\n  input.hasPrefix();\n}\n"
     expect_no_match: true
-  description: "NSString -hasPrefix:@\"/...\" — slash-rooted same-origin redirect/path guard."
+  description: "NSString -hasPrefix:@\"/...\" - slash-rooted same-origin redirect/path guard."
 
 - id: objc.sanitizer.contains_object_allowlist
   enabled: false
@@ -263,8 +263,8 @@
     code: |
       void test(id input) { [allowed containsObject:input]; }
     expect_match_text: [allowed.containsObject]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. NSArray/NSSet/NSDictionary
-    lookup on allowlist-named receivers — finite set/map validation."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. NSArray/NSSet/NSDictionary
+    lookup on allowlist-named receivers - finite set/map validation."
 
   disabled_reason:
     code: over-broad
@@ -286,7 +286,7 @@
   - name: NSPredicate SELF MATCHES negative constraint boundary
     code: "void test(id input) { predicateWithFormat(); }\n"
     expect_no_match: true
-  description: "NSPredicate SELF MATCHES with an anchored allowlist regex — validates the whole input shape."
+  description: "NSPredicate SELF MATCHES with an anchored allowlist regex - validates the whole input shape."
 
 - id: objc.sanitizer.regex_replace_char_allowlist
   enabled: true
@@ -308,7 +308,7 @@
   - name: strip non slug chars negative constraint boundary
     code: "void example() {\n  input.stringByReplacingOccurrencesOfString();\n}\n"
     expect_no_match: true
-  description: "NSString regex replacement of `[^safe]` with empty string — strips characters outside an allowlist."
+  description: "NSString regex replacement of `[^safe]` with empty string - strips characters outside an allowlist."
 
 - id: objc.sanitizer.nsregularexpression_validate
   enabled: false
@@ -320,12 +320,12 @@
     kind: call
     callee:
       name: numberOfMatchesInString
-  description: "Disabled — NSRegularExpression -numberOfMatchesInString: is only a sanitizer when used as an allowlist guard;
+  description: "Disabled - NSRegularExpression -numberOfMatchesInString: is only a sanitizer when used as an allowlist guard;
     cannot prove guard semantics from the call shape alone. Enable per-project with rule-narrowing."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: objc.passthrough.string_by_removing_percent
@@ -343,4 +343,4 @@
     code: |
       void test(id input) { id target = input; int amount = 1; stringByRemovingPercentEncoding(input); }
     expect_match_text: [stringByRemovingPercentEncoding]
-  description: "NSString stringByRemovingPercentEncoding — instance method; preserves taint."
+  description: "NSString stringByRemovingPercentEncoding - instance method; preserves taint."

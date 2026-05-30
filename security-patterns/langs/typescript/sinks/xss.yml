@@ -51,7 +51,7 @@
     kind: call
     callee:
       name: insertAdjacentHTML
-  description: "Disabled — bare `insertAdjacentHTML` name has no receiver constraint; flag via Element receiver when analysis supports it."
+  description: "Disabled - bare `insertAdjacentHTML` name has no receiver constraint; flag via Element receiver when analysis supports it."
 - id: typescript.xss.document_write
   enabled: true
   language: typescript
@@ -76,7 +76,7 @@
         return document.write("<p>safe</p>");
       }
     expect_no_match: true
-  description: "document.write — legacy DOM XSS vector."
+  description: "document.write - legacy DOM XSS vector."
 - id: typescript.xss.document_writeln
   enabled: true
   language: typescript
@@ -188,7 +188,7 @@
         const dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;
       }
     expect_no_match: true
-  description: "React/Solid dangerouslySetInnerHTML — renders raw HTML."
+  description: "React/Solid dangerouslySetInnerHTML - renders raw HTML."
 - id: typescript.xss.vue_v_html
   enabled: false
   disabled_reason:
@@ -204,7 +204,7 @@
     kind: write
     target:
       name: v-html
-  description: "Disabled — `v-html` is a Vue template directive, not a JS identifier; it appears inside .vue SFC templates and is not emitted as a write-target name by the TS parser. Flag at SFC-template analysis level."
+  description: "Disabled - `v-html` is a Vue template directive, not a JS identifier; it appears inside .vue SFC templates and is not emitted as a write-target name by the TS parser. Flag at SFC-template analysis level."
 - id: typescript.xss.angular_bypass_html
   enabled: true
   language: typescript
@@ -237,7 +237,7 @@
         return DomSanitizer.bypassSecurityTrustHtml("<p>safe</p>");
       }
     expect_no_match: true
-  description: "Angular DomSanitizer.bypassSecurityTrustHtml — explicit sanitization escape hatch."
+  description: "Angular DomSanitizer.bypassSecurityTrustHtml - explicit sanitization escape hatch."
 - id: typescript.xss.angular_bypass_script
   enabled: true
   language: typescript
@@ -270,7 +270,7 @@
         return DomSanitizer.bypassSecurityTrustScript("console.log(1)");
       }
     expect_no_match: true
-  description: "Angular bypassSecurityTrustScript — executes arbitrary JS."
+  description: "Angular bypassSecurityTrustScript - executes arbitrary JS."
 - id: typescript.xss.angular_bypass_url
   enabled: true
   language: typescript
@@ -303,7 +303,7 @@
         return DomSanitizer.bypassSecurityTrustUrl("/safe");
       }
     expect_no_match: true
-  description: "Angular bypassSecurityTrustUrl — enables javascript: URLs."
+  description: "Angular bypassSecurityTrustUrl - enables javascript: URLs."
 - id: typescript.xss.angular_bypass_resourceurl
   enabled: true
   language: typescript
@@ -336,7 +336,7 @@
         return DomSanitizer.bypassSecurityTrustResourceUrl("/safe.js");
       }
     expect_no_match: true
-  description: "Angular bypassSecurityTrustResourceUrl — loads arbitrary iframe/script src."
+  description: "Angular bypassSecurityTrustResourceUrl - loads arbitrary iframe/script src."
 - id: typescript.xss.angular_bypass_style
   enabled: true
   language: typescript
@@ -369,7 +369,7 @@
         return DomSanitizer.bypassSecurityTrustStyle("color: black");
       }
     expect_no_match: true
-  description: "Angular bypassSecurityTrustStyle — allows CSS expression injection."
+  description: "Angular bypassSecurityTrustStyle - allows CSS expression injection."
 - id: typescript.xss.angularjs_sce_trustashtml
   enabled: true
   language: typescript
@@ -409,7 +409,7 @@
         return $sce.trustAsHtml("<p>safe</p>");
       }
     expect_no_match: true
-  description: "AngularJS $sce.trustAs* — explicit trust bypass for HTML, script, URL, resource URL, or CSS contexts."
+  description: "AngularJS $sce.trustAs* - explicit trust bypass for HTML, script, URL, resource URL, or CSS contexts."
 - id: typescript.xss.angularjs_resource_url_wildcard
   enabled: true
   language: typescript
@@ -449,7 +449,7 @@
     kind: call
     callee:
       name: html
-  description: "Disabled — bare `html` name matches any method; need jQuery receiver narrowing."
+  description: "Disabled - bare `html` name matches any method; need jQuery receiver narrowing."
 - id: typescript.xss.jquery_append
   enabled: false
   disabled_reason:
@@ -465,7 +465,7 @@
     kind: call
     callee:
       name: append
-  description: "Disabled — bare `append` name is too ubiquitous (Array, FormData, URLSearchParams, etc)."
+  description: "Disabled - bare `append` name is too ubiquitous (Array, FormData, URLSearchParams, etc)."
 - id: typescript.xss.jquery_prepend
   enabled: false
   disabled_reason:
@@ -481,7 +481,7 @@
     kind: call
     callee:
       name: prepend
-  description: "Disabled — bare `prepend` name too ubiquitous (Node.prepend, etc)."
+  description: "Disabled - bare `prepend` name too ubiquitous (Node.prepend, etc)."
 - id: typescript.xss.jquery_after
   enabled: false
   disabled_reason:
@@ -497,7 +497,7 @@
     kind: call
     callee:
       name: after
-  description: "Disabled — bare `after` name is too ubiquitous (testing after(), Element.after())."
+  description: "Disabled - bare `after` name is too ubiquitous (testing after(), Element.after())."
 - id: typescript.xss.jquery_dollar_html
   enabled: true
   language: typescript
@@ -527,7 +527,7 @@
         return $("#target").html("<p>safe</p>");
       }
     expect_no_match: true
-  description: "$(...).html(tainted) — jQuery HTML insertion (receiver $)."
+  description: "$(...).html(tainted) - jQuery HTML insertion (receiver $)."
 - id: typescript.xss.location_href_assign
   enabled: false
   disabled_reason:
@@ -541,7 +541,7 @@
     kind: write
     target:
       name: href
-  description: "Disabled — `href = tainted` matches every anchor href; need javascript: constraint."
+  description: "Disabled - `href = tainted` matches every anchor href; need javascript: constraint."
 - id: typescript.xss.script_src_assign
   enabled: false
   disabled_reason:
@@ -555,7 +555,7 @@
     kind: write
     target:
       name: src
-  description: "Disabled — `src = tainted` matches every img/iframe/script src; too broad."
+  description: "Disabled - `src = tainted` matches every img/iframe/script src; too broad."
 - id: typescript.xss.iframe_srcdoc
   enabled: true
   language: typescript
@@ -600,7 +600,7 @@
         return Range.createContextualFragment("<p>safe</p>");
       }
     expect_no_match: true
-  description: "Range.createContextualFragment(tainted) — parses and renders HTML."
+  description: "Range.createContextualFragment(tainted) - parses and renders HTML."
 - id: typescript.xss.dom_parser_parsefromstring
   enabled: false
   disabled_reason:
@@ -616,7 +616,7 @@
       attribute:
       - DOMParser
       - parseFromString
-  description: "Disabled — DOMParser parses but does not auto-render; flag downstream inserts instead."
+  description: "Disabled - DOMParser parses but does not auto-render; flag downstream inserts instead."
 - id: typescript.xss.express_res_end_html
   enabled: true
   language: typescript
@@ -658,7 +658,7 @@
         return res.end("<p>safe</p>");
       }
     expect_no_match: true
-  description: "Express/Node res.end with concatenated or template HTML — raw HTTP response body can become reflected XSS."
+  description: "Express/Node res.end with concatenated or template HTML - raw HTTP response body can become reflected XSS."
 - id: typescript.xss.koa_ctx_body_html
   enabled: true
   language: typescript
@@ -699,4 +699,4 @@
         return body;
       }
     expect_no_match: true
-  description: "Koa ctx.body = concatenated/template HTML — raw response body can reflect attacker-controlled markup."
+  description: "Koa ctx.body = concatenated/template HTML - raw response body can reflect attacker-controlled markup."

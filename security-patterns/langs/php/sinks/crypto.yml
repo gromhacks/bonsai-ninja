@@ -14,7 +14,7 @@
   match_examples:
   - name: php.crypto.md5 example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  md5($input);\n}\n"
-  description: "md5() \u2014 broken hash."
+  description: "md5() - broken hash."
 - id: php.crypto.md5_file
   enabled: true
   language: php
@@ -30,7 +30,7 @@
   match_examples:
   - name: php.crypto.md5_file example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  md5_file($input);\n}\n"
-  description: "md5_file() \u2014 broken hash for integrity / fingerprinting; use sha256_file or hash_file with a modern algorithm."
+  description: "md5_file() - broken hash for integrity / fingerprinting; use sha256_file or hash_file with a modern algorithm."
 - id: php.crypto.sha1
   enabled: true
   language: php
@@ -47,7 +47,7 @@
   match_examples:
   - name: php.crypto.sha1 example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  sha1($input);\n}\n"
-  description: "sha1() \u2014 collision-vulnerable."
+  description: "sha1() - collision-vulnerable."
 - id: php.crypto.crypt_des
   enabled: true
   language: php
@@ -63,7 +63,7 @@
   match_examples:
   - name: php.crypto.crypt_des example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  crypt($input);\n}\n"
-  description: "crypt() \u2014 flag DES variant; default depends on salt prefix."
+  description: "crypt() - flag DES variant; default depends on salt prefix."
 - id: php.crypto.mcrypt_encrypt
   enabled: true
   language: php
@@ -79,7 +79,7 @@
   match_examples:
   - name: php.crypto.mcrypt_encrypt example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mcrypt_encrypt($input);\n}\n"
-  description: "mcrypt_encrypt \u2014 removed PHP 7.2; legacy code is broken."
+  description: "mcrypt_encrypt - removed PHP 7.2; legacy code is broken."
 - id: php.crypto.openssl_encrypt_ecb
   enabled: true
   language: php
@@ -114,7 +114,7 @@
   match_examples:
   - name: php.crypto.rand example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  rand($input);\n}\n"
-  description: "rand() \u2014 LCG PRNG, not crypto-secure. Use random_int for tokens, passwords, CSRF."
+  description: "rand() - LCG PRNG, not crypto-secure. Use random_int for tokens, passwords, CSRF."
 - id: php.crypto.mt_rand
   enabled: true
   language: php
@@ -130,7 +130,7 @@
   match_examples:
   - name: php.crypto.mt_rand example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mt_rand($input);\n}\n"
-  description: "mt_rand() \u2014 Mersenne Twister; state recoverable from ~624 outputs. Not crypto-secure; use random_int."
+  description: "mt_rand() - Mersenne Twister; state recoverable from ~624 outputs. Not crypto-secure; use random_int."
 - id: php.crypto.uniqid
   enabled: true
   language: php
@@ -147,7 +147,7 @@
   match_examples:
   - name: php.crypto.uniqid example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  uniqid($input);\n}\n"
-  description: "uniqid() \u2014 microsecond-timestamp based; predictable across requests. Use random_bytes for tokens."
+  description: "uniqid() - microsecond-timestamp based; predictable across requests. Use random_bytes for tokens."
 - id: php.crypto.password_hash_md5
   enabled: false
   disabled_reason:
@@ -161,4 +161,4 @@
     kind: call
     callee:
       name: password_hash
-  description: "Disabled \u2014 password_hash() is OK; flag only weak algo."
+  description: "Disabled - password_hash() is OK; flag only weak algo."

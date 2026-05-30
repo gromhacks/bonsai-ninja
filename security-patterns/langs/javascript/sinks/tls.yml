@@ -13,7 +13,7 @@
   match_examples:
   - name: https reject unauthorized
     code: "function demo(input, req, obj) {\n  rejectUnauthorized = input; return rejectUnauthorized;\n}\n"
-  description: "`rejectUnauthorized` property assignment — when set to false, disables TLS certificate validation (MITM). Write-match accepts any RHS; audit the literal."
+  description: "`rejectUnauthorized` property assignment - when set to false, disables TLS certificate validation (MITM). Write-match accepts any RHS; audit the literal."
 - id: javascript.tls.node_tls_reject_unauth_env
   enabled: true
   language: javascript
@@ -29,7 +29,7 @@
   match_examples:
   - name: node tls reject unauth env
     code: "function demo(input, req, obj) {\n  NODE_TLS_REJECT_UNAUTHORIZED = input; return NODE_TLS_REJECT_UNAUTHORIZED;\n}\n"
-  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED assignment — when set to '0', disables TLS verification process-wide."
+  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED assignment - when set to '0', disables TLS verification process-wide."
 - id: javascript.tls.axios_https_agent_reject_unauth
   enabled: true
   language: javascript
@@ -54,7 +54,7 @@
       function demo(input, req, obj) {
         return new https.Agent(input, { rejectUnauthorized: false });
       }
-  description: "new https.Agent({rejectUnauthorized: false}) — agent ignores cert errors."
+  description: "new https.Agent({rejectUnauthorized: false}) - agent ignores cert errors."
 - id: javascript.tls.request_strict_ssl_false
   enabled: true
   language: javascript
@@ -76,7 +76,7 @@
       function demo(input, req, obj) {
         strictSSL = input; return strictSSL;
       }
-  description: "request strictSSL property assignment — when set to false, legacy http client cert validation is off."
+  description: "request strictSSL property assignment - when set to false, legacy http client cert validation is off."
 - id: javascript.tls.tls_connect_reject_unauth
   enabled: true
   language: javascript
@@ -100,7 +100,7 @@
       function demo(input, req, obj) {
         return tls.connect(input, { rejectUnauthorized: false });
       }
-  description: "tls.connect({rejectUnauthorized: false}) — raw TLS socket with validation off."
+  description: "tls.connect({rejectUnauthorized: false}) - raw TLS socket with validation off."
 - id: javascript.tls.fetch_node_insecure
   enabled: false
   disabled_reason:
@@ -114,7 +114,7 @@
     kind: write
     target:
       name: insecureHTTPParser
-  description: "Disabled — insecureHTTPParser is HTTP-parser laxity (request smuggling), not TLS validation."
+  description: "Disabled - insecureHTTPParser is HTTP-parser laxity (request smuggling), not TLS validation."
 - id: javascript.tls.grpc_create_insecure
   enabled: true
   language: javascript
@@ -163,7 +163,7 @@
       attribute:
       - https
       - request
-  description: "Disabled duplicate — same https.request rejectUnauthorized:false shape is covered by javascript.tls.https_request_reject_unauth."
+  description: "Disabled duplicate - same https.request rejectUnauthorized:false shape is covered by javascript.tls.https_request_reject_unauth."
 - id: javascript.tls.disable_verify_axios
   enabled: true
   language: javascript
@@ -187,7 +187,7 @@
       function demo(input, req, obj) {
         return axios.create(input, { rejectUnauthorized: false });
       }
-  description: "axios.create({httpsAgent: new https.Agent({rejectUnauthorized: false})}) — global axios with TLS verification off."
+  description: "axios.create({httpsAgent: new https.Agent({rejectUnauthorized: false})}) - global axios with TLS verification off."
 - id: javascript.tls.disable_verify_env
   enabled: false
   disabled_reason:
@@ -201,4 +201,4 @@
     kind: write
     target:
       name: process.env.NODE_TLS_REJECT_UNAUTHORIZED
-  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0' — disables TLS verification for the entire process."
+  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0' - disables TLS verification for the entire process."

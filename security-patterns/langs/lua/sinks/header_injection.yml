@@ -28,7 +28,7 @@
         local header = input
       end
     expect_no_match: true
-  description: "ngx.header[name] = tainted — pre-nginx-1.0 CRLF injection; modern nginx strips \\r\\n but cookie/location splitting still possible."
+  description: "ngx.header[name] = tainted - pre-nginx-1.0 CRLF injection; modern nginx strips \\r\\n but cookie/location splitting still possible."
 
 - id: lua.header.ngx_req_set_header
   enabled: true
@@ -58,7 +58,7 @@
         ngx.req.set_header("X-User", "guest")
       end
     expect_no_match: true
-  description: "ngx.req.set_header(name, tainted) — forwarded upstream; header-smuggling / cache-poisoning."
+  description: "ngx.req.set_header(name, tainted) - forwarded upstream; header-smuggling / cache-poisoning."
 
 - id: lua.header.resty_req_set_header
   enabled: true
@@ -88,4 +88,4 @@
         httpc.set_header("X-User", "guest")
       end
     expect_no_match: true
-  description: "lua-resty-http httpc:set_header — forwarded to upstream with tainted value."
+  description: "lua-resty-http httpc:set_header - forwarded to upstream with tainted value."

@@ -54,4 +54,4 @@
     kind: new
     callee:
       name: OAuth2PasswordBearer
-  description: "Disabled — FastAPI OAuth2PasswordBearer needs missing-scopes / token-validation constraint to flag risky configurations precisely."
+  description: "Disabled - FastAPI OAuth2PasswordBearer needs missing-scopes / token-validation constraint to flag risky configurations precisely."

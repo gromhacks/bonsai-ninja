@@ -1,4 +1,4 @@
-# Celery / queue param sources removed — they required a bare-regex
+# Celery / queue param sources removed - they required a bare-regex
 # placeholder (kind: param + target.regex: ".*") that fired on every
 # function parameter in the workspace, not just @task / @shared_task
 # / @app.task handlers. Re-add once the adapter exposes

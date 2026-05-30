@@ -21,7 +21,7 @@
   - name: arg tainted literal negative
     code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.getRuntime.exec(\"safe\");\n  }\n}\n"
     expect_no_match: true
-  description: "Runtime.getRuntime().exec(tainted) — shell-parsed on Unix for String form."
+  description: "Runtime.getRuntime().exec(tainted) - shell-parsed on Unix for String form."
 
 - id: java.cmdi.runtime_exec_local
   enabled: true
@@ -58,7 +58,7 @@
         }
       }
     expect_no_match: true
-  description: "Runtime.exec(tainted) through a typed Runtime receiver — attacker-controlled command execution."
+  description: "Runtime.exec(tainted) through a typed Runtime receiver - attacker-controlled command execution."
 
 - id: java.cmdi.runtime_exec_string
   enabled: false
@@ -79,7 +79,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.exec(input);\n  }\n}\n"
-  description: "Runtime.exec(String) via a stored Runtime reference — shell-parsed."
+  description: "Runtime.exec(String) via a stored Runtime reference - shell-parsed."
 - id: java.cmdi.processbuilder_ctor
   enabled: true
   language: java
@@ -103,7 +103,7 @@
   - name: literal processbuilder program negative
     code: "class App {\n  void handle() throws Exception {\n    new ProcessBuilder(\"true\");\n  }\n}\nclass ProcessBuilder {\n  ProcessBuilder(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "new ProcessBuilder(tainted) — command elements from untrusted input."
+  description: "new ProcessBuilder(tainted) - command elements from untrusted input."
 - id: java.cmdi.processbuilder_shell_wrapper
   enabled: true
   language: java
@@ -132,7 +132,7 @@
   - name: literal shell command negative
     code: "class App {\n  void handle() throws Exception {\n    new ProcessBuilder(\"sh\", \"-c\", \"whoami\");\n  }\n}\nclass ProcessBuilder {\n  ProcessBuilder(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "new ProcessBuilder(\"sh\", \"-c\", tainted) — shell command string is interpreted by /bin/sh."
+  description: "new ProcessBuilder(\"sh\", \"-c\", tainted) - shell command string is interpreted by /bin/sh."
 - id: java.cmdi.processbuilder_start
   enabled: true
   language: java
@@ -192,7 +192,7 @@
   - name: processbuilder command literal negative
     code: "class App {\n  void handle(String input) throws Exception {\n    ProcessBuilder.command(\"/bin/echo\");\n  }\n}\n"
     expect_no_match: true
-  description: "ProcessBuilder.command(tainted) — replaces the command list with attacker-controlled executable tokens."
+  description: "ProcessBuilder.command(tainted) - replaces the command list with attacker-controlled executable tokens."
 - id: java.cmdi.processbuilder_command_local
   enabled: false
   disabled_reason:
@@ -232,7 +232,7 @@
         ProcessBuilder command(Object... args) { return this; }
       }
     expect_no_match: true
-  description: "Disabled duplicate — semantic receiver-type matching in java.cmdi.processbuilder_command covers local ProcessBuilder receivers without receiver-name lists."
+  description: "Disabled duplicate - semantic receiver-type matching in java.cmdi.processbuilder_command covers local ProcessBuilder receivers without receiver-name lists."
 - id: java.cmdi.commons_exec_commandline_parse
   enabled: true
   language: java
@@ -269,7 +269,7 @@
         }
       }
     expect_no_match: true
-  description: "commons-exec CommandLine.parse(tainted) — shell-parsed command string."
+  description: "commons-exec CommandLine.parse(tainted) - shell-parsed command string."
 - id: java.cmdi.desktop_browse
   enabled: true
   language: java
@@ -298,7 +298,7 @@
         }
       }
     expect_no_match: true
-  description: "Desktop.getDesktop().browse(URI) — launches local handler for tainted URI."
+  description: "Desktop.getDesktop().browse(URI) - launches local handler for tainted URI."
 - id: java.cmdi.desktop_open
   enabled: true
   language: java
@@ -326,7 +326,7 @@
         }
       }
     expect_no_match: true
-  description: "Desktop.getDesktop().open(File) — executes associated handler for tainted file."
+  description: "Desktop.getDesktop().open(File) - executes associated handler for tainted file."
 - id: java.cmdi.runtime_exec_array
   enabled: false
   disabled_reason:
@@ -340,4 +340,4 @@
     kind: call
     callee:
       name: exec
-  description: "Disabled — bare `exec` is too broad; covered by runtime_exec / runtime_exec_string."
+  description: "Disabled - bare `exec` is too broad; covered by runtime_exec / runtime_exec_string."

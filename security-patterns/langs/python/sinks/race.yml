@@ -11,9 +11,9 @@
     kind: call
     callee:
       attribute: [os, path, exists]
-  description: "TOCTOU: os.path.exists check then open — race window. Disabled by default."
+  description: "TOCTOU: os.path.exists check then open - race window. Disabled by default."
 
-# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# TOCTOU check sites - pair with subsequent open/chmod use-sites
 # in source order to identify the race window.
 - id: python.toctou.os_access
   enabled: true
@@ -39,7 +39,7 @@
       def example(user_input):
           return os.access('safe')
     expect_no_match: true
-  description: "os.access(path) — check site; pair with subsequent os.open/os.stat to find TOCTOU."
+  description: "os.access(path) - check site; pair with subsequent os.open/os.stat to find TOCTOU."
 - id: python.toctou.os_stat_check
   enabled: true
   language: python
@@ -64,7 +64,7 @@
       def example(user_input):
           return os.stat('safe')
     expect_no_match: true
-  description: "os.stat(path) — used as a precondition before open/chmod is the TOCTOU window."
+  description: "os.stat(path) - used as a precondition before open/chmod is the TOCTOU window."
 - id: python.toctou.path_exists
   enabled: true
   language: python
@@ -89,7 +89,7 @@
       def example(user_input):
           return path.exists('safe')
     expect_no_match: true
-  description: "os.path.exists(path) — check site for TOCTOU; symlink swap between this and a subsequent open is the race."
+  description: "os.path.exists(path) - check site for TOCTOU; symlink swap between this and a subsequent open is the race."
 - id: python.race.connection_commit
   enabled: true
   language: python
@@ -109,7 +109,7 @@
         def handle(conn):
           conn.commit()
       expect_match_text: [conn.commit]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). DB-API Connection.commit() — transaction-after-error race-pair; later cursor.execute on the same connection runs outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). DB-API Connection.commit() - transaction-after-error race-pair; later cursor.execute on the same connection runs outside the intended transaction window."
 - id: python.race.connection_rollback
   enabled: true
   language: python
@@ -129,4 +129,4 @@
         def handle(conn):
           conn.rollback()
       expect_match_text: [conn.rollback]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). DB-API Connection.rollback() — transaction-after-error race-pair; later cursor.execute on the same connection persists writes the rollback was supposed to undo."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). DB-API Connection.rollback() - transaction-after-error race-pair; later cursor.execute on the same connection persists writes the rollback was supposed to undo."

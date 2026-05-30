@@ -20,7 +20,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
-  description: mysqli::query — use prepared statements.
+  description: mysqli::query - use prepared statements.
 - id: php.sqli.local_mysqli_query
   enabled: true
   language: php
@@ -98,7 +98,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->multi_query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
-  description: mysqli::multi_query — multi-statement; severe blast radius.
+  description: mysqli::multi_query - multi-statement; severe blast radius.
 - id: php.sqli.mysqli_query_proc
   enabled: true
   language: php
@@ -142,7 +142,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  PDO::query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
-  description: 'PDO::query() with tainted SQL — raw string becomes the prepared statement; SQL injection regardless of the driver. PHP built-in PDO class has no canonical ecosystem package, so strict `[''PDO'', ''query'']` match only.'
+  description: 'PDO::query() with tainted SQL - raw string becomes the prepared statement; SQL injection regardless of the driver. PHP built-in PDO class has no canonical ecosystem package, so strict `[''PDO'', ''query'']` match only.'
 - id: php.sqli.pdo_prepare_concat
   enabled: false
   disabled_reason:
@@ -158,7 +158,7 @@
       attribute:
       - PDO
       - prepare
-  description: Disabled — prepare() is safe when bound; flag only on tainted string.
+  description: Disabled - prepare() is safe when bound; flag only on tainted string.
 - id: php.sqli.mysql_query
   enabled: true
   language: php
@@ -179,7 +179,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mysql_query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
-  description: Legacy ext/mysql mysql_query — removed in PHP 7.
+  description: Legacy ext/mysql mysql_query - removed in PHP 7.
 - id: php.sqli.pg_query
   enabled: true
   language: php
@@ -200,7 +200,7 @@
   - name: pg query literal sql negative
     code: "<?php\nfunction example($input) {\n  pg_query(\"SELECT 1\");\n}\n"
     expect_no_match: true
-  description: pg_query — Postgres raw.
+  description: pg_query - Postgres raw.
 - id: php.sqli.pg_query_conn_sql
   enabled: true
   language: php
@@ -221,7 +221,7 @@
   - name: pg query literal sql negative
     code: "<?php\nfunction example($conn, $input) {\n  pg_query($conn, \"SELECT 1\");\n}\n"
     expect_no_match: true
-  description: pg_query(connection, tainted_sql) — Postgres raw SQL.
+  description: pg_query(connection, tainted_sql) - Postgres raw SQL.
 - id: php.sqli.pg_send_query
   enabled: true
   language: php
@@ -242,7 +242,7 @@
   - name: pg send query literal sql negative
     code: "<?php\nfunction example($input) {\n  pg_send_query(\"SELECT 1\");\n}\n"
     expect_no_match: true
-  description: pg_send_query() — async Postgres query with tainted SQL allows SQL injection.
+  description: pg_send_query() - async Postgres query with tainted SQL allows SQL injection.
 - id: php.sqli.pg_send_query_conn_sql
   enabled: true
   language: php
@@ -263,7 +263,7 @@
   - name: pg send query literal sql negative
     code: "<?php\nfunction example($conn, $input) {\n  pg_send_query($conn, \"SELECT 1\");\n}\n"
     expect_no_match: true
-  description: pg_send_query(connection, tainted_sql) — async Postgres query with tainted SQL allows SQL injection.
+  description: pg_send_query(connection, tainted_sql) - async Postgres query with tainted SQL allows SQL injection.
 - id: php.sqli.sqlite_query
   enabled: true
   language: php
@@ -320,7 +320,7 @@
         Connection::executeQuery("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: Doctrine DBAL Connection::executeQuery — flag if SQL string concatenated.
+  description: Doctrine DBAL Connection::executeQuery - flag if SQL string concatenated.
   imports:
   - doctrine\dbal
   - doctrine
@@ -398,7 +398,7 @@
         EntityManager::createQuery("SELECT u FROM User u WHERE u.id = 1");
       }
     expect_no_match: true
-  description: Doctrine ORM createQuery(DQL) — flag tainted DQL fragment.
+  description: Doctrine ORM createQuery(DQL) - flag tainted DQL fragment.
   imports:
   - doctrine\orm
   - doctrine
@@ -476,7 +476,7 @@
         DB::raw("COUNT(*)");
       }
     expect_no_match: true
-  description: Laravel DB::raw — bypasses parameterization.
+  description: Laravel DB::raw - bypasses parameterization.
   imports:
   - illuminate\database
   - illuminate
@@ -515,7 +515,7 @@
         DB::select("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: Laravel DB::select — flag concatenated SQL.
+  description: Laravel DB::select - flag concatenated SQL.
   imports:
   - illuminate\database
   - illuminate
@@ -554,7 +554,7 @@
         DB::statement("UPDATE users SET active = 1 WHERE id = 1");
       }
     expect_no_match: true
-  description: Laravel DB::statement — raw.
+  description: Laravel DB::statement - raw.
   imports:
   - illuminate\database
   - illuminate
@@ -593,7 +593,7 @@
         DB::unprepared("CREATE TEMPORARY TABLE report_ids (id INT)");
       }
     expect_no_match: true
-  description: Laravel DB::unprepared — explicit no-prepare.
+  description: Laravel DB::unprepared - explicit no-prepare.
   imports:
   - illuminate\database
   - illuminate
@@ -784,7 +784,7 @@
         $wpdb->get_results("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: WordPress wpdb::get_results — flag concatenated SQL (use wpdb::prepare).
+  description: WordPress wpdb::get_results - flag concatenated SQL (use wpdb::prepare).
 - id: php.sqli.wordpress_query
   enabled: true
   language: php
@@ -856,7 +856,7 @@
         Connection::query("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: Doctrine DBAL Connection::query — legacy API, flag string-built SQL.
+  description: Doctrine DBAL Connection::query - legacy API, flag string-built SQL.
   imports:
   - doctrine\dbal
   - doctrine
@@ -895,7 +895,7 @@
         CDbCommand::setText("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: Yii CDbCommand::setText — sets raw SQL.
+  description: Yii CDbCommand::setText - sets raw SQL.
   imports:
   - yiisoft\yii2
   - yiisoft
@@ -935,7 +935,7 @@
         Zend_Db_Adapter::query("SELECT * FROM users WHERE id = 1");
       }
     expect_no_match: true
-  description: Zend_Db_Adapter::query — flag concatenated SQL.
+  description: Zend_Db_Adapter::query - flag concatenated SQL.
   imports:
   - zendframework/zenddb
   - zendframework

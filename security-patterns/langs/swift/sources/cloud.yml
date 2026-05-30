@@ -12,7 +12,7 @@
     kind: param
     target:
       name: event
-  description: "Disabled — `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Swift callbacks."
+  description: "Disabled - `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Swift callbacks."
 - id: swift.cloud.aws_lambda_context
   enabled: false
   disabled_reason:
@@ -26,4 +26,4 @@
     kind: param
     target:
       name: context
-  description: "Disabled — Lambda context is runtime metadata, not untrusted."
+  description: "Disabled - Lambda context is runtime metadata, not untrusted."

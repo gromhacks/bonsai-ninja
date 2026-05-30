@@ -21,6 +21,6 @@
       import 'package:shelf_cors_headers/shelf_cors_headers.dart'; // shelf_cors_headers
       void test() { var input = "x"; var amount = 1; corsHeaders("Access-Control-Allow-Origin: *"); }
   description: |-
-    shelf_cors_headers with Access-Control-Allow-Origin: * — wildcard.
+    shelf_cors_headers with Access-Control-Allow-Origin: * - wildcard.
   imports:
   - shelf_cors_headers/shelf_cors_headers.dart

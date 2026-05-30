@@ -21,6 +21,6 @@
         end
       end
   description: |-
-    Plug CORSPlug origin: '*' — wildcard CORS.
+    Plug CORSPlug origin: '*' - wildcard CORS.
   imports:
   - Cors_plug

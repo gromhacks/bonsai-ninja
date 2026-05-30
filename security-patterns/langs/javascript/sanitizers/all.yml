@@ -1,9 +1,9 @@
-# JavaScript sanitizers — tag names use the spec-canonical vocabulary
+# JavaScript sanitizers - tag names use the spec-canonical vocabulary
 # (html-encode / html-sanitize / url-encode / url-parse / shell-escape /
 # sql-parameter / constant-time / jwt-verify / path-sanitize / ldap-escape /
 # numeric-coerce / validation).
 
-# ── HTML ────────────────────────────────────────────────────────────────────
+# -- HTML --------------------------------------------------------------------
 - id: javascript.sanitizer.dompurify_sanitize
   enabled: true
   language: javascript
@@ -22,7 +22,7 @@
         return DOMPurify.sanitize(input);
       }
     expect_match_text: [DOMPurify.sanitize]
-  description: DOMPurify.sanitize — strips executable HTML/SVG/MathML, yielding an XSS-safe fragment.
+  description: DOMPurify.sanitize - strips executable HTML/SVG/MathML, yielding an XSS-safe fragment.
 
 - id: javascript.sanitizer.xss_library
   enabled: true
@@ -42,7 +42,7 @@
         return xss(input);
       }
     expect_match_text: [xss]
-  description: xss library filter — whitelists tags/attrs and escapes the rest.
+  description: xss library filter - whitelists tags/attrs and escapes the rest.
 
 - id: javascript.sanitizer.sanitize_html
   enabled: true
@@ -61,7 +61,7 @@
         return sanitizeHtml(input);
       }
     expect_match_text: [sanitizeHtml]
-  description: sanitize-html — tag/attribute allowlist stripping.
+  description: sanitize-html - tag/attribute allowlist stripping.
 
 - id: javascript.sanitizer.he_encode
   enabled: true
@@ -80,7 +80,7 @@
         return he.encode(input);
       }
     expect_match_text: [he.encode]
-  description: he.encode — HTML-entity-encodes a string (safe for text contexts).
+  description: he.encode - HTML-entity-encodes a string (safe for text contexts).
 
 - id: javascript.sanitizer.escape_html_lodash
   enabled: false
@@ -93,7 +93,7 @@
     kind: call
     callee:
       name: escape
-  description: "Disabled — bare escape overmatches unrelated helper functions; use receiver-qualified lodash/underscore rules."
+  description: "Disabled - bare escape overmatches unrelated helper functions; use receiver-qualified lodash/underscore rules."
 
 - id: javascript.sanitizer.lodash_escape
   enabled: true
@@ -112,7 +112,7 @@
         return _.escape(input);
       }
     expect_match_text: [_.escape]
-  description: "lodash/underscore escape — HTML-encodes a string for text/attribute context."
+  description: "lodash/underscore escape - HTML-encodes a string for text/attribute context."
 
 - id: javascript.sanitizer.lodash_named_escape
   enabled: false
@@ -126,7 +126,7 @@
     kind: call
     callee:
       regex: "^lodash\\.escape$"
-  description: "Disabled — covered by javascript.sanitizer.lodash_escape to avoid duplicate sanitizer evidence."
+  description: "Disabled - covered by javascript.sanitizer.lodash_escape to avoid duplicate sanitizer evidence."
 
 - id: javascript.sanitizer.escape_html_module
   enabled: true
@@ -145,7 +145,7 @@
         return escapeHtml(input);
       }
     expect_match_text: [escapeHtml]
-  description: escape-html module — returns an HTML-encoded copy of the input.
+  description: escape-html module - returns an HTML-encoded copy of the input.
 
 - id: javascript.sanitizer.validator_escape
   enabled: true
@@ -165,9 +165,9 @@
         return validator.escape(input);
       }
     expect_match_text: [validator.escape]
-  description: validator.escape — HTML-escapes &, <, >, ", ', /.
+  description: validator.escape - HTML-escapes &, <, >, ", ', /.
 
-# ── URL ─────────────────────────────────────────────────────────────────────
+# -- URL ---------------------------------------------------------------------
 - id: javascript.sanitizer.encodeuricomponent
   enabled: true
   language: javascript
@@ -183,7 +183,7 @@
         return encodeURIComponent(input);
       }
     expect_match_text: [encodeURIComponent]
-  description: encodeURIComponent — percent-encodes a URL component (safe for query-string values).
+  description: encodeURIComponent - percent-encodes a URL component (safe for query-string values).
 
 - id: javascript.sanitizer.encodeuri
   enabled: true
@@ -200,7 +200,7 @@
         return encodeURI(input);
       }
     expect_match_text: [encodeURI]
-  description: encodeURI — percent-encodes a URL (preserves reserved chars).
+  description: encodeURI - percent-encodes a URL (preserves reserved chars).
 
 - id: javascript.sanitizer.url_constructor
   enabled: true
@@ -217,7 +217,7 @@
         return new URL(input);
       }
     expect_match_text: [URL]
-  description: new URL(input) — throws on malformed URLs and exposes host/protocol for allowlisting.
+  description: new URL(input) - throws on malformed URLs and exposes host/protocol for allowlisting.
 
 - id: javascript.sanitizer.validator_isurl
   enabled: true
@@ -236,9 +236,9 @@
         return validator.isURL(input);
       }
     expect_match_text: [validator.isURL]
-  description: validator.isURL — boolean URL validator (use together with a host allowlist).
+  description: validator.isURL - boolean URL validator (use together with a host allowlist).
 
-# ── Shell ───────────────────────────────────────────────────────────────────
+# -- Shell -------------------------------------------------------------------
 - id: javascript.sanitizer.shell_quote
   enabled: true
   language: javascript
@@ -256,7 +256,7 @@
         return shellQuote.quote(argv);
       }
     expect_match_text: [shellQuote.quote]
-  description: shell-quote .quote — POSIX-shell-escapes an argv array for safe interpolation.
+  description: shell-quote .quote - POSIX-shell-escapes an argv array for safe interpolation.
 
 - id: javascript.sanitizer.shell_escape_module
   enabled: true
@@ -275,9 +275,9 @@
         return shellescape(argv);
       }
     expect_match_text: [shellescape]
-  description: shell-escape — escapes a single argv token for /bin/sh.
+  description: shell-escape - escapes a single argv token for /bin/sh.
 
-# ── SQL ─────────────────────────────────────────────────────────────────────
+# -- SQL ---------------------------------------------------------------------
 - id: javascript.sanitizer.sql_template_strings
   enabled: true
   language: javascript
@@ -295,7 +295,7 @@
         return SQL`SELECT * FROM users WHERE id = ${id}`;
       }
     expect_match_text: [SQL]
-  description: sql-template-strings tagged template — produces a parameterised query object.
+  description: sql-template-strings tagged template - produces a parameterised query object.
 
 - id: javascript.sanitizer.sqlstring_escape
   enabled: true
@@ -314,7 +314,7 @@
         return sqlstring.escape(input);
       }
     expect_match_text: [sqlstring.escape]
-  description: sqlstring.escape — escapes a value for MySQL string literals (prefer `?` placeholders).
+  description: sqlstring.escape - escapes a value for MySQL string literals (prefer `?` placeholders).
 
 - id: javascript.sanitizer.mysql_escape
   enabled: true
@@ -333,7 +333,7 @@
         return mysql.escape(input);
       }
     expect_match_text: [mysql.escape]
-  description: mysql/mysql2 .escape — driver-level value escaping.
+  description: mysql/mysql2 .escape - driver-level value escaping.
 
 - id: javascript.sanitizer.pg_format
   enabled: true
@@ -352,9 +352,9 @@
         return format("%L", input);
       }
     expect_match_text: [format]
-  description: pg-format — postgres format() with %I/%L identifier & literal escaping.
+  description: pg-format - postgres format() with %I/%L identifier & literal escaping.
 
-# ── Constant-time / crypto ──────────────────────────────────────────────────
+# -- Constant-time / crypto --------------------------------------------------
 - id: javascript.sanitizer.crypto_timing_safe_equal
   enabled: true
   language: javascript
@@ -373,9 +373,9 @@
         return crypto.timingSafeEqual(a, b);
       }
     expect_match_text: [crypto.timingSafeEqual]
-  description: crypto.timingSafeEqual — constant-time buffer comparison for secrets/HMACs.
+  description: crypto.timingSafeEqual - constant-time buffer comparison for secrets/HMACs.
 
-# ── JWT verify ──────────────────────────────────────────────────────────────
+# -- JWT verify --------------------------------------------------------------
 - id: javascript.sanitizer.jwt_verify
   enabled: true
   language: javascript
@@ -394,7 +394,7 @@
         return jwt.verify(token, key);
       }
     expect_match_text: [jwt.verify]
-  description: jwt.verify — signature verification (safe only when `algorithms` is pinned to a non-`none` list).
+  description: jwt.verify - signature verification (safe only when `algorithms` is pinned to a non-`none` list).
 
 - id: javascript.sanitizer.jose_jwtverify
   enabled: true
@@ -413,9 +413,9 @@
         return jwtVerify(token, key);
       }
     expect_match_text: [jwtVerify]
-  description: jose jwtVerify — signature verification with explicit key material.
+  description: jose jwtVerify - signature verification with explicit key material.
 
-# ── Path ────────────────────────────────────────────────────────────────────
+# -- Path --------------------------------------------------------------------
 - id: javascript.sanitizer.path_normalize
   enabled: false
   disabled_reason:
@@ -428,7 +428,7 @@
     kind: call
     callee:
       attribute: [path, normalize]
-  description: "Disabled — path.normalize canonicalizes .. and . segments but does not enforce trusted-root containment."
+  description: "Disabled - path.normalize canonicalizes .. and . segments but does not enforce trusted-root containment."
 
 - id: javascript.sanitizer.path_basename
   enabled: true
@@ -447,9 +447,9 @@
         return path.basename(input);
       }
     expect_match_text: [path.basename]
-  description: path.basename — strips directory components, leaving just the filename.
+  description: path.basename - strips directory components, leaving just the filename.
 
-# ── LDAP ────────────────────────────────────────────────────────────────────
+# -- LDAP --------------------------------------------------------------------
 - id: javascript.sanitizer.ldap_escape
   enabled: false
   disabled_reason:
@@ -461,10 +461,10 @@
     kind: call
     callee:
       regex: "^ldapEscape\\.filter$"
-  description: "Disabled duplicate — javascript.sanitizer.ldap_escape_variants covers ldapEscape.filter plus ldapjs/ldap escapeFilter
+  description: "Disabled duplicate - javascript.sanitizer.ldap_escape_variants covers ldapEscape.filter plus ldapjs/ldap escapeFilter
     variants."
 
-# ── Numeric coercion ────────────────────────────────────────────────────────
+# -- Numeric coercion --------------------------------------------------------
 - id: javascript.sanitizer.number_coerce
   enabled: true
   language: javascript
@@ -480,7 +480,7 @@
         return Number(input);
       }
     expect_match_text: [Number]
-  description: Number(x) — coerces to a finite number or NaN (use with isFinite/isInteger check).
+  description: Number(x) - coerces to a finite number or NaN (use with isFinite/isInteger check).
 
 - id: javascript.sanitizer.parseint
   enabled: true
@@ -497,7 +497,7 @@
         return parseInt(input, 10);
       }
     expect_match_text: [parseInt]
-  description: parseInt(x, 10) — integer coercion; neutralises string-based SQL/path/shell injection vectors.
+  description: parseInt(x, 10) - integer coercion; neutralises string-based SQL/path/shell injection vectors.
 
 - id: javascript.sanitizer.parsefloat
   enabled: true
@@ -514,9 +514,9 @@
         return parseFloat(input);
       }
     expect_match_text: [parseFloat]
-  description: parseFloat — float coercion.
+  description: parseFloat - float coercion.
 
-# ── Validation (zod/joi/yup) ────────────────────────────────────────────────
+# -- Validation (zod/joi/yup) ------------------------------------------------
 - id: javascript.sanitizer.zod_parse
   enabled: true
   language: javascript
@@ -535,7 +535,7 @@
         return schema.parse(input);
       }
     expect_match_text: [schema.parse]
-  description: zod schema.parse — throws on shape/type mismatch; coerced output is schema-constrained.
+  description: zod schema.parse - throws on shape/type mismatch; coerced output is schema-constrained.
 
 - id: javascript.sanitizer.zod_safeparse
   enabled: true
@@ -555,7 +555,7 @@
         return schema.safeParse(input);
       }
     expect_match_text: [schema.safeParse]
-  description: zod schema.safeParse — returns {success,data}; data is schema-constrained.
+  description: zod schema.safeParse - returns {success,data}; data is schema-constrained.
 
 - id: javascript.sanitizer.joi_validate
   enabled: true
@@ -574,7 +574,7 @@
         return joiSchema.validate(input);
       }
     expect_match_text: [joiSchema.validate]
-  description: "Joi schema.validate — validates and coerces input against a declared schema."
+  description: "Joi schema.validate - validates and coerces input against a declared schema."
 
 - id: javascript.sanitizer.yup_validate
   enabled: true
@@ -593,7 +593,7 @@
         return yupSchema.validateSync(input);
       }
     expect_match_text: [yupSchema.validateSync]
-  description: "yup schema.validate / validateSync — coerces and rejects out-of-shape input."
+  description: "yup schema.validate / validateSync - coerces and rejects out-of-shape input."
 
 - id: javascript.sanitizer.ajv_validate
   enabled: true
@@ -612,9 +612,9 @@
         return validate(input);
       }
     expect_match_text: [validate]
-  description: "ajv compiled validator — JSON-schema validation; data is shape-constrained on success."
+  description: "ajv compiled validator - JSON-schema validation; data is shape-constrained on success."
 
-# ── NoSQL operator stripping (mongo-sanitize / express-mongo-sanitize) ──────
+# -- NoSQL operator stripping (mongo-sanitize / express-mongo-sanitize) ------
 - id: javascript.sanitizer.mongo_sanitize
   enabled: true
   language: javascript
@@ -632,7 +632,7 @@
         return mongoSanitize(input);
       }
     expect_match_text: [mongoSanitize]
-  description: "mongo-sanitize — strips top-level $-prefixed and dot-containing keys from input objects, neutralising operator
+  description: "mongo-sanitize - strips top-level $-prefixed and dot-containing keys from input objects, neutralising operator
     injection."
 
 - id: javascript.sanitizer.express_mongo_sanitize
@@ -647,10 +647,10 @@
     kind: call
     callee:
       name: mongoSanitize
-  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by javascript.sanitizer.mongo_sanitize with
+  description: "Disabled duplicate - same `mongoSanitize()` call shape is covered by javascript.sanitizer.mongo_sanitize with
     express-mongo-sanitize package metadata merged."
 
-# ── Password / KDF verifiers (constant-time compare) ────────────────────────
+# -- Password / KDF verifiers (constant-time compare) ------------------------
 - id: javascript.sanitizer.bcrypt_compare
   enabled: true
   language: javascript
@@ -668,7 +668,7 @@
         return bcrypt.compare(input, hash);
       }
     expect_match_text: [bcrypt.compare]
-  description: "bcrypt.compare / compareSync — constant-time hash verification; safe replacement for === password compare."
+  description: "bcrypt.compare / compareSync - constant-time hash verification; safe replacement for === password compare."
 
 - id: javascript.sanitizer.argon2_verify
   enabled: true
@@ -687,7 +687,7 @@
         return argon2.verify(hash, input);
       }
     expect_match_text: [argon2.verify]
-  description: "argon2.verify — Argon2id constant-time verification."
+  description: "argon2.verify - Argon2id constant-time verification."
 
 - id: javascript.sanitizer.scrypt_compare
   enabled: false
@@ -708,9 +708,9 @@
         return scrypt.verify(hash, input);
       }
     expect_match_text: [scrypt.verify]
-  description: "Disabled — receiver-agnostic .verify collides with jsonwebtoken.verify; enable only after adapter facts can prove the receiver is the scrypt-kdf module."
+  description: "Disabled - receiver-agnostic .verify collides with jsonwebtoken.verify; enable only after adapter facts can prove the receiver is the scrypt-kdf module."
 
-# ── Path containment ────────────────────────────────────────────────────────
+# -- Path containment --------------------------------------------------------
 - id: javascript.sanitizer.path_resolve
   enabled: false
   disabled_reason:
@@ -722,10 +722,10 @@
     kind: call
     callee:
       attribute: [path, resolve]
-  description: "Disabled — path.resolve canonicalises but does not enforce a trusted root; only credit when followed by a
+  description: "Disabled - path.resolve canonicalises but does not enforce a trusted root; only credit when followed by a
     startsWith check."
 
-# ── Context-aware HTML/URL/JS encoders (node-esapi) ─────────────────────────
+# -- Context-aware HTML/URL/JS encoders (node-esapi) -------------------------
 # ESAPI offers context-distinct encoders. Each is tagged so a URL-context
 # sink does NOT count an HTML-encoded string as sanitized (and vice versa).
 - id: javascript.sanitizer.esapi_encode_for_html
@@ -745,7 +745,7 @@
         return ESAPI.encoder().encodeForHTML(input);
       }
     expect_match_text: [ESAPI.encoder().encodeForHTML]
-  description: "node-esapi encodeForHTML — entity-encodes for HTML text/attribute context. NOT a substitute for URL or JS-string
+  description: "node-esapi encodeForHTML - entity-encodes for HTML text/attribute context. NOT a substitute for URL or JS-string
     encoding."
 
 - id: javascript.sanitizer.esapi_encode_for_url
@@ -765,7 +765,7 @@
         return ESAPI.encoder().encodeForURL(input);
       }
     expect_match_text: [ESAPI.encoder().encodeForURL]
-  description: "node-esapi encodeForURL — percent-encodes for URL context. Use when interpolating into href/src/action."
+  description: "node-esapi encodeForURL - percent-encodes for URL context. Use when interpolating into href/src/action."
 
 - id: javascript.sanitizer.esapi_encode_for_javascript
   enabled: true
@@ -784,7 +784,7 @@
         return ESAPI.encoder().encodeForJavaScript(input);
       }
     expect_match_text: [ESAPI.encoder().encodeForJavaScript]
-  description: "node-esapi encodeForJavaScript — escapes for inline-JS string-literal context."
+  description: "node-esapi encodeForJavaScript - escapes for inline-JS string-literal context."
 
 - id: javascript.sanitizer.esapi_encode_for_css
   enabled: true
@@ -803,9 +803,9 @@
         return ESAPI.encoder().encodeForCSS(input);
       }
     expect_match_text: [ESAPI.encoder().encodeForCSS]
-  description: "node-esapi encodeForCSS — escapes for CSS context (style attribute or block)."
+  description: "node-esapi encodeForCSS - escapes for CSS context (style attribute or block)."
 
-# ── class-validator decorators (declarative, but used as runtime gates) ─────
+# -- class-validator decorators (declarative, but used as runtime gates) -----
 - id: javascript.sanitizer.class_validator_validate
   enabled: false
   disabled_reason:
@@ -818,7 +818,7 @@
     kind: call
     callee:
       name: validate
-  description: "Disabled duplicate/weak bare-name validator — `validate(...)` is already used by javascript.sanitizer.ajv_validate;
+  description: "Disabled duplicate/weak bare-name validator - `validate(...)` is already used by javascript.sanitizer.ajv_validate;
     class-validator's precise throwing gate remains javascript.sanitizer.class_validator_validate_or_reject."
 
 - id: javascript.sanitizer.class_validator_validate_or_reject
@@ -954,7 +954,7 @@
         return allowedRoles.has(role);
       }
     expect_match_text: [allowedRoles.has]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
 
   disabled_reason:
@@ -978,7 +978,7 @@
         return allowedRoutes.includes(next);
       }
     expect_match_text: [allowedRoutes.includes]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Named Array.includes allowlists - validates that input is one of a finite literal set."
 
   disabled_reason:
@@ -1011,7 +1011,7 @@
     code: "const allowedRoutes = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name) {\n  if (Object.hasOwn())
       {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before
     selecting a trusted mapped value."
 
@@ -1036,7 +1036,7 @@
         return uuidRe.test(id);
       }
     expect_match_text: [uuidRe.test]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
 
   disabled_reason:
@@ -1129,8 +1129,8 @@
   - name: input match slug regex negative constraint boundary
     code: "function ok(input, slugRe) {\n  return input.match();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    String.match(named allowlist regex) gates - regex object must be named for safe/id/slug/uuid/allowed validation."
 
   disabled_reason:
     code: over-broad
@@ -1165,8 +1165,8 @@
   - name: resolved path startsWith uploadDir negative constraint boundary
     code: "const _u = require(\"path\");\nfunction ok(resolved, uploadDir) {\n  return resolved.startsWith();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Canonical path containment guard after path.resolve/normalize - validates the resolved candidate remains under a trusted
     root."
 
   disabled_reason:
@@ -1199,8 +1199,8 @@
   - name: allowed origins has url origin negative constraint boundary
     code: "function ok(url, allowedOrigins) {\n  return allowedOrigins.has();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    URL origin/host allowlist membership - credits finite allowlists over parsed URL origin/host/hostname values."
 
   disabled_reason:
     code: over-broad
@@ -1242,7 +1242,7 @@
         return prisma.$queryRaw(Prisma.raw("SELECT * FROM " + table));
       }
     expect_no_match: true
-  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string
+  description: "Prisma $queryRaw/$executeRaw tagged-template form - interpolations are parameterized unless Prisma.raw/string
     concatenation is used."
 
 - id: javascript.sanitizer.sequelize_query_bindings
@@ -1277,7 +1277,7 @@
   - name: sequelize replacements negative constraint boundary
     code: "const _u = require(\"sequelize\");\nfunction byId(sequelize, id) {\n  return sequelize.query();\n}\n"
     expect_no_match: true
-  description: "Sequelize raw query with replacements/bind options and literal SQL text — parameterized form."
+  description: "Sequelize raw query with replacements/bind options and literal SQL text - parameterized form."
 
 - id: javascript.sanitizer.ldap_escape_variants
   enabled: true
@@ -1303,7 +1303,7 @@
         return ldapEscape.filter(input);
       }
     expect_match_text: [ldapEscape.filter]
-  description: "LDAP filter escaping variants — RFC 4515 escaping before LDAP search filter interpolation."
+  description: "LDAP filter escaping variants - RFC 4515 escaping before LDAP search filter interpolation."
 
 - id: javascript.sanitizer.xpath_literal_escape
   enabled: true
@@ -1329,7 +1329,7 @@
         return xpath.literal(input);
       }
     expect_match_text: [xpath.literal]
-  description: "XPath literal escaping — quotes attacker-controlled strings before XPath expression interpolation."
+  description: "XPath literal escaping - quotes attacker-controlled strings before XPath expression interpolation."
 
 - id: javascript.sanitizer.xml_escape
   enabled: true
@@ -1380,11 +1380,11 @@
   - name: libxmljs parseXml safe noent false negative constraint boundary
     code: "const _u = require(\"libxmljs\");\nfunction parse(libxmljs, input) {\n  return libxmljs.parseXml();\n}\n"
     expect_no_match: true
-  description: "libxmljs parser calls with safe XXE options — entity expansion/DTD loading disabled and network access blocked."
+  description: "libxmljs parser calls with safe XXE options - entity expansion/DTD loading disabled and network access blocked."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: javascript.passthrough.decode_uri_component
@@ -1404,7 +1404,7 @@
         return decodeURIComponent(input);
       }
     expect_match_text: [decodeURIComponent]
-  description: "decodeURIComponent(s) — preserves taint; canonical client-side decode."
+  description: "decodeURIComponent(s) - preserves taint; canonical client-side decode."
 - id: javascript.passthrough.decode_uri
   enabled: true
   language: javascript
@@ -1422,7 +1422,7 @@
         return decodeURI(input);
       }
     expect_match_text: [decodeURI]
-  description: "decodeURI(s) — preserves taint."
+  description: "decodeURI(s) - preserves taint."
 - id: javascript.passthrough.unescape
   enabled: true
   language: javascript
@@ -1440,7 +1440,7 @@
         return unescape(input);
       }
     expect_match_text: [unescape]
-  description: "unescape(s) — legacy, deprecated decode; preserves taint."
+  description: "unescape(s) - legacy, deprecated decode; preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -1463,7 +1463,7 @@
         return csurf();
       }
     expect_match_text: [csurf]
-  description: "csurf() — Express CSRF middleware factory; presence on the app/router signals CSRF protection."
+  description: "csurf() - Express CSRF middleware factory; presence on the app/router signals CSRF protection."
 - id: javascript.csrf.express_csrf
   enabled: true
   language: javascript
@@ -1480,7 +1480,7 @@
         return express.csrf();
       }
     expect_match_text: [express.csrf]
-  description: "express.csrf() — legacy Express built-in; same protection."
+  description: "express.csrf() - legacy Express built-in; same protection."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -1500,7 +1500,7 @@
         return mutex.acquire();
       }
     expect_match_text: [mutex.acquire]
-  description: "async-mutex Mutex.acquire() — releases via the returned token."
+  description: "async-mutex Mutex.acquire() - releases via the returned token."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer
@@ -1527,7 +1527,7 @@
   - name: secure httponly cookie negative constraint boundary
     code: "function setCookie(res, token) {\n  return res.cookie();\n}\n"
     expect_no_match: true
-  description: "res.cookie(name, val, {httpOnly: true, secure: true}) — cookie set with HttpOnly + Secure flags."
+  description: "res.cookie(name, val, {httpOnly: true, secure: true}) - cookie set with HttpOnly + Secure flags."
 
 # Rate-limit middleware presence sanitizers (architectural).
 - id: javascript.ratelimit.express_rate_limit
@@ -1547,7 +1547,7 @@
         return rateLimit({ windowMs: 60000, max: 100 });
       }
     expect_match_text: [rateLimit]
-  description: "express-rate-limit middleware factory — presence signals throttling; absence on /login is the finding."
+  description: "express-rate-limit middleware factory - presence signals throttling; absence on /login is the finding."
 - id: javascript.ratelimit.express_slow_down
   enabled: true
   language: javascript
@@ -1565,4 +1565,4 @@
         return slowDown({ windowMs: 60000 });
       }
     expect_match_text: [slowDown]
-  description: "express-slow-down middleware — same enumeration as rateLimit."
+  description: "express-slow-down middleware - same enumeration as rateLimit."

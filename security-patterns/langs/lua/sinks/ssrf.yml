@@ -30,7 +30,7 @@
         httpc.request_uri("https://api.example.test/health")
       end
     expect_no_match: true
-  description: "lua-resty-http httpc:request_uri(url) — tainted URL reaches arbitrary internal/cloud endpoint. Also covers merged aliases: lua.tls.resty_http_ssl_verify_false."
+  description: "lua-resty-http httpc:request_uri(url) - tainted URL reaches arbitrary internal/cloud endpoint. Also covers merged aliases: lua.tls.resty_http_ssl_verify_false."
 
 - id: lua.ssrf.luaresty_http_request
   enabled: true
@@ -61,7 +61,7 @@
         httpc.request({ path = "/health" })
       end
     expect_no_match: true
-  description: "lua-resty-http httpc:request{} — tainted URI/path hits arbitrary origin."
+  description: "lua-resty-http httpc:request{} - tainted URI/path hits arbitrary origin."
 
 - id: lua.ssrf.ngx_location_capture
   enabled: true
@@ -89,7 +89,7 @@
         ngx.location.capture("/health")
       end
     expect_no_match: true
-  description: "ngx.location.capture(uri) — issues internal subrequest; tainted URI pivots to any internal location."
+  description: "ngx.location.capture(uri) - issues internal subrequest; tainted URI pivots to any internal location."
 
 - id: lua.ssrf.ngx_location_capture_multi
   enabled: true
@@ -117,7 +117,7 @@
         ngx.location.capture_multi({ { "/health" } })
       end
     expect_no_match: true
-  description: "ngx.location.capture_multi — batched internal subrequests with tainted URIs."
+  description: "ngx.location.capture_multi - batched internal subrequests with tainted URIs."
 
 - id: lua.ssrf.luasocket_http_request
   enabled: true
@@ -147,7 +147,7 @@
         http.request("https://api.example.test/health")
       end
     expect_no_match: true
-  description: "LuaSocket http.request(url) — blocking HTTP fetch of attacker-controlled URL."
+  description: "LuaSocket http.request(url) - blocking HTTP fetch of attacker-controlled URL."
 
 - id: lua.ssrf.lua_requests_get
   enabled: true
@@ -177,7 +177,7 @@
         requests.get("https://api.example.test/health")
       end
     expect_no_match: true
-  description: "lua-requests requests.get(url) — tainted URL fetched server-side."
+  description: "lua-requests requests.get(url) - tainted URL fetched server-side."
 
 - id: lua.ssrf.lua_requests_post
   enabled: true
@@ -207,4 +207,4 @@
         requests.post("https://api.example.test/submit")
       end
     expect_no_match: true
-  description: "lua-requests requests.post(url) — tainted URL fetched server-side."
+  description: "lua-requests requests.post(url) - tainted URL fetched server-side."

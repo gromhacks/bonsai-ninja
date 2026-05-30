@@ -18,7 +18,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  echo \"safe\";\n}\n"
     expect_no_match: true
-  description: echo(tainted) — direct HTML output to response body. Constraint requires interp (`$var`) or concat (`.`) shape so plain literal echos are skipped; the taint engine is the second gate.
+  description: echo(tainted) - direct HTML output to response body. Constraint requires interp (`$var`) or concat (`.`) shape so plain literal echos are skipped; the taint engine is the second gate.
 - id: php.xss.print
   enabled: false
   disabled_reason:
@@ -32,7 +32,7 @@
     kind: call
     callee:
       name: print
-  description: Disabled — print is ubiquitous.
+  description: Disabled - print is ubiquitous.
 - id: php.xss.printf
   enabled: false
   disabled_reason:
@@ -46,7 +46,7 @@
     kind: call
     callee:
       name: printf
-  description: Disabled — flag per-audit.
+  description: Disabled - flag per-audit.
 - id: php.xss.twig_markup
   enabled: true
   language: php
@@ -80,7 +80,7 @@
         new Markup("safe");
       }
     expect_no_match: true
-  description: new \Twig\Markup(tainted) — bypasses autoescape.
+  description: new \Twig\Markup(tainted) - bypasses autoescape.
   imports:
   - twig\twig
   - twig
@@ -101,7 +101,7 @@
       attribute:
       - Environment
       - createTemplate
-  description: Disabled duplicate — Twig Environment::createTemplate covered by template.twig_createTemplate (classified as SSTI).
+  description: Disabled duplicate - Twig Environment::createTemplate covered by template.twig_createTemplate (classified as SSTI).
 - id: php.xss.blade_html_string
   enabled: true
   language: php
@@ -135,7 +135,7 @@
         new HtmlString("safe");
       }
     expect_no_match: true
-  description: new HtmlString(tainted) — Blade {!! !!} compiled output.
+  description: new HtmlString(tainted) - Blade {!! !!} compiled output.
   imports:
   - illuminate\support
   - illuminate
@@ -163,7 +163,7 @@
       function example($input, $url, $id, $payload, $request) {
         the_content($input);
       }
-  description: "Disabled — the_content() prints global post content; unsafe user content reaches this through WordPress state rather than a taintable argument."
+  description: "Disabled - the_content() prints global post content; unsafe user content reaches this through WordPress state rather than a taintable argument."
 - id: php.xss.smarty_display
   enabled: false
   disabled_reason:
@@ -181,7 +181,7 @@
       attribute:
       - Smarty
       - display
-  description: Disabled duplicate — Smarty::display is classified as SSTI/template-path selection in php.template.smarty_display; v1 matching cannot distinguish tainted template path from tainted assigned variable.
+  description: Disabled duplicate - Smarty::display is classified as SSTI/template-path selection in php.template.smarty_display; v1 matching cannot distinguish tainted template path from tainted assigned variable.
 - id: php.xss.cakephp_set
   enabled: false
   disabled_reason:
@@ -197,7 +197,7 @@
     kind: call
     callee:
       name: set
-  description: Disabled — generic set(); flag with h() absence.
+  description: Disabled - generic set(); flag with h() absence.
 - id: php.xss.yii_raw
   enabled: true
   language: php
@@ -252,4 +252,4 @@
     kind: call
     callee:
       name: raw
-  description: Disabled — Twig |raw filter surfaced in template scanner.
+  description: Disabled - Twig |raw filter surfaced in template scanner.

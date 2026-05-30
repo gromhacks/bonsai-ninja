@@ -31,4 +31,4 @@
         return transporter.sendMail({from: "a@x", to: "b@x", subject: "fixed"});
       }
     expect_no_match: true
-  description: "nodemailer transporter.sendMail({from, to, subject, ...}) — CR/LF in any header field injects additional headers / recipients."
+  description: "nodemailer transporter.sendMail({from, to, subject, ...}) - CR/LF in any header field injects additional headers / recipients."

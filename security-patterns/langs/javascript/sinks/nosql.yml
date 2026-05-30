@@ -56,7 +56,7 @@
         return collection.find({ active: true });
       }
     expect_no_match: true
-  description: "Mongo-style find/findOne filter APIs — tainted object-form filters enable $where/$regex/operator injection. Merged collision aliases: javascript.nosql.mongo_findone, javascript.nosql.mongo_credential_object_filter, javascript.nosql.mongo_caller_controlled_filter_value, javascript.nosql.mongoose_find, javascript.nosql.couchdb_find."
+  description: "Mongo-style find/findOne filter APIs - tainted object-form filters enable $where/$regex/operator injection. Merged collision aliases: javascript.nosql.mongo_findone, javascript.nosql.mongo_credential_object_filter, javascript.nosql.mongo_caller_controlled_filter_value, javascript.nosql.mongoose_find, javascript.nosql.couchdb_find."
   aliases:
   - javascript.nosql.mongo_findone
   - javascript.nosql.mongo_credential_object_filter
@@ -106,7 +106,7 @@
         return collection.aggregate([{ $match: { active: true } }]);
       }
     expect_no_match: true
-  description: "mongodb collection.aggregate — tainted pipeline stages allow $where/$expr code execution."
+  description: "mongodb collection.aggregate - tainted pipeline stages allow $where/$expr code execution."
 - id: javascript.nosql.mongo_updateone
   enabled: true
   language: javascript
@@ -139,7 +139,7 @@
         return collection.updateOne({ id: 1 }, { $set: { active: true } });
       }
     expect_no_match: true
-  description: "mongodb collection.updateOne(tainted filter, update) — operator injection in the selector."
+  description: "mongodb collection.updateOne(tainted filter, update) - operator injection in the selector."
 - id: javascript.nosql.mongo_updateone_update_doc
   enabled: true
   language: javascript
@@ -172,7 +172,7 @@
         return collection.updateOne({ id: 1 }, { $set: { active: true } });
       }
     expect_no_match: true
-  description: "mongodb collection.updateOne(filter, tainted update) — attacker-controlled update documents can inject operators."
+  description: "mongodb collection.updateOne(filter, tainted update) - attacker-controlled update documents can inject operators."
 - id: javascript.nosql.mongo_updatemany
   enabled: true
   language: javascript
@@ -205,7 +205,7 @@
         return collection.updateMany({ active: false }, { $set: { active: true } });
       }
     expect_no_match: true
-  description: "mongodb collection.updateMany(tainted filter, update) — same selector hazard as updateOne."
+  description: "mongodb collection.updateMany(tainted filter, update) - same selector hazard as updateOne."
 - id: javascript.nosql.mongo_updatemany_update_doc
   enabled: true
   language: javascript
@@ -238,7 +238,7 @@
         return collection.updateMany({ active: false }, { $set: { active: true } });
       }
     expect_no_match: true
-  description: "mongodb collection.updateMany(filter, tainted update) — attacker-controlled update documents can inject operators."
+  description: "mongodb collection.updateMany(filter, tainted update) - attacker-controlled update documents can inject operators."
 - id: javascript.nosql.mongo_deletemany
   enabled: true
   language: javascript
@@ -271,7 +271,7 @@
         return collection.deleteMany({ active: false });
       }
     expect_no_match: true
-  description: "mongodb collection.deleteMany — operator injection in filter can match unintended docs."
+  description: "mongodb collection.deleteMany - operator injection in filter can match unintended docs."
 - id: javascript.nosql.mongo_command
   enabled: true
   language: javascript
@@ -304,7 +304,7 @@
         return db.command({ ping: 1 });
       }
     expect_no_match: true
-  description: "mongodb db.command runs an arbitrary command document — tainted input can invoke admin commands."
+  description: "mongodb db.command runs an arbitrary command document - tainted input can invoke admin commands."
 - id: javascript.nosql.mongoose_find
   enabled: false
   disabled_reason:
@@ -383,7 +383,7 @@
         return Model.where({ active: true });
       }
     expect_no_match: true
-  description: "Mongoose Model.where — tainted $where string is evaluated as server-side JavaScript."
+  description: "Mongoose Model.where - tainted $where string is evaluated as server-side JavaScript."
 - id: javascript.nosql.elasticsearch_search
   enabled: true
   language: javascript
@@ -416,7 +416,7 @@
         return Client.search({ index: "users", query: { match_all: {} } });
       }
     expect_no_match: true
-  description: "elasticsearch Client.search with a tainted `body` DSL — attacker controls query shape."
+  description: "elasticsearch Client.search with a tainted `body` DSL - attacker controls query shape."
 - id: javascript.nosql.couchdb_find
   enabled: false
   disabled_reason:
@@ -459,7 +459,7 @@
       attribute:
       - DynamoDBClient
       - send
-  description: "Disabled — DynamoDB scan/query runs via generic .send(Command); flag only when the FilterExpression is string-built."
+  description: "Disabled - DynamoDB scan/query runs via generic .send(Command); flag only when the FilterExpression is string-built."
 - id: javascript.nosql.dynamodb_scan_command
   enabled: true
   language: javascript
@@ -490,7 +490,7 @@
         return new ScanCommand({ TableName: "Users" });
       }
     expect_no_match: true
-  description: "new ScanCommand({FilterExpression, ProjectionExpression, ...}) — tainted expressions build a DynamoDB query shape."
+  description: "new ScanCommand({FilterExpression, ProjectionExpression, ...}) - tainted expressions build a DynamoDB query shape."
 - id: javascript.nosql.dynamodb_query_command
   enabled: true
   language: javascript
@@ -521,7 +521,7 @@
         return new QueryCommand({ TableName: "Users" });
       }
     expect_no_match: true
-  description: "new QueryCommand({KeyConditionExpression, FilterExpression, ...}) — tainted expressions drive DynamoDB query logic."
+  description: "new QueryCommand({KeyConditionExpression, FilterExpression, ...}) - tainted expressions drive DynamoDB query logic."
 - id: javascript.nosql.mongo_findandmodify
   enabled: true
   language: javascript
@@ -554,7 +554,7 @@
         return collection.findAndModify({ active: true }, []);
       }
     expect_no_match: true
-  description: "mongodb collection.findAndModify (legacy 2.x driver) — operator injection in filter/update/sort; tainted $where in filter is server-side JS exec."
+  description: "mongodb collection.findAndModify (legacy 2.x driver) - operator injection in filter/update/sort; tainted $where in filter is server-side JS exec."
 - id: javascript.nosql.mongo_replaceone
   enabled: true
   language: javascript
@@ -587,7 +587,7 @@
         return collection.replaceOne({ id: 1 }, { active: true });
       }
     expect_no_match: true
-  description: "mongodb collection.replaceOne — operator injection in filter; replacement document can clobber unintended fields."
+  description: "mongodb collection.replaceOne - operator injection in filter; replacement document can clobber unintended fields."
 - id: javascript.nosql.mongo_deleteone
   enabled: true
   language: javascript
@@ -620,7 +620,7 @@
         return collection.deleteOne({ active: false });
       }
     expect_no_match: true
-  description: "mongodb collection.deleteOne — operator injection in filter can match unintended docs."
+  description: "mongodb collection.deleteOne - operator injection in filter can match unintended docs."
 - id: javascript.nosql.mongo_bulkwrite
   enabled: true
   language: javascript
@@ -651,7 +651,7 @@
         return collection.bulkWrite([{ insertOne: { document: { active: true } } }]);
       }
     expect_no_match: true
-  description: "mongodb collection.bulkWrite — array of operations; any tainted filter/update inherits per-op operator injection."
+  description: "mongodb collection.bulkWrite - array of operations; any tainted filter/update inherits per-op operator injection."
 - id: javascript.nosql.mongo_mapreduce
   enabled: true
   language: javascript
@@ -685,7 +685,7 @@
         return collection.mapReduce(function map() {}, function reduce() {});
       }
     expect_no_match: true
-  description: "mongodb collection.mapReduce(map, reduce, options) — tainted map JavaScript is evaluated server-side."
+  description: "mongodb collection.mapReduce(map, reduce, options) - tainted map JavaScript is evaluated server-side."
 - id: javascript.nosql.mongo_mapreduce_reduce
   enabled: true
   language: javascript
@@ -719,7 +719,7 @@
         return collection.mapReduce(function map() {}, function reduce() {});
       }
     expect_no_match: true
-  description: "mongodb collection.mapReduce(map, reduce, options) — tainted reduce JavaScript is evaluated server-side."
+  description: "mongodb collection.mapReduce(map, reduce, options) - tainted reduce JavaScript is evaluated server-side."
 - id: javascript.nosql.mongo_mapreduce_options
   enabled: true
   language: javascript
@@ -753,7 +753,7 @@
         return collection.mapReduce(function map() {}, function reduce() {}, { out: "tmp" });
       }
     expect_no_match: true
-  description: "mongodb collection.mapReduce(map, reduce, options) — tainted options can carry server-side finalize JavaScript."
+  description: "mongodb collection.mapReduce(map, reduce, options) - tainted options can carry server-side finalize JavaScript."
 - id: javascript.nosql.mongo_db_eval
   enabled: true
   language: javascript
@@ -786,7 +786,7 @@
         return db.eval("return 1");
       }
     expect_no_match: true
-  description: "mongodb db.eval(script) — runs an arbitrary JavaScript program inside the mongod server. Removed in 4.2 but still present on legacy clusters; tainted script = RCE."
+  description: "mongodb db.eval(script) - runs an arbitrary JavaScript program inside the mongod server. Removed in 4.2 but still present on legacy clusters; tainted script = RCE."
 - id: javascript.nosql.mongoose_aggregate
   enabled: true
   language: javascript
@@ -819,7 +819,7 @@
         return Model.aggregate([{ $match: { active: true } }]);
       }
     expect_no_match: true
-  description: "Mongoose Model.aggregate — tainted pipeline stages allow $where/$expr/$function code execution."
+  description: "Mongoose Model.aggregate - tainted pipeline stages allow $where/$expr/$function code execution."
 - id: javascript.nosql.mongoose_bulkwrite
   enabled: true
   language: javascript
@@ -850,7 +850,7 @@
         return Model.bulkWrite([{ insertOne: { document: { active: true } } }]);
       }
     expect_no_match: true
-  description: "Mongoose Model.bulkWrite — array of operations; per-op operator injection inherited."
+  description: "Mongoose Model.bulkWrite - array of operations; per-op operator injection inherited."
 - id: javascript.nosql.nedb_update
   enabled: true
   language: javascript
@@ -884,7 +884,7 @@
         return Datastore.update({ id: 1 }, { $set: { active: true } });
       }
     expect_no_match: true
-  description: "NeDB Datastore.update(tainted selector, modifier) — operator injection in selector."
+  description: "NeDB Datastore.update(tainted selector, modifier) - operator injection in selector."
 - id: javascript.nosql.nedb_update_modifier
   enabled: true
   language: javascript
@@ -918,4 +918,4 @@
         return Datastore.update({ id: 1 }, { $set: { active: true } });
       }
     expect_no_match: true
-  description: "NeDB Datastore.update(selector, tainted modifier) — attacker-controlled modifiers can inject operators."
+  description: "NeDB Datastore.update(selector, tainted modifier) - attacker-controlled modifiers can inject operators."

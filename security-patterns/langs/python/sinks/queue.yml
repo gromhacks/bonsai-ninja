@@ -13,7 +13,7 @@
     kind: call
     callee:
       name: delay
-  description: "Disabled — flag with dynamic-task-name analysis."
+  description: "Disabled - flag with dynamic-task-name analysis."
 
 - id: python.queue.boto3_send_message
   enabled: true
@@ -42,7 +42,7 @@
       def example(user_input):
           return send_message(MessageBody="safe")
     expect_no_match: true
-  description: "boto3 SQS Queue.send_message / client.send_message with MessageBody=tainted — attacker-controlled queue payload injects arbitrary messages."
+  description: "boto3 SQS Queue.send_message / client.send_message with MessageBody=tainted - attacker-controlled queue payload injects arbitrary messages."
 
 - id: python.queue.boto3_send_message_queue_url
   enabled: true
@@ -71,7 +71,7 @@
       def example(user_input):
           return send_message(QueueUrl="https://sqs.us-east-1.amazonaws.com/123/q", MessageBody="safe")
     expect_no_match: true
-  description: "boto3 SQS send_message(QueueUrl=tainted_url, MessageBody) — attacker-controlled queue target can redirect messages to unintended queues."
+  description: "boto3 SQS send_message(QueueUrl=tainted_url, MessageBody) - attacker-controlled queue target can redirect messages to unintended queues."
 
 - id: python.queue.azure_servicebus_send_messages
   enabled: true
@@ -99,7 +99,7 @@
       def example(user_input):
           return send_messages("safe")
     expect_no_match: true
-  description: "ServiceBusSender.send_messages — tainted queue target/body injects arbitrary Service Bus payloads."
+  description: "ServiceBusSender.send_messages - tainted queue target/body injects arbitrary Service Bus payloads."
 
   imports:
   - azureservicebus
@@ -116,4 +116,4 @@
     kind: call
     callee:
       name: publish
-  description: "Disabled — Pub/Sub Topic.publish and many non-queue APIs share the bare `publish` name; enable only in Pub/Sub-focused audits."
+  description: "Disabled - Pub/Sub Topic.publish and many non-queue APIs share the bare `publish` name; enable only in Pub/Sub-focused audits."

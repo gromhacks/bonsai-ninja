@@ -1,7 +1,7 @@
 # TypeScript memory-safety / lifecycle audit-pair sites.
 # These rules fire on the *use-after-transition* call (write / etc.)
 # and gate on the adapter-emitted lifecycle state via the
-# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+# `requires_state` engine constraint (P6 - see docs/contributing/analysis-roadmap.mdx).
 
 - id: typescript.memory.stream_destroy
   enabled: true
@@ -34,7 +34,7 @@
         s.write('payload');
       }
     expect_no_match: true
-  description: "Use-after-destroy — `<Stream>.write()` on a stream whose preceding `.destroy()` released the underlying socket/connection. Subsequent writes emit an `error` event or are silently dropped (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `freed` lifecycle state."
+  description: "Use-after-destroy - `<Stream>.write()` on a stream whose preceding `.destroy()` released the underlying socket/connection. Subsequent writes emit an `error` event or are silently dropped (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `freed` lifecycle state."
 - id: typescript.memory.abort_controller_abort
   enabled: true
   language: typescript
@@ -54,7 +54,7 @@
         controller.abort();
       }
     expect_match_text: [controller.abort]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. AbortController.abort() / XMLHttpRequest.abort() — subsequent fetch promises tied to the same signal reject with AbortError (CWE-672). Abort signals don't have a canonical `use` callee shape (the consuming `await fetch(...)` is decoupled from the controller binding); the rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. AbortController.abort() / XMLHttpRequest.abort() - subsequent fetch promises tied to the same signal reject with AbortError (CWE-672). Abort signals don't have a canonical `use` callee shape (the consuming `await fetch(...)` is decoupled from the controller binding); the rule remains a transition-site audit-pair."
 - id: typescript.memory.subscription_unsubscribe
   enabled: true
   language: typescript
@@ -74,4 +74,4 @@
         sub.unsubscribe();
       }
     expect_match_text: [sub.unsubscribe]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. RxJS Subscription.unsubscribe() — subsequent next/error/complete on the same subscription are silently dropped; reactive-pipeline state divergence (CWE-672). Reactive observers don't have a canonical post-unsubscribe `use` callee shape, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. RxJS Subscription.unsubscribe() - subsequent next/error/complete on the same subscription are silently dropped; reactive-pipeline state divergence (CWE-672). Reactive observers don't have a canonical post-unsubscribe `use` callee shape, so this rule remains a transition-site audit-pair."

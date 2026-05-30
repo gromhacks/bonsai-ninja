@@ -13,4 +13,4 @@
     kind: call
     callee:
       name: login_user
-  description: "Disabled — login_user requires user-trust analysis to distinguish validated principals from attacker-selected users."
+  description: "Disabled - login_user requires user-trust analysis to distinguish validated principals from attacker-selected users."

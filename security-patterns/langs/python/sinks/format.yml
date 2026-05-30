@@ -25,4 +25,4 @@
     kind: call
     callee:
       attribute: [template, format]
-  description: "Tainted template `.format(**fields)` — disabled pending receiver-tainted constraint support."
+  description: "Tainted template `.format(**fields)` - disabled pending receiver-tainted constraint support."

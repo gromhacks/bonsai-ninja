@@ -23,7 +23,7 @@
         }
       }
     expect_no_match: true
-  description: "new URL(tainted) — flag construction of URLs from user input."
+  description: "new URL(tainted) - flag construction of URLs from user input."
 - id: java.ssrf.uri_ctor
   enabled: true
   language: java
@@ -49,7 +49,7 @@
         }
       }
     expect_no_match: true
-  description: "new URI(tainted) — construction only; open when passed to a client."
+  description: "new URI(tainted) - construction only; open when passed to a client."
 - id: java.ssrf.urlconnection_openconnection
   enabled: false
   disabled_reason:
@@ -72,7 +72,7 @@
           URL.openConnection(input);
         }
       }
-  description: 'Disabled — URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument. Merged collision aliases: java.ssrf.httpurlconnection_openconnection.'
+  description: 'Disabled - URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument. Merged collision aliases: java.ssrf.httpurlconnection_openconnection.'
   aliases:
   - java.ssrf.httpurlconnection_openconnection
   packages:
@@ -107,7 +107,7 @@
       }
     expect_match_text:
     - conn.connect
-  description: "Disabled — HttpURLConnection.connect() dispatches receiver URL state, not a taintable call argument. Merged collision aliases: java.ssrf.jsoup_connect."
+  description: "Disabled - HttpURLConnection.connect() dispatches receiver URL state, not a taintable call argument. Merged collision aliases: java.ssrf.jsoup_connect."
   aliases:
   - java.ssrf.jsoup_connect
 - id: java.ssrf.httpurlconnection_getinputstream
@@ -139,7 +139,7 @@
       }
     expect_match_text:
     - conn.getInputStream
-  description: "Disabled — HttpURLConnection.getInputStream() dispatches receiver URL state, not a taintable call argument."
+  description: "Disabled - HttpURLConnection.getInputStream() dispatches receiver URL state, not a taintable call argument."
 - id: java.ssrf.urlconnection_openstream
   enabled: false
   disabled_reason:
@@ -158,7 +158,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    URL.openStream(input);\n  }\n}\n"
-  description: "Disabled — URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+  description: "Disabled - URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: java.ssrf.jdk_httpclient_send
   enabled: true
   language: java
@@ -272,7 +272,7 @@
         }
       }
     expect_no_match: true
-  description: "Apache HttpClient HttpGet(url) — request target controlled by attacker input."
+  description: "Apache HttpClient HttpGet(url) - request target controlled by attacker input."
 - id: java.ssrf.resttemplate_getforobject
   enabled: true
   language: java
@@ -461,7 +461,7 @@
       }
     expect_match_text:
     - restTemplate.exchange
-  description: "Spring RestTemplate.exchange(url, ...) on a local RestTemplate variable — server-side request to attacker-controlled URL."
+  description: "Spring RestTemplate.exchange(url, ...) on a local RestTemplate variable - server-side request to attacker-controlled URL."
   imports:
   - org
 - id: java.ssrf.webclient_uri
@@ -543,7 +543,7 @@
       }
     expect_match_text:
     - webClient.uri
-  description: "Spring WebClient.uri(url) on a local request spec — reactive server-side request target controlled by attacker input."
+  description: "Spring WebClient.uri(url) on a local request spec - reactive server-side request target controlled by attacker input."
   imports:
   - org
 - id: java.ssrf.webclient_retrieve
@@ -575,7 +575,7 @@
       }
     expect_match_text:
     - requestSpec.retrieve
-  description: "Disabled — WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
+  description: "Disabled - WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
 - id: java.ssrf.play_wsclient_url
   enabled: true
   language: java
@@ -618,7 +618,7 @@
         }
       }
     expect_no_match: true
-  description: "Play WSClient.url(url) — asynchronous server-side request target controlled by attacker input."
+  description: "Play WSClient.url(url) - asynchronous server-side request target controlled by attacker input."
 - id: java.ssrf.okhttp_request_url
   enabled: true
   language: java
@@ -729,7 +729,7 @@
         }
       }
     expect_no_match: true
-  description: "java.net.http.HttpRequest.Builder.uri(tainted URI) — request target controlled by attacker input."
+  description: "java.net.http.HttpRequest.Builder.uri(tainted URI) - request target controlled by attacker input."
 - id: java.ssrf.jdk_httprequest_newbuilder_uri
   enabled: true
   language: java
@@ -766,7 +766,7 @@
         }
       }
     expect_no_match: true
-  description: "java.net.http.HttpRequest.newBuilder(tainted URI) — constructs a request for a caller-controlled target."
+  description: "java.net.http.HttpRequest.newBuilder(tainted URI) - constructs a request for a caller-controlled target."
 - id: java.ssrf.httpurlconnection_getresponsecode
   enabled: false
   disabled_reason:
@@ -796,4 +796,4 @@
       }
     expect_match_text:
     - connection.getResponseCode
-  description: "Disabled — HttpURLConnection.getResponseCode() dispatches receiver URL state, not a taintable call argument."
+  description: "Disabled - HttpURLConnection.getResponseCode() dispatches receiver URL state, not a taintable call argument."

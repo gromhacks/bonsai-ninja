@@ -12,7 +12,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled — bare `param name: request` taints any function with that param name; no canonical exists. Re-enable when adapter supports class-scoped Firebase HttpsFunction param matching. Use the attribute-chain rule dart.cloud.firebase_oncall_data for callable functions."
+  description: "Disabled - bare `param name: request` taints any function with that param name; no canonical exists. Re-enable when adapter supports class-scoped Firebase HttpsFunction param matching. Use the attribute-chain rule dart.cloud.firebase_oncall_data for callable functions."
 
 - id: dart.cloud.firebase_functions_data
   enabled: false
@@ -27,7 +27,7 @@
     kind: param
     target:
       name: data
-  description: "Disabled — FP-prone. Bare param name 'data' is ubiquitous. Re-enable with context constraint."
+  description: "Disabled - FP-prone. Bare param name 'data' is ubiquitous. Re-enable with context constraint."
 
 - id: dart.cloud.lambda_event_param
   enabled: true
@@ -66,4 +66,4 @@
     kind: param
     target:
       name: context
-  description: "Disabled — bare `param name: context` is FP-prone; no canonical exists. Lambda event payload is covered by dart.cloud.lambda_event_param. Re-enable when adapter supports class-scoped Lambda Context param matching."
+  description: "Disabled - bare `param name: context` is FP-prone; no canonical exists. Lambda event payload is covered by dart.cloud.lambda_event_param. Re-enable when adapter supports class-scoped Lambda Context param matching."

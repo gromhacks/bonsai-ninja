@@ -34,7 +34,7 @@
         return jwt.sign(input, "secret", { algorithm: "HS256" });
       }
     expect_no_match: true
-  description: "jwt.sign(..., {algorithm: 'none'}) — produces unsigned tokens."
+  description: "jwt.sign(..., {algorithm: 'none'}) - produces unsigned tokens."
 - id: typescript.jwt.verify_ignore_expiration
   enabled: true
   language: typescript
@@ -70,7 +70,7 @@
         return jwt.verify(input, "secret", { ignoreExpiration: false });
       }
     expect_no_match: true
-  description: "jwt.verify(..., {ignoreExpiration: true}) — accepts expired tokens. Merged aliases: typescript.jwt.verify_none_algorithm, typescript.jwt.alg_confusion."
+  description: "jwt.verify(..., {ignoreExpiration: true}) - accepts expired tokens. Merged aliases: typescript.jwt.verify_none_algorithm, typescript.jwt.alg_confusion."
   aliases:
   - typescript.jwt.verify_none_algorithm
   - typescript.jwt.alg_confusion
@@ -105,7 +105,7 @@
         return jwt.decode("header.payload.signature");
       }
     expect_no_match: true
-  description: "jwt.decode — returns payload WITHOUT verifying signature; trusting it = auth bypass."
+  description: "jwt.decode - returns payload WITHOUT verifying signature; trusting it = auth bypass."
 - id: typescript.jwt.jose_decodejwt
   enabled: true
   language: typescript
@@ -139,7 +139,7 @@
         return jose.decodeJwt("header.payload.signature");
       }
     expect_no_match: true
-  description: "jose.decodeJwt — decodes payload without signature verification."
+  description: "jose.decodeJwt - decodes payload without signature verification."
 - id: typescript.jwt.jose_unsecuredjwt_decode
   enabled: true
   language: typescript
@@ -171,7 +171,7 @@
         return UnsecuredJWT.decode("header.payload.signature");
       }
     expect_no_match: true
-  description: "jose UnsecuredJWT.decode — explicit `alg: none` handling."
+  description: "jose UnsecuredJWT.decode - explicit `alg: none` handling."
 
 - id: typescript.jwt.jose_jwt_verify_alg_none
   enabled: true
@@ -204,4 +204,4 @@
         return jose.jwtVerify(token, key, { algorithms: ["HS256"] });
       }
     expect_no_match: true
-  description: 'jose.jwtVerify(..., {algorithms: ["none"]}) — accepts unsigned tokens; alg-none JWT bypass.'
+  description: 'jose.jwtVerify(..., {algorithms: ["none"]}) - accepts unsigned tokens; alg-none JWT bypass.'

@@ -27,7 +27,7 @@
           JsRuntime::execute_script("1 + 1");
       }
     expect_no_match: true
-  description: "deno_core JsRuntime::execute_script — tainted source executes inside the embedded V8 runtime (sandbox escapes historical)."
+  description: "deno_core JsRuntime::execute_script - tainted source executes inside the embedded V8 runtime (sandbox escapes historical)."
 
 - id: rust.eval.js_context_eval
   enabled: true
@@ -57,7 +57,7 @@
           Context::eval("1 + 1");
       }
     expect_no_match: true
-  description: "JS embedded-engine Context::eval — covers boa_engine::Context::eval and rquickjs::Context::eval (same `[Context, eval]` suffix). Tainted script = RCE inside the JS sandbox (and sandbox escapes exist for both). `min_args: 1` rejects 0-arg `Context.eval()` decoys."
+  description: "JS embedded-engine Context::eval - covers boa_engine::Context::eval and rquickjs::Context::eval (same `[Context, eval]` suffix). Tainted script = RCE inside the JS sandbox (and sandbox escapes exist for both). `min_args: 1` rejects 0-arg `Context.eval()` decoys."
 
 - id: rust.eval.mlua_load
   enabled: true
@@ -117,7 +117,7 @@
           Lua::exec("return 1");
       }
     expect_no_match: true
-  description: "rlua Lua::exec — executes Lua source from string; tainted input = sandbox-escaping RCE inside the Lua VM."
+  description: "rlua Lua::exec - executes Lua source from string; tainted input = sandbox-escaping RCE inside the Lua VM."
 
 - id: rust.eval.rhai_engine_eval
   enabled: true
@@ -177,7 +177,7 @@
           Evaluator::eval_module("x = 1");
       }
     expect_no_match: true
-  description: "starlark Evaluator::eval_module — evaluates Starlark (Bazel-flavoured Python); tainted source runs arbitrary logic in the host."
+  description: "starlark Evaluator::eval_module - evaluates Starlark (Bazel-flavoured Python); tainted source runs arbitrary logic in the host."
 
 - id: rust.eval.libloading_library_new
   enabled: true
@@ -207,7 +207,7 @@
           Library::new("/usr/lib/libsafe.so");
       }
     expect_no_match: true
-  description: "libloading::Library::new(tainted) — loads arbitrary .so/.dll."
+  description: "libloading::Library::new(tainted) - loads arbitrary .so/.dll."
 
 - id: rust.eval.dlopen_open
   enabled: true
@@ -268,4 +268,4 @@
           Library::get(b"safe_symbol");
       }
     expect_no_match: true
-  description: "libloading Library.get(attacker_symbol_name) — load arbitrary symbol by name from a dlopen'd library; reflection-equivalent dynamic dispatch."
+  description: "libloading Library.get(attacker_symbol_name) - load arbitrary symbol by name from a dlopen'd library; reflection-equivalent dynamic dispatch."

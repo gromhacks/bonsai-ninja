@@ -3,7 +3,7 @@
 # memory-safety pass. This file adds the NSStream-style explicit close
 # audit-pair shape. The rule fires on the *use-after-close* call (`[stream
 # read:...]`) and gates on the adapter-emitted lifecycle state via the
-# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+# `requires_state` engine constraint (P6 - see docs/contributing/analysis-roadmap.mdx).
 
 - id: objc.memory.nsstream_close
   enabled: true
@@ -35,4 +35,4 @@
         [stream read:NULL maxLength:0];
       }
     expect_no_match: true
-  description: "Use-after-close — `[stream read:...]` on a stream whose preceding `[stream close]` released the underlying NSStream. Subsequent reads return -1 with NSStreamStatusClosed at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+  description: "Use-after-close - `[stream read:...]` on a stream whose preceding `[stream close]` released the underlying NSStream. Subsequent reads return -1 with NSStreamStatusClosed at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."

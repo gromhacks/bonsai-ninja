@@ -13,7 +13,7 @@
   - name: declared shape
     code: |
       void handle(String arguments) { var seen = arguments; }
-  description: "main(List<String> arguments) — argv."
+  description: "main(List<String> arguments) - argv."
 
 - id: dart.cli.args_param
   enabled: true
@@ -29,7 +29,7 @@
   - name: declared shape
     code: |
       void handle(String args) { var seen = args; }
-  description: "main(List<String> args) — argv (short form)."
+  description: "main(List<String> args) - argv (short form)."
 
 - id: dart.cli.stdin_readline_sync
   enabled: true
@@ -45,7 +45,7 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; stdin.readLineSync(input); }
-  description: "stdin.readLineSync — interactive input."
+  description: "stdin.readLineSync - interactive input."
 
 - id: dart.cli.stdin_read_byte_sync
   enabled: true
@@ -75,7 +75,7 @@
     kind: read
     target:
       name: environment
-  description: "Disabled — the current Dart adapter does not index `Platform.environment` property reads."
+  description: "Disabled - the current Dart adapter does not index `Platform.environment` property reads."
 
 - id: dart.os.platform_script
   enabled: false
@@ -89,7 +89,7 @@
     kind: read
     target:
       name: script
-  description: "Disabled — the current Dart adapter does not index `Platform.script` property reads."
+  description: "Disabled - the current Dart adapter does not index `Platform.script` property reads."
 
 - id: dart.args.argparser_parse
   enabled: true
@@ -128,4 +128,4 @@
     kind: read
     target:
       name: text
-  description: "Disabled — FP-prone. Bare name 'text' matches every .text attribute across Flutter widgets."
+  description: "Disabled - FP-prone. Bare name 'text' matches every .text attribute across Flutter widgets."

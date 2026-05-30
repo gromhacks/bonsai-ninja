@@ -1,7 +1,7 @@
 # Dart memory-safety / lifecycle audit-pair sites.
 # These rules fire on the *use-after-transition* call (write / read /
 # etc.) and gate on the adapter-emitted lifecycle state via the
-# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+# `requires_state` engine constraint (P6 - see docs/contributing/analysis-roadmap.mdx).
 
 - id: dart.memory.iosink_close
   enabled: true
@@ -34,7 +34,7 @@
         sink.write('payload');
       }
     expect_no_match: true
-  description: "Use-after-close — `IOSink.write()` / `File.write*()` / `HttpClient.<op>()` on a sink whose preceding `.close()` released the underlying stream. Subsequent writes throw StateError at runtime (CWE-416). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+  description: "Use-after-close - `IOSink.write()` / `File.write*()` / `HttpClient.<op>()` on a sink whose preceding `.close()` released the underlying stream. Subsequent writes throw StateError at runtime (CWE-416). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
 - id: dart.memory.stream_subscription_cancel
   enabled: true
   language: dart
@@ -66,4 +66,4 @@
         sub.pause();
       }
     expect_no_match: true
-  description: "Use-after-cancel — `StreamSubscription.pause()` / `.resume()` / similar on a subscription whose preceding `.cancel()` tore down the listener. The call is silently dropped or raises StateError (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+  description: "Use-after-cancel - `StreamSubscription.pause()` / `.resume()` / similar on a subscription whose preceding `.cancel()` tore down the listener. The call is silently dropped or raises StateError (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."

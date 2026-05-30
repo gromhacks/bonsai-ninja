@@ -22,7 +22,7 @@
       using AWSSDK.SQS;
       class App { void Test() { AmazonSQSClient.SendMessageAsync("queue-url"); } }
     expect_no_match: true
-  description: "AmazonSQSClient.SendMessageAsync — tainted queue target/body injects arbitrary SQS messages."
+  description: "AmazonSQSClient.SendMessageAsync - tainted queue target/body injects arbitrary SQS messages."
 
 - id: csharp.queue.aws_sqs_send_message_body
   enabled: true
@@ -48,7 +48,7 @@
       using AWSSDK.SQS;
       class App { void Test() { AmazonSQSClient.SendMessageAsync("queue-url", "safe"); } }
     expect_no_match: true
-  description: "AmazonSQSClient.SendMessageAsync(queueUrl, taintedBody) — tainted body injects arbitrary SQS messages."
+  description: "AmazonSQSClient.SendMessageAsync(queueUrl, taintedBody) - tainted body injects arbitrary SQS messages."
 
 - id: csharp.queue.aws_sns_publish
   enabled: true
@@ -74,7 +74,7 @@
       using AWSSDK.SimpleNotificationService;
       class App { void Test() { AmazonSimpleNotificationServiceClient.PublishAsync("topic-arn"); } }
     expect_no_match: true
-  description: "AmazonSimpleNotificationServiceClient.PublishAsync — tainted topic/message injects arbitrary SNS fanout."
+  description: "AmazonSimpleNotificationServiceClient.PublishAsync - tainted topic/message injects arbitrary SNS fanout."
 
 - id: csharp.queue.aws_sns_publish_message
   enabled: true
@@ -100,7 +100,7 @@
       using AWSSDK.SimpleNotificationService;
       class App { void Test() { AmazonSimpleNotificationServiceClient.PublishAsync("topic-arn", "safe"); } }
     expect_no_match: true
-  description: "AmazonSimpleNotificationServiceClient.PublishAsync(topicArn, taintedMessage) — tainted message injects arbitrary SNS fanout."
+  description: "AmazonSimpleNotificationServiceClient.PublishAsync(topicArn, taintedMessage) - tainted message injects arbitrary SNS fanout."
 
 - id: csharp.queue.azure_servicebus_send_message
   enabled: true
@@ -126,7 +126,7 @@
       using Azure.Messaging.ServiceBus;
       class App { void Test() { ServiceBusSender.SendMessageAsync("safe"); } }
     expect_no_match: true
-  description: "ServiceBusSender.SendMessageAsync — tainted entity path/payload injects arbitrary Service Bus messages."
+  description: "ServiceBusSender.SendMessageAsync - tainted entity path/payload injects arbitrary Service Bus messages."
 
 - id: csharp.queue.azure_eventhub_send
   enabled: true
@@ -152,7 +152,7 @@
       using Azure.Messaging.EventHubs.Producer;
       class App { void Test() { EventHubProducerClient.SendAsync("safe"); } }
     expect_no_match: true
-  description: "EventHubProducerClient.SendAsync — tainted event batch injects arbitrary Event Hub payloads."
+  description: "EventHubProducerClient.SendAsync - tainted event batch injects arbitrary Event Hub payloads."
 
 - id: csharp.queue.gcp_pubsub_publish
   enabled: true
@@ -178,4 +178,4 @@
       using Google.Cloud.PubSub.V1;
       class App { void Test() { PublisherClient.PublishAsync("safe"); } }
     expect_no_match: true
-  description: "PublisherClient.PublishAsync — tainted topic message injects arbitrary Pub/Sub payloads."
+  description: "PublisherClient.PublishAsync - tainted topic message injects arbitrary Pub/Sub payloads."

@@ -10,7 +10,7 @@
     kind: call
     callee:
       attribute: [URLComponents, addingPercentEncoding]
-  description: "Disabled — `URLComponents.addingPercentEncoding` is not a real method (it lives on `String`); covered by swift.sanitizer.adding_percent_encoding."
+  description: "Disabled - `URLComponents.addingPercentEncoding` is not a real method (it lives on `String`); covered by swift.sanitizer.adding_percent_encoding."
 - id: swift.sanitizer.adding_percent_encoding
   enabled: true
   language: swift
@@ -38,7 +38,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; SecRandomCopyBytes(input) }
     expect_match_text: [SecRandomCopyBytes]
-  description: "SecRandomCopyBytes — crypto-secure RNG."
+  description: "SecRandomCopyBytes - crypto-secure RNG."
 - id: swift.sanitizer.html_escape_kanna
   enabled: true
   language: swift
@@ -70,7 +70,7 @@
       import SwiftSoup // SwiftSoup
       func test() { let input = "x"; let amount = 1; SwiftSoup.clean(input) }
     expect_match_text: [SwiftSoup.clean]
-  description: "SwiftSoup.clean — HTML whitelist sanitization."
+  description: "SwiftSoup.clean - HTML whitelist sanitization."
 - id: swift.sanitizer.bcrypt_verify
   enabled: true
   language: swift
@@ -86,7 +86,7 @@
       import Vapor
       func test() { let input = "x"; let amount = 1; Bcrypt.verify(input) }
     expect_match_text: [Bcrypt.verify]
-  description: "Vapor Bcrypt.verify — constant-time password check."
+  description: "Vapor Bcrypt.verify - constant-time password check."
 - id: swift.sanitizer.sqlite_swift_bind
   enabled: false
   disabled_reason:
@@ -98,7 +98,7 @@
     kind: call
     callee:
       name: bind
-  description: "Disabled — bare `.bind` matches SwiftUI `@State.bind`, Combine, etc.; would over-sanitize. Enable with receiver
+  description: "Disabled - bare `.bind` matches SwiftUI `@State.bind`, Combine, etc.; would over-sanitize. Enable with receiver
     narrowing to Statement/Connection."
 - id: swift.sanitizer.grdb_arguments
   enabled: true
@@ -115,7 +115,7 @@
       import GRDB
       func test() { let input = "x"; let amount = 1; StatementArguments(input) }
     expect_match_text: [StatementArguments]
-  description: "GRDB StatementArguments — parameterized query."
+  description: "GRDB StatementArguments - parameterized query."
 - id: swift.sanitizer.fmdb_bind_args
   enabled: true
   language: swift
@@ -142,7 +142,7 @@
     kind: call
     callee:
       name: Int
-  description: "Disabled — bare `Int(...)` fires on every numeric literal/type conversion (Int(x), Int(exactly:)); would over-sanitize.
+  description: "Disabled - bare `Int(...)` fires on every numeric literal/type conversion (Int(x), Int(exactly:)); would over-sanitize.
     Enable only with kwarg-presence filter for Int(String-var)."
 - id: swift.sanitizer.uuid_coerce
   enabled: false
@@ -154,7 +154,7 @@
     kind: call
     callee:
       name: UUID
-  description: "Disabled — bare `UUID()` is the common no-arg random-UUID form; the tainted-string form `UUID(uuidString:)`
+  description: "Disabled - bare `UUID()` is the common no-arg random-UUID form; the tainted-string form `UUID(uuidString:)`
     isn't distinguishable without kwarg-presence filter."
 - id: swift.sanitizer.resolving_symlinks
   enabled: false
@@ -166,7 +166,7 @@
     kind: call
     callee:
       name: resolvingSymlinksInPath
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
     traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
     must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
     Marking these as sanitizers produced false negatives on attacker-controlled paths."
@@ -185,7 +185,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; queryItems = input }
     expect_match_text: [queryItems]
-  description: "URLComponents.queryItems = [URLQueryItem(...)] — Foundation builds the URL with proper percent-encoding per
+  description: "URLComponents.queryItems = [URLQueryItem(...)] - Foundation builds the URL with proper percent-encoding per
     RFC 3986; safer than string concatenation into a URL."
 
 # --- SQLite prepared-bind sanitizers ---------------------------------------
@@ -202,7 +202,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; sqlite3_bind_text(input) }
     expect_match_text: [sqlite3_bind_text]
-  description: "sqlite3_bind_text(stmt, idx, value, ...) — bound parameter on a prepared statement; value is not interpreted
+  description: "sqlite3_bind_text(stmt, idx, value, ...) - bound parameter on a prepared statement; value is not interpreted
     as SQL."
 - id: swift.sanitizer.sqlite3_bind_blob
   enabled: true
@@ -217,7 +217,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; sqlite3_bind_blob(input) }
     expect_match_text: [sqlite3_bind_blob]
-  description: "sqlite3_bind_blob — bound BLOB parameter on a prepared statement."
+  description: "sqlite3_bind_blob - bound BLOB parameter on a prepared statement."
 - id: swift.sanitizer.sqlite3_bind_int
   enabled: true
   language: swift
@@ -231,7 +231,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; sqlite3_bind_int(input) }
     expect_match_text: [sqlite3_bind_int]
-  description: "sqlite3_bind_int / int64 / double — typed bound parameter; value cannot inject SQL syntax."
+  description: "sqlite3_bind_int / int64 / double - typed bound parameter; value cannot inject SQL syntax."
 
 # --- SQLite.swift parameterized prepare ------------------------------------
 - id: swift.sanitizer.sqlite_swift_prepare
@@ -252,7 +252,7 @@
       import SQLite // SQLite.swift
       func test() { let input = "x"; let amount = 1; Connection.prepare(input) }
     expect_match_text: [Connection.prepare]
-  description: "SQLite.swift Connection.prepare(sql, bindings...) — when called with the bindings overload, parameters are
+  description: "SQLite.swift Connection.prepare(sql, bindings...) - when called with the bindings overload, parameters are
     bound, not concatenated. (The raw `Connection.execute` path is the SQLi sink in sqli.yml.) `min_args: 1` rejects 0-arg
     `Connection.prepare()` decoys."
 
@@ -274,7 +274,7 @@
       import CryptoKit
       func test() { let input = "x"; let amount = 1; safeCompare(input) }
     expect_match_text: [safeCompare]
-  description: "CryptoKit / common helper `safeCompare(_:_:)` — constant-time byte comparison built on SymmetricKey.withUnsafeBytes
+  description: "CryptoKit / common helper `safeCompare(_:_:)` - constant-time byte comparison built on SymmetricKey.withUnsafeBytes
     + memcmp_constant_time / timingsafe_bcmp; mitigates CWE-208 timing leaks on MAC/hash equality."
 - id: swift.sanitizer.hashed_authentication_code_equality
   enabled: false
@@ -287,7 +287,7 @@
     kind: call
     callee:
       attribute: [HashedAuthenticationCode, ==]
-  description: "CryptoKit HashedAuthenticationCode `==` — Apple's overload performs a constant-time compare; safe MAC verification."
+  description: "CryptoKit HashedAuthenticationCode `==` - Apple's overload performs a constant-time compare; safe MAC verification."
 - id: swift.sanitizer.timingsafe_bcmp
   enabled: true
   language: swift
@@ -319,7 +319,7 @@
       import Vapor
       func test() { let input = "x"; let amount = 1; Validator.email(input) }
     expect_match_text: [Validator.email]
-  description: "Vapor Validator.email — schema validation gate; rejects values that are not RFC-compatible email strings before
+  description: "Vapor Validator.email - schema validation gate; rejects values that are not RFC-compatible email strings before
     they reach business logic."
 - id: swift.sanitizer.vapor_validators_count
   enabled: true
@@ -336,7 +336,7 @@
       import Vapor
       func test() { let input = "x"; let amount = 1; Validator.count(input) }
     expect_match_text: [Validator.count]
-  description: "Vapor Validator.count(_:) — length-bound validation gate; constrains string/collection size before downstream
+  description: "Vapor Validator.count(_:) - length-bound validation gate; constrains string/collection size before downstream
     use."
 - id: swift.sanitizer.vapor_content_validate
   enabled: true
@@ -353,7 +353,7 @@
       import Vapor
       func test() { let input = "x"; let amount = 1; content.validate(input) }
     expect_match_text: [content.validate]
-  description: "Vapor `Validatable.validate()` / `Content.validate(content:)` — runs the registered Validations schema and
+  description: "Vapor `Validatable.validate()` / `Content.validate(content:)` - runs the registered Validations schema and
     throws on failure."
 
 # --- CoreData / NSPredicate parameterized form -----------------------------
@@ -375,7 +375,7 @@
   - name: declared shape negative constraint boundary
     code: "func test() { let input = \"x\"; let amount = 1; NSPredicate() }\n"
     expect_no_match: true
-  description: "NSPredicate(format: \"name == %@\", argumentArray: [tainted]) — `%@` placeholder + argumentArray binds the
+  description: "NSPredicate(format: \"name == %@\", argumentArray: [tainted]) - `%@` placeholder + argumentArray binds the
     value as a literal; CoreData/Realm cannot interpret it as predicate syntax. Mirror sink: swift.eval.nspredicate_format
     / swift.nosql.nspredicate_format."
 
@@ -399,7 +399,7 @@
   - name: hasPrefix local path negative constraint boundary
     code: "func test(target: String) { target.hasPrefix() }\n"
     expect_no_match: true
-  description: "String.hasPrefix(\"/...\") — slash-rooted local path prefix check used to keep redirects and path routing
+  description: "String.hasPrefix(\"/...\") - slash-rooted local path prefix check used to keep redirects and path routing
     same-origin."
 
 - id: swift.sanitizer.set_contains_allowlist
@@ -415,8 +415,8 @@
     code: |
       func test(input: String) { allowed.contains(input) }
     expect_match_text: [allowed.contains]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Allowlist-named Set/Dictionary membership check — validates a tainted value against a finite accepted set before dispatch,
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Allowlist-named Set/Dictionary membership check - validates a tainted value against a finite accepted set before dispatch,
     redirects, or queries."
 
   disabled_reason:
@@ -434,7 +434,7 @@
     code: |
       func test(input: String, slug: Regex<AnyRegexOutput>) { slug.wholeMatch(in: input) }
     expect_match_text: [slug.wholeMatch]
-  description: "Swift Regex.wholeMatch(in:) — validates that the entire input matches a UUID/slug/full-string allowlist regex."
+  description: "Swift Regex.wholeMatch(in:) - validates that the entire input matches a UUID/slug/full-string allowlist regex."
 
 - id: swift.sanitizer.grdb_execute_arguments
   enabled: true
@@ -453,7 +453,7 @@
       import GRDB
       func test(input: String) { db.execute(sql: "select * from users where name = ?", arguments: [input]) }
     expect_match_text: [db.execute]
-  description: "GRDB Database.execute(sql:arguments:) — binds Swift values to SQL placeholders through StatementArguments."
+  description: "GRDB Database.execute(sql:arguments:) - binds Swift values to SQL placeholders through StatementArguments."
 
 - id: swift.sanitizer.regex_replace_char_allowlist
   enabled: true
@@ -475,12 +475,12 @@
   - name: strip non slug chars negative constraint boundary
     code: "func test(input: String) { input.replacingOccurrences() }\n"
     expect_no_match: true
-  description: "String.replacingOccurrences(of: \"[^safe]\", with: \"\", options: .regularExpression) — strips characters
+  description: "String.replacingOccurrences(of: \"[^safe]\", with: \"\", options: .regularExpression) - strips characters
     outside an allowlist."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: swift.passthrough.removing_percent_encoding
@@ -498,7 +498,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; removingPercentEncoding(input) }
     expect_match_text: [removingPercentEncoding]
-  description: "String.removingPercentEncoding — instance member; preserves taint."
+  description: "String.removingPercentEncoding - instance member; preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -520,7 +520,7 @@
     code: |
       func test() { let input = "x"; let amount = 1; req.session() }
     expect_match_text: [req.session]
-  description: "Vapor req.session — session-token presence; pair with custom CSRF check (no built-in middleware in Vapor 4).
+  description: "Vapor req.session - session-token presence; pair with custom CSRF check (no built-in middleware in Vapor 4).
     Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
 # Cookie-secure sanitizers (round 3).
@@ -548,4 +548,4 @@
     code: "import vapor\nimport Vapor // vapor\nimport Vapor // vapor\nfunc test() { let input = \"x\"; let amount = 1; Cookie.isHttpOnly()
       }\n"
     expect_no_match: true
-  description: 'Vapor Cookie.isHttpOnly = true — explicit HttpOnly flag.'
+  description: 'Vapor Cookie.isHttpOnly = true - explicit HttpOnly flag.'

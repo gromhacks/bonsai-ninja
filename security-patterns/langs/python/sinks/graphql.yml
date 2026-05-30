@@ -26,7 +26,7 @@
       def example(schema, user_input):
           return graphql.graphql_sync(schema, 'safe')
     expect_no_match: true
-  description: "graphql.graphql_sync(tainted_query) — dynamic GraphQL documents can expose introspection or resolver-side injection paths."
+  description: "graphql.graphql_sync(tainted_query) - dynamic GraphQL documents can expose introspection or resolver-side injection paths."
 
 - id: python.graphql.graphql_core_graphql
   enabled: true
@@ -57,7 +57,7 @@
       def example(schema, user_input):
           return graphql.graphql(schema, 'safe')
     expect_no_match: true
-  description: "graphql.graphql(schema, tainted_query) — dynamic GraphQL documents reach query execution."
+  description: "graphql.graphql(schema, tainted_query) - dynamic GraphQL documents reach query execution."
 
 - id: python.graphql.schema_execute
   enabled: true
@@ -88,7 +88,7 @@
       def example(schema, user_input):
           return schema.execute('safe')
     expect_no_match: true
-  description: "schema.execute(tainted_query) — Graphene/graphql-core schema execution with attacker-controlled query text."
+  description: "schema.execute(tainted_query) - Graphene/graphql-core schema execution with attacker-controlled query text."
 
 - id: python.graphql.strawberry_schema_execute
   enabled: true
@@ -124,7 +124,7 @@
       class Schema:
           def execute_sync(self, *args): pass
     expect_no_match: true
-  description: "Strawberry GraphQL schema.execute_sync(tainted_query) — attacker-controlled query string drives resolver execution and may probe introspection."
+  description: "Strawberry GraphQL schema.execute_sync(tainted_query) - attacker-controlled query string drives resolver execution and may probe introspection."
 
 - id: python.graphql.ariadne_graphql_sync
   enabled: true
@@ -154,7 +154,7 @@
       def example(schema, user_input):
           return ariadne.graphql_sync(schema, '{ viewer { id } }')
     expect_no_match: true
-  description: "Ariadne ariadne.graphql_sync(schema, tainted_data) — synchronous GraphQL execution with attacker-controlled query body."
+  description: "Ariadne ariadne.graphql_sync(schema, tainted_data) - synchronous GraphQL execution with attacker-controlled query body."
 
 - id: python.graphql.gql_client_execute
   enabled: true
@@ -196,4 +196,4 @@
       def example(self, cmd):
           return self.runner.execute(cmd)
     expect_no_match: true
-  description: "gql Client.execute(tainted_query) — sends attacker-controlled GraphQL document upstream to a remote API."
+  description: "gql Client.execute(tainted_query) - sends attacker-controlled GraphQL document upstream to a remote API."

@@ -10,4 +10,4 @@
     kind: call
     callee:
       attribute: [response, headers, add]
-  description: "Disabled — flag only on tainted Vary / Cache-Control values."
+  description: "Disabled - flag only on tainted Vary / Cache-Control values."

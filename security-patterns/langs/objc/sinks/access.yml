@@ -22,7 +22,7 @@
       #import <AWSS3/AWSS3.h>
       void test(void) { getObject(@"safe-key"); }
     expect_no_match: true
-  description: "AWSS3 getObject — tainted bucket/key selector reads arbitrary object data."
+  description: "AWSS3 getObject - tainted bucket/key selector reads arbitrary object data."
 
 - id: objc.access.aws_put_object
   enabled: true
@@ -48,7 +48,7 @@
       #import <AWSS3/AWSS3.h>
       void test(void) { putObject(@"safe-key"); }
     expect_no_match: true
-  description: "AWSS3 putObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+  description: "AWSS3 putObject - tainted bucket/key selector overwrites attacker-chosen object keys."
 
 - id: objc.access.aws_get_secret_value
   enabled: true
@@ -74,4 +74,4 @@
       #import <AWSSecretsManager/AWSSecretsManager.h>
       void test(void) { getSecretValue(@"safe-secret"); }
     expect_no_match: true
-  description: "AWS Secrets Manager getSecretValue — tainted secret id reads arbitrary secret material."
+  description: "AWS Secrets Manager getSecretValue - tainted secret id reads arbitrary secret material."

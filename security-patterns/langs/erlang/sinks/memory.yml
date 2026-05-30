@@ -1,10 +1,10 @@
 # Erlang memory-safety / lifecycle audit-pair sites for OTP processes.
 # OTP semantic: gen_server:stop terminates the child process;
 # subsequent gen_server:call / erlang:send to the same pid yields
-# {error, noproc} / 'EXIT' — i.e. use-after-stop. The
+# {error, noproc} / 'EXIT' - i.e. use-after-stop. The
 # `erlang.memory.gen_server_stop` rule fires on the *use-after-stop*
 # call (`send(Pid, ...)`) and gates on the adapter-emitted lifecycle
-# state via the `requires_state` engine constraint (P6 — see
+# state via the `requires_state` engine constraint (P6 - see
 # docs/contributing/analysis-roadmap.mdx).
 
 - id: erlang.memory.gen_server_stop
@@ -33,7 +33,7 @@
       example(Pid) ->
           send(Pid, ping).
     expect_no_match: true
-  description: "Use-after-stop — `send(Pid, ...)` to a pid whose preceding `gen_server:stop(Pid)` already terminated the OTP callback module. Subsequent traffic addressed to the same pid yields `{error, noproc}` / `'EXIT'` (CWE-672/CWE-404). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+  description: "Use-after-stop - `send(Pid, ...)` to a pid whose preceding `gen_server:stop(Pid)` already terminated the OTP callback module. Subsequent traffic addressed to the same pid yields `{error, noproc}` / `'EXIT'` (CWE-672/CWE-404). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
 - id: erlang.memory.supervisor_terminate_child
   enabled: true
   language: erlang
@@ -50,4 +50,4 @@
       example(Sup, ChildId) ->
           supervisor:terminate_child(Sup, ChildId).
     expect_match_text: ["supervisor:terminate_child"]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. supervisor:terminate_child(Sup, Child) — OTP shuts the child down; subsequent traffic addressed to the child pid yields {error, noproc} / 'EXIT' (use-after-shutdown, CWE-672). The `supervisor:terminate_child` selector isn't in the adapter's lifecycle transition table, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. supervisor:terminate_child(Sup, Child) - OTP shuts the child down; subsequent traffic addressed to the child pid yields {error, noproc} / 'EXIT' (use-after-shutdown, CWE-672). The `supervisor:terminate_child` selector isn't in the adapter's lifecycle transition table, so this rule remains a transition-site audit-pair."

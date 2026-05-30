@@ -1,4 +1,4 @@
-# Async queue / pipeline sources. All marked `trust: service` — the
+# Async queue / pipeline sources. All marked `trust: service` - the
 # queue operator is semi-trusted but the payload itself often
 # originates from an external caller that eventually becomes a
 # message.
@@ -23,7 +23,7 @@
           message
         end
       end
-  description: "Broadway handle_message/3 `message` — payload from SQS/Kafka/RabbitMQ/GCPubSub; .data byte-blob is attacker-reachable."
+  description: "Broadway handle_message/3 `message` - payload from SQS/Kafka/RabbitMQ/GCPubSub; .data byte-blob is attacker-reachable."
 
   imports:
   - Broadway
@@ -48,7 +48,7 @@
           messages
         end
       end
-  description: "Broadway handle_batch/4 `messages` list — batch of payloads from the queue; each element is attacker-reachable."
+  description: "Broadway handle_batch/4 `messages` list - batch of payloads from the queue; each element is attacker-reachable."
 
   imports:
   - Broadway
@@ -65,7 +65,7 @@
     kind: read
     target:
       name: args
-  description: "Disabled — current Elixir adapter does not emit `kind: read` property facts for `%Oban.Job{}.args`. The `elixir.oban.worker_perform` `job` param rule already taints the worker entrypoint; re-enable once the adapter exposes field reads."
+  description: "Disabled - current Elixir adapter does not emit `kind: read` property facts for `%Oban.Job{}.args`. The `elixir.oban.worker_perform` `job` param rule already taints the worker entrypoint; re-enable once the adapter exposes field reads."
 
 - id: elixir.oban.worker_perform
   enabled: true
@@ -87,7 +87,7 @@
           job
         end
       end
-  description: "Oban.Worker perform/1 `%Oban.Job{}` parameter — .args/.meta carries enqueue-time payload."
+  description: "Oban.Worker perform/1 `%Oban.Job{}` parameter - .args/.meta carries enqueue-time payload."
 
   imports:
   - Oban
@@ -111,7 +111,7 @@
           events
         end
       end
-  description: "GenStage handle_events/3 `events` list — upstream producer payload."
+  description: "GenStage handle_events/3 `events` list - upstream producer payload."
 
   imports:
   - Gen_stage
@@ -137,7 +137,7 @@
           payload
         end
       end
-  description: "Disabled — duplicate bare `payload` parameter shape with elixir.phoenix.channel_handle_in under the current matcher."
+  description: "Disabled - duplicate bare `payload` parameter shape with elixir.phoenix.channel_handle_in under the current matcher."
 
   imports:
   - Amqp
@@ -161,6 +161,6 @@
           data
         end
       end
-  description: "Bandit/Cowboy raw socket handler — `handle_data/handle_info` `data` parameter carries unparsed bytes from the peer. Bare-name match on `data`."
+  description: "Bandit/Cowboy raw socket handler - `handle_data/handle_info` `data` parameter carries unparsed bytes from the peer. Bare-name match on `data`."
   imports:
   - Bandit

@@ -281,7 +281,7 @@
 
       '
     expect_no_match: true
-  description: "WebClient.OpenRead(tainted URL) \u2014 opens an attacker-selected\
+  description: "WebClient.OpenRead(tainted URL) - opens an attacker-selected\
     \ network resource."
 - id: csharp.ssrf.webclient_openreadasync
   enabled: true
@@ -313,7 +313,7 @@
 
       '
     expect_no_match: true
-  description: "WebClient.OpenReadAsync(tainted URL) \u2014 async network fetch to\
+  description: "WebClient.OpenReadAsync(tainted URL) - async network fetch to\
     \ an attacker-selected destination."
 - id: csharp.ssrf.webclient_downloaddata
   enabled: true
@@ -373,7 +373,7 @@
 
       '
     expect_no_match: true
-  description: "WebClient.DownloadFile \u2014 also writes to disk."
+  description: "WebClient.DownloadFile - also writes to disk."
 - id: csharp.ssrf.webclient_uploadstring
   enabled: true
   language: csharp
@@ -463,7 +463,7 @@
 
       '
     expect_no_match: true
-  description: "new RestClient(tainted base URL) \u2014 attacker-controlled RestSharp\
+  description: "new RestClient(tainted base URL) - attacker-controlled RestSharp\
     \ base URL creates an SSRF client."
 - id: csharp.ssrf.restsharp_executeasync
   enabled: true
@@ -512,7 +512,7 @@
     kind: call
     callee:
       name: GetAsync
-  description: "Disabled \u2014 bare GetAsync collides with HttpClient.GetAsync and\
+  description: "Disabled - bare GetAsync collides with HttpClient.GetAsync and\
     \ many async APIs; HttpClient rules already cover the concrete risk."
 - id: csharp.ssrf.refit_client
   enabled: false
@@ -529,7 +529,7 @@
     kind: call
     callee:
       name: For
-  description: "Disabled \u2014 Refit interface clients; flag only when base URL is\
+  description: "Disabled - Refit interface clients; flag only when base URL is\
     \ tainted."
 - id: csharp.ssrf.smtpclient_send
   enabled: false
@@ -546,7 +546,7 @@
       attribute:
       - SmtpClient
       - Send
-  description: "Disabled \u2014 SmtpClient.Send is mail, not generic SSRF."
+  description: "Disabled - SmtpClient.Send is mail, not generic SSRF."
 - id: csharp.ssrf.httpclient_getstring
   enabled: false
   disabled_reason:
@@ -568,4 +568,4 @@
       dynamic amount = 1; HttpClient.GetStringAsync(input); } }
 
       '
-  description: "Disabled duplicate \u2014 same matcher as canonical csharp.ssrf.httpclient_getstringasync."
+  description: "Disabled duplicate - same matcher as canonical csharp.ssrf.httpclient_getstringasync."

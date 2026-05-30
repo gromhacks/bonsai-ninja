@@ -30,4 +30,4 @@
           }
         }
       expect_no_match: true
-  description: 'HttpServletResponse.setHeader (Scala) — manual framing override.'
+  description: 'HttpServletResponse.setHeader (Scala) - manual framing override.'

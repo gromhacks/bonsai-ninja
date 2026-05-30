@@ -23,7 +23,7 @@
       func example() {
         cfg.InsecureSkipVerify = true
       }
-  description: "tls.Config.InsecureSkipVerify assignment — setting true disables certificate verification (MITM)."
+  description: "tls.Config.InsecureSkipVerify assignment - setting true disables certificate verification (MITM)."
 
 - id: go.tls.minversion_old
   enabled: true
@@ -46,7 +46,7 @@
       func example() {
         cfg.MinVersion = true
       }
-  description: "tls.Config.MinVersion — values VersionTLS10 / VersionTLS11 allow deprecated-protocol downgrade."
+  description: "tls.Config.MinVersion - values VersionTLS10 / VersionTLS11 allow deprecated-protocol downgrade."
 
 - id: go.tls.weak_ciphersuites
   enabled: false
@@ -61,7 +61,7 @@
     kind: write
     target:
       name: CipherSuites
-  description: "Disabled — tls.Config.CipherSuites write; enable when the list contains known-weak suites (RC4, 3DES, CBC with SHA1)."
+  description: "Disabled - tls.Config.CipherSuites write; enable when the list contains known-weak suites (RC4, 3DES, CBC with SHA1)."
 
 - id: go.tls.servername_unset
   enabled: false
@@ -76,7 +76,7 @@
     kind: write
     target:
       name: ServerName
-  description: "Disabled — unset ServerName defeats SNI-based hostname verification; enable with a more specific constraint."
+  description: "Disabled - unset ServerName defeats SNI-based hostname verification; enable with a more specific constraint."
 
 - id: go.tls.grpc_with_insecure
   enabled: true
@@ -102,4 +102,4 @@
         value := "value"
         grpc.WithInsecure(target)
       }
-  description: "grpc.WithInsecure() — disables TLS entirely on gRPC client; plaintext transport."
+  description: "grpc.WithInsecure() - disables TLS entirely on gRPC client; plaintext transport."

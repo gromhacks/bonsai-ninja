@@ -25,7 +25,7 @@
         curl_easy_setopt("safe", "safe", "safe");
       }
     expect_no_match: true
-  description: "curl_easy_setopt(CURLOPT_URL, tainted) — outbound request to attacker host. Also covers merged aliases: cpp.tls.curl_ssl_verifypeer_off, cpp.tls.curl_ssl_verifyhost_off."
+  description: "curl_easy_setopt(CURLOPT_URL, tainted) - outbound request to attacker host. Also covers merged aliases: cpp.tls.curl_ssl_verifypeer_off, cpp.tls.curl_ssl_verifyhost_off."
 - id: cpp.ssrf.curlpp_options_url
   enabled: true
   language: cpp
@@ -51,7 +51,7 @@
         auto *x = new Url("safe");
       }
     expect_no_match: true
-  description: "curlpp::options::Url(tainted) — URL option consumed by cURL wrapper."
+  description: "curlpp::options::Url(tainted) - URL option consumed by cURL wrapper."
 - id: cpp.ssrf.cpp_httplib_get
   enabled: true
   language: cpp
@@ -233,7 +233,7 @@
         auto *x = new HTTPClientSession("safe");
       }
     expect_no_match: true
-  description: "Poco::Net::HTTPClientSession(host, port) — tainted host."
+  description: "Poco::Net::HTTPClientSession(host, port) - tainted host."
 - id: cpp.ssrf.poco_uri
   enabled: false
   disabled_reason:
@@ -249,7 +249,7 @@
     kind: new
     callee:
       name: URI
-  description: "Disabled — Poco::URI is often used for parsing (not requesting); flag only when passed to HTTPClientSession."
+  description: "Disabled - Poco::URI is often used for parsing (not requesting); flag only when passed to HTTPClientSession."
 - id: cpp.ssrf.poco_httprequest
   enabled: true
   language: cpp
@@ -305,7 +305,7 @@
         auto *x = new HTTPRequest("safe");
       }
     expect_no_match: true
-  description: Poco::Net::HTTPRequest(method, uri) — tainted methods can influence outbound request semantics.
+  description: Poco::Net::HTTPRequest(method, uri) - tainted methods can influence outbound request semantics.
 - id: cpp.ssrf.qt_qnetworkaccessmanager_get
   enabled: false
   language: cpp
@@ -395,4 +395,4 @@
       attribute:
       - http
       - async_write
-  description: "Disabled — Boost.Beast http::async_write is generic; flag only when target/host fields are tainted."
+  description: "Disabled - Boost.Beast http::async_write is generic; flag only when target/host fields are tainted."

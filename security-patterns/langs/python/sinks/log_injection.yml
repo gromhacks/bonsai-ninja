@@ -28,7 +28,7 @@
       def example(user_input):
           return logger.info('safe', '%sd0-9')
     expect_no_match: true
-  description: "logger.info(user_msg) where user_msg contains `%s` / `{0}` markers — log message becomes a format-string attack. Merged aliases: python.log_injection.logger_info_concat."
+  description: "logger.info(user_msg) where user_msg contains `%s` / `{0}` markers - log message becomes a format-string attack. Merged aliases: python.log_injection.logger_info_concat."
   aliases:
   - python.log_injection.logger_info_concat
   - python.log_injection.structlog_info_concat
@@ -60,7 +60,7 @@
       def example(user_input):
           return logger.debug('safe', '`f"f\'format')
     expect_no_match: true
-  description: "logger.debug — log-injection via concat / f-string / .format()."
+  description: "logger.debug - log-injection via concat / f-string / .format()."
 - id: python.log_injection.logger_warning_concat
   enabled: true
   language: python
@@ -90,7 +90,7 @@
       def example(user_input):
           return logger.warning('safe', '`f"f\'format')
     expect_no_match: true
-  description: "logger.warning — log-injection via concat / f-string / .format(). Merged collision aliases: python.log_injection.structlog_warning_concat."
+  description: "logger.warning - log-injection via concat / f-string / .format(). Merged collision aliases: python.log_injection.structlog_warning_concat."
   aliases:
   - python.log_injection.structlog_warning_concat
   packages:
@@ -121,4 +121,4 @@
       def example(user_input):
           return logger.critical('safe', '`f"f\'format')
     expect_no_match: true
-  description: "logger.critical — log-injection via concat / f-string / .format()."
+  description: "logger.critical - log-injection via concat / f-string / .format()."

@@ -26,7 +26,7 @@
     code: "use Crypt::JWT;\nsub example {\n  my ($input, $url, $id, $payload, $request)
       = @_;\n  encode_jwt($input)\n}\n"
     expect_no_match: true
-  description: "decode_jwt — Crypt::JWT / JSON::WebToken share this exported name.
+  description: "decode_jwt - Crypt::JWT / JSON::WebToken share this exported name.
     Without `accepted_alg => [...]` the library accepts alg=none and forged HS256-via-RS256-pubkey
     tokens."
 
@@ -43,7 +43,7 @@
     kind: call
     callee:
       name: decode_jwt
-  description: "Disabled — merged into perl.jwt.crypt_jwt_decode (same bare `decode_jwt`
+  description: "Disabled - merged into perl.jwt.crypt_jwt_decode (same bare `decode_jwt`
     name)."
 
 - id: perl.jwt.mojo_jwt_decode
@@ -76,7 +76,7 @@
         decode("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzYWZlIn0.sig")
       }
     expect_no_match: true
-  description: "Mojo::JWT $jwt->decode — only safe if `algorithm`/`secret` are set
+  description: "Mojo::JWT $jwt->decode - only safe if `algorithm`/`secret` are set
     before decode; missing verification = accept any signature."
 
 - id: perl.jwt_jwt_decode_no_verify
@@ -110,5 +110,5 @@
         decode_jwt_no_verify("eyJhbGciOiJub25lIn0.eyJzdWIiOiJzYWZlIn0.");
       }
     expect_no_match: true
-  description: "decode_jwt_no_verify-style helpers — parses attacker-controlled claims
+  description: "decode_jwt_no_verify-style helpers - parses attacker-controlled claims
     without validating signature / algorithm."

@@ -24,7 +24,7 @@
         grmustache_render("safe");
       }
     expect_no_match: true
-  description: "GRMustache -renderObject: with tainted template string — Mustache injection. Constrained to GRMustache template receivers."
+  description: "GRMustache -renderObject: with tainted template string - Mustache injection. Constrained to GRMustache template receivers."
 
 - id: objc.template.mgtemplateengine_process
   enabled: true
@@ -50,7 +50,7 @@
       #import <MGTemplateEngine/MGTemplateEngine.h>
       void test(void) { [MGTemplateEngine processTemplate:@"Hello safe"]; }
     expect_no_match: true
-  description: "MGTemplateEngine -processTemplate:withVariables: — SSTI when template is tainted."
+  description: "MGTemplateEngine -processTemplate:withVariables: - SSTI when template is tainted."
 
 - id: objc.template.handlebars_compile
   enabled: true
@@ -76,4 +76,4 @@
       #import <Handlebars-iOS/Handlebars-iOS.h>
       void test(void) { [HBHandlebars compileTemplate:@"Hello safe"]; }
     expect_no_match: true
-  description: "Handlebars-iOS +compileTemplate: — SSTI when template comes from tainted input."
+  description: "Handlebars-iOS +compileTemplate: - SSTI when template comes from tainted input."

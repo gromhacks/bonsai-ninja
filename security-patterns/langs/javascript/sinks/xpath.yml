@@ -43,7 +43,7 @@
         return xpath.select("//user", doc);
       }
     expect_no_match: true
-  description: "xpath/xpath2 select(expr, doc) — attacker-controlled XPath expressions can bypass node selection constraints."
+  description: "xpath/xpath2 select(expr, doc) - attacker-controlled XPath expressions can bypass node selection constraints."
 
 - id: javascript.xpath.select1
   enabled: true
@@ -75,4 +75,4 @@
         return xpath.select1("//*[@id='root']", doc);
       }
     expect_no_match: true
-  description: "xpath.select1(expr, doc) — single-node XPath selection with attacker-controlled expression text."
+  description: "xpath.select1(expr, doc) - single-node XPath selection with attacker-controlled expression text."

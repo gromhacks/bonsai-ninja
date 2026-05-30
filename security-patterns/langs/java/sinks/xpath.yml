@@ -33,7 +33,7 @@
         }
       }
     expect_no_match: true
-  description: "XPath.evaluate(expr, doc) — typed receiver form for XPath injection in javax.xml.xpath."
+  description: "XPath.evaluate(expr, doc) - typed receiver form for XPath injection in javax.xml.xpath."
 
 - id: java.xpath.xpath_compile
   enabled: true
@@ -70,7 +70,7 @@
         }
       }
     expect_no_match: true
-  description: "XPath.compile(expr) — compiled XPath expressions built by concatenating attacker input are injectable before later evaluation."
+  description: "XPath.compile(expr) - compiled XPath expressions built by concatenating attacker input are injectable before later evaluation."
 
 - id: java.xpath.xpath_expression_evaluate
   enabled: true
@@ -105,4 +105,4 @@
         }
       }
     expect_no_match: true
-  description: "XPathExpression.evaluate(...) on a tainted compiled XPath expression — executes an attacker-influenced XPath query."
+  description: "XPathExpression.evaluate(...) on a tainted compiled XPath expression - executes an attacker-influenced XPath query."

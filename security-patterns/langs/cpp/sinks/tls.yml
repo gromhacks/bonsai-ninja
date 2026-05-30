@@ -17,7 +17,7 @@
     code: "#include <openssl/evp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
       ;\n  const char *fmt = arg;\n  const char *query = arg;\n  SSL_CTX_set_verify(arg,\
       \ SSL_VERIFY_NONE);\n}\n"
-  description: "OpenSSL SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL) \u2014 no cert\
+  description: "OpenSSL SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL) - no cert\
     \ verification."
 - id: cpp.tls.openssl_set_verify_none
   enabled: true
@@ -38,7 +38,7 @@
     code: "#include <openssl/evp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
       ;\n  const char *fmt = arg;\n  const char *query = arg;\n  SSL_set_verify(arg,\
       \ SSL_VERIFY_NONE);\n}\n"
-  description: "OpenSSL SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL) \u2014 per-connection\
+  description: "OpenSSL SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL) - per-connection\
     \ no verify."
 - id: cpp.tls.boost_asio_verify_none
   enabled: true
@@ -62,7 +62,7 @@
       void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n\
       \  const char *query = arg;\n  context::set_verify_mode(verify_none);\n}\n"
   description: "boost::asio::ssl::context::set_verify_mode(verify_none). Arg-shape\
-    \ constraint requires the verify-none enumerator literal \u2014 `set_verify_mode(verify_peer)`\
+    \ constraint requires the verify-none enumerator literal - `set_verify_mode(verify_peer)`\
     \ does NOT fire."
   imports:
   - boost
@@ -87,7 +87,7 @@
       \ */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt\
       \ = arg;\n  const char *query = arg;\n  QSslConfiguration::setPeerVerifyMode(arg);\n\
       }\n"
-  description: "Qt QSslConfiguration::setPeerVerifyMode(VerifyNone) \u2014 disables\
+  description: "Qt QSslConfiguration::setPeerVerifyMode(VerifyNone) - disables\
     \ cert check."
   imports:
   - QtCore
@@ -134,7 +134,7 @@
   - name: generated direct match
     code: "#include <Poco/Net/Context.h>\nusing Poco::Net::Context;\nvoid example() {\n  const char *arg = \"tainted\"\
       ;\n  auto *x = new Context(arg);\n}\n"
-  description: "Poco::Net::Context(...) \u2014 flag when constructed with VERIFY_NONE\
+  description: "Poco::Net::Context(...) - flag when constructed with VERIFY_NONE\
     \ verification mode."
 - id: cpp.tls.cpphttplib_server_verify_off
   enabled: true
@@ -169,7 +169,7 @@
       }
     expect_no_match: true
   description: "cpp-httplib Client::enable_server_certificate_verification(false)\
-    \ \u2014 disables verification. Arg-equals constraint scopes the rule to the disabling\
+    \ - disables verification. Arg-equals constraint scopes the rule to the disabling\
     \ form; the `(true)` call does NOT fire."
   imports:
   - httplib.h

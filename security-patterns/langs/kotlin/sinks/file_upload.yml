@@ -34,7 +34,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring MultipartFile.transferTo — dest path can be client-controlled filename."
+  description: "Spring MultipartFile.transferTo - dest path can be client-controlled filename."
 
   imports:
   - org.springframework.web
@@ -73,7 +73,7 @@
       }
       }
     expect_no_match: true
-  description: "Apache Commons FileUpload FileItem.write — uploaded content is written to a destination that can be filename/path influenced."
+  description: "Apache Commons FileUpload FileItem.write - uploaded content is written to a destination that can be filename/path influenced."
 
   imports:
   - org.apache.commons.fileupload
@@ -100,6 +100,6 @@
         }
       }
     expect_match_text: [Files.copy]
-  description: "Disabled duplicate — same matcher as canonical kotlin.path.files_copy; enable a project-local file-upload rule when multipart-specific receiver facts are available."
+  description: "Disabled duplicate - same matcher as canonical kotlin.path.files_copy; enable a project-local file-upload rule when multipart-specific receiver facts are available."
   imports:
   - java

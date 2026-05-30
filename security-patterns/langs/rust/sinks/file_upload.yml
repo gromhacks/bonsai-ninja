@@ -1,4 +1,4 @@
-# Rust file-upload sinks — attacker-chosen filename flowing into a
+# Rust file-upload sinks - attacker-chosen filename flowing into a
 # filesystem path without allowlist / basename stripping.
 - id: rust.upload.actix_multipart_filename
   enabled: false
@@ -25,7 +25,7 @@
           let query = "user";
           ContentDisposition::get_filename(target);
       }
-  description: "Disabled — ContentDisposition::get_filename is a client-controlled filename source; file-write/path sinks report the unsafe use."
+  description: "Disabled - ContentDisposition::get_filename is a client-controlled filename source; file-write/path sinks report the unsafe use."
 
   imports:
   - actix_multipart
@@ -52,7 +52,7 @@
           let query = "user";
           Field::file_name(target);
       }
-  description: "Disabled — Field::file_name is already modeled as rust.axum.multipart_field_file_name. Report only when the returned filename reaches a write/path sink."
+  description: "Disabled - Field::file_name is already modeled as rust.axum.multipart_field_file_name. Report only when the returned filename reaches a write/path sink."
 
 - id: rust.upload.rocket_tempfile_persist_to
   enabled: true
@@ -83,4 +83,4 @@
           TempFile::persist_to("/var/app/uploads/file.bin");
       }
     expect_no_match: true
-  description: "rocket TempFile::persist_to(path) — persisting uploads to attacker-influenced paths can overwrite arbitrary files."
+  description: "rocket TempFile::persist_to(path) - persisting uploads to attacker-influenced paths can overwrite arbitrary files."

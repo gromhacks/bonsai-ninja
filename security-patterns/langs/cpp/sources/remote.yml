@@ -18,7 +18,7 @@
         char buf[4096];
         recv(0, buf, sizeof(buf), 0);
       }
-  description: "BSD socket recv(fd, buf, len, flags) — remote bytes taint the caller-supplied buffer argument."
+  description: "BSD socket recv(fd, buf, len, flags) - remote bytes taint the caller-supplied buffer argument."
 - id: cpp.input.recvfrom
   enabled: true
   language: cpp
@@ -38,7 +38,7 @@
         char buf[4096];
         recvfrom(0, buf, sizeof(buf), 0, 0, 0);
       }
-  description: "BSD socket recvfrom(fd, buf, len, flags, ...) — remote datagram bytes taint the caller buffer."
+  description: "BSD socket recvfrom(fd, buf, len, flags, ...) - remote datagram bytes taint the caller buffer."
 - id: cpp.archive.libzip_zip_get_name
   enabled: true
   language: cpp
@@ -59,7 +59,7 @@
         const char *name = zip_get_name(archive, 0, 0);
       }
     expect_match_text: [zip_get_name]
-  description: "libzip zip_get_name(za, idx, flags) — archive-controlled entry name. Taint the returned name; Zip Slip is reported only when that value reaches a path open/write sink."
+  description: "libzip zip_get_name(za, idx, flags) - archive-controlled entry name. Taint the returned name; Zip Slip is reported only when that value reaches a path open/write sink."
 - id: cpp.archive.minizip_unzgetcurrentfileinfo_filename
   enabled: true
   language: cpp
@@ -83,7 +83,7 @@
         unzGetCurrentFileInfo(archive, 0, filename, sizeof(filename), 0, 0, 0, 0);
       }
     expect_match_text: [unzGetCurrentFileInfo]
-  description: "minizip unzGetCurrentFileInfo(..., filename, filename_size, ...) — archive-controlled entry name is written to the filename output buffer. Zip Slip is reported only when that buffer reaches a path open/write sink."
+  description: "minizip unzGetCurrentFileInfo(..., filename, filename_size, ...) - archive-controlled entry name is written to the filename output buffer. Zip Slip is reported only when that buffer reaches a path open/write sink."
 - id: cpp.source.cpphttplib_file_value
   enabled: true
   language: cpp
@@ -105,7 +105,7 @@
         auto file = req.get_file_value("upload");
       }
     expect_match_text: [req.get_file_value]
-  description: "cpp-httplib Request::get_file_value(name) — returned MultipartFormData contains client-controlled upload metadata, including filename."
+  description: "cpp-httplib Request::get_file_value(name) - returned MultipartFormData contains client-controlled upload metadata, including filename."
 - id: cpp.source.drogon_uploaded_filename
   enabled: true
   language: cpp
@@ -126,7 +126,7 @@
         auto name = file.getFileName();
       }
     expect_match_text: [file.getFileName]
-  description: "Drogon HttpFile::getFileName() — client-controlled multipart filename; report when it reaches a path/file-write sink."
+  description: "Drogon HttpFile::getFileName() - client-controlled multipart filename; report when it reaches a path/file-write sink."
 - id: cpp.input.read_socket
   enabled: false
   disabled_reason:
@@ -139,7 +139,7 @@
     kind: call
     callee:
       name: read
-  description: "Disabled — bare `read` name collides with iostream / container `.read()` methods; rely on recv/recvfrom/Boost.Beast for socket reads."
+  description: "Disabled - bare `read` name collides with iostream / container `.read()` methods; rely on recv/recvfrom/Boost.Beast for socket reads."
 - id: cpp.input.accept
   enabled: false
   disabled_reason:
@@ -151,7 +151,7 @@
     kind: call
     callee:
       name: accept
-  description: "Disabled — accept yields fd, not tainted bytes directly."
+  description: "Disabled - accept yields fd, not tainted bytes directly."
 - id: cpp.input.params_param
   enabled: false
   disabled_reason:
@@ -163,7 +163,7 @@
     kind: param
     target:
       name: params
-  description: "Disabled — unscoped `params` parameter name matches every function with a param named `params` (render loops, math helpers, anything). The per-framework crow / drogon / pistache / cpphttplib rules below capture the real HTTP-handler shape with proper package scoping."
+  description: "Disabled - unscoped `params` parameter name matches every function with a param named `params` (render loops, math helpers, anything). The per-framework crow / drogon / pistache / cpphttplib rules below capture the real HTTP-handler shape with proper package scoping."
 - id: cpp.input.crow_request_param
   enabled: false
   disabled_reason:
@@ -185,7 +185,7 @@
       void example(const char *req) {
         (void)req;
       }
-  description: "Disabled — a bare `req` parameter name is not a security boundary without type/enclosing-handler evidence. Use precise request accessor rules such as multipart/file/query helpers until the C++ adapter can scope param rules to framework handler signatures."
+  description: "Disabled - a bare `req` parameter name is not a security boundary without type/enclosing-handler evidence. Use precise request accessor rules such as multipart/file/query helpers until the C++ adapter can scope param rules to framework handler signatures."
 - id: cpp.input.drogon_request_param
   enabled: false
   disabled_reason:
@@ -199,7 +199,7 @@
     kind: param
     target:
       name: req
-  description: "Disabled duplicate — merged into cpp.input.crow_request_param."
+  description: "Disabled duplicate - merged into cpp.input.crow_request_param."
 - id: cpp.input.pistache_request_param
   enabled: true
   language: cpp
@@ -218,7 +218,7 @@
       void example(const char *request) {
         (void)request;
       }
-  description: "HTTP handler `request` parameter — covers Pistache Rest::Request&."
+  description: "HTTP handler `request` parameter - covers Pistache Rest::Request&."
 - id: cpp.input.cpphttplib_req_param
   enabled: false
   disabled_reason:
@@ -231,7 +231,7 @@
     kind: param
     target:
       name: req
-  description: "Disabled duplicate — merged into cpp.input.crow_request_param."
+  description: "Disabled duplicate - merged into cpp.input.crow_request_param."
 - id: cpp.input.qt_tcpsocket_readall
   enabled: true
   language: cpp
@@ -253,7 +253,7 @@
         QTcpSocket.readAll();
       }
     expect_match_text: [QTcpSocket.readAll]
-  description: "QTcpSocket::readAll — remote socket bytes; local receiver calls require semantic QTcpSocket receiver-type facts."
+  description: "QTcpSocket::readAll - remote socket bytes; local receiver calls require semantic QTcpSocket receiver-type facts."
   imports:
   - QtCore
   - QtCore/Qt
@@ -278,7 +278,7 @@
         QNetworkReply.readAll();
       }
     expect_match_text: [QNetworkReply.readAll]
-  description: "QNetworkReply::readAll — HTTP response bytes; local receiver calls require semantic QNetworkReply receiver-type facts."
+  description: "QNetworkReply::readAll - HTTP response bytes; local receiver calls require semantic QNetworkReply receiver-type facts."
   imports:
   - QtCore
   - QtCore/Qt
@@ -301,7 +301,7 @@
       void example() {
         http::read(stream, buffer, request);
       }
-  description: "Boost.Beast http::read(stream, buffer, message) — remote HTTP message bytes taint the parsed message argument."
+  description: "Boost.Beast http::read(stream, buffer, message) - remote HTTP message bytes taint the parsed message argument."
 
   imports:
   - boost/beast.hpp
@@ -326,7 +326,7 @@
       void example() {
         asio::read(socket, buffer);
       }
-  description: "Boost.Asio asio::read(socket, buf) — remote socket bytes."
+  description: "Boost.Asio asio::read(socket, buf) - remote socket bytes."
 
   imports:
   - boost
@@ -351,7 +351,7 @@
       void example() {
         asio::async_read(socket, buffer, handler);
       }
-  description: "Boost.Asio asio::async_read — async remote socket bytes."
+  description: "Boost.Asio asio::async_read - async remote socket bytes."
 
   imports:
   - boost
@@ -376,7 +376,7 @@
         StreamSocket.receiveBytes(buffer, sizeof(buffer));
       }
     expect_match_text: [StreamSocket.receiveBytes]
-  description: "Poco StreamSocket::receiveBytes — remote socket bytes; local receiver calls require semantic StreamSocket receiver-type facts."
+  description: "Poco StreamSocket::receiveBytes - remote socket bytes; local receiver calls require semantic StreamSocket receiver-type facts."
 
 - id: cpp.input.grpc_request_param
   enabled: true
@@ -396,7 +396,7 @@
       void example(const char *reader) {
         (void)reader;
       }
-  description: "gRPC server streaming reader parameter — remote protobuf request."
+  description: "gRPC server streaming reader parameter - remote protobuf request."
 
 - id: cpp.input.boost_asio_async_receive
   enabled: true
@@ -418,7 +418,7 @@
       void example() {
         socket::async_receive(buffer, handler);
       }
-  description: "Boost.Asio socket::async_receive — async UDP/TCP datagram bytes from peer."
+  description: "Boost.Asio socket::async_receive - async UDP/TCP datagram bytes from peer."
 
   imports:
   - boost
@@ -443,7 +443,7 @@
       void example() {
         socket::async_receive_from(buffer, endpoint, handler);
       }
-  description: "Boost.Asio socket::async_receive_from — async UDP datagram bytes."
+  description: "Boost.Asio socket::async_receive_from - async UDP datagram bytes."
 
   imports:
   - boost
@@ -473,7 +473,7 @@
         const char *query = arg;
         request::get_header_value(arg);
       }
-  description: "Crow request::get_header_value(name) — caller-controlled HTTP header. Signature: `get_header_value(const std::string &name)` — exactly 1 arg; bounds reject same-name decoys."
+  description: "Crow request::get_header_value(name) - caller-controlled HTTP header. Signature: `get_header_value(const std::string &name)` - exactly 1 arg; bounds reject same-name decoys."
 
 - id: cpp.input.crow_request_url_params_get
   enabled: true
@@ -497,7 +497,7 @@
         const char *query = arg;
         url_params::get(arg);
       }
-  description: "Crow url_params.get(name) — query-string parameter."
+  description: "Crow url_params.get(name) - query-string parameter."
 
 - id: cpp.input.drogon_request_get_parameter
   enabled: true
@@ -521,7 +521,7 @@
         const char *query = arg;
         HttpRequest::getParameter(arg);
       }
-  description: "Drogon HttpRequest::getParameter(name) — query/form param."
+  description: "Drogon HttpRequest::getParameter(name) - query/form param."
 
 - id: cpp.input.drogon_request_get_header
   enabled: true
@@ -545,7 +545,7 @@
         const char *query = arg;
         HttpRequest::getHeader(arg);
       }
-  description: "Drogon HttpRequest::getHeader(name) — caller-controlled HTTP header."
+  description: "Drogon HttpRequest::getHeader(name) - caller-controlled HTTP header."
 
 - id: cpp.input.qt_qnetworkrequest_url
   enabled: true
@@ -569,7 +569,7 @@
         const char *query = arg;
         QNetworkRequest::url(arg);
       }
-  description: "Qt QNetworkRequest::url() — request-controlled URL accessor."
+  description: "Qt QNetworkRequest::url() - request-controlled URL accessor."
 
   imports:
   - QtCore
@@ -597,7 +597,7 @@
         const char *query = arg;
         QNetworkRequest::rawHeader(arg);
       }
-  description: "Qt QNetworkRequest::rawHeader(name) — caller-controlled header value."
+  description: "Qt QNetworkRequest::rawHeader(name) - caller-controlled header value."
 
   imports:
   - QtCore
@@ -623,7 +623,7 @@
         const char *query = arg;
         ServerContext::client_metadata(arg);
       }
-  description: "gRPC ServerContext::client_metadata() — client-supplied metadata multimap."
+  description: "gRPC ServerContext::client_metadata() - client-supplied metadata multimap."
 
 - id: cpp.input.qt_mqtt_message_payload
   enabled: true
@@ -648,7 +648,7 @@
         const char *query = arg;
         QMqttMessage::payload(arg);
       }
-  description: "Qt QMqttMessage::payload() — broker-delivered MQTT payload bytes."
+  description: "Qt QMqttMessage::payload() - broker-delivered MQTT payload bytes."
 
 # Untrusted-size parameter source for the cpp.memory.malloc_tainted_size
 # / calloc / realloc family. Names taken from common C++ network-parser
@@ -674,4 +674,4 @@
       void example(const char *size) {
         (void)size;
       }
-  description: "Multi-arg size-style parameter (`size`, `len`, `length`, `count`, …) typically populated from a peer-controlled message header. Pairs with cpp.memory.malloc_tainted_size / calloc / realloc and the memcpy family for CWE-190/787 detection."
+  description: "Multi-arg size-style parameter (`size`, `len`, `length`, `count`, ...) typically populated from a peer-controlled message header. Pairs with cpp.memory.malloc_tainted_size / calloc / realloc and the memcpy family for CWE-190/787 detection."

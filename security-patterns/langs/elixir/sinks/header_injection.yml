@@ -31,7 +31,7 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.put_resp_header(conn, name, tainted) — value is written verbatim; `\\r\\n` splits the response / injects cookies."
+  description: "Plug.Conn.put_resp_header(conn, name, tainted) - value is written verbatim; `\\r\\n` splits the response / injects cookies."
 
   imports:
   - Plug
@@ -67,7 +67,7 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.put_resp_cookie(conn, name, tainted value) — cookie value written verbatim into Set-Cookie; `\\r\\n` enables response splitting."
+  description: "Plug.Conn.put_resp_cookie(conn, name, tainted value) - cookie value written verbatim into Set-Cookie; `\\r\\n` enables response splitting."
 
   imports:
   - Plug
@@ -103,7 +103,7 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.merge_resp_headers/2 — list entries become response headers without CRLF filtering."
+  description: "Plug.Conn.merge_resp_headers/2 - list entries become response headers without CRLF filtering."
 
   imports:
   - Plug
@@ -139,7 +139,7 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.prepend_resp_headers/2 — same CRLF risk as merge_resp_headers; tainted list entries land verbatim in the response."
+  description: "Plug.Conn.prepend_resp_headers/2 - same CRLF risk as merge_resp_headers; tainted list entries land verbatim in the response."
 
   imports:
   - Plug
@@ -176,6 +176,6 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.put_resp_content_type(conn, tainted) — MIME string written into Content-Type; CRLF / mime-type confusion can bypass content sniffing defences."
+  description: "Plug.Conn.put_resp_content_type(conn, tainted) - MIME string written into Content-Type; CRLF / mime-type confusion can bypass content sniffing defences."
   imports:
   - Plug

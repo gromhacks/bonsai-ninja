@@ -28,7 +28,7 @@
         }
       }
     expect_no_match: true
-  description: "String.format(tainted_fmt, ...) — attacker-controlled format string; %s/%n directives read uninitialised arg slots."
+  description: "String.format(tainted_fmt, ...) - attacker-controlled format string; %s/%n directives read uninitialised arg slots."
 
 - id: java.format.printstream_printf_tainted
   enabled: true
@@ -60,4 +60,4 @@
         }
       }
     expect_no_match: true
-  description: "System.out.printf(tainted_fmt, ...) — same hazard as String.format."
+  description: "System.out.printf(tainted_fmt, ...) - same hazard as String.format."

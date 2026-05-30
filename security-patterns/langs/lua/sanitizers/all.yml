@@ -1,6 +1,6 @@
-# Lua sanitizers — canonical tags only.
+# Lua sanitizers - canonical tags only.
 #
-# NOTE: ngx.unescape_uri is intentionally NOT a sanitizer — it is the
+# NOTE: ngx.unescape_uri is intentionally NOT a sanitizer - it is the
 # inverse (decode) operation and re-introduces metacharacters. See the
 # disabled stub `lua.sanitizer.ngx_unescape_uri` below.
 - id: lua.sanitizer.ngx_escape_uri
@@ -19,7 +19,7 @@
         ngx.escape_uri(input)
       end
     expect_match_text: ["ngx.escape_uri"]
-  description: "ngx.escape_uri — percent-encodes URI components; neutralises path/query injection."
+  description: "ngx.escape_uri - percent-encodes URI components; neutralises path/query injection."
 
 - id: lua.sanitizer.ngx_quote_sql_str
   enabled: true
@@ -37,7 +37,7 @@
         ngx.quote_sql_str(input)
       end
     expect_match_text: ["ngx.quote_sql_str"]
-  description: "ngx.quote_sql_str — single-quotes and escapes a Lua string for SQL literal use."
+  description: "ngx.quote_sql_str - single-quotes and escapes a Lua string for SQL literal use."
 
 - id: lua.sanitizer.html_escape_lapis
   enabled: true
@@ -56,7 +56,7 @@
         lapis.html.escape(input)
       end
     expect_match_text: ["lapis.html.escape"]
-  description: "lapis.html.escape — HTML-entity encoding prevents reflected/stored XSS."
+  description: "lapis.html.escape - HTML-entity encoding prevents reflected/stored XSS."
 
 - id: lua.sanitizer.html_entities_encode
   enabled: true
@@ -75,7 +75,7 @@
         html.encode(input)
       end
     expect_match_text: ["html.encode"]
-  description: "html.encode (lua-resty-html / html-entities) — HTML-entity encoder."
+  description: "html.encode (lua-resty-html / html-entities) - HTML-entity encoder."
 
 - id: lua.sanitizer.tonumber
   enabled: true
@@ -92,7 +92,7 @@
         tonumber(input)
       end
     expect_match_text: ["tonumber"]
-  description: "tonumber — coerces input to number; removes shell/SQL/path payloads when non-numeric yields nil."
+  description: "tonumber - coerces input to number; removes shell/SQL/path payloads when non-numeric yields nil."
 
 - id: lua.sanitizer.resty_string_to_hex
   enabled: true
@@ -111,7 +111,7 @@
         resty_string.to_hex(input)
       end
     expect_match_text: ["resty_string.to_hex"]
-  description: "lua-resty-string to_hex — hex-encodes bytes; output cannot contain shell/SQL/HTML metacharacters."
+  description: "lua-resty-string to_hex - hex-encodes bytes; output cannot contain shell/SQL/HTML metacharacters."
 
 - id: lua.sanitizer.string_format_q
   enabled: false
@@ -123,7 +123,7 @@
     kind: call
     callee:
       attribute: [string, format]
-  description: "Disabled — string.format with %q quotes for Lua source only; NOT a shell or SQL escape."
+  description: "Disabled - string.format with %q quotes for Lua source only; NOT a shell or SQL escape."
 
 - id: lua.sanitizer.ngx_encode_args
   enabled: true
@@ -141,7 +141,7 @@
         ngx.encode_args(input)
       end
     expect_match_text: ["ngx.encode_args"]
-  description: "ngx.encode_args — URL-encodes a Lua table into application/x-www-form-urlencoded; neutralises query/body injection."
+  description: "ngx.encode_args - URL-encodes a Lua table into application/x-www-form-urlencoded; neutralises query/body injection."
 
 - id: lua.sanitizer.ngx_encode_base64
   enabled: true
@@ -159,7 +159,7 @@
         ngx.encode_base64(input)
       end
     expect_match_text: ["ngx.encode_base64"]
-  description: "ngx.encode_base64 — base64 output cannot contain shell/SQL/HTML metacharacters; treat as opaque-encode sanitizer."
+  description: "ngx.encode_base64 - base64 output cannot contain shell/SQL/HTML metacharacters; treat as opaque-encode sanitizer."
 
 - id: lua.sanitizer.resty_template_escape
   enabled: true
@@ -178,7 +178,7 @@
         template.escape(input)
       end
     expect_match_text: ["template.escape"]
-  description: "lua-resty-template escape — HTML-entity encodes a string for safe template interpolation."
+  description: "lua-resty-template escape - HTML-entity encodes a string for safe template interpolation."
 
 - id: lua.sanitizer.resty_string_sha256_bin
   enabled: true
@@ -197,7 +197,7 @@
         resty_sha256.sha256_bin(input)
       end
     expect_match_text: ["resty_sha256.sha256_bin"]
-  description: "lua-resty-string sha256_bin — one-way SHA-256 digest; downstream cannot recover original taint payload (use
+  description: "lua-resty-string sha256_bin - one-way SHA-256 digest; downstream cannot recover original taint payload (use
     only as identifier, not for auth)."
 
 - id: lua.sanitizer.ngx_unescape_uri
@@ -211,7 +211,7 @@
     kind: call
     callee:
       attribute: [ngx, unescape_uri]
-  description: "Disabled — ngx.unescape_uri is the DECODE inverse of escape_uri; it re-introduces percent-encoded metacharacters
+  description: "Disabled - ngx.unescape_uri is the DECODE inverse of escape_uri; it re-introduces percent-encoded metacharacters
     and MUST NOT be treated as a sanitizer. Listed for audit visibility only."
 
 # -- Audit-derived validation / binding sanitizers -----------------------------
@@ -237,7 +237,7 @@
   - name: lua.sanitizer.same_origin_string_match example negative constraint boundary
     code: "function example(next)\n  string.match()\nend\n"
     expect_no_match: true
-  description: "string.match(value, '^/') — same-origin redirect/path guard for root-relative targets."
+  description: "string.match(value, '^/') - same-origin redirect/path guard for root-relative targets."
 
 - id: lua.sanitizer.table_allowlist_lookup
   enabled: false
@@ -255,8 +255,8 @@
         return allowed[role]
       end
     expect_match_text: [allowed]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    allowed[value] table lookup — table-backed enum/set allowlist membership check."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    allowed[value] table lookup - table-backed enum/set allowlist membership check."
 
   disabled_reason:
     code: over-broad
@@ -282,7 +282,7 @@
   - name: lua.sanitizer.string_match_full_shape example negative constraint boundary
     code: "function example(slug)\n  string.match()\nend\n"
     expect_no_match: true
-  description: "string.match(value, '^...$') — full-string shape validator for slugs, identifiers, and similar bounded formats."
+  description: "string.match(value, '^...$') - full-string shape validator for slugs, identifiers, and similar bounded formats."
 
 - id: lua.sanitizer.statement_bind_values
   enabled: true
@@ -303,7 +303,7 @@
         stmt:bind_values(id)
       end
     expect_match_text: [stmt:bind_values]
-  description: "prepared statement bind_values(...) — binds values to SQL placeholders."
+  description: "prepared statement bind_values(...) - binds values to SQL placeholders."
 
 - id: lua.sanitizer.gsub_char_allowlist
   enabled: true
@@ -330,11 +330,11 @@
   - name: lua.sanitizer.gsub_char_allowlist example negative constraint boundary
     code: "function example(input)\n  string.gsub()\nend\n"
     expect_no_match: true
-  description: "string.gsub(value, '[^safe]', '') — strips every character outside an explicit allowlist."
+  description: "string.gsub(value, '[^safe]', '') - strips every character outside an explicit allowlist."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: lua.passthrough.ngx_unescape_uri
@@ -354,7 +354,7 @@
         ngx.unescape_uri(input)
       end
     expect_match_text: ["ngx.unescape_uri"]
-  description: "ngx.unescape_uri(s) — OpenResty URL decode; preserves taint."
+  description: "ngx.unescape_uri(s) - OpenResty URL decode; preserves taint."
 - id: lua.passthrough.string_upper
   enabled: true
   language: lua
@@ -372,7 +372,7 @@
         return string.upper(input)
       end
     expect_match_text: ["string.upper"]
-  description: "string.upper(s) — case-normalizes but preserves taint from s."
+  description: "string.upper(s) - case-normalizes but preserves taint from s."
 - id: lua.passthrough.string_lower
   enabled: true
   language: lua
@@ -390,7 +390,7 @@
         return string.lower(input)
       end
     expect_match_text: ["string.lower"]
-  description: "string.lower(s) — case-normalizes but preserves taint from s."
+  description: "string.lower(s) - case-normalizes but preserves taint from s."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -412,4 +412,4 @@
         csrf.generate_token(input)
       end
     expect_match_text: ["csrf.generate_token"]
-  description: "Lapis lapis.csrf — generate_token / validate_token pair signals CSRF protection."
+  description: "Lapis lapis.csrf - generate_token / validate_token pair signals CSRF protection."

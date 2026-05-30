@@ -1,4 +1,4 @@
-# Erlang SSRF sinks — HTTP clients. Tainted URL → attacker picks destination host.
+# Erlang SSRF sinks - HTTP clients. Tainted URL -> attacker picks destination host.
 - id: erlang.ssrf.httpc_request_url
   enabled: true
   language: erlang
@@ -27,7 +27,7 @@
       test() ->
         httpc:request("https://example.com").
     expect_no_match: true
-  description: "inets httpc:request/1 — tainted URL reaches internal metadata (169.254.169.254)."
+  description: "inets httpc:request/1 - tainted URL reaches internal metadata (169.254.169.254)."
 - id: erlang.ssrf.httpc_request_tuple
   enabled: true
   language: erlang
@@ -56,7 +56,7 @@
       test() ->
         httpc:request(get, {"https://example.com", []}, [], []).
     expect_no_match: true
-  description: "inets httpc:request/4 — tainted request URL tuple reaches internal metadata (169.254.169.254)."
+  description: "inets httpc:request/4 - tainted request URL tuple reaches internal metadata (169.254.169.254)."
 - id: erlang.ssrf.gun_method_path
   enabled: true
   language: erlang
@@ -87,7 +87,7 @@
       test(Conn) ->
         gun:get(Conn, "/health").
     expect_no_match: true
-  description: "gun HTTP client — tainted request path reaches arbitrary upstream route."
+  description: "gun HTTP client - tainted request path reaches arbitrary upstream route."
 - id: erlang.ssrf.gun_request_path
   enabled: true
   language: erlang
@@ -118,7 +118,7 @@
       test(Conn) ->
         gun:request(Conn, get, "/health", []).
     expect_no_match: true
-  description: "gun:request — tainted request path reaches arbitrary upstream route."
+  description: "gun:request - tainted request path reaches arbitrary upstream route."
 - id: erlang.ssrf.hackney_method_url
   enabled: true
   language: erlang
@@ -149,7 +149,7 @@
       test() ->
         hackney:get("https://example.com").
     expect_no_match: true
-  description: "hackney HTTP method helpers — tainted URL enables SSRF to cloud metadata and localhost."
+  description: "hackney HTTP method helpers - tainted URL enables SSRF to cloud metadata and localhost."
 - id: erlang.ssrf.hackney_request_url
   enabled: true
   language: erlang
@@ -180,7 +180,7 @@
       test() ->
         hackney:request(get, "https://example.com", [], <<>>, []).
     expect_no_match: true
-  description: "hackney:request(Method, Url, ...) — tainted URL enables SSRF to cloud metadata and localhost."
+  description: "hackney:request(Method, Url, ...) - tainted URL enables SSRF to cloud metadata and localhost."
 - id: erlang.ssrf.ibrowse_send_req
   enabled: true
   language: erlang
@@ -211,4 +211,4 @@
       test() ->
         ibrowse:send_req("https://example.com", [], get, []).
     expect_no_match: true
-  description: "ibrowse:send_req — tainted URL reaches attacker-picked host."
+  description: "ibrowse:send_req - tainted URL reaches attacker-picked host."

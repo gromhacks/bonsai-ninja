@@ -25,7 +25,7 @@
         value := "value"
         oauth2.AuthCodeURL("")
       }
-  description: 'oauth2.Config.AuthCodeURL("", ...) — empty state string disables CSRF protection on the OAuth callback.'
+  description: 'oauth2.Config.AuthCodeURL("", ...) - empty state string disables CSRF protection on the OAuth callback.'
 
 - id: go.oauth.golang_oauth2_exchange_tainted
   enabled: true
@@ -68,5 +68,5 @@
         cfg.Exchange(context.Background(), "fixed-static-code")
       }
     expect_no_match: true
-  description: "oauth2.Config.Exchange(ctx, tainted_code) — accepts attacker-supplied authorization code; without state binding the call enables OAuth code-injection / login CSRF."
+  description: "oauth2.Config.Exchange(ctx, tainted_code) - accepts attacker-supplied authorization code; without state binding the call enables OAuth code-injection / login CSRF."
 

@@ -37,7 +37,7 @@
         end
       end
     expect_no_match: true
-  description: "Phoenix.HTML.raw/1 — wraps the argument in a :safe tuple, disabling EEx/HEEx auto-escape; tainted value renders as HTML/JS. Merged collision aliases: elixir.xss.phoenix_html_raw_imported."
+  description: "Phoenix.HTML.raw/1 - wraps the argument in a :safe tuple, disabling EEx/HEEx auto-escape; tainted value renders as HTML/JS. Merged collision aliases: elixir.xss.phoenix_html_raw_imported."
   aliases:
   - elixir.xss.phoenix_html_raw_imported
   imports:
@@ -82,7 +82,7 @@
         end
       end
     expect_no_match: true
-  description: "Phoenix.HTML.Safe.to_iodata/1 — converts a value implementing the Safe protocol; custom impls that return raw binaries bypass escaping."
+  description: "Phoenix.HTML.Safe.to_iodata/1 - converts a value implementing the Safe protocol; custom impls that return raw binaries bypass escaping."
   imports:
   - Phoenix_html
 - id: elixir.xss.plug_send_resp_body
@@ -118,7 +118,7 @@
         end
       end
     expect_no_match: true
-  description: "Plug.Conn.send_resp(conn, status, tainted_body) — raw response body can reflect attacker-controlled HTML/JS when content type is HTML."
+  description: "Plug.Conn.send_resp(conn, status, tainted_body) - raw response body can reflect attacker-controlled HTML/JS when content type is HTML."
   imports:
   - Plug
 - id: elixir.xss.phoenix_controller_html
@@ -154,6 +154,6 @@
         end
       end
     expect_no_match: true
-  description: "Phoenix.Controller.html(conn, tainted_body) — sends raw HTML response content without template escaping."
+  description: "Phoenix.Controller.html(conn, tainted_body) - sends raw HTML response content without template escaping."
   imports:
   - Phoenix

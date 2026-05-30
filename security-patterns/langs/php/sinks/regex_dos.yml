@@ -11,7 +11,7 @@
     kind: call
     callee:
       name: preg_match
-  description: "Disabled — preg_match is usually called with tainted subject text; enable only when arg-specific taint can prove the pattern is attacker-controlled."
+  description: "Disabled - preg_match is usually called with tainted subject text; enable only when arg-specific taint can prove the pattern is attacker-controlled."
 
 - id: php.redos.preg_replace
   enabled: false
@@ -26,4 +26,4 @@
     kind: call
     callee:
       name: preg_replace
-  description: "Disabled — preg_replace is noisy without arg-specific taint proving the regex pattern, not the replacement subject, is attacker-controlled."
+  description: "Disabled - preg_replace is noisy without arg-specific taint proving the regex pattern, not the replacement subject, is attacker-controlled."

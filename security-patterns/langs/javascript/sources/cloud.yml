@@ -1,5 +1,5 @@
 # JavaScript cloud-function handler sources.
-# AWS Lambda / GCF / Azure Functions / CloudEvents — all deliver untrusted
+# AWS Lambda / GCF / Azure Functions / CloudEvents - all deliver untrusted
 # payloads. Bare `event`/`req`/`context` param names are FP-prone, so these
 # rules are off by default and must be enabled in a cloud-specific audit
 # profile (where the entry-point shape is known).
@@ -18,7 +18,7 @@
     kind: param
     target:
       name: event
-  description: "AWS Lambda handler `event` parameter. Disabled — bare param name `event` matches every event-emitter handler; enable in Lambda-only audits."
+  description: "AWS Lambda handler `event` parameter. Disabled - bare param name `event` matches every event-emitter handler; enable in Lambda-only audits."
 
 - id: javascript.cloud.aws_lambda_event_body
   enabled: true
@@ -39,7 +39,7 @@
       function demo(input, req, obj) {
         return event.body;
       }
-  description: "AWS Lambda/APIGateway event.body — cloud-delivered request payload."
+  description: "AWS Lambda/APIGateway event.body - cloud-delivered request payload."
 
 - id: javascript.cloud.aws_lambda_event_headers
   enabled: true
@@ -60,7 +60,7 @@
       function demo(input, req, obj) {
         return event.headers;
       }
-  description: "AWS Lambda/APIGateway event.headers — attacker-controlled request headers."
+  description: "AWS Lambda/APIGateway event.headers - attacker-controlled request headers."
 
 - id: javascript.cloud.aws_lambda_event_query
   enabled: true
@@ -81,7 +81,7 @@
       function demo(input, req, obj) {
         return event.queryStringParameters;
       }
-  description: "AWS Lambda/APIGateway event.queryStringParameters — cloud-delivered query input."
+  description: "AWS Lambda/APIGateway event.queryStringParameters - cloud-delivered query input."
 
 - id: javascript.cloud.aws_lambda_event_path
   enabled: true
@@ -102,7 +102,7 @@
       function demo(input, req, obj) {
         return event.pathParameters;
       }
-  description: "AWS Lambda/APIGateway event.pathParameters — cloud-delivered route parameters."
+  description: "AWS Lambda/APIGateway event.pathParameters - cloud-delivered route parameters."
 
 - id: javascript.cloud.cloudevent_data
   enabled: true
@@ -121,4 +121,4 @@
       function demo(input, req, obj) {
         return cloudEvent.data;
       }
-  description: "CloudEvents cloudEvent.data attribute — service-delivered event payload."
+  description: "CloudEvents cloudEvent.data attribute - service-delivered event payload."

@@ -70,7 +70,7 @@
         return res.set({ "Content-Disposition": "attachment; filename=safe.txt" });
       }
     expect_no_match: true
-  description: "Express/Restify res.set(headersObject) — tainted header map can inject response headers or Location values."
+  description: "Express/Restify res.set(headersObject) - tainted header map can inject response headers or Location values."
 - id: typescript.header.express_res_header
   enabled: true
   language: typescript
@@ -105,7 +105,7 @@
         return res.header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Express/Restify res.header(name, tainted) — alias of res.set. Merged collision aliases: typescript.open_redirect.express_res_header_location."
+  description: "Express/Restify res.header(name, tainted) - alias of res.set. Merged collision aliases: typescript.open_redirect.express_res_header_location."
   aliases:
   - typescript.open_redirect.express_res_header_location
 - id: typescript.header.node_setheader
@@ -137,7 +137,7 @@
         return res.setHeader("X-User", "safe");
       }
     expect_no_match: true
-  description: "Node res.setHeader(name, value with CRLF) — response splitting. Merged aliases: typescript.open_redirect.node_setheader_location."
+  description: "Node res.setHeader(name, value with CRLF) - response splitting. Merged aliases: typescript.open_redirect.node_setheader_location."
   aliases:
   - typescript.open_redirect.node_setheader_location
   - typescript.header.node_content_disposition_setheader
@@ -177,7 +177,7 @@
         return res.cookie("session");
       }
     expect_no_match: true
-  description: "Express res.cookie(name, tainted) — cookie value CRLF/flags injection."
+  description: "Express res.cookie(name, tainted) - cookie value CRLF/flags injection."
 - id: typescript.header.express_res_cookie_value
   enabled: true
   language: typescript
@@ -211,7 +211,7 @@
         return res.cookie("session", "safe");
       }
     expect_no_match: true
-  description: "Express res.cookie(name, value) — tainted cookie value reflects in Set-Cookie."
+  description: "Express res.cookie(name, value) - tainted cookie value reflects in Set-Cookie."
 - id: typescript.header.koa_set
   enabled: true
   language: typescript
@@ -286,7 +286,7 @@
         return ctx.set({ "Content-Disposition": "attachment; filename=safe.txt" });
       }
     expect_no_match: true
-  description: "Koa ctx.set(headersObject) — tainted header map can inject response headers or Location values."
+  description: "Koa ctx.set(headersObject) - tainted header map can inject response headers or Location values."
 - id: typescript.header.fastify_header
   enabled: true
   language: typescript
@@ -358,7 +358,7 @@
         return new Response("ok", { headers: { "Content-Disposition": "attachment; filename=safe.txt" } });
       }
     expect_no_match: true
-  description: "Bun/fetch Response headers Content-Disposition value — tainted filename can inject response headers. Merged aliases: typescript.xss.bun_response_html_body."
+  description: "Bun/fetch Response headers Content-Disposition value - tainted filename can inject response headers. Merged aliases: typescript.xss.bun_response_html_body."
   aliases:
   - typescript.xss.bun_response_html_body
   - typescript.open_redirect.fetch_response_location
@@ -396,7 +396,7 @@
         return h.response("ok").header("Content-Disposition", "attachment; filename=safe.txt");
       }
     expect_no_match: true
-  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) — filename/header value can inject response headers. The bare `response.header(...)` shape is intentionally not matched here to avoid colliding with express/fastify; rely on the response()-prefixed shape and the package gate. Merged aliases: typescript.open_redirect.hapi_response_header_location, typescript.xss.hapi_response_html_body."
+  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) - filename/header value can inject response headers. The bare `response.header(...)` shape is intentionally not matched here to avoid colliding with express/fastify; rely on the response()-prefixed shape and the package gate. Merged aliases: typescript.open_redirect.hapi_response_header_location, typescript.xss.hapi_response_html_body."
   aliases:
   - typescript.open_redirect.hapi_response_header_location
   - typescript.xss.hapi_response_html_body

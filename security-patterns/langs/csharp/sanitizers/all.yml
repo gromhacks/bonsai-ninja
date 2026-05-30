@@ -1,4 +1,4 @@
-# C# sanitizers — taint stops here.
+# C# sanitizers - taint stops here.
 - id: csharp.sanitizer.htmlencoder_encode
   enabled: true
   language: csharp
@@ -78,7 +78,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.EscapeDataString(input); } }
     expect_match_text: [Uri.EscapeDataString]
-  description: "Uri.EscapeDataString — RFC 3986 component encoding."
+  description: "Uri.EscapeDataString - RFC 3986 component encoding."
 
 - id: csharp.sanitizer.uri_escapeuristring
   enabled: true
@@ -93,7 +93,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.EscapeUriString(input); } }
     expect_match_text: [Uri.EscapeUriString]
-  description: "Uri.EscapeUriString — deprecated but used widely."
+  description: "Uri.EscapeUriString - deprecated but used widely."
 
 - id: csharp.sanitizer.antixss_encoder_html
   enabled: true
@@ -163,7 +163,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddWithValue(input); } }
     expect_match_text: [AddWithValue]
-  description: "SqlCommand.Parameters.AddWithValue — parameterised SQL."
+  description: "SqlCommand.Parameters.AddWithValue - parameterised SQL."
 
 - id: csharp.sanitizer.parameter_add
   enabled: false
@@ -175,7 +175,7 @@
     kind: call
     callee:
       name: Add
-  description: "Disabled — bare Add matches every .Add() in the codebase; rely on AddWithValue/Parameters.Add via attribute
+  description: "Disabled - bare Add matches every .Add() in the codebase; rely on AddWithValue/Parameters.Add via attribute
     chain."
 
 - id: csharp.sanitizer.parameters_add
@@ -191,7 +191,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Parameters.Add(input); } }
     expect_match_text: [Parameters.Add]
-  description: "command.Parameters.Add(...) — parameterised SQL binding."
+  description: "command.Parameters.Add(...) - parameterised SQL binding."
 
 - id: csharp.sanitizer.ef_fromsqlinterpolated
   enabled: true
@@ -208,7 +208,7 @@
       using Microsoft.EntityFrameworkCore;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; FromSqlInterpolated(input); } }
     expect_match_text: [FromSqlInterpolated]
-  description: "EF Core FromSqlInterpolated — auto-parameterises interpolated SQL."
+  description: "EF Core FromSqlInterpolated - auto-parameterises interpolated SQL."
 
 - id: csharp.sanitizer.ef_executesqlinterpolated
   enabled: true
@@ -225,7 +225,7 @@
       using Microsoft.EntityFrameworkCore;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ExecuteSqlInterpolated(input); } }
     expect_match_text: [ExecuteSqlInterpolated]
-  description: "EF Core ExecuteSqlInterpolated — auto-parameterises."
+  description: "EF Core ExecuteSqlInterpolated - auto-parameterises."
 
 - id: csharp.sanitizer.javascript_encoder
   enabled: true
@@ -242,7 +242,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JavaScriptEncoder.Encode(input); } }
     expect_match_text: [JavaScriptEncoder.Encode]
-  description: "JavaScriptEncoder.Default.Encode — JS string escaping."
+  description: "JavaScriptEncoder.Default.Encode - JS string escaping."
 
 - id: csharp.sanitizer.url_encoder
   enabled: true
@@ -334,7 +334,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Guid.TryParse(input); } }
     expect_match_text: [Guid.TryParse]
-  description: "Guid.TryParse — validates GUID shape."
+  description: "Guid.TryParse - validates GUID shape."
 
 - id: csharp.sanitizer.fixed_time_equals
   enabled: true
@@ -349,7 +349,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; CryptographicOperations.FixedTimeEquals(input); } }
     expect_match_text: [CryptographicOperations.FixedTimeEquals]
-  description: "CryptographicOperations.FixedTimeEquals — constant-time comparison."
+  description: "CryptographicOperations.FixedTimeEquals - constant-time comparison."
 
 - id: csharp.sanitizer.path_getfilename
   enabled: true
@@ -364,7 +364,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Path.GetFileName(input); } }
     expect_match_text: [Path.GetFileName]
-  description: "Path.GetFileName — strips directories."
+  description: "Path.GetFileName - strips directories."
 
 - id: csharp.sanitizer.path_getfullpath
   enabled: false
@@ -376,7 +376,7 @@
     kind: call
     callee:
       attribute: [Path, GetFullPath]
-  description: "Disabled — Path.GetFullPath canonicalizes but does not by itself enforce trusted-root containment."
+  description: "Disabled - Path.GetFullPath canonicalizes but does not by itself enforce trusted-root containment."
 
 - id: csharp.sanitizer.regex_escape
   enabled: true
@@ -391,7 +391,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Regex.Escape(input); } }
     expect_match_text: [Regex.Escape]
-  description: "Regex.Escape — escapes regex metacharacters (prevents regex-injection); canonical tag `validation`."
+  description: "Regex.Escape - escapes regex metacharacters (prevents regex-injection); canonical tag `validation`."
 
 - id: csharp.sanitizer.int_parse
   enabled: true
@@ -406,7 +406,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Int32.Parse(input); } }
     expect_match_text: [Int32.Parse]
-  description: "Int32.Parse — coerces to int."
+  description: "Int32.Parse - coerces to int."
 
 - id: csharp.sanitizer.int_tryparse
   enabled: true
@@ -436,7 +436,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Guid.Parse(input); } }
     expect_match_text: [Guid.Parse]
-  description: "Guid.Parse — validates GUID shape."
+  description: "Guid.Parse - validates GUID shape."
 
 - id: csharp.sanitizer.sqlparameter_ctor
   enabled: false
@@ -453,7 +453,7 @@
     code: |
       class SqlParameter { public SqlParameter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SqlParameter(input); } }
     expect_match_text: [SqlParameter]
-  description: "Disabled duplicate — csharp.sanitizer.sqlparameter_constructor is the canonical constrained SqlParameter(name,
+  description: "Disabled duplicate - csharp.sanitizer.sqlparameter_constructor is the canonical constrained SqlParameter(name,
     value) binding rule."
 
 - id: csharp.sanitizer.npgsql_parameter_ctor
@@ -471,7 +471,7 @@
       using Npgsql;
       class App { void Test() { dynamic input = "x"; var result = new Npgsql.NpgsqlParameter(input); } }
     expect_match_text: [Npgsql.NpgsqlParameter]
-  description: "new NpgsqlParameter — parameterised Postgres binding."
+  description: "new NpgsqlParameter - parameterised Postgres binding."
 
 - id: csharp.sanitizer.convert_toint32
   enabled: true
@@ -486,7 +486,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToInt32(input); } }
     expect_match_text: [Convert.ToInt32]
-  description: "Convert.ToInt32 — coerces to int, throws on bad input."
+  description: "Convert.ToInt32 - coerces to int, throws on bad input."
 
 - id: csharp.sanitizer.convert_toint64
   enabled: true
@@ -501,7 +501,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToInt64(input); } }
     expect_match_text: [Convert.ToInt64]
-  description: "Convert.ToInt64 — coerces to long."
+  description: "Convert.ToInt64 - coerces to long."
 
 - id: csharp.sanitizer.jwt_validate_strict
   enabled: true
@@ -518,7 +518,7 @@
       using System.IdentityModel.Tokens.Jwt;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TokenValidationParameters.Clone(input); } }
     expect_match_text: [TokenValidationParameters.Clone]
-  description: "TokenValidationParameters used with ValidateToken — full signature/issuer/audience verification; canonical
+  description: "TokenValidationParameters used with ValidateToken - full signature/issuer/audience verification; canonical
     jwt-verify anchor."
 
 - id: csharp.sanitizer.xmlresolver_null_assign
@@ -536,7 +536,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlResolver = input; } }
     expect_match_text: [XmlResolver]
-  description: "Disabled duplicate — csharp.sanitizer.xmlreadersettings_xmlresolver_null is the precise enabled XmlResolver=null
+  description: "Disabled duplicate - csharp.sanitizer.xmlreadersettings_xmlresolver_null is the precise enabled XmlResolver=null
     rule for v1 matching."
 
 - id: csharp.sanitizer.dtd_processing_prohibit
@@ -552,7 +552,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DtdProcessing = input; } }
     expect_match_text: [DtdProcessing]
-  description: "XmlReaderSettings.DtdProcessing = Prohibit/Ignore — blocks DTD/XXE."
+  description: "XmlReaderSettings.DtdProcessing = Prohibit/Ignore - blocks DTD/XXE."
 
 - id: csharp.sanitizer.ldap_filter_encode
   enabled: true
@@ -569,7 +569,7 @@
       using AntiXSS;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.LdapFilterEncode(input); } }
     expect_match_text: [Encoder.LdapFilterEncode]
-  description: "AntiXSS Encoder.LdapFilterEncode — escapes LDAP filter metacharacters."
+  description: "AntiXSS Encoder.LdapFilterEncode - escapes LDAP filter metacharacters."
 
 - id: csharp.sanitizer.ldap_distinguishedname_encode
   enabled: true
@@ -586,7 +586,7 @@
       using AntiXSS;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.LdapDistinguishedNameEncode(input); } }
     expect_match_text: [Encoder.LdapDistinguishedNameEncode]
-  description: "AntiXSS Encoder.LdapDistinguishedNameEncode — escapes LDAP DN metacharacters."
+  description: "AntiXSS Encoder.LdapDistinguishedNameEncode - escapes LDAP DN metacharacters."
 
 - id: csharp.sanitizer.authorize_filter
   enabled: false
@@ -599,7 +599,7 @@
     kind: call
     callee:
       name: Authorize
-  description: "Disabled — bare Authorize() call matching is too broad for ASP.NET Core authorization evidence; prefer attribute/decorator
+  description: "Disabled - bare Authorize() call matching is too broad for ASP.NET Core authorization evidence; prefer attribute/decorator
     or middleware-specific rules that prove a protected endpoint or policy guard."
 
 - id: csharp.sanitizer.bcrypt_verify
@@ -618,7 +618,7 @@
       using BCrypt.Net-Next;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BCrypt.Verify(input); } }
     expect_match_text: [BCrypt.Verify]
-  description: "BCrypt.Net.BCrypt.Verify(password, hash) — constant-time bcrypt password check; treats taint as consumed."
+  description: "BCrypt.Net.BCrypt.Verify(password, hash) - constant-time bcrypt password check; treats taint as consumed."
 
 - id: csharp.sanitizer.argon2_verify
   enabled: true
@@ -635,7 +635,7 @@
       using Konscious.Security.Cryptography.Argon2;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Argon2.Verify(input); } }
     expect_match_text: [Argon2.Verify]
-  description: "Argon2.Verify — constant-time argon2 password check."
+  description: "Argon2.Verify - constant-time argon2 password check."
 
 - id: csharp.sanitizer.antixss_encoder_class_html
   enabled: true
@@ -654,7 +654,7 @@
       using AntiXSS;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AntiXssEncoder.HtmlEncode(input); } }
     expect_match_text: [AntiXssEncoder.HtmlEncode]
-  description: "AntiXssEncoder.HtmlEncode (System.Web.Security.AntiXss) — strict allow-list HTML encoding."
+  description: "AntiXssEncoder.HtmlEncode (System.Web.Security.AntiXss) - strict allow-list HTML encoding."
 
 - id: csharp.sanitizer.antixss_encoder_class_url
   enabled: true
@@ -707,7 +707,7 @@
       using System.Text.Encodings.Web;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlEncoder.Default(input); } }
     expect_match_text: [HtmlEncoder.Default]
-  description: "HtmlEncoder.Default — canonical reference to default HTML encoder used with .Encode."
+  description: "HtmlEncoder.Default - canonical reference to default HTML encoder used with .Encode."
 
 - id: csharp.sanitizer.htmlsanitizer_sanitizedocument
   enabled: true
@@ -726,7 +726,7 @@
       using HtmlSanitizer;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlSanitizer.SanitizeDocument(input); } }
     expect_match_text: [HtmlSanitizer.SanitizeDocument]
-  description: "Mganss.XSS.HtmlSanitizer.SanitizeDocument — full-document sanitisation."
+  description: "Mganss.XSS.HtmlSanitizer.SanitizeDocument - full-document sanitisation."
 
 - id: csharp.sanitizer.cryptographic_operations_zero
   enabled: true
@@ -741,7 +741,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; CryptographicOperations.ZeroMemory(input); } }
     expect_match_text: [CryptographicOperations.ZeroMemory]
-  description: "CryptographicOperations.ZeroMemory — clears secret material; treated as taint consumer."
+  description: "CryptographicOperations.ZeroMemory - clears secret material; treated as taint consumer."
 
 - id: csharp.sanitizer.uri_trycreate
   enabled: true
@@ -756,11 +756,11 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.TryCreate(input); } }
     expect_match_text: [Uri.TryCreate]
-  description: "Uri.TryCreate — validates URL shape; pair with allow-list scheme check at the call site."
+  description: "Uri.TryCreate - validates URL shape; pair with allow-list scheme check at the call site."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: csharp.passthrough.httputility_urldecode
@@ -778,7 +778,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.UrlDecode(input); } }
     expect_match_text: [HttpUtility.UrlDecode]
-  description: "System.Web.HttpUtility.UrlDecode(s) — preserves taint."
+  description: "System.Web.HttpUtility.UrlDecode(s) - preserves taint."
 - id: csharp.passthrough.uri_unescapedatastring
   enabled: true
   language: csharp
@@ -794,7 +794,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.UnescapeDataString(input); } }
     expect_match_text: [Uri.UnescapeDataString]
-  description: "System.Uri.UnescapeDataString(s) — preserves taint."
+  description: "System.Uri.UnescapeDataString(s) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -814,7 +814,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddAntiforgery(input); } }
     expect_match_text: [AddAntiforgery]
-  description: "ASP.NET Core services.AddAntiforgery() — registers anti-forgery token services."
+  description: "ASP.NET Core services.AddAntiforgery() - registers anti-forgery token services."
 - id: csharp.csrf.validate_antiforgery_token_attr
   enabled: false
   disabled_reason:
@@ -825,7 +825,7 @@
     kind: read
     target:
       name: ValidateAntiForgeryToken
-  description: "[ValidateAntiForgeryToken] attribute — controller/action-scoped CSRF check."
+  description: "[ValidateAntiForgeryToken] attribute - controller/action-scoped CSRF check."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer
@@ -868,7 +868,7 @@
       using Microsoft.AspNetCore.RateLimiting;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddRateLimiter(input); } }
     expect_match_text: [AddRateLimiter]
-  description: 'ASP.NET Core services.AddRateLimiter — built-in rate-limit middleware presence.'
+  description: 'ASP.NET Core services.AddRateLimiter - built-in rate-limit middleware presence.'
 
 # False-positive audit fill: validators and parameter binding shapes.
 - id: csharp.sanitizer.same_origin_path_startswith_slash
@@ -917,7 +917,7 @@
   - name: reject scheme-relative redirect target negative constraint boundary
     code: "class App { bool Allow(string next) { return next.StartsWith(\"/\") && !next.StartsWith(\"http://\"); } }\n"
     expect_no_match: true
-  description: "Disabled — same-receiver StartsWith(\"/\") + StartsWith(\"//\") is modeled by csharp.sanitizer.same_origin_path_startswith_slash."
+  description: "Disabled - same-receiver StartsWith(\"/\") + StartsWith(\"//\") is modeled by csharp.sanitizer.same_origin_path_startswith_slash."
 
 - id: csharp.sanitizer.allowlist_contains
   enabled: false
@@ -934,7 +934,7 @@
     code: |
       class App { bool Allow(string role) { dynamic allowed = null; return allowed.Contains(role); } }
     expect_match_text: [allowed.Contains]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. HashSet/List
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. HashSet/List
     allowlist membership check on explicitly allowlist-named receivers."
 
   disabled_reason:
@@ -954,7 +954,7 @@
     code: |
       class App { string Allow(string key) { dynamic allowed = null; return allowed.GetValueOrDefault(key, "/"); } }
     expect_match_text: [allowed.GetValueOrDefault]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Dictionary.GetValueOrDefault
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Dictionary.GetValueOrDefault
     on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
   disabled_reason:
@@ -1045,8 +1045,8 @@
   - name: uri host allowlist negative constraint boundary
     code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedHosts = \"x\"; allowedHosts.Contains(); } }\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
-    allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
+    allowlist check - validates the parsed host against a trusted set before SSRF-sensitive use."
 
   disabled_reason:
     code: over-broad
@@ -1070,8 +1070,8 @@
   - name: uri scheme allowlist negative constraint boundary
     code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedSchemes = \"x\"; allowedSchemes.Contains(); } }\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
-    allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
+    allowlist check - only explicitly permitted schemes are allowed before redirect or outbound request use."
 
   disabled_reason:
     code: over-broad
@@ -1095,8 +1095,8 @@
   - name: full path containment negative constraint boundary
     code: "class App { void Test() { dynamic fullPath = \"x\"; dynamic root = \"x\"; fullPath.StartsWith(); } }\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Full-path
-    containment check — a normalized absolute path is accepted only if it remains under a trusted root."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Full-path
+    containment check - a normalized absolute path is accepted only if it remains under a trusted root."
 
   disabled_reason:
     code: over-broad
@@ -1117,7 +1117,7 @@
       using Microsoft.AspNetCore.Mvc;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IUrlHelper.IsLocalUrl(input); } }
     expect_match_text: [IUrlHelper.IsLocalUrl]
-  description: "ASP.NET Core IUrlHelper.IsLocalUrl — accepts only local redirect URLs."
+  description: "ASP.NET Core IUrlHelper.IsLocalUrl - accepts only local redirect URLs."
 
 - id: csharp.sanitizer.xmlreadersettings_xmlresolver_null
   enabled: true
@@ -1132,7 +1132,7 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlReaderSettings.XmlResolver = null; } }
     expect_match_text: [XmlReaderSettings.XmlResolver]
-  description: "XmlReaderSettings.XmlResolver = null — disables external entity resolution."
+  description: "XmlReaderSettings.XmlResolver = null - disables external entity resolution."
 
 - id: csharp.sanitizer.dapper_query_parameters
   enabled: true

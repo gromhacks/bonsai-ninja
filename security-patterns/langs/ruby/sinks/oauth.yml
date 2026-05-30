@@ -20,4 +20,4 @@
       def example(input, url, id, payload, request, params)
         OmniAuth.config(allowed_request_methods: [:get])
       end
-  description: "OmniAuth config disabling origin check / allowing GET initiation — CSRF on the OAuth callback flow."
+  description: "OmniAuth config disabling origin check / allowing GET initiation - CSRF on the OAuth callback flow."

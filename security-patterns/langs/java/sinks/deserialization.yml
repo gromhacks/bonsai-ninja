@@ -10,7 +10,7 @@
     kind: call
     callee:
       regex: "^ObjectInputStream\\.readObject$"
-  description: "Disabled — ObjectInputStream.readObject() has no tainted argument; needs receiver state showing the stream wraps untrusted bytes. Merged aliases: java.deser.object_input_stream_local."
+  description: "Disabled - ObjectInputStream.readObject() has no tainted argument; needs receiver state showing the stream wraps untrusted bytes. Merged aliases: java.deser.object_input_stream_local."
   aliases:
   - java.deser.object_input_stream_local
 
@@ -38,7 +38,7 @@
         Object readObject(Object... args) { return null; }
       }
     expect_match_text: [ois.readObject]
-  description: "ObjectInputStream.readObject() on a local stream variable — classic Java deserialization RCE."
+  description: "ObjectInputStream.readObject() on a local stream variable - classic Java deserialization RCE."
 
 - id: java.deser.xstream_fromxml
   enabled: true
@@ -84,7 +84,7 @@
         }
       }
     expect_no_match: true
-  description: XStream.fromXML — CVE-2021-39140 family.
+  description: XStream.fromXML - CVE-2021-39140 family.
 
 - id: java.deser.xstream_fromxml_local
   enabled: false
@@ -112,7 +112,7 @@
         Object fromXML(Object... args) { return null; }
       }
     expect_match_text: [xstream.fromXML]
-  description: "XStream.fromXML(...) on a local XStream instance — unsafe XML deserialization."
+  description: "XStream.fromXML(...) on a local XStream instance - unsafe XML deserialization."
   imports:
   - com
 - id: java.deser.jackson_enable_default_typing
@@ -136,7 +136,7 @@
           ObjectMapper.enableDefaultTyping(input);
         }
       }
-  description: Jackson enableDefaultTyping — gadget-chain RCE.
+  description: Jackson enableDefaultTyping - gadget-chain RCE.
 - id: java.deser.xmldecoder
   enabled: false
   disabled_reason:
@@ -149,7 +149,7 @@
     kind: call
     callee:
       regex: "^XMLDecoder\\.readObject$"
-  description: "Disabled — XMLDecoder.readObject() executes data supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
+  description: "Disabled - XMLDecoder.readObject() executes data supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
 - id: java.deser.snake_yaml
   enabled: true
   language: java
@@ -194,7 +194,7 @@
         }
       }
     expect_no_match: true
-  description: SnakeYAML Yaml.load — constructor chain RCE.
+  description: SnakeYAML Yaml.load - constructor chain RCE.
 
 - id: java.deser.snake_yaml_local
   enabled: false
@@ -222,7 +222,7 @@
         Object load(Object... args) { return null; }
       }
     expect_match_text: [yaml.load]
-  description: "SnakeYAML Yaml.load(...) on a local Yaml instance — constructor-chain deserialization risk."
+  description: "SnakeYAML Yaml.load(...) on a local Yaml instance - constructor-chain deserialization risk."
   imports:
   - org
 - id: java.deser.kryo_readclassandobject
@@ -257,7 +257,7 @@
         }
       }
     expect_no_match: true
-  description: Kryo readClassAndObject — unsafe with untrusted input.
+  description: Kryo readClassAndObject - unsafe with untrusted input.
 - id: java.deser.hessian_readobject
   enabled: false
   disabled_reason:
@@ -271,7 +271,7 @@
     kind: call
     callee:
       regex: "^HessianInput\\.readObject$"
-  description: "Disabled — HessianInput.readObject() has no data argument; needs receiver state showing the HessianInput wraps untrusted bytes."
+  description: "Disabled - HessianInput.readObject() has no data argument; needs receiver state showing the HessianInput wraps untrusted bytes."
 
 - id: java.deser.jackson_activate_default_typing
   enabled: true
@@ -294,7 +294,7 @@
           ObjectMapper.activateDefaultTyping(input);
         }
       }
-  description: Jackson activateDefaultTyping — polymorphic deser gadget-chain RCE.
+  description: Jackson activateDefaultTyping - polymorphic deser gadget-chain RCE.
 
 - id: java.deser.jackson_readvalue
   enabled: true
@@ -332,7 +332,7 @@
         }
       }
     expect_no_match: true
-  description: "ObjectMapper.readValue(...) after default typing or polymorphic type handling — gadget-chain deserialization risk when fed untrusted JSON."
+  description: "ObjectMapper.readValue(...) after default typing or polymorphic type handling - gadget-chain deserialization risk when fed untrusted JSON."
 
 - id: java.deser.apache_poi_xssfworkbook_inputstream
   enabled: false
@@ -362,7 +362,7 @@
         XSSFWorkbook(Object... args) {}
       }
     expect_match_text: [XSSFWorkbook]
-  description: "Disabled — Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  description: "Disabled - Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
 
   imports:
   - org
@@ -393,7 +393,7 @@
         Object unmarshal(Object... args) { return null; }
       }
     expect_match_text: [unmarshaller.unmarshal]
-  description: "Disabled — duplicate of java.xxe.unmarshaller_unmarshal; JAXB XML parsing is classified once as XXE."
+  description: "Disabled - duplicate of java.xxe.unmarshaller_unmarshal; JAXB XML parsing is classified once as XXE."
 
   imports:
   - javax
@@ -410,7 +410,7 @@
     kind: call
     callee:
       regex: "^ObjectMessage\\.getObject$"
-  description: "Disabled — ObjectMessage.getObject() deserializes message body state; needs tainted/untrusted JMS message provenance."
+  description: "Disabled - ObjectMessage.getObject() deserializes message body state; needs tainted/untrusted JMS message provenance."
 
 - id: java.deser.snake_yaml_loadall
   enabled: true
@@ -444,7 +444,7 @@
         }
       }
     expect_no_match: true
-  description: SnakeYAML Yaml.loadAll — same constructor-chain risk as load.
+  description: SnakeYAML Yaml.loadAll - same constructor-chain risk as load.
 
 - id: java.deser.msgpack_messagepack_read
   enabled: true
@@ -479,7 +479,7 @@
         }
       }
     expect_no_match: true
-  description: "msgpack-java MessagePack.read(...) — deserializes untrusted MessagePack bytes into application objects."
+  description: "msgpack-java MessagePack.read(...) - deserializes untrusted MessagePack bytes into application objects."
 
 - id: java.deser.msgpack_unpacker_read
   enabled: true
@@ -514,7 +514,7 @@
         }
       }
     expect_no_match: true
-  description: "msgpack-java Unpacker.read(...) — typed object materialization from attacker-controlled MessagePack bytes."
+  description: "msgpack-java Unpacker.read(...) - typed object materialization from attacker-controlled MessagePack bytes."
 
 - id: java.deser.msgpack_messageunpacker_unpackvalue
   enabled: true
@@ -549,4 +549,4 @@
         }
       }
     expect_no_match: true
-  description: "msgpack-core MessageUnpacker.unpackValue(...) — parses attacker-controlled MessagePack payloads for downstream object mapping."
+  description: "msgpack-core MessageUnpacker.unpackValue(...) - parses attacker-controlled MessagePack payloads for downstream object mapping."

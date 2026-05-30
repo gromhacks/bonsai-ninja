@@ -28,7 +28,7 @@
 
       '
     expect_no_match: true
-  description: "System.Diagnostics.Process.Start \u2014 flag if FileName/Arguments\
+  description: "System.Diagnostics.Process.Start - flag if FileName/Arguments\
     \ tainted."
 - id: csharp.cmdi.process_start_shell_wrapper
   enabled: true
@@ -63,7 +63,7 @@
 
       '
     expect_no_match: true
-  description: "Process.Start(shell, tainted arguments) \u2014 shell command string\
+  description: "Process.Start(shell, tainted arguments) - shell command string\
     \ is interpreted by the selected shell."
 - id: csharp.cmdi.process_start_info_args
   enabled: true
@@ -91,7 +91,7 @@
 
       '
     expect_no_match: true
-  description: "ProcessStartInfo.Arguments = tainted \u2014 argv passed verbatim."
+  description: "ProcessStartInfo.Arguments = tainted - argv passed verbatim."
 - id: csharp.cmdi.process_start_info_filename
   enabled: true
   language: csharp
@@ -139,7 +139,7 @@
       dynamic amount = 1; UseShellExecute = input; } }
 
       '
-  description: "Disabled — UseShellExecute is only dangerous with receiver FileName/Arguments state; enable when receiver-state constraints can join those writes."
+  description: "Disabled - UseShellExecute is only dangerous with receiver FileName/Arguments state; enable when receiver-state constraints can join those writes."
 - id: csharp.cmdi.cmd_exe_runtime
   enabled: false
   disabled_reason:
@@ -154,7 +154,7 @@
     kind: call
     callee:
       name: ExecuteCommand
-  description: "Disabled \u2014 too generic; rely on Process.Start patterns."
+  description: "Disabled - too generic; rely on Process.Start patterns."
 - id: csharp.cmdi.medallion_shell_run
   enabled: true
   language: csharp
@@ -220,7 +220,7 @@
 
       '
     expect_no_match: true
-  description: "CliWrap WithArguments(string) \u2014 flag interpolated string form\
+  description: "CliWrap WithArguments(string) - flag interpolated string form\
     \ (IList<string> overload is safe)."
 - id: csharp.cmdi.powershell_addscript
   enabled: true
@@ -256,7 +256,7 @@
 
       '
     expect_no_match: true
-  description: "PowerShell.AddScript(tainted) \u2014 executes script text in PS runspace."
+  description: "PowerShell.AddScript(tainted) - executes script text in PS runspace."
 - id: csharp.cmdi.powershell_addcommand
   enabled: true
   language: csharp
@@ -290,7 +290,7 @@
 
       '
     expect_no_match: true
-  description: "PowerShell.AddCommand(tainted) \u2014 cmdlet name / path injection."
+  description: "PowerShell.AddCommand(tainted) - cmdlet name / path injection."
 - id: csharp.cmdi.runspace_invoke
   enabled: false
   language: csharp
@@ -315,7 +315,7 @@
       amount = 1; Pipeline.Invoke(input); } }
 
       '
-  description: "Pipeline.Invoke \u2014 PowerShell pipeline executes queued commands."
+  description: "Pipeline.Invoke - PowerShell pipeline executes queued commands."
   disabled_reason:
     code: over-broad
 - id: csharp.cmdi.process_start_info_ctor
@@ -346,7 +346,7 @@
 
       '
     expect_no_match: true
-  description: "new ProcessStartInfo(tainted_fileName, arguments) \u2014 attacker-controlled executable path, typically paired with Process.Start."
+  description: "new ProcessStartInfo(tainted_fileName, arguments) - attacker-controlled executable path, typically paired with Process.Start."
 - id: csharp.cmdi.process_start_info_ctor_args
   enabled: true
   language: csharp
@@ -375,7 +375,7 @@
 
       '
     expect_no_match: true
-  description: "new ProcessStartInfo(fileName, tainted_arguments) \u2014 attacker-controlled command arguments, typically paired with Process.Start."
+  description: "new ProcessStartInfo(fileName, tainted_arguments) - attacker-controlled command arguments, typically paired with Process.Start."
 - id: csharp.cmdi.management_object_invoke
   enabled: true
   language: csharp
@@ -408,7 +408,7 @@
       using System.Management;
       class App { void Test() { ManagementObject.InvokeMethod("Create"); } }
     expect_no_match: true
-  description: "ManagementObject.InvokeMethod (WMI Create) \u2014 used to spawn processes\
+  description: "ManagementObject.InvokeMethod (WMI Create) - used to spawn processes\
     \ via Win32_Process; tainted command-line argument is RCE."
 - id: csharp.cmdi.management_object_invoke_args
   enabled: true
@@ -445,7 +445,7 @@
 
       '
     expect_no_match: true
-  description: "ManagementObject.InvokeMethod(\"Create\", tainted_args) — WMI process creation command line is attacker-controlled."
+  description: "ManagementObject.InvokeMethod(\"Create\", tainted_args) - WMI process creation command line is attacker-controlled."
 - id: csharp.cmdi.management_class_invoke
   enabled: true
   language: csharp
@@ -478,7 +478,7 @@
       using System.Management;
       class App { void Test() { ManagementClass.InvokeMethod("Create"); } }
     expect_no_match: true
-  description: "ManagementClass.InvokeMethod \u2014 WMI process creation surface."
+  description: "ManagementClass.InvokeMethod - WMI process creation surface."
 - id: csharp.cmdi.management_class_invoke_args
   enabled: true
   language: csharp
@@ -514,7 +514,7 @@
 
       '
     expect_no_match: true
-  description: "ManagementClass.InvokeMethod(\"Create\", tainted_args) — WMI process creation command line is attacker-controlled."
+  description: "ManagementClass.InvokeMethod(\"Create\", tainted_args) - WMI process creation command line is attacker-controlled."
 - id: csharp.cmdi.sshnet_runcommand
   enabled: true
   language: csharp
@@ -549,7 +549,7 @@
 
       '
     expect_no_match: true
-  description: "Renci.SshNet SshClient.RunCommand \u2014 executes attacker-supplied\
+  description: "Renci.SshNet SshClient.RunCommand - executes attacker-supplied\
     \ shell command on remote host."
 - id: csharp.cmdi.sshnet_createcommand
   enabled: true
@@ -585,7 +585,7 @@
 
       '
     expect_no_match: true
-  description: "Renci.SshNet SshClient.CreateCommand(string) \u2014 wraps a shell\
+  description: "Renci.SshNet SshClient.CreateCommand(string) - wraps a shell\
     \ command for later Execute()."
 - id: csharp.cmdi.runspace_invoke_command
   enabled: true
@@ -620,7 +620,7 @@
 
       '
     expect_no_match: true
-  description: "RunspaceInvoke.Invoke(scriptText) \u2014 executes raw PowerShell text\
+  description: "RunspaceInvoke.Invoke(scriptText) - executes raw PowerShell text\
     \ in a runspace."
 - id: csharp.cmdi.cliwrap_targetfile
   enabled: true
@@ -653,5 +653,5 @@
 
       '
     expect_no_match: true
-  description: "CliWrap Cli.Wrap(...).WithTargetFile(tainted) \u2014 executable path\
+  description: "CliWrap Cli.Wrap(...).WithTargetFile(tainted) - executable path\
     \ is attacker-controlled."

@@ -4,10 +4,10 @@
 #
 # Every enabled source uses either an attribute-chain target (e.g. [req, body])
 # or a rare, framework-specific parameter/property name. Bare ubiquitous names
-# (`body`, `query`, `params`, `headers`, `data`, `message`, `req`, …) are off
-# by default — flip them on only in an audit profile that accepts the FP cost.
+# (`body`, `query`, `params`, `headers`, `data`, `message`, `req`, ...) are off
+# by default - flip them on only in an audit profile that accepts the FP cost.
 
-# ── Express (attribute chains on `req`) ─────────────────────────────────────
+# -- Express (attribute chains on `req`) -------------------------------------
 - id: javascript.source.express_req_body
   enabled: true
   language: javascript
@@ -28,7 +28,7 @@
       function demo(input, req, obj) {
         return req.body;
       }
-  description: req.body — HTTP request body for Express-compatible frameworks; attribute-chain avoids matching every `.body` read.
+  description: req.body - HTTP request body for Express-compatible frameworks; attribute-chain avoids matching every `.body` read.
 
 - id: javascript.source.express_req_query
   enabled: true
@@ -50,7 +50,7 @@
       function demo(input, req, obj) {
         return req.query;
       }
-  description: req.query — URL query-string for Express/restify/Hono-compatible request objects, attacker-controlled.
+  description: req.query - URL query-string for Express/restify/Hono-compatible request objects, attacker-controlled.
 
 - id: javascript.source.express_req_params
   enabled: true
@@ -72,7 +72,7 @@
       function demo(input, req, obj) {
         return req.params;
       }
-  description: req.params — URL path parameters, attacker-controlled.
+  description: req.params - URL path parameters, attacker-controlled.
 
 - id: javascript.source.express_req_headers
   enabled: true
@@ -94,7 +94,7 @@
       function demo(input, req, obj) {
         return req.headers;
       }
-  description: req.headers — HTTP request headers, attacker-controlled; covers Express and Hapi handlers that name the request `req`.
+  description: req.headers - HTTP request headers, attacker-controlled; covers Express and Hapi handlers that name the request `req`.
 
 - id: javascript.source.express_req_cookies
   enabled: true
@@ -115,7 +115,7 @@
       function demo(input, req, obj) {
         return req.cookies;
       }
-  description: req.cookies — HTTP cookies, attacker-controlled.
+  description: req.cookies - HTTP cookies, attacker-controlled.
 
 - id: javascript.source.express_req_files
   enabled: true
@@ -135,7 +135,7 @@
       function demo(input, req, obj) {
         return req.files;
       }
-  description: req.files — uploaded files (multer/express-fileupload), client-controlled filenames/content.
+  description: req.files - uploaded files (multer/express-fileupload), client-controlled filenames/content.
 
 - id: javascript.source.express_req_file
   enabled: true
@@ -155,7 +155,7 @@
       function demo(input, req, obj) {
         return req.file;
       }
-  description: req.file — single uploaded file (multer), client-controlled filename/content.
+  description: req.file - single uploaded file (multer), client-controlled filename/content.
 
 - id: javascript.source.express_req_url
   enabled: true
@@ -176,7 +176,7 @@
       function demo(input, req, obj) {
         return req.url;
       }
-  description: req.url — request path + query, attacker-controlled; also covers Bun.serve request URLs when handlers name the Request `req`.
+  description: req.url - request path + query, attacker-controlled; also covers Bun.serve request URLs when handlers name the Request `req`.
 
 - id: javascript.source.express_req_originalurl
   enabled: true
@@ -197,7 +197,7 @@
       function demo(input, req, obj) {
         return req.originalUrl;
       }
-  description: req.originalUrl — pre-rewrite request URL, attacker-controlled.
+  description: req.originalUrl - pre-rewrite request URL, attacker-controlled.
 
 - id: javascript.source.express_req_path
   enabled: true
@@ -218,7 +218,7 @@
       function demo(input, req, obj) {
         return req.path;
       }
-  description: req.path — request pathname, attacker-controlled.
+  description: req.path - request pathname, attacker-controlled.
 
 - id: javascript.source.express_req_hostname
   enabled: true
@@ -238,7 +238,7 @@
       function demo(input, req, obj) {
         return req.hostname;
       }
-  description: req.hostname — Host header, attacker-controlled (host-header attacks).
+  description: req.hostname - Host header, attacker-controlled (host-header attacks).
 
 - id: javascript.source.express_req_header_getter
   enabled: true
@@ -270,7 +270,7 @@
         return req.header("referer");
       }
     expect_match_text: [req.header]
-  description: "Express/Nest req.get()/req.header() — single request header value, attacker-controlled."
+  description: "Express/Nest req.get()/req.header() - single request header value, attacker-controlled."
 
 - id: javascript.source.express_signed_cookies
   enabled: true
@@ -292,9 +292,9 @@
         return req.signedCookies;
       }
     expect_match_text: [req.signedCookies]
-  description: "Express req.signedCookies — cookie names and values are client-controlled even when signatures are verified."
+  description: "Express req.signedCookies - cookie names and values are client-controlled even when signatures are verified."
 
-# ── Koa (attribute chains on `ctx.request` / `ctx`) ─────────────────────────
+# -- Koa (attribute chains on `ctx.request` / `ctx`) -------------------------
 - id: javascript.source.koa_request_body
   enabled: true
   language: javascript
@@ -313,7 +313,7 @@
       function demo(input, req, obj) {
         return request.body;
       }
-  description: Koa/Fastify request.body — HTTP request body.
+  description: Koa/Fastify request.body - HTTP request body.
 
 - id: javascript.source.koa_request_query
   enabled: true
@@ -333,7 +333,7 @@
       function demo(input, req, obj) {
         return request.query;
       }
-  description: Koa/Fastify/Hapi request.query — URL query-string.
+  description: Koa/Fastify/Hapi request.query - URL query-string.
 
 - id: javascript.source.koa_ctx_params
   enabled: true
@@ -353,7 +353,7 @@
       function demo(input, req, obj) {
         return ctx.params;
       }
-  description: Koa ctx.params — route parameters (koa-router).
+  description: Koa ctx.params - route parameters (koa-router).
 
 - id: javascript.source.koa_request_headers
   enabled: true
@@ -397,7 +397,7 @@
         return ctx.request.body;
       }
     expect_match_text: [ctx.request.body]
-  description: "Koa ctx.request.body — parsed HTTP body from bodyparser middleware."
+  description: "Koa ctx.request.body - parsed HTTP body from bodyparser middleware."
 
 - id: javascript.source.koa_ctx_query
   enabled: true
@@ -420,7 +420,7 @@
         return ctx.query;
       }
     expect_match_text: [ctx.query]
-  description: "Koa ctx.query — parsed URL query-string object."
+  description: "Koa ctx.query - parsed URL query-string object."
 
 - id: javascript.source.koa_ctx_headers
   enabled: true
@@ -443,7 +443,7 @@
         return ctx.headers;
       }
     expect_match_text: [ctx.headers]
-  description: "Koa ctx.headers — HTTP request headers."
+  description: "Koa ctx.headers - HTTP request headers."
 
 - id: javascript.source.koa_ctx_headers_referer
   enabled: false
@@ -460,7 +460,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
-  description: "Disabled duplicate — javascript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
+  description: "Disabled duplicate - javascript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
 
 - id: javascript.source.koa_cookie_get
   enabled: true
@@ -485,9 +485,9 @@
         return ctx.cookies.get("sid");
       }
     expect_match_text: [ctx.cookies.get]
-  description: "Koa ctx.cookies.get(name) — single client-controlled cookie value."
+  description: "Koa ctx.cookies.get(name) - single client-controlled cookie value."
 
-# ── Fastify ─────────────────────────────────────────────────────────────────
+# -- Fastify -----------------------------------------------------------------
 - id: javascript.source.fastify_request_body
   enabled: false
   disabled_reason:
@@ -501,7 +501,7 @@
     kind: read
     target:
       attribute: [request, body]
-  description: "Disabled duplicate — same `request.body` shape as javascript.source.koa_request_body; package metadata is merged there."
+  description: "Disabled duplicate - same `request.body` shape as javascript.source.koa_request_body; package metadata is merged there."
 
 - id: javascript.source.fastify_request_query
   enabled: false
@@ -516,7 +516,7 @@
     kind: read
     target:
       attribute: [request, query]
-  description: "Disabled duplicate — same `request.query` shape as javascript.source.koa_request_query; package metadata is merged there."
+  description: "Disabled duplicate - same `request.query` shape as javascript.source.koa_request_query; package metadata is merged there."
 
 - id: javascript.source.fastify_request_params
   enabled: true
@@ -551,7 +551,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — same `request.headers` shape as javascript.source.koa_request_headers; package metadata is merged there."
+  description: "Disabled duplicate - same `request.headers` shape as javascript.source.koa_request_headers; package metadata is merged there."
 
 - id: javascript.source.fastify_req_user_agent
   enabled: false
@@ -584,9 +584,9 @@
         return request.headers.userAgent;
       }
     expect_match_text: [request.headers.userAgent]
-  description: "Disabled duplicate — bracket User-Agent reads are surfaced as the whole `req.headers` / `request.headers` object and are already covered by the framework header-object rules; dot `request.headers.userAgent` cannot be kept without colliding on the same example family."
+  description: "Disabled duplicate - bracket User-Agent reads are surfaced as the whole `req.headers` / `request.headers` object and are already covered by the framework header-object rules; dot `request.headers.userAgent` cannot be kept without colliding on the same example family."
 
-# ── Hapi ────────────────────────────────────────────────────────────────────
+# -- Hapi --------------------------------------------------------------------
 - id: javascript.source.hapi_request_payload
   enabled: true
   language: javascript
@@ -606,7 +606,7 @@
       function demo(input, req, obj) {
         return request.payload;
       }
-  description: Hapi request.payload — HTTP request body.
+  description: Hapi request.payload - HTTP request body.
 
 - id: javascript.source.hapi_req_payload
   enabled: true
@@ -629,7 +629,7 @@
         return req.payload;
       }
     expect_match_text: [req.payload]
-  description: "Hapi req.payload — HTTP request body when the handler parameter is named `req`."
+  description: "Hapi req.payload - HTTP request body when the handler parameter is named `req`."
 
 - id: javascript.source.hapi_request_headers
   enabled: false
@@ -647,7 +647,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — same `request.headers` shape is covered by javascript.source.koa_request_headers with Hapi package metadata merged."
+  description: "Disabled duplicate - same `request.headers` shape is covered by javascript.source.koa_request_headers with Hapi package metadata merged."
 
 - id: javascript.source.hapi_request_state
   enabled: true
@@ -670,7 +670,7 @@
         return request.state;
       }
     expect_match_text: [request.state]
-  description: "Hapi request.state — parsed cookies from the request."
+  description: "Hapi request.state - parsed cookies from the request."
 
 - id: javascript.source.hapi_request_query
   enabled: false
@@ -685,7 +685,7 @@
     kind: read
     target:
       attribute: [request, query]
-  description: "Disabled duplicate — same `request.query` shape as javascript.source.koa_request_query; package metadata is merged there."
+  description: "Disabled duplicate - same `request.query` shape as javascript.source.koa_request_query; package metadata is merged there."
 
 - id: javascript.source.hapi_request_params
   enabled: false
@@ -700,9 +700,9 @@
     kind: read
     target:
       attribute: [request, params]
-  description: "Disabled duplicate — same `request.params` shape as javascript.source.fastify_request_params; package metadata is merged there."
+  description: "Disabled duplicate - same `request.params` shape as javascript.source.fastify_request_params; package metadata is merged there."
 
-# ── NestJS decorators (disabled until decorator metadata is indexed) ────────
+# -- NestJS decorators (disabled until decorator metadata is indexed) --------
 - id: javascript.source.nestjs_param_decorator
   enabled: false
   disabled_reason:
@@ -716,7 +716,7 @@
     kind: param
     target:
       name: Body
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: javascript.source.nestjs_query_decorator
   enabled: false
@@ -731,7 +731,7 @@
     kind: param
     target:
       name: Query
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: javascript.source.nestjs_param_path
   enabled: false
@@ -746,7 +746,7 @@
     kind: param
     target:
       name: Param
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: javascript.source.nestjs_headers_decorator
   enabled: false
@@ -761,7 +761,7 @@
     kind: param
     target:
       name: Headers
-  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
 
 - id: javascript.source.nestjs_message_body_decorator
   enabled: false
@@ -776,9 +776,9 @@
     kind: param
     target:
       annotation: MessageBody
-  description: "Disabled for JavaScript — NestJS websocket decorators are not reliably emitted as parameter annotations by the JS adapter."
+  description: "Disabled for JavaScript - NestJS websocket decorators are not reliably emitted as parameter annotations by the JS adapter."
 
-# ── Browser DOM ─────────────────────────────────────────────────────────────
+# -- Browser DOM -------------------------------------------------------------
 - id: javascript.source.window_location_hash
   enabled: true
   language: javascript
@@ -801,7 +801,7 @@
         return window.location.hash;
       }
     expect_match_text: [window.location.hash]
-  description: window.location.hash / location.hash — URL fragment, DOM-XSS source.
+  description: window.location.hash / location.hash - URL fragment, DOM-XSS source.
 
 - id: javascript.source.window_location_search
   enabled: true
@@ -825,7 +825,7 @@
         return window.location.search;
       }
     expect_match_text: [window.location.search]
-  description: window.location.search / location.search — URL query-string from the browser.
+  description: window.location.search / location.search - URL query-string from the browser.
 
 - id: javascript.source.window_location_href
   enabled: true
@@ -849,7 +849,7 @@
         return window.location.href;
       }
     expect_match_text: [window.location.href]
-  description: window.location.href / location.href — full URL, attacker-controlled via navigation.
+  description: window.location.href / location.href - full URL, attacker-controlled via navigation.
 
 - id: javascript.source.document_url
   enabled: true
@@ -874,7 +874,7 @@
         return document.title;
       }
     expect_no_match: true
-  description: "document.URL — browser URL-derived field used as a DOM-XSS source."
+  description: "document.URL - browser URL-derived field used as a DOM-XSS source."
 
 - id: javascript.source.document_referrer
   enabled: true
@@ -892,7 +892,7 @@
         return document.referrer;
       }
     expect_match_text: [document.referrer]
-  description: document.referrer — Referer header, attacker-controlled.
+  description: document.referrer - Referer header, attacker-controlled.
 
 - id: javascript.source.document_cookie
   enabled: true
@@ -910,7 +910,7 @@
         return document.cookie;
       }
     expect_match_text: [document.cookie]
-  description: document.cookie — attacker-controllable when XSS or other-origin script has set cookies.
+  description: document.cookie - attacker-controllable when XSS or other-origin script has set cookies.
 
 - id: javascript.source.window_location_origin_path
   enabled: true
@@ -935,7 +935,7 @@
         return window.location.host;
       }
     expect_match_text: [window.location.host]
-  description: "Browser location origin/path/host fields — attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
+  description: "Browser location origin/path/host fields - attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
 
 - id: javascript.source.localstorage_getitem
   enabled: true
@@ -956,7 +956,7 @@
         return localStorage.getItem("next");
       }
     expect_match_text: [localStorage.getItem]
-  description: "localStorage.getItem(key) — browser-persistent client storage that can carry attacker-controlled state into DOM sinks."
+  description: "localStorage.getItem(key) - browser-persistent client storage that can carry attacker-controlled state into DOM sinks."
 
 - id: javascript.source.sessionstorage_getitem
   enabled: true
@@ -977,7 +977,7 @@
         return sessionStorage.getItem("html");
       }
     expect_match_text: [sessionStorage.getItem]
-  description: "sessionStorage.getItem(key) — browser session storage that can carry attacker-controlled state into DOM sinks."
+  description: "sessionStorage.getItem(key) - browser session storage that can carry attacker-controlled state into DOM sinks."
 
 - id: javascript.cloud.gcf_http_req
   enabled: false
@@ -992,7 +992,7 @@
     kind: param
     target:
       name: req
-  description: "Google Cloud HTTP function `req` parameter. Disabled — bare `req` fires on every Express handler; enable in GCF-only audits."
+  description: "Google Cloud HTTP function `req` parameter. Disabled - bare `req` fires on every Express handler; enable in GCF-only audits."
 
 - id: javascript.cloud.azure_context_req
   enabled: true
@@ -1012,9 +1012,9 @@
       function demo(input, req, obj) {
         return context.req;
       }
-  description: "Azure Functions context.req — HTTP request object from the Azure host."
+  description: "Azure Functions context.req - HTTP request object from the Azure host."
 
-# ── IPC / WebSocket ─────────────────────────────────────────────────────────
+# -- IPC / WebSocket ---------------------------------------------------------
 - id: javascript.source.websocket_message_event
   enabled: true
   language: javascript
@@ -1033,7 +1033,7 @@
       function demo(input, req, obj) {
         return event.data;
       }
-  description: WebSocket/postMessage MessageEvent.data — untrusted payload from cross-origin or remote peer.
+  description: WebSocket/postMessage MessageEvent.data - untrusted payload from cross-origin or remote peer.
 
 - id: javascript.source.websocket_structured_frame_data
   enabled: false
@@ -1057,7 +1057,7 @@
         return frame.data;
       }
     expect_match_text: [frame.data]
-  description: "Disabled — receiver-agnostic .data collides with event.data; enable only after adapter facts can distinguish WebSocket frame/packet payload objects."
+  description: "Disabled - receiver-agnostic .data collides with event.data; enable only after adapter facts can distinguish WebSocket frame/packet payload objects."
 
 - id: javascript.source.socketio_handshake
   enabled: true
@@ -1086,7 +1086,7 @@
         return socket.handshake.auth;
       }
     expect_match_text: [socket.handshake.auth]
-  description: "Socket.IO handshake query/header/auth objects — remote-controlled connection metadata."
+  description: "Socket.IO handshake query/header/auth objects - remote-controlled connection metadata."
 
 - id: javascript.source.postmessage_param
   enabled: false
@@ -1099,7 +1099,7 @@
     kind: param
     target:
       name: message
-  description: "Disabled — bare param `message` is ubiquitous (loggers, handlers); enable only in DOM-only audits."
+  description: "Disabled - bare param `message` is ubiquitous (loggers, handlers); enable only in DOM-only audits."
 
 - id: javascript.source.eventsource_message_data
   enabled: false
@@ -1116,7 +1116,7 @@
     kind: read
     target:
       attribute: [event, data]
-  description: "Disabled — SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by javascript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
+  description: "Disabled - SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by javascript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
 
 - id: javascript.source.socketio_event_param
   enabled: false
@@ -1130,9 +1130,9 @@
     kind: param
     target:
       name: payload
-  description: "Disabled — Socket.IO `socket.on(event, (payload) => ...)` payload param; bare param `payload` is ubiquitous and would over-match. Enable with consumer-class matching (or framework-aware decorator) when available."
+  description: "Disabled - Socket.IO `socket.on(event, (payload) => ...)` payload param; bare param `payload` is ubiquitous and would over-match. Enable with consumer-class matching (or framework-aware decorator) when available."
 
-# ── GraphQL / raw-HTTP ─────────────────────────────────────────────────────
+# -- GraphQL / raw-HTTP -----------------------------------------------------
 - id: javascript.source.graphql_resolver_args
   enabled: true
   language: javascript
@@ -1159,7 +1159,7 @@
         return args;
       }
     expect_no_match: true
-  description: "GraphQL resolver `(parent, args, ...)` parameter — client-supplied field arguments. The zero-based index gate keeps common helper params named `args` quiet."
+  description: "GraphQL resolver `(parent, args, ...)` parameter - client-supplied field arguments. The zero-based index gate keeps common helper params named `args` quiet."
 
 - id: javascript.source.graphql_args_field
   enabled: true
@@ -1210,7 +1210,7 @@
         return user.id;
       }
     expect_no_match: true
-  description: "GraphQL resolver args.<field> — attacker-controlled resolver arguments. Receiver name and second-parameter position are both required to avoid tainting unrelated helper objects."
+  description: "GraphQL resolver args.<field> - attacker-controlled resolver arguments. Receiver name and second-parameter position are both required to avoid tainting unrelated helper objects."
 
 - id: javascript.source.graphql_info_context_args
   enabled: true
@@ -1246,7 +1246,7 @@
         return info.context.args.q;
       }
     expect_match_text: [info.context.args.q]
-  description: "GraphQL info.context.args — framework-propagated resolver args exposed through GraphQL context."
+  description: "GraphQL info.context.args - framework-propagated resolver args exposed through GraphQL context."
 
 - id: javascript.source.http_incoming_message
   enabled: false
@@ -1261,9 +1261,9 @@
     kind: param
     target:
       name: req
-  description: "Disabled — bare `req` in http.createServer((req,res)=>…); enable only when framework-agnostic Node servers are the primary surface."
+  description: "Disabled - bare `req` in http.createServer((req,res)=>...); enable only when framework-agnostic Node servers are the primary surface."
 
-# ── Hono (modern edge framework) ────────────────────────────────────────────
+# -- Hono (modern edge framework) --------------------------------------------
 - id: javascript.source.hono_ctx_req_query
   enabled: false
   disabled_reason:
@@ -1279,7 +1279,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.query$"
-  description: "Disabled duplicate — current matching also emits `req.query`; javascript.source.express_req_query carries Hono package metadata for this adapter fact."
+  description: "Disabled duplicate - current matching also emits `req.query`; javascript.source.express_req_query carries Hono package metadata for this adapter fact."
 
 - id: javascript.source.hono_ctx_req_json
   enabled: true
@@ -1301,7 +1301,7 @@
       function demo(input, req, obj) {
         return c.req.json(input);
       }
-  description: "Hono c.req.json() — parsed JSON body, attacker-controlled."
+  description: "Hono c.req.json() - parsed JSON body, attacker-controlled."
 
 - id: javascript.source.hono_ctx_req_param
   enabled: true
@@ -1323,7 +1323,7 @@
       function demo(input, req, obj) {
         return c.req.param(input);
       }
-  description: "Hono c.req.param('name') — URL path parameter."
+  description: "Hono c.req.param('name') - URL path parameter."
 
 - id: javascript.source.hono_ctx_req_header
   enabled: true
@@ -1345,7 +1345,7 @@
       function demo(input, req, obj) {
         return c.req.header(input);
       }
-  description: "Hono c.req.header('X-…') — HTTP request header value."
+  description: "Hono c.req.header('X-...') - HTTP request header value."
 
 - id: javascript.source.hono_ctx_req_form
   enabled: true
@@ -1367,9 +1367,9 @@
       function demo(input, req, obj) {
         return c.req.parseBody(input);
       }
-  description: "Hono c.req.parseBody() — multipart/urlencoded form body."
+  description: "Hono c.req.parseBody() - multipart/urlencoded form body."
 
-# ── Next.js (Pages router req object + App router Request) ──────────────────
+# -- Next.js (Pages router req object + App router Request) ------------------
 - id: javascript.source.next_pages_req_body
   enabled: false
   disabled_reason:
@@ -1386,7 +1386,7 @@
     kind: read
     target:
       attribute: [req, body]
-  description: "Disabled duplicate — same `req.body` shape is covered by javascript.source.express_req_body with Next.js package metadata merged."
+  description: "Disabled duplicate - same `req.body` shape is covered by javascript.source.express_req_body with Next.js package metadata merged."
 
 - id: javascript.source.next_request_body_methods
   enabled: true
@@ -1416,7 +1416,7 @@
         return request.formData();
       }
     expect_match_text: [request.formData]
-  description: "Fetch Request body readers used by Next.js App Router and Bun.serve — attacker-controlled request body payloads."
+  description: "Fetch Request body readers used by Next.js App Router and Bun.serve - attacker-controlled request body payloads."
 
 - id: javascript.source.next_request_url_headers
   enabled: true
@@ -1439,7 +1439,7 @@
         return request.url;
       }
     expect_match_text: [request.url]
-  description: "Fetch Request URL/cookies fields used by Next.js App Router and Bun.serve — attacker-controlled HTTP metadata. `request.headers` is the same adapter fact as Koa/Fastify/Hapi `request.headers`; `request.nextUrl.searchParams` is covered by the query-specific rule."
+  description: "Fetch Request URL/cookies fields used by Next.js App Router and Bun.serve - attacker-controlled HTTP metadata. `request.headers` is the same adapter fact as Koa/Fastify/Hapi `request.headers`; `request.nextUrl.searchParams` is covered by the query-specific rule."
 
 - id: javascript.source.next_searchparams
   enabled: true
@@ -1469,7 +1469,7 @@
         return nextUrl.searchParams;
       }
     expect_match_text: [nextUrl.searchParams]
-  description: "NextRequest.nextUrl.searchParams — parsed query-string values."
+  description: "NextRequest.nextUrl.searchParams - parsed query-string values."
 
 # -- Multipart upload filename sources ---------------------------------------
 - id: javascript.source.multipart_file_originalname
@@ -1499,9 +1499,9 @@
         return info.filename;
       }
     expect_match_text: [info.filename]
-  description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload — client-controlled names."
+  description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload - client-controlled names."
 
-# ── tRPC procedure input ────────────────────────────────────────────────────
+# -- tRPC procedure input ----------------------------------------------------
 - id: javascript.source.trpc_input
   enabled: true
   language: javascript
@@ -1519,7 +1519,7 @@
       function demo(input, req, obj) {
         return ctx.input;
       }
-  description: "tRPC procedure ctx.input — attacker-supplied procedure argument (already validated by zod if pipe configured)."
+  description: "tRPC procedure ctx.input - attacker-supplied procedure argument (already validated by zod if pipe configured)."
 
 - id: javascript.source.trpc_resolver_input_property
   enabled: false
@@ -1542,7 +1542,7 @@
         return opts.input;
       }
     expect_match_text: [opts.input]
-  description: "Disabled — without semantic resolver-parameter facts this collides with ctx.input; javascript.source.trpc_input covers the canonical tRPC input object."
+  description: "Disabled - without semantic resolver-parameter facts this collides with ctx.input; javascript.source.trpc_input covers the canonical tRPC input object."
 
 - id: javascript.source.adonis_request_input
   enabled: true
@@ -1567,7 +1567,7 @@
         return request.input("q");
       }
     expect_match_text: [request.input]
-  description: "AdonisJS request.input(name) — merged body/query/route input value controlled by the HTTP client."
+  description: "AdonisJS request.input(name) - merged body/query/route input value controlled by the HTTP client."
 
 - id: javascript.source.adonis_request_all
   enabled: true
@@ -1599,7 +1599,7 @@
         return request.only(["name"]);
       }
     expect_match_text: [request.only]
-  description: "AdonisJS request.all()/only()/except() — selected or complete client-controlled request input."
+  description: "AdonisJS request.all()/only()/except() - selected or complete client-controlled request input."
 
 - id: javascript.source.h3_get_query
   enabled: true
@@ -1624,7 +1624,7 @@
         return getQuery(event);
       });
     expect_match_text: [getQuery]
-  description: "h3 getQuery(event) — parsed request query object."
+  description: "h3 getQuery(event) - parsed request query object."
 
 - id: javascript.source.h3_read_body
   enabled: true
@@ -1649,7 +1649,7 @@
         return readBody(event);
       });
     expect_match_text: [readBody]
-  description: "h3 readBody(event) — parsed request body controlled by the HTTP client."
+  description: "h3 readBody(event) - parsed request body controlled by the HTTP client."
 
 - id: javascript.source.h3_event_req
   enabled: true
@@ -1672,9 +1672,9 @@
         return event.node.req;
       }
     expect_match_text: [event.node.req]
-  description: "h3 event.node.req / event.req — raw Node request object carrying HTTP body, headers, and URL."
+  description: "h3 event.node.req / event.req - raw Node request object carrying HTTP body, headers, and URL."
 
-# ── SvelteKit ───────────────────────────────────────────────────────────────
+# -- SvelteKit ---------------------------------------------------------------
 - id: javascript.source.sveltekit_event_url
   enabled: true
   language: javascript
@@ -1694,9 +1694,9 @@
       function demo(input, req, obj) {
         return event.url;
       }
-  description: "SvelteKit event.url — URL object including searchParams; attacker-controlled."
+  description: "SvelteKit event.url - URL object including searchParams; attacker-controlled."
 
-# ── AWS Lambda direct invoke event ──────────────────────────────────────────
+# -- AWS Lambda direct invoke event ------------------------------------------
 - id: javascript.cloud.lambda_event
   enabled: false
   disabled_reason:
@@ -1709,9 +1709,9 @@
     kind: param
     target:
       name: event
-  description: "Disabled — bare `event` parameter collides with h3/nitro event handlers; attribute-chain Lambda event body/header/query/path rules remain enabled."
+  description: "Disabled - bare `event` parameter collides with h3/nitro event handlers; attribute-chain Lambda event body/header/query/path rules remain enabled."
 
-# ── Express raw stream chunk (disabled) ─────────────────────────────────────
+# -- Express raw stream chunk (disabled) -------------------------------------
 - id: javascript.source.req_on_data_chunk
   enabled: false
   disabled_reason:
@@ -1726,9 +1726,9 @@
     kind: param
     target:
       name: chunk
-  description: "Disabled — `chunk` in req.on('data', chunk => …) is attacker-controlled but bare-name fires across non-HTTP streams; enable narrowed."
+  description: "Disabled - `chunk` in req.on('data', chunk => ...) is attacker-controlled but bare-name fires across non-HTTP streams; enable narrowed."
 
-# ── Bun.serve ───────────────────────────────────────────────────────────────
+# -- Bun.serve ---------------------------------------------------------------
 - id: javascript.source.bun_serve_request
   enabled: false
   disabled_reason:
@@ -1742,4 +1742,4 @@
     kind: param
     target:
       name: req
-  description: "Disabled — Bun.serve({fetch(req){…}}) — `req` is a stdlib Request; enable narrowed by Bun-only audit."
+  description: "Disabled - Bun.serve({fetch(req){...}}) - `req` is a stdlib Request; enable narrowed by Bun-only audit."

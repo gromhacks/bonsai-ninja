@@ -12,7 +12,7 @@
     kind: param
     target:
       name: Req
-  description: "Disabled — whole Cowboy Req container is too broad without field-sensitive request access tracking; specific cowboy_req accessors stay enabled."
+  description: "Disabled - whole Cowboy Req container is too broad without field-sensitive request access tracking; specific cowboy_req accessors stay enabled."
 
 - id: erlang.source.cowboy_parse_qs
   enabled: true
@@ -33,7 +33,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:parse_qs(Input).
-  description: "cowboy_req:parse_qs — parsed query string key/value list from the URL."
+  description: "cowboy_req:parse_qs - parsed query string key/value list from the URL."
 
 - id: erlang.source.cowboy_read_body
   enabled: true
@@ -54,7 +54,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:read_body(Input).
-  description: "cowboy_req:read_body — raw request body bytes from the client."
+  description: "cowboy_req:read_body - raw request body bytes from the client."
 
 - id: erlang.source.cowboy_read_urlencoded
   enabled: true
@@ -74,7 +74,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:read_urlencoded_body(Input).
-  description: "cowboy_req:read_urlencoded_body — form POST body parsed into kv list."
+  description: "cowboy_req:read_urlencoded_body - form POST body parsed into kv list."
 
 - id: erlang.source.cowboy_read_part
   enabled: true
@@ -95,7 +95,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:read_part(Input).
-  description: "cowboy_req:read_part — multipart headers including Content-Disposition filename are client-controlled."
+  description: "cowboy_req:read_part - multipart headers including Content-Disposition filename are client-controlled."
 
 - id: erlang.source.cowboy_read_part_body
   enabled: true
@@ -116,7 +116,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:read_part_body(Input).
-  description: "cowboy_req:read_part_body — multipart upload bytes from the client."
+  description: "cowboy_req:read_part_body - multipart upload bytes from the client."
 
 - id: erlang.source.cowboy_match_qs
   enabled: true
@@ -137,7 +137,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:match_qs(Input).
-  description: "cowboy_req:match_qs — extracts query params by spec; values remain attacker-controlled."
+  description: "cowboy_req:match_qs - extracts query params by spec; values remain attacker-controlled."
 
 - id: erlang.source.cowboy_qs
   enabled: true
@@ -158,7 +158,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:qs(Input).
-  description: "cowboy_req:qs — raw query string from the request URL."
+  description: "cowboy_req:qs - raw query string from the request URL."
 
 - id: erlang.source.cowboy_header
   enabled: true
@@ -179,7 +179,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:header(Input).
-  description: "cowboy_req:header — individual request header value sent by the client."
+  description: "cowboy_req:header - individual request header value sent by the client."
 
 - id: erlang.source.cowboy_headers
   enabled: true
@@ -200,7 +200,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:headers(Input).
-  description: "cowboy_req:headers — all request headers supplied by the client."
+  description: "cowboy_req:headers - all request headers supplied by the client."
 
 - id: erlang.source.cowboy_path
   enabled: true
@@ -221,7 +221,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:path(Input).
-  description: "cowboy_req:path — raw request path controlled by the client."
+  description: "cowboy_req:path - raw request path controlled by the client."
 
 - id: erlang.source.cowboy_uri
   enabled: true
@@ -242,7 +242,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:uri(Input).
-  description: "cowboy_req:uri — request URI assembled from client-controlled path and query string."
+  description: "cowboy_req:uri - request URI assembled from client-controlled path and query string."
 
 - id: erlang.source.cowboy_binding
   enabled: true
@@ -263,7 +263,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:binding(Input).
-  description: "cowboy_req:binding — router path parameter (e.g. /users/:id)."
+  description: "cowboy_req:binding - router path parameter (e.g. /users/:id)."
 
 - id: erlang.source.cowboy_bindings
   enabled: true
@@ -283,7 +283,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:bindings(Input).
-  description: "cowboy_req:bindings — all router path parameters as a map."
+  description: "cowboy_req:bindings - all router path parameters as a map."
 
 - id: erlang.source.cowboy_cookie
   enabled: true
@@ -304,7 +304,7 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:parse_cookies(Input).
-  description: "cowboy_req:parse_cookies — client-supplied cookie values."
+  description: "cowboy_req:parse_cookies - client-supplied cookie values."
 
 - id: erlang.source.mochiweb_request_parse_qs
   enabled: true
@@ -324,7 +324,7 @@
       -export([test/1]).
       test(Input) ->
         mochiweb_request:parse_qs(Input).
-  description: "mochiweb_request:parse_qs — URL query string kv list."
+  description: "mochiweb_request:parse_qs - URL query string kv list."
 
 - id: erlang.source.mochiweb_parse_post
   enabled: true
@@ -344,7 +344,7 @@
       -export([test/1]).
       test(Input) ->
         mochiweb_request:parse_post(Input).
-  description: "mochiweb_request:parse_post — form POST body kv list."
+  description: "mochiweb_request:parse_post - form POST body kv list."
 
 - id: erlang.source.yaws_arg_querydata
   enabled: true
@@ -364,7 +364,7 @@
       -export([test/1]).
       test(Input) ->
         yaws_api:parse_query(Input).
-  description: "yaws_api:parse_query — Yaws query-string parser output."
+  description: "yaws_api:parse_query - Yaws query-string parser output."
 
 - id: erlang.source.yaws_arg_postdata
   enabled: true
@@ -384,7 +384,7 @@
       -export([test/1]).
       test(Input) ->
         yaws_api:parse_post(Input).
-  description: "yaws_api:parse_post — Yaws form POST body parser output."
+  description: "yaws_api:parse_post - Yaws form POST body parser output."
 
 - id: erlang.source.inets_httpd_parse_query
   enabled: true
@@ -405,7 +405,7 @@
       -export([test/1]).
       test(Input) ->
         httpd:parse_query(Input).
-  description: "inets httpd:parse_query — query string from a client request."
+  description: "inets httpd:parse_query - query string from a client request."
 
 - id: erlang.source.gen_tcp_recv
   enabled: true
@@ -423,7 +423,7 @@
       -export([test/1]).
       test(Input) ->
         gen_tcp:recv(Input).
-  description: "gen_tcp:recv — raw TCP bytes from peer; protocol-level attacker input."
+  description: "gen_tcp:recv - raw TCP bytes from peer; protocol-level attacker input."
 
 - id: erlang.source.gen_udp_recv
   enabled: true
@@ -441,7 +441,7 @@
       -export([test/1]).
       test(Input) ->
         gen_udp:recv(Input).
-  description: "gen_udp:recv — raw UDP datagram bytes from peer; spoofable origin."
+  description: "gen_udp:recv - raw UDP datagram bytes from peer; spoofable origin."
 
 - id: erlang.source.ssl_recv
   enabled: true
@@ -459,4 +459,4 @@
       -export([test/1]).
       test(Input) ->
         ssl:recv(Input).
-  description: "ssl:recv — TLS-decrypted bytes from peer; cleartext is still attacker-controlled."
+  description: "ssl:recv - TLS-decrypted bytes from peer; cleartext is still attacker-controlled."

@@ -18,7 +18,7 @@
   - name: local innerhtml variable negative
     code: "function demo(input) {\n  const innerHTML = input; return innerHTML;\n}\n"
     expect_no_match: true
-  description: "Element.innerHTML = tainted \u2014 DOM XSS."
+  description: "Element.innerHTML = tainted - DOM XSS."
 - id: javascript.xss.outerhtml
   enabled: true
   language: javascript
@@ -39,7 +39,7 @@
   - name: local outerhtml variable negative
     code: "function demo(input) {\n  const outerHTML = input; return outerHTML;\n}\n"
     expect_no_match: true
-  description: "Element.outerHTML = tainted \u2014 DOM XSS."
+  description: "Element.outerHTML = tainted - DOM XSS."
 - id: javascript.xss.insertadjacenthtml
   enabled: false
   disabled_reason:
@@ -53,7 +53,7 @@
     kind: call
     callee:
       name: insertAdjacentHTML
-  description: "Disabled \u2014 bare `insertAdjacentHTML` is DOM-specific but the name alone is ubiquitous; enable with receiver narrowing (Element)."
+  description: "Disabled - bare `insertAdjacentHTML` is DOM-specific but the name alone is ubiquitous; enable with receiver narrowing (Element)."
 - id: javascript.xss.document_write
   enabled: true
   language: javascript
@@ -78,7 +78,7 @@
   - name: document write literal
     code: "function demo() {\n  return document.write(\"<p>safe</p>\");\n}\n"
     expect_no_match: true
-  description: "document.write(tainted) \u2014 legacy DOM XSS vector. arg_tainted scopes to attacker-controlled content; literal/static strings don't fire (R6)."
+  description: "document.write(tainted) - legacy DOM XSS vector. arg_tainted scopes to attacker-controlled content; literal/static strings don't fire (R6)."
 - id: javascript.xss.document_writeln
   enabled: true
   language: javascript
@@ -178,7 +178,7 @@
   - name: local dangerously set inner html negative
     code: "const _u = require(\"react\");\nfunction demo(input) {\n  const dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;\n}\n"
     expect_no_match: true
-  description: "React dangerouslySetInnerHTML={{__html: tainted}} renders raw HTML \u2014 explicit XSS escape hatch."
+  description: "React dangerouslySetInnerHTML={{__html: tainted}} renders raw HTML - explicit XSS escape hatch."
 - id: javascript.xss.vue_v_html
   enabled: false
   disabled_reason:
@@ -194,7 +194,7 @@
     kind: write
     target:
       name: v-html
-  description: "Disabled \u2014 `v-html` is a template directive, not a JS assignment; requires a template-parser to detect, not tree-sitter JS."
+  description: "Disabled - `v-html` is a template directive, not a JS assignment; requires a template-parser to detect, not tree-sitter JS."
 - id: javascript.xss.angular_bypass_security_html
   enabled: true
   language: javascript
@@ -216,7 +216,7 @@
   - name: angular bypass security html literal
     code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustHtml(\"<p>safe</p>\");\n}\n"
     expect_no_match: true
-  description: "Angular DomSanitizer.bypassSecurityTrustHtml \u2014 explicit escape hatch for raw HTML."
+  description: "Angular DomSanitizer.bypassSecurityTrustHtml - explicit escape hatch for raw HTML."
   constraints:
   - arg_tainted:
       index: 0
@@ -242,7 +242,7 @@
   - name: angular bypass security script literal
     code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustScript(\"console.log(1)\");\n}\n"
     expect_no_match: true
-  description: "Angular bypassSecurityTrustScript \u2014 explicit code-execution escape hatch."
+  description: "Angular bypassSecurityTrustScript - explicit code-execution escape hatch."
   constraints:
   - arg_tainted:
       index: 0
@@ -267,7 +267,7 @@
   - name: angular bypass security url literal
     code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustUrl(\"/safe\");\n}\n"
     expect_no_match: true
-  description: "Angular bypassSecurityTrustUrl \u2014 bypasses URL sanitisation (javascript: URIs)."
+  description: "Angular bypassSecurityTrustUrl - bypasses URL sanitisation (javascript: URIs)."
   constraints:
   - arg_tainted:
       index: 0
@@ -292,7 +292,7 @@
   - name: angular bypass security resourceurl literal
     code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustResourceUrl(\"/safe.js\");\n}\n"
     expect_no_match: true
-  description: "Angular bypassSecurityTrustResourceUrl \u2014 bypasses script/iframe URL sanitisation."
+  description: "Angular bypassSecurityTrustResourceUrl - bypasses script/iframe URL sanitisation."
   constraints:
   - arg_tainted:
       index: 0
@@ -318,7 +318,7 @@
   - name: angular bypass security style literal
     code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustStyle(\"color: black\");\n}\n"
     expect_no_match: true
-  description: "Angular DomSanitizer.bypassSecurityTrustStyle \u2014 bypasses CSS sanitization."
+  description: "Angular DomSanitizer.bypassSecurityTrustStyle - bypasses CSS sanitization."
   constraints:
   - arg_tainted:
       index: 0
@@ -347,7 +347,7 @@
   - name: angularjs sce trust literal
     code: "const _u = require(\"angular\");\nfunction demo($sce) {\n  return $sce.trustAsHtml(\"<p>safe</p>\");\n}\n"
     expect_no_match: true
-  description: "AngularJS $sce.trustAs* \u2014 explicit trust bypass for HTML, script, URL, resource URL, or CSS contexts."
+  description: "AngularJS $sce.trustAs* - explicit trust bypass for HTML, script, URL, resource URL, or CSS contexts."
   constraints:
   - arg_tainted:
       index: 0
@@ -411,7 +411,7 @@
     kind: call
     callee:
       name: html
-  description: "Disabled \u2014 bare `.html(tainted)` on any object is too ubiquitous; jQuery-specific form requires receiver narrowing."
+  description: "Disabled - bare `.html(tainted)` on any object is too ubiquitous; jQuery-specific form requires receiver narrowing."
 - id: javascript.xss.jquery_append
   enabled: false
   disabled_reason:
@@ -427,7 +427,7 @@
     kind: call
     callee:
       name: append
-  description: "Disabled \u2014 `.append()` is also common on arrays/streams/Buffers; enable with jQuery receiver narrowing."
+  description: "Disabled - `.append()` is also common on arrays/streams/Buffers; enable with jQuery receiver narrowing."
 - id: javascript.xss.jquery_prepend
   enabled: false
   disabled_reason:
@@ -443,7 +443,7 @@
     kind: call
     callee:
       name: prepend
-  description: "Disabled \u2014 ubiquitous method name; enable with jQuery receiver narrowing."
+  description: "Disabled - ubiquitous method name; enable with jQuery receiver narrowing."
 - id: javascript.xss.jquery_after
   enabled: false
   disabled_reason:
@@ -459,7 +459,7 @@
     kind: call
     callee:
       name: after
-  description: "Disabled \u2014 `.after()` is ubiquitous (also sinon, lodash); enable with jQuery receiver narrowing."
+  description: "Disabled - `.after()` is ubiquitous (also sinon, lodash); enable with jQuery receiver narrowing."
 - id: javascript.xss.location_href_assign
   enabled: false
   disabled_reason:
@@ -473,7 +473,7 @@
     kind: write
     target:
       name: href
-  description: "Disabled \u2014 bare `.href = ...` is too broad; enable only when the assignment is on `location`/`anchor` with a javascript:-URI constraint."
+  description: "Disabled - bare `.href = ...` is too broad; enable only when the assignment is on `location`/`anchor` with a javascript:-URI constraint."
 - id: javascript.xss.script_src_assign
   enabled: false
   disabled_reason:
@@ -487,7 +487,7 @@
     kind: write
     target:
       name: src
-  description: "Disabled \u2014 bare `.src = ...` fires on every img/video/audio/iframe assignment; enable with element-type constraint."
+  description: "Disabled - bare `.src = ...` fires on every img/video/audio/iframe assignment; enable with element-type constraint."
 - id: javascript.xss.iframe_srcdoc
   enabled: true
   language: javascript
@@ -508,7 +508,7 @@
   - name: local srcdoc variable negative
     code: "function demo(input) {\n  const srcdoc = input; return srcdoc;\n}\n"
     expect_no_match: true
-  description: "iframe.srcdoc = tainted HTML \u2014 renders attacker-controlled document inside an iframe."
+  description: "iframe.srcdoc = tainted HTML - renders attacker-controlled document inside an iframe."
 - id: javascript.xss.range_createcontextualfragment
   enabled: true
   language: javascript
@@ -547,7 +547,7 @@
       attribute:
       - DOMParser
       - parseFromString
-  description: "Disabled \u2014 DOMParser parses but doesn't auto-render; XSS only materialises when the result is attached; flag downstream."
+  description: "Disabled - DOMParser parses but doesn't auto-render; XSS only materialises when the result is attached; flag downstream."
 - id: javascript.xss.koa_ctx_body_html
   enabled: true
   language: javascript
@@ -581,7 +581,7 @@
         return body;
       }
     expect_no_match: true
-  description: "Koa <ctx>.body = concatenated/template HTML \u2014 raw response body can reflect attacker-controlled markup. Receiver-agnostic; package gate keeps this from firing outside Koa workspaces."
+  description: "Koa <ctx>.body = concatenated/template HTML - raw response body can reflect attacker-controlled markup. Receiver-agnostic; package gate keeps this from firing outside Koa workspaces."
 - id: javascript.xss.create_html_document_href_concat
   enabled: true
   language: javascript
@@ -605,7 +605,7 @@
         return createHtmlDocument("safe", "<a href='/safe'>");
       }
     expect_no_match: true
-  description: "createHtmlDocument(...) with concatenated href-bearing HTML \u2014 flags the precise HTML construction site before it is sent/rendered."
+  description: "createHtmlDocument(...) with concatenated href-bearing HTML - flags the precise HTML construction site before it is sent/rendered."
 - id: javascript.xss.express_res_write
   enabled: true
   language: javascript
@@ -667,4 +667,4 @@
         return res.end("<p>safe</p>");
       }
     expect_no_match: true
-  description: "Express/Node res.end with concatenated or template HTML \u2014 raw HTTP response body can become reflected XSS."
+  description: "Express/Node res.end with concatenated or template HTML - raw HTTP response body can become reflected XSS."

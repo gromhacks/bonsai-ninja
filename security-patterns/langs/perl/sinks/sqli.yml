@@ -14,7 +14,7 @@
     kind: call
     callee:
       name: do
-  description: "Disabled — bare `name: do` overmatches the Perl keyword `do EXPR` and other `->do` accessors; no canonical exists. Re-enable when adapter supports receiver-type narrowing for $dbh->do."
+  description: "Disabled - bare `name: do` overmatches the Perl keyword `do EXPR` and other `->do` accessors; no canonical exists. Re-enable when adapter supports receiver-type narrowing for $dbh->do."
 
 - id: perl.sqli.dbi_selectrow_array
   enabled: true
@@ -221,7 +221,7 @@
     kind: call
     callee:
       name: prepare
-  description: "Disabled — prepare is safe when binding; flag only with concatenated SQL."
+  description: "Disabled - prepare is safe when binding; flag only with concatenated SQL."
 
 - id: perl.sqli.dbi_prepare_cached
   enabled: false
@@ -236,7 +236,7 @@
     kind: call
     callee:
       name: prepare_cached
-  description: "Disabled — same as prepare."
+  description: "Disabled - same as prepare."
 
 - id: perl.sqli.dbix_class_search_literal
   enabled: true
@@ -268,7 +268,7 @@
         search_literal("name = ?")
       }
     expect_no_match: true
-  description: "DBIx::Class search_literal — raw SQL fragment."
+  description: "DBIx::Class search_literal - raw SQL fragment."
 
 - id: perl.sqli.dbix_class_storage_dbh_do
   enabled: false
@@ -291,7 +291,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         dbh_do($input)
       }
-  description: "Disabled — dbh_do passes a DBI handle to a callback; raw SQL is issued inside callback state, not in a taintable dbh_do argument."
+  description: "Disabled - dbh_do passes a DBI handle to a callback; raw SQL is issued inside callback state, not in a taintable dbh_do argument."
 
 - id: perl.sqli.sql_abstract_select
   enabled: false
@@ -306,7 +306,7 @@
     kind: call
     callee:
       name: select
-  description: "Disabled — SQL::Abstract is parameterised by default."
+  description: "Disabled - SQL::Abstract is parameterised by default."
 
 - id: perl.sqli.rose_db_object_new_from_sql
   enabled: true
@@ -338,12 +338,12 @@
         get_objects_from_sql("select 1")
       }
     expect_no_match: true
-  description: "Rose::DB::Object::Manager get_objects_from_sql — raw SQL."
+  description: "Rose::DB::Object::Manager get_objects_from_sql - raw SQL."
 
 # Interpolation-shape DBI prepare. Distinct from perl.sqli.dbi_prepare
 # (disabled because parameterised prepare is safe). This fires only
 # when the prepare arg shows scalar interpolation (`$var`) or dot-
-# concat — i.e. inlined SQL pre-bind.
+# concat - i.e. inlined SQL pre-bind.
 - id: perl.sqli.dbi_prepare_interp
   enabled: true
   language: perl
@@ -374,4 +374,4 @@
         $dbh->prepare("select 1")
       }
     expect_no_match: true
-  description: "$dbh->prepare(tainted_sql) — interpolated/concatenated SQL bypasses placeholder binding. The taint boundary is the SQL string argument; safe literal prepares are skipped by arg_tainted."
+  description: "$dbh->prepare(tainted_sql) - interpolated/concatenated SQL bypasses placeholder binding. The taint boundary is the SQL string argument; safe literal prepares are skipped by arg_tainted."

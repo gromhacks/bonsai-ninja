@@ -19,7 +19,7 @@
           BorrowedMessage::payload();
       }
     expect_match_text: ["BorrowedMessage::payload"]
-  description: "rdkafka BorrowedMessage::payload() — Kafka message payload; local receiver calls require semantic BorrowedMessage receiver-type facts."
+  description: "rdkafka BorrowedMessage::payload() - Kafka message payload; local receiver calls require semantic BorrowedMessage receiver-type facts."
 - id: rust.lapin.delivery_data
   enabled: false
   disabled_reason:
@@ -34,7 +34,7 @@
     kind: read
     target:
       name: data
-  description: "Disabled — bare `data` overmatches unrelated fields; enable with a receiver-qualified Delivery.data read once Rust field receiver facts are available."
+  description: "Disabled - bare `data` overmatches unrelated fields; enable with a receiver-qualified Delivery.data read once Rust field receiver facts are available."
 - id: rust.nats.message_data
   enabled: false
   disabled_reason:
@@ -49,7 +49,7 @@
     kind: read
     target:
       name: payload
-  description: "Disabled — bare `payload` overmatches unrelated fields; enable with a receiver-qualified Message.payload read once Rust field receiver facts are available."
+  description: "Disabled - bare `payload` overmatches unrelated fields; enable with a receiver-qualified Message.payload read once Rust field receiver facts are available."
 - id: rust.sqs.receive_message
   enabled: true
   language: rust
@@ -70,4 +70,4 @@
           Message::body();
       }
     expect_match_text: ["Message::body"]
-  description: "aws-sdk-sqs Message::body() — SQS message body; local receiver calls require semantic Message receiver-type facts."
+  description: "aws-sdk-sqs Message::body() - SQS message body; local receiver calls require semantic Message receiver-type facts."

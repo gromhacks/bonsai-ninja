@@ -17,7 +17,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IFormFile.CopyTo(input); } }
-  description: "Disabled — IFormFile.CopyTo(stream) writes to a stream; unsafe filename/path state is established before this call."
+  description: "Disabled - IFormFile.CopyTo(stream) writes to a stream; unsafe filename/path state is established before this call."
 
 - id: csharp.upload.iformfile_copytoasync
   enabled: false
@@ -37,7 +37,7 @@
     code: |
       using Microsoft.AspNetCore.Http;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IFormFile.CopyToAsync(input); } }
-  description: "Disabled — IFormFile.CopyToAsync(stream) writes to a stream; unsafe filename/path state is established before this call."
+  description: "Disabled - IFormFile.CopyToAsync(stream) writes to a stream; unsafe filename/path state is established before this call."
 
 - id: csharp.upload.httppostedfile_saveas
   enabled: true

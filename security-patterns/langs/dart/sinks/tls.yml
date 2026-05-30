@@ -15,7 +15,7 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; badCertificateCallback = input; }
-  description: "Disabled broad duplicate — only callbacks that explicitly accept certificates are weak TLS; covered by dart.tls.disable_verify_bad_cert_callback."
+  description: "Disabled broad duplicate - only callbacks that explicitly accept certificates are weak TLS; covered by dart.tls.disable_verify_bad_cert_callback."
 
 - id: dart.tls.dio_badcertificatecallback
   enabled: true
@@ -60,4 +60,4 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; client.badCertificateCallback = true; }
-  description: "HttpClient.badCertificateCallback = (cert, host, port) => true — accepts any certificate."
+  description: "HttpClient.badCertificateCallback = (cert, host, port) => true - accepts any certificate."

@@ -29,7 +29,7 @@
         mongocxx_find("safe");
       }
     expect_no_match: true
-  description: "mongocxx collection::find(filter) — flag when BSON filter is built from tainted input."
+  description: "mongocxx collection::find(filter) - flag when BSON filter is built from tainted input."
 
 - id: cpp.nosql.mongocxx_find_one
   enabled: true
@@ -61,7 +61,7 @@
         mongocxx_find_one("safe");
       }
     expect_no_match: true
-  description: "mongocxx collection::find_one(filter) — same concern as find."
+  description: "mongocxx collection::find_one(filter) - same concern as find."
 
 - id: cpp.nosql.mongocxx_aggregate
   enabled: true
@@ -93,7 +93,7 @@
         mongocxx_aggregate("safe");
       }
     expect_no_match: true
-  description: "mongocxx collection::aggregate(pipeline) — tainted pipeline stages."
+  description: "mongocxx collection::aggregate(pipeline) - tainted pipeline stages."
 
 - id: cpp.nosql.mongocxx_update
   enabled: true
@@ -125,7 +125,7 @@
         mongocxx_update("safe");
       }
     expect_no_match: true
-  description: "mongocxx collection::update_one(filter, update) — tainted filter = NoSQL injection."
+  description: "mongocxx collection::update_one(filter, update) - tainted filter = NoSQL injection."
 
 - id: cpp.nosql.mongocxx_update_doc
   enabled: true
@@ -154,7 +154,7 @@
         collection::update_one("safe", "safe");
       }
     expect_no_match: true
-  description: "collection::update_one(filter, update) — tainted update documents can inject operators or alter unintended fields."
+  description: "collection::update_one(filter, update) - tainted update documents can inject operators or alter unintended fields."
 
 - id: cpp.nosql.mongocxx_delete
   enabled: true
@@ -186,7 +186,7 @@
         mongocxx_delete("safe");
       }
     expect_no_match: true
-  description: "mongocxx collection::delete_one(filter) — tainted filter deletes wrong docs."
+  description: "mongocxx collection::delete_one(filter) - tainted filter deletes wrong docs."
 
 - id: cpp.nosql.mongocxx_runcommand
   enabled: true
@@ -218,7 +218,7 @@
         mongocxx_runcommand("safe");
       }
     expect_no_match: true
-  description: "mongocxx database::run_command(cmd) — admin command injection."
+  description: "mongocxx database::run_command(cmd) - admin command injection."
 
 - id: cpp.nosql.hiredis_eval
   enabled: true
@@ -252,7 +252,7 @@
         redisCommand(ctx, "GET %s", "safe");
       }
     expect_no_match: true
-  description: "hiredis redisCommand(ctx, \"EVAL ...\", taintedScript) — Redis Lua injection."
+  description: "hiredis redisCommand(ctx, \"EVAL ...\", taintedScript) - Redis Lua injection."
 
 - id: cpp.nosql.hiredis_command_generic
   enabled: true
@@ -284,4 +284,4 @@
         redisCommand(ctx, "GET %s", arg);
       }
     expect_no_match: true
-  description: "hiredis redisCommand(ctx, fmt, ...) — tainted command format permits attacker-controlled Redis operations."
+  description: "hiredis redisCommand(ctx, fmt, ...) - tainted command format permits attacker-controlled Redis operations."

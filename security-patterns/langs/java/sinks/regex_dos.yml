@@ -30,5 +30,5 @@
         }
       }
     expect_no_match: true
-  description: "Pattern.compile(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "Pattern.compile(tainted_pattern) - attacker-controlled regular expressions can trigger catastrophic backtracking."
 

@@ -19,7 +19,7 @@
   - name: arg tainted literal negative
     code: "def example(input, url, id, payload, request, params)\n  system(\"safe\")\nend\n"
     expect_no_match: true
-  description: "Kernel#system — single-string form spawns a shell."
+  description: "Kernel#system - single-string form spawns a shell."
 - id: ruby.cmdi.kernel_exec
   enabled: true
   language: ruby
@@ -41,7 +41,7 @@
   - name: ruby.cmdi.kernel_exec literal negative
     code: "def example(input, url, id, payload, request, params)\n  exec(\"/usr/bin/id\")\nend\n"
     expect_no_match: true
-  description: "Kernel#exec — replaces the current process with a tainted command."
+  description: "Kernel#exec - replaces the current process with a tainted command."
 - id: ruby.cmdi.kernel_spawn
   enabled: true
   language: ruby
@@ -63,7 +63,7 @@
   - name: ruby.cmdi.kernel_spawn literal negative
     code: "def example(input, url, id, payload, request, params)\n  spawn(\"/usr/bin/id\")\nend\n"
     expect_no_match: true
-  description: "Kernel#spawn — single-string form spawns via shell. Merged collision aliases: ruby.cmdi.process_spawn, ruby.cmdi.pty_spawn."
+  description: "Kernel#spawn - single-string form spawns via shell. Merged collision aliases: ruby.cmdi.process_spawn, ruby.cmdi.pty_spawn."
   aliases:
   - ruby.cmdi.process_spawn
   - ruby.cmdi.pty_spawn
@@ -106,7 +106,7 @@
   match_examples:
   - name: ruby.cmdi.backticks_interp example
     code: "def example(input, url, id, payload, request, params)\n  `echo #{payload}`\nend\n"
-  description: "Disabled duplicate — ruby.cmdi.kernel_backtick owns the backtick execution fact. The adapter's backtick call fact is not currently separable enough for a second interpolation-specific sink without duplicate matches."
+  description: "Disabled duplicate - ruby.cmdi.kernel_backtick owns the backtick execution fact. The adapter's backtick call fact is not currently separable enough for a second interpolation-specific sink without duplicate matches."
 - id: ruby.cmdi.io_popen
   enabled: true
   language: ruby
@@ -130,7 +130,7 @@
   - name: arg tainted literal negative
     code: "def example(input, url, id, payload, request, params)\n  IO.popen(\"safe\")\nend\n"
     expect_no_match: true
-  description: "IO.popen — single-string form invokes a shell. `io_popen` core class has no canonical ecosystem package, so strict `['IO', 'popen']` match only."
+  description: "IO.popen - single-string form invokes a shell. `io_popen` core class has no canonical ecosystem package, so strict `['IO', 'popen']` match only."
 - id: ruby.cmdi.open3_popen3
   enabled: true
   language: ruby
@@ -166,7 +166,7 @@
         Open3.popen3("/usr/bin/id")
       end
     expect_no_match: true
-  description: "Open3.popen3 — flag if first arg is interpolated string."
+  description: "Open3.popen3 - flag if first arg is interpolated string."
 - id: ruby.cmdi.open3_popen2
   enabled: true
   language: ruby
@@ -202,7 +202,7 @@
         Open3.popen2("/usr/bin/id")
       end
     expect_no_match: true
-  description: "Open3.popen2() — spawns child process with tainted argv; same RCE surface as exec + pipes."
+  description: "Open3.popen2() - spawns child process with tainted argv; same RCE surface as exec + pipes."
 - id: ruby.cmdi.open3_popen2e
   enabled: true
   language: ruby
@@ -238,7 +238,7 @@
         Open3.popen2e("/usr/bin/id")
       end
     expect_no_match: true
-  description: "Open3.popen2e() — spawns child with merged stdout+stderr; tainted argv executes arbitrary commands."
+  description: "Open3.popen2e() - spawns child with merged stdout+stderr; tainted argv executes arbitrary commands."
 - id: ruby.cmdi.open3_capture3
   enabled: true
   language: ruby
@@ -274,7 +274,7 @@
         Open3.capture3("/usr/bin/id")
       end
     expect_no_match: true
-  description: "Open3.capture3 — flag if first arg is interpolated string."
+  description: "Open3.capture3 - flag if first arg is interpolated string."
 - id: ruby.cmdi.open3_capture2
   enabled: true
   language: ruby
@@ -341,7 +341,7 @@
         open("|whoami")
       end
     expect_no_match: true
-  description: "Kernel#open with leading '|' executes a command — flag when path is tainted (also overlaps with open-uri SSRF rule). Merged collision aliases: ruby.path.file_open, ruby.path.zip_file_open, ruby.ssrf.uri_open."
+  description: "Kernel#open with leading '|' executes a command - flag when path is tainted (also overlaps with open-uri SSRF rule). Merged collision aliases: ruby.path.file_open, ruby.path.zip_file_open, ruby.ssrf.uri_open."
   aliases:
   - ruby.path.file_open
   - ruby.path.zip_file_open
@@ -378,4 +378,4 @@
         sh("bundle exec rake test")
       end
     expect_no_match: true
-  description: "Rake sh(tainted_string) — shell exec helper inside rake tasks."
+  description: "Rake sh(tainted_string) - shell exec helper inside rake tasks."

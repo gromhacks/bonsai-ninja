@@ -17,7 +17,7 @@
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    URL.openConnection(input)\n\
       \  }\n}\n"
-  description: "Disabled — URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+  description: "Disabled - URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: kotlin.ssrf.url_ctor
   enabled: true
   language: kotlin
@@ -40,7 +40,7 @@
     code: "class App {\nfun handle(input: String) {\n  URL(\"safe\")\n}\n}\nclass\
       \ URL(vararg args: Any?)\n"
     expect_no_match: true
-  description: "new URL(tainted) \u2014 flag construction of URLs from user input."
+  description: "new URL(tainted) - flag construction of URLs from user input."
 - id: kotlin.ssrf.uri_ctor
   enabled: true
   language: kotlin
@@ -63,7 +63,7 @@
     code: "class App {\nfun handle(input: String) {\n  URI(\"safe\")\n}\n}\nclass\
       \ URI(vararg args: Any?)\n"
     expect_no_match: true
-  description: "new URI(tainted) \u2014 construction only; open when passed to a client."
+  description: "new URI(tainted) - construction only; open when passed to a client."
 - id: kotlin.ssrf.httpclient_execute
   enabled: true
   language: kotlin
@@ -282,7 +282,7 @@
       }\n"
     expect_match_text:
     - requestSpec.retrieve
-  description: "Disabled — WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
+  description: "Disabled - WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
 - id: kotlin.ssrf.play_wsclient_url
   enabled: true
   language: kotlin
@@ -312,7 +312,7 @@
     code: "import com.typesafe.play.*\nclass App {\nfun handle(url: String): Any?\
       \ {\n  return WSClient.url(\"safe\")\n}\n}\n"
     expect_no_match: true
-  description: "Play WSClient.url(url) \u2014 asynchronous server-side request target\
+  description: "Play WSClient.url(url) - asynchronous server-side request target\
     \ controlled by attacker input."
 - id: kotlin.ssrf.okhttp_builder_url
   enabled: true
@@ -340,7 +340,7 @@
     code: "import okhttp3.*\nclass App {\nfun handle(input: String) {\n  Builder.url(\"\
       safe\")\n}\n}\n"
     expect_no_match: true
-  description: "OkHttp Request.Builder().url(tainted) \u2014 tainted URL."
+  description: "OkHttp Request.Builder().url(tainted) - tainted URL."
 - id: kotlin.ssrf.okhttp_call_execute
   enabled: false
   language: kotlin
@@ -360,7 +360,7 @@
   - name: generated shape example
     code: "import okhttp3.*\n// uses okhttp3\nclass App {\n  fun handle(input: String)\
       \ {\n    Call.execute(input)\n  }\n}\n"
-  description: "OkHttp Call.execute \u2014 dispatches Request to tainted URL."
+  description: "OkHttp Call.execute - dispatches Request to tainted URL."
   disabled_reason:
     code: over-broad
 - id: kotlin.ssrf.ktor_httpclient_request
@@ -413,7 +413,7 @@
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    HttpClient.send(input)\n\
       \  }\n}\n"
-  description: "Disabled duplicate \u2014 same matcher as canonical kotlin.ssrf.jdk_httpclient_send."
+  description: "Disabled duplicate - same matcher as canonical kotlin.ssrf.jdk_httpclient_send."
 - id: kotlin.ssrf.java_httpclient_sendasync
   enabled: false
   disabled_reason:
@@ -435,7 +435,7 @@
   - name: generated shape example
     code: "import java.net.http.*\nclass App {\n  fun handle(input: String) {\n  \
       \  HttpClient.sendAsync(input)\n  }\n}\n"
-  description: "Disabled duplicate \u2014 same matcher as canonical kotlin.ssrf.jdk_httpclient_sendasync."
+  description: "Disabled duplicate - same matcher as canonical kotlin.ssrf.jdk_httpclient_sendasync."
   imports:
   - java
 - id: kotlin.ssrf.url_openstream
@@ -457,7 +457,7 @@
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    URL.openStream(input)\n\
       \  }\n}\n"
-  description: "Disabled — URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+  description: "Disabled - URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
 - id: kotlin.ssrf.jsoup_connect
   enabled: true
   language: kotlin
@@ -538,7 +538,7 @@
     code: "import okhttp3.*\nclass App {\nfun handle(input: String) {\n  OkHttpClient.newCall(\"\
       safe\")\n}\n}\n"
     expect_no_match: true
-  description: "OkHttpClient.newCall(request) \u2014 dispatches a Request whose URL\
+  description: "OkHttpClient.newCall(request) - dispatches a Request whose URL\
     \ may be tainted (SSRF)."
 - id: kotlin.ssrf.okhttp_call_enqueue
   enabled: false
@@ -561,7 +561,7 @@
   - name: generated shape example
     code: "import okhttp3.*\n// uses okhttp3\nclass App {\n  fun handle(input: String)\
       \ {\n    Call.enqueue(input)\n  }\n}\n"
-  description: "Disabled — OkHttp Call.enqueue(callback) dispatches receiver Request state; Request.Builder.url(tainted) and OkHttpClient.newCall(tainted) carry the tainted arguments."
+  description: "Disabled - OkHttp Call.enqueue(callback) dispatches receiver Request state; Request.Builder.url(tainted) and OkHttpClient.newCall(tainted) carry the tainted arguments."
 - id: kotlin.ssrf.jdk_httpclient_send
   enabled: true
   language: kotlin
@@ -588,7 +588,7 @@
     code: "import java.net.http.*\nclass App {\nfun handle(input: String) {\n  HttpClient.send(\"\
       safe\")\n}\n}\n"
     expect_no_match: true
-  description: "java.net.http.HttpClient.send(request) \u2014 dispatches an HTTP request\
+  description: "java.net.http.HttpClient.send(request) - dispatches an HTTP request\
     \ whose URI may be attacker-controlled."
 - id: kotlin.ssrf.jdk_httpclient_sendasync
   enabled: true
@@ -616,7 +616,7 @@
     code: "import java.net.http.*\nclass App {\nfun handle(input: String) {\n  HttpClient.sendAsync(\"\
       safe\")\n}\n}\n"
     expect_no_match: true
-  description: "java.net.http.HttpClient.sendAsync(request) \u2014 async dispatch\
+  description: "java.net.http.HttpClient.sendAsync(request) - async dispatch\
     \ of an attacker-influenced request URI."
 - id: kotlin.ssrf.jdk_httprequest_builder_uri
   enabled: true
@@ -644,5 +644,5 @@
     code: "import java.net.http.*\nclass App {\nfun handle(input: String) {\n  Builder.uri(\"\
       safe\")\n}\n}\n"
     expect_no_match: true
-  description: "java.net.http.HttpRequest.Builder.uri(tainted URI) \u2014 request\
+  description: "java.net.http.HttpRequest.Builder.uri(tainted URI) - request\
     \ target controlled by attacker input."

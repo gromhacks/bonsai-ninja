@@ -34,7 +34,7 @@
         return jwt.sign(input, "secret", { algorithm: "HS256" });
       }
     expect_no_match: true
-  description: "jwt.sign with algorithm 'none' — unsigned token, trivially forgeable."
+  description: "jwt.sign with algorithm 'none' - unsigned token, trivially forgeable."
 - id: javascript.jwt.verify_none_algorithm
   enabled: true
   language: javascript
@@ -72,7 +72,7 @@
         return jwt.verify(input, "secret", { algorithms: ["HS256"] });
       }
     expect_no_match: true
-  description: "jwt.verify(..., {algorithms: ['none']}) — accepts unsigned tokens. Merged aliases: javascript.jwt.verify_ignore_expiration, javascript.jwt.alg_confusion."
+  description: "jwt.verify(..., {algorithms: ['none']}) - accepts unsigned tokens. Merged aliases: javascript.jwt.verify_ignore_expiration, javascript.jwt.alg_confusion."
   aliases:
   - javascript.jwt.verify_ignore_expiration
   - javascript.jwt.alg_confusion
@@ -93,7 +93,7 @@
       attribute:
       - jwt
       - sign
-  description: "Disabled — overlaps with sign_none; enable only when missing-secret detection is wired up."
+  description: "Disabled - overlaps with sign_none; enable only when missing-secret detection is wired up."
 - id: javascript.jwt.decode_unsafe
   enabled: true
   language: javascript
@@ -125,7 +125,7 @@
         return jwt.decode("header.payload.signature");
       }
     expect_no_match: true
-  description: "jwt.decode — parses the token without verifying the signature; never trust the payload."
+  description: "jwt.decode - parses the token without verifying the signature; never trust the payload."
 - id: javascript.jwt.jose_decode_jwt
   enabled: true
   language: javascript
@@ -157,7 +157,7 @@
         return jose.decodeJwt("header.payload.signature");
       }
     expect_no_match: true
-  description: "jose.decodeJwt — header/claim inspection only, does not verify the signature."
+  description: "jose.decodeJwt - header/claim inspection only, does not verify the signature."
 - id: javascript.jwt.jose_unsecured_decode
   enabled: true
   language: javascript
@@ -189,7 +189,7 @@
         return UnsecuredJWT.decode("header.payload.signature");
       }
     expect_no_match: true
-  description: "jose UnsecuredJWT.decode — explicitly reads unsecured (alg=none) tokens."
+  description: "jose UnsecuredJWT.decode - explicitly reads unsecured (alg=none) tokens."
 
 - id: javascript.jwt.jose_jwt_verify_alg_none
   enabled: true
@@ -222,4 +222,4 @@
         return jose.jwtVerify(token, key, { algorithms: ["HS256"] });
       }
     expect_no_match: true
-  description: 'jose.jwtVerify(..., {algorithms: ["none"]}) — accepts unsigned tokens; alg-none JWT bypass.'
+  description: 'jose.jwtVerify(..., {algorithms: ["none"]}) - accepts unsigned tokens; alg-none JWT bypass.'

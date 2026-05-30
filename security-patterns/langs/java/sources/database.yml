@@ -19,7 +19,7 @@
         }
       }
     expect_match_text: [rs.getString]
-  description: "ResultSet.getString(...) on a result-set receiver — value read from the database boundary."
+  description: "ResultSet.getString(...) on a result-set receiver - value read from the database boundary."
 
 - id: java.jdbc.resultset_getbytes
   enabled: true
@@ -41,7 +41,7 @@
         }
       }
     expect_match_text: [rs.getBytes]
-  description: "ResultSet.getBytes(...) on a result-set receiver — binary value read from the database boundary."
+  description: "ResultSet.getBytes(...) on a result-set receiver - binary value read from the database boundary."
 
 - id: java.hibernate.session_get
   enabled: true
@@ -64,4 +64,4 @@
       }
       class User {}
     expect_match_text: [session.get]
-  description: "Hibernate Session.get(...) on a session receiver — entity data read from the database boundary."
+  description: "Hibernate Session.get(...) on a session receiver - entity data read from the database boundary."

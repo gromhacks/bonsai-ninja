@@ -125,4 +125,4 @@
         }
       }
     expect_no_match: true
-  description: "Disabled — response.getWriter().println overlaps the XSS sink and the YAML matcher cannot prove the argument is specifically SQLException/exception state without type-aware constraints."
+  description: "Disabled - response.getWriter().println overlaps the XSS sink and the YAML matcher cannot prove the argument is specifically SQLException/exception state without type-aware constraints."

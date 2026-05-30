@@ -35,7 +35,7 @@
         }
       }
     expect_no_match: true
-  description: "ReactiveMongo BSONCollection.find — tainted BSON filter object. Merged collision aliases: scala.nosql.mongo_collection_find, scala.nosql.mongo_collection_find_local_document."
+  description: "ReactiveMongo BSONCollection.find - tainted BSON filter object. Merged collision aliases: scala.nosql.mongo_collection_find, scala.nosql.mongo_collection_find_local_document."
   aliases:
   - scala.nosql.mongo_collection_find
   - scala.nosql.mongo_collection_find_local_document
@@ -77,7 +77,7 @@
         }
       }
     expect_no_match: true
-  description: "ReactiveMongo BSONCollection.update — tainted filter/modifier."
+  description: "ReactiveMongo BSONCollection.update - tainted filter/modifier."
 - id: scala.nosql.casbah_find
   enabled: false
   disabled_reason:
@@ -95,7 +95,7 @@
       attribute:
       - MongoCollection
       - find
-  description: "Disabled — Casbah is deprecated; canonical rule is scala.nosql.mongo_collection_find (same `[MongoCollection, find]` attribute chain)."
+  description: "Disabled - Casbah is deprecated; canonical rule is scala.nosql.mongo_collection_find (same `[MongoCollection, find]` attribute chain)."
 - id: scala.nosql.mongo_command
   enabled: true
   language: scala
@@ -173,7 +173,7 @@
       }
       class Document(args: Any*)
     expect_no_match: true
-  description: "new Document(callerMap) — MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
+  description: "new Document(callerMap) - MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
   imports:
   - org.mongodb.scala
 - id: scala.nosql.basicdbobject_operator_ctor
@@ -215,7 +215,7 @@
       }
       class BasicDBObject(args: Any*)
     expect_no_match: true
-  description: "new BasicDBObject(\"$ne\", value) and related operator keys — caller-controlled operator objects can bypass intended equality checks."
+  description: "new BasicDBObject(\"$ne\", value) and related operator keys - caller-controlled operator objects can bypass intended equality checks."
 - id: scala.nosql.spring_mongo_template_criteria_is
   enabled: true
   language: scala
@@ -254,7 +254,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring Data Mongo Criteria.is(operator object) — caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
+  description: "Spring Data Mongo Criteria.is(operator object) - caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
   imports:
   - org.springframework.data.mongodb
 - id: scala.nosql.elastic4s_search
@@ -291,4 +291,4 @@
         }
       }
     expect_no_match: true
-  description: "elastic4s rawQuery(tainted JSON) — raw ES query bypass."
+  description: "elastic4s rawQuery(tainted JSON) - raw ES query bypass."

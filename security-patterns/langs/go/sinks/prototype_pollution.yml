@@ -1,6 +1,6 @@
 # go prototype_pollution sinks.
 
-# Prototype-pollution sinks (round 3 — cross-language).
+# Prototype-pollution sinks (round 3 - cross-language).
 - id: go.proto_pollution.mergo_map_with_body
   enabled: true
   language: go
@@ -35,4 +35,4 @@
         mergo.MapWithOverwrite(&target, map[string]any{"role": "user"})
       }
     expect_no_match: true
-  description: 'mergo.MapWithOverwrite(target, attacker_map) — recursive merge with overwrite semantics; cross-bound attacker keys leak into target struct.'
+  description: 'mergo.MapWithOverwrite(target, attacker_map) - recursive merge with overwrite semantics; cross-bound attacker keys leak into target struct.'

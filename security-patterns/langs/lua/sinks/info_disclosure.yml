@@ -31,4 +31,4 @@
         ngx.log(ngx.ERR, "user=", input)
       end
     expect_no_match: true
-  description: "ngx.log with secret-shaped data — credentials or tokens can leak to nginx / OpenResty logs. Also covers merged aliases: lua.log_injection.ngx_log_newline."
+  description: "ngx.log with secret-shaped data - credentials or tokens can leak to nginx / OpenResty logs. Also covers merged aliases: lua.log_injection.ngx_log_newline."

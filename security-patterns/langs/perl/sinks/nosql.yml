@@ -316,7 +316,7 @@
         evalsha("0123456789abcdef0123456789abcdef01234567")
       }
     expect_no_match: true
-  description: "Redis->evalsha — Lua script injection via SHA."
+  description: "Redis->evalsha - Lua script injection via SHA."
 
 - id: perl.nosql.redis_eval_direct
   enabled: false
@@ -331,4 +331,4 @@
     kind: call
     callee:
       name: eval
-  description: "Disabled — overlaps Perl builtin eval (see eval.builtin_eval)."
+  description: "Disabled - overlaps Perl builtin eval (see eval.builtin_eval)."

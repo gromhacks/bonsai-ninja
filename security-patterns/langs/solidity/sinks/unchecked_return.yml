@@ -10,7 +10,7 @@
     kind: call
     callee:
       name: call
-  description: "Disabled — v1 matching sees only .call and cannot prove the bool return is unchecked; reentrancy.call covers the external-call sink shape."
+  description: "Disabled - v1 matching sees only .call and cannot prove the bool return is unchecked; reentrancy.call covers the external-call sink shape."
 - id: solidity.unchecked_return.send
   enabled: false
   disabled_reason:
@@ -23,4 +23,4 @@
     kind: call
     callee:
       name: send
-  description: "Disabled — v1 matching sees only .send and cannot prove the bool return is unchecked; reentrancy.send covers the external-call sink shape."
+  description: "Disabled - v1 matching sees only .send and cannot prove the bool return is unchecked; reentrancy.send covers the external-call sink shape."

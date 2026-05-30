@@ -76,7 +76,7 @@
         }
       }
     expect_no_match: true
-  description: "log4j-core JndiManager.lookup(name) — receiver-narrowed Log4Shell sink. Identifies the canonical JndiLookup#lookup call site distinct from the broader Logger.info-with-${jndi:} message-shape rule above."
+  description: "log4j-core JndiManager.lookup(name) - receiver-narrowed Log4Shell sink. Identifies the canonical JndiLookup#lookup call site distinct from the broader Logger.info-with-${jndi:} message-shape rule above."
   imports:
   - org.apache.logging.log4j.core
 - id: java.log_injection.logger_debug_concat
@@ -106,7 +106,7 @@
         }
       }
     expect_no_match: true
-  description: "Logger.debug(... + tainted) — log-injection via concat."
+  description: "Logger.debug(... + tainted) - log-injection via concat."
 - id: java.log_injection.logger_warn_concat
   enabled: true
   language: java
@@ -134,7 +134,7 @@
         }
       }
     expect_no_match: true
-  description: "Logger.warn(... + tainted) — log-injection via concat."
+  description: "Logger.warn(... + tainted) - log-injection via concat."
 - id: java.log_injection.logger_trace_concat
   enabled: true
   language: java
@@ -162,7 +162,7 @@
         }
       }
     expect_no_match: true
-  description: "Logger.trace(... + tainted) — log-injection via concat."
+  description: "Logger.trace(... + tainted) - log-injection via concat."
 - id: java.log_injection.logger_fatal_concat
   enabled: true
   language: java
@@ -190,7 +190,7 @@
         }
       }
     expect_no_match: true
-  description: "Logger.fatal(... + tainted) — log-injection via concat."
+  description: "Logger.fatal(... + tainted) - log-injection via concat."
 - id: java.log_injection.mdc_put
   enabled: true
   language: java
@@ -241,7 +241,7 @@
         }
       }
     expect_no_match: true
-  description: "MDC.put(key, tainted header) — attacker-controlled logging context value can forge structured logs or poison downstream log correlation. Merged collision aliases: java.nosql.basicdbobject_where_put, java.nosql.basicdbobjectbuilder_where."
+  description: "MDC.put(key, tainted header) - attacker-controlled logging context value can forge structured logs or poison downstream log correlation. Merged collision aliases: java.nosql.basicdbobject_where_put, java.nosql.basicdbobjectbuilder_where."
   aliases:
   - java.nosql.basicdbobject_where_put
   - java.nosql.basicdbobjectbuilder_where

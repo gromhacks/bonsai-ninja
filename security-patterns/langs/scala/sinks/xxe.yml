@@ -28,7 +28,7 @@
         }
       }
     expect_no_match: true
-  description: "scala.xml.XML.load — uses JDK parser with default (unsafe) settings."
+  description: "scala.xml.XML.load - uses JDK parser with default (unsafe) settings."
 
 - id: scala.xxe.xml_loadstring
   enabled: true
@@ -59,7 +59,7 @@
         }
       }
     expect_no_match: true
-  description: "scala.xml.XML.loadString — XXE via default JDK parser."
+  description: "scala.xml.XML.loadString - XXE via default JDK parser."
 
 - id: scala.xxe.xml_loadfile
   enabled: true
@@ -90,7 +90,7 @@
         }
       }
     expect_no_match: true
-  description: "scala.xml.XML.loadFile — reads local file via default JDK parser; resolves external entities by default (XXE + SSRF + file read)."
+  description: "scala.xml.XML.loadFile - reads local file via default JDK parser; resolves external entities by default (XXE + SSRF + file read)."
 
 - id: scala.xxe.document_builder_parse
   enabled: true
@@ -126,7 +126,7 @@
         }
       }
     expect_no_match: true
-  description: "javax.xml.parsers.DocumentBuilder.parse — unsafe unless FEATURE_SECURE_PROCESSING is set."
+  description: "javax.xml.parsers.DocumentBuilder.parse - unsafe unless FEATURE_SECURE_PROCESSING is set."
 
 - id: scala.xxe.sax_parser_parse
   enabled: true
@@ -162,7 +162,7 @@
         }
       }
     expect_no_match: true
-  description: "javax.xml.parsers.SAXParser.parse — XXE risk with defaults."
+  description: "javax.xml.parsers.SAXParser.parse - XXE risk with defaults."
 
 - id: scala.xxe.xmlinputfactory_create
   enabled: true
@@ -193,7 +193,7 @@
         }
       }
     expect_no_match: true
-  description: "XMLInputFactory.createXMLStreamReader — XXE if IS_SUPPORTING_EXTERNAL_ENTITIES not disabled."
+  description: "XMLInputFactory.createXMLStreamReader - XXE if IS_SUPPORTING_EXTERNAL_ENTITIES not disabled."
 
 - id: scala.xxe.transformer_factory_new
   enabled: true
@@ -214,7 +214,7 @@
           TransformerFactory.newInstance(input)
         }
       }
-  description: "TransformerFactory.newInstance — XSLT + XXE risk."
+  description: "TransformerFactory.newInstance - XSLT + XXE risk."
 
 - id: scala.xxe.jaxb_unmarshaller_unmarshal
   enabled: true
@@ -250,7 +250,7 @@
         }
       }
     expect_no_match: true
-  description: "JAXB Unmarshaller.unmarshal — wraps SAX parser; same XXE rules apply."
+  description: "JAXB Unmarshaller.unmarshal - wraps SAX parser; same XXE rules apply."
 
 - id: scala.xxe.apache_poi_xssfworkbook_inputstream
   enabled: true
@@ -289,4 +289,4 @@
       class InputStream
       class XSSFWorkbook(args: Any*)
     expect_no_match: true
-  description: "Apache POI XSSFWorkbook(InputStream) — parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."
+  description: "Apache POI XSSFWorkbook(InputStream) - parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."

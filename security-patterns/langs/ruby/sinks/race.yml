@@ -1,6 +1,6 @@
 # ruby race / TOCTOU sinks (T501).
 
-# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# TOCTOU check sites - pair with subsequent open/chmod use-sites
 # in source order to identify the race window.
 - id: ruby.toctou.file_exist
   enabled: true
@@ -19,7 +19,7 @@
         def example(input, url, id, payload, request, params)
           File.exist?(input)
         end
-  description: "File.exist?(path) — check site; followed by File.open in a different stat window is TOCTOU."
+  description: "File.exist?(path) - check site; followed by File.open in a different stat window is TOCTOU."
 - id: ruby.toctou.file_stat
   enabled: true
   language: ruby
@@ -37,7 +37,7 @@
         def example(input, url, id, payload, request, params)
           File.stat(input)
         end
-  description: "File.stat(path) — check site for TOCTOU."
+  description: "File.stat(path) - check site for TOCTOU."
 - id: ruby.race.activerecord_commit
   enabled: true
   language: ruby
@@ -58,7 +58,7 @@
           txn.commit
         end
       expect_match_text: [txn.commit]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). ActiveRecord transaction#commit — transaction-after-error race-pair; later writes on the same connection without a fresh begin run outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). ActiveRecord transaction#commit - transaction-after-error race-pair; later writes on the same connection without a fresh begin run outside the intended transaction window."
 - id: ruby.race.activerecord_rollback
   enabled: true
   language: ruby
@@ -79,4 +79,4 @@
           txn.rollback
         end
       expect_match_text: [txn.rollback]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). ActiveRecord transaction#rollback — transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). ActiveRecord transaction#rollback - transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."

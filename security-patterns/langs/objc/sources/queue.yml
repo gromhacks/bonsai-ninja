@@ -12,7 +12,7 @@
     kind: call
     callee:
       name: receiveMessage
-  description: "Disabled — AWSSQS receiveMessage: — message body is attacker-controlled when producer is untrusted. Enable for iOS apps consuming SQS."
+  description: "Disabled - AWSSQS receiveMessage: - message body is attacker-controlled when producer is untrusted. Enable for iOS apps consuming SQS."
 
 - id: objc.source.mqtt_message_received
   enabled: false
@@ -27,4 +27,4 @@
     kind: param
     target:
       name: newMessage
-  description: "Disabled — MQTTSessionDelegate newMessage:data:onTopic: — MQTT payload from broker. Enable when broker is untrusted."
+  description: "Disabled - MQTTSessionDelegate newMessage:data:onTopic: - MQTT payload from broker. Enable when broker is untrusted."

@@ -18,7 +18,7 @@
       function example(input, url, id, payload, request, params, user)
         ssl_verify = false
       end
-  description: "ssl_verify = false in proxy/subrequest config — disables peer cert validation (MITM)."
+  description: "ssl_verify = false in proxy/subrequest config - disables peer cert validation (MITM)."
 
 - id: lua.tls.luasec_verify_none
   enabled: true
@@ -39,7 +39,7 @@
       function example(input, url, id, payload, request, params, user)
         verify = false
       end
-  description: "luasec ssl params verify = 'none' — skips certificate validation."
+  description: "luasec ssl params verify = 'none' - skips certificate validation."
 
 - id: lua.tls.http_request_verify_false
   enabled: false
@@ -54,4 +54,4 @@
     kind: call
     callee:
       attribute: [requests, get]
-  description: "Disabled — lua-requests get{verify=false}; off by default because lua-requests already has the SSRF rule."
+  description: "Disabled - lua-requests get{verify=false}; off by default because lua-requests already has the SSRF rule."

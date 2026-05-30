@@ -30,4 +30,4 @@
           end
         end
       expect_no_match: true
-  description: 'Logger.info("...#{user}...\n") — log forging.'
+  description: 'Logger.info("...#{user}...\n") - log forging.'

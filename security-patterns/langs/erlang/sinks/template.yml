@@ -29,7 +29,7 @@
       test() ->
         erlydtl:compile("Hello {{ name }}").
     expect_no_match: true
-  description: "erlydtl:compile — Django-template port; compiling a tainted template string enables SSTI."
+  description: "erlydtl:compile - Django-template port; compiling a tainted template string enables SSTI."
 
 - id: erlang.template_bbmustache_compile
   enabled: true
@@ -62,7 +62,7 @@
       test() ->
         bbmustache:render("Hello {{name}}").
     expect_no_match: true
-  description: "bbmustache:render / compile with a tainted template string — server-side template injection through dynamic templates."
+  description: "bbmustache:render / compile with a tainted template string - server-side template injection through dynamic templates."
 
 - id: erlang.template_mustache_render
   enabled: true
@@ -95,4 +95,4 @@
       test() ->
         mustache:render("Hello {{name}}").
     expect_no_match: true
-  description: "mustache:render / compile with attacker-controlled template text — dynamic template execution can expose SSTI behavior."
+  description: "mustache:render / compile with attacker-controlled template text - dynamic template execution can expose SSTI behavior."

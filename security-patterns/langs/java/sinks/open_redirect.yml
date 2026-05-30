@@ -120,7 +120,7 @@
         ModelAndView(Object... args) {}
       }
     expect_no_match: true
-  description: "Spring ModelAndView(\"redirect:\" + target) — tainted redirect view suffix can send users to attacker-controlled locations."
+  description: "Spring ModelAndView(\"redirect:\" + target) - tainted redirect view suffix can send users to attacker-controlled locations."
   imports:
   - org.springframework.web.servlet
 - id: java.open_redirect.jaxrs_response_seeother
@@ -253,7 +253,7 @@
       attribute:
       - ResponseEntity
       - status
-  description: "Disabled — flag only when 30x + Location header is tainted."
+  description: "Disabled - flag only when 30x + Location header is tainted."
 - id: java.open_redirect.quarkus_response_seeother
   enabled: true
   language: java
@@ -293,7 +293,7 @@
         }
       }
     expect_no_match: true
-  description: "Quarkus RestResponse.seeOther(tainted URI) — open redirect."
+  description: "Quarkus RestResponse.seeOther(tainted URI) - open redirect."
 
 - id: java.open_redirect.spring_oauth_redirect_uri_tainted
   enabled: true
@@ -329,4 +329,4 @@
         }
       }
     expect_no_match: true
-  description: "Spring OAuth2AuthorizationRequest.redirectUri(tainted) — attacker-controlled redirect_uri allows OAuth callback hijack and token theft."
+  description: "Spring OAuth2AuthorizationRequest.redirectUri(tainted) - attacker-controlled redirect_uri allows OAuth callback hijack and token theft."

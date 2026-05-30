@@ -28,7 +28,7 @@
         Nokogiri.XML("<root/>")
       end
     expect_no_match: true
-  description: "Nokogiri::XML — flag if NOENT or DTDLOAD set."
+  description: "Nokogiri::XML - flag if NOENT or DTDLOAD set."
 - id: ruby.xxe.nokogiri_xml_document_parse
   enabled: true
   language: ruby
@@ -79,7 +79,7 @@
       attribute:
       - Nokogiri
       - HTML
-  description: "Disabled — HTML parser ignores DTDs."
+  description: "Disabled - HTML parser ignores DTDs."
 - id: ruby.xxe.libxml_parser_string
   enabled: true
   language: ruby
@@ -112,7 +112,7 @@
         LibXML::XML::Parser.string("<root/>")
       end
     expect_no_match: true
-  description: "LibXML::XML::Parser.string — DTD load enabled by default."
+  description: "LibXML::XML::Parser.string - DTD load enabled by default."
 - id: ruby.xxe.libxml_parser_file
   enabled: true
   language: ruby
@@ -169,7 +169,7 @@
   - name: ruby.xxe.rexml_document_new literal negative
     code: "def example(input, url, id, payload, request, params)\n  REXML::Document.new(\"<root/>\")\nend\n"
     expect_no_match: true
-  description: "REXML::Document.new — historically vulnerable to billion-laughs / XXE."
+  description: "REXML::Document.new - historically vulnerable to billion-laughs / XXE."
 - id: ruby.xxe.hpricot_xml
   enabled: true
   language: ruby
@@ -200,7 +200,7 @@
         Hpricot.XML("<root/>")
       end
     expect_no_match: true
-  description: "Hpricot.XML(xml) — historic XML parser, XXE-vulnerable."
+  description: "Hpricot.XML(xml) - historic XML parser, XXE-vulnerable."
 - id: ruby.xxe.nori_parse
   enabled: true
   language: ruby
@@ -233,4 +233,4 @@
         Nori.parse("<root/>")
       end
     expect_no_match: true
-  description: "Nori.parse — underlying parser (Nokogiri/REXML) controls XXE defaults."
+  description: "Nori.parse - underlying parser (Nokogiri/REXML) controls XXE defaults."

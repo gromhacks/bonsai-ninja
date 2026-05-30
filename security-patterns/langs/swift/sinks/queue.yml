@@ -23,7 +23,7 @@
       import AWSCore // aws-sdk-swift
       func test() { sendMessage("safe") }
     expect_no_match: true
-  description: "AWS SDK for Swift sendMessage — tainted queue target/body injects arbitrary broker payloads."
+  description: "AWS SDK for Swift sendMessage - tainted queue target/body injects arbitrary broker payloads."
 
   imports:
   - AWSCore
@@ -40,4 +40,4 @@
     kind: call
     callee:
       name: publish
-  description: "Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across Swift clients and app code."
+  description: "Disabled - cloud publish is real queue fanout, but bare `publish` is too generic across Swift clients and app code."

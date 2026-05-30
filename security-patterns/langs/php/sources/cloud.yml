@@ -12,7 +12,7 @@
     kind: param
     target:
       name: event
-  description: "Disabled — too broad; enable per-project via a narrower rule."
+  description: "Disabled - too broad; enable per-project via a narrower rule."
 
 - id: php.source.bref_handler_handle
   enabled: false
@@ -26,4 +26,4 @@
     kind: call
     callee:
       attribute: [Handler, handle]
-  description: "Disabled — adapters index local receivers like `$handler->handle(...)`, not Bref Handler type facts; a bare `handle` fallback would match unrelated APIs."
+  description: "Disabled - adapters index local receivers like `$handler->handle(...)`, not Bref Handler type facts; a bare `handle` fallback would match unrelated APIs."

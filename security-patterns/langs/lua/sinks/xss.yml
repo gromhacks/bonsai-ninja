@@ -27,7 +27,7 @@
           ngx.say("<p>ok</p>")
         end
       expect_no_match: true
-  description: "ngx.say(body) — writes response body + newline; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_say_traceback."
+  description: "ngx.say(body) - writes response body + newline; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_say_traceback."
 
 - id: lua.xss.ngx_print
   aliases:
@@ -57,4 +57,4 @@
           ngx.print("<p>ok</p>")
         end
       expect_no_match: true
-  description: "ngx.print(body) — writes raw response body; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_print_error."
+  description: "ngx.print(body) - writes raw response body; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_print_error."

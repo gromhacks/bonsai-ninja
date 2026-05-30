@@ -1,9 +1,9 @@
-# TypeScript sanitizers — tag names use the spec-canonical vocabulary
+# TypeScript sanitizers - tag names use the spec-canonical vocabulary
 # (html-encode / html-sanitize / url-encode / url-parse / shell-escape /
 # sql-parameter / constant-time / jwt-verify / path-sanitize / ldap-escape /
 # numeric-coerce / validation).
 
-# ── HTML ────────────────────────────────────────────────────────────────────
+# -- HTML --------------------------------------------------------------------
 - id: typescript.sanitizer.dompurify_sanitize
   enabled: true
   language: typescript
@@ -22,7 +22,7 @@
         return DOMPurify.sanitize(input);
       }
     expect_match_text: [DOMPurify.sanitize]
-  description: "DOMPurify.sanitize — strips executable HTML/SVG, returns XSS-safe fragment."
+  description: "DOMPurify.sanitize - strips executable HTML/SVG, returns XSS-safe fragment."
 
 - id: typescript.sanitizer.xss_library
   enabled: true
@@ -42,7 +42,7 @@
         return xss(input);
       }
     expect_match_text: [xss]
-  description: "`xss` library filter — whitelists tags/attrs, escapes the rest."
+  description: "`xss` library filter - whitelists tags/attrs, escapes the rest."
 
 - id: typescript.sanitizer.he_encode
   enabled: true
@@ -61,7 +61,7 @@
         return he.encode(input);
       }
     expect_match_text: [he.encode]
-  description: "he.encode — HTML entity encode (named + numeric refs)."
+  description: "he.encode - HTML entity encode (named + numeric refs)."
 
 - id: typescript.sanitizer.he_escape
   enabled: true
@@ -80,7 +80,7 @@
         return he.escape(input);
       }
     expect_match_text: [he.escape]
-  description: "he.escape — escapes &<>\"' to HTML entities."
+  description: "he.escape - escapes &<>\"' to HTML entities."
 
 - id: typescript.sanitizer.validator_escape
   enabled: true
@@ -99,9 +99,9 @@
         return validator.escape(input);
       }
     expect_match_text: [validator.escape]
-  description: "validator.escape — replaces HTML-unsafe characters with entity refs."
+  description: "validator.escape - replaces HTML-unsafe characters with entity refs."
 
-# ── URL ─────────────────────────────────────────────────────────────────────
+# -- URL ---------------------------------------------------------------------
 - id: typescript.sanitizer.validator_is_url
   enabled: true
   language: typescript
@@ -119,7 +119,7 @@
         return validator.isURL(input);
       }
     expect_match_text: [validator.isURL]
-  description: "validator.isURL — URL format check; pair with allowlist to block open-redirect."
+  description: "validator.isURL - URL format check; pair with allowlist to block open-redirect."
 
 - id: typescript.sanitizer.validator_is_numeric
   enabled: true
@@ -138,9 +138,9 @@
         return validator.isNumeric(input);
       }
     expect_match_text: [validator.isNumeric]
-  description: "validator.isNumeric — digits-only check; neutralises tainted numeric paths."
+  description: "validator.isNumeric - digits-only check; neutralises tainted numeric paths."
 
-# ── SQL ─────────────────────────────────────────────────────────────────────
+# -- SQL ---------------------------------------------------------------------
 - id: typescript.sanitizer.sqlstring_escape
   enabled: true
   language: typescript
@@ -158,7 +158,7 @@
         return SqlString.escape(input);
       }
     expect_match_text: [SqlString.escape]
-  description: "sqlstring.escape — MySQL-quotes the value for direct interpolation."
+  description: "sqlstring.escape - MySQL-quotes the value for direct interpolation."
 
 - id: typescript.sanitizer.sql_template_strings
   enabled: true
@@ -177,7 +177,7 @@
         return SQL`SELECT * FROM users WHERE id = ${id}`;
       }
     expect_match_text: [SQL]
-  description: "sql-template-strings tagged template — parametrises interpolations."
+  description: "sql-template-strings tagged template - parametrises interpolations."
 
 - id: typescript.sanitizer.mysql_escape
   enabled: true
@@ -196,7 +196,7 @@
         return mysql.escape(input);
       }
     expect_match_text: [mysql.escape]
-  description: "mysql / mysql2 .escape() — quotes literals for raw SQL."
+  description: "mysql / mysql2 .escape() - quotes literals for raw SQL."
 
 - id: typescript.sanitizer.pg_format
   enabled: true
@@ -215,9 +215,9 @@
         return format("%L", input);
       }
     expect_match_text: [format]
-  description: "pg-format format() — quotes with %I / %L specifiers (bare `format` name; narrow in audit)."
+  description: "pg-format format() - quotes with %I / %L specifiers (bare `format` name; narrow in audit)."
 
-# ── Shell ───────────────────────────────────────────────────────────────────
+# -- Shell -------------------------------------------------------------------
 - id: typescript.sanitizer.shell_quote
   enabled: true
   language: typescript
@@ -235,7 +235,7 @@
         return shellQuote.quote(argv);
       }
     expect_match_text: [shellQuote.quote]
-  description: "shell-quote.quote — produces a POSIX-safe shell-escaped string."
+  description: "shell-quote.quote - produces a POSIX-safe shell-escaped string."
 - id: typescript.sanitizer.shell_escape_default
   enabled: true
   language: typescript
@@ -253,9 +253,9 @@
         return shellescape(argv);
       }
     expect_match_text: [shellescape]
-  description: "shell-escape default export — produces a POSIX-safe shell-escaped string."
+  description: "shell-escape default export - produces a POSIX-safe shell-escaped string."
 
-# ── Validation (zod / joi / yup / class-validator) ──────────────────────────
+# -- Validation (zod / joi / yup / class-validator) --------------------------
 - id: typescript.sanitizer.zod_parse
   enabled: true
   language: typescript
@@ -274,7 +274,7 @@
         return schema.parse(input);
       }
     expect_match_text: [schema.parse]
-  description: "zod schema.parse — throws on shape mismatch; coerced output is schema-constrained."
+  description: "zod schema.parse - throws on shape mismatch; coerced output is schema-constrained."
 
 - id: typescript.sanitizer.zod_safeparse
   enabled: true
@@ -294,7 +294,7 @@
         return schema.safeParse(input);
       }
     expect_match_text: [schema.safeParse]
-  description: "zod schema.safeParse — non-throwing schema validation."
+  description: "zod schema.safeParse - non-throwing schema validation."
 
 - id: typescript.sanitizer.yup_validate
   enabled: true
@@ -313,7 +313,7 @@
         return yupSchema.validate(input);
       }
     expect_match_text: [yupSchema.validate]
-  description: "yup schema.validate / validateSync — schema validation."
+  description: "yup schema.validate / validateSync - schema validation."
 
 - id: typescript.sanitizer.joi_validate
   enabled: true
@@ -332,7 +332,7 @@
         return joiSchema.validate(input);
       }
     expect_match_text: [joiSchema.validate]
-  description: "Joi schema.validate — validates and coerces input against a declared schema."
+  description: "Joi schema.validate - validates and coerces input against a declared schema."
 
 - id: typescript.sanitizer.class_validator_validate
   enabled: false
@@ -345,9 +345,9 @@
     kind: call
     callee:
       name: validate
-  description: "Disabled — bare validate overmatches unrelated functions; enable when import-aware matching can prove class-validator."
+  description: "Disabled - bare validate overmatches unrelated functions; enable when import-aware matching can prove class-validator."
 
-# ── JWT ─────────────────────────────────────────────────────────────────────
+# -- JWT ---------------------------------------------------------------------
 - id: typescript.sanitizer.jwt_verify
   enabled: true
   language: typescript
@@ -365,7 +365,7 @@
         return jwt.verify(token, key);
       }
     expect_match_text: [jwt.verify]
-  description: "jsonwebtoken.verify — asserts signature & expiry (pin `algorithms`)."
+  description: "jsonwebtoken.verify - asserts signature & expiry (pin `algorithms`)."
 
 - id: typescript.sanitizer.jose_jwtverify
   enabled: true
@@ -384,9 +384,9 @@
         return jwtVerify(token, key);
       }
     expect_match_text: [jwtVerify]
-  description: "jose.jwtVerify — verifies JWS signature + claims."
+  description: "jose.jwtVerify - verifies JWS signature + claims."
 
-# ── Constant-time compare ───────────────────────────────────────────────────
+# -- Constant-time compare ---------------------------------------------------
 - id: typescript.sanitizer.crypto_timingsafeequal
   enabled: true
   language: typescript
@@ -404,9 +404,9 @@
         return crypto.timingSafeEqual(a, b);
       }
     expect_match_text: [crypto.timingSafeEqual]
-  description: "crypto.timingSafeEqual — constant-time buffer comparison (anti-timing-oracle)."
+  description: "crypto.timingSafeEqual - constant-time buffer comparison (anti-timing-oracle)."
 
-# ── Path ────────────────────────────────────────────────────────────────────
+# -- Path --------------------------------------------------------------------
 - id: typescript.sanitizer.path_normalize
   enabled: false
   disabled_reason:
@@ -418,9 +418,9 @@
     kind: call
     callee:
       attribute: [path, normalize]
-  description: "Disabled — path.normalize alone does NOT prevent traversal; requires path.resolve + prefix check."
+  description: "Disabled - path.normalize alone does NOT prevent traversal; requires path.resolve + prefix check."
 
-# ── NoSQL operator stripping ────────────────────────────────────────────────
+# -- NoSQL operator stripping ------------------------------------------------
 - id: typescript.sanitizer.mongo_sanitize
   enabled: true
   language: typescript
@@ -438,7 +438,7 @@
         return mongoSanitize(input);
       }
     expect_match_text: [mongoSanitize]
-  description: "mongo-sanitize — strips top-level $-prefixed and dot-containing keys, neutralising operator injection."
+  description: "mongo-sanitize - strips top-level $-prefixed and dot-containing keys, neutralising operator injection."
 
 - id: typescript.sanitizer.express_mongo_sanitize
   enabled: false
@@ -452,10 +452,10 @@
     kind: call
     callee:
       name: mongoSanitize
-  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by typescript.sanitizer.mongo_sanitize with
+  description: "Disabled duplicate - same `mongoSanitize()` call shape is covered by typescript.sanitizer.mongo_sanitize with
     express-mongo-sanitize package metadata merged."
 
-# ── Schema validation gates ────────────────────────────────────────────────
+# -- Schema validation gates ------------------------------------------------
 - id: typescript.sanitizer.iots_decode
   enabled: true
   language: typescript
@@ -473,7 +473,7 @@
         return User.decode(input);
       }
     expect_match_text: [User.decode]
-  description: "io-ts decoder.decode — fp-ts/io-ts runtime type validation; right side of Either is schema-constrained."
+  description: "io-ts decoder.decode - fp-ts/io-ts runtime type validation; right side of Either is schema-constrained."
 
 - id: typescript.sanitizer.class_validator_validate_or_reject
   enabled: true
@@ -492,7 +492,7 @@
         return validateOrReject(input);
       }
     expect_match_text: [validateOrReject]
-  description: "class-validator validateOrReject — throws on schema mismatch."
+  description: "class-validator validateOrReject - throws on schema mismatch."
 
 - id: typescript.sanitizer.bcrypt_compare
   enabled: true
@@ -511,7 +511,7 @@
         return bcrypt.compare(input, hash);
       }
     expect_match_text: [bcrypt.compare]
-  description: "bcrypt.compare / compareSync — constant-time hash verification."
+  description: "bcrypt.compare / compareSync - constant-time hash verification."
 
 - id: typescript.sanitizer.argon2_verify
   enabled: true
@@ -620,7 +620,7 @@
         return allowedRoles.has(role);
       }
     expect_match_text: [allowedRoles.has]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
 
   disabled_reason:
@@ -644,7 +644,7 @@
         return allowedRoutes.includes(next);
       }
     expect_match_text: [allowedRoutes.includes]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Named Array.includes allowlists - validates that input is one of a finite literal set."
 
   disabled_reason:
@@ -677,7 +677,7 @@
     code: "const allowedRoutes: Record<string, string> = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name:
       string): string {\n  if (Object.hasOwn()) {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before
     selecting a trusted mapped value."
 
@@ -702,7 +702,7 @@
         return uuidRe.test(id);
       }
     expect_match_text: [uuidRe.test]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
     Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
 
   disabled_reason:
@@ -784,7 +784,7 @@
         return sanitizeHtml(input);
       }
     expect_match_text: [sanitizeHtml]
-  description: "sanitize-html — tag/attribute allowlist stripping."
+  description: "sanitize-html - tag/attribute allowlist stripping."
 
 - id: typescript.sanitizer.escape_html_module
   enabled: true
@@ -803,7 +803,7 @@
         return escapeHtml(input);
       }
     expect_match_text: [escapeHtml]
-  description: "escape-html module — returns an HTML-encoded copy of the input."
+  description: "escape-html module - returns an HTML-encoded copy of the input."
 
 - id: typescript.sanitizer.named_regex_match
   enabled: false
@@ -833,8 +833,8 @@
   - name: input match slug regex negative constraint boundary
     code: "function ok(input: string, slugRe: RegExp) {\n  return input.match();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    String.match(named allowlist regex) gates - regex object must be named for safe/id/slug/uuid/allowed validation."
 
   disabled_reason:
     code: over-broad
@@ -870,8 +870,8 @@
     code: "const _u = require(\"path\");\nfunction ok(resolved: string, uploadDir: string) {\n  return resolved.startsWith();\n\
       }\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Canonical path containment guard after path.resolve/normalize - validates the resolved candidate remains under a trusted
     root."
 
   disabled_reason:
@@ -904,8 +904,8 @@
   - name: allowed origins has url origin negative constraint boundary
     code: "function ok(url: URL, allowedOrigins: Set<string>) {\n  return allowedOrigins.has();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    URL origin/host allowlist membership - credits finite allowlists over parsed URL origin/host/hostname values."
 
   disabled_reason:
     code: over-broad
@@ -947,7 +947,7 @@
         return prisma.$queryRaw(Prisma.raw("SELECT * FROM " + table));
       }
     expect_no_match: true
-  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string
+  description: "Prisma $queryRaw/$executeRaw tagged-template form - interpolations are parameterized unless Prisma.raw/string
     concatenation is used."
 
 - id: typescript.sanitizer.sequelize_query_bindings
@@ -983,7 +983,7 @@
     code: "const _u = require(\"sequelize\");\nfunction byId(sequelize: any, id: string) {\n  return sequelize.query();\n\
       }\n"
     expect_no_match: true
-  description: "Sequelize raw query with replacements/bind options and literal SQL text — parameterized form."
+  description: "Sequelize raw query with replacements/bind options and literal SQL text - parameterized form."
 
 - id: typescript.sanitizer.ldap_escape_variants
   enabled: true
@@ -1009,7 +1009,7 @@
         return ldapEscape.filter(input);
       }
     expect_match_text: [ldapEscape.filter]
-  description: "LDAP filter escaping variants — RFC 4515 escaping before LDAP search filter interpolation."
+  description: "LDAP filter escaping variants - RFC 4515 escaping before LDAP search filter interpolation."
 
 - id: typescript.sanitizer.xpath_literal_escape
   enabled: true
@@ -1035,7 +1035,7 @@
         return xpath.literal(input);
       }
     expect_match_text: [xpath.literal]
-  description: "XPath literal escaping — quotes attacker-controlled strings before XPath expression interpolation."
+  description: "XPath literal escaping - quotes attacker-controlled strings before XPath expression interpolation."
 
 - id: typescript.sanitizer.xml_escape
   enabled: true
@@ -1087,11 +1087,11 @@
     code: "const _u = require(\"libxmljs\");\nfunction parse(libxmljs: any, input: string) {\n  return libxmljs.parseXml();\n\
       }\n"
     expect_no_match: true
-  description: "libxmljs parser calls with safe XXE options — entity expansion/DTD loading disabled and network access blocked."
+  description: "libxmljs parser calls with safe XXE options - entity expansion/DTD loading disabled and network access blocked."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: typescript.passthrough.decode_uri_component
@@ -1111,7 +1111,7 @@
         return decodeURIComponent(input);
       }
     expect_match_text: [decodeURIComponent]
-  description: "decodeURIComponent(s) — preserves taint."
+  description: "decodeURIComponent(s) - preserves taint."
 - id: typescript.passthrough.decode_uri
   enabled: true
   language: typescript
@@ -1129,7 +1129,7 @@
         return decodeURI(input);
       }
     expect_match_text: [decodeURI]
-  description: "decodeURI(s) — preserves taint."
+  description: "decodeURI(s) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -1152,7 +1152,7 @@
         return csurf();
       }
     expect_match_text: [csurf]
-  description: "csurf() — Express/Koa CSRF middleware factory."
+  description: "csurf() - Express/Koa CSRF middleware factory."
 - id: typescript.csrf.koa_csrf
   enabled: true
   language: typescript
@@ -1215,4 +1215,4 @@
   - name: secure httponly cookie negative constraint boundary
     code: "function setCookie(res: any, token: string) {\n  return res.cookie();\n}\n"
     expect_no_match: true
-  description: "res.cookie(name, val, {httpOnly: true, secure: true}) — TS via @types/express."
+  description: "res.cookie(name, val, {httpOnly: true, secure: true}) - TS via @types/express."

@@ -26,7 +26,7 @@
         dlopen("safe");
       }
     expect_no_match: true
-  description: "dlopen(tainted) — loads arbitrary shared library."
+  description: "dlopen(tainted) - loads arbitrary shared library."
 
 - id: c.eval.dlmopen
   enabled: true
@@ -55,7 +55,7 @@
         dlmopen("safe", "safe");
       }
     expect_no_match: true
-  description: "dlmopen(lmid, tainted_path, flags) — loads a shared object into a namespace; tainted path runs arbitrary attacker code."
+  description: "dlmopen(lmid, tainted_path, flags) - loads a shared object into a namespace; tainted path runs arbitrary attacker code."
 
 - id: c.eval.loadlibrary
   enabled: true
@@ -113,7 +113,7 @@
         LoadLibraryW("safe");
       }
     expect_no_match: true
-  description: "Win32 LoadLibraryW(tainted_path) — UTF-16 variant; tainted DLL path loads attacker-chosen code."
+  description: "Win32 LoadLibraryW(tainted_path) - UTF-16 variant; tainted DLL path loads attacker-chosen code."
 
 - id: c.eval.dlsym
   enabled: true
@@ -140,7 +140,7 @@
         dlsym(handle, "plugin_init");
       }
     expect_no_match: true
-  description: "dlsym(handle, tainted_symbol) — resolves an attacker-chosen symbol from a loaded library; unsafe plugin dispatch can become code execution."
+  description: "dlsym(handle, tainted_symbol) - resolves an attacker-chosen symbol from a loaded library; unsafe plugin dispatch can become code execution."
 
 - id: c.eval.lua_dostring
   enabled: true
@@ -171,7 +171,7 @@
         luaL_dostring("safe", "safe");
       }
     expect_no_match: true
-  description: "Lua C API luaL_dostring(L, tainted_src) — loads + executes Lua source; tainted source = arbitrary Lua exec."
+  description: "Lua C API luaL_dostring(L, tainted_src) - loads + executes Lua source; tainted source = arbitrary Lua exec."
 
 - id: c.eval.lua_dofile
   enabled: true
@@ -202,7 +202,7 @@
         luaL_dofile("safe", "safe");
       }
     expect_no_match: true
-  description: "Lua C API luaL_dofile(L, tainted_path) — loads + executes a Lua script; tainted path = arbitrary script exec."
+  description: "Lua C API luaL_dofile(L, tainted_path) - loads + executes a Lua script; tainted path = arbitrary script exec."
 
 - id: c.eval.lua_loadstring
   enabled: true
@@ -233,7 +233,7 @@
         luaL_loadstring("safe", "safe");
       }
     expect_no_match: true
-  description: "luaL_loadstring — preps code; paired with lua_pcall."
+  description: "luaL_loadstring - preps code; paired with lua_pcall."
 
 - id: c.eval.python_pyrun_simplestring
   enabled: true
@@ -267,7 +267,7 @@
         PyRun_SimpleString("safe");
       }
     expect_no_match: true
-  description: "Embedded CPython PyRun_SimpleString(tainted) — executes Python source in __main__; full RCE via eval."
+  description: "Embedded CPython PyRun_SimpleString(tainted) - executes Python source in __main__; full RCE via eval."
 
   imports:
   - Python
@@ -306,7 +306,7 @@
         PyRun_String("safe");
       }
     expect_no_match: true
-  description: "CPython PyRun_String(tainted, start, globals, locals) — executes Python source in a caller-supplied scope; RCE if source is attacker-controlled."
+  description: "CPython PyRun_String(tainted, start, globals, locals) - executes Python source in a caller-supplied scope; RCE if source is attacker-controlled."
 
   imports:
   - Python
@@ -342,7 +342,7 @@
         Tcl_Eval("safe", "safe");
       }
     expect_no_match: true
-  description: "Embedded Tcl Tcl_Eval(interp, tainted_script) — runs a Tcl script; command substitution makes tainted input trivial RCE."
+  description: "Embedded Tcl Tcl_Eval(interp, tainted_script) - runs a Tcl script; command substitution makes tainted input trivial RCE."
 
 - id: c.eval.duk_eval_string
   enabled: true
@@ -373,4 +373,4 @@
         duk_eval_string("safe", "safe");
       }
     expect_no_match: true
-  description: "duktape duk_eval_string(ctx, tainted_src) — evaluates JavaScript source in the embedded engine; RCE inside the duk sandbox."
+  description: "duktape duk_eval_string(ctx, tainted_src) - evaluates JavaScript source in the embedded engine; RCE inside the duk sandbox."

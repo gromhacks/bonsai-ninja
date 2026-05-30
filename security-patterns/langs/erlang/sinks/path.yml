@@ -26,7 +26,7 @@
         test() ->
           file:read_file("priv/app.config").
       expect_no_match: true
-  description: "file:read_file/1 — reads arbitrary path; traversal via ../ leaks secrets (/etc/passwd, keys)."
+  description: "file:read_file/1 - reads arbitrary path; traversal via ../ leaks secrets (/etc/passwd, keys)."
 - id: erlang.path.file_write_file
   aliases:
   - erlang.upload_file_write_client_filename
@@ -56,7 +56,7 @@
         test(Input) ->
           file:write_file("tmp/report.txt", Input).
       expect_no_match: true
-  description: "file:write_file/2,3 — tainted path lets attacker clobber arbitrary files; tainted file content alone is not a traversal finding."
+  description: "file:write_file/2,3 - tainted path lets attacker clobber arbitrary files; tainted file content alone is not a traversal finding."
 - id: erlang.path.file_delete
   enabled: true
   language: erlang
@@ -84,7 +84,7 @@
         test() ->
           file:delete("tmp/cache.dat").
       expect_no_match: true
-  description: "file:delete/1 — tainted path enables arbitrary file deletion (DoS)."
+  description: "file:delete/1 - tainted path enables arbitrary file deletion (DoS)."
 - id: erlang.path.file_open
   enabled: true
   language: erlang
@@ -112,7 +112,7 @@
         test() ->
           file:open("priv/app.config", [read]).
       expect_no_match: true
-  description: "file:open/2 — same traversal surface as read_file/write_file depending on modes."
+  description: "file:open/2 - same traversal surface as read_file/write_file depending on modes."
 - id: erlang.path.file_make_dir
   enabled: true
   language: erlang
@@ -140,7 +140,7 @@
         test() ->
           file:make_dir("tmp/uploads").
       expect_no_match: true
-  description: "file:make_dir/1 — tainted dir name allows directory creation outside intended root."
+  description: "file:make_dir/1 - tainted dir name allows directory creation outside intended root."
 - id: erlang.path.file_make_dir_all
   enabled: true
   language: erlang
@@ -168,7 +168,7 @@
         test() ->
           filelib:ensure_dir("tmp/uploads/file.txt").
       expect_no_match: true
-  description: "filelib:ensure_dir/1 — creates parent directories for a tainted path outside the intended root."
+  description: "filelib:ensure_dir/1 - creates parent directories for a tainted path outside the intended root."
 - id: erlang.path.file_rename_source
   enabled: true
   language: erlang
@@ -196,7 +196,7 @@
         test() ->
           file:rename("tmp/in.dat", "tmp/out.dat").
       expect_no_match: true
-  description: "file:rename/2 — tainted source path enables arbitrary file move."
+  description: "file:rename/2 - tainted source path enables arbitrary file move."
 - id: erlang.path.file_rename_dest
   enabled: true
   language: erlang
@@ -224,7 +224,7 @@
         test() ->
           file:rename("tmp/in.dat", "tmp/out.dat").
       expect_no_match: true
-  description: "file:rename/2 — tainted destination path enables arbitrary overwrite."
+  description: "file:rename/2 - tainted destination path enables arbitrary overwrite."
 - id: erlang.path.zip_extract
   enabled: true
   language: erlang
@@ -252,7 +252,7 @@
         test() ->
           zip:extract("priv/archive.zip").
       expect_no_match: true
-  description: "zip:extract — archive with ../ entries escapes target dir (zip-slip / arbitrary write)."
+  description: "zip:extract - archive with ../ entries escapes target dir (zip-slip / arbitrary write)."
 - id: erlang.path.file_list_dir
   enabled: true
   language: erlang
@@ -280,7 +280,7 @@
         test() ->
           file:list_dir("priv/static").
       expect_no_match: true
-  description: "file:list_dir/list_dir_all — tainted directory path discloses arbitrary filesystem structure."
+  description: "file:list_dir/list_dir_all - tainted directory path discloses arbitrary filesystem structure."
 - id: erlang.path.file_del_dir
   enabled: true
   language: erlang
@@ -308,4 +308,4 @@
         test() ->
           file:del_dir("tmp/cache").
       expect_no_match: true
-  description: "file:del_dir/del_dir_r — tainted directory path enables arbitrary directory deletion."
+  description: "file:del_dir/del_dir_r - tainted directory path enables arbitrary directory deletion."

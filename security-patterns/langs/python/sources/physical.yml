@@ -17,7 +17,7 @@
       import RPi.GPIO
       def example(user_input):
           return GPIO.input(user_input)
-  description: "RPi.GPIO GPIO.input(pin) — physical pin state read."
+  description: "RPi.GPIO GPIO.input(pin) - physical pin state read."
 
 - id: python.physical.smbus_read_byte
   enabled: true
@@ -36,7 +36,7 @@
       import smbus
       def example(user_input):
           return read_byte(user_input)
-  description: "SMBus read_byte — byte read from an I2C/SMBus peripheral."
+  description: "SMBus read_byte - byte read from an I2C/SMBus peripheral."
 
 - id: python.physical.smbus_read_byte_data
   enabled: true
@@ -55,7 +55,7 @@
       import smbus
       def example(user_input):
           return read_byte_data(user_input)
-  description: "SMBus read_byte_data — device register read over a chip-to-chip bus."
+  description: "SMBus read_byte_data - device register read over a chip-to-chip bus."
 
 - id: python.physical.smbus_read_word_data
   enabled: true
@@ -74,7 +74,7 @@
       import smbus
       def example(user_input):
           return read_word_data(user_input)
-  description: "SMBus read_word_data — 16-bit register read from an attached device."
+  description: "SMBus read_word_data - 16-bit register read from an attached device."
 
 - id: python.physical.smbus_read_i2c_block_data
   enabled: true
@@ -93,7 +93,7 @@
       import smbus
       def example(user_input):
           return read_i2c_block_data(user_input)
-  description: "SMBus read_i2c_block_data — block read from a peripheral over I2C."
+  description: "SMBus read_i2c_block_data - block read from a peripheral over I2C."
 
 - id: python.physical.spidev_readbytes
   enabled: true
@@ -112,7 +112,7 @@
       import spidev
       def example(user_input):
           return readbytes(user_input)
-  description: "spidev readbytes — SPI peripheral bytes clocked in from external hardware."
+  description: "spidev readbytes - SPI peripheral bytes clocked in from external hardware."
 
 - id: python.physical.pyserial_read_until
   enabled: true
@@ -131,7 +131,7 @@
       import pyserial
       def example(user_input):
           return read_until(user_input)
-  description: "pyserial read_until — UART/serial frame bytes received from connected hardware."
+  description: "pyserial read_until - UART/serial frame bytes received from connected hardware."
 
 - id: python.physical.periphery_gpio_read_event
   enabled: true
@@ -150,6 +150,6 @@
       import pythonperiphery
       def example(user_input):
           return read_event(user_input)
-  description: "python-periphery read_event — edge event from GPIO-backed hardware."
+  description: "python-periphery read_event - edge event from GPIO-backed hardware."
   imports:
   - pythonperiphery

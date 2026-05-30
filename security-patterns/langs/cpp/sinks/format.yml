@@ -1,4 +1,4 @@
-# C++ format-string sinks — tainted format argument.
+# C++ format-string sinks - tainted format argument.
 # (iostreams are safe by default; these are C-style APIs still used from C++.)
 - id: cpp.format.printf_tainted
   enabled: true
@@ -26,7 +26,7 @@
         printf("%s", "safe");
       }
     expect_no_match: true
-  description: "printf(fmt, ...) with tainted fmt — arbitrary read/write via %n / %s."
+  description: "printf(fmt, ...) with tainted fmt - arbitrary read/write via %n / %s."
 
 - id: cpp.format.fprintf_tainted
   aliases:
@@ -90,7 +90,7 @@
         sprintf(buf, "%s", "safe");
       }
     expect_no_match: true
-  description: "sprintf(buf, fmt, ...) with tainted fmt — format injection + overflow. Also covers merged aliases: cpp.memory.sprintf."
+  description: "sprintf(buf, fmt, ...) with tainted fmt - format injection + overflow. Also covers merged aliases: cpp.memory.sprintf."
 
 - id: cpp.format.snprintf_tainted
   enabled: true
@@ -122,7 +122,7 @@
         snprintf(buf, 128, "%s", "safe");
       }
     expect_no_match: true
-  description: "snprintf(buf, n, fmt, ...) with tainted fmt — format injection (length is bounded)."
+  description: "snprintf(buf, n, fmt, ...) with tainted fmt - format injection (length is bounded)."
 
 - id: cpp.format.vprintf_tainted
   enabled: true
@@ -205,7 +205,7 @@
         std::format("{}");
       }
     expect_no_match: true
-  description: "std::format(fmt, args...) with non-literal/tainted fmt — C++20 format consteval is bypassed when the template is a runtime string (use std::vformat at your own risk)."
+  description: "std::format(fmt, args...) with non-literal/tainted fmt - C++20 format consteval is bypassed when the template is a runtime string (use std::vformat at your own risk)."
 
 - id: cpp.format.std_vformat_tainted
   enabled: true
@@ -232,4 +232,4 @@
         std::vformat("{}");
       }
     expect_no_match: true
-  description: "std::vformat(fmt, args) with tainted fmt — runtime template string, no consteval check."
+  description: "std::vformat(fmt, args) with tainted fmt - runtime template string, no consteval check."

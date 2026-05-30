@@ -1,5 +1,5 @@
 # Perl weak-crypto sinks.
-# Called as exported subs: `md5_hex($x)` or `sha1_hex($x)` — bare name.
+# Called as exported subs: `md5_hex($x)` or `sha1_hex($x)` - bare name.
 - id: perl.crypto.digest_md5
   enabled: true
   language: perl
@@ -20,7 +20,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         md5_hex($input)
       }
-  description: "Digest::MD5 md5_hex — collision-broken; never use for password hashing or integrity."
+  description: "Digest::MD5 md5_hex - collision-broken; never use for password hashing or integrity."
 
 - id: perl.crypto.digest_md5_base64
   enabled: true
@@ -42,7 +42,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         md5_base64($input)
       }
-  description: "Digest::MD5 md5_base64 — same MD5 primitive, base64 output; collision-broken."
+  description: "Digest::MD5 md5_base64 - same MD5 primitive, base64 output; collision-broken."
 
 - id: perl.crypto.digest_sha1
   enabled: true
@@ -64,7 +64,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         sha1_hex($input)
       }
-  description: "Digest::SHA sha1_hex — collision attacks published (SHAttered); use SHA-256+ for integrity, argon2/bcrypt for passwords."
+  description: "Digest::SHA sha1_hex - collision attacks published (SHAttered); use SHA-256+ for integrity, argon2/bcrypt for passwords."
 
 - id: perl.crypto.crypt_des
   enabled: true
@@ -86,7 +86,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         Crypt::DES->new($input)
       }
-  description: "Crypt::DES — 56-bit key, brute-forceable in hours; do not use."
+  description: "Crypt::DES - 56-bit key, brute-forceable in hours; do not use."
 
 - id: perl.crypto.crypt_rc4
   enabled: true
@@ -108,7 +108,7 @@
         my ($input, $url, $id, $payload, $request) = @_;
         RC4($input)
       }
-  description: "Crypt::RC4 — biased keystream; broken for TLS and WEP. Do not use."
+  description: "Crypt::RC4 - biased keystream; broken for TLS and WEP. Do not use."
 
 - id: perl.crypto.rand
   enabled: true
@@ -128,4 +128,4 @@
         my ($input, $url, $id, $payload, $request) = @_;
         rand($input)
       }
-  description: "rand() — non-crypto linear PRNG; predictable output. For tokens/keys use Crypt::URandom or Bytes::Random::Secure."
+  description: "rand() - non-crypto linear PRNG; predictable output. For tokens/keys use Crypt::URandom or Bytes::Random::Secure."

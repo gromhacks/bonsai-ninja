@@ -27,7 +27,7 @@
         jwt.verify("eyJhbGciOiJIUzI1NiJ9.e30.sig")
       end
     expect_no_match: true
-  description: "lua-resty-jwt jwt:verify — accepts tokens even with alg=none unless alg_whitelist is set."
+  description: "lua-resty-jwt jwt:verify - accepts tokens even with alg=none unless alg_whitelist is set."
 
 - id: lua.jwt.resty_jwt_verify_jwt_obj
   enabled: true
@@ -57,7 +57,7 @@
         jwt.verify_jwt_obj({ header = { alg = "HS256" }, claims = {} })
       end
     expect_no_match: true
-  description: "lua-resty-jwt jwt:verify_jwt_obj — verifies a pre-parsed token; same alg-whitelist pitfall."
+  description: "lua-resty-jwt jwt:verify_jwt_obj - verifies a pre-parsed token; same alg-whitelist pitfall."
 
 - id: lua.jwt.resty_jwt_load
   enabled: true
@@ -87,7 +87,7 @@
         jwt.load_jwt("eyJhbGciOiJIUzI1NiJ9.e30.sig")
       end
     expect_no_match: true
-  description: "lua-resty-jwt jwt:load_jwt — parses header/payload WITHOUT signature verification; trusting claims is auth bypass."
+  description: "lua-resty-jwt jwt:load_jwt - parses header/payload WITHOUT signature verification; trusting claims is auth bypass."
 
 - id: lua.jwt.resty_jwt_sign_none
   enabled: false
@@ -102,4 +102,4 @@
     kind: call
     callee:
       attribute: [jwt, sign]
-  description: "Disabled — jwt:sign is unsafe only when alg='none'; flag with alg-constant narrowing."
+  description: "Disabled - jwt:sign is unsafe only when alg='none'; flag with alg-constant narrowing."

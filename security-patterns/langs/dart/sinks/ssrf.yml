@@ -300,7 +300,7 @@
 
       '
     expect_no_match: true
-  description: "package:http http.read \u2014 returns body string."
+  description: "package:http http.read - returns body string."
   imports:
   - http/http.dart
 - id: dart.ssrf.http_client_send
@@ -387,7 +387,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.get(url) \u2014 HTTP GET to tainted URL allows SSRF to internal\
+  description: "Dio.get(url) - HTTP GET to tainted URL allows SSRF to internal\
     \ services / cloud metadata."
   imports:
   - dio/dio.dart
@@ -431,7 +431,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.post(url) \u2014 HTTP POST to tainted URL allows SSRF with request-body\
+  description: "Dio.post(url) - HTTP POST to tainted URL allows SSRF with request-body\
     \ exfiltration."
   imports:
   - dio/dio.dart
@@ -475,7 +475,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.put(url) \u2014 HTTP PUT to tainted URL allows SSRF with write-capable\
+  description: "Dio.put(url) - HTTP PUT to tainted URL allows SSRF with write-capable\
     \ verbs."
   imports:
   - dio/dio.dart
@@ -562,7 +562,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.patch(url) \u2014 HTTP PATCH to tainted URL allows SSRF with write-capable\
+  description: "Dio.patch(url) - HTTP PATCH to tainted URL allows SSRF with write-capable\
     \ verbs."
   imports:
   - dio/dio.dart
@@ -606,7 +606,7 @@
 
       '
     expect_no_match: true
-  description: "Dio dio.request \u2014 generic verb."
+  description: "Dio dio.request - generic verb."
   imports:
   - dio/dio.dart
 - id: dart.ssrf.dio_download
@@ -786,7 +786,7 @@
 
       '
     expect_no_match: true
-  description: "dart:io HttpClient.openUrl \u2014 generic."
+  description: "dart:io HttpClient.openUrl - generic."
 - id: dart.ssrf.httpclient_head_url
   enabled: true
   language: dart
@@ -883,7 +883,7 @@
 
       '
     expect_no_match: true
-  description: "Flutter Image.network(url) \u2014 SSRF via tainted URL."
+  description: "Flutter Image.network(url) - SSRF via tainted URL."
   imports:
   - flutter/flutter.dart
   - flutter/material.dart
@@ -973,7 +973,7 @@
       import 'package:webview_flutter/webview_flutter.dart';
       void test() { controller.loadRequest(Uri.parse("https://example.com")); }
     expect_no_match: true
-  description: "WebViewController.loadRequest(tainted URI) — loads attacker-controlled URL in an embedded browser."
+  description: "WebViewController.loadRequest(tainted URI) - loads attacker-controlled URL in an embedded browser."
   imports:
   - webview_flutter/webview_flutter.dart
 - id: dart.ssrf.webview_load_html_string
@@ -1007,7 +1007,7 @@
       }
 
       '
-  description: "WebViewController.loadHtmlString \u2014 tainted HTML/URI."
+  description: "WebViewController.loadHtmlString - tainted HTML/URI."
   imports:
   - webview_flutter/webview_flutter.dart
   disabled_reason:
@@ -1026,7 +1026,7 @@
     kind: call
     callee:
       regex: ^Uri\.parse$
-  description: "Disabled audit-only \u2014 Uri.parse(tainted) by itself does not perform\
+  description: "Disabled audit-only - Uri.parse(tainted) by itself does not perform\
     \ a network or filesystem call. Enable when triaging URL-construction sites; the\
     \ dangerous sinks are the http/HttpClient/File rules that consume the parsed Uri."
 - id: dart.ssrf.uri_https_constructor
@@ -1056,7 +1056,7 @@
       '
     expect_no_match: true
   description: "TODO(only-when-packaged): Uri lives in dart:core which is auto-imported\
-    \ \u2014 Uri.https(tainted host or path) \u2014 host parameter is attacker-controlled,\
+    \ - Uri.https(tainted host or path) - host parameter is attacker-controlled,\
     \ enabling SSRF when later fetched."
 - id: dart.ssrf.uri_http_constructor
   enabled: true
@@ -1084,5 +1084,5 @@
 
       '
     expect_no_match: true
-  description: "Uri.http(tainted host or path) \u2014 host parameter is attacker-controlled,\
+  description: "Uri.http(tainted host or path) - host parameter is attacker-controlled,\
     \ enabling SSRF when later fetched."

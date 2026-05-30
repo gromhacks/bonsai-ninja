@@ -11,7 +11,7 @@
     kind: call
     callee:
       attribute: [ConsumerRecord, value]
-  description: "Disabled — adapters index local receivers like `record.value`, not receiver types like `ConsumerRecord.value`."
+  description: "Disabled - adapters index local receivers like `record.value`, not receiver types like `ConsumerRecord.value`."
 
 - id: kotlin.source.kafka_listener
   enabled: false
@@ -25,7 +25,7 @@
     kind: param
     target:
       name: KafkaListener
-  description: "Disabled — matcher only sees parameter identifiers, not Spring @KafkaListener annotations."
+  description: "Disabled - matcher only sees parameter identifiers, not Spring @KafkaListener annotations."
 
 - id: kotlin.source.rabbit_listener
   enabled: false
@@ -39,7 +39,7 @@
     kind: param
     target:
       name: RabbitListener
-  description: "Disabled — matcher only sees parameter identifiers, not Spring @RabbitListener annotations."
+  description: "Disabled - matcher only sees parameter identifiers, not Spring @RabbitListener annotations."
 
 - id: kotlin.source.jms_listener
   enabled: false
@@ -53,7 +53,7 @@
     kind: param
     target:
       name: JmsListener
-  description: "Disabled — matcher only sees parameter identifiers, not Spring @JmsListener annotations."
+  description: "Disabled - matcher only sees parameter identifiers, not Spring @JmsListener annotations."
 
 - id: kotlin.source.sqs_listener
   enabled: false
@@ -67,7 +67,7 @@
     kind: param
     target:
       name: SqsListener
-  description: "Disabled — matcher only sees parameter identifiers, not Spring Cloud AWS @SqsListener annotations."
+  description: "Disabled - matcher only sees parameter identifiers, not Spring Cloud AWS @SqsListener annotations."
 
 - id: kotlin.source.amqp_delivery_getbody
   enabled: false
@@ -81,7 +81,7 @@
     kind: call
     callee:
       attribute: [Delivery, getBody]
-  description: "Disabled — adapters index local receivers like `delivery.getBody`, not receiver types like `Delivery.getBody`."
+  description: "Disabled - adapters index local receivers like `delivery.getBody`, not receiver types like `Delivery.getBody`."
 
 - id: kotlin.source.jms_textmessage_gettext
   enabled: false
@@ -95,7 +95,7 @@
     kind: call
     callee:
       attribute: [TextMessage, getText]
-  description: "Disabled — adapters index local receivers like `msg.getText`, not receiver types like `TextMessage.getText`."
+  description: "Disabled - adapters index local receivers like `msg.getText`, not receiver types like `TextMessage.getText`."
 
 - id: kotlin.source.jms_bytesmessage_readbytes
   enabled: false
@@ -109,7 +109,7 @@
     kind: call
     callee:
       attribute: [BytesMessage, readBytes]
-  description: "Disabled — adapters index local receivers like `msg.readBytes`, not receiver types like `BytesMessage.readBytes`."
+  description: "Disabled - adapters index local receivers like `msg.readBytes`, not receiver types like `BytesMessage.readBytes`."
 
 - id: kotlin.source.jms_message_getbody
   enabled: false
@@ -123,7 +123,7 @@
     kind: call
     callee:
       attribute: [Message, getBody]
-  description: "Disabled — adapters index local receivers like `msg.getBody`, not receiver types like `Message.getBody`."
+  description: "Disabled - adapters index local receivers like `msg.getBody`, not receiver types like `Message.getBody`."
 
 - id: kotlin.source.pubsub_message_getdata
   enabled: false
@@ -137,4 +137,4 @@
     kind: call
     callee:
       attribute: [PubsubMessage, getData]
-  description: "Disabled — adapters index local receivers like `message.getData`, not receiver types like `PubsubMessage.getData`."
+  description: "Disabled - adapters index local receivers like `message.getData`, not receiver types like `PubsubMessage.getData`."

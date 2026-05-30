@@ -28,7 +28,7 @@
         }
       }
     expect_no_match: true
-  description: "scala.tools.reflect.ToolBox.eval — runtime Scala compile + execute."
+  description: "scala.tools.reflect.ToolBox.eval - runtime Scala compile + execute."
 
 - id: scala.eval.scala_reflect_toolbox_compile
   enabled: true
@@ -64,7 +64,7 @@
         }
       }
     expect_no_match: true
-  description: "ToolBox.compile — compiles attacker-provided Scala source."
+  description: "ToolBox.compile - compiles attacker-provided Scala source."
 
 - id: scala.eval.scala_reflect_toolbox_parse
   enabled: true
@@ -126,7 +126,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    ScriptEngine.eval(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "javax.script ScriptEngine.eval — Nashorn / Rhino / JEP RCE."
+  description: "javax.script ScriptEngine.eval - Nashorn / Rhino / JEP RCE."
 
 - id: scala.eval.groovy_shell_evaluate
   enabled: true
@@ -162,7 +162,7 @@
         }
       }
     expect_no_match: true
-  description: "GroovyShell.evaluate(tainted) — Groovy RCE."
+  description: "GroovyShell.evaluate(tainted) - Groovy RCE."
 
 # Reflection-based dynamic invocation (T406). Tag
 # code-injection so reviewer enumerates with `security sinks
@@ -191,9 +191,9 @@
           Method.invoke(input)
         }
       }
-  description: "Disabled — Method.invoke() executes the reflected receiver Method; needs state linking the Method object to a tainted lookup/name."
+  description: "Disabled - Method.invoke() executes the reflected receiver Method; needs state linking the Method object to a tainted lookup/name."
 
-# IMain interpreter — evaluates Scala source at runtime. Used by REPL
+# IMain interpreter - evaluates Scala source at runtime. Used by REPL
 # tooling and by some script-eval libraries. Tainted source = RCE.
 - id: scala.eval.imain_interpret
   enabled: true
@@ -224,7 +224,7 @@
         }
       }
     expect_no_match: true
-  description: "scala.tools.nsc.interpreter.IMain.interpret(src) — runtime Scala compile+execute; tainted src = RCE."
+  description: "scala.tools.nsc.interpreter.IMain.interpret(src) - runtime Scala compile+execute; tainted src = RCE."
 
 - id: scala.eval.jexl_create_expression
   enabled: true
@@ -258,4 +258,4 @@
         }
       }
     expect_no_match: true
-  description: "JEXL JexlEngine.createExpression(tainted) — expression language code injection."
+  description: "JEXL JexlEngine.createExpression(tainted) - expression language code injection."

@@ -33,7 +33,7 @@
         end
       end
     expect_no_match: true
-  description: "Logger.error with secret-shaped data — credentials or tokens can leak to application logs."
+  description: "Logger.error with secret-shaped data - credentials or tokens can leak to application logs."
 
 - id: elixir.info_disclosure.plug_send_resp_error
   enabled: true
@@ -56,7 +56,7 @@
         end
       end
     expect_match_text: [Plug.Conn.send_resp]
-  description: "Plug.Conn.send_resp(conn, 500, exception/stack) — exposes diagnostic internals to HTTP clients."
+  description: "Plug.Conn.send_resp(conn, 500, exception/stack) - exposes diagnostic internals to HTTP clients."
 
   imports:
   - Plug
@@ -80,4 +80,4 @@
         end
       end
     expect_match_text: [Phoenix.Controller.json]
-  description: "Phoenix.Controller.json with raw exception data — returns internal error messages in API responses."
+  description: "Phoenix.Controller.json with raw exception data - returns internal error messages in API responses."

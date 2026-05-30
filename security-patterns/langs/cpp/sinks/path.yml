@@ -21,7 +21,7 @@
         fopen("safe");
       }
     expect_no_match: true
-  description: "fopen(path, mode) — tainted path traverses outside base dir."
+  description: "fopen(path, mode) - tainted path traverses outside base dir."
 - id: cpp.path.open
   enabled: true
   language: cpp
@@ -52,7 +52,7 @@
         open("/tmp/safe", 0);
       }
     expect_no_match: true
-  description: "POSIX open(path, flags) — tainted path traverses outside base dir. Bare name retained because POSIX open is a true top-level symbol; top_level constraint suppresses ifstream::open / socket::open / QFile::open collisions."
+  description: "POSIX open(path, flags) - tainted path traverses outside base dir. Bare name retained because POSIX open is a true top-level symbol; top_level constraint suppresses ifstream::open / socket::open / QFile::open collisions."
 - id: cpp.path.openat
   enabled: true
   language: cpp
@@ -76,7 +76,7 @@
         openat("safe", "safe");
       }
     expect_no_match: true
-  description: "POSIX openat — tainted path component."
+  description: "POSIX openat - tainted path component."
 - id: cpp.path.ifstream
   enabled: true
   language: cpp
@@ -100,7 +100,7 @@
         auto *x = new ifstream("safe");
       }
     expect_no_match: true
-  description: "std::ifstream ctor — tainted path traverses outside base dir."
+  description: "std::ifstream ctor - tainted path traverses outside base dir."
 - id: cpp.path.ofstream
   enabled: true
   language: cpp
@@ -124,7 +124,7 @@
         auto *x = new ofstream("safe");
       }
     expect_no_match: true
-  description: "std::ofstream ctor — write anywhere via tainted path."
+  description: "std::ofstream ctor - write anywhere via tainted path."
 - id: cpp.path.fstream
   enabled: true
   language: cpp
@@ -148,7 +148,7 @@
         auto *x = new fstream("safe");
       }
     expect_no_match: true
-  description: "std::fstream ctor — tainted path."
+  description: "std::fstream ctor - tainted path."
 - id: cpp.path.std_filesystem_remove
   enabled: true
   language: cpp
@@ -177,7 +177,7 @@
         filesystem::remove("safe");
       }
     expect_no_match: true
-  description: "std::filesystem::remove / boost::filesystem::remove — tainted path = arbitrary file delete (same attribute chain for both)."
+  description: "std::filesystem::remove / boost::filesystem::remove - tainted path = arbitrary file delete (same attribute chain for both)."
   imports:
   - stdio
   - stdio.h
@@ -206,7 +206,7 @@
         filesystem::remove_all("safe");
       }
     expect_no_match: true
-  description: "std::filesystem::remove_all(tainted) — recursive delete."
+  description: "std::filesystem::remove_all(tainted) - recursive delete."
 - id: cpp.path.std_filesystem_copy
   enabled: true
   language: cpp
@@ -229,7 +229,7 @@
   - name: literal filesystem copy source negative
     code: "void example() {\n  filesystem::copy(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "std::filesystem::copy — tainted source or destination."
+  description: "std::filesystem::copy - tainted source or destination."
 - id: cpp.path.std_filesystem_copy_dest
   enabled: true
   language: cpp
@@ -252,7 +252,7 @@
   - name: literal filesystem copy destination negative
     code: "void example() {\n  filesystem::copy(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "std::filesystem::copy(src, dest) — tainted destination can overwrite files outside the intended directory."
+  description: "std::filesystem::copy(src, dest) - tainted destination can overwrite files outside the intended directory."
 - id: cpp.path.std_filesystem_copy_file
   enabled: true
   language: cpp
@@ -278,7 +278,7 @@
   - name: literal filesystem copy_file source negative
     code: "#include <stdio.h>\nvoid example() {\n  filesystem::copy_file(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "std::filesystem::copy_file / boost::filesystem::copy_file — tainted source or destination."
+  description: "std::filesystem::copy_file / boost::filesystem::copy_file - tainted source or destination."
   imports:
   - stdio
   - stdio.h
@@ -307,7 +307,7 @@
   - name: literal filesystem copy_file destination negative
     code: "#include <stdio.h>\nvoid example() {\n  filesystem::copy_file(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "std::filesystem::copy_file(src, dest) — tainted destination can overwrite files outside the intended directory."
+  description: "std::filesystem::copy_file(src, dest) - tainted destination can overwrite files outside the intended directory."
   imports:
   - stdio
   - stdio.h
@@ -336,7 +336,7 @@
   - name: literal filesystem rename source negative
     code: "#include <stdio.h>\nvoid example() {\n  filesystem::rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "std::filesystem::rename / boost::filesystem::rename — tainted source or destination."
+  description: "std::filesystem::rename / boost::filesystem::rename - tainted source or destination."
   imports:
   - stdio
   - stdio.h
@@ -365,7 +365,7 @@
   - name: literal filesystem rename destination negative
     code: "#include <stdio.h>\nvoid example() {\n  filesystem::rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
     expect_no_match: true
-  description: "std::filesystem::rename(src, dest) — tainted destination can overwrite files outside the intended directory."
+  description: "std::filesystem::rename(src, dest) - tainted destination can overwrite files outside the intended directory."
   imports:
   - stdio
   - stdio.h
@@ -394,7 +394,7 @@
         filesystem::create_directory("safe");
       }
     expect_no_match: true
-  description: "std::filesystem::create_directory(tainted) — create directory anywhere."
+  description: "std::filesystem::create_directory(tainted) - create directory anywhere."
 - id: cpp.path.std_filesystem_create_directories
   enabled: true
   language: cpp
@@ -420,7 +420,7 @@
         filesystem::create_directories("safe");
       }
     expect_no_match: true
-  description: "std::filesystem::create_directories(tainted) — recursive mkdir."
+  description: "std::filesystem::create_directories(tainted) - recursive mkdir."
 - id: cpp.path.qt_qfile_open
   enabled: true
   language: cpp
@@ -446,7 +446,7 @@
         auto *x = new QFile("safe");
       }
     expect_no_match: true
-  description: "Qt QFile(path) ctor — tainted path."
+  description: "Qt QFile(path) ctor - tainted path."
   imports:
   - QtCore
   - QtCore/Qt
@@ -477,7 +477,7 @@
         QDir::mkpath("safe");
       }
     expect_no_match: true
-  description: "Qt QDir::mkpath(tainted) — create dir tree anywhere."
+  description: "Qt QDir::mkpath(tainted) - create dir tree anywhere."
   imports:
   - QtCore
   - QtCore/Qt
@@ -508,7 +508,7 @@
         QFile::remove("safe");
       }
     expect_no_match: true
-  description: "Qt QFile::remove(tainted) — arbitrary file delete."
+  description: "Qt QFile::remove(tainted) - arbitrary file delete."
   imports:
   - QtCore
   - QtCore/Qt
@@ -527,7 +527,7 @@
       attribute:
       - filesystem
       - exists
-  description: "Disabled — std::filesystem::exists(tainted) leaks file presence; off by default (audit only)."
+  description: "Disabled - std::filesystem::exists(tainted) leaks file presence; off by default (audit only)."
 - id: cpp.path.std_filesystem_read_symlink
   enabled: true
   language: cpp
@@ -554,7 +554,7 @@
         filesystem::read_symlink("safe");
       }
     expect_no_match: true
-  description: "std::filesystem::read_symlink(tainted) — discloses symlink target outside the trust root."
+  description: "std::filesystem::read_symlink(tainted) - discloses symlink target outside the trust root."
 - id: cpp.path.std_filesystem_directory_iterator
   enabled: true
   language: cpp
@@ -578,7 +578,7 @@
         auto *x = new directory_iterator("safe");
       }
     expect_no_match: true
-  description: "std::filesystem::directory_iterator(tainted) — enumerates an attacker-chosen directory."
+  description: "std::filesystem::directory_iterator(tainted) - enumerates an attacker-chosen directory."
 - id: cpp.path.libzip_zip_open
   enabled: false
   disabled_reason:
@@ -594,7 +594,7 @@
     kind: call
     callee:
       name: zip_open
-  description: "Disabled — informational marker for libzip archive open; the Zip Slip site is the use of zip_get_name() output (paired with file open / write below)."
+  description: "Disabled - informational marker for libzip archive open; the Zip Slip site is the use of zip_get_name() output (paired with file open / write below)."
 - id: cpp.path.libzip_zip_get_name
   enabled: false
   disabled_reason:
@@ -614,7 +614,7 @@
   match_examples:
   - name: generated direct match
     code: "#include <libzip.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  zip_get_name(arg);\n}\n"
-  description: "Disabled sink duplicate — zip_get_name returns an attacker-controlled archive entry name and is modeled as source cpp.archive.libzip_zip_get_name; the actual Zip Slip sink is the later path open/write."
+  description: "Disabled sink duplicate - zip_get_name returns an attacker-controlled archive entry name and is modeled as source cpp.archive.libzip_zip_get_name; the actual Zip Slip sink is the later path open/write."
 - id: cpp.path.minizip_unzgetcurrentfileinfo
   enabled: false
   disabled_reason:
@@ -632,4 +632,4 @@
   match_examples:
   - name: generated direct match
     code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  unzGetCurrentFileInfo(arg);\n}\n"
-  description: "Disabled sink duplicate — unzGetCurrentFileInfo writes an attacker-controlled archive filename into an output buffer and is modeled as source cpp.archive.minizip_unzgetcurrentfileinfo_filename; the actual Zip Slip sink is the later path open/write."
+  description: "Disabled sink duplicate - unzGetCurrentFileInfo writes an attacker-controlled archive filename into an output buffer and is modeled as source cpp.archive.minizip_unzgetcurrentfileinfo_filename; the actual Zip Slip sink is the later path open/write."

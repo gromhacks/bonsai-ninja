@@ -35,7 +35,7 @@
         c.Redirect(302, "/home")
       }
     expect_no_match: true
-  description: "gin/echo Context.Redirect(status, tainted URL) — review for external absolute URLs; relative-path redirects are usually safe. Merged collision aliases: go.open_redirect.framework_redirect, go.open_redirect.http_redirect."
+  description: "gin/echo Context.Redirect(status, tainted URL) - review for external absolute URLs; relative-path redirects are usually safe. Merged collision aliases: go.open_redirect.framework_redirect, go.open_redirect.http_redirect."
   aliases:
   - go.open_redirect.framework_redirect
   - go.open_redirect.http_redirect

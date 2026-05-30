@@ -1,4 +1,4 @@
-# Ruby sanitizers — declared safe by us; downstream taint stops here.
+# Ruby sanitizers - declared safe by us; downstream taint stops here.
 - id: ruby.sanitizer.cgi_escape_html
   enabled: true
   language: ruby
@@ -14,7 +14,7 @@
         CGI.escapeHTML(input)
       end
     expect_match_text: ["CGI.escapeHTML"]
-  description: "CGI.escapeHTML — HTML entity escape."
+  description: "CGI.escapeHTML - HTML entity escape."
 
 - id: ruby.sanitizer.erb_html_escape
   enabled: true
@@ -48,7 +48,7 @@
         CGI.escape(input)
       end
     expect_match_text: ["CGI.escape"]
-  description: "CGI.escape — URL component encode."
+  description: "CGI.escape - URL component encode."
 
 - id: ruby.sanitizer.uri_encode_www_form
   enabled: true
@@ -99,7 +99,7 @@
         Shellwords.escape(input)
       end
     expect_match_text: ["Shellwords.escape"]
-  description: "Shellwords.escape — neutralises argv injection."
+  description: "Shellwords.escape - neutralises argv injection."
 
 - id: ruby.sanitizer.shellwords_shellescape
   enabled: true
@@ -135,7 +135,7 @@
         permit(input)
       end
     expect_match_text: ["permit"]
-  description: "Strong Parameters #permit — whitelists keys."
+  description: "Strong Parameters #permit - whitelists keys."
 
 - id: ruby.sanitizer.action_view_sanitize
   enabled: false
@@ -148,7 +148,7 @@
     kind: call
     callee:
       name: sanitize
-  description: "Disabled — bare sanitize overmatches unrelated helpers; use receiver-qualified Loofah/Rails sanitizer rules."
+  description: "Disabled - bare sanitize overmatches unrelated helpers; use receiver-qualified Loofah/Rails sanitizer rules."
 
 - id: ruby.sanitizer.loofah_scrub
   enabled: true
@@ -260,7 +260,7 @@
     kind: call
     callee:
       attribute: [JSON, dump]
-  description: "Disabled — JSON.dump escapes for JSON context, not HTML."
+  description: "Disabled - JSON.dump escapes for JSON context, not HTML."
 
 - id: ruby.sanitizer.integer_coerce
   enabled: true
@@ -277,7 +277,7 @@
         to_i(input)
       end
     expect_match_text: ["to_i"]
-  description: "to_i — coerces to integer; flag-clears for SQL/path concat."
+  description: "to_i - coerces to integer; flag-clears for SQL/path concat."
 
 - id: ruby.sanitizer.float_coerce
   enabled: true
@@ -294,7 +294,7 @@
         to_f(input)
       end
     expect_match_text: ["to_f"]
-  description: "to_f — coerces the receiver to a float; clears taint for SQL / path concat contexts because the result can
+  description: "to_f - coerces the receiver to a float; clears taint for SQL / path concat contexts because the result can
     no longer carry arbitrary payload bytes."
 
 - id: ruby.sanitizer.rack_escape_html
@@ -352,7 +352,7 @@
         Loofah.fragment(input)
       end
     expect_match_text: ["Loofah.fragment"]
-  description: "Loofah.fragment — HTML sanitizer."
+  description: "Loofah.fragment - HTML sanitizer."
 
 - id: ruby.sanitizer.rack_secure_compare
   enabled: true
@@ -371,7 +371,7 @@
         Rack::Utils.secure_compare(input)
       end
     expect_match_text: ["Rack::Utils.secure_compare"]
-  description: "Rack::Utils.secure_compare — constant-time string compare."
+  description: "Rack::Utils.secure_compare - constant-time string compare."
 
 - id: ruby.sanitizer.openssl_fixed_length_secure_compare
   enabled: true
@@ -388,7 +388,7 @@
         OpenSSL.fixed_length_secure_compare(input)
       end
     expect_match_text: ["OpenSSL.fixed_length_secure_compare"]
-  description: "OpenSSL.fixed_length_secure_compare — constant-time compare for HMACs."
+  description: "OpenSSL.fixed_length_secure_compare - constant-time compare for HMACs."
 
 - id: ruby.sanitizer.securerandom_uuid
   enabled: true
@@ -405,7 +405,7 @@
         SecureRandom.uuid(input)
       end
     expect_match_text: ["SecureRandom.uuid"]
-  description: "SecureRandom.uuid — cryptographically random UUID, safe as path/ID."
+  description: "SecureRandom.uuid - cryptographically random UUID, safe as path/ID."
 
 - id: ruby.sanitizer.securerandom_hex
   enabled: true
@@ -422,7 +422,7 @@
         SecureRandom.hex(input)
       end
     expect_match_text: ["SecureRandom.hex"]
-  description: "SecureRandom.hex — cryptographically random hex."
+  description: "SecureRandom.hex - cryptographically random hex."
 
 - id: ruby.sanitizer.integer_fn
   enabled: true
@@ -439,7 +439,7 @@
         Integer(input)
       end
     expect_match_text: ["Integer"]
-  description: "Integer(str[, base]) — raises on non-numeric; safer than to_i for path/ID coercion."
+  description: "Integer(str[, base]) - raises on non-numeric; safer than to_i for path/ID coercion."
 
 - id: ruby.sanitizer.pathname_expand_path
   enabled: false
@@ -451,7 +451,7 @@
     kind: call
     callee:
       name: expand_path
-  description: "Disabled — expand_path normalizes paths but does not enforce root containment."
+  description: "Disabled - expand_path normalizes paths but does not enforce root containment."
 
 - id: ruby.sanitizer.activesupport_secure_compare
   enabled: true
@@ -470,7 +470,7 @@
         ActiveSupport::SecurityUtils.secure_compare(input)
       end
     expect_match_text: ["ActiveSupport::SecurityUtils.secure_compare"]
-  description: "ActiveSupport::SecurityUtils.secure_compare — constant-time string compare (Rails)."
+  description: "ActiveSupport::SecurityUtils.secure_compare - constant-time string compare (Rails)."
 
 - id: ruby.sanitizer.activesupport_fixed_length_secure_compare
   enabled: true
@@ -489,7 +489,7 @@
         ActiveSupport::SecurityUtils.fixed_length_secure_compare(input)
       end
     expect_match_text: ["ActiveSupport::SecurityUtils.fixed_length_secure_compare"]
-  description: "ActiveSupport::SecurityUtils.fixed_length_secure_compare — constant-time HMAC compare."
+  description: "ActiveSupport::SecurityUtils.fixed_length_secure_compare - constant-time HMAC compare."
 
 - id: ruby.sanitizer.bcrypt_password_eq
   enabled: true
@@ -508,7 +508,7 @@
         BCrypt::Password.==(input)
       end
     expect_match_text: ["BCrypt::Password.=="]
-  description: "BCrypt::Password#== — constant-time hash compare; clears taint on password verify."
+  description: "BCrypt::Password#== - constant-time hash compare; clears taint on password verify."
 
 - id: ruby.sanitizer.argon2_verify_password
   enabled: true
@@ -527,7 +527,7 @@
         Argon2::Password.verify_password(input)
       end
     expect_match_text: ["Argon2::Password.verify_password"]
-  description: "Argon2::Password.verify_password — constant-time password verify."
+  description: "Argon2::Password.verify_password - constant-time password verify."
 
 - id: ruby.sanitizer.erb_url_encode
   enabled: true
@@ -544,7 +544,7 @@
         ERB::Util.url_encode(input)
       end
     expect_match_text: ["ERB::Util.url_encode"]
-  description: "ERB::Util.url_encode — URL-encodes a string for safe URL composition."
+  description: "ERB::Util.url_encode - URL-encodes a string for safe URL composition."
 
 - id: ruby.sanitizer.shellwords_shelljoin
   enabled: true
@@ -561,7 +561,7 @@
         Shellwords.shelljoin(input)
       end
     expect_match_text: ["Shellwords.shelljoin"]
-  description: "Shellwords.shelljoin — joins an argv array with proper shell escaping."
+  description: "Shellwords.shelljoin - joins an argv array with proper shell escaping."
 
 - id: ruby.sanitizer.loofah_clean
   enabled: true
@@ -580,7 +580,7 @@
         Loofah.clean(input)
       end
     expect_match_text: ["Loofah.clean"]
-  description: "Loofah.clean — sanitizes an HTML fragment using the configured scrubber."
+  description: "Loofah.clean - sanitizes an HTML fragment using the configured scrubber."
 
 - id: ruby.sanitizer.sanitize_gem_clean
   enabled: true
@@ -599,7 +599,7 @@
         Sanitize.fragment(input)
       end
     expect_match_text: ["Sanitize.fragment"]
-  description: "Sanitize.fragment — gem-based HTML allowlist sanitizer."
+  description: "Sanitize.fragment - gem-based HTML allowlist sanitizer."
 
 - id: ruby.sanitizer.jwt_decode_verify
   enabled: true
@@ -678,7 +678,7 @@
   - name: ruby.sanitizer.same_origin_start_with example negative constraint boundary
     code: "def example(url)\n  url.start_with?()\nend\n"
     expect_no_match: true
-  description: "String#start_with?(\"/\") — same-origin redirect/path guard for root-relative targets."
+  description: "String#start_with?(\"/\") - same-origin redirect/path guard for root-relative targets."
 
 - id: ruby.sanitizer.include_allowlist
   enabled: false
@@ -696,8 +696,8 @@
         ALLOWED.include?(role)
       end
     expect_match_text: ["ALLOWED.include?"]
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    allowlist.include?(value) on known allowlist receiver names — enum/set membership validator for constrained values."
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    allowlist.include?(value) on known allowlist receiver names - enum/set membership validator for constrained values."
 
   disabled_reason:
     code: over-broad
@@ -723,7 +723,7 @@
   - name: ruby.sanitizer.match_full_string_shape example negative constraint boundary
     code: "def example(slug)\n  slug.match?()\nend\n"
     expect_no_match: true
-  description: "String#match? with full-string anchors — shape validator for UUIDs, slugs, emails, and similar bounded formats."
+  description: "String#match? with full-string anchors - shape validator for UUIDs, slugs, emails, and similar bounded formats."
 
 - id: ruby.sanitizer.activerecord_where_bind_array
   enabled: true
@@ -747,7 +747,7 @@
   - name: ruby.sanitizer.activerecord_where_bind_array example negative constraint boundary
     code: "require \"activerecord\"\ndef example(id)\n  User.where()\nend\n"
     expect_no_match: true
-  description: "ActiveRecord where([\"col = ?\", value]) — bind-array form keeps values outside the SQL template."
+  description: "ActiveRecord where([\"col = ?\", value]) - bind-array form keeps values outside the SQL template."
 
 - id: ruby.sanitizer.activerecord_find_by_sql_bind_array
   enabled: true
@@ -771,7 +771,7 @@
   - name: ruby.sanitizer.activerecord_find_by_sql_bind_array example negative constraint boundary
     code: "require \"activerecord\"\ndef example(id)\n  User.find_by_sql()\nend\n"
     expect_no_match: true
-  description: "ActiveRecord find_by_sql([sql, binds...]) — bind-array form parameterizes dynamic values."
+  description: "ActiveRecord find_by_sql([sql, binds...]) - bind-array form parameterizes dynamic values."
 
 - id: ruby.sanitizer.gsub_char_allowlist
   enabled: true
@@ -798,11 +798,11 @@
   - name: ruby.sanitizer.gsub_char_allowlist example negative constraint boundary
     code: "def example(input)\n  input.gsub()\nend\n"
     expect_no_match: true
-  description: "String#gsub(/[^safe]/, \"\") — strips every character outside an explicit allowlist."
+  description: "String#gsub(/[^safe]/, \"\") - strips every character outside an explicit allowlist."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: ruby.passthrough.cgi_unescape
@@ -822,7 +822,7 @@
         CGI.unescape(input)
       end
     expect_match_text: ["CGI.unescape"]
-  description: "CGI.unescape(s) — preserves taint; classic Rack/CGI decode."
+  description: "CGI.unescape(s) - preserves taint; classic Rack/CGI decode."
 - id: ruby.passthrough.uri_decode_www_form_component
   enabled: true
   language: ruby
@@ -840,7 +840,7 @@
         URI.decode_www_form_component(input)
       end
     expect_match_text: ["URI.decode_www_form_component"]
-  description: "URI.decode_www_form_component(s) — preserves taint."
+  description: "URI.decode_www_form_component(s) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -862,7 +862,7 @@
         protect_from_forgery(input)
       end
     expect_match_text: ["protect_from_forgery"]
-  description: "Rails ApplicationController#protect_from_forgery — global CSRF token check."
+  description: "Rails ApplicationController#protect_from_forgery - global CSRF token check."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -882,7 +882,7 @@
         Mutex.synchronize(input)
       end
     expect_match_text: ["Mutex.synchronize"]
-  description: "Mutex#synchronize { ... } — guards the block body."
+  description: "Mutex#synchronize { ... } - guards the block body."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer
@@ -929,4 +929,4 @@
         Rack::Attack.throttle(input)
       end
     expect_match_text: ["Rack::Attack.throttle"]
-  description: "Rack::Attack.throttle declaration — sensitive-route throttling."
+  description: "Rack::Attack.throttle declaration - sensitive-route throttling."

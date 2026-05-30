@@ -20,7 +20,7 @@
     code: |
       class DirectorySearcher { public DirectorySearcher(dynamic input) { } } class App { void Test() { var result = new DirectorySearcher("(cn=safe)"); } }
     expect_no_match: true
-  description: "new DirectorySearcher(tainted_filter) — LDAP filter injection."
+  description: "new DirectorySearcher(tainted_filter) - LDAP filter injection."
 
 - id: csharp.ldap.directorysearcher_filter_assign
   enabled: true
@@ -61,7 +61,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.FindAll("(cn=input)"); } }
-  description: "Disabled — DirectorySearcher.FindAll() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
+  description: "Disabled - DirectorySearcher.FindAll() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
 
 - id: csharp.ldap.directorysearcher_findone
   enabled: false
@@ -79,7 +79,7 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.FindOne("(cn=input)"); } }
-  description: "Disabled — DirectorySearcher.FindOne() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
+  description: "Disabled - DirectorySearcher.FindOne() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
 
 - id: csharp.ldap.directoryentry_ctor
   enabled: true
@@ -128,7 +128,7 @@
       using System.DirectoryServices.Protocols;
       class SearchRequest { public SearchRequest(string dn, string filter) { } } class App { void Test() { var result = new SearchRequest("dc=example,dc=com", "(cn=safe)"); } }
     expect_no_match: true
-  description: "new SearchRequest(distinguishedName, filter, ...) — tainted filter."
+  description: "new SearchRequest(distinguishedName, filter, ...) - tainted filter."
 
 - id: csharp.ldap.novell_search
   enabled: true

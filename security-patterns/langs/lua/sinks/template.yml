@@ -27,7 +27,7 @@
         lustache.render("Hello {{name}}")
       end
     expect_no_match: true
-  description: "lustache.render(template, ctx) — tainted template enables Mustache expression injection."
+  description: "lustache.render(template, ctx) - tainted template enables Mustache expression injection."
 
 - id: lua.template.etlua_compile
   enabled: true
@@ -57,7 +57,7 @@
         etlua.compile("Hello <%= name %>")
       end
     expect_no_match: true
-  description: "etlua.compile(src) — compiles tainted template containing <% lua %> which eval()s."
+  description: "etlua.compile(src) - compiles tainted template containing <% lua %> which eval()s."
 
 - id: lua.template.etlua_render
   enabled: true
@@ -87,7 +87,7 @@
         etlua.render("Hello <%= name %>")
       end
     expect_no_match: true
-  description: "etlua.render(src, env) — compiles and renders tainted template."
+  description: "etlua.render(src, env) - compiles and renders tainted template."
 
 - id: lua.template.resty_template_compile_string
   enabled: true
@@ -117,7 +117,7 @@
         template.compile_string("Hello {{name}}")
       end
     expect_no_match: true
-  description: "lua-resty-template template.compile_string — compiles tainted template source to Lua; RCE."
+  description: "lua-resty-template template.compile_string - compiles tainted template source to Lua; RCE."
 
 - id: lua.template.resty_template_render
   enabled: true
@@ -147,7 +147,7 @@
         template.render("profile.html")
       end
     expect_no_match: true
-  description: "lua-resty-template template.render — tainted template name path-traverses or injects."
+  description: "lua-resty-template template.render - tainted template name path-traverses or injects."
 
 - id: lua.template.lapis_render
   enabled: true
@@ -177,7 +177,7 @@
         self:render("profile")
       end
     expect_no_match: true
-  description: "Lapis self:render / render_html — tainted view name enables traversal / render of attacker templates."
+  description: "Lapis self:render / render_html - tainted view name enables traversal / render of attacker templates."
 
 - id: lua.template.lapis_raw
   enabled: true
@@ -207,7 +207,7 @@
         html.raw("<strong>ok</strong>")
       end
     expect_no_match: true
-  description: "lapis.html raw(x) — emits x without HTML-escaping; tainted value = stored/reflected XSS."
+  description: "lapis.html raw(x) - emits x without HTML-escaping; tainted value = stored/reflected XSS."
 
 # Templating engine autoescape disabled (T302). Config-shape
 # sinks: when the developer explicitly turns off the engine's
@@ -224,4 +224,4 @@
     kind: call
     callee:
       attribute: [template, render]
-  description: "OpenResty lua-resty-template render — values are not autoescaped by default; reviewer must verify caller escapes (this rule is informational, paired with sanitizer rules)."
+  description: "OpenResty lua-resty-template render - values are not autoescaped by default; reviewer must verify caller escapes (this rule is informational, paired with sanitizer rules)."

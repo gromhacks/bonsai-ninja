@@ -21,7 +21,7 @@
           HttpsURLConnection.setDefaultHostnameVerifier(input)
         }
       }
-  description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) — global bypass. Merged aliases: kotlin.tls.disable_verify_hostname_verifier."
+  description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) - global bypass. Merged aliases: kotlin.tls.disable_verify_hostname_verifier."
   aliases:
   - kotlin.tls.disable_verify_hostname_verifier
   packages:
@@ -43,7 +43,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    HttpsURLConnection.setHostnameVerifier(input)\n  }\n}\n"
-  description: "HttpsURLConnection.setHostnameVerifier — accepts any."
+  description: "HttpsURLConnection.setHostnameVerifier - accepts any."
 - id: kotlin.tls.set_default_ssl_socket_factory_trustall
   enabled: true
   language: kotlin
@@ -79,7 +79,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    SSLContext.init(input)\n  }\n}\n"
-  description: "SSLContext.init(km, [TrustAllCerts], rng) — accept-any X509TrustManager."
+  description: "SSLContext.init(km, [TrustAllCerts], rng) - accept-any X509TrustManager."
 - id: kotlin.tls.okhttp_hostnameverifier_allow
   enabled: true
   language: kotlin
@@ -131,7 +131,7 @@
           Builder.sslSocketFactory(input)
         }
       }
-  description: "OkHttp Builder.sslSocketFactory(trustAll, …)."
+  description: "OkHttp Builder.sslSocketFactory(trustAll, ...)."
 - id: kotlin.tls.apache_httpclient_noopverifier
   enabled: true
   language: kotlin
@@ -216,6 +216,6 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    SSLContext.getInstance(\"SSL\")\n  }\n}\n"
-  description: "SSLContext.getInstance(\"SSL\") — legacy SSLv3 context, vulnerable to POODLE; use \"TLSv1.2\" or \"TLSv1.3\". Merged aliases: kotlin.tls.sslcontext_getinstance_ssl_v3."
+  description: "SSLContext.getInstance(\"SSL\") - legacy SSLv3 context, vulnerable to POODLE; use \"TLSv1.2\" or \"TLSv1.3\". Merged aliases: kotlin.tls.sslcontext_getinstance_ssl_v3."
   aliases:
   - kotlin.tls.sslcontext_getinstance_ssl_v3

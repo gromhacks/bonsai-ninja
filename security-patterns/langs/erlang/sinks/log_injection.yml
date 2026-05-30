@@ -28,4 +28,4 @@
         test() ->
           logger:info("~ts", ["safe"]).
       expect_no_match: true
-  description: 'logger:info("...~ts...~n", [User]) — log forging.'
+  description: 'logger:info("...~ts...~n", [User]) - log forging.'

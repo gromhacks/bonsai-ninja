@@ -3,7 +3,7 @@
 # block is the audit-interesting shape. These rules fire on the
 # *use-after-transition* call (Read / IsCancellationRequested / etc.)
 # and gate on the adapter-emitted lifecycle state via the
-# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+# `requires_state` engine constraint (P6 - see docs/contributing/analysis-roadmap.mdx).
 
 - id: csharp.memory.idisposable_dispose
   enabled: true
@@ -40,7 +40,7 @@
         }
       }
     expect_no_match: true
-  description: "Use-after-dispose — `Stream.Read()` / `<IDisposable>.<op>()` on a handle whose preceding `.Dispose()` / `.DisposeAsync()` released the underlying resource. Subsequent calls throw ObjectDisposedException (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so explicit-Dispose-then-reuse is flagged while `using` blocks stay silent."
+  description: "Use-after-dispose - `Stream.Read()` / `<IDisposable>.<op>()` on a handle whose preceding `.Dispose()` / `.DisposeAsync()` released the underlying resource. Subsequent calls throw ObjectDisposedException (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so explicit-Dispose-then-reuse is flagged while `using` blocks stay silent."
 - id: csharp.memory.cancellation_token_cancel
   enabled: true
   language: csharp
@@ -76,7 +76,7 @@
         }
       }
     expect_no_match: true
-  description: "Use-after-cancel — `CancellationTokenSource.ThrowIfCancellationRequested()` / token-derived ops on a CTS whose preceding `.Cancel()` already tripped the cancellation flag. The call throws OperationCanceledException at runtime (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+  description: "Use-after-cancel - `CancellationTokenSource.ThrowIfCancellationRequested()` / token-derived ops on a CTS whose preceding `.Cancel()` already tripped the cancellation flag. The call throws OperationCanceledException at runtime (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
 - id: csharp.memory.mutex_release
   enabled: true
   language: csharp
@@ -98,4 +98,4 @@
         }
       }
     expect_match_text: [m.ReleaseMutex]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Mutex.ReleaseMutex() — subsequent guarded-region reads/writes without a re-WaitOne are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Mutex.ReleaseMutex() - subsequent guarded-region reads/writes without a re-WaitOne are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

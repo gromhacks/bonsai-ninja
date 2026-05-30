@@ -23,7 +23,7 @@
         xQueueReceive(queue, item, 0);
       }
     expect_match_text: [xQueueReceive]
-  description: "FreeRTOS xQueueReceive(queue, pvBuffer, ticks) — queue data taints the caller-supplied buffer."
+  description: "FreeRTOS xQueueReceive(queue, pvBuffer, ticks) - queue data taints the caller-supplied buffer."
 - id: c.input.freertos_xstream_buffer_receive
   enabled: true
   language: c
@@ -46,7 +46,7 @@
         xStreamBufferReceive(stream, buf, sizeof(buf), 0);
       }
     expect_match_text: [xStreamBufferReceive]
-  description: "FreeRTOS xStreamBufferReceive(stream, pvRxData, len, ticks) — received bytes taint the caller buffer."
+  description: "FreeRTOS xStreamBufferReceive(stream, pvRxData, len, ticks) - received bytes taint the caller buffer."
 - id: c.input.freertos_xmessage_buffer_receive
   enabled: true
   language: c
@@ -69,7 +69,7 @@
         xMessageBufferReceive(messages, buf, sizeof(buf), 0);
       }
     expect_match_text: [xMessageBufferReceive]
-  description: "FreeRTOS xMessageBufferReceive(buffer, pvRxData, len, ticks) — message bytes taint the caller buffer."
+  description: "FreeRTOS xMessageBufferReceive(buffer, pvRxData, len, ticks) - message bytes taint the caller buffer."
 - id: c.input.lwip_netconn_recv
   enabled: true
   language: c
@@ -90,7 +90,7 @@
         char *fmt = arg;
         netconn_recv(arg);
       }
-  description: "lwIP netconn_recv — returns a netbuf populated from the network peer; payload is attacker-controlled."
+  description: "lwIP netconn_recv - returns a netbuf populated from the network peer; payload is attacker-controlled."
 - id: c.input.lwip_netconn_recv_tcp_pbuf
   enabled: true
   language: c
@@ -111,7 +111,7 @@
         char *fmt = arg;
         netconn_recv_tcp_pbuf(arg);
       }
-  description: "lwIP netconn_recv_tcp_pbuf — returns a pbuf chain holding TCP segment payload from the network."
+  description: "lwIP netconn_recv_tcp_pbuf - returns a pbuf chain holding TCP segment payload from the network."
 - id: c.input.lwip_netbuf_data
   enabled: true
   language: c
@@ -135,4 +135,4 @@
         netbuf_data(nb, &data, &len);
       }
     expect_match_text: [netbuf_data]
-  description: "lwIP netbuf_data(netbuf, dataptr, len) — exposes network-payload bytes through the data out-parameter."
+  description: "lwIP netbuf_data(netbuf, dataptr, len) - exposes network-payload bytes through the data out-parameter."

@@ -18,7 +18,7 @@
       function example(input, url, id, payload, request, params, user)
         lxp.new(input)
       end
-  description: "LuaExpat lxp.new(callbacks) — parser created with entity-expansion callbacks resolves external entities."
+  description: "LuaExpat lxp.new(callbacks) - parser created with entity-expansion callbacks resolves external entities."
 
 - id: lua.xxe.lxp_parse
   enabled: true
@@ -48,7 +48,7 @@
         parser.parse("<root/>")
       end
     expect_no_match: true
-  description: "LuaExpat parser:parse(xml) — parses tainted XML; external entities expanded by default."
+  description: "LuaExpat parser:parse(xml) - parses tainted XML; external entities expanded by default."
 
 - id: lua.xxe.luaxml_eval
   enabled: true
@@ -78,7 +78,7 @@
         xml.eval("<root/>")
       end
     expect_no_match: true
-  description: "LuaXML xml.eval — parses tainted XML; external_entities default resolves DOCTYPE DTDs."
+  description: "LuaXML xml.eval - parses tainted XML; external_entities default resolves DOCTYPE DTDs."
 
 - id: lua.xxe.xml2lua_parse
   enabled: true
@@ -108,7 +108,7 @@
         xml2lua.parse("<root/>")
       end
     expect_no_match: true
-  description: "xml2lua.parse — resolves entities referenced by tainted XML."
+  description: "xml2lua.parse - resolves entities referenced by tainted XML."
 
 - id: lua.xxe.xml2lua_parser
   enabled: false
@@ -123,4 +123,4 @@
     kind: call
     callee:
       attribute: [parser, parse]
-  description: "Disabled duplicate — parser:parse is indistinguishable from LuaExpat parser:parse in v1 matching; xml2lua.parse remains enabled."
+  description: "Disabled duplicate - parser:parse is indistinguishable from LuaExpat parser:parse in v1 matching; xml2lua.parse remains enabled."

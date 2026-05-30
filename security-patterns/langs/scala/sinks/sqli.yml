@@ -34,7 +34,7 @@
         }
       }
     expect_no_match: true
-  description: "sql\"\" interpolator — covers Slick, doobie, scalikejdbc (same `^sql\"` regex). ${} binds but #${} / string-built fragments splice raw."
+  description: "sql\"\" interpolator - covers Slick, doobie, scalikejdbc (same `^sql\"` regex). ${} binds but #${} / string-built fragments splice raw."
 - id: scala.sqli.slick_sqlu_interpolator
   enabled: true
   language: scala
@@ -69,7 +69,7 @@
         }
       }
     expect_no_match: true
-  description: "Slick sqlu\"\" update interpolator — same splice caveat."
+  description: "Slick sqlu\"\" update interpolator - same splice caveat."
 - id: scala.sqli.doobie_sql_interpolator
   enabled: false
   disabled_reason:
@@ -85,7 +85,7 @@
     kind: call
     callee:
       regex: ^sql"
-  description: "Disabled — merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
+  description: "Disabled - merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
 - id: scala.sqli.doobie_fr_interpolator
   enabled: true
   language: scala
@@ -120,7 +120,7 @@
         }
       }
     expect_no_match: true
-  description: "doobie fr\"\" fragment interpolator — flag tainted strings inlined as Fragment.const."
+  description: "doobie fr\"\" fragment interpolator - flag tainted strings inlined as Fragment.const."
 - id: scala.sqli.quill_infix
   enabled: true
   language: scala
@@ -155,7 +155,7 @@
         }
       }
     expect_no_match: true
-  description: "Quill infix\"\" — escape hatch bypassing Quill's compile-time safety."
+  description: "Quill infix\"\" - escape hatch bypassing Quill's compile-time safety."
 - id: scala.sqli.anorm_sql
   enabled: true
   language: scala
@@ -190,7 +190,7 @@
         }
       }
     expect_no_match: true
-  description: "Anorm SQL(tainted) — SQL.on(...) binds placeholders; flag dynamic SQL strings."
+  description: "Anorm SQL(tainted) - SQL.on(...) binds placeholders; flag dynamic SQL strings."
 - id: scala.sqli.jdbc_statement_execute
   enabled: true
   language: scala
@@ -228,7 +228,7 @@
         }
       }
     expect_no_match: true
-  description: "java.sql.Statement.execute(sql) — no parameter binding."
+  description: "java.sql.Statement.execute(sql) - no parameter binding."
 - id: scala.sqli.jdbc_statement_execute_variable
   enabled: true
   language: scala
@@ -287,7 +287,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeQuery(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.sql.Statement.executeQuery(sql) — no parameter binding."
+  description: "java.sql.Statement.executeQuery(sql) - no parameter binding."
 - id: scala.sqli.jdbc_statement_execute_update
   enabled: true
   language: scala
@@ -310,7 +310,7 @@
   - name: arg tainted literal negative
     code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeUpdate(\"safe\")\n  }\n}\n"
     expect_no_match: true
-  description: "java.sql.Statement.executeUpdate(sql) — no parameter binding."
+  description: "java.sql.Statement.executeUpdate(sql) - no parameter binding."
 - id: scala.sqli.scalikejdbc_sql_interpolator
   enabled: false
   disabled_reason:
@@ -326,7 +326,7 @@
     kind: call
     callee:
       regex: ^sql"
-  description: "Disabled — merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
+  description: "Disabled - merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
 - id: scala.sqli.scalikejdbc_sqls
   enabled: true
   language: scala
@@ -400,7 +400,7 @@
         }
       }
     expect_no_match: true
-  description: "Doobie Fragment.const(tainted) — splices the string verbatim into SQL, bypassing parameter binding."
+  description: "Doobie Fragment.const(tainted) - splices the string verbatim into SQL, bypassing parameter binding."
 - id: scala.sqli.doobie_fragment_const0
   enabled: true
   language: scala
@@ -437,7 +437,7 @@
         }
       }
     expect_no_match: true
-  description: "Doobie Fragment.const0(tainted) — verbatim splice without trailing space; same SQLi risk as Fragment.const."
+  description: "Doobie Fragment.const0(tainted) - verbatim splice without trailing space; same SQLi risk as Fragment.const."
 - id: scala.sqli.spark_session_sql
   enabled: true
   language: scala
@@ -474,7 +474,7 @@
         }
       }
     expect_no_match: true
-  description: "sparkSession.sql(tainted) — no binding; Spark SQL parses the raw string."
+  description: "sparkSession.sql(tainted) - no binding; Spark SQL parses the raw string."
   imports:
   - org.apache.spark.sql
 - id: scala.sqli.spring_jdbctemplate_execute
@@ -515,7 +515,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring JdbcTemplate.execute(sql) — raw SQL string execution."
+  description: "Spring JdbcTemplate.execute(sql) - raw SQL string execution."
 - id: scala.sqli.jpa_create_native_query
   enabled: true
   language: scala
@@ -554,7 +554,7 @@
         }
       }
     expect_no_match: true
-  description: "JPA EntityManager.createNativeQuery(sql) — raw native SQL execution."
+  description: "JPA EntityManager.createNativeQuery(sql) - raw native SQL execution."
 - id: scala.sqli.r2dbc_databaseclient_sql
   enabled: true
   language: scala
@@ -593,7 +593,7 @@
         }
       }
     expect_no_match: true
-  description: "Spring R2DBC DatabaseClient.sql(sql) — SQL text remains injectable when built from tainted input; bind values separately."
+  description: "Spring R2DBC DatabaseClient.sql(sql) - SQL text remains injectable when built from tainted input; bind values separately."
 - id: scala.sqli.jdbi_handle_createquery
   enabled: true
   language: scala
@@ -637,6 +637,6 @@
         def createQuery(args: Any*): Any = null
       }
     expect_no_match: true
-  description: "JDBI Handle.createQuery(sql) — raw SQL text remains injectable when built from attacker-controlled input. Merged collision aliases: scala.sqli.hibernate_create_query."
+  description: "JDBI Handle.createQuery(sql) - raw SQL text remains injectable when built from attacker-controlled input. Merged collision aliases: scala.sqli.hibernate_create_query."
   aliases:
   - scala.sqli.hibernate_create_query

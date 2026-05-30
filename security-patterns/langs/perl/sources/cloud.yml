@@ -14,7 +14,7 @@
     kind: param
     target:
       name: event
-  description: "Disabled — AWS Lambda Perl runtime `event` param is too broad without a runtime-specific handler wrapper."
+  description: "Disabled - AWS Lambda Perl runtime `event` param is too broad without a runtime-specific handler wrapper."
 
 - id: perl.source.gcf_request
   enabled: false
@@ -29,4 +29,4 @@
     kind: param
     target:
       name: req
-  description: "Disabled — GCF/Functions-style `req` param collides with non-cloud HTTP handlers; enable only in cloud-only audits."
+  description: "Disabled - GCF/Functions-style `req` param collides with non-cloud HTTP handlers; enable only in cloud-only audits."

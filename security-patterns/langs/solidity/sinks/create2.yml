@@ -1,4 +1,4 @@
-# CREATE2 family — deterministic-address deployment sinks.
+# CREATE2 family - deterministic-address deployment sinks.
 #
 # CREATE2 derives the deployed address from
 #   keccak256(0xff, deployer, salt, keccak256(initcode))[12..]
@@ -30,7 +30,7 @@
       pragma solidity ^0.8.0;
       contract App { function test() public { assembly { create2(0, 0, 0, 0) } } }
     expect_no_match: true
-  description: "CREATE2 with attacker-controlled salt — address is deterministic from (deployer, salt, initcode). Attacker can squat the address ahead of deployment, or (post-selfdestruct) redeploy different code at a previously-trusted address."
+  description: "CREATE2 with attacker-controlled salt - address is deterministic from (deployer, salt, initcode). Attacker can squat the address ahead of deployment, or (post-selfdestruct) redeploy different code at a previously-trusted address."
 - id: solidity.create2.openzeppelin_create2
   enabled: true
   language: solidity
@@ -57,4 +57,4 @@
       import "@openzeppelin/contracts/Foo.sol";
       contract App { function test(bytes memory data) public { deploy(0, bytes32(0), data); } }
     expect_no_match: true
-  description: "OZ Create2.deploy(amount, salt, bytecode) — same address-squatting hazards as raw CREATE2 when salt is attacker-influenced."
+  description: "OZ Create2.deploy(amount, salt, bytecode) - same address-squatting hazards as raw CREATE2 when salt is attacker-influenced."

@@ -23,7 +23,7 @@
       import 'dart:io';
       void test(String input) { Process.run("echo", [input]); }
     expect_no_match: true
-  description: "Process.run(tainted_executable, argv) — attacker-controlled executable paths can spawn unintended programs. Shell-command string injection is covered by dart.cmdi.process_run_in_shell."
+  description: "Process.run(tainted_executable, argv) - attacker-controlled executable paths can spawn unintended programs. Shell-command string injection is covered by dart.cmdi.process_run_in_shell."
 
 - id: dart.cmdi.process_run_in_shell
   aliases:
@@ -55,7 +55,7 @@
     code: |
       void test(String input) { Process.run("sh", ["-c", input], runInShell: false); }
     expect_no_match: true
-  description: "Process.run(runInShell: true) — passes command arguments through /bin/sh or cmd.exe; metacharacters in the argument list execute arbitrary commands. Also covers merged aliases: dart.cmdi.process_run_sh_c."
+  description: "Process.run(runInShell: true) - passes command arguments through /bin/sh or cmd.exe; metacharacters in the argument list execute arbitrary commands. Also covers merged aliases: dart.cmdi.process_run_sh_c."
 
 - id: dart.cmdi.process_run_sync
   enabled: true
@@ -80,7 +80,7 @@
       import 'dart:io';
       void test(String input) { Process.runSync("echo", [input]); }
     expect_no_match: true
-  description: "Process.runSync(tainted_executable, argv) — attacker-controlled executable paths can spawn unintended programs."
+  description: "Process.runSync(tainted_executable, argv) - attacker-controlled executable paths can spawn unintended programs."
 
 - id: dart.cmdi.process_runsync_in_shell
   enabled: true
@@ -113,7 +113,7 @@
       import 'dart:io';
       void test(String input) { Process.runSync("sh", ["-c", input], runInShell: false); }
     expect_no_match: true
-  description: "Process.runSync(runInShell: true) — shell-interpreted exec where tainted command arguments execute arbitrary commands."
+  description: "Process.runSync(runInShell: true) - shell-interpreted exec where tainted command arguments execute arbitrary commands."
 
 - id: dart.cmdi.process_start
   enabled: false
@@ -127,7 +127,7 @@
     kind: call
     callee:
       attribute: [Process, start]
-  description: "Disabled — Process.start without `runInShell: true` is argv-form (safe). The real RCE sink is dart.cmdi.process_start_in_shell."
+  description: "Disabled - Process.start without `runInShell: true` is argv-form (safe). The real RCE sink is dart.cmdi.process_start_in_shell."
 
 - id: dart.cmdi.process_start_in_shell
   enabled: true
@@ -161,7 +161,7 @@
       import 'dart:io';
       void test(String input) { Process.start(input, [], runInShell: false); }
     expect_no_match: true
-  description: "Process.start(tainted_executable, argv) — attacker-controlled executable paths can spawn unintended programs."
+  description: "Process.start(tainted_executable, argv) - attacker-controlled executable paths can spawn unintended programs."
 
 # Explicit `sh -c` argv shape. Skips the runInShell gate because the
 # program itself is /bin/sh and arg0 of arguments is `-c` carrying a
@@ -194,4 +194,4 @@
       import 'dart:io';
       void test() { Process.start("sh", ["-c", "whoami"]); }
     expect_no_match: true
-  description: "Process.start(\"sh\", tainted_argv) — explicit shell invocation can interpret attacker-controlled command strings."
+  description: "Process.start(\"sh\", tainted_argv) - explicit shell invocation can interpret attacker-controlled command strings."

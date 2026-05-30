@@ -15,7 +15,7 @@
     kind: param
     target:
       name: event
-  description: "Disabled — AWS Lambda custom-runtime `event` param is too broad without a runtime-specific bootstrap shape."
+  description: "Disabled - AWS Lambda custom-runtime `event` param is too broad without a runtime-specific bootstrap shape."
 
 - id: c.cloud.aws_lambda_context
   enabled: false
@@ -30,4 +30,4 @@
     kind: param
     target:
       name: context
-  description: "Disabled — Lambda context is runtime metadata; enable only with a concrete custom-runtime wrapper."
+  description: "Disabled - Lambda context is runtime metadata; enable only with a concrete custom-runtime wrapper."

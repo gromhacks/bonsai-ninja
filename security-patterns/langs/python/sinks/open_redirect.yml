@@ -27,7 +27,7 @@
       def example(user_input):
           return flask.redirect('safe')
     expect_no_match: true
-  description: "flask.redirect(tainted) — fully-qualified form; returns a 302 with a tainted Location."
+  description: "flask.redirect(tainted) - fully-qualified form; returns a 302 with a tainted Location."
 
 - id: python.open_redirect.flask_redirect_bare
   enabled: false
@@ -43,7 +43,7 @@
     kind: call
     callee:
       name: redirect
-  description: "Disabled — bare `redirect(...)` collides with app-defined helpers. Re-enable per-project when imports of `flask.redirect` / `django.shortcuts.redirect` can be resolved and gated."
+  description: "Disabled - bare `redirect(...)` collides with app-defined helpers. Re-enable per-project when imports of `flask.redirect` / `django.shortcuts.redirect` can be resolved and gated."
 
 - id: python.open_redirect.werkzeug_redirect
   enabled: true
@@ -394,4 +394,4 @@
       def example(request):
           return oauth.authorize_redirect(request, '/callback')
     expect_no_match: true
-  description: "Authlib oauth.authorize_redirect(request, tainted_redirect_uri) — attacker-controlled redirect URI permits OAuth open-redirect / token theft via callback hijack."
+  description: "Authlib oauth.authorize_redirect(request, tainted_redirect_uri) - attacker-controlled redirect URI permits OAuth open-redirect / token theft via callback hijack."

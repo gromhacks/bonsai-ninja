@@ -27,7 +27,7 @@
         console.log(username);
       }
     expect_no_match: true
-  description: "console.log(secret/token/password) — secret-shaped data written to process logs or captured stdout. Merged aliases: javascript.log_injection.console_newline."
+  description: "console.log(secret/token/password) - secret-shaped data written to process logs or captured stdout. Merged aliases: javascript.log_injection.console_newline."
   aliases:
   - javascript.log_injection.console_newline
 - id: javascript.info_disclosure.response_send_error_stack
@@ -69,7 +69,7 @@
         return res.send(html);
       }
     expect_no_match: true
-  description: "Express res.send(error.stack/message) — exposes internal exception details to the response body."
+  description: "Express res.send(error.stack/message) - exposes internal exception details to the response body."
 - id: javascript.info_disclosure.response_render_error_page
   enabled: true
   language: javascript
@@ -94,7 +94,7 @@
       }
     expect_match_text:
     - res.render
-  description: "Express res.render(error, err/stack) — debug or exception details can be rendered into an error page."
+  description: "Express res.render(error, err/stack) - debug or exception details can be rendered into an error page."
 - id: javascript.info_disclosure.postmessage_wildcard_target
   enabled: true
   language: javascript

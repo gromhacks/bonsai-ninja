@@ -1,5 +1,5 @@
 # Lua memory-safety / lifecycle audit-pair sites.
-# These rules fire on the *transition site* — the Lua method-call
+# These rules fire on the *transition site* - the Lua method-call
 # receiver field isn't populated by the kit (Lua uses `:` rather than
 # `.`), so the lifecycle lattice cannot extract the binding from
 # `f:close()`. The `requires_state` engine constraint (P6) cannot gate
@@ -22,7 +22,7 @@
         io.close(f)
       end
     expect_match_text: [io.close]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. io.close(f) — subsequent f:read/f:write on the same handle errors with 'attempt to use a closed file' (use-after-close, CWE-416). Lua's `:` method-call receiver isn't surfaced to the lifecycle lattice today, so this rule remains a transition-site audit-pair until the adapter populates the `receiver` field."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. io.close(f) - subsequent f:read/f:write on the same handle errors with 'attempt to use a closed file' (use-after-close, CWE-416). Lua's `:` method-call receiver isn't surfaced to the lifecycle lattice today, so this rule remains a transition-site audit-pair until the adapter populates the `receiver` field."
 - id: lua.memory.coroutine_close
   enabled: true
   language: lua
@@ -40,4 +40,4 @@
         coroutine.close(co)
       end
     expect_match_text: [coroutine.close]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. coroutine.close(co) (Lua 5.4+) — subsequent coroutine.resume on the closed coroutine returns false with 'cannot resume dead coroutine' (use-after-close, CWE-672). Lua's `:` method-call receiver isn't surfaced to the lifecycle lattice today."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value. coroutine.close(co) (Lua 5.4+) - subsequent coroutine.resume on the closed coroutine returns false with 'cannot resume dead coroutine' (use-after-close, CWE-672). Lua's `:` method-call receiver isn't surfaced to the lifecycle lattice today."

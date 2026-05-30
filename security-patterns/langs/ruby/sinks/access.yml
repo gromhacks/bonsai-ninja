@@ -26,7 +26,7 @@
         get_object(bucket: "public", key: "readme.txt")
       end
     expect_no_match: true
-  description: "aws-sdk-s3 get_object — tainted bucket/key selector reads arbitrary object data."
+  description: "aws-sdk-s3 get_object - tainted bucket/key selector reads arbitrary object data."
 
 - id: ruby.access.aws_put_object
   enabled: true
@@ -56,7 +56,7 @@
         put_object(bucket: "public", key: "readme.txt", body: "ok")
       end
     expect_no_match: true
-  description: "aws-sdk-s3 put_object — tainted bucket/key selector overwrites attacker-chosen object keys."
+  description: "aws-sdk-s3 put_object - tainted bucket/key selector overwrites attacker-chosen object keys."
 
 - id: ruby.access.aws_get_secret_value
   enabled: true
@@ -86,7 +86,7 @@
         get_secret_value(secret_id: "app/config")
       end
     expect_no_match: true
-  description: "aws-sdk-secretsmanager get_secret_value — tainted secret id reads arbitrary secret material."
+  description: "aws-sdk-secretsmanager get_secret_value - tainted secret id reads arbitrary secret material."
 
 - id: ruby.access.gcp_access_secret_version
   enabled: true
@@ -116,4 +116,4 @@
         access_secret_version(name: "projects/demo/secrets/app/versions/latest")
       end
     expect_no_match: true
-  description: "Secret Manager access_secret_version — tainted resource name reads arbitrary secret versions."
+  description: "Secret Manager access_secret_version - tainted resource name reads arbitrary secret versions."

@@ -1,5 +1,5 @@
 # Phoenix / Plug / Absinthe / LiveView HTTP + socket request sources.
-# Every enabled rule MUST have `trust:` — without it the security
+# Every enabled rule MUST have `trust:` - without it the security
 # dataflow ranker can't tell attacker input apart from service or local
 # input. All of these are `trust: remote`.
 - id: elixir.phoenix.params
@@ -24,7 +24,7 @@
           params
         end
       end
-  description: "Phoenix.Controller action `params` — second arg of every controller `action(conn, params)`; carries merged route/query/body params. Bare-name match: also fires on any other function with a `params` parameter."
+  description: "Phoenix.Controller action `params` - second arg of every controller `action(conn, params)`; carries merged route/query/body params. Bare-name match: also fires on any other function with a `params` parameter."
 
   imports:
   - Phoenix
@@ -42,7 +42,7 @@
     kind: param
     target:
       name: conn
-  description: "Disabled — whole Plug.Conn taints too broadly without field-sensitive conn access tracking; params/read_body/header accessors stay enabled."
+  description: "Disabled - whole Plug.Conn taints too broadly without field-sensitive conn access tracking; params/read_body/header accessors stay enabled."
 
 - id: elixir.plug.conn_params_read
   enabled: false
@@ -57,7 +57,7 @@
     kind: read
     target:
       name: params
-  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.params`; Phoenix `params` parameter rules cover the common source shape."
+  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.params`; Phoenix `params` parameter rules cover the common source shape."
 
 # Bare-name `conn` source on Plug.Conn. Distinct ID from the read-
 # shape rule above so the param-shape match (which the elixir adapter
@@ -84,7 +84,7 @@
           conn
         end
       end
-  description: "Plug action `conn` parameter — first arg of every Plug callback. Bare-name match: also fires on any other function with a `conn` parameter; treat findings on non-Plug modules as audit hints. Used to seed `conn.params[...]` access flows that the read-shape rule cannot model."
+  description: "Plug action `conn` parameter - first arg of every Plug callback. Bare-name match: also fires on any other function with a `conn` parameter; treat findings on non-Plug modules as audit hints. Used to seed `conn.params[...]` access flows that the read-shape rule cannot model."
 
   imports:
   - Plug
@@ -101,7 +101,7 @@
     kind: read
     target:
       name: query_params
-  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.query_params`."
+  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.query_params`."
 
 - id: elixir.plug.body_params_read
   enabled: false
@@ -116,7 +116,7 @@
     kind: read
     target:
       name: body_params
-  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.body_params`."
+  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.body_params`."
 
 - id: elixir.plug.cookies_read
   enabled: false
@@ -131,7 +131,7 @@
     kind: read
     target:
       name: cookies
-  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.cookies`."
+  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.cookies`."
 
 - id: elixir.plug.req_headers_read
   enabled: false
@@ -146,7 +146,7 @@
     kind: read
     target:
       name: req_headers
-  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.req_headers`."
+  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.req_headers`."
 
 - id: elixir.plug.fetch_query_params
   enabled: true
@@ -169,7 +169,7 @@
           Plug.Conn.fetch_query_params(input)
         end
       end
-  description: "Plug.Conn.fetch_query_params/2 — parses the raw query string into conn.query_params; the returned conn carries attacker-controlled query data."
+  description: "Plug.Conn.fetch_query_params/2 - parses the raw query string into conn.query_params; the returned conn carries attacker-controlled query data."
 
   imports:
   - Plug
@@ -194,7 +194,7 @@
           Plug.Conn.fetch_cookies(input)
         end
       end
-  description: "Plug.Conn.fetch_cookies/2 — parses request cookies into conn.cookies/req_cookies; values are attacker-controlled."
+  description: "Plug.Conn.fetch_cookies/2 - parses request cookies into conn.cookies/req_cookies; values are attacker-controlled."
 
   imports:
   - Plug
@@ -219,7 +219,7 @@
           Plug.Conn.fetch_session(input)
         end
       end
-  description: "Plug.Conn.fetch_session/2 — loads session data from a (potentially attacker-supplied) cookie; values originate from the request."
+  description: "Plug.Conn.fetch_session/2 - loads session data from a (potentially attacker-supplied) cookie; values originate from the request."
 
   imports:
   - Plug
@@ -244,7 +244,7 @@
           Plug.Conn.get_session(input)
         end
       end
-  description: "Plug.Conn.get_session/2 — returns a session value sourced from the request cookie/store; treat as remote until explicitly validated."
+  description: "Plug.Conn.get_session/2 - returns a session value sourced from the request cookie/store; treat as remote until explicitly validated."
 
   imports:
   - Plug
@@ -267,7 +267,7 @@
           Plug.Conn.read_body(input)
         end
       end
-  description: "Plug.Conn.read_body/2 — raw request body bytes; attacker-controlled."
+  description: "Plug.Conn.read_body/2 - raw request body bytes; attacker-controlled."
 
 - id: elixir.plug.get_req_header
   enabled: true
@@ -288,7 +288,7 @@
           Plug.Conn.get_req_header(input)
         end
       end
-  description: "Plug.Conn.get_req_header/2 — attacker-controlled request header values."
+  description: "Plug.Conn.get_req_header/2 - attacker-controlled request header values."
 
 - id: elixir.plug.conn_query_decode
   enabled: true
@@ -311,7 +311,7 @@
           Plug.Conn.Query.decode(input)
         end
       end
-  description: "Plug.Conn.Query.decode/1 — parsed query-string values; commonly fed by conn.query_string and therefore attacker-controlled."
+  description: "Plug.Conn.Query.decode/1 - parsed query-string values; commonly fed by conn.query_string and therefore attacker-controlled."
   imports:
   - Plug
 
@@ -333,7 +333,7 @@
           URI.decode_query(input)
         end
       end
-  description: "URI.decode_query/1,2 — query-string parser; when used on request URLs the returned parameter values are remote input."
+  description: "URI.decode_query/1,2 - query-string parser; when used on request URLs the returned parameter values are remote input."
 
 - id: elixir.phoenix.channel_handle_in
   enabled: true
@@ -356,7 +356,7 @@
           payload
         end
       end
-  description: "Phoenix.Channel handle_in/3 `payload` — client-sent message body over a websocket/long-poll transport. Bare-name match: also fires on any other function with a `payload` parameter; treat findings on non-channel modules as audit hints."
+  description: "Phoenix.Channel handle_in/3 `payload` - client-sent message body over a websocket/long-poll transport. Bare-name match: also fires on any other function with a `payload` parameter; treat findings on non-channel modules as audit hints."
 
   imports:
   - Phoenix
@@ -375,7 +375,7 @@
     kind: param
     target:
       name: params
-  description: "Disabled duplicate — bare `param name: params` is already covered by elixir.phoenix.params; v1 matching cannot distinguish controller vs LiveView callback context, so a second rule on the same name only emits redundant rows."
+  description: "Disabled duplicate - bare `param name: params` is already covered by elixir.phoenix.params; v1 matching cannot distinguish controller vs LiveView callback context, so a second rule on the same name only emits redundant rows."
 
 - id: elixir.absinthe.resolver_args
   enabled: true
@@ -408,6 +408,6 @@
         end
       end
     expect_no_match: true
-  description: "Absinthe resolver `resolve(args)` parameter — GraphQL caller-supplied arguments. Scoped to resolver method names so ordinary helpers named args stay clean."
+  description: "Absinthe resolver `resolve(args)` parameter - GraphQL caller-supplied arguments. Scoped to resolver method names so ordinary helpers named args stay clean."
   imports:
   - Absinthe

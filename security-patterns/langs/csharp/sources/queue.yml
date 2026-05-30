@@ -11,7 +11,7 @@
     kind: param
     target:
       name: QueueTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure [QueueTrigger] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not Azure [QueueTrigger] attributes."
 
 - id: csharp.source.azure_servicebus_trigger
   enabled: false
@@ -25,7 +25,7 @@
     kind: param
     target:
       name: ServiceBusTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure [ServiceBusTrigger] attributes."
+  description: "Disabled - matcher only sees parameter identifiers, not Azure [ServiceBusTrigger] attributes."
 
 - id: csharp.source.masstransit_consume
   enabled: false
@@ -39,7 +39,7 @@
     kind: param
     target:
       name: ConsumeContext
-  description: "Disabled — `ConsumeContext` is a type name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `ConsumeContext` is a type name; `kind: param` only matches parameter identifiers."
 
 - id: csharp.source.rabbitmq_received
   enabled: false
@@ -53,7 +53,7 @@
     kind: param
     target:
       name: BasicDeliverEventArgs
-  description: "Disabled — `BasicDeliverEventArgs` is a type name; `kind: param` only matches parameter identifiers."
+  description: "Disabled - `BasicDeliverEventArgs` is a type name; `kind: param` only matches parameter identifiers."
 
 - id: csharp.source.kafka_consume
   enabled: false
@@ -67,7 +67,7 @@
     kind: call
     callee:
       attribute: [Consumer, Consume]
-  description: "Disabled — adapters index local receivers like `consumer.Consume`, not receiver types like `Consumer.Consume`."
+  description: "Disabled - adapters index local receivers like `consumer.Consume`, not receiver types like `Consumer.Consume`."
 
 - id: csharp.source.sqs_receivemessage
   enabled: true
@@ -85,4 +85,4 @@
       using AWSSDK.SQS;
       class App { void Test() { dynamic input = "x"; dynamic client = input; client.ReceiveMessageAsync(); } }
     expect_match_text: [client.ReceiveMessageAsync]
-  description: "AmazonSQSClient.ReceiveMessageAsync — package-scoped SQS receive call on a local client receiver."
+  description: "AmazonSQSClient.ReceiveMessageAsync - package-scoped SQS receive call on a local client receiver."

@@ -1,4 +1,4 @@
-# Java sanitizers — calls that neutralise a specific taint tag.
+# Java sanitizers - calls that neutralise a specific taint tag.
 # SQL ----------------------------------------------------------------
 - id: java.sanitizer.prepared_statement
   enabled: true
@@ -43,7 +43,7 @@
         }
       }
     expect_no_match: true
-  description: "Connection.prepareStatement(static SQL with placeholders) — bound args via setX neutralise SQL value injection.
+  description: "Connection.prepareStatement(static SQL with placeholders) - bound args via setX neutralise SQL value injection.
     Dynamic SQL text is handled by java.sqli.connection_preparestatement_tainted_sql."
 
 - id: java.sanitizer.prepared_statement_setstring
@@ -65,7 +65,7 @@
         }
       }
     expect_match_text: [PreparedStatement.setString]
-  description: "PreparedStatement.setString — parameter bind escapes the bound value at the driver."
+  description: "PreparedStatement.setString - parameter bind escapes the bound value at the driver."
 
 - id: java.sanitizer.prepared_statement_setint
   enabled: true
@@ -86,7 +86,7 @@
         }
       }
     expect_match_text: [PreparedStatement.setInt]
-  description: "PreparedStatement.setInt — integer bind forces numeric type."
+  description: "PreparedStatement.setInt - integer bind forces numeric type."
 
 - id: java.sanitizer.prepared_statement_setlong
   enabled: true
@@ -107,7 +107,7 @@
         }
       }
     expect_match_text: [PreparedStatement.setLong]
-  description: "PreparedStatement.setLong — long bind forces numeric type."
+  description: "PreparedStatement.setLong - long bind forces numeric type."
 
 - id: java.sanitizer.esapi_encode_for_sql
   enabled: true
@@ -139,7 +139,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForSQL]
-  description: "OWASP ESAPI Encoder.encodeForSQL — codec-based SQL escaping (prefer PreparedStatement)."
+  description: "OWASP ESAPI Encoder.encodeForSQL - codec-based SQL escaping (prefer PreparedStatement)."
 
 # URL / SSRF ---------------------------------------------------------
 - id: java.sanitizer.uri_create
@@ -159,7 +159,7 @@
         }
       }
     expect_match_text: [URI.create]
-  description: "URI.create — parses and validates URI syntax; rejects malformed inputs."
+  description: "URI.create - parses and validates URI syntax; rejects malformed inputs."
 
 - id: java.sanitizer.url_encoder
   enabled: true
@@ -178,7 +178,7 @@
         }
       }
     expect_match_text: [URLEncoder.encode]
-  description: "URLEncoder.encode — percent-encodes for URL placement."
+  description: "URLEncoder.encode - percent-encodes for URL placement."
 
 - id: java.sanitizer.owasp_encoder_uricomponent
   enabled: true
@@ -199,7 +199,7 @@
         }
       }
     expect_match_text: [Encode.forUriComponent]
-  description: "OWASP Java Encoder Encode.forUriComponent — URI component encoder."
+  description: "OWASP Java Encoder Encode.forUriComponent - URI component encoder."
 
 - id: java.sanitizer.esapi_encode_for_url
   enabled: true
@@ -255,7 +255,7 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeHtml4]
-  description: "Apache Commons Text StringEscapeUtils.escapeHtml4 — encodes HTML entities."
+  description: "Apache Commons Text StringEscapeUtils.escapeHtml4 - encodes HTML entities."
 
 - id: java.sanitizer.html_escape_xml
   enabled: true
@@ -278,7 +278,7 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeXml10]
-  description: "Apache Commons Text StringEscapeUtils.escapeXml10 — XML entity encoding."
+  description: "Apache Commons Text StringEscapeUtils.escapeXml10 - XML entity encoding."
 
 - id: java.sanitizer.spring_htmlutils
   enabled: true
@@ -301,7 +301,7 @@
         }
       }
     expect_match_text: [HtmlUtils.htmlEscape]
-  description: "Spring HtmlUtils.htmlEscape — HTML-entity encoder for response bodies."
+  description: "Spring HtmlUtils.htmlEscape - HTML-entity encoder for response bodies."
 
 - id: java.sanitizer.owasp_encoder_forhtml
   enabled: true
@@ -324,7 +324,7 @@
         }
       }
     expect_match_text: [Encode.forHtml]
-  description: "OWASP Java Encoder Encode.forHtml — HTML body context encoder."
+  description: "OWASP Java Encoder Encode.forHtml - HTML body context encoder."
 
 - id: java.sanitizer.owasp_encoder_forjs
   enabled: true
@@ -347,7 +347,7 @@
         }
       }
     expect_match_text: [Encode.forJavaScript]
-  description: "OWASP Java Encoder Encode.forJavaScript — JS string context encoder."
+  description: "OWASP Java Encoder Encode.forJavaScript - JS string context encoder."
 
 - id: java.sanitizer.owasp_html_sanitizer_policy
   enabled: true
@@ -370,7 +370,7 @@
         }
       }
     expect_match_text: [PolicyFactory.sanitize]
-  description: "OWASP HTML Sanitizer PolicyFactory.sanitize — policy-driven HTML cleaner."
+  description: "OWASP HTML Sanitizer PolicyFactory.sanitize - policy-driven HTML cleaner."
 
   imports:
   - com
@@ -396,7 +396,7 @@
         }
       }
     expect_match_text: [HtmlPolicyBuilder.sanitize]
-  description: "OWASP HTML Sanitizer HtmlPolicyBuilder.sanitize — per-policy HTML scrub."
+  description: "OWASP HTML Sanitizer HtmlPolicyBuilder.sanitize - per-policy HTML scrub."
 
   imports:
   - com
@@ -422,7 +422,7 @@
         }
       }
     expect_match_text: [Jsoup.clean]
-  description: "Jsoup.clean(html, whitelist) — whitelist-based HTML sanitizer."
+  description: "Jsoup.clean(html, whitelist) - whitelist-based HTML sanitizer."
 
 # ESAPI --------------------------------------------------------------
 - id: java.sanitizer.esapi_encode_for_html
@@ -519,7 +519,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForLDAP]
-  description: "OWASP ESAPI Encoder.encodeForLDAP — escapes LDAP filter metacharacters."
+  description: "OWASP ESAPI Encoder.encodeForLDAP - escapes LDAP filter metacharacters."
 
 - id: java.sanitizer.esapi_encode_for_xml
   enabled: true
@@ -551,7 +551,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForXML]
-  description: "OWASP ESAPI Encoder.encodeForXML — XML text encoder."
+  description: "OWASP ESAPI Encoder.encodeForXML - XML text encoder."
 
 - id: java.sanitizer.esapi_encode_for_html_attribute
   enabled: true
@@ -583,7 +583,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForHTMLAttribute]
-  description: "OWASP ESAPI Encoder.encodeForHTMLAttribute — escapes attacker input for HTML attribute context."
+  description: "OWASP ESAPI Encoder.encodeForHTMLAttribute - escapes attacker input for HTML attribute context."
 
 - id: java.sanitizer.esapi_encode_for_css
   enabled: true
@@ -615,7 +615,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForCSS]
-  description: "OWASP ESAPI Encoder.encodeForCSS — escapes attacker input for CSS string/property context."
+  description: "OWASP ESAPI Encoder.encodeForCSS - escapes attacker input for CSS string/property context."
 
 - id: java.sanitizer.esapi_encode_for_xml_attribute
   enabled: true
@@ -647,7 +647,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForXMLAttribute]
-  description: "OWASP ESAPI Encoder.encodeForXMLAttribute — escapes attacker input for XML attribute context."
+  description: "OWASP ESAPI Encoder.encodeForXMLAttribute - escapes attacker input for XML attribute context."
 
 - id: java.sanitizer.esapi_encode_for_dn
   enabled: true
@@ -679,7 +679,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForDN]
-  description: "OWASP ESAPI Encoder.encodeForDN — escapes LDAP distinguished-name metacharacters."
+  description: "OWASP ESAPI Encoder.encodeForDN - escapes LDAP distinguished-name metacharacters."
 
 - id: java.sanitizer.esapi_encode_for_xpath
   enabled: true
@@ -711,7 +711,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForXPath]
-  description: "OWASP ESAPI Encoder.encodeForXPath — escapes attacker input for XPath literal context."
+  description: "OWASP ESAPI Encoder.encodeForXPath - escapes attacker input for XPath literal context."
 
 - id: java.sanitizer.esapi_encode_for_os
   enabled: true
@@ -743,7 +743,7 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForOS]
-  description: "OWASP ESAPI Encoder.encodeForOS — escapes attacker input for a specific OS command argument context."
+  description: "OWASP ESAPI Encoder.encodeForOS - escapes attacker input for a specific OS command argument context."
 
 # Auth / crypto ------------------------------------------------------
 - id: java.sanitizer.bcrypt_matches
@@ -765,7 +765,7 @@
         }
       }
     expect_match_text: [BCrypt.checkpw]
-  description: "jBCrypt checkpw — bcrypt password verification."
+  description: "jBCrypt checkpw - bcrypt password verification."
 
 - id: java.sanitizer.spring_security_password_encoder_matches
   enabled: true
@@ -786,7 +786,7 @@
         }
       }
     expect_match_text: [PasswordEncoder.matches]
-  description: "Spring Security PasswordEncoder.matches — algorithm-agnostic verifier."
+  description: "Spring Security PasswordEncoder.matches - algorithm-agnostic verifier."
 
 - id: java.sanitizer.message_digest_isequal
   enabled: true
@@ -805,7 +805,7 @@
         }
       }
     expect_match_text: [MessageDigest.isEqual]
-  description: "MessageDigest.isEqual — constant-time byte[] compare (MAC / hash verification)."
+  description: "MessageDigest.isEqual - constant-time byte[] compare (MAC / hash verification)."
 
 # Path ---------------------------------------------------------------
 - id: java.sanitizer.path_normalize
@@ -818,7 +818,7 @@
     kind: call
     callee:
       attribute: [Path, normalize]
-  description: "Disabled — Path.normalize removes .. segments but does not by itself enforce trusted-root containment."
+  description: "Disabled - Path.normalize removes .. segments but does not by itself enforce trusted-root containment."
 
 - id: java.sanitizer.path_startswith
   enabled: false
@@ -830,7 +830,7 @@
     kind: call
     callee:
       attribute: [Path, startsWith]
-  description: "Disabled — startsWith is only a sanitizer when the receiver is a normalized Path and the argument is the trusted
+  description: "Disabled - startsWith is only a sanitizer when the receiver is a normalized Path and the argument is the trusted
     root; receiver type is not available in v1 matching."
 
 - id: java.sanitizer.filename_get_name
@@ -852,7 +852,7 @@
         }
       }
     expect_match_text: [FilenameUtils.getName]
-  description: "Apache Commons IO FilenameUtils.getName — strips directory components from a filename."
+  description: "Apache Commons IO FilenameUtils.getName - strips directory components from a filename."
 
 # Numeric coercion ---------------------------------------------------
   imports:
@@ -874,7 +874,7 @@
         }
       }
     expect_match_text: [Integer.parseInt]
-  description: "Integer.parseInt — forces numeric shape; throws on non-numeric."
+  description: "Integer.parseInt - forces numeric shape; throws on non-numeric."
 
 - id: java.sanitizer.long_parselong
   enabled: true
@@ -893,7 +893,7 @@
         }
       }
     expect_match_text: [Long.parseLong]
-  description: "Long.parseLong — forces numeric shape; throws on non-numeric."
+  description: "Long.parseLong - forces numeric shape; throws on non-numeric."
 
 - id: java.sanitizer.uuid_fromstring
   enabled: true
@@ -912,7 +912,7 @@
         }
       }
     expect_match_text: [UUID.fromString]
-  description: "UUID.fromString — validates UUID shape; throws on malformed input."
+  description: "UUID.fromString - validates UUID shape; throws on malformed input."
 
 # JWT ----------------------------------------------------------------
 - id: java.sanitizer.jjwt_verifywith
@@ -934,7 +934,7 @@
         }
       }
     expect_match_text: [JwtParserBuilder.verifyWith]
-  description: "jjwt parserBuilder().verifyWith(key) — enforces signature verification."
+  description: "jjwt parserBuilder().verifyWith(key) - enforces signature verification."
 
 - id: java.sanitizer.jjwt_setsigningkey
   enabled: true
@@ -955,7 +955,7 @@
         }
       }
     expect_match_text: [JwtParserBuilder.setSigningKey]
-  description: "jjwt parserBuilder().setSigningKey — enforces signature verification (legacy API)."
+  description: "jjwt parserBuilder().setSigningKey - enforces signature verification (legacy API)."
 
 - id: java.sanitizer.nimbus_verify
   enabled: true
@@ -976,7 +976,7 @@
         }
       }
     expect_match_text: [SignedJWT.verify]
-  description: "Nimbus SignedJWT.verify — enforces JWT signature verification with the configured verifier."
+  description: "Nimbus SignedJWT.verify - enforces JWT signature verification with the configured verifier."
 
 # Additional encoder / sanitizer coverage --------------------------------
 
@@ -1001,7 +1001,7 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeEcmaScript]
-  description: "Apache Commons Text StringEscapeUtils.escapeEcmaScript — escapes JS string literal context."
+  description: "Apache Commons Text StringEscapeUtils.escapeEcmaScript - escapes JS string literal context."
 
 - id: java.sanitizer.commons_text_escape_java
   enabled: true
@@ -1024,7 +1024,7 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeJava]
-  description: "Apache Commons Text StringEscapeUtils.escapeJava — Java string-literal escape."
+  description: "Apache Commons Text StringEscapeUtils.escapeJava - Java string-literal escape."
 
 - id: java.sanitizer.commons_text_escape_xml11
   enabled: true
@@ -1045,7 +1045,7 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeXml11]
-  description: "Apache Commons Text StringEscapeUtils.escapeXml11 — XML 1.1 entity encoding."
+  description: "Apache Commons Text StringEscapeUtils.escapeXml11 - XML 1.1 entity encoding."
 
 - id: java.sanitizer.bcrypt_password_encoder_matches
   enabled: true
@@ -1066,7 +1066,7 @@
         }
       }
     expect_match_text: [BCryptPasswordEncoder.matches]
-  description: "Spring Security BCryptPasswordEncoder.matches — bcrypt password verification (constant-time within bcrypt)."
+  description: "Spring Security BCryptPasswordEncoder.matches - bcrypt password verification (constant-time within bcrypt)."
 
 - id: java.sanitizer.argon2_password_encoder_matches
   enabled: true
@@ -1087,7 +1087,7 @@
         }
       }
     expect_match_text: [Argon2PasswordEncoder.matches]
-  description: "Spring Security Argon2PasswordEncoder.matches — argon2 password verification."
+  description: "Spring Security Argon2PasswordEncoder.matches - argon2 password verification."
 
 - id: java.sanitizer.jsoup_parse_clean
   enabled: true
@@ -1108,7 +1108,7 @@
         }
       }
     expect_match_text: [Jsoup.parse]
-  description: "Jsoup.parse(html) — HTML parsing typically chained with .clean(...) / .text(); stripping returns sanitized
+  description: "Jsoup.parse(html) - HTML parsing typically chained with .clean(...) / .text(); stripping returns sanitized
     markup."
 
 - id: java.sanitizer.hibernate_validator_validate
@@ -1130,7 +1130,7 @@
         }
       }
     expect_match_text: [Validator.validate]
-  description: "Bean Validation (Hibernate Validator) Validator.validate — runs JSR-380 constraints; rejects values that fail
+  description: "Bean Validation (Hibernate Validator) Validator.validate - runs JSR-380 constraints; rejects values that fail
     schema."
 
 - id: java.sanitizer.pattern_matcher_matches
@@ -1143,7 +1143,7 @@
     kind: call
     callee:
       attribute: [Matcher, matches]
-  description: "Disabled — Matcher.matches is a sanitizer only when the pattern is a strict allowlist; pattern intent is not
+  description: "Disabled - Matcher.matches is a sanitizer only when the pattern is a strict allowlist; pattern intent is not
     visible to the matcher."
 
 - id: java.sanitizer.path_normalize_resolved
@@ -1196,7 +1196,7 @@
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: java.passthrough.urldecoder_decode
@@ -1218,7 +1218,7 @@
         }
       }
     expect_match_text: [URLDecoder.decode]
-  description: "java.net.URLDecoder.decode(s, charset) — preserves taint."
+  description: "java.net.URLDecoder.decode(s, charset) - preserves taint."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
@@ -1242,7 +1242,7 @@
         }
       }
     expect_match_text: [http.csrf]
-  description: "Spring Security HttpSecurity#csrf() — enables Spring Security CSRF filter chain."
+  description: "Spring Security HttpSecurity#csrf() - enables Spring Security CSRF filter chain."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -1264,7 +1264,7 @@
         }
       }
     expect_match_text: [Lock.lock]
-  description: "java.util.concurrent.locks.Lock.lock() — explicit lock acquire."
+  description: "java.util.concurrent.locks.Lock.lock() - explicit lock acquire."
 - id: java.lock.reentrant_lock
   enabled: true
   language: java
@@ -1282,7 +1282,7 @@
         }
       }
     expect_match_text: [ReentrantLock.lock]
-  description: "ReentrantLock.lock() — guard for shared-state access."
+  description: "ReentrantLock.lock() - guard for shared-state access."
 
 # Cookie-secure sanitizers (T402). Cookie-set calls with
 # httpOnly + secure flags are the SAFE shape; reviewer
@@ -1311,7 +1311,7 @@
   - name: generated shape example negative constraint boundary
     code: "class App {\n  void handle(String input) throws Exception {\n    Cookie.setHttpOnly();\n  }\n}\n"
     expect_no_match: true
-  description: "javax.servlet.http.Cookie.setHttpOnly(true) — explicit HttpOnly flag."
+  description: "javax.servlet.http.Cookie.setHttpOnly(true) - explicit HttpOnly flag."
 - id: java.cookie.cookie_setsecure_true
   enabled: true
   language: java
@@ -1335,7 +1335,7 @@
   - name: generated shape example negative constraint boundary
     code: "class App {\n  void handle(String input) throws Exception {\n    Cookie.setSecure();\n  }\n}\n"
     expect_no_match: true
-  description: "Cookie.setSecure(true) — explicit Secure flag."
+  description: "Cookie.setSecure(true) - explicit Secure flag."
 
 # Rate-limit middleware presence sanitizers (round 2 fill).
 - id: java.ratelimit.bucket4j_consume
@@ -1357,7 +1357,7 @@
         }
       }
     expect_match_text: [Bucket.tryConsume]
-  description: 'Bucket4j Bucket.tryConsume — rate-limit token-bucket consume.'
+  description: 'Bucket4j Bucket.tryConsume - rate-limit token-bucket consume.'
 
 # False-positive audit fill: validators and parameter binding shapes.
 - id: java.sanitizer.same_origin_path_startswith_slash
@@ -1385,7 +1385,7 @@
   - name: paired same-origin path guard negative constraint boundary
     code: "class App {\n  boolean allow(String next) {\n    return next.startsWith() && !next.startsWith(\"//\");\n  }\n}\n"
     expect_no_match: true
-  description: "Same-origin redirect path guard — the leading slash check is only credited when another startsWith call is
+  description: "Same-origin redirect path guard - the leading slash check is only credited when another startsWith call is
     present on the same receiver, allowing the paired `!path.startsWith(\"//\")` scheme-relative guard shape."
 
 - id: java.sanitizer.same_origin_path_reject_scheme_relative
@@ -1415,7 +1415,7 @@
     code: "class App {\n  boolean allow(String next) {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\"\
       );\n  }\n}\n"
     expect_no_match: true
-  description: "Disabled — same-receiver startsWith(\"/\") + startsWith(\"//\") is modeled by java.sanitizer.same_origin_path_startswith_slash."
+  description: "Disabled - same-receiver startsWith(\"/\") + startsWith(\"//\") is modeled by java.sanitizer.same_origin_path_startswith_slash."
 
 - id: java.sanitizer.allowlist_contains
   enabled: false
@@ -1438,7 +1438,7 @@
         }
       }
     expect_match_text: [allowed.contains]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
     allowlist membership check on explicitly allowlist-named receivers."
 
   disabled_reason:
@@ -1474,7 +1474,7 @@
         }
       }
     expect_no_match: true
-  description: "OWASP Benchmark Utils.TESTFILES_DIR.contains(file) — finite fixture-file allowlist used before path-sensitive file access."
+  description: "OWASP Benchmark Utils.TESTFILES_DIR.contains(file) - finite fixture-file allowlist used before path-sensitive file access."
 - id: java.sanitizer.map_get_or_default_allowlist
   enabled: false
   language: java
@@ -1496,7 +1496,7 @@
         }
       }
     expect_match_text: [allowed.getOrDefault]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrDefault
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrDefault
     on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
   disabled_reason:
@@ -1521,7 +1521,7 @@
         }
       }
     expect_match_text: [AllowedRole.valueOf]
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Enum.valueOf
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Enum.valueOf
     on narrowly named allowlist enums rejects values outside the enum domain."
 
   disabled_reason:
@@ -1816,7 +1816,7 @@
         }
       }
     expect_match_text: [jdbcTemplate.query]
-  description: "Disabled duplicate — same matcher as canonical java.sanitizer.jdbctemplate_query_rowmapper_params; JdbcTemplate.query
+  description: "Disabled duplicate - same matcher as canonical java.sanitizer.jdbctemplate_query_rowmapper_params; JdbcTemplate.query
     parameter binding is represented once until argument-order constraints exist."
 
   imports:
@@ -1891,7 +1891,7 @@
         void handle(@Pattern String slug) {
         }
       }
-  description: "Bean Validation @Pattern annotated parameter — framework validation constrains the accepted input shape."
+  description: "Bean Validation @Pattern annotated parameter - framework validation constrains the accepted input shape."
 
 - id: java.sanitizer.bean_validation_size_param
   enabled: true
@@ -1910,7 +1910,7 @@
         void handle(@Size String value) {
         }
       }
-  description: "Bean Validation @Size annotated parameter — framework validation enforces length bounds."
+  description: "Bean Validation @Size annotated parameter - framework validation enforces length bounds."
 
 - id: java.sanitizer.spring_ldap_filter_encode
   enabled: true
@@ -1931,7 +1931,7 @@
         }
       }
     expect_match_text: [LdapEncoder.filterEncode]
-  description: "Spring LDAP LdapEncoder.filterEncode — escapes LDAP filter metacharacters."
+  description: "Spring LDAP LdapEncoder.filterEncode - escapes LDAP filter metacharacters."
 
 - id: java.sanitizer.spring_ldap_name_encode
   enabled: true
@@ -1952,7 +1952,7 @@
         }
       }
     expect_match_text: [LdapEncoder.nameEncode]
-  description: "Spring LDAP LdapEncoder.nameEncode — escapes LDAP DN/RDN metacharacters."
+  description: "Spring LDAP LdapEncoder.nameEncode - escapes LDAP DN/RDN metacharacters."
 
 - id: java.sanitizer.rdn_escape_value
   enabled: true
@@ -1973,7 +1973,7 @@
         }
       }
     expect_match_text: [Rdn.escapeValue]
-  description: "javax.naming.ldap.Rdn.escapeValue — escapes attacker input for an LDAP RDN value."
+  description: "javax.naming.ldap.Rdn.escapeValue - escapes attacker input for an LDAP RDN value."
 
 - id: java.sanitizer.path_normalize_startswith_root
   enabled: false
@@ -2007,8 +2007,8 @@
       \    return normalized.startsWith();\n  }\n}\nclass Path {\n  Path resolve(Object o) { return this; }\n  Path normalize()
       { return this; }\n  boolean startsWith(Object o) { return true; }\n}\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Normalized
-    path containment check — a normalized/resolved path is accepted only if it remains under a trusted root."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Normalized
+    path containment check - a normalized/resolved path is accepted only if it remains under a trusted root."
 
   disabled_reason:
     code: over-broad
@@ -2037,8 +2037,8 @@
     code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedSchemes) {\n    return allowedSchemes.contains();\n\
       \  }\n}\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
-    allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
+    allowlist check - only explicitly permitted schemes are allowed before redirect or outbound request use."
 
   disabled_reason:
     code: over-broad
@@ -2067,8 +2067,8 @@
     code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedHosts) {\n    return allowedHosts.contains();\n\
       \  }\n}\n"
     expect_no_match: true
-  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
-    allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+  description: "Disabled - receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
+    allowlist check - validates the parsed host against a trusted set before SSRF-sensitive use."
 
   disabled_reason:
     code: over-broad
@@ -2108,7 +2108,7 @@
     code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n\
       \    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "XML parser feature hardening — disables external entity or external DTD loading features."
+  description: "XML parser feature hardening - disables external entity or external DTD loading features."
 
 - id: java.sanitizer.xml_factory_disallow_doctype_true
   enabled: true
@@ -2146,7 +2146,7 @@
     code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n\
       \    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
     expect_no_match: true
-  description: "XML parser feature hardening — disallows DOCTYPE declarations to block XXE payloads."
+  description: "XML parser feature hardening - disallows DOCTYPE declarations to block XXE payloads."
 
 - id: java.sanitizer.xml_factory_secure_processing
   enabled: true
@@ -2234,4 +2234,4 @@
       {\n    factory.setAttribute();\n  }\n}\nclass DocumentBuilderFactory {\n  void setAttribute(Object... args) {}\n}\n\
       class XMLConstants {\n  static String ACCESS_EXTERNAL_DTD = \"\";\n}\n"
     expect_no_match: true
-  description: "XMLConstants ACCESS_EXTERNAL_* set to empty string — blocks external DTD/schema/stylesheet resolution."
+  description: "XMLConstants ACCESS_EXTERNAL_* set to empty string - blocks external DTD/schema/stylesheet resolution."

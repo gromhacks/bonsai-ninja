@@ -33,7 +33,7 @@
         print "hello world"
       }
     expect_no_match: true
-  description: "print(tainted) — CGI body write. Constraint requires scalar interp (`$var`), dot-concat, or method-call shape so plain literal prints are skipped; the taint engine is the second gate. Also covers merged aliases: perl.info_disclosure.cgi_print_error."
+  description: "print(tainted) - CGI body write. Constraint requires scalar interp (`$var`), dot-concat, or method-call shape so plain literal prints are skipped; the taint engine is the second gate. Also covers merged aliases: perl.info_disclosure.cgi_print_error."
 
 - id: perl.xss.mojolicious_render
   enabled: true
@@ -65,7 +65,7 @@
         $c->render(text => "<p>safe</p>")
       }
     expect_no_match: true
-  description: "Mojolicious $c->render(text|data => tainted, format => 'html') — text/data kwargs bypass auto-escape, emitting raw HTML."
+  description: "Mojolicious $c->render(text|data => tainted, format => 'html') - text/data kwargs bypass auto-escape, emitting raw HTML."
 
 - id: perl.xss.dancer2_send_as
   enabled: true
@@ -97,7 +97,7 @@
         send_as html => "<p>safe</p>"
       }
     expect_no_match: true
-  description: "Dancer2 send_as html => tainted — writes raw HTML body bypassing template escaping."
+  description: "Dancer2 send_as html => tainted - writes raw HTML body bypassing template escaping."
 
 - id: perl.xss.catalyst_body
   enabled: false
@@ -112,4 +112,4 @@
     kind: call
     callee:
       name: body
-  description: "Disabled — bare `name: body` is FP-prone; matches HTTP::Response, email, HTML body accessors, and request body reads alike. No canonical exists; re-enable when adapter supports receiver-type narrowing for Catalyst::Response->body."
+  description: "Disabled - bare `name: body` is FP-prone; matches HTTP::Response, email, HTML body accessors, and request body reads alike. No canonical exists; re-enable when adapter supports receiver-type narrowing for Catalyst::Response->body."

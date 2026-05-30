@@ -33,7 +33,7 @@
         ActiveRecord.update_attributes({name: "alice"})
       end
     expect_no_match: true
-  description: "Rails ActiveRecord#update_attributes(params[:user]) — mass-assigns every key in params; admin/role fields slip through unless strong_parameters narrow the hash."
+  description: "Rails ActiveRecord#update_attributes(params[:user]) - mass-assigns every key in params; admin/role fields slip through unless strong_parameters narrow the hash."
 - id: ruby.mass_assign.assign_attributes
   enabled: true
   language: ruby
@@ -65,4 +65,4 @@
         ActiveRecord.assign_attributes({name: "alice"})
       end
     expect_no_match: true
-  description: "ActiveRecord#assign_attributes(params[:user]) — same overpost surface as update_attributes; permit narrowing required."
+  description: "ActiveRecord#assign_attributes(params[:user]) - same overpost surface as update_attributes; permit narrowing required."

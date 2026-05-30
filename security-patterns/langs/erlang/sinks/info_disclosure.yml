@@ -28,7 +28,7 @@
         test(User) ->
           logger:error("user=~p", [User]).
       expect_no_match: true
-  description: "logger:error with secret-shaped data — credentials or tokens can leak to Erlang logs."
+  description: "logger:error with secret-shaped data - credentials or tokens can leak to Erlang logs."
 
 - id: erlang.info_disclosure.error_logger_stack
   enabled: true
@@ -48,4 +48,4 @@
         test(Stack) ->
           error_logger:error_msg("stack trace ~p", [Stack]).
       expect_match_text: [error_logger:error_msg]
-  description: "error_logger:error_msg with stack / crash diagnostics — exposes internals through logs."
+  description: "error_logger:error_msg with stack / crash diagnostics - exposes internals through logs."

@@ -14,7 +14,7 @@
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  Header.Set(target, target)\n}\n"
-  description: "Header().Set(name, value) — only response headers and arg 1 are injection-relevant; kept medium until receiver/arg precision improves."
+  description: "Header().Set(name, value) - only response headers and arg 1 are injection-relevant; kept medium until receiver/arg precision improves."
 - id: go.header.responsewriter_header_chain_set
   enabled: true
   language: go
@@ -63,7 +63,7 @@
         w.Header().Set("X-User", "safe")
       }
     expect_no_match: true
-  description: "w.Header().Set(name, value) — response header name or value derived from tainted input can produce response-splitting/header-injection risk. Merged aliases: go.open_redirect.location_header_set."
+  description: "w.Header().Set(name, value) - response header name or value derived from tainted input can produce response-splitting/header-injection risk. Merged aliases: go.open_redirect.location_header_set."
   aliases:
   - go.open_redirect.location_header_set
   - go.header.echo_response_header_set
@@ -104,7 +104,7 @@
         w.Header().Set("X-User", "safe")
       }
     expect_no_match: true
-  description: "w.Header().Set(name, value) — tainted response header names can inject delimiters or overwrite security-sensitive headers."
+  description: "w.Header().Set(name, value) - tainted response header names can inject delimiters or overwrite security-sensitive headers."
 - id: go.header.responsewriter_header_chain_add
   enabled: true
   language: go
@@ -140,7 +140,7 @@
         w.Header().Add("X-Token", "safe")
       }
     expect_no_match: true
-  description: "w.Header().Add(name, value) — response header value derived from tainted input can produce response-splitting/header-injection risk. Merged collision aliases: go.ldap.conn_add."
+  description: "w.Header().Add(name, value) - response header value derived from tainted input can produce response-splitting/header-injection risk. Merged collision aliases: go.ldap.conn_add."
   aliases:
   - go.ldap.conn_add
   packages:
@@ -179,7 +179,7 @@
         w.Header().Add("X-Token", "safe")
       }
     expect_no_match: true
-  description: "w.Header().Add(name, value) — tainted response header names can corrupt the emitted header block."
+  description: "w.Header().Add(name, value) - tainted response header names can corrupt the emitted header block."
 - id: go.header.http_header_set
   enabled: true
   language: go
@@ -210,7 +210,7 @@
         h.Set("X-User", "safe")
       }
     expect_no_match: true
-  description: "http.Header.Set(name, tainted) — response header maps assigned through a local header variable can still carry CRLF/header-injection risk."
+  description: "http.Header.Set(name, tainted) - response header maps assigned through a local header variable can still carry CRLF/header-injection risk."
 - id: go.header.http_header_set_name
   enabled: true
   language: go
@@ -247,7 +247,7 @@
         h.Set("X-User", "safe")
       }
     expect_no_match: true
-  description: "http.Header.Set(name, value) — tainted header names can inject delimiters or target security-sensitive headers."
+  description: "http.Header.Set(name, value) - tainted header names can inject delimiters or target security-sensitive headers."
 - id: go.header.responsewriter_header_add
   enabled: false
   disabled_reason:
@@ -261,7 +261,7 @@
     kind: call
     callee:
       regex: \.Add$
-  description: "Disabled — bare `.Add$` regex double-fires with go.ldap.conn_add. The ldap rule already covers the call shape; enable only when semantic receiver facts distinguish http.Header.Add from LDAP Add."
+  description: "Disabled - bare `.Add$` regex double-fires with go.ldap.conn_add. The ldap rule already covers the call shape; enable only when semantic receiver facts distinguish http.Header.Add from LDAP Add."
 - id: go.header.gin_header
   enabled: true
   language: go
@@ -296,7 +296,7 @@
         c.Header("X-User", "safe")
       }
     expect_no_match: true
-  description: "gin Context.Header(name, tainted) — sets response header with tainted value."
+  description: "gin Context.Header(name, tainted) - sets response header with tainted value."
 - id: go.header.gin_header_name
   enabled: true
   language: go
@@ -331,7 +331,7 @@
         c.Header("X-User", "safe")
       }
     expect_no_match: true
-  description: "gin Context.Header(name, value) — tainted response header names can corrupt the emitted header block."
+  description: "gin Context.Header(name, value) - tainted response header names can corrupt the emitted header block."
 - id: go.header.gin_fileattachment
   enabled: true
   language: go
@@ -356,7 +356,7 @@
   - name: literal gin file attachment filename negative
     code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc download(c *gin.Context, file string) {\n  c.FileAttachment(file, \"report.txt\")\n}\n"
     expect_no_match: true
-  description: "gin Context.FileAttachment(file, filename) — filename argument is used to build Content-Disposition; CR/LF or quote injection can corrupt response headers."
+  description: "gin Context.FileAttachment(file, filename) - filename argument is used to build Content-Disposition; CR/LF or quote injection can corrupt response headers."
 - id: go.header.echo_attachment
   enabled: true
   language: go
@@ -382,7 +382,7 @@
   - name: literal echo attachment filename negative
     code: "package main\nimport \"github.com/labstack/echo\"\nfunc download(ctx echo.Context, file string) error {\n  return ctx.Attachment(file, \"report.txt\")\n}\n"
     expect_no_match: true
-  description: "echo Context.Attachment(file, filename) — filename argument is used to build Content-Disposition; attacker text can produce header injection. Merged aliases: go.header.fiber_attachment."
+  description: "echo Context.Attachment(file, filename) - filename argument is used to build Content-Disposition; attacker text can produce header injection. Merged aliases: go.header.fiber_attachment."
   aliases:
   - go.header.fiber_attachment
 - id: go.header.fiber_set
@@ -401,7 +401,7 @@
     kind: call
     callee:
       regex: \.Set$
-  description: "Disabled — bare `.Set$` regex is over-broad; go.header.http_header_set (enabled) covers the same `<receiver>.Set` call shape via `^[A-Za-z_$][A-Za-z0-9_$]*\\.Set$`."
+  description: "Disabled - bare `.Set$` regex is over-broad; go.header.http_header_set (enabled) covers the same `<receiver>.Set` call shape via `^[A-Za-z_$][A-Za-z0-9_$]*\\.Set$`."
 - id: go.header.set_cookie
   enabled: true
   language: go
@@ -438,4 +438,4 @@
         http.SetCookie(w, &http.Cookie{Name: "sid", Value: "safe"})
       }
     expect_no_match: true
-  description: "http.SetCookie(w, cookie) — tainted cookie name/value reaches Set-Cookie header."
+  description: "http.SetCookie(w, cookie) - tainted cookie name/value reaches Set-Cookie header."

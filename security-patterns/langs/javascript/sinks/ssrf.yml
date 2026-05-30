@@ -29,7 +29,7 @@
         return fetch("https://example.com");
       }
     expect_no_match: true
-  description: "fetch(url) — tainted URL enables SSRF to internal endpoints (metadata services, localhost)."
+  description: "fetch(url) - tainted URL enables SSRF to internal endpoints (metadata services, localhost)."
 - id: javascript.ssrf.axios_get
   enabled: true
   language: javascript
@@ -65,7 +65,7 @@
         return axios.get("https://example.com");
       }
     expect_no_match: true
-  description: "axios.get with a tainted URL — SSRF to internal services."
+  description: "axios.get with a tainted URL - SSRF to internal services."
 - id: javascript.ssrf.axios_post
   enabled: true
   language: javascript
@@ -101,7 +101,7 @@
         return axios.post("https://example.com", {});
       }
     expect_no_match: true
-  description: "axios.post with a tainted URL — SSRF to internal services."
+  description: "axios.post with a tainted URL - SSRF to internal services."
 - id: javascript.ssrf.axios_request
   enabled: true
   language: javascript
@@ -134,7 +134,7 @@
         return axios.request({ url: "https://example.com" });
       }
     expect_no_match: true
-  description: "axios.request({url: tainted}) — generic SSRF path."
+  description: "axios.request({url: tainted}) - generic SSRF path."
 - id: javascript.ssrf.got
   enabled: true
   language: javascript
@@ -167,7 +167,7 @@
         return got("https://example.com");
       }
     expect_no_match: true
-  description: "got(url) — tainted URL enables SSRF."
+  description: "got(url) - tainted URL enables SSRF."
 - id: javascript.ssrf.request
   enabled: true
   language: javascript
@@ -200,7 +200,7 @@
         return request("https://example.com");
       }
     expect_no_match: true
-  description: "request(url) — legacy http client, tainted URL enables SSRF."
+  description: "request(url) - legacy http client, tainted URL enables SSRF."
 - id: javascript.ssrf.http_get
   enabled: true
   language: javascript
@@ -237,7 +237,7 @@
         return http.get("http://example.com");
       }
     expect_no_match: true
-  description: "node http.get(url) — tainted URL enables SSRF."
+  description: "node http.get(url) - tainted URL enables SSRF."
 - id: javascript.ssrf.http_get_var
   enabled: false
   disabled_reason:
@@ -257,7 +257,7 @@
       attribute:
       - http
       - get
-  description: "Disabled duplicate — same http.get min-args shape is covered by javascript.ssrf.http_get."
+  description: "Disabled duplicate - same http.get min-args shape is covered by javascript.ssrf.http_get."
 - id: javascript.ssrf.http_request
   enabled: true
   language: javascript
@@ -292,7 +292,7 @@
         return http.request("http://example.com");
       }
     expect_no_match: true
-  description: "node http.request(options) — tainted host enables SSRF."
+  description: "node http.request(options) - tainted host enables SSRF."
 - id: javascript.ssrf.https_get
   enabled: true
   language: javascript
@@ -327,7 +327,7 @@
         return https.get("https://example.com");
       }
     expect_no_match: true
-  description: "node https.get(url) — tainted URL enables SSRF."
+  description: "node https.get(url) - tainted URL enables SSRF."
 - id: javascript.ssrf.https_request
   enabled: true
   language: javascript
@@ -363,7 +363,7 @@
         return https.request("https://example.com");
       }
     expect_no_match: true
-  description: "node https.request(options) — tainted host enables SSRF. Merged collision aliases: javascript.tls.https_request_reject_unauth."
+  description: "node https.request(options) - tainted host enables SSRF. Merged collision aliases: javascript.tls.https_request_reject_unauth."
   aliases:
   - javascript.tls.https_request_reject_unauth
 - id: javascript.ssrf.undici_fetch
@@ -398,7 +398,7 @@
         return undici.fetch("https://example.com");
       }
     expect_no_match: true
-  description: "undici.fetch(url) — tainted URL enables SSRF (undici is the built-in Node http client)."
+  description: "undici.fetch(url) - tainted URL enables SSRF (undici is the built-in Node http client)."
 - id: javascript.ssrf.needle
   enabled: true
   language: javascript
@@ -429,7 +429,7 @@
         return needle("get", "https://example.com");
       }
     expect_no_match: true
-  description: "needle(method, url) — tainted URL enables SSRF."
+  description: "needle(method, url) - tainted URL enables SSRF."
 - id: javascript.ssrf.superagent_get
   enabled: true
   language: javascript
@@ -462,7 +462,7 @@
         return superagent.get("https://example.com");
       }
     expect_no_match: true
-  description: "superagent.get(url) — tainted URL enables SSRF."
+  description: "superagent.get(url) - tainted URL enables SSRF."
 - id: javascript.ssrf.superagent_post
   enabled: true
   language: javascript
@@ -495,7 +495,7 @@
         return superagent.post("https://example.com");
       }
     expect_no_match: true
-  description: "superagent.post(url) — tainted URL enables SSRF."
+  description: "superagent.post(url) - tainted URL enables SSRF."
 - id: javascript.ssrf.ky
   enabled: true
   language: javascript
@@ -528,7 +528,7 @@
         return ky.get("https://example.com");
       }
     expect_no_match: true
-  description: "ky.get(url) — tainted URL enables SSRF (ky is a fetch-based http client)."
+  description: "ky.get(url) - tainted URL enables SSRF (ky is a fetch-based http client)."
 - id: javascript.ssrf.ky_post
   enabled: true
   language: javascript
@@ -561,7 +561,7 @@
         return ky.post("https://example.com");
       }
     expect_no_match: true
-  description: "ky.post(url) — tainted URL enables SSRF."
+  description: "ky.post(url) - tainted URL enables SSRF."
 - id: javascript.ssrf.undici_request
   enabled: true
   language: javascript
@@ -594,4 +594,4 @@
         return undici.request("https://example.com");
       }
     expect_no_match: true
-  description: "undici.request(url) — tainted URL enables SSRF."
+  description: "undici.request(url) - tainted URL enables SSRF."

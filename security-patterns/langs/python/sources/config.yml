@@ -19,7 +19,7 @@
       import os
       def example(user_input):
           return os.environ.get(user_input)
-  description: "Disabled duplicate — `os.environ.get(KEY)` is surfaced with an `os.environ` read and is covered by python.config.os_environ_read, which also preserves subscript/bare environment coverage."
+  description: "Disabled duplicate - `os.environ.get(KEY)` is surfaced with an `os.environ` read and is covered by python.config.os_environ_read, which also preserves subscript/bare environment coverage."
 
 - id: python.config.os_getenv
   enabled: true
@@ -37,7 +37,7 @@
       import os
       def example(user_input):
           return os.getenv(user_input)
-  description: "os.getenv(KEY) — convenience wrapper for os.environ.get."
+  description: "os.getenv(KEY) - convenience wrapper for os.environ.get."
 
 - id: python.config.os_environ_read
   enabled: true
@@ -56,7 +56,7 @@
       def example():
           value = os.environ
           return value
-  description: "Bare read of os.environ — covers `os.environ['KEY']` subscript uses where tree-sitter surfaces the attribute read."
+  description: "Bare read of os.environ - covers `os.environ['KEY']` subscript uses where tree-sitter surfaces the attribute read."
 
 - id: python.config.decouple_config
   enabled: false
@@ -70,4 +70,4 @@
     kind: call
     callee:
       name: config
-  description: "Disabled — bare `config()` callee is ambiguous; re-enable per-project."
+  description: "Disabled - bare `config()` callee is ambiguous; re-enable per-project."

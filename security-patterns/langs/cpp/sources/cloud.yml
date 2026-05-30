@@ -13,7 +13,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled — bare `request` is too broad outside Lambda-only audits; use the more specific invocationRequest rule below when available."
+  description: "Disabled - bare `request` is too broad outside Lambda-only audits; use the more specific invocationRequest rule below when available."
 
 - id: cpp.cloud.aws_lambda_invocation_request
   enabled: true

@@ -29,7 +29,7 @@
         end
       end
     expect_no_match: true
-  description: ":xmerl_scan.string/1,2 — Erlang XML parser; external entities / DTDs are expanded unless `[{allow_entities, false}]` + custom acc_fun rejects them."
+  description: ":xmerl_scan.string/1,2 - Erlang XML parser; external entities / DTDs are expanded unless `[{allow_entities, false}]` + custom acc_fun rejects them."
 
 - id: elixir.xxe.xmerl_scan_file
   enabled: true
@@ -60,7 +60,7 @@
         end
       end
     expect_no_match: true
-  description: ":xmerl_scan.file/1,2 — same XXE defaults as .string/2; tainted path also compounds with path-traversal."
+  description: ":xmerl_scan.file/1,2 - same XXE defaults as .string/2; tainted path also compounds with path-traversal."
 
 - id: elixir.xxe.sweet_xml_parse
   enabled: true
@@ -95,7 +95,7 @@
         end
       end
     expect_no_match: true
-  description: "SweetXml.parse/1 — delegates to :xmerl with default options; external entities expand, file:// URIs are dereferenced."
+  description: "SweetXml.parse/1 - delegates to :xmerl with default options; external entities expand, file:// URIs are dereferenced."
 
   imports:
   - Sweet_xml
@@ -112,7 +112,7 @@
     kind: call
     callee:
       name: sigil_x
-  description: "Disabled — SweetXml ~x sigil is usually a static XPath pattern, not tainted; enable when auditing dynamic XPath construction."
+  description: "Disabled - SweetXml ~x sigil is usually a static XPath pattern, not tainted; enable when auditing dynamic XPath construction."
 
 - id: elixir.xxe.saxy_parse_string
   enabled: true
@@ -146,7 +146,7 @@
         end
       end
     expect_no_match: true
-  description: "Saxy.parse_string/2 — disable external DTDs via :expand_entity handler or reject attacker-controlled XML outright."
+  description: "Saxy.parse_string/2 - disable external DTDs via :expand_entity handler or reject attacker-controlled XML outright."
 
   imports:
   - Saxy
@@ -182,7 +182,7 @@
         end
       end
     expect_no_match: true
-  description: "Saxy.parse_stream/2 — streaming variant; same entity-expansion risk on tainted XML."
+  description: "Saxy.parse_stream/2 - streaming variant; same entity-expansion risk on tainted XML."
 
   imports:
   - Saxy
@@ -218,6 +218,6 @@
         end
       end
     expect_no_match: true
-  description: ":erlsom.simple_form/1 — Erlang SAX/DOM parser; DTD / external-entity handling is on unless overridden."
+  description: ":erlsom.simple_form/1 - Erlang SAX/DOM parser; DTD / external-entity handling is on unless overridden."
   imports:
   - Erlsom

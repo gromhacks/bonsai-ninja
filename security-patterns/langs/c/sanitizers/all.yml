@@ -8,7 +8,7 @@
     kind: call
     callee:
       name: strncpy
-  description: "Disabled — strncpy does NOT NUL-terminate; it is a sink, not a sanitizer."
+  description: "Disabled - strncpy does NOT NUL-terminate; it is a sink, not a sanitizer."
 - id: c.passthrough.strncpy_copy
   enabled: true
   language: c
@@ -28,7 +28,7 @@
         strncpy(dst, src, n);
       }
     expect_match_text: [strncpy]
-  description: "strncpy(dst, src, n) — value-preserving copy from src to dst for taint transfer; not sanitizer credit and not a memory-safety finding by itself."
+  description: "strncpy(dst, src, n) - value-preserving copy from src to dst for taint transfer; not sanitizer credit and not a memory-safety finding by itself."
 - id: c.sanitizer.snprintf_bounded
   enabled: true
   language: c
@@ -50,7 +50,7 @@
         snprintf(arg);
       }
     expect_match_text: [snprintf]
-  description: "snprintf — bounded format."
+  description: "snprintf - bounded format."
 - id: c.sanitizer.isalnum_char_allowlist
   enabled: true
   language: c
@@ -67,7 +67,7 @@
         isalnum(input);
       }
     expect_match_text: [isalnum]
-  description: "isalnum — character allowlist predicate used to copy only alphanumeric bytes into a sanitized buffer."
+  description: "isalnum - character allowlist predicate used to copy only alphanumeric bytes into a sanitized buffer."
 - id: c.sanitizer.strlcpy
   enabled: true
   language: c
@@ -85,7 +85,7 @@
         strlcpy(arg);
       }
     expect_match_text: [strlcpy]
-  description: "strlcpy (BSD) — bounded + NUL-terminates."
+  description: "strlcpy (BSD) - bounded + NUL-terminates."
 - id: c.sanitizer.openssl_constant_time
   enabled: true
   language: c
@@ -103,7 +103,7 @@
         CRYPTO_memcmp(arg);
       }
     expect_match_text: [CRYPTO_memcmp]
-  description: "OpenSSL CRYPTO_memcmp — constant-time memory compare prevents timing oracles on HMAC/token equality."
+  description: "OpenSSL CRYPTO_memcmp - constant-time memory compare prevents timing oracles on HMAC/token equality."
 - id: c.sanitizer.realpath
   enabled: false
   disabled_reason:
@@ -114,7 +114,7 @@
     kind: call
     callee:
       name: realpath
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+  description: "Disabled - path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
     traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
     must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
     Marking these as sanitizers produced false negatives on attacker-controlled paths."
@@ -135,7 +135,7 @@
         strlcat(arg);
       }
     expect_match_text: [strlcat]
-  description: "strlcat (BSD) — bounded concat that always NUL-terminates."
+  description: "strlcat (BSD) - bounded concat that always NUL-terminates."
 - id: c.sanitizer.strtol
   enabled: true
   language: c
@@ -153,7 +153,7 @@
         strtol(arg);
       }
     expect_match_text: [strtol]
-  description: "strtol — coerces text to long (caller must check errno/endptr)."
+  description: "strtol - coerces text to long (caller must check errno/endptr)."
 - id: c.sanitizer.strtoul
   enabled: true
   language: c
@@ -171,7 +171,7 @@
         strtoul(arg);
       }
     expect_match_text: [strtoul]
-  description: "strtoul — coerces text to unsigned long."
+  description: "strtoul - coerces text to unsigned long."
 - id: c.sanitizer.strtoll
   enabled: true
   language: c
@@ -189,7 +189,7 @@
         strtoll(arg);
       }
     expect_match_text: [strtoll]
-  description: "strtoll — coerces text to long long."
+  description: "strtoll - coerces text to long long."
 - id: c.sanitizer.strtod
   enabled: true
   language: c
@@ -207,7 +207,7 @@
         strtod(arg);
       }
     expect_match_text: [strtod]
-  description: "strtod — coerces text to double."
+  description: "strtod - coerces text to double."
 - id: c.sanitizer.curl_easy_escape
   enabled: true
   language: c
@@ -225,7 +225,7 @@
         curl_easy_escape(arg);
       }
     expect_match_text: [curl_easy_escape]
-  description: "libcurl curl_easy_escape — URL-encodes a string."
+  description: "libcurl curl_easy_escape - URL-encodes a string."
 - id: c.sanitizer.sqlite3_bind_text
   enabled: true
   language: c
@@ -243,7 +243,7 @@
         sqlite3_bind_text(arg);
       }
     expect_match_text: [sqlite3_bind_text]
-  description: "sqlite3_bind_text — parameterised SQL binding."
+  description: "sqlite3_bind_text - parameterised SQL binding."
 - id: c.sanitizer.sqlite3_bind_int
   enabled: true
   language: c
@@ -261,7 +261,7 @@
         sqlite3_bind_int(arg);
       }
     expect_match_text: [sqlite3_bind_int]
-  description: "sqlite3_bind_int — parameterised SQL binding."
+  description: "sqlite3_bind_int - parameterised SQL binding."
 - id: c.sanitizer.sqlite3_bind_blob
   enabled: true
   language: c
@@ -279,7 +279,7 @@
         sqlite3_bind_blob(arg);
       }
     expect_match_text: [sqlite3_bind_blob]
-  description: "sqlite3_bind_blob — parameterised SQL binding."
+  description: "sqlite3_bind_blob - parameterised SQL binding."
 - id: c.sanitizer.pq_exec_params
   enabled: true
   language: c
@@ -297,7 +297,7 @@
         PQexecParams(arg);
       }
     expect_match_text: [PQexecParams]
-  description: "libpq PQexecParams — parameterised query execution."
+  description: "libpq PQexecParams - parameterised query execution."
 - id: c.sanitizer.mysql_stmt_bind_param
   enabled: true
   language: c
@@ -315,7 +315,7 @@
         mysql_stmt_bind_param(arg);
       }
     expect_match_text: [mysql_stmt_bind_param]
-  description: "mysql_stmt_bind_param — prepared statement parameter binding."
+  description: "mysql_stmt_bind_param - prepared statement parameter binding."
 - id: c.sanitizer.g_markup_escape_text
   enabled: true
   language: c
@@ -333,7 +333,7 @@
         g_markup_escape_text(arg);
       }
     expect_match_text: [g_markup_escape_text]
-  description: "GLib g_markup_escape_text — escapes &<>'\" for safe inclusion in HTML/XML text nodes."
+  description: "GLib g_markup_escape_text - escapes &<>'\" for safe inclusion in HTML/XML text nodes."
 - id: c.sanitizer.xml_encode_entities_reentrant
   enabled: true
   language: c
@@ -351,7 +351,7 @@
         xmlEncodeEntitiesReentrant(arg);
       }
     expect_match_text: [xmlEncodeEntitiesReentrant]
-  description: "libxml2 xmlEncodeEntitiesReentrant — escapes XML entities; safe for attribute / text content."
+  description: "libxml2 xmlEncodeEntitiesReentrant - escapes XML entities; safe for attribute / text content."
 - id: c.sanitizer.curl_easy_unescape
   enabled: false
   disabled_reason:
@@ -362,7 +362,7 @@
     kind: call
     callee:
       name: curl_easy_unescape
-  description: "Disabled — curl_easy_unescape is DECODE (attacker-controlled), not an encoder; listed for completeness."
+  description: "Disabled - curl_easy_unescape is DECODE (attacker-controlled), not an encoder; listed for completeness."
 - id: c.sanitizer.consttime_memequal
   enabled: true
   language: c
@@ -380,7 +380,7 @@
         consttime_memequal(arg);
       }
     expect_match_text: [consttime_memequal]
-  description: "NetBSD/portable consttime_memequal — constant-time buffer equality; protects HMAC/token comparison from timing
+  description: "NetBSD/portable consttime_memequal - constant-time buffer equality; protects HMAC/token comparison from timing
     oracles."
 - id: c.sanitizer.timingsafe_bcmp
   enabled: true
@@ -399,7 +399,7 @@
         timingsafe_bcmp(arg);
       }
     expect_match_text: [timingsafe_bcmp]
-  description: "OpenBSD timingsafe_bcmp — constant-time bcmp replacement for secret comparison."
+  description: "OpenBSD timingsafe_bcmp - constant-time bcmp replacement for secret comparison."
 - id: c.sanitizer.timingsafe_memcmp
   enabled: true
   language: c
@@ -417,7 +417,7 @@
         timingsafe_memcmp(arg);
       }
     expect_match_text: [timingsafe_memcmp]
-  description: "OpenBSD timingsafe_memcmp — constant-time memcmp replacement for secret comparison."
+  description: "OpenBSD timingsafe_memcmp - constant-time memcmp replacement for secret comparison."
 - id: c.sanitizer.boringssl_constant_time_memcmp
   enabled: true
   language: c
@@ -435,7 +435,7 @@
         CRYPTO_memcmp_constant_time(arg);
       }
     expect_match_text: [CRYPTO_memcmp_constant_time]
-  description: "BoringSSL CRYPTO_memcmp_constant_time — constant-time helper used for MAC / signature equality."
+  description: "BoringSSL CRYPTO_memcmp_constant_time - constant-time helper used for MAC / signature equality."
 - id: c.sanitizer.mbedtls_safer_memcmp
   enabled: true
   language: c
@@ -453,7 +453,7 @@
         mbedtls_ssl_safer_memcmp(arg);
       }
     expect_match_text: [mbedtls_ssl_safer_memcmp]
-  description: "mbedTLS mbedtls_ssl_safer_memcmp — constant-time comparison used in TLS record verification."
+  description: "mbedTLS mbedtls_ssl_safer_memcmp - constant-time comparison used in TLS record verification."
 - id: c.sanitizer.sodium_memcmp
   enabled: true
   language: c
@@ -471,7 +471,7 @@
         sodium_memcmp(arg);
       }
     expect_match_text: [sodium_memcmp]
-  description: "libsodium sodium_memcmp — constant-time compare for authenticators / keys."
+  description: "libsodium sodium_memcmp - constant-time compare for authenticators / keys."
 - id: c.sanitizer.getauxval_at_secure
   enabled: false
   disabled_reason:
@@ -482,7 +482,7 @@
     kind: call
     callee:
       name: getauxval
-  description: "Disabled — getauxval(AT_SECURE) is a privilege-state probe, not a value sanitizer; still useful evidence for
+  description: "Disabled - getauxval(AT_SECURE) is a privilege-state probe, not a value sanitizer; still useful evidence for
     elevated-trust logic when paired with AT_SECURE constraint matching."
 - id: c.sanitizer.html_escape
   enabled: true
@@ -501,7 +501,7 @@
         html_escape(arg);
       }
     expect_match_text: [html_escape]
-  description: "Generic html_escape helper (apache-portable-runtime, micro-frameworks) — escapes &<>'\" for HTML output."
+  description: "Generic html_escape helper (apache-portable-runtime, micro-frameworks) - escapes &<>'\" for HTML output."
 - id: c.sanitizer.apr_pescape_url
   enabled: true
   language: c
@@ -521,7 +521,7 @@
         apr_pescape_url(arg);
       }
     expect_match_text: [apr_pescape_url]
-  description: "APR apr_pescape_url — percent-encodes a string for URL inclusion."
+  description: "APR apr_pescape_url - percent-encodes a string for URL inclusion."
 - id: c.sanitizer.uri_escape_ex_a
   enabled: true
   language: c
@@ -541,7 +541,7 @@
         uriEscapeExA(arg);
       }
     expect_match_text: [uriEscapeExA]
-  description: "uriparser uriEscapeExA — RFC 3986 percent-encoding."
+  description: "uriparser uriEscapeExA - RFC 3986 percent-encoding."
 
 - id: c.sanitizer.sqlite3_bind_extended
   enabled: true
@@ -559,7 +559,7 @@
         sqlite3_bind_text16(arg);
       }
     expect_match_text: [sqlite3_bind_text16]
-  description: "sqlite3_bind_text16 / int64 / double / null / value / zeroblob / pointer — prepared-statement parameter binding;
+  description: "sqlite3_bind_text16 / int64 / double / null / value / zeroblob / pointer - prepared-statement parameter binding;
     bound values are not parsed as SQL."
 
 - id: c.sanitizer.path_prefix_strncmp
@@ -585,7 +585,7 @@
   - name: relative redirect prefix check negative constraint boundary
     code: "void example(char *target) {\n  strncmp();\n}\n"
     expect_no_match: true
-  description: "strncmp/memcmp against a literal slash-prefixed path prefix — common C guard for same-origin redirects or
+  description: "strncmp/memcmp against a literal slash-prefixed path prefix - common C guard for same-origin redirects or
     chrooted path routing. Scoped to prefix literals and three-arg compare calls."
 
 - id: c.sanitizer.g_hash_table_contains_allowlist
@@ -612,8 +612,8 @@
   - name: glib hash allowlist negative constraint boundary
     code: "#include <glib.h>\nvoid example(void *input) {\n  g_hash_table_contains();\n}\n"
     expect_no_match: true
-  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
-    GLib g_hash_table_contains on an allowlist-named table — finite-set membership validation before routing, redirects, or
+  description: "Disabled - this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    GLib g_hash_table_contains on an allowlist-named table - finite-set membership validation before routing, redirects, or
     dispatch."
 
   disabled_reason:
@@ -641,7 +641,7 @@
   - name: anchored glib regex validator negative constraint boundary
     code: "#include <glib.h>\nvoid example(char *input) {\n  g_regex_match_simple();\n}\n"
     expect_no_match: true
-  description: "g_regex_match_simple with an anchored full-string allowlist pattern — validates UUID/slug/token shape instead
+  description: "g_regex_match_simple with an anchored full-string allowlist pattern - validates UUID/slug/token shape instead
     of substring matching."
 
 - id: c.sanitizer.g_regex_replace_char_allowlist
@@ -671,7 +671,7 @@
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
-# identity edge (T104) — taint propagates THROUGH instead of
+# identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
 - id: c.passthrough.curl_easy_unescape
@@ -693,7 +693,7 @@
         curl_easy_unescape(arg);
       }
     expect_match_text: [curl_easy_unescape]
-  description: "libcurl curl_easy_unescape(curl, s, len, &outlen) — preserves taint."
+  description: "libcurl curl_easy_unescape(curl, s, len, &outlen) - preserves taint."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
@@ -717,7 +717,7 @@
         pthread_mutex_lock(arg);
       }
     expect_match_text: [pthread_mutex_lock]
-  description: "pthread_mutex_lock(&m) — POSIX threads mutex acquire."
+  description: "pthread_mutex_lock(&m) - POSIX threads mutex acquire."
 - id: c.lock.pthread_rwlock_rdlock
   enabled: true
   language: c
@@ -737,7 +737,7 @@
         pthread_rwlock_rdlock(arg);
       }
     expect_match_text: [pthread_rwlock_rdlock]
-  description: "pthread_rwlock_rdlock — read-side acquire."
+  description: "pthread_rwlock_rdlock - read-side acquire."
 - id: c.lock.pthread_rwlock_wrlock
   enabled: true
   language: c
@@ -757,4 +757,4 @@
         pthread_rwlock_wrlock(arg);
       }
     expect_match_text: [pthread_rwlock_wrlock]
-  description: "pthread_rwlock_wrlock — write-side acquire."
+  description: "pthread_rwlock_wrlock - write-side acquire."

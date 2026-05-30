@@ -36,7 +36,7 @@
         end
       end
     expect_no_match: true
-  description: "Phoenix.Controller.redirect(conn, to: tainted | external: tainted) — Location header set from user input enables phishing redirects; `external:` skips any same-origin check. Merged collision aliases: elixir.open_redirect.phoenix_redirect_imported, elixir.open_redirect.liveview_redirect."
+  description: "Phoenix.Controller.redirect(conn, to: tainted | external: tainted) - Location header set from user input enables phishing redirects; `external:` skips any same-origin check. Merged collision aliases: elixir.open_redirect.phoenix_redirect_imported, elixir.open_redirect.liveview_redirect."
   aliases:
   - elixir.open_redirect.phoenix_redirect_imported
   - elixir.open_redirect.liveview_redirect
@@ -81,6 +81,6 @@
         end
       end
     expect_no_match: true
-  description: "Phoenix.LiveView.push_navigate(socket, to: tainted) — client-side navigation to attacker-chosen path; no same-origin guard."
+  description: "Phoenix.LiveView.push_navigate(socket, to: tainted) - client-side navigation to attacker-chosen path; no same-origin guard."
   imports:
   - Phoenix_live_view

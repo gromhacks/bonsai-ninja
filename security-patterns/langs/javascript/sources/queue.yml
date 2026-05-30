@@ -22,7 +22,7 @@
       function demo(input, req, obj) {
         return message.value;
       }
-  description: "kafkajs consumer message.value — producer-controlled bytes."
+  description: "kafkajs consumer message.value - producer-controlled bytes."
 
 - id: javascript.source.amqplib_msg_content
   enabled: true
@@ -41,7 +41,7 @@
       function demo(input, req, obj) {
         return msg.content;
       }
-  description: "amqplib msg.content — RabbitMQ publisher-controlled bytes."
+  description: "amqplib msg.content - RabbitMQ publisher-controlled bytes."
 
 - id: javascript.source.bullmq_job_data
   enabled: true
@@ -60,7 +60,7 @@
       function demo(input, req, obj) {
         return job.data;
       }
-  description: "bullmq/bull Job.data — enqueuer-controlled payload."
+  description: "bullmq/bull Job.data - enqueuer-controlled payload."
 
 - id: javascript.source.sqs_record_body
   enabled: true
@@ -79,7 +79,7 @@
       function demo(input, req, obj) {
         return record.body;
       }
-  description: "AWS Lambda SQS event record.body — producer-controlled message payload."
+  description: "AWS Lambda SQS event record.body - producer-controlled message payload."
 
 - id: javascript.source.nats_msg_data
   enabled: true
@@ -98,7 +98,7 @@
       function demo(input, req, obj) {
         return msg.data;
       }
-  description: "NATS Msg.data — publisher-controlled payload."
+  description: "NATS Msg.data - publisher-controlled payload."
 
 - id: javascript.source.pubsub_message_data
   enabled: true
@@ -117,7 +117,7 @@
       function demo(input, req, obj) {
         return message.data;
       }
-  description: "GCP Pub/Sub Message.data — publisher-controlled Buffer. This owns the ambiguous `message.data` adapter fact; WebSocket structured frames use `frame.data` / `packet.data` to avoid duplicate source evidence."
+  description: "GCP Pub/Sub Message.data - publisher-controlled Buffer. This owns the ambiguous `message.data` adapter fact; WebSocket structured frames use `frame.data` / `packet.data` to avoid duplicate source evidence."
 
 - id: javascript.source.azure_servicebus_message_body
   enabled: true

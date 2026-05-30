@@ -22,7 +22,7 @@
           }
         }
       expect_match_text: [File.Exists]
-  description: "File.Exists(path) — check site for TOCTOU; the symlink/file swap window between this and File.Open is the race."
+  description: "File.Exists(path) - check site for TOCTOU; the symlink/file swap window between this and File.Open is the race."
 - id: csharp.race.sql_transaction_commit
   enabled: true
   language: csharp
@@ -45,7 +45,7 @@
           }
         }
       expect_match_text: [tx.Commit]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Commit() — transaction-after-error race-pair; later command.ExecuteNonQuery on the same connection runs outside the intended transaction window."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Commit() - transaction-after-error race-pair; later command.ExecuteNonQuery on the same connection runs outside the intended transaction window."
 - id: csharp.race.sql_transaction_rollback
   enabled: true
   language: csharp
@@ -68,4 +68,4 @@
           }
         }
       expect_match_text: [tx.Rollback]
-  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Rollback() — transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."
+  description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Rollback() - transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."

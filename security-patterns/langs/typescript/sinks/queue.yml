@@ -25,7 +25,7 @@
         return new SendMessageCommand({ MessageBody: "safe" });
       }
     expect_no_match: true
-  description: "new SendMessageCommand({QueueUrl, MessageBody}) — tainted queue target/body injects arbitrary SQS messages."
+  description: "new SendMessageCommand({QueueUrl, MessageBody}) - tainted queue target/body injects arbitrary SQS messages."
 
 - id: typescript.queue.aws_publish_command
   enabled: true
@@ -54,7 +54,7 @@
         return new PublishCommand({ Message: "safe" });
       }
     expect_no_match: true
-  description: "new PublishCommand({TopicArn, Message}) — tainted topic/message injects arbitrary SNS fanout."
+  description: "new PublishCommand({TopicArn, Message}) - tainted topic/message injects arbitrary SNS fanout."
 
 - id: typescript.queue.azure_servicebus_send_messages
   enabled: true
@@ -83,7 +83,7 @@
         return sender.sendMessages([{ body: "safe" }]);
       }
     expect_no_match: true
-  description: "ServiceBusSender.sendMessages — tainted queue payload or entity path injects arbitrary Service Bus messages."
+  description: "ServiceBusSender.sendMessages - tainted queue payload or entity path injects arbitrary Service Bus messages."
 
 - id: typescript.queue.gcp_pubsub_publish_message
   enabled: true
@@ -112,4 +112,4 @@
         return topic.publishMessage({ data: Buffer.from("safe") });
       }
     expect_no_match: true
-  description: "Pub/Sub topic.publishMessage — tainted topic payload injects arbitrary Pub/Sub messages."
+  description: "Pub/Sub topic.publishMessage - tainted topic payload injects arbitrary Pub/Sub messages."

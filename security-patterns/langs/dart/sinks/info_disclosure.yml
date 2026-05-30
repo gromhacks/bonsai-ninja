@@ -24,7 +24,7 @@
     code: |
       void test(String username) { print(username); }
     expect_no_match: true
-  description: "print(...) with secret-shaped data — credentials or tokens can leak to stdout / platform logs. Also covers merged aliases: dart.log_injection.print_newline."
+  description: "print(...) with secret-shaped data - credentials or tokens can leak to stdout / platform logs. Also covers merged aliases: dart.log_injection.print_newline."
 
 - id: dart.info_disclosure.shelf_internal_server_error
   enabled: true
@@ -47,7 +47,7 @@
       import 'package:shelf/shelf.dart';
       void test(Object error) { Response.internalServerError(body: "stack: $error"); }
     expect_match_text: [Response.internalServerError]
-  description: "shelf Response.internalServerError(body: error/stack) — sends diagnostic internals to the client."
+  description: "shelf Response.internalServerError(body: error/stack) - sends diagnostic internals to the client."
 
   imports:
   - shelf/shelf.dart
@@ -72,7 +72,7 @@
       import 'package:flutter/material.dart'; // flutter
       void test(dynamic details) { FlutterError.dumpErrorToConsole(details); }
     expect_match_text: [FlutterError.dumpErrorToConsole]
-  description: "FlutterError.dumpErrorToConsole(details) — debug exception details can disclose stack traces and application state."
+  description: "FlutterError.dumpErrorToConsole(details) - debug exception details can disclose stack traces and application state."
   imports:
   - flutter/flutter.dart
   - flutter/material.dart

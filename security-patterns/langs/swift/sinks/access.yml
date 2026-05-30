@@ -23,7 +23,7 @@
       import AWSCore // aws-sdk-swift
       func test() { getObject("reports/fixed.csv") }
     expect_no_match: true
-  description: "AWS SDK for Swift getObject — tainted bucket/key selector reads arbitrary object data."
+  description: "AWS SDK for Swift getObject - tainted bucket/key selector reads arbitrary object data."
 
   imports:
   - AWSCore
@@ -52,7 +52,7 @@
       import AWSCore // aws-sdk-swift
       func test() { putObject("reports/fixed.csv") }
     expect_no_match: true
-  description: "AWS SDK for Swift putObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+  description: "AWS SDK for Swift putObject - tainted bucket/key selector overwrites attacker-chosen object keys."
 
   imports:
   - AWSCore
@@ -81,6 +81,6 @@
       import AWSCore // aws-sdk-swift
       func test() { getSecretValue("app/prod/db") }
     expect_no_match: true
-  description: "AWS SDK for Swift getSecretValue — tainted secret id reads arbitrary secret material."
+  description: "AWS SDK for Swift getSecretValue - tainted secret id reads arbitrary secret material."
   imports:
   - AWSCore

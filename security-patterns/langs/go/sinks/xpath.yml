@@ -30,7 +30,7 @@
         _, _ = xmlquery.Query(nil, "//user[@id='alice']")
       }
     expect_no_match: true
-  description: "xmlquery.Query(node, tainted XPath) \u2014 concatenated XPath predicates allow XPath injection."
+  description: "xmlquery.Query(node, tainted XPath) - concatenated XPath predicates allow XPath injection."
 - id: go.xpath.xmlquery_queryall
   enabled: true
   language: go
@@ -63,4 +63,4 @@
         _ = xmlquery.QueryAll(nil, "//user")
       }
     expect_no_match: true
-  description: "xmlquery.QueryAll(node, tainted XPath) \u2014 attacker-controlled XPath expression."
+  description: "xmlquery.QueryAll(node, tainted XPath) - attacker-controlled XPath expression."

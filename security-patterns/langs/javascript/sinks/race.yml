@@ -1,6 +1,6 @@
 # javascript race / TOCTOU sinks (T501).
 
-# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# TOCTOU check sites - pair with subsequent open/chmod use-sites
 # in source order to identify the race window.
 - id: javascript.toctou.fs_existssync
   enabled: true
@@ -19,7 +19,7 @@
         function demo(input, req, obj) {
           return fs.existsSync(input);
         }
-  description: "fs.existsSync(path) — check site preceding fs.openSync/readFileSync is TOCTOU on POSIX systems."
+  description: "fs.existsSync(path) - check site preceding fs.openSync/readFileSync is TOCTOU on POSIX systems."
 - id: javascript.toctou.fs_statsync
   enabled: true
   language: javascript
@@ -37,4 +37,4 @@
         function demo(input, req, obj) {
           return fs.statSync(input);
         }
-  description: "fs.statSync(path) — check site for TOCTOU."
+  description: "fs.statSync(path) - check site for TOCTOU."

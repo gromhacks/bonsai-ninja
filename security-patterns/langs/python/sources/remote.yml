@@ -18,7 +18,7 @@
       def example():
           value = request.query
           return value
-  description: aiohttp/Bottle request.query — query-string params. Same adapter fact is canonicalized here to avoid duplicate framework-specific query sources.
+  description: aiohttp/Bottle request.query - query-string params. Same adapter fact is canonicalized here to avoid duplicate framework-specific query sources.
 - id: python.aiohttp.request_rel_url
   enabled: true
   language: python
@@ -37,7 +37,7 @@
       def example():
           value = request.rel_url
           return value
-  description: aiohttp request.rel_url — relative URL object (path + query) from the client.
+  description: aiohttp request.rel_url - relative URL object (path + query) from the client.
 - id: python.aiohttp.request_cookies
   enabled: false
   disabled_reason:
@@ -54,7 +54,7 @@
     kind: read
     target:
       attribute: [request, cookies]
-  description: "Disabled duplicate — same request.cookies adapter fact as python.pyramid.request_cookies, which carries aiohttp/FastAPI/Flask/Starlette package metadata."
+  description: "Disabled duplicate - same request.cookies adapter fact as python.pyramid.request_cookies, which carries aiohttp/FastAPI/Flask/Starlette package metadata."
 - id: python.aiohttp.request_headers
   enabled: false
   disabled_reason:
@@ -71,7 +71,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — bare request.headers is too broad; python.web.request_headers_get covers keyed header reads across major frameworks."
+  description: "Disabled duplicate - bare request.headers is too broad; python.web.request_headers_get covers keyed header reads across major frameworks."
 - id: python.tornado.request_body
   enabled: false
   disabled_reason:
@@ -87,7 +87,7 @@
     kind: read
     target:
       attribute: [request, body]
-  description: "Disabled duplicate — bare `request.body` is too broad; python.tornado.self_request_body covers Tornado's `self.request.body` with an explicit receiver regex."
+  description: "Disabled duplicate - bare `request.body` is too broad; python.tornado.self_request_body covers Tornado's `self.request.body` with an explicit receiver regex."
 - id: python.django.request_get
   enabled: true
   language: python
@@ -109,7 +109,7 @@
       def example():
           value = request.GET
           return value
-  description: Django/Pyramid request.GET — query parameters supplied by the remote client.
+  description: Django/Pyramid request.GET - query parameters supplied by the remote client.
 - id: python.django.request_post
   enabled: true
   language: python
@@ -130,7 +130,7 @@
       def example():
           value = request.POST
           return value
-  description: Django/Pyramid request.POST — form parameters supplied by the remote client.
+  description: Django/Pyramid request.POST - form parameters supplied by the remote client.
 - id: python.django.request_body
   enabled: false
   disabled_reason:
@@ -146,7 +146,7 @@
     kind: read
     target:
       attribute: [request, body]
-  description: "Disabled duplicate — same request.body adapter fact as python.pyramid.request_body, which carries Django/Pyramid/Bottle package metadata."
+  description: "Disabled duplicate - same request.body adapter fact as python.pyramid.request_body, which carries Django/Pyramid/Bottle package metadata."
 - id: python.django.request_cookies
   enabled: true
   language: python
@@ -181,7 +181,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks (aiohttp, bottle, fastapi, flask, pyramid, sanic, starlette, tornado, django)."
+  description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks (aiohttp, bottle, fastapi, flask, pyramid, sanic, starlette, tornado, django)."
 - id: python.django.request_meta
   enabled: true
   language: python
@@ -221,7 +221,7 @@
       def example():
           value = request.FILES
           return value
-  description: Django/DRF request.FILES — uploaded files supplied by the remote client.
+  description: Django/DRF request.FILES - uploaded files supplied by the remote client.
 - id: python.fastapi.request_path
   enabled: true
   language: python
@@ -243,7 +243,7 @@
       def example():
           value = request.path_params
           return value
-  description: FastAPI / Starlette request.path_params — dict of URL path params.
+  description: FastAPI / Starlette request.path_params - dict of URL path params.
 
 - id: python.fastapi.request_query_params
   enabled: true
@@ -287,7 +287,7 @@
       attribute: [request, json]
   constraints:
   - max_args: 0
-  description: "Disabled duplicate — same `request.json()` adapter fact as python.aiohttp.request_json (enabled), which carries fastapi/starlette in frameworks/packages."
+  description: "Disabled duplicate - same `request.json()` adapter fact as python.aiohttp.request_json (enabled), which carries fastapi/starlette in frameworks/packages."
 
 - id: python.fastapi.uploadfile_filename
   enabled: false
@@ -303,7 +303,7 @@
     kind: read
     target:
       attribute: [UploadFile, filename]
-  description: "Disabled — adapters index local reads like `file.filename`, not receiver types like `UploadFile.filename`."
+  description: "Disabled - adapters index local reads like `file.filename`, not receiver types like `UploadFile.filename`."
 - id: python.fastapi.request_form
   enabled: false
   disabled_reason:
@@ -322,7 +322,7 @@
       attribute: [request, form]
   constraints:
   - max_args: 0
-  description: "Disabled duplicate — current matching also emits `request.form`; python.flask.request_form (enabled) carries FastAPI/Starlette package metadata for this adapter fact."
+  description: "Disabled duplicate - current matching also emits `request.form`; python.flask.request_form (enabled) carries FastAPI/Starlette package metadata for this adapter fact."
 - id: python.fastapi.request_body
   enabled: true
   language: python
@@ -344,7 +344,7 @@
       import fastapi
       def example(user_input):
           return request.body()
-  description: "Starlette/FastAPI await request.body() — raw request bytes. `body()` takes 0 args; `max_args: 0` rejects unrelated overloads."
+  description: "Starlette/FastAPI await request.body() - raw request bytes. `body()` takes 0 args; `max_args: 0` rejects unrelated overloads."
 - id: python.fastapi.request_cookies
   enabled: false
   disabled_reason:
@@ -360,7 +360,7 @@
     kind: read
     target:
       attribute: [request, cookies]
-  description: "Disabled duplicate — same `request.cookies` shape as python.pyramid.request_cookies (enabled), which carries fastapi/starlette in frameworks/packages."
+  description: "Disabled duplicate - same `request.cookies` shape as python.pyramid.request_cookies (enabled), which carries fastapi/starlette in frameworks/packages."
 - id: python.fastapi.request_headers
   enabled: false
   disabled_reason:
@@ -376,7 +376,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
+  description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
 - id: python.fastapi.depends_param
   enabled: true
   language: python
@@ -400,7 +400,7 @@
       def handler(token: str = Depends(get_token)):
           return token
     expect_match_text: [token]
-  description: "FastAPI `Depends(...)` parameter binder — value is the dependency factory's return. Annotation-based match per python adapter's binder-marker support; only fires when the parameter's default-value is a `Depends(...)` call (G1)."
+  description: "FastAPI `Depends(...)` parameter binder - value is the dependency factory's return. Annotation-based match per python adapter's binder-marker support; only fires when the parameter's default-value is a `Depends(...)` call (G1)."
 - id: python.flask.request_args
   enabled: false
   disabled_reason:
@@ -425,7 +425,7 @@
       def example():
           value = request.args
           return value
-  description: "Disabled duplicate — python.flask.request_args_get covers query values at the call site and avoids duplicate source findings on request.args.get(...)."
+  description: "Disabled duplicate - python.flask.request_args_get covers query values at the call site and avoids duplicate source findings on request.args.get(...)."
 - id: python.flask.request_args_get
   aliases: [python.flask.request_args]
   enabled: true
@@ -450,7 +450,7 @@
       def example(user_input):
           return request.args.get(user_input)
     expect_match_text: [request.args.get]
-  description: "Flask/Sanic request.args.get(name) — explicit query-value source retained for source-rule filtering and precise call-site attribution."
+  description: "Flask/Sanic request.args.get(name) - explicit query-value source retained for source-rule filtering and precise call-site attribution."
 - id: python.flask.req_args_get
   enabled: false
   disabled_reason:
@@ -478,7 +478,7 @@
       def example(req):
           return req.args.get("name")
     expect_match_text: [req.args.get]
-  description: "Flask-style short handler variable `req.args.get(...)` — common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get through the shared explicit receiver regex."
+  description: "Flask-style short handler variable `req.args.get(...)` - common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get through the shared explicit receiver regex."
 - id: python.flask.request_json
   enabled: false
   disabled_reason:
@@ -493,7 +493,7 @@
     kind: read
     target:
       attribute: [request, json]
-  description: "Disabled — `request.json` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+  description: "Disabled - `request.json` also matches non-web request DTOs; needs framework/type-aware receiver matching."
 - id: python.flask.request_form
   enabled: true
   language: python
@@ -514,7 +514,7 @@
       def example():
           value = request.form
           return value
-  description: Flask/FastAPI/Sanic/Starlette request.form — URL-encoded / multipart form body. Same adapter fact is canonicalized here to avoid duplicate framework-specific form sources.
+  description: Flask/FastAPI/Sanic/Starlette request.form - URL-encoded / multipart form body. Same adapter fact is canonicalized here to avoid duplicate framework-specific form sources.
 - id: python.flask.request_files
   enabled: false
   disabled_reason:
@@ -529,7 +529,7 @@
     kind: read
     target:
       attribute: [request, files]
-  description: "Disabled — `request.files` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+  description: "Disabled - `request.files` also matches non-web request DTOs; needs framework/type-aware receiver matching."
 - id: python.flask.request_headers
   enabled: false
   disabled_reason:
@@ -545,7 +545,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled duplicate — bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
+  description: "Disabled duplicate - bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
 - id: python.flask.request_cookies
   enabled: false
   disabled_reason:
@@ -560,7 +560,7 @@
     kind: read
     target:
       attribute: [request, cookies]
-  description: "Disabled duplicate — same `request.cookies` shape as python.aiohttp.request_cookies; package metadata is merged there."
+  description: "Disabled duplicate - same `request.cookies` shape as python.aiohttp.request_cookies; package metadata is merged there."
 - id: python.flask.request_values
   enabled: true
   language: python
@@ -579,7 +579,7 @@
       def example():
           value = request.values
           return value
-  description: Flask request.values — combined view of args + form.
+  description: Flask request.values - combined view of args + form.
 - id: python.tornado.get_argument
   enabled: true
   language: python
@@ -682,7 +682,7 @@
               return self.request.headers.get(name)
     expect_no_match: true
     expect_no_match_text: [self.request.headers.get]
-  description: "Tornado RequestHandler.self.request.headers.get(name) — exact self receiver plus RequestHandler class gate."
+  description: "Tornado RequestHandler.self.request.headers.get(name) - exact self receiver plus RequestHandler class gate."
 
 - id: python.tornado.self_request_body
   enabled: true
@@ -775,7 +775,7 @@
           def resolver(self, info):
               return info
     expect_match_text: [info]
-  description: "Strawberry GraphQL resolver `info` parameter — carries variable_values, context, and request envelope from the GraphQL request. Param-rule scoping (`in_method`) pins the resolver signature so unrelated helpers with an `info` param do not match."
+  description: "Strawberry GraphQL resolver `info` parameter - carries variable_values, context, and request envelope from the GraphQL request. Param-rule scoping (`in_method`) pins the resolver signature so unrelated helpers with an `info` param do not match."
 
 - id: python.graphql.graphene_resolver_kwargs
   enabled: true
@@ -796,7 +796,7 @@
       def resolve_user(parent, info, **kwargs):
           return kwargs
     expect_match_text: [kwargs]
-  description: "Graphene/Ariadne resolver **kwargs — client-supplied GraphQL field arguments. This is the representable resolver-argument shape in v1 matching; the sink flow is the second gate."
+  description: "Graphene/Ariadne resolver **kwargs - client-supplied GraphQL field arguments. This is the representable resolver-argument shape in v1 matching; the sink flow is the second gate."
 
 - id: python.graphql.graphene_resolver_args
   enabled: true
@@ -838,4 +838,4 @@
       def resolve_products(args, other):
           return args
     expect_no_match: true
-  description: "GraphQL resolver `args` parameter in Graphene/Ariadne-style handlers — field arguments supplied by the client. Resolver-name scoping keeps ordinary helpers named `args` quiet."
+  description: "GraphQL resolver `args` parameter in Graphene/Ariadne-style handlers - field arguments supplied by the client. Resolver-name scoping keeps ordinary helpers named `args` quiet."

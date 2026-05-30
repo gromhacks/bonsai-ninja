@@ -20,7 +20,7 @@
       code: |
         class App { void Test() { XmlDocument.LoadXml("<root />"); } }
       expect_no_match: true
-  description: "XmlDocument.LoadXml — set XmlResolver=null to disable entities."
+  description: "XmlDocument.LoadXml - set XmlResolver=null to disable entities."
 
 - id: csharp.xxe.xmldocument_load
   enabled: true
@@ -43,7 +43,7 @@
       code: |
         class App { void Test() { XmlDocument.Load("safe.xml"); } }
       expect_no_match: true
-  description: "XmlDocument.Load — file/stream loader."
+  description: "XmlDocument.Load - file/stream loader."
 
 - id: csharp.xxe.xmltextreader_ctor
   enabled: true
@@ -66,7 +66,7 @@
       code: |
         class XmlTextReader { public XmlTextReader(dynamic input) { } } class App { void Test() { var result = new XmlTextReader("safe.xml"); } }
       expect_no_match: true
-  description: "new XmlTextReader — ProhibitDtd defaults to false on .NET Framework <4.0."
+  description: "new XmlTextReader - ProhibitDtd defaults to false on .NET Framework <4.0."
 
 - id: csharp.xxe.xmlreader_create_default
   enabled: false
@@ -80,7 +80,7 @@
     kind: call
     callee:
       attribute: [XmlReader, Create]
-  description: "Disabled — XmlReader.Create is safe by default; flag only with DtdProcessing=Parse."
+  description: "Disabled - XmlReader.Create is safe by default; flag only with DtdProcessing=Parse."
 
 - id: csharp.xxe.xpathdocument_ctor
   enabled: true
@@ -103,7 +103,7 @@
       code: |
         class XPathDocument { public XPathDocument(dynamic input) { } } class App { void Test() { var result = new XPathDocument("safe.xml"); } }
       expect_no_match: true
-  description: "new XPathDocument — uses XmlTextReader internally."
+  description: "new XPathDocument - uses XmlTextReader internally."
 
 - id: csharp.xxe.xslcompiledtransform_load
   enabled: true
@@ -126,7 +126,7 @@
       code: |
         class App { void Test() { XslCompiledTransform.Load("safe.xsl"); } }
       expect_no_match: true
-  description: "XslCompiledTransform.Load — XSLT can run scripts and load entities."
+  description: "XslCompiledTransform.Load - XSLT can run scripts and load entities."
 
 - id: csharp.xxe.xdocument_load_with_resolver
   enabled: false
@@ -140,7 +140,7 @@
     kind: call
     callee:
       attribute: [XDocument, Load]
-  description: "Disabled — XDocument.Load is safe by default."
+  description: "Disabled - XDocument.Load is safe by default."
 
 - id: csharp.xxe.dataset_readxml
   enabled: true
@@ -163,7 +163,7 @@
       code: |
         class App { void Test() { DataSet.ReadXml("safe.xml"); } }
       expect_no_match: true
-  description: "DataSet.ReadXml — uses XmlTextReader internally; DTD/external entities resolved unless overridden."
+  description: "DataSet.ReadXml - uses XmlTextReader internally; DTD/external entities resolved unless overridden."
 
 - id: csharp.xxe.datatable_readxml
   enabled: true
@@ -186,7 +186,7 @@
       code: |
         class App { void Test() { DataTable.ReadXml("safe.xml"); } }
       expect_no_match: true
-  description: "DataTable.ReadXml — same XXE path as DataSet.ReadXml."
+  description: "DataTable.ReadXml - same XXE path as DataSet.ReadXml."
 
 - id: csharp.xxe.xmldictionaryreader_create
   enabled: false
@@ -200,7 +200,7 @@
     kind: call
     callee:
       attribute: [XmlDictionaryReader, CreateTextReader]
-  description: "Disabled — XmlDictionaryReader.CreateTextReader is safe by default in modern frameworks; flag with explicit unsafe quotas."
+  description: "Disabled - XmlDictionaryReader.CreateTextReader is safe by default in modern frameworks; flag with explicit unsafe quotas."
 
 - id: csharp.xxe.dtd_processing_parse
   enabled: true
@@ -221,7 +221,7 @@
       code: |
         class App { void Test(dynamic input) { var DtdProcessing = input; } }
       expect_no_match: true
-  description: "XmlReaderSettings.DtdProcessing = Parse — explicitly re-enables DTD/XXE parsing on otherwise-safe XmlReader."
+  description: "XmlReaderSettings.DtdProcessing = Parse - explicitly re-enables DTD/XXE parsing on otherwise-safe XmlReader."
 
 - id: csharp.xxe.prohibitdtd_false
   enabled: true
@@ -242,4 +242,4 @@
       code: |
         class App { void Test(dynamic input) { var ProhibitDtd = input; } }
       expect_no_match: true
-  description: "XmlReaderSettings.ProhibitDtd = false (legacy .NET) — re-enables DTD parsing."
+  description: "XmlReaderSettings.ProhibitDtd = false (legacy .NET) - re-enables DTD parsing."

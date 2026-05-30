@@ -12,7 +12,7 @@
     kind: read
     target:
       attribute: [message, Body]
-  description: "Disabled — SQS message body reads are real queue input, but `message.Body` is too broad without SDK-aware receiver typing."
+  description: "Disabled - SQS message body reads are real queue input, but `message.Body` is too broad without SDK-aware receiver typing."
 
 - id: perl.source.rabbitmq_delivery_body
   enabled: false
@@ -27,4 +27,4 @@
     kind: read
     target:
       attribute: [delivery, body]
-  description: "Disabled — RabbitMQ delivery body is attacker-controlled, but bare `delivery.body` needs receiver typing to avoid over-match."
+  description: "Disabled - RabbitMQ delivery body is attacker-controlled, but bare `delivery.body` needs receiver typing to avoid over-match."

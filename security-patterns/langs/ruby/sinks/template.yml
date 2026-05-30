@@ -21,7 +21,7 @@
   - name: ruby.template.erb_new literal negative
     code: "def example(input, url, id, payload, request, params)\n  ERB.new(\"hello <%= user %>\")\nend\n"
     expect_no_match: true
-  description: "ERB.new(tainted) — Ruby code execution via templates."
+  description: "ERB.new(tainted) - Ruby code execution via templates."
 - id: ruby.template.erb_result_with_hash
   enabled: false
   disabled_reason:
@@ -35,7 +35,7 @@
     kind: call
     callee:
       name: result_with_hash
-  description: "Disabled — execution risk is in the template body compiled by ERB.new, not result_with_hash itself."
+  description: "Disabled - execution risk is in the template body compiled by ERB.new, not result_with_hash itself."
 - id: ruby.template.liquid_template_parse
   enabled: true
   language: ruby
@@ -68,7 +68,7 @@
         Liquid::Template.parse("hello {{ user }}")
       end
     expect_no_match: true
-  description: "Liquid::Template.parse(tainted) — restricted DSL but still injection."
+  description: "Liquid::Template.parse(tainted) - restricted DSL but still injection."
 - id: ruby.template.haml_engine_new
   enabled: true
   language: ruby
@@ -103,7 +103,7 @@
         Haml::Engine.new("%p Hello")
       end
     expect_no_match: true
-  description: "Haml::Engine.new(tainted) — Ruby code execution."
+  description: "Haml::Engine.new(tainted) - Ruby code execution."
 - id: ruby.template.slim_template_new
   enabled: true
   language: ruby
@@ -172,7 +172,7 @@
         Tilt.new("views/show.erb")
       end
     expect_no_match: true
-  description: "Tilt.new(tainted_template_path) — loads and compiles a template by path."
+  description: "Tilt.new(tainted_template_path) - loads and compiles a template by path."
 - id: ruby.template.actionview_render_inline
   enabled: false
   disabled_reason:
@@ -188,7 +188,7 @@
     kind: call
     callee:
       name: render
-  description: "Disabled — render() fires on every controller action. Enable only with LLM-assisted per-call review of the inline: kwarg."
+  description: "Disabled - render() fires on every controller action. Enable only with LLM-assisted per-call review of the inline: kwarg."
 - id: ruby.template.html_safe
   enabled: false
   disabled_reason:
@@ -213,7 +213,7 @@
       def example(input, url, id, payload, request, params)
         String.html_safe("{{ user }}")
       end
-  description: "Disabled duplicate — covered by ruby.xss.html_safe. Receiver typing is not available in YAML, so keeping both rules makes the same ActionView html_safe call produce duplicate sink facts."
+  description: "Disabled duplicate - covered by ruby.xss.html_safe. Receiver typing is not available in YAML, so keeping both rules makes the same ActionView html_safe call produce duplicate sink facts."
 - id: ruby.template.raw_helper
   enabled: false
   disabled_reason:
@@ -229,7 +229,7 @@
     kind: call
     callee:
       name: raw
-  description: "Disabled — bare `raw` is too ambiguous (collides with local variables named `raw`); enable with a Rails view-context constraint when one becomes available."
+  description: "Disabled - bare `raw` is too ambiguous (collides with local variables named `raw`); enable with a Rails view-context constraint when one becomes available."
 
 - id: ruby.template.tilt_new_with_block
   enabled: true
@@ -265,7 +265,7 @@
         Tilt::ERBTemplate.new("views/show.erb")
       end
     expect_no_match: true
-  description: "Tilt::ERBTemplate.new(tainted) — explicit ERB template constructor with attacker-controlled source enables Ruby code execution."
+  description: "Tilt::ERBTemplate.new(tainted) - explicit ERB template constructor with attacker-controlled source enables Ruby code execution."
 
 - id: ruby.template.erubi_engine_new
   enabled: true
@@ -301,4 +301,4 @@
         Erubi::Engine.new("hello <%= user %>")
       end
     expect_no_match: true
-  description: "Erubi::Engine.new(tainted) — Erubi (modern ERB) compiles tainted source to executable Ruby; classic SSTI to RCE."
+  description: "Erubi::Engine.new(tainted) - Erubi (modern ERB) compiles tainted source to executable Ruby; classic SSTI to RCE."

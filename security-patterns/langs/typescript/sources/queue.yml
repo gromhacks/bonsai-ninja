@@ -16,7 +16,7 @@
       function demo(input, req, obj) {
         return message.value;
       }
-  description: "kafkajs consumer message.value — producer-controlled bytes."
+  description: "kafkajs consumer message.value - producer-controlled bytes."
 
 - id: typescript.source.amqplib_msg_content
   enabled: true
@@ -35,7 +35,7 @@
       function demo(input, req, obj) {
         return msg.content;
       }
-  description: "amqplib msg.content — RabbitMQ publisher-controlled bytes."
+  description: "amqplib msg.content - RabbitMQ publisher-controlled bytes."
 
 - id: typescript.source.bullmq_job_data
   enabled: true
@@ -54,7 +54,7 @@
       function demo(input, req, obj) {
         return job.data;
       }
-  description: "bullmq/bull Job.data — enqueuer-controlled payload."
+  description: "bullmq/bull Job.data - enqueuer-controlled payload."
 
 - id: typescript.source.sqs_message_body
   enabled: false
@@ -68,7 +68,7 @@
     kind: read
     target:
       attribute: [Message, Body]
-  description: "Disabled — adapters index local receivers like `message.Body`, not receiver types like `Message.Body`."
+  description: "Disabled - adapters index local receivers like `message.Body`, not receiver types like `Message.Body`."
 
 - id: typescript.source.pubsub_message_data
   enabled: true
@@ -87,7 +87,7 @@
       function demo(input, req, obj) {
         return message.data;
       }
-  description: "GCP Pub/Sub Message.data — publisher-controlled Buffer. This owns the ambiguous `message.data` adapter fact; WebSocket structured frames use `frame.data` / `packet.data` to avoid duplicate source evidence."
+  description: "GCP Pub/Sub Message.data - publisher-controlled Buffer. This owns the ambiguous `message.data` adapter fact; WebSocket structured frames use `frame.data` / `packet.data` to avoid duplicate source evidence."
 
 - id: typescript.source.azure_servicebus_message_body
   enabled: true

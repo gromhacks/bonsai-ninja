@@ -35,7 +35,7 @@
       }
       }
     expect_no_match: true
-  description: "JNDI DirContext.search — filter interpolation is LDAP injection; attackers bypass auth checks or enumerate directory entries."
+  description: "JNDI DirContext.search - filter interpolation is LDAP injection; attackers bypass auth checks or enumerate directory entries."
 - id: kotlin.ldap.initial_dir_context_search
   enabled: true
   language: kotlin
@@ -73,7 +73,7 @@
       }
       }
     expect_no_match: true
-  description: "JNDI InitialDirContext.search — sync LDAP lookup; tainted filter allows LDAP injection."
+  description: "JNDI InitialDirContext.search - sync LDAP lookup; tainted filter allows LDAP injection."
 - id: kotlin.ldap.initial_ldap_context_search
   enabled: true
   language: kotlin
@@ -111,7 +111,7 @@
       }
       }
     expect_no_match: true
-  description: "JNDI InitialLdapContext.search — LDAP v3 lookup; tainted filter allows LDAP injection."
+  description: "JNDI InitialLdapContext.search - LDAP v3 lookup; tainted filter allows LDAP injection."
 - id: kotlin.ldap.spring_ldap_template_search
   enabled: true
   language: kotlin
@@ -150,7 +150,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring LdapTemplate.search — framework-level LDAP search; tainted filter lets the attacker rewrite the query predicate."
+  description: "Spring LdapTemplate.search - framework-level LDAP search; tainted filter lets the attacker rewrite the query predicate."
 - id: kotlin.ldap.spring_ldap_template_bind
   enabled: true
   language: kotlin
@@ -187,7 +187,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring LdapTemplate.bind — tainted DN writes to attacker-chosen directory entries."
+  description: "Spring LdapTemplate.bind - tainted DN writes to attacker-chosen directory entries."
 - id: kotlin.ldap.spring_ldap_template_authenticate
   enabled: true
   language: kotlin
@@ -227,7 +227,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring LdapTemplate.authenticate — tainted filter can bypass auth by matching unintended entries (e.g. `uid=*` substring injection)."
+  description: "Spring LdapTemplate.authenticate - tainted filter can bypass auth by matching unintended entries (e.g. `uid=*` substring injection)."
 - id: kotlin.ldap.spring_ldap_template_modify_attributes
   enabled: true
   language: kotlin
@@ -264,7 +264,7 @@
       }
       }
     expect_no_match: true
-  description: "Spring LdapTemplate.modifyAttributes — tainted DN or attribute values allow arbitrary directory writes."
+  description: "Spring LdapTemplate.modifyAttributes - tainted DN or attribute values allow arbitrary directory writes."
 - id: kotlin.ldap.unboundid_search
   enabled: true
   language: kotlin
@@ -303,7 +303,7 @@
       }
       }
     expect_no_match: true
-  description: "UnboundID LDAPConnection.search — tainted filter parameter allows LDAP injection."
+  description: "UnboundID LDAPConnection.search - tainted filter parameter allows LDAP injection."
 - id: kotlin.ldap.unboundid_bind
   enabled: true
   language: kotlin
@@ -341,7 +341,7 @@
       }
       }
     expect_no_match: true
-  description: "UnboundID LDAPConnection.bind — tainted DN allows auth bypass via DN injection."
+  description: "UnboundID LDAPConnection.bind - tainted DN allows auth bypass via DN injection."
 - id: kotlin.ldap.apache_dir_search
   enabled: true
   language: kotlin
@@ -380,4 +380,4 @@
       }
       }
     expect_no_match: true
-  description: "Apache Directory LdapConnection.search — tainted filter allows LDAP injection."
+  description: "Apache Directory LdapConnection.search - tainted filter allows LDAP injection."

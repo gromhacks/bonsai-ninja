@@ -1,4 +1,4 @@
-# C++ ReDoS / regex-engine sinks — std::regex / boost::regex with tainted pattern or input.
+# C++ ReDoS / regex-engine sinks - std::regex / boost::regex with tainted pattern or input.
 - id: cpp.redos.std_regex_search
   enabled: true
   language: cpp
@@ -27,7 +27,7 @@
         std::regex_search("safe", "safe");
       }
     expect_no_match: true
-  description: "std::regex_search(input, pattern) — catastrophic backtracking when pattern is attacker-controlled."
+  description: "std::regex_search(input, pattern) - catastrophic backtracking when pattern is attacker-controlled."
 
 - id: cpp.redos.std_regex_match
   enabled: true
@@ -57,7 +57,7 @@
         std::regex_match("safe", "safe");
       }
     expect_no_match: true
-  description: "std::regex_match(input, pattern) — catastrophic backtracking when pattern is attacker-controlled."
+  description: "std::regex_match(input, pattern) - catastrophic backtracking when pattern is attacker-controlled."
 
 - id: cpp.redos.std_regex_replace
   enabled: true
@@ -87,7 +87,7 @@
         std::regex_replace("safe", "safe");
       }
     expect_no_match: true
-  description: "std::regex_replace(input, pattern, repl) — pathological pattern can hang the thread."
+  description: "std::regex_replace(input, pattern, repl) - pathological pattern can hang the thread."
 
 - id: cpp.redos.std_regex_ctor
   enabled: true
@@ -115,7 +115,7 @@
         auto *x = new regex("safe");
       }
     expect_no_match: true
-  description: "std::regex(tainted_pattern) — compiling an attacker-controlled regex pattern."
+  description: "std::regex(tainted_pattern) - compiling an attacker-controlled regex pattern."
 
 - id: cpp.redos.boost_regex_search
   enabled: true
@@ -149,7 +149,7 @@
         boost::regex_search("safe", "safe");
       }
     expect_no_match: true
-  description: "boost::regex_search — catastrophic backtracking with tainted pattern."
+  description: "boost::regex_search - catastrophic backtracking with tainted pattern."
   imports:
   - boost
   - boost/regex.hpp

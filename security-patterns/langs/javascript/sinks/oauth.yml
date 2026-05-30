@@ -11,7 +11,7 @@
     kind: call
     callee:
       attribute: [passport, use]
-  description: "Disabled — passport.use needs strategy-aware analysis."
+  description: "Disabled - passport.use needs strategy-aware analysis."
 
 # OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
 # id_token verify off, redirect_uri substring match.
@@ -33,7 +33,7 @@
       function demo(input, req, obj) {
         return passport.authenticate(input, { state: false });
       }
-  description: "passport.authenticate({state: false}) — disables OAuth state-CSRF defense."
+  description: "passport.authenticate({state: false}) - disables OAuth state-CSRF defense."
 
 - id: javascript.oauth.openid_client_callback_no_state
   enabled: true
@@ -67,4 +67,4 @@
       }
       done({ callback: () => null }, "");
     expect_no_match: true
-  description: "openid-client client.callback(redirect_uri, tainted_params) — attacker-controlled callback parameters bypass state/nonce binding when not validated against a server-bound expectedState."
+  description: "openid-client client.callback(redirect_uri, tainted_params) - attacker-controlled callback parameters bypass state/nonce binding when not validated against a server-bound expectedState."

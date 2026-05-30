@@ -20,7 +20,7 @@
       function demo(input, req, obj) {
         return Document.set(input, req.body);
       }
-  description: "Mongoose Document.set(req.body) — bulk-merges request body into the document; admin / role fields slip through."
+  description: "Mongoose Document.set(req.body) - bulk-merges request body into the document; admin / role fields slip through."
 - id: javascript.mass_assign.object_assign_body
   enabled: false
   disabled_reason:
@@ -39,4 +39,4 @@
       function demo(input, req, obj) {
         return Object.assign(input, req.body);
       }
-  description: "Disabled duplicate — without source-name taint proxies, Object.assign(target, request data) is the same API/arity shape as javascript.proto_pollution.object_assign_request_body; keep the prototype-pollution rule as the canonical Object.assign bulk-merge sink and let taint decide attacker control."
+  description: "Disabled duplicate - without source-name taint proxies, Object.assign(target, request data) is the same API/arity shape as javascript.proto_pollution.object_assign_request_body; keep the prototype-pollution rule as the canonical Object.assign bulk-merge sink and let taint decide attacker control."

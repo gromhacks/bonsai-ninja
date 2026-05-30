@@ -38,4 +38,4 @@
         }
       }
     expect_no_match: true
-  description: "Cookie.setSecure(false) — explicitly permits cookie transmission over cleartext HTTP."
+  description: "Cookie.setSecure(false) - explicitly permits cookie transmission over cleartext HTTP."

@@ -22,4 +22,4 @@
       import Foundation
       func test() { NSRegularExpression("^[a-z]+$") }
     expect_no_match: true
-  description: "NSRegularExpression(pattern: tainted) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+  description: "NSRegularExpression(pattern: tainted) - attacker-controlled regular expressions can trigger catastrophic backtracking."

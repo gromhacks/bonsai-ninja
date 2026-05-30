@@ -34,7 +34,7 @@
     kind: read
     target:
       name: data
-  description: "Disabled — the current Dart adapter does not index property reads like `message.data`."
+  description: "Disabled - the current Dart adapter does not index property reads like `message.data`."
 
 - id: dart.queue.fcm_notification_title
   enabled: false
@@ -48,4 +48,4 @@
     kind: read
     target:
       name: notification
-  description: "Disabled — the current Dart adapter does not index property reads like `message.notification`."
+  description: "Disabled - the current Dart adapter does not index property reads like `message.notification`."

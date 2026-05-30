@@ -27,7 +27,7 @@
       def example(user_input):
           return etree.parse('safe')
     expect_no_match: true
-  description: "lxml.etree.parse — enable DEFUSEDXML or set resolve_entities=False."
+  description: "lxml.etree.parse - enable DEFUSEDXML or set resolve_entities=False."
 
 - id: python.xxe.lxml_fromstring
   enabled: true
@@ -81,7 +81,7 @@
 
       def example(user_input):
           return etree.XMLParser(user_input)
-  description: "new etree.XMLParser — flag if resolve_entities/load_dtd default."
+  description: "new etree.XMLParser - flag if resolve_entities/load_dtd default."
 
 - id: python.xxe.etree_fromstring
   enabled: true
@@ -460,7 +460,7 @@
       import xml
       def example(user_input):
           return sax.make_parser(user_input)
-  description: "xml.sax.make_parser — uses expat which can fetch entities."
+  description: "xml.sax.make_parser - uses expat which can fetch entities."
 
 - id: python.xxe.xmltodict_parse
   enabled: true
@@ -489,7 +489,7 @@
       def example(user_input):
           return xmltodict.parse('safe')
     expect_no_match: true
-  description: "xmltodict.parse — built on expat; can fetch entities."
+  description: "xmltodict.parse - built on expat; can fetch entities."
 
 - id: python.xxe.bs4_xml
   enabled: false
@@ -504,7 +504,7 @@
     kind: new
     callee:
       name: BeautifulSoup
-  description: "Disabled — BeautifulSoup with 'xml' parser delegates to lxml; lxml rule covers."
+  description: "Disabled - BeautifulSoup with 'xml' parser delegates to lxml; lxml rule covers."
 
 - id: python.xxe.suds_client
   enabled: true
@@ -539,7 +539,7 @@
       def example(user_input):
           return client.Client('safe')
     expect_no_match: true
-  description: "suds Client — SOAP/XML-RPC, vulnerable to XXE. Constructor takes a WSDL URL as first arg; `min_args: 1` rejects unrelated 0-arg `client.Client()` decoys."
+  description: "suds Client - SOAP/XML-RPC, vulnerable to XXE. Constructor takes a WSDL URL as first arg; `min_args: 1` rejects unrelated 0-arg `client.Client()` decoys."
 
 - id: python.xxe.zeep_client
   enabled: false
@@ -554,4 +554,4 @@
     kind: new
     callee:
       attribute: [zeep, Client]
-  description: "Disabled — zeep uses defusedxml by default."
+  description: "Disabled - zeep uses defusedxml by default."

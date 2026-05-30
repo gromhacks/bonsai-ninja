@@ -34,7 +34,7 @@
         exec.Command("true", "--version")
       }
     expect_no_match: true
-  description: "exec.Command(name, args…) — tainted program names select arbitrary binaries."
+  description: "exec.Command(name, args...) - tainted program names select arbitrary binaries."
   aliases:
   - go.cmdi.cmd_run
   - go.cmdi.exec_command_chained_run
@@ -83,7 +83,7 @@
         exec.Command("/bin/sh", "-c", "echo clean")
       }
     expect_no_match: true
-  description: "exec.Command(\"/bin/sh\", \"-c\", cmd) — shell-wrapper form executes tainted command text."
+  description: "exec.Command(\"/bin/sh\", \"-c\", cmd) - shell-wrapper form executes tainted command text."
 - id: go.cmdi.exec_command_context
   enabled: true
   language: go
@@ -128,7 +128,7 @@
         exec.CommandContext(context.Background(), "true", "--version")
       }
     expect_no_match: true
-  description: "exec.CommandContext(ctx, name, args…) — same exposure as exec.Command."
+  description: "exec.CommandContext(ctx, name, args...) - same exposure as exec.Command."
 - id: go.cmdi.syscall_exec
   enabled: true
   language: go
@@ -173,7 +173,7 @@
         syscall.Exec("/usr/bin/true", []string{"true"}, nil)
       }
     expect_no_match: true
-  description: "syscall.Exec(argv0, argv, env) — tainted argv0 replaces the process image. Merged collision aliases: go.eval.starlark_exec, go.graphql.schema_exec, go.sqli.db_exec."
+  description: "syscall.Exec(argv0, argv, env) - tainted argv0 replaces the process image. Merged collision aliases: go.eval.starlark_exec, go.graphql.schema_exec, go.sqli.db_exec."
   aliases:
   - go.eval.starlark_exec
   - go.graphql.schema_exec
@@ -216,7 +216,7 @@
         syscall.Exec("/usr/bin/git", []string{"git", "status"}, nil)
       }
     expect_no_match: true
-  description: "syscall.Exec(argv0, argv, env) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+  description: "syscall.Exec(argv0, argv, env) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: go.cmdi.syscall_startprocess
   enabled: true
   language: go
@@ -255,7 +255,7 @@
         syscall.StartProcess("/usr/bin/true", []string{"true"}, nil)
       }
     expect_no_match: true
-  description: "syscall.StartProcess(name, argv, attr) — tainted name = RCE."
+  description: "syscall.StartProcess(name, argv, attr) - tainted name = RCE."
 - id: go.cmdi.syscall_startprocess_argv
   enabled: true
   language: go
@@ -294,7 +294,7 @@
         syscall.StartProcess("/usr/bin/git", []string{"git", "status"}, nil)
       }
     expect_no_match: true
-  description: "syscall.StartProcess(name, argv, attr) — tainted argv controls flags or subcommands passed to the spawned process."
+  description: "syscall.StartProcess(name, argv, attr) - tainted argv controls flags or subcommands passed to the spawned process."
 - id: go.cmdi.os_startprocess
   enabled: true
   language: go
@@ -333,7 +333,7 @@
         os.StartProcess("/usr/bin/true", []string{"true"}, nil)
       }
     expect_no_match: true
-  description: "os.StartProcess(name, argv, attr) — tainted name = RCE."
+  description: "os.StartProcess(name, argv, attr) - tainted name = RCE."
 - id: go.cmdi.os_startprocess_argv
   enabled: true
   language: go
@@ -372,7 +372,7 @@
         os.StartProcess("/usr/bin/git", []string{"git", "status"}, nil)
       }
     expect_no_match: true
-  description: "os.StartProcess(name, argv, attr) — tainted argv controls flags or subcommands passed to the spawned process."
+  description: "os.StartProcess(name, argv, attr) - tainted argv controls flags or subcommands passed to the spawned process."
 - id: go.cmdi.cmd_start
   enabled: false
   disabled_reason:
@@ -390,7 +390,7 @@
       attribute:
       - Cmd
       - Start
-  description: "Disabled — Cmd.Start() has no command argument; needs receiver state from exec.Command, Cmd.Path, or Cmd.Args taint."
+  description: "Disabled - Cmd.Start() has no command argument; needs receiver state from exec.Command, Cmd.Path, or Cmd.Args taint."
 - id: go.cmdi.cmd_output
   enabled: false
   disabled_reason:
@@ -408,7 +408,7 @@
       attribute:
       - Cmd
       - Output
-  description: "Disabled — Cmd.Output() executes receiver state and has no command argument; needs tainted Cmd state tracking."
+  description: "Disabled - Cmd.Output() executes receiver state and has no command argument; needs tainted Cmd state tracking."
 - id: go.cmdi.cmd_combined_output
   enabled: false
   disabled_reason:
@@ -426,7 +426,7 @@
       attribute:
       - Cmd
       - CombinedOutput
-  description: "Disabled — Cmd.CombinedOutput() executes receiver state and has no command argument; needs tainted Cmd state tracking."
+  description: "Disabled - Cmd.CombinedOutput() executes receiver state and has no command argument; needs tainted Cmd state tracking."
 - id: go.cmdi.syscall_forkexec
   enabled: true
   language: go
@@ -465,7 +465,7 @@
         syscall.ForkExec("/usr/bin/true", []string{"true"}, nil)
       }
     expect_no_match: true
-  description: "syscall.ForkExec(argv0, argv, attr) — low-level fork+exec; tainted argv0 runs an arbitrary binary."
+  description: "syscall.ForkExec(argv0, argv, attr) - low-level fork+exec; tainted argv0 runs an arbitrary binary."
 - id: go.cmdi.syscall_forkexec_argv
   enabled: true
   language: go
@@ -504,7 +504,7 @@
         syscall.ForkExec("/usr/bin/git", []string{"git", "status"}, nil)
       }
     expect_no_match: true
-  description: "syscall.ForkExec(argv0, argv, attr) — tainted argv controls flags or subcommands passed to the spawned process."
+  description: "syscall.ForkExec(argv0, argv, attr) - tainted argv controls flags or subcommands passed to the spawned process."
 - id: go.cmdi.exec_lookpath_tainted
   enabled: false
   disabled_reason:
@@ -523,7 +523,7 @@
       attribute:
       - exec
       - LookPath
-  description: "Disabled — exec.LookPath(tainted) can resolve an attacker-planted binary on $PATH; enable with PATH-hardening analysis."
+  description: "Disabled - exec.LookPath(tainted) can resolve an attacker-planted binary on $PATH; enable with PATH-hardening analysis."
 - id: go.cmdi.cmd_path_tainted
   enabled: false
   disabled_reason:
@@ -541,4 +541,4 @@
       attribute:
       - cmd
       - Path
-  description: "Disabled audit variant — cmd.Path = tainted assigns the executable path of an existing exec.Cmd; subsequent Run/Start/Output then runs an attacker-chosen binary."
+  description: "Disabled audit variant - cmd.Path = tainted assigns the executable path of an existing exec.Cmd; subsequent Run/Start/Output then runs an attacker-chosen binary."

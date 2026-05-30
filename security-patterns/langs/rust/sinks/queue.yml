@@ -30,7 +30,7 @@
           obj.send_message("safe");
       }
     expect_no_match: true
-  description: "aws-sdk-sqs send_message — tainted queue target/body injects arbitrary broker payloads."
+  description: "aws-sdk-sqs send_message - tainted queue target/body injects arbitrary broker payloads."
 
   imports:
   - aws_sdk_sqs
@@ -47,4 +47,4 @@
     kind: call
     callee:
       regex: "\\.publish$"
-  description: "Disabled — cloud publish is real queue fanout, but bare `.publish` is too generic across Rust clients and app code."
+  description: "Disabled - cloud publish is real queue fanout, but bare `.publish` is too generic across Rust clients and app code."

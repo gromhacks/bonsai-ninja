@@ -12,7 +12,7 @@
     kind: param
     target:
       name: delivery
-  description: "Disabled — Swift NIO AMQP delivery param; enable when using RabbitMQ consumer."
+  description: "Disabled - Swift NIO AMQP delivery param; enable when using RabbitMQ consumer."
 - id: swift.queue.kafka_message
   enabled: false
   disabled_reason:
@@ -26,4 +26,4 @@
     kind: param
     target:
       name: message
-  description: "Disabled — Kafka consumer message param; enable when active."
+  description: "Disabled - Kafka consumer message param; enable when active."

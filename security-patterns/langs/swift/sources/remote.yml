@@ -1,4 +1,4 @@
-# Swift remote-trust sources — Vapor / Hummingbird / URLSession / Perfect / Kitura.
+# Swift remote-trust sources - Vapor / Hummingbird / URLSession / Perfect / Kitura.
 #
 # Vapor is the dominant server-side Swift framework; Hummingbird is its
 # async competitor. Both expose request data through attribute-read
@@ -7,7 +7,7 @@
 # the match doesn't leak into unrelated `.decode` calls on Codable
 # types.
 #
-# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# -- Adapter coverage notes (audited 2026-04) ---------------------------------
 # Swift HTTP frameworks (Vapor, Hummingbird, Perfect, Kitura) expose almost
 # every request surface as a property access on `Request` (req.query,
 # req.content, req.headers, req.parameters, req.cookies, req.body). The
@@ -36,7 +36,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; content.decode(input) }
-  description: "Vapor req.content.decode(T.self) — decodes the request body into a model; payload is attacker-controlled."
+  description: "Vapor req.content.decode(T.self) - decodes the request body into a model; payload is attacker-controlled."
 
 - id: swift.vapor.request_query_decode
   enabled: true
@@ -55,7 +55,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; query.decode(input) }
-  description: "Vapor req.query.decode(T.self) — decodes the query-string into a model; attacker-controlled."
+  description: "Vapor req.query.decode(T.self) - decodes the query-string into a model; attacker-controlled."
 
 - id: swift.vapor.request_headers_first
   enabled: true
@@ -74,7 +74,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; headers.first(input) }
-  description: "Vapor req.headers.first(name:) — header value lookup; attacker-controlled."
+  description: "Vapor req.headers.first(name:) - header value lookup; attacker-controlled."
 
 - id: swift.vapor.request_parameters_get
   enabled: true
@@ -93,7 +93,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; parameters.get(input) }
-  description: "Vapor req.parameters.get(_:) — URL path parameter; attacker-controlled."
+  description: "Vapor req.parameters.get(_:) - URL path parameter; attacker-controlled."
 
 - id: swift.uipasteboard_general
   enabled: true
@@ -110,7 +110,7 @@
     code: |
       import UIKit
       func test() { let input = "x"; let amount = 1; UIPasteboard.general(input) }
-  description: "UIPasteboard.general.string — clipboard contents are user-mutable; treat as untrusted when used in security-sensitive flows."
+  description: "UIPasteboard.general.string - clipboard contents are user-mutable; treat as untrusted when used in security-sensitive flows."
 
 - id: swift.vapor.request_query
   enabled: true
@@ -129,7 +129,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.query }
-  description: "Vapor req.query property read — query-string container from the remote request."
+  description: "Vapor req.query property read - query-string container from the remote request."
 
 - id: swift.vapor.request_content
   enabled: true
@@ -148,7 +148,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.content }
-  description: "Vapor req.content property read — request content container controlled by the client."
+  description: "Vapor req.content property read - request content container controlled by the client."
 
 - id: swift.vapor.request_parameters
   enabled: true
@@ -167,7 +167,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.parameters }
-  description: "Vapor req.parameters property read — route parameters from the remote request."
+  description: "Vapor req.parameters property read - route parameters from the remote request."
 
 - id: swift.vapor.request_headers
   enabled: true
@@ -186,7 +186,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.headers }
-  description: "Vapor req.headers property read — client-supplied HTTP headers."
+  description: "Vapor req.headers property read - client-supplied HTTP headers."
 
 - id: swift.vapor.request_cookies
   enabled: true
@@ -205,7 +205,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.cookies }
-  description: "Vapor req.cookies property read — client-supplied cookie values."
+  description: "Vapor req.cookies property read - client-supplied cookie values."
 
 - id: swift.vapor.request_url
   enabled: true
@@ -224,7 +224,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.url }
-  description: "Vapor req.url property read — URL supplied by the client."
+  description: "Vapor req.url property read - URL supplied by the client."
 
 - id: swift.vapor.request_body
   enabled: true
@@ -243,7 +243,7 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; let result = Request.body }
-  description: "Vapor req.body property read — raw request body bytes controlled by the client."
+  description: "Vapor req.body property read - raw request body bytes controlled by the client."
 
 - id: swift.vapor.file_filename
   enabled: true
@@ -262,7 +262,7 @@
     code: |
       import Vapor
       func test() { let result = File.filename }
-  description: "Vapor File.filename — multipart Content-Disposition filename supplied by the client."
+  description: "Vapor File.filename - multipart Content-Disposition filename supplied by the client."
 
 - id: swift.hummingbird.request_query
   enabled: false
@@ -278,7 +278,7 @@
     kind: read
     target:
       attribute: [Request, uri, query]
-  description: "Disabled — the current Swift adapter does not index property reads like `req.uri.query`."
+  description: "Disabled - the current Swift adapter does not index property reads like `req.uri.query`."
 
 - id: swift.hummingbird.request_body
   enabled: false
@@ -294,7 +294,7 @@
     kind: read
     target:
       attribute: [Request, body]
-  description: "Disabled — the current Swift adapter does not index property reads like `req.body`."
+  description: "Disabled - the current Swift adapter does not index property reads like `req.body`."
 
 - id: swift.kitura.request_query
   enabled: false
@@ -310,7 +310,7 @@
     kind: read
     target:
       attribute: [RouterRequest, queryParameters]
-  description: "Disabled — the current Swift adapter does not index property reads like `request.queryParameters`."
+  description: "Disabled - the current Swift adapter does not index property reads like `request.queryParameters`."
 
 - id: swift.kitura.request_body
   enabled: false
@@ -326,7 +326,7 @@
     kind: read
     target:
       attribute: [RouterRequest, body]
-  description: "Disabled — the current Swift adapter does not index property reads like `request.body`."
+  description: "Disabled - the current Swift adapter does not index property reads like `request.body`."
 
 - id: swift.perfect.request_param
   enabled: true
@@ -346,7 +346,7 @@
       import PerfectHTTP
       func test() { let input = "x"; HTTPRequest.param(input) }
     expect_match_text: [HTTPRequest.param]
-  description: "Perfect HTTPRequest.param(_:) — request parameter value; local receiver calls require semantic HTTPRequest receiver-type facts."
+  description: "Perfect HTTPRequest.param(_:) - request parameter value; local receiver calls require semantic HTTPRequest receiver-type facts."
 
 - id: swift.urlsession_response_data
   enabled: true
@@ -362,7 +362,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; URLSession.shared.data(input) }
-  description: "URLSession.shared.data(for:) — returns (Data, URLResponse) from a remote server; payload may be attacker-controlled (supply-chain / redirection)."
+  description: "URLSession.shared.data(for:) - returns (Data, URLResponse) from a remote server; payload may be attacker-controlled (supply-chain / redirection)."
 
 - id: swift.alamofire_response
   enabled: false
@@ -378,7 +378,7 @@
     kind: call
     callee:
       name: responseData
-  description: "Disabled — responseData call is not itself tainted; needs callback/result binding support."
+  description: "Disabled - responseData call is not itself tainted; needs callback/result binding support."
 
 - id: swift.alamofire_response_json
   enabled: false
@@ -394,7 +394,7 @@
     kind: call
     callee:
       name: responseJSON
-  description: "Disabled — responseJSON call is not itself tainted; needs callback/result binding support."
+  description: "Disabled - responseJSON call is not itself tainted; needs callback/result binding support."
 
 - id: swift.alamofire_response_decodable
   enabled: false
@@ -410,7 +410,7 @@
     kind: call
     callee:
       name: responseDecodable
-  description: "Disabled — responseDecodable call is not itself tainted; needs callback/result binding support."
+  description: "Disabled - responseDecodable call is not itself tainted; needs callback/result binding support."
 
 - id: swift.alamofire_publish_data
   enabled: false
@@ -426,7 +426,7 @@
     kind: call
     callee:
       name: publishData
-  description: "Disabled — publishData call is not itself tainted; needs Combine output binding support."
+  description: "Disabled - publishData call is not itself tainted; needs Combine output binding support."
 
 - id: swift.alamofire_publish_decodable
   enabled: false
@@ -442,7 +442,7 @@
     kind: call
     callee:
       name: publishDecodable
-  description: "Disabled — publishDecodable call is not itself tainted; needs Combine output binding support."
+  description: "Disabled - publishDecodable call is not itself tainted; needs Combine output binding support."
 
 - id: swift.alamofire_serializing_data
   enabled: false
@@ -458,7 +458,7 @@
     kind: call
     callee:
       name: serializingData
-  description: "Disabled — serializingData call is not itself tainted; needs async result binding support."
+  description: "Disabled - serializingData call is not itself tainted; needs async result binding support."
 
 - id: swift.alamofire_serializing_decodable
   enabled: false
@@ -474,7 +474,7 @@
     kind: call
     callee:
       name: serializingDecodable
-  description: "Disabled — serializingDecodable call is not itself tainted; needs async result binding support."
+  description: "Disabled - serializingDecodable call is not itself tainted; needs async result binding support."
 
 - id: swift.nio.channel_read
   enabled: true
@@ -494,7 +494,7 @@
       import NIO
       func test(input: Any) { ChannelHandlerContext.fireChannelRead(input) }
     expect_match_text: [ChannelHandlerContext.fireChannelRead]
-  description: "SwiftNIO ChannelHandlerContext.fireChannelRead(_:) — inbound network bytes/messages; local receiver calls require semantic ChannelHandlerContext receiver-type facts."
+  description: "SwiftNIO ChannelHandlerContext.fireChannelRead(_:) - inbound network bytes/messages; local receiver calls require semantic ChannelHandlerContext receiver-type facts."
 
 - id: swift.grpc.request_param
   enabled: false
@@ -510,7 +510,7 @@
     kind: param
     target:
       name: request
-  description: "Disabled — `kind: param` cannot currently prove the enclosing function is a grpc-swift service handler, so bare `request` overmatches ordinary Swift APIs."
+  description: "Disabled - `kind: param` cannot currently prove the enclosing function is a grpc-swift service handler, so bare `request` overmatches ordinary Swift APIs."
 
 - id: swift.websocket_on_text
   enabled: true
@@ -530,4 +530,4 @@
       import Vapor
       func test() { WebSocket.onText { ws, text in _ = text } }
     expect_match_text: [WebSocket.onText]
-  description: "Vapor WebSocket.onText(_:) — inbound WebSocket text frame; local receiver calls require semantic WebSocket receiver-type facts."
+  description: "Vapor WebSocket.onText(_:) - inbound WebSocket text frame; local receiver calls require semantic WebSocket receiver-type facts."

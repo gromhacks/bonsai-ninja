@@ -1,5 +1,5 @@
 # Elixir SSTI / template-injection sinks. EEx compiles the <% %>
-# expressions to Elixir AST and evaluates them — a tainted template
+# expressions to Elixir AST and evaluates them - a tainted template
 # body is arbitrary code execution.
 - id: elixir.ssti.eex_eval_string
   enabled: true
@@ -30,7 +30,7 @@
         end
       end
     expect_no_match: true
-  description: "EEx.eval_string/3 — tainted template body runs <% %> expressions; equivalent to Code.eval_string on the attacker's payload."
+  description: "EEx.eval_string/3 - tainted template body runs <% %> expressions; equivalent to Code.eval_string on the attacker's payload."
 
 - id: elixir.ssti.eex_compile_string
   enabled: true
@@ -61,7 +61,7 @@
         end
       end
     expect_no_match: true
-  description: "EEx.compile_string/2 — compiles a template string; emitting the compiled quoted form executes the tainted code."
+  description: "EEx.compile_string/2 - compiles a template string; emitting the compiled quoted form executes the tainted code."
 
 - id: elixir.ssti.eex_eval_file
   enabled: true
@@ -92,7 +92,7 @@
         end
       end
     expect_no_match: true
-  description: "EEx.eval_file/3 — reads template from disk, same code-execution risk if the path is attacker-controlled."
+  description: "EEx.eval_file/3 - reads template from disk, same code-execution risk if the path is attacker-controlled."
 
 - id: elixir.ssti.eex_compile_file
   enabled: true
@@ -123,7 +123,7 @@
         end
       end
     expect_no_match: true
-  description: "EEx.compile_file/2 — compiles template at a tainted path; combines path-traversal + SSTI."
+  description: "EEx.compile_file/2 - compiles template at a tainted path; combines path-traversal + SSTI."
 
 - id: elixir.ssti.solid_render
   enabled: true
@@ -158,6 +158,6 @@
         end
       end
     expect_no_match: true
-  description: "Solid.render/2 — Elixir Liquid engine; tainted template source exposes template logic even if sandboxed."
+  description: "Solid.render/2 - Elixir Liquid engine; tainted template source exposes template logic even if sandboxed."
   imports:
   - Solid

@@ -34,7 +34,7 @@
       }
       }
     expect_no_match: true
-  description: "Logger.info(\"...$user...\\n\") — newline in interpolated user text forges log entries. Merged aliases: kotlin.log_injection.logger_info_concat."
+  description: "Logger.info(\"...$user...\\n\") - newline in interpolated user text forges log entries. Merged aliases: kotlin.log_injection.logger_info_concat."
   aliases:
   - kotlin.log_injection.logger_info_concat
 - id: kotlin.log_injection.logger_debug_concat
@@ -74,7 +74,7 @@
       }
       }
     expect_no_match: true
-  description: "Logger.debug(... tainted ...) — log-injection via concat / template."
+  description: "Logger.debug(... tainted ...) - log-injection via concat / template."
 - id: kotlin.log_injection.logger_warn_concat
   enabled: true
   language: kotlin
@@ -102,7 +102,7 @@
       }
       }
     expect_no_match: true
-  description: "Logger.warn(... tainted ...) — log-injection via concat / template."
+  description: "Logger.warn(... tainted ...) - log-injection via concat / template."
 - id: kotlin.log_injection.logger_error_concat
   enabled: true
   language: kotlin
@@ -140,7 +140,7 @@
       }
       }
     expect_no_match: true
-  description: "Logger.error(... tainted ...) — log-injection via concat / template."
+  description: "Logger.error(... tainted ...) - log-injection via concat / template."
 - id: kotlin.log_injection.mdc_put
   enabled: true
   language: kotlin
@@ -180,4 +180,4 @@
       }
       }
     expect_no_match: true
-  description: "MDC.put(key, tainted header) — attacker-controlled logging context value can forge structured logs or poison downstream log correlation."
+  description: "MDC.put(key, tainted header) - attacker-controlled logging context value can forge structured logs or poison downstream log correlation."
