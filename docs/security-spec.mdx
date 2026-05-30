@@ -117,11 +117,12 @@ Constraints are post-filters applied after the basic match. All must pass.
 | `any_arg_tainted: true` | Engine must prove at least one syntactic arg flows from a source. |
 | `keyword_arg_equals: { name, value }` | Named arg equals. |
 | `arg_matches_regex: { index, regex }` | Arg N matches regex. |
+| `arg_not_matches_regex: { index, regex }` | Arg N must NOT match regex (exclude escaped / constant-built args). |
+| `any_arg_matches_regex: <regex>` | Any argument matches regex (varargs / option bags). |
 | `format_arg_index: N` | Treat arg N as a format string. |
-| `top_level_only` / `not_in_top_level` | Decl-position gate. |
-| `max_args: N` / `min_args: N` | Argcount bounds. |
-| `enclosing_fn_annotation: …` | Outer function carries a decorator. |
-| `not_in_test_dir: true` | Skip test paths. |
+| `top_level: true \| false` | Match must (`true`) or must not (`false`) be at module top-level. |
+| `arg_count: N` / `max_args: N` / `min_args: N` | Exact / upper / lower argcount bounds. |
+| `enclosing_decorator_in: [name, ...]` | Enclosing decl carries one of the listed decorators. |
 
 `arg_tainted` is intentionally narrow. For `call` and `new` rules it
 evaluates syntactic call arguments against engine `TaintedCallKind::Call`
