@@ -43,6 +43,7 @@ fn sample_finding() -> Finding {
             "run_admin_command".to_string(),
         ],
         taint_path: Vec::new(),
+        hops: Vec::new(),
         tag: Some("command-injection".to_string()),
         severity: Some(Severity::Critical),
         precision: "exact".to_string(),

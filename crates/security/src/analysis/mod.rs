@@ -866,6 +866,19 @@ where
             .then_with(|| a.finding.finding_id.cmp(&b.finding.finding_id))
     });
 
+    // Embed per-hop source bodies so JSON/SARIF carry the same code the text
+    // view renders. Done last, on surviving findings only, so filtered-out
+    // findings never pay the VFS read.
+    for combined in &mut findings {
+        combined.finding.hops = crate::flow_evidence::build_flow_bodies(
+            ws,
+            &combined.chain_funcs,
+            &combined.finding.source,
+            &combined.finding.sink,
+            &combined.finding.taint_path,
+        );
+    }
+
     Ok(TaintAnalysisReport {
         findings,
         source_rule_count: sources.len(),
@@ -6107,6 +6120,7 @@ fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId
         analysis_incomplete_reasons: Vec::new(),
         chain_display,
         taint_path: Vec::new(),
+        hops: Vec::new(),
         tag: sink_rule.tag.clone(),
         severity: sink_rule.severity,
         precision: precision_label(Precision::Exact).to_string(),
@@ -6281,6 +6295,7 @@ fn make_finding(
         analysis_incomplete_reasons: context.analysis_incomplete_reasons,
         chain_display: context.chain_names,
         taint_path: context.taint_path,
+        hops: Vec::new(),
         tag: skr.tag.clone(),
         severity,
         precision: precision_label(context.precision).to_string(),
