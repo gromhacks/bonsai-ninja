@@ -874,8 +874,8 @@ where
             ws,
             &combined.chain_funcs,
             &combined.finding.source,
-            &combined.finding.sink,
             &combined.finding.taint_path,
+            crate::flow_evidence::FlowRole::Sink,
         );
     }
 
