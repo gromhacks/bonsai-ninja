@@ -157,6 +157,18 @@ impl LanguageAdapter for PerlAdapter {
             augment_perl_collection_flow_events(&mut decl.flow_events, &source);
             inject_perl_coderef_aliases(&mut decl.flow_events, &source);
             normalize_perl_eval_exception_flow_events(&mut decl.flow_events, &source);
+            // L1: lower `die` to Throw across the WHOLE sub body, not
+            // just inside an `eval {}; if ($@)` region. This seeds a
+            // native `try { die $x; } catch ($e) { ... }` body (the
+            // kit builds the Try + catch_param; we make the die a
+            // Throw inside it) and models cross-procedural propagation
+            // of an uncaught top-level `die`. The lowering is
+            // idempotent: a `die` Call left in place by the eval
+            // normalization (which already emitted its Throw) is
+            // recognised by the Throw that immediately precedes it and
+            // is NOT lowered a second time.
+            let body = std::mem::take(&mut decl.flow_events);
+            decl.flow_events = lower_perl_die_calls_to_throws(body);
         }
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         apply_perl_package_semantic_identity(&mut idx);
@@ -881,19 +893,41 @@ fn lower_perl_die_calls_to_throws(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
                 call_kind,
                 args,
             } if name == "die" => {
-                out.push(FlowEvent::Throw {
-                    span: perl_die_throw_span(span, &args),
-                    value_name: perl_die_value_name(&args),
-                    thrown_type: None,
-                });
-                out.push(FlowEvent::Call {
-                    span,
-                    name,
-                    receiver,
-                    receiver_types,
-                    call_kind,
-                    args,
-                });
+                // Idempotency guard: if the event we just emitted is
+                // already the Throw lowered from THIS die (same span
+                // start, since `perl_die_throw_span` preserves the
+                // call's start byte), this `die` Call is the residual
+                // kept by a prior lowering pass. Re-lowering it would
+                // emit a duplicate Throw, so pass it through unchanged.
+                let already_lowered = matches!(
+                    out.last(),
+                    Some(FlowEvent::Throw { span: throw_span, .. })
+                        if throw_span.start == span.start && throw_span.file == span.file
+                );
+                if already_lowered {
+                    out.push(FlowEvent::Call {
+                        span,
+                        name,
+                        receiver,
+                        receiver_types,
+                        call_kind,
+                        args,
+                    });
+                } else {
+                    out.push(FlowEvent::Throw {
+                        span: perl_die_throw_span(span, &args),
+                        value_name: perl_die_value_name(&args),
+                        thrown_type: None,
+                    });
+                    out.push(FlowEvent::Call {
+                        span,
+                        name,
+                        receiver,
+                        receiver_types,
+                        call_kind,
+                        args,
+                    });
+                }
             }
             FlowEvent::Branch {
                 span,
@@ -2748,9 +2782,107 @@ fn attach_synthesized_calls_to_decls(idx: &mut DeclIndex, events: Vec<(Span, Flo
             }
         }
         if let Some(decl_idx) = best_decl {
+            // L8: `method_call_expression` is in COMMON_CALL_KINDS, so
+            // the kit already emitted a Call for `$obj->method(...)`
+            // (carrying source_names + a receiver this synth lacks).
+            // Drop the synth duplicate when the kit's Call for the
+            // same node is already present: its name-span is CONTAINED
+            // in this synth's whole-call-node span and it shares the
+            // same name + receiver. We only drop when a real match is
+            // found, so a node the kit somehow missed still keeps its
+            // synth Call.
+            if perl_synth_call_duplicates_kit_call(&idx.defs[decl_idx].flow_events, event_span, &event) {
+                continue;
+            }
             idx.defs[decl_idx].flow_events.push(event);
         }
     }
+}
+
+/// True when `event` is a synthesized `$obj->method(...)` Call that
+/// the kit already emitted for the same node. The kit's Call uses the
+/// `method`-identifier span (a name-span), which falls inside this
+/// synth event's whole-`method_call_expression` span, and carries the
+/// same `name`/`receiver`. Matching on overlap (CONTAINS) rather than
+/// identical spans is required because the two spans deliberately
+/// differ. Recurses into nested bodies since a kit Call inside an
+/// `if`/`while`/`try` lands in a child event list.
+fn perl_synth_call_duplicates_kit_call(
+    existing: &[FlowEvent],
+    synth_span: Span,
+    event: &FlowEvent,
+) -> bool {
+    let FlowEvent::Call {
+        name: synth_name,
+        receiver: synth_receiver,
+        call_kind,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    // Only the method-call synth produces `receiver->method` names
+    // with a Method/Constructor kind; qx/builtin synths are Functions.
+    if !matches!(call_kind, CallKind::Method | CallKind::Constructor) || !synth_name.contains("->") {
+        return false;
+    }
+    perl_flow_has_contained_call(existing, synth_span, synth_name, synth_receiver.as_deref())
+}
+
+fn perl_flow_has_contained_call(
+    events: &[FlowEvent],
+    synth_span: Span,
+    synth_name: &str,
+    synth_receiver: Option<&str>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                ..
+            } => {
+                let contained = span.file == synth_span.file
+                    && span.start >= synth_span.start
+                    && span.end <= synth_span.end;
+                if contained && name == synth_name && receiver.as_deref() == synth_receiver {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if perl_flow_has_contained_call(then_events, synth_span, synth_name, synth_receiver)
+                    || perl_flow_has_contained_call(else_events, synth_span, synth_name, synth_receiver)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if perl_flow_has_contained_call(body, synth_span, synth_name, synth_receiver) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if perl_flow_has_contained_call(body, synth_span, synth_name, synth_receiver)
+                    || perl_flow_has_contained_call(catch_events, synth_span, synth_name, synth_receiver)
+                    || perl_flow_has_contained_call(finally_events, synth_span, synth_name, synth_receiver)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// True for decl kinds that represent Perl-style class-like

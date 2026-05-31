@@ -120,3 +120,30 @@ fn call(name: &str, args: &[&str]) -> FlowEvent {
             .collect(),
     }
 }
+
+
+// audit re-apply: H1 + H7-guard: pure-helper unit tests matching the existing 
+
+#[test]
+fn compound_assignment_operators_detected() {
+    use super::is_compound_assignment_operator;
+    for op in [
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "**=", ".=", "||=", "&&=", "??=",
+    ] {
+        assert!(is_compound_assignment_operator(op), "{op} should be compound");
+    }
+    for op in ["=", "==", "!=", "<=", ">=", ":=", "=>"] {
+        assert!(!is_compound_assignment_operator(op), "{op} should NOT be compound");
+    }
+}
+
+#[test]
+fn receiver_projection_base_extracts_leftmost_token() {
+    use super::receiver_projection_base;
+    assert_eq!(receiver_projection_base("this.conn"), "this");
+    assert_eq!(receiver_projection_base("self.conn"), "self");
+    assert_eq!(receiver_projection_base("pool.conn"), "pool");
+    assert_eq!(receiver_projection_base("a->b->c"), "a");
+    assert_eq!(receiver_projection_base("Foo::bar"), "Foo");
+    assert_eq!(receiver_projection_base("conn"), "conn");
+}

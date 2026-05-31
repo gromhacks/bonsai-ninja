@@ -21,6 +21,16 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // wrapper methods such as `def wrap(data); new(data); end`.
     constructor_names: &["initialize", "new"],
     tail_expression_returns: true,
+    // tree-sitter-ruby parses `buf += data`, `x ||= y`, `arr <<= e`
+    // as `operator_assignment`, which is absent from the generic
+    // assignment_kinds list (audit H24). Without it `is_assignment`
+    // never matches and no Assign{target, source} is emitted, so the
+    // RHS taint never binds to the target. `is_assignment` ORs with
+    // GENERIC_HANDLER.assignment_kinds, so the plain `x = y`
+    // (`assignment`) kind still matches via that fallback; the
+    // compound arm in the kit then re-adds the LHS as a source
+    // operand (read-modify-write).
+    assignment_kinds: &["operator_assignment"],
     ..BASE_HANDLER
 };
 
@@ -324,14 +334,32 @@ fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
     if name != "raise" {
         return None;
     }
-    let first_arg = args.first();
+    // `raise ExceptionClass, message` (M17): arg0 is the exception
+    // class, so the thrown *value* is the message in arg1. Recognize
+    // the class form by a Capitalized constant or `Foo::Bar` scope.
+    let thrown_arg = match args.first() {
+        Some(first) if args.len() >= 2 && ruby_is_exception_class(&first.value_text) => args.get(1),
+        other => other,
+    };
+    // value_name is contractually a bare identifier (M18): take it
+    // only from `place`, leaving compound throws such as
+    // `StandardError.new(msg)` as None so the engine routes them
+    // through its conservative inter-procedural branch.
     Some(FlowEvent::Throw {
         span: *span,
-        value_name: first_arg
-            .and_then(|arg| arg.place.clone())
-            .or_else(|| first_arg.map(|arg| arg.value_text.clone())),
+        value_name: thrown_arg.and_then(|arg| arg.place.clone()),
         thrown_type: None,
     })
+}
+
+/// True when an argument's text names a Ruby exception class -- a
+/// Capitalized constant (`ArgumentError`) or a scope-resolved constant
+/// (`Net::HTTPError`). Used to detect the two-argument
+/// `raise ExceptionClass, message` form (audit M17).
+fn ruby_is_exception_class(text: &str) -> bool {
+    let head = text.trim().rsplit("::").next().unwrap_or("").trim();
+    head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn normalize_ruby_subshell_events(events: &mut [FlowEvent], src: &[u8]) {

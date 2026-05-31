@@ -111,11 +111,21 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     let has_precise_returns = !return_names.is_empty();
     let allow_terminal_tail_return = decl.has_implicit_returns;
     // Methods that return `self`-style state need an extra check:
-    // any growth of the taint set past the seed implies the receiver state changed.
+    // when a return is the receiver itself, a param transits only if
+    // the seeded param reached the returned receiver state. The bare
+    // names of that receiver state (`self`, `this`, plus adapter /
+    // first-param fallbacks) are collected once here so each param's
+    // tainted-at-end set can be probed for `self = tainted` or
+    // `self.x = tainted` evidence instead of any monotonic set growth.
     let returns_implicit_receiver = decl.parent.is_some()
         && return_names
             .iter()
             .any(|name| !receiver_state_candidates(name).is_empty());
+    let receiver_state_names: Vec<String> = if returns_implicit_receiver {
+        receiver_state_names_for_decl(decl)
+    } else {
+        Vec::new()
+    };
     for (param_idx, param) in decl.params.iter().enumerate() {
         if param.is_empty() {
             continue;
@@ -127,8 +137,14 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         let value_contributes = if has_precise_returns {
             return_names.iter().any(|name| value_tainted_at_end.contains(name))
                 || contains_tainted_return(&decl.flow_events, &value_tainted_at_end)
-                // Receiver-state methods: any growth past the seed counts as transit.
-                || (returns_implicit_receiver && value_tainted_at_end.len() > value_seed.len())
+                // Receiver-state methods: transit only when the seeded
+                // param actually reached the returned receiver state
+                // (`self = value` or `self.x = value`), not on any local
+                // assignment that merely grew the seed-derived set.
+                || (returns_implicit_receiver
+                    && receiver_state_names
+                        .iter()
+                        .any(|name| target_param_is_mutated_by_state(name, &value_tainted_at_end)))
         } else {
             // No precise return names — fall back to explicit / terminal-tail evidence.
             contains_tainted_return(&decl.flow_events, &value_tainted_at_end)
@@ -154,7 +170,10 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
                     || arg_text_is_tainted(name, &descendant_tainted_at_end)
                     || return_name_has_descendant_taint(name, &descendant_tainted_at_end)
             }) || contains_tainted_return(&decl.flow_events, &descendant_tainted_at_end)
-                || (returns_implicit_receiver && descendant_tainted_at_end.len() > descendant_seed.len())
+                || (returns_implicit_receiver
+                    && receiver_state_names
+                        .iter()
+                        .any(|name| target_param_is_mutated_by_state(name, &descendant_tainted_at_end)))
         } else {
             contains_tainted_return(&decl.flow_events, &descendant_tainted_at_end)
                 || (allow_terminal_tail_return

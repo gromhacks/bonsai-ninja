@@ -5431,9 +5431,126 @@ fn sanitizer_call_overlaps_tainted_call(san: &RuleMatch, tainted_call_spans: &AH
         .any(|span| spans_overlap(*span, san.span))
 }
 
-fn sanitizer_is_nested_in_tainted_sink_arg(san: &RuleMatch, sink_tainted_args: &[TaintedArgInfo]) -> bool {
+/// M4: a sanitizer is only "nested in a tainted sink arg" when the
+/// sink arg actually INVOKES the sanitizer as a call AND a tainted
+/// carrier sits inside that call's parentheses. The old unanchored
+/// `value_text.contains(text)` credited any arg whose text merely
+/// contained the callee identifier as a substring (a field, a literal,
+/// a longer identifier, or a sibling call), wrongly downgrading real
+/// flows to `Sanitized`. The carrier comes from the source match so
+/// `escapeHtml("static") + Input` does NOT credit (the tainted `Input`
+/// is concatenated OUTSIDE the sanitizer call), while a genuine
+/// `["ping ", uri_string:quote(Input)]` still does.
+fn sanitizer_is_nested_in_tainted_sink_arg(
+    src: &RuleMatch,
+    san: &RuleMatch,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> bool {
     let text = san.match_text.trim();
-    !text.is_empty() && sink_tainted_args.iter().any(|arg| arg.value_text.contains(text))
+    if text.is_empty() {
+        return false;
+    }
+    // Carrier = base identifier of the source expression (`Input`,
+    // `req` for `req.query`). Without a carrier we cannot prove the
+    // tainted value is the one wrapped, so fail closed (no credit).
+    let Some(carrier) = source_expr_base_identifier(&src.match_text) else {
+        return false;
+    };
+    sink_tainted_args
+        .iter()
+        .any(|arg| sanitizer_call_wraps_carrier(&arg.value_text, text, carrier))
+}
+
+/// True when `value_text` invokes `callee` as a CALL (anchored on the
+/// `callee(` form, and `callee` not preceded by an identifier char so a
+/// longer identifier such as `myEscapeHtml` never matches) and that
+/// call's balanced argument list mentions `carrier` as a whole token.
+fn sanitizer_call_wraps_carrier(value_text: &str, callee: &str, carrier: &str) -> bool {
+    if callee.is_empty() {
+        return false;
+    }
+    let bytes = value_text.as_bytes();
+    let mut search_from = 0;
+    while let Some(rel) = value_text[search_from..].find(callee) {
+        let start = search_from + rel;
+        let after = start + callee.len();
+        // Advance past this occurrence regardless of acceptance.
+        search_from = start + 1;
+        // Reject the callee being the tail of a longer identifier
+        // (`myEscapeHtml`): the preceding byte must not be ident-ish.
+        if start > 0 {
+            let prev = bytes[start - 1];
+            if prev == b'_' || prev == b'$' || prev.is_ascii_alphanumeric() {
+                continue;
+            }
+        }
+        // Require the call form `callee(`, tolerating spaces.
+        let mut idx = after;
+        while idx < bytes.len() && bytes[idx] == b' ' {
+            idx += 1;
+        }
+        if idx >= bytes.len() || bytes[idx] != b'(' {
+            continue;
+        }
+        if let Some(args) = balanced_paren_slice(value_text, idx) {
+            if text_mentions_token(args, carrier) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Slice between the `(` at `open_idx` and its matching `)`, tracking
+/// nesting. `None` when the parens are unbalanced.
+fn balanced_paren_slice(text: &str, open_idx: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if open_idx >= bytes.len() || bytes[open_idx] != b'(' {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut idx = open_idx;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[open_idx + 1..idx]);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+/// True when `token` appears in `text` as a whole identifier (not as a
+/// substring of a longer identifier). Empty token never matches.
+fn text_mentions_token(text: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(token) {
+        let start = search_from + rel;
+        let end = start + token.len();
+        search_from = start + 1;
+        let before_ok = start == 0 || {
+            let b = bytes[start - 1];
+            !(b == b'_' || b == b'$' || b.is_ascii_alphanumeric())
+        };
+        let after_ok = end >= bytes.len() || {
+            let b = bytes[end];
+            !(b == b'_' || b == b'$' || b.is_ascii_alphanumeric())
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when a sanitizer match could plausibly attach to the
@@ -5464,7 +5581,7 @@ fn sanitizer_can_attach(
     }
     if sanitizer_func == sink_func
         && !match_precedes_or_same(san, snk)
-        && !sanitizer_is_nested_in_tainted_sink_arg(san, sink_tainted_args)
+        && !sanitizer_is_nested_in_tainted_sink_arg(src, san, sink_tainted_args)
     {
         return false;
     }
@@ -6220,7 +6337,7 @@ fn make_finding(
         for sanitizer_match in sanitizer_hits {
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
-                    || sanitizer_is_nested_in_tainted_sink_arg(sanitizer_match, &context.sink_tainted_args);
+                    || sanitizer_is_nested_in_tainted_sink_arg(src, sanitizer_match, &context.sink_tainted_args);
             if !sanitizer_can_attach(
                 src,
                 context.source_func,

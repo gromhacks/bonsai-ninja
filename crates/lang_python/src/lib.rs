@@ -166,27 +166,19 @@ impl LanguageAdapter for PythonAdapter {
             }
         }
         // `__all__ = ["foo", "bar"]` (or the tuple form) declares the
-        // module's explicit public surface. Decls whose name isn't in
-        // the list become library-private (`Visibility::Module`) so
-        // the resolver narrows cross-module candidate sets to the
-        // declared exports. Missing/unparseable `__all__` falls open:
-        // we keep the dunder rule above as the only filter.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let src = snapshot.text.as_bytes();
-            if let Some(all_list) = collect_python_dunder_all(&tree, src) {
-                for decl in &mut idx.defs {
-                    if decl.parent.is_some() {
-                        continue; // only top-level decls; class methods are unaffected by __all__
-                    }
-                    if matches!(decl.visibility, Visibility::Private) {
-                        continue; // already private (dunder, etc.)
-                    }
-                    if !all_list.contains(&decl.name) {
-                        decl.visibility = Visibility::Module;
-                    }
-                }
-            }
-        }
+        // names exported by `from module import *` ONLY. It is NOT a
+        // visibility boundary: `from module import run_query` and
+        // `import module; module.run_query(x)` are legal for names
+        // absent from `__all__`. Downgrading unlisted top-level decls
+        // to `Visibility::Module` made the resolver drop every
+        // cross-module flow through an internal helper (the common
+        // "public API in __all__, sink-bearing helpers omitted" idiom),
+        // a soundness false-negative. We therefore keep such decls
+        // `Public` and let the `__name` -> Private dunder rule above be
+        // the only visibility filter. Precise wildcard-import narrowing
+        // (consult `__all__` only on the `from module import *` path)
+        // belongs in the resolver as a separate exported-names fact;
+        // `collect_python_dunder_all` is retained for that future use.
         // Per-decl `type_aliases`: walk the tree and record
         // `param: Type` annotations plus FastAPI-style binder
         // markers (`param: T = Body(...)` / `Depends(...)` /
@@ -1958,6 +1950,10 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 /// literal list/tuple of strings (e.g. computed `__all__` such as
 /// `__all__ = list(_MODULE_NAMES)`); the public surface is then not
 /// narrowed.
+// Retained for the future resolver-side wildcard-import (`from m
+// import *`) narrowing fact; no longer drives `Visibility::Module`
+// (see extract_declarations and audit finding H21).
+#[allow(dead_code)]
 fn collect_python_dunder_all(tree: &Tree, src: &[u8]) -> Option<Vec<String>> {
     let root = tree.root_node();
     let mut cursor = root.walk();

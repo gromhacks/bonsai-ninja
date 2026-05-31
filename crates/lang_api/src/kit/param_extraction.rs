@@ -425,6 +425,27 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         return;
     }
 
+    // JS destructured params: tree-sitter-javascript places the pattern
+    // directly as the param node (no `required_parameter` wrapper as in
+    // TS), so `{cmd}` / `[a, b]` never reach the `pattern`-field path
+    // below. A default (`{cmd} = {}`) wraps it in an assignment_pattern;
+    // unwrap to the `left` binding first. Mirror the TS routing through
+    // `binding_tokens_from_pattern` so both languages expand identically.
+    let mut pattern_node = param;
+    if matches!(pattern_node.kind(), "assignment_pattern" | "object_assignment_pattern") {
+        if let Some(left) = pattern_node.child_by_field_name("left") {
+            pattern_node = left;
+        }
+    }
+    if matches!(pattern_node.kind(), "object_pattern" | "array_pattern") {
+        let pattern_text = node_text(&pattern_node, src).trim();
+        let pattern_bindings = binding_tokens_from_pattern(pattern_text);
+        if !pattern_bindings.is_empty() {
+            param_names.extend(pattern_bindings);
+            return;
+        }
+    }
+
     // Bare identifier params: the param node itself carries the name.
     let bare_identifier_text = if looks_like_identifier(param.kind()) {
         Some(node_text(&param, src).to_string())

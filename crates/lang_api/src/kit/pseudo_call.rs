@@ -15,8 +15,10 @@
 //!   language construct, not a function call).
 //! - **Ruby backticks** — `` `cmd` `` parses as `subshell` → synthetic
 //!   `` `(cmd)`` `` for the rulepack to anchor on.
-//! - **Scala infix expressions** — `obj op arg` (the `+` operator) →
-//!   synthetic `+` call for the rulepack's string-concat XSS shape.
+//! - **Scala infix expressions** — `obj op arg`. Symbolic `+` →
+//!   synthetic `+` call for the rulepack's string-concat XSS shape;
+//!   any alphabetic-named infix method (`obj method arg`) → a real
+//!   method `Call { receiver: obj, name: method, args: [arg] }`.
 //!
 //! Each lowering preserves the source span so downstream consumers
 //! can still tie the synthesized call back to its original syntax.
@@ -31,8 +33,9 @@ use bonsai_common::FileId;
 use tree_sitter::Node;
 
 use super::{
-    argument_place, extract_rhs_expr_operands, first_named_child, looks_like_identifier, node_text,
-    normalize_call_name_whitespace, span_of, CallArg, CallKind, FlowEvent,
+    argument_place, extract_rhs_expr_operands, first_named_child, looks_like_bare_identifier,
+    looks_like_identifier, node_text, normalize_call_name_whitespace, span_of, CallArg, CallKind,
+    FlowEvent,
 };
 
 pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
@@ -47,6 +50,15 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
     // re-implement the surrounding pipeline.
     if matches!(node.kind(), "jsx_self_closing_element" | "jsx_opening_element") {
         if let Some(call) = jsx_call_from_opening(node, file, src) {
+            return Some(call);
+        }
+    }
+    // Scala general infix method call (`obj method arg`). Lower it to a
+    // real method Call so infix-applied sinks/transfers ride the call
+    // model. Gated on an alphabetic-named operator; symbolic `+` falls
+    // through to its dedicated string-concat arm below.
+    if node.kind() == "infix_expression" {
+        if let Some(call) = infix_method_call_event(node, file, src) {
             return Some(call);
         }
     }
@@ -250,9 +262,102 @@ fn infix_expression_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallA
     call_args
 }
 
+/// Lower a Scala general infix method call (`receiver method arg`) into a
+/// method `Call`. Scala applies any single-arg method infix, parsed as
+/// `infix_expression` with `left` / `operator` / `right` fields. Gated on an
+/// alphabetic-identifier operator so symbolic/comparison operators (`+`,
+/// `==`, `::`) stay out — `+` keeps its dedicated string-concat lowering.
+fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+    let operator = node.child_by_field_name("operator")?;
+    let name = node_text(&operator, src).trim().to_string();
+    // Only method-name operators; symbolic operators are not method calls.
+    if !looks_like_bare_identifier(&name) {
+        return None;
+    }
+    // tree-sitter-kotlin parses `object Foo { ... }` as an
+    // `infix_expression` with the declaration keyword in the operator
+    // slot (handled by the Kotlin adapter, not a method call). Keep
+    // those declaration keywords out of the call lowering.
+    if matches!(name.as_str(), "object" | "companion") {
+        return None;
+    }
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+    // The single infix argument is the right operand.
+    let arg = CallArg {
+        span: span_of(file, &right),
+        name: None,
+        place: argument_place(&right, src),
+        source_names: extract_rhs_expr_operands(&right, src),
+        value_text: normalize_call_name_whitespace(node_text(&right, src)),
+    };
+    Some(FlowEvent::Call {
+        span: span_of(file, node),
+        receiver: Some(normalize_call_name_whitespace(node_text(&left, src))),
+        receiver_types: Vec::new(),
+        name,
+        call_kind: CallKind::Method,
+        args: vec![arg],
+    })
+}
+
 /// Read the operator-marker text on an `infix_expression` node, or `None`
 /// when the grammar didn't expose an `operator` field.
 fn infix_operator_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
     let operator_node = node.child_by_field_name("operator")?;
     Some(node_text(&operator_node, src).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pseudo_call_event;
+    use crate::kit::language_from_pack;
+    use crate::{CallKind, FlowEvent};
+    use bonsai_common::FileId;
+    use tree_sitter::{Node, Parser};
+
+    fn find_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+        if node.kind() == kind {
+            return Some(node);
+        }
+        for i in 0..node.named_child_count() {
+            let idx = u32::try_from(i).ok()?;
+            if let Some(child) = node.named_child(idx) {
+                if let Some(found) = find_kind(child, kind) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn scala_alphabetic_infix_method_lowered_to_method_call() {
+        // `payload concat suffix` is `payload.concat(suffix)` applied
+        // infix; only `+` was lowered before, so this produced no Call.
+        let src = "object A { val r = payload concat suffix }";
+        let language = language_from_pack("scala").expect("scala pack available");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("set language");
+        let tree = parser.parse(src, None).expect("parse succeeded");
+        let infix = find_kind(tree.root_node(), "infix_expression").expect("infix node");
+
+        let event = pseudo_call_event(&infix, FileId::INVALID, src.as_bytes())
+            .expect("infix method call lowered to a Call event");
+        let FlowEvent::Call {
+            name,
+            receiver,
+            call_kind,
+            args,
+            ..
+        } = event
+        else {
+            panic!("expected a Call event, got {event:?}");
+        };
+        assert_eq!(name, "concat");
+        assert_eq!(call_kind, CallKind::Method);
+        assert_eq!(receiver.as_deref(), Some("payload"));
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].value_text, "suffix");
+    }
 }

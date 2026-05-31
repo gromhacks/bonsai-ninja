@@ -1118,6 +1118,8 @@ pub const COMMON_CALL_KINDS: &[&str] = &[
     "generic_function",
     // PHP's `$obj->method()` arrow-call form.
     "member_call_expression",
+    // PHP's `$obj?->method()` nullsafe arrow-call form (H13).
+    "nullsafe_member_call_expression",
     // Perl's tree-sitter grammar tags bareword calls without parens as an
     // `ambiguous_function_call_expression` — still a call site for us.
     "ambiguous_function_call_expression",
@@ -1715,12 +1717,27 @@ fn walk_into(
                 source_names.extend(identifier_tokens_from_text(rhs_text));
             }
         }
-        source_names.retain(|name| !same_identifier_name(name, &target));
+        // H1: `x OP= rhs` desugars to `x = x OP rhs`, so the LHS is always
+        // read. Keep it among the sources (don't strip via same_identifier)
+        // so a literal / untainted RHS can't reach the clean-overwrite kill
+        // arm and drop `x`'s prior taint.
+        let is_compound = assignment_is_compound(&node, kind, src);
+        if !is_compound {
+            source_names.retain(|name| !same_identifier_name(name, &target));
+        }
         if source_names.is_empty() {
             if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
                 source_names.extend(identifier_tokens_from_text(rhs_text));
-                source_names.retain(|name| !same_identifier_name(name, &target));
+                if !is_compound {
+                    source_names.retain(|name| !same_identifier_name(name, &target));
+                }
             }
+        }
+        if is_compound
+            && !target.is_empty()
+            && !source_names.iter().any(|name| same_identifier_name(name, &target))
+        {
+            source_names.push(target.clone());
         }
         source_names.sort();
         source_names.dedup();
@@ -2977,6 +2994,11 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
             continue;
         }
         if MEMBER_EXPR_KINDS.contains(&n.kind()) {
+            // NOTE: H6 (suppress the member TAIL as a phantom operand) was
+            // reverted to baseline: its targeted object-only descent missed
+            // C# conditional-access (`raw?.Length`) node shapes and dropped
+            // the real receiver `raw`, regressing the C# mega_flow finding.
+            // H6 needs a node-shape-complete descent before re-applying.
             if let Some(name) = normalize_member_name(&n, src) {
                 out.push(name);
             }
@@ -3613,8 +3635,37 @@ fn direct_call_wrapper_kind(kind: &str) -> bool {
             | "await"
             | "await_expression"
             | "co_await_expression"
+            // Rust `expr?` (H25): a transparent single-call wrapper around
+            // its operand, so `let x = foo()?` binds the `foo` call result
+            // just like `let x = foo()` and return-summary taint flows.
+            | "try_expression"
+            // NOTE: TS/C# type-assertion wrappers (as_expression /
+            // satisfies_expression / non_null_expression / type_assertion)
+            // were intentionally NOT added here: treating C# `raw!`
+            // (non_null_expression) as a call-wrapper dropped `raw` as an
+            // operand and regressed the C# mega_flow finding (M20 needs a
+            // narrower approach than blanket wrapper-kind treatment).
             | "dot"
     )
+}
+
+/// For a C/C++ `function_declarator` (or a definition node wrapping one),
+/// if its declarator is a qualified/scoped name (`Class::method`), return
+/// the `name` field node so an out-of-line definition is keyed under
+/// `method`, not the leftmost scope token `Class` (H8).
+fn qualified_method_name_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+    let inner = if node.kind() == "function_declarator" {
+        node.child_by_field_name("declarator")?
+    } else {
+        node.child_by_field_name("declarator")
+            .filter(|d| d.kind() == "function_declarator")
+            .and_then(|d| d.child_by_field_name("declarator"))?
+    };
+    if matches!(inner.kind(), "qualified_identifier" | "scoped_identifier") {
+        inner.child_by_field_name("name")
+    } else {
+        None
+    }
 }
 
 fn first_call_descendant<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
@@ -4434,6 +4485,47 @@ fn push_text_identifier(out: &mut Vec<String>, current: &mut String) {
 /// emitted `target` is a plain identifier callers can substring
 /// on.
 #[must_use]
+/// True when `op` is a compound (read-modify-write) assignment operator
+/// like `+=`, `||=`, `.=`, `<<=`. A bare `=` is NOT compound, nor are
+/// comparisons (`==`, `<=`), the walrus/short-var `:=`, or the arrow `=>`.
+fn is_compound_assignment_operator(op: &str) -> bool {
+    let op = op.trim();
+    op.len() >= 2
+        && op.ends_with('=')
+        && !matches!(op, "==" | "!=" | "<=" | ">=" | ":=" | "=>")
+        && op.chars().next().is_some_and(|c| {
+            matches!(
+                c,
+                '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '.' | '<' | '>' | '?' | '~'
+            )
+        })
+}
+
+/// True when an assignment node is a compound `x OP= rhs` (so `x` is
+/// always a read operand). Recognized by node kind, an `operator` field,
+/// or a top-level `OP=` token among the node's unnamed children.
+fn assignment_is_compound(node: &Node<'_>, kind: &str, src: &[u8]) -> bool {
+    if matches!(
+        kind,
+        "augmented_assignment"
+            | "augmented_assignment_expression"
+            | "compound_assignment_expr"
+            | "operator_assignment"
+    ) {
+        return true;
+    }
+    if let Some(op) = node.child_by_field_name("operator") {
+        if is_compound_assignment_operator(node_text(&op, src)) {
+            return true;
+        }
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    children
+        .iter()
+        .any(|child| !child.is_named() && is_compound_assignment_operator(node_text(child, src)))
+}
+
 pub fn sanitize_assign_target(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -4841,6 +4933,13 @@ pub fn decl_index_with_handler(
             .map(|def| def.name)
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| binding_name_node(&node))
+            // H8: out-of-line `RetType Class::method(...)` — take the
+            // qualified declarator's `name` field so the decl is keyed
+            // under `method`, not the scope token `Class`.
+            .or_else(|| {
+                node.child_by_field_name("declarator")
+                    .and_then(|d| qualified_method_name_node(&d))
+            })
             .or_else(|| {
                 node.child_by_field_name("declarator")
                     .and_then(first_identifier_descendant)
@@ -5070,7 +5169,15 @@ pub fn decl_index_with_handler(
             .or_else(|| lambda.child_by_field_name("block"))
             .or_else(|| first_named_child_of_kind(&lambda, "block"))
             .or_else(|| first_named_child_of_kind(&lambda, "compound_statement"))
-            .or_else(|| first_named_child_of_kind(&lambda, "statement_block"));
+            .or_else(|| first_named_child_of_kind(&lambda, "statement_block"))
+            // Erlang `F = fun() -> Body end` (H17): the fun body nests under
+            // `clause_body` (directly, or via a `fun_clause` wrapper), the
+            // same field the main function-decl path handles.
+            .or_else(|| first_named_child_of_kind(&lambda, "clause_body"))
+            .or_else(|| {
+                first_named_child_of_kind(&lambda, "fun_clause")
+                    .and_then(|fc| first_named_child_of_kind(&fc, "clause_body"))
+            });
         let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
         let body_implicit_returns = implicit_return_node.is_some();
         let flow_events = if let Some(b) = body_node {
@@ -7323,6 +7430,7 @@ fn strip_known_import_extension(module: &str) -> Option<&str> {
 /// rule shapes can match.
 const MEMBER_EXPR_KINDS: &[&str] = &[
     "member_expression",                 // javascript, typescript, php, solidity
+    "nullsafe_member_access_expression", // php `$obj?->prop` (H13)
     "member_access_expression",          // c#
     "field_access",                      // java
     "field_expression",                  // rust, c, c++, objc, scala, go (some grammars)
@@ -7382,6 +7490,7 @@ fn is_call_callee(node: &Node<'_>) -> bool {
         "method_call",
         "method_call_expression",
         "member_call_expression",
+        "nullsafe_member_call_expression",
         "invocation_expression",
         "function_call",
         "function_call_expression",
@@ -7792,13 +7901,19 @@ fn method_receiver_name<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'
         // PHP arrow-calls (`$obj->method()`) use `->` as the
         // semantic separator; detect this by the node kind so the
         // reconstructed text matches the source idiom.
-        let sep = if node.kind() == "member_call_expression" {
+        let sep = if matches!(
+            node.kind(),
+            "member_call_expression" | "nullsafe_member_call_expression"
+        ) {
             "->"
         } else {
             "."
         };
         let receiver_raw = node_text(&obj, src).trim();
-        let receiver = if node.kind() == "member_call_expression" {
+        let receiver = if matches!(
+            node.kind(),
+            "member_call_expression" | "nullsafe_member_call_expression"
+        ) {
             receiver_raw
         } else {
             receiver_raw.trim_start_matches('$')
@@ -8089,6 +8204,53 @@ fn is_swift_defer_call(node: &Node<'_>, src: &[u8]) -> bool {
     find_lambda(*node, 0)
 }
 
+/// True when an Elixir `binary_operator` node's operator token equals `op`.
+fn elixir_binary_operator_is(node: &Node<'_>, src: &[u8], op: &str) -> bool {
+    if let Some(operator) = node.child_by_field_name("operator") {
+        return node_text(&operator, src).trim() == op;
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    children
+        .iter()
+        .any(|child| !child.is_named() && node_text(child, src).trim() == op)
+}
+
+/// Elixir `for x <- enum` (H20) and `with pat <- expr` (M14) generator
+/// clauses bind a new variable to the enumerable / matched expression.
+/// Each clause is a `binary_operator` arg whose operator is `<-`.
+/// Synthesize an Assign per binding target so taint flows into the
+/// comprehension body / with-chain. Filters and the do-block are ignored.
+fn extract_elixir_generator_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    let Some(args) = node
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(node, "arguments"))
+    else {
+        return Vec::new();
+    };
+    let mut cursor = args.walk();
+    let arg_nodes: Vec<Node<'_>> = args.named_children(&mut cursor).collect();
+    let mut out = Vec::new();
+    for arg in arg_nodes {
+        if arg.kind() != "binary_operator" || !elixir_binary_operator_is(&arg, src, "<-") {
+            continue;
+        }
+        let (Some(pattern), Some(rhs)) = (
+            arg.child_by_field_name("left"),
+            arg.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        let rhs_text = node_text(&rhs, src);
+        for target in binding_targets_from_pattern_node(&pattern, src) {
+            if let Some(assign) = pattern_binding_assign(file, &pattern, &target, rhs_text) {
+                out.push(assign);
+            }
+        }
+    }
+    dedup_assign_events(out)
+}
+
 fn emit_elixir_control_flow_call(
     node: &Node<'_>,
     file: FileId,
@@ -8132,6 +8294,19 @@ fn emit_elixir_control_flow_call(
                     then_events = prefixed;
                     if !else_events.is_empty() {
                         let mut prefixed_else = match_bindings;
+                        prefixed_else.extend(else_events);
+                        else_events = prefixed_else;
+                    }
+                }
+            }
+            if name == "with" {
+                let with_bindings = extract_elixir_generator_binding_assigns(file, node, src);
+                if !with_bindings.is_empty() {
+                    let mut prefixed = with_bindings.clone();
+                    prefixed.extend(then_events);
+                    then_events = prefixed;
+                    if !else_events.is_empty() {
+                        let mut prefixed_else = with_bindings;
                         prefixed_else.extend(else_events);
                         else_events = prefixed_else;
                     }
@@ -8191,6 +8366,10 @@ fn emit_elixir_loop_call(
     out: &mut Vec<FlowEvent>,
 ) -> bool {
     let mut body = Vec::new();
+    // H20: a plain `for x <- enum, do: ...` comprehension binds `x` to the
+    // enumerable; the closure-param path below only covers Enum.each/map
+    // closures, so synthesize the generator bindings up front.
+    body.extend(extract_elixir_generator_binding_assigns(file, node, src));
     let sources = non_closure_arg_source_names(node, src, &["arguments"]);
     if let Some(args) = first_named_child_of_kind(node, "arguments") {
         let mut cursor = args.walk();
@@ -8479,9 +8658,18 @@ fn emit_inline_closure_param_bindings(
         return;
     }
     let params = extract_param_names(&lambda, src);
-    if params.is_empty() {
-        return;
-    }
+    // H11: a single-param Kotlin lambda omits the param list and refers to
+    // the implicit `it`. Synthesize it so `xs.forEach { sink(it) }` and
+    // `tainted.let { sink(it) }` seed `it` from the receiver/source.
+    let params = if params.is_empty() {
+        if matches!(lambda.kind(), "lambda_literal" | "annotated_lambda") {
+            vec!["it".to_string()]
+        } else {
+            return;
+        }
+    } else {
+        params
+    };
     let mut sources = source_names.to_vec();
     sources.sort();
     sources.dedup();
@@ -9500,12 +9688,27 @@ pub fn apply_assign_call_result_types(idx: &mut crate::DeclIndex) {
     use std::collections::HashMap;
     // Build callee_name → return_type map.
     let mut returns: HashMap<String, String> = HashMap::new();
+    // M9: fail closed on ambiguity. Two same-named functions/overloads with
+    // differing return types make a name-only `let y = make()` type lookup
+    // unknowable; drop the name entirely rather than stamp a last-writer-
+    // wins (wrong) alias that drives bogus [Type, method] matching.
+    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
     for decl in &idx.defs {
         if let Some(rt) = &decl.return_type {
             if !rt.is_empty() {
-                returns.insert(decl.name.clone(), rt.clone());
+                match returns.get(decl.name.as_str()) {
+                    Some(existing) if existing != rt => {
+                        ambiguous.insert(decl.name.clone());
+                    }
+                    _ => {
+                        returns.insert(decl.name.clone(), rt.clone());
+                    }
+                }
             }
         }
+    }
+    for name in &ambiguous {
+        returns.remove(name);
     }
     if returns.is_empty() {
         return;
@@ -9866,8 +10069,21 @@ fn receiver_types_for_expr(
     if let Some(type_name) = receiver_type_from_constructor_expr(&normalized) {
         push_receiver_type_and_bases(&mut out, type_name, class_facts);
     }
+    let has_member_projection = normalized.contains('.')
+        || normalized.contains("->")
+        || normalized.contains("::")
+        || normalized.contains('\\');
+    let projection_base = receiver_projection_base(&normalized);
+    let base_is_implicit = matches!(projection_base, "this" | "self" | "super")
+        || super_receiver_tokens.contains(&projection_base);
+    // H7: an unguarded `alias.name == tail` types `pool.conn` (tail `conn`)
+    // as whatever an unrelated local/param named `conn` is, a name-only FP.
+    // Only fall back to the bare tail when there is no member projection, OR
+    // the projection base is an implicit receiver (`this.field`/`self.field`)
+    // where the tail genuinely names a field the alias map can resolve.
+    let allow_bare_tail = !has_member_projection || base_is_implicit;
     for alias in aliases {
-        if alias.name == normalized || alias.name == tail {
+        if alias.name == normalized || (allow_bare_tail && alias.name == tail) {
             push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }
@@ -9909,6 +10125,21 @@ fn receiver_class_object_inner_expr(receiver: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// The leftmost token of a (possibly projected) receiver expression:
+/// `this` for `this.conn`, `pool` for `pool.conn`, the whole string for a
+/// bare identifier. Used to detect implicit-receiver bases so the bare-tail
+/// alias fallback stays available for `this.field` / `self.field`.
+fn receiver_projection_base(receiver: &str) -> &str {
+    let receiver = receiver.trim();
+    let mut end = receiver.len();
+    for sep in [".", "->", "::", "\\"] {
+        if let Some(idx) = receiver.find(sep) {
+            end = end.min(idx);
+        }
+    }
+    receiver[..end].trim()
 }
 
 fn receiver_projected_alias_matches(receiver: &str, alias_name: &str) -> bool {

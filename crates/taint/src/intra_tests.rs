@@ -374,3 +374,29 @@ fn receiver_method_projection_handles_unicode_boundaries() {
         "multibyte text inside call expressions must keep byte slicing on char boundaries"
     );
 }
+
+
+// audit re-apply: M5: direct unit test of `text_is_tainted` (private fn, visib
+
+
+#[test]
+fn qualified_seed_base_matches_but_tail_does_not_promote_bare_local() {
+    // Seed is the qualified access `obj.password`. The base `obj`
+    // and the seed itself remain tainted, but an UNRELATED bare
+    // local that merely shares the tail name (`password`) must not
+    // be promoted to tainted. Mirrors the inter pass (base-only)
+    // and the OT_01 sibling-field precision boundary. (M5)
+    let state = seed(&["obj.password"]);
+    assert!(
+        text_is_tainted("obj.password", &state),
+        "the tracked qualified seed itself stays tainted"
+    );
+    assert!(
+        text_is_tainted("obj", &state),
+        "the qualified seed's base remains tainted, matching the inter helper"
+    );
+    assert!(
+        !text_is_tainted("password", &state),
+        "a qualified seed must not promote an unrelated bare local sharing only the tail name"
+    );
+}

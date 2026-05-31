@@ -284,3 +284,79 @@ fn call_arg_edges_merge_branch_definitions_at_call_site() {
         );
     }
 }
+
+
+// audit re-apply: R3
+
+#[test]
+fn try_catch_links_thrown_value_to_catch_binding() {
+    // R3: `throw a; catch (e) { sink(e); }` — on the legacy value-flow
+    // walker the thrown param must reach the catch binding `e` and
+    // onward to the sink. Before the fix the Try arm seeded `e` with no
+    // incoming edge from the body's thrown value, so the param `a` had
+    // no forward lineage at all.
+    let decl = decl(
+        &["a"],
+        vec![FlowEvent::Try {
+            span: span(FileId::new(0), 10, 60),
+            body: vec![FlowEvent::Throw {
+                span: span(FileId::new(0), 12, 20),
+                value_name: Some("a".to_string()),
+                thrown_type: None,
+            }],
+            catch_events: vec![call(40, "sink", "e")],
+            finally_events: Vec::new(),
+            catch_param: Some("e".to_string()),
+            catch_types: Vec::new(),
+        }],
+    );
+    let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);
+    let param_a = graph
+        .nodes
+        .iter()
+        .find(|n| n.kind == ValueFlowNodeKind::Param && n.value_text == "a")
+        .expect("entry param `a` must exist")
+        .clone();
+    let reached = graph.forward_closure(&param_a);
+    assert!(
+        reached
+            .iter()
+            .any(|n| n.kind == ValueFlowNodeKind::Catch && n.value_text == "e"),
+        "thrown param `a` must reach the catch binding `e`: {reached:?}"
+    );
+    assert!(
+        reached
+            .iter()
+            .any(|n| n.kind == ValueFlowNodeKind::CallArg && n.value_text == "e"),
+        "thrown param `a` must reach the sink arg `e`: {reached:?}"
+    );
+}
+
+#[test]
+fn yield_emits_return_node_for_yielded_value() {
+    // R3: `yield a` must produce a Return-kind output node fed by the
+    // yielded value's origins so backward lineage from a consumer can
+    // reach `a`. Before the fix the Yield event hit the catch-all `_`
+    // arm and produced no node or edge at all.
+    let decl = decl(
+        &["a"],
+        vec![FlowEvent::Yield {
+            span: span(FileId::new(0), 10, 18),
+            value_text: Some("a".to_string()),
+        }],
+    );
+    let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);
+    let param_a = graph
+        .nodes
+        .iter()
+        .find(|n| n.kind == ValueFlowNodeKind::Param && n.value_text == "a")
+        .expect("entry param `a` must exist")
+        .clone();
+    let reached = graph.forward_closure(&param_a);
+    assert!(
+        reached
+            .iter()
+            .any(|n| n.kind == ValueFlowNodeKind::Return && n.value_text == "a"),
+        "yielded param `a` must reach a Return-kind output node: {reached:?}"
+    );
+}

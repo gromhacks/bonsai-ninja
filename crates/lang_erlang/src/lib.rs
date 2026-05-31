@@ -108,6 +108,7 @@ impl LanguageAdapter for ErlangAdapter {
                 normalize_erlang_access_events(&mut decl.flow_events, snapshot.text.as_ref());
                 augment_erlang_record_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
                 inject_erlang_fun_ref_aliases(&mut decl.flow_events, snapshot.text.as_ref());
+                rewrite_erlang_throw_calls(&mut decl.flow_events);
                 augment_erlang_tail_return_event(&mut decl.flow_events, decl.span, snapshot.text.as_ref());
                 decl.has_implicit_returns = true;
             }
@@ -356,6 +357,78 @@ fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
         }
     }
     *events = rewritten;
+}
+
+/// Rewrite Erlang exception BIF calls (`throw/1`, `error/1`, `exit/1`,
+/// and their `erlang:`-qualified forms) into `FlowEvent::Throw`. These
+/// raise via plain `call` nodes, so the walker emits them as `Call`
+/// events; without this pass `throw(X)` is never a Throw and try/catch
+/// taint seeding (G8) can't link the thrown value to the catch binding.
+fn rewrite_erlang_throw_calls(events: &mut Vec<FlowEvent>) {
+    // Recurse into nested bodies first so throws inside branch / loop /
+    // try regions are rewritten too.
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_erlang_throw_calls(then_events);
+                rewrite_erlang_throw_calls(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_erlang_throw_calls(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_erlang_throw_calls(body);
+                rewrite_erlang_throw_calls(catch_events);
+                rewrite_erlang_throw_calls(finally_events);
+            }
+            _ => {}
+        }
+    }
+    for event in events.iter_mut() {
+        if let Some(throw) = erlang_throw_from_call(event) {
+            *event = throw;
+        }
+    }
+}
+
+/// Build a `Throw` from a `Call` to `throw`/`error`/`exit`, taking the
+/// thrown value name from the first argument when it is a bare Erlang
+/// variable (so G8 can pre-taint the catch binding).
+fn erlang_throw_from_call(event: &FlowEvent) -> Option<FlowEvent> {
+    let FlowEvent::Call { span, name, args, .. } = event else {
+        return None;
+    };
+    // Match both bare (`throw`) and module-qualified (`erlang:error`,
+    // `erlang.exit`) forms by taking the trailing name segment.
+    let short = name.trim().rsplit([':', '.']).next().unwrap_or("").trim();
+    if !matches!(short, "throw" | "error" | "exit") {
+        return None;
+    }
+    let value_name = args.first().and_then(|arg| {
+        let text = arg.value_text.trim();
+        if erlang_variable_name(text) {
+            Some(text.to_string())
+        } else {
+            arg.source_names
+                .iter()
+                .find(|name| erlang_variable_name(name))
+                .cloned()
+        }
+    });
+    Some(FlowEvent::Throw {
+        span: *span,
+        value_name,
+        thrown_type: None,
+    })
 }
 
 fn erlang_fun_ref_alias_assignment(event: &FlowEvent, src: &str) -> Option<FlowEvent> {

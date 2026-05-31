@@ -157,3 +157,20 @@ fn idg_parity_assigned_local_then_call() {
         &["args"],
     );
 }
+
+
+// audit re-apply: H4
+
+#[test]
+fn idg_parity_call_nested_in_with_block() {
+    // H4: a call nested in a `with` (FlowEvent::Using) body must still
+    // reach the callee param on the IDG-backed path, matching the
+    // legacy engine path. Before the find_call_arg Using/Defer recursion
+    // fix the IDG path recovers an empty arg text, synthesises a
+    // disconnected CallArg, and never reaches `helper`'s `p`.
+    assert_idg_legacy_parity(
+        "def entry(args):\n    with open(\"f\") as fh:\n        helper(args)\n\ndef helper(p):\n    sink(p)\n",
+        "entry",
+        &["args"],
+    );
+}

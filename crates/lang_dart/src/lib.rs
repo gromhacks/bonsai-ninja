@@ -172,6 +172,13 @@ impl LanguageAdapter for DartAdapter {
                     }
                 }
             }
+            // The kit's generic catch-param walk picks Dart's `on Type`
+            // identifier over the bound variable in `on E catch (e)`.
+            // Recompute `Try::catch_param` from the structural context so
+            // the catch body's read of `e` gets G8-seeded.
+            for decl in &mut decl_index.defs {
+                fix_dart_catch_params(&mut decl.flow_events, &tree, source_bytes);
+            }
         }
         // Recognised Dart lifecycle transitions — `close` for streams /
         // sinks / files, `cancel` for stream subscriptions and timers,
@@ -264,6 +271,95 @@ fn synthesize_dart_constructor_implicit_returns(index: &mut DeclIndex) {
             value_name: None,
         });
     }
+}
+
+/// The kit's generic `extract_catch_param` returns the first
+/// identifier descendant of the catch arm. For Dart's `on E catch (e)`
+/// the arm is an `on_part` whose `type_not_void` (`FormatException`)
+/// precedes the nested `catch_clause`, so the generic walk returns the
+/// TYPE instead of the bound variable `e` and the catch body's read of
+/// `e` is never seeded, dropping exception taint. Recompute
+/// `Try::catch_param` from the structural context here — mirrors
+/// `collect_java_catch_param_name`. Plain `catch (e)` (no preceding
+/// `on` type) is already correct, so we only overwrite when we
+/// positively find a binding identifier.
+fn fix_dart_catch_params(events: &mut [FlowEvent], tree: &Tree, src: &[u8]) {
+    for event in events {
+        match event {
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                if let Some(node) =
+                    bonsai_lang_api::kit::node_at_span(tree.root_node(), *span, &["try_statement"])
+                {
+                    if let Some(name) = dart_catch_param_name(node, src) {
+                        *catch_param = Some(name);
+                    }
+                }
+                fix_dart_catch_params(body, tree, src);
+                fix_dart_catch_params(catch_events, tree, src);
+                fix_dart_catch_params(finally_events, tree, src);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                fix_dart_catch_params(then_events, tree, src);
+                fix_dart_catch_params(else_events, tree, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                fix_dart_catch_params(body, tree, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract the bound exception variable from a Dart `try_statement`.
+/// `on E catch (e)` parses as an `on_part` holding a `type_not_void`
+/// (the `on` type) followed by a nested `catch_clause`; the binding is
+/// the first plain `identifier` of that `catch_clause`. Plain
+/// `catch (e)` parses the `catch_clause` as a direct try child. Returns
+/// the first such binding in source order, or `None` for parameterless
+/// `catch { }` / `on E { }` arms (leaving the kit value untouched).
+fn dart_catch_param_name(try_node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = try_node.walk();
+    for child in try_node.named_children(&mut cursor) {
+        // Descend an `on E catch (e)` arm to its nested catch_clause; a
+        // bare `catch (e)` arm is already a catch_clause itself.
+        let catch_clause = match child.kind() {
+            "catch_clause" => Some(child),
+            "on_part" => first_descendant_of_kind(child, "catch_clause"),
+            _ => None,
+        };
+        if let Some(catch_clause) = catch_clause {
+            if let Some(name) = dart_catch_clause_binding(catch_clause, src) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// First plain `identifier` child of a `catch_clause` — the bound
+/// exception variable. The `on`-clause type lives outside the
+/// catch_clause so it is never seen here; the optional second
+/// (stack-trace) identifier is ignored since only the primary binding
+/// carries the thrown value.
+fn dart_catch_clause_binding(catch_clause: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = catch_clause.walk();
+    for child in catch_clause.named_children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return Some(node_text(&child, src).trim().to_string());
+        }
+    }
+    None
 }
 
 /// Convert a getter / expression-bodied function whose body is a

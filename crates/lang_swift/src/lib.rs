@@ -692,7 +692,12 @@ fn canonical_swift_base_name(raw: &str) -> Option<String> {
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     let mut imports = Vec::new();
     for import_node in collect_kinds(tree, &["import_declaration"]) {
-        let text = node_text(&import_node, src).trim_start_matches("import ").trim();
+        // Strip any leading Swift attribute (`@testable`, `@_exported`,
+        // `@available(...)`, ...) before the `import ` trim — otherwise
+        // the attribute corrupts the module name and fails the package gate.
+        let text = strip_swift_import_attribute_prefixes(node_text(&import_node, src))
+            .trim_start_matches("import ")
+            .trim();
         // Strip the optional symbol-kind keyword so the resulting module path
         // matches what callers reference at use sites.
         let module = text
@@ -720,6 +725,34 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+/// Strip leading Swift attribute tokens from an `import_declaration`'s
+/// text so the module name resolves cleanly. `@testable import
+/// Foundation` -> `import Foundation`; `@_exported import X` -> `import
+/// X`. Handles an optional `(...)` attribute argument list and multiple
+/// stacked attributes. A no-op when no leading `@` is present.
+fn strip_swift_import_attribute_prefixes(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    while let Some(after_at) = rest.strip_prefix('@') {
+        // Consume the attribute identifier (`testable`, `_exported`, ...).
+        let ident_end = after_at
+            .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+            .unwrap_or(after_at.len());
+        if ident_end == 0 {
+            break; // bare `@` with no identifier — leave untouched.
+        }
+        let mut after_ident = after_at[ident_end..].trim_start();
+        // Optional balanced argument list, e.g. `@available(...)`.
+        if let Some(after_paren) = after_ident.strip_prefix('(') {
+            match after_paren.find(')') {
+                Some(close) => after_ident = after_paren[close + 1..].trim_start(),
+                None => break, // unbalanced — give up rather than mangle.
+            }
+        }
+        rest = after_ident;
+    }
+    rest
 }
 
 /// Synthesize a zero-arg `Method` decl for each Swift computed

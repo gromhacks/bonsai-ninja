@@ -23,6 +23,7 @@
 //! - `for (Type x : xs)` / `for (auto x : xs)` (Java / C++ range-for)
 //! - `for my $part (split /\s+/, $cmd) { ... }` (Perl)
 //! - `for my $t (@tokens) { ... }` (Perl)
+//! - `for (x <- xs) { ... }` (Scala for-comprehension generator)
 //!
 //! Binding-keyword stripping (`const`/`let`/`var`/`final`) is
 //! intentionally narrow; adding new keywords requires a test case
@@ -40,6 +41,15 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
     after_for = after_for.trim_start();
     if let Some(rest) = after_for.strip_prefix("await ") {
         after_for = rest.trim_start();
+    }
+    // Adapters hand us the WHOLE foreach node (header + body), not a
+    // pre-sliced header. A foreach header never legitimately contains a
+    // `{`, so truncate at the first one: this keeps body text (and any
+    // stray `)` inside body calls like `system($cmd)`) out of the paren
+    // `rsplit_once(')')` below, which would otherwise grab a body `)` and
+    // route body identifiers onto the binding side (PHP `as` shape).
+    if let Some(body_open) = after_for.find('{') {
+        after_for = after_for[..body_open].trim_end();
     }
     if let Some(paren_body) = after_for
         .strip_prefix('(')
@@ -74,11 +84,13 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
 /// Split on the iteration keyword (`in` or `of`) — the two surface forms
 /// most supported languages reduce to. PHP's `foreach ($xs as $x)`
 /// reverses the written order, so return `(binding, iterable)` for
-/// that spelling too.
+/// that spelling too. Scala for-comprehension generators bind with the
+/// `<-` arrow (`for (x <- xs)`), so recognise that spelling as well.
 fn split_foreach_lhs_rhs(text: &str) -> Option<(&str, &str)> {
     text.split_once(" in ")
         .or_else(|| text.split_once(" of "))
         .or_else(|| text.split_once(" : "))
+        .or_else(|| text.split_once(" <- "))
         .or_else(|| {
             text.split_once(" as ").map(|(iterable, binding)| {
                 let binding = binding.rsplit_once("=>").map_or(binding, |(_, value)| value);

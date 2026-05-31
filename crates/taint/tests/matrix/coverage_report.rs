@@ -51,34 +51,34 @@ fn render() -> String {
     out.push_str("+ engine pipeline and asserts the expected taint outcome (positive\n");
     out.push_str("flows reach the sink, over-taint cases stay clean). Every applicable\n");
     out.push_str("cell shows `pass` because its per-language `#[test]` passes in the\n");
-    out.push_str("workspace test sweep — drift would block CI.\n\n");
+    out.push_str("workspace test sweep - drift would block CI.\n\n");
     out.push_str("The matrix also refuses to mark a cell `Applicable` unless the\n");
     out.push_str("scenario fixture file contains a concrete `fn <scenario>_<lang>()`\n");
     out.push_str("test. Cells without executable fixture coverage must stay explicit as\n");
     out.push_str("`n/a`; the adapter-deferred status is kept as a historical guardrail\n");
     out.push_str("and must remain zero in a clean tree.\n\n");
     out.push_str("Two sister documents look pessimistic by comparison and that is\n");
-    out.push_str("intentional — they measure different things:\n\n");
+    out.push_str("intentional - they measure different things:\n\n");
     out.push_str("- [`COVERAGE_BASELINE.md`](COVERAGE_BASELINE.md) reports per-construct\n");
     out.push_str("  *modeling level*. Cells say `Partial` because that is the engine's\n");
-    out.push_str("  healthy default — common case modeled precisely, rare forms emit\n");
+    out.push_str("  healthy default - common case modeled precisely, rare forms emit\n");
     out.push_str("  `Precision::OverApproximate`. `Partial` does NOT mean the scenario\n");
     out.push_str("  fails; it means precision is honestly flagged.\n");
     out.push_str("- [`adapter-capabilities.mdx`](contributing/adapter-capabilities.mdx) tracks which\n");
-    out.push_str("  *optional* `Decl` fields each adapter populates. `—` cells are\n");
+    out.push_str("  *optional* `Decl` fields each adapter populates. `-` cells are\n");
     out.push_str("  precision-booster backlog (e.g. tighter virtual dispatch); none of\n");
     out.push_str("  them gate taint analysis.\n\n");
     out.push_str("If a cell here passes but a sister-doc cell shows `Partial` /\n");
-    out.push_str("`—`, the engine still produces the correct taint answer — it just\n");
+    out.push_str("`-`, the engine still produces the correct taint answer - it just\n");
     out.push_str("flags lower precision on the rarer shapes. The behavioural truth\n");
     out.push_str("lives in this matrix.\n\n");
 
     out.push_str("## Legend\n\n");
-    out.push_str("- `pass` — applicable cell, per-language test exists and passes\n");
-    out.push_str("- `fail` — applicable cell, per-language test exists but fails (would block CI; never present in a clean tree)\n");
-    out.push_str("- `n/a` — language has no equivalent construct\n");
+    out.push_str("- `pass` - applicable cell, per-language test exists and passes\n");
+    out.push_str("- `fail` - applicable cell, per-language test exists but fails (would block CI; never present in a clean tree)\n");
+    out.push_str("- `n/a` - language has no equivalent construct\n");
     out.push_str(
-        "- `deferred` — legacy guardrail status; current sanity tests require zero deferred cells\n\n",
+        "- `deferred` - legacy guardrail status; current sanity tests require zero deferred cells\n\n",
     );
 
     for category in [
@@ -167,7 +167,7 @@ fn taint_coverage_matrix_is_up_to_date() {
 
     assert!(
         on_disk.trim() == live.trim(),
-        "TAINT_COVERAGE_MATRIX.md drift — regenerate with: \
+        "TAINT_COVERAGE_MATRIX.md drift - regenerate with: \
          BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint \
          --test matrix_coverage_report -- --nocapture\n\n\
          on-disk lines: {} | live lines: {}",

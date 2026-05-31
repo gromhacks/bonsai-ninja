@@ -572,3 +572,84 @@ fn arg_int_compare_out_of_bounds_fails() {
     // index 1 is out of bounds — constraint fails.
     assert!(!super::arg_int_compare(&args, 1, |_| true));
 }
+
+
+// audit re-apply: R5 RED-before/GREEN-after: before the Yield arm, collect_cal
+
+#[test]
+fn collect_calls_lowers_yielded_call_expression_to_a_call_fact() {
+    // R5: `yield exec(cmd)` / C# `yield return Sink(x)` must surface as
+    // a CallFact so sink attribution can see the yielded call.
+    let events = vec![FlowEvent::Yield {
+        span: span(),
+        value_text: Some("exec(cmd)".to_string()),
+    }];
+    let calls = collect_calls(&events);
+    assert_eq!(
+        calls.len(),
+        1,
+        "a sink in the yielded value must become a CallFact"
+    );
+    assert_eq!(calls[0].callee, "exec");
+    assert_eq!(calls[0].origin, CallFactOrigin::NestedReceiverCall);
+    assert_eq!(
+        calls[0]
+            .args
+            .iter()
+            .map(|arg| arg.value_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cmd"]
+    );
+}
+
+#[test]
+fn collect_calls_ignores_non_call_yield_value() {
+    // A bare `yield x` carries no call; do not synthesize a CallFact.
+    let events = vec![FlowEvent::Yield {
+        span: span(),
+        value_text: Some("x".to_string()),
+    }];
+    assert!(collect_calls(&events).is_empty());
+}
+
+
+// audit re-apply: H10 RED-before/GREEN-after (matcher portion): before adding 
+
+#[test]
+fn receiver_root_name_strips_kotlin_safe_call_sigil() {
+    // H10: safe-call receivers (`stmt?.executeQuery`) leave `call_receiver_text`
+    // returning `stmt?`; the root must still resolve to `stmt`.
+    assert_eq!(receiver_root_name("stmt?"), Some("stmt".to_string()));
+    assert_eq!(receiver_root_name("obj?.field"), Some("obj".to_string()));
+}
+
+#[test]
+fn safe_call_receiver_inherits_type_alias() {
+    // H10 integration: `stmt?.executeQuery(query)` must adopt the alias
+    // type of `stmt` so the matcher's [Statement, executeQuery] rule fires.
+    let events = vec![FlowEvent::Call {
+        name: "stmt?.executeQuery".to_string(),
+        receiver: Some("stmt?".to_string()),
+        args: Vec::new(),
+        receiver_types: Vec::new(),
+        span: span(),
+        call_kind: CallKind::Method,
+    }];
+    let mut calls = collect_calls(&events);
+    enrich_call_fact_receiver_types(
+        &mut calls,
+        &[TypeAliasBinding {
+            name: "stmt".to_string(),
+            type_name: "java.sql.Statement".to_string(),
+        }],
+    );
+    let real = calls
+        .iter()
+        .find(|c| c.callee == "stmt?.executeQuery")
+        .expect("real call fact present");
+    assert_eq!(
+        real.receiver_types,
+        vec!["java.sql.Statement".to_string()],
+        "safe-call receiver must inherit the alias type of its root binding"
+    );
+}
