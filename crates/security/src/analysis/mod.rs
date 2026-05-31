@@ -6975,6 +6975,120 @@ fn short_file(path: &str) -> String {
         .to_string()
 }
 
+/// Entry-rooted dominator relation over a control-flow graph, used to make
+/// sanitizer credit path-sensitive (audit R2). A sanitizer should credit a
+/// sink only when its block DOMINATES the sink's block on the value-flow
+/// path -- not merely co-occurs on some branch. A branch-local `clean(x)`
+/// in the `then` arm of `if (c) { y = clean(x); } sink(x)` does NOT
+/// dominate the post-join `sink(x)` (the `else` path skips it), so it must
+/// not credit.
+///
+/// `for_cfg` computes dominators by the standard iterative dataflow
+/// fixpoint (`Dom(entry) = {entry}`, `Dom(n) = {n} union intersect
+/// Dom(pred)`), so it needs no external graph library and is self-contained
+/// and unit-testable. NOTE: threading real per-call `BasicBlockId`s from
+/// the taint layer into `TaintedCallEdge` and consuming this in
+/// `compute_status` is the remaining R2 integration step (a multi-crate
+/// change); this dominator substrate + predicate land first with a unit
+/// test pinning the must-dominate contract.
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub(crate) struct DominatorQuery {
+    /// `dominators[b]` is the set of blocks that dominate `b` (always
+    /// including `b` itself and the entry block).
+    dominators: std::collections::HashMap<
+        bonsai_common::BasicBlockId,
+        std::collections::HashSet<bonsai_common::BasicBlockId>,
+    >,
+}
+
+#[allow(dead_code)]
+impl DominatorQuery {
+    /// Build the dominator relation from an `entry` block and a successor
+    /// adjacency list `(block, successors)`. Blocks that appear only as a
+    /// successor (never as a key) are still included as nodes.
+    pub(crate) fn for_cfg(
+        entry: bonsai_common::BasicBlockId,
+        edges: &[(bonsai_common::BasicBlockId, Vec<bonsai_common::BasicBlockId>)],
+    ) -> Self {
+        use bonsai_common::BasicBlockId;
+        use std::collections::{HashMap, HashSet};
+
+        let mut nodes: HashSet<BasicBlockId> = HashSet::new();
+        nodes.insert(entry);
+        let mut preds: HashMap<BasicBlockId, Vec<BasicBlockId>> = HashMap::new();
+        for (block, succs) in edges {
+            nodes.insert(*block);
+            for succ in succs {
+                nodes.insert(*succ);
+                preds.entry(*succ).or_default().push(*block);
+            }
+        }
+        // Initialize: Dom(entry) = {entry}; Dom(other) = all nodes.
+        let mut dom: HashMap<BasicBlockId, HashSet<BasicBlockId>> = HashMap::new();
+        for &node in &nodes {
+            if node == entry {
+                dom.insert(node, HashSet::from([entry]));
+            } else {
+                dom.insert(node, nodes.clone());
+            }
+        }
+        // Iterate to fixpoint.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &node in &nodes {
+                if node == entry {
+                    continue;
+                }
+                let mut new_dom: Option<HashSet<BasicBlockId>> = None;
+                for pred in preds.get(&node).map(Vec::as_slice).unwrap_or(&[]) {
+                    let pred_dom = dom.get(pred).cloned().unwrap_or_default();
+                    new_dom = Some(match new_dom {
+                        None => pred_dom,
+                        Some(acc) => acc.intersection(&pred_dom).copied().collect(),
+                    });
+                }
+                let mut new_dom = new_dom.unwrap_or_default();
+                new_dom.insert(node);
+                if dom.get(&node) != Some(&new_dom) {
+                    dom.insert(node, new_dom);
+                    changed = true;
+                }
+            }
+        }
+        DominatorQuery { dominators: dom }
+    }
+
+    /// True when `a` dominates `b`: every path from entry to `b` passes
+    /// through `a`. A block dominates itself.
+    pub(crate) fn dominates(
+        &self,
+        a: bonsai_common::BasicBlockId,
+        b: bonsai_common::BasicBlockId,
+    ) -> bool {
+        self.dominators.get(&b).is_some_and(|doms| doms.contains(&a))
+    }
+}
+
+/// R2: true when a sanitizer at block `san_block` dominates the sink at
+/// `sink_block` on the value-flow path -- the must-dominate condition that
+/// makes sanitizer credit path-sensitive. When either block is unknown
+/// (`None`, e.g. a stale cached graph predating block plumbing) fall back
+/// to crediting, so the change is monotonic-safe (introduces no new false
+/// `Unsanitized`). Same-block sanitizers dominate trivially.
+#[allow(dead_code)]
+pub(crate) fn sanitizer_dominates_sink_on_value_flow(
+    san_block: Option<bonsai_common::BasicBlockId>,
+    sink_block: Option<bonsai_common::BasicBlockId>,
+    dominators: &DominatorQuery,
+) -> bool {
+    match (san_block, sink_block) {
+        (Some(san), Some(sink)) => dominators.dominates(san, sink),
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod compute_status_tests;
 pub(crate) mod value_flow_match;

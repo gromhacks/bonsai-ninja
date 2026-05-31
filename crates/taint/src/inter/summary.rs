@@ -67,6 +67,23 @@ pub struct FunctionSummary {
     /// returns, e.g. C-style `join(dst, cap, sep, tok)` writing
     /// `tok` into `dst`.
     pub taints_params_from: Vec<ParamSideEffect>,
+    /// Parameter indices whose taint reaches a `throw` / `raise` on some
+    /// path through the function body. `throws_taint_of = {0}` means
+    /// tainting param 0 produces a tainted exception, so a caller doing
+    /// `try { callee(tainted) } catch (e) { sink(e) }` must seed its
+    /// catch binding `e` even though the caller's own try body contains
+    /// no literal `Throw` event (audit R1 -- interprocedural exception
+    /// flow). Empty when no parameter transits to a thrown value.
+    pub throws_taint_of: Vec<usize>,
+    /// Names of module-level / global variables (or captured outer
+    /// locals) that a parameter-less function reads and forwards to its
+    /// return value. `reads_global_taint_of = {"g"}` means
+    /// `def reader(): return g` transits `g`'s taint to its result, so the
+    /// inter pass can seed a tainted module-global channel through an
+    /// otherwise empty summary. Empty for functions with parameters --
+    /// their transit is captured by `returns_taint_of` (audit R6 -- the
+    /// module/global taint channel).
+    pub reads_global_taint_of: Vec<String>,
 }
 
 /// One field-of-parameter access path that the function returns.

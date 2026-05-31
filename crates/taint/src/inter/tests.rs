@@ -142,6 +142,7 @@ fn summary_decl(flow_events: Vec<FlowEvent>, has_implicit_returns: bool) -> Decl
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     }
 }
 
@@ -1937,5 +1938,170 @@ def entry(args):
                 .is_none_or(|decl| decl.name != "Run")
         }),
         "expression receiver must not fabricate an edge to a same-named top-level `Run`"
+    );
+}
+
+// audit M1: variadic param index. Direct unit test of the private
+// `param_index_for_call_arg` (in scope via `use super::*;`).
+#[test]
+fn variadic_callee_routes_overflow_positional_args_to_collector_param() {
+    let span = Span::new(FileId::new(0), 0, 10);
+    let decl = Decl {
+        symbol: SymbolId::new(1),
+        kind: DeclKind::Function,
+        name: "f".to_string(),
+        qualified_name: None,
+        module_path: ModulePath::default(),
+        span,
+        name_span: span,
+        visibility: bonsai_lang_api::Visibility::Public,
+        parent: None,
+        body_span: Some(span),
+        flow_events: Vec::new(),
+        has_implicit_returns: false,
+        // `def f(fmt, *args)` -> kit stores the named splat as its bare
+        // name, so the collector param is "args", NOT __bonsai_varargs.
+        params: vec!["fmt".to_string(), "args".to_string()],
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: Vec::new(),
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+        is_variadic: true,
+    };
+    let args = vec![
+        EffectiveCallArg::positional("x".to_string()),
+        EffectiveCallArg::positional("clean".to_string()),
+        EffectiveCallArg::positional("tainted".to_string()),
+    ];
+
+    assert_eq!(
+        param_index_for_call_arg(&decl, &args, 0),
+        Some(0),
+        "first positional binds to fmt"
+    );
+    assert_eq!(
+        param_index_for_call_arg(&decl, &args, 1),
+        Some(1),
+        "second positional binds to the collector param args"
+    );
+    assert_eq!(
+        param_index_for_call_arg(&decl, &args, 2),
+        Some(1),
+        "third (overflow) positional must fold onto the variadic collector args, not be dropped (M1)"
+    );
+}
+
+// Guard: a non-variadic callee must still drop true overflow (no
+// fabricated binding). Keeps the M1 fix conservative.
+#[test]
+fn non_variadic_callee_still_drops_overflow_positional_args() {
+    let span = Span::new(FileId::new(0), 0, 10);
+    let decl = Decl {
+        symbol: SymbolId::new(2),
+        kind: DeclKind::Function,
+        name: "g".to_string(),
+        qualified_name: None,
+        module_path: ModulePath::default(),
+        span,
+        name_span: span,
+        visibility: bonsai_lang_api::Visibility::Public,
+        parent: None,
+        body_span: Some(span),
+        flow_events: Vec::new(),
+        has_implicit_returns: false,
+        params: vec!["a".to_string(), "b".to_string()],
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: Vec::new(),
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+        is_variadic: false,
+    };
+    let args = vec![
+        EffectiveCallArg::positional("p".to_string()),
+        EffectiveCallArg::positional("q".to_string()),
+        EffectiveCallArg::positional("r".to_string()),
+    ];
+    assert_eq!(param_index_for_call_arg(&decl, &args, 2), None);
+}
+
+// audit R1: interprocedural exception flow. `explode(payload)` re-raises
+// its tainted parameter; the caller invokes it inside a try block whose
+// catch binds the exception to `e` and sinks it. Pre-fix the caller's try
+// body holds only a `Call` (never a `Throw`), so the catch param `e` is
+// never seeded. After the fix, explode's summary (`throws_taint_of = {0}`)
+// lets the caller seed `e`, so the catch-block sink appears.
+#[test]
+fn interproc_callee_throws_tainted_seeds_caller_catch() {
+    let src = "
+def explode(payload):
+    raise payload
+
+def entry(user_input):
+    try:
+        explode(user_input)
+    except Exception as e:
+        os_system(e)
+";
+    let db = python_ws_one_file(src);
+    let entry = func_id_of(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["user_input"]), &config(&[]), &db);
+    assert!(
+        result
+            .tainted_calls
+            .iter()
+            .any(|call| call.name == "os_system"),
+        "callee that re-raises a tainted param must seed the caller's \
+         catch binding so the catch-block sink is tainted; got {:?}",
+        result.tainted_calls,
+    );
+}
+
+// audit R6: a zero-arg function reading a module-global tainted value and
+// returning it must produce a non-empty summary recording the global as a
+// return transit. Pre-fix `compute_function_summary` early-outs to an empty
+// summary for any paramless decl, so the global->return channel is invisible.
+#[test]
+fn zero_arg_function_reading_module_global_records_global_transit() {
+    let span = Span::new(FileId::new(0), 0, 10);
+    let reader = Decl {
+        symbol: SymbolId::new(2),
+        kind: DeclKind::Function,
+        name: "reader".to_string(),
+        qualified_name: None,
+        module_path: ModulePath::default(),
+        span,
+        name_span: span,
+        visibility: bonsai_lang_api::Visibility::Public,
+        parent: None,
+        body_span: Some(span),
+        flow_events: vec![FlowEvent::Return {
+            span: Span::new(FileId::new(0), 1, 2),
+            value_text: Some("g".to_string()),
+            value_name: Some("g".to_string()),
+        }],
+        has_implicit_returns: false,
+        params: Vec::new(),
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: Vec::new(),
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+        is_variadic: false,
+    };
+    let summary = compute_function_summary(&reader);
+    assert!(
+        summary.reads_global_taint_of.iter().any(|name| name == "g"),
+        "a paramless function returning module-global `g` must record the global->return transit; got {summary:?}"
     );
 }

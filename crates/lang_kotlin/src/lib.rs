@@ -675,6 +675,7 @@ fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         });
         // Re-parent every method-like decl whose span is contained
         // by the lambda body to the synthesized class.
@@ -810,6 +811,7 @@ fn kotlin_constructor_decl(
         implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     }
 }
 

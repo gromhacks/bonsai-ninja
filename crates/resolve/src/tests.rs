@@ -52,6 +52,7 @@ fn decl(file: FileId, kind: DeclKind, name: &str, module: &[&str], start: u64) -
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     }
 }
 
@@ -580,6 +581,7 @@ fn class_resolution_rewrites_alias_map() {
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     };
     global.insert(DeclIndex {
         file,

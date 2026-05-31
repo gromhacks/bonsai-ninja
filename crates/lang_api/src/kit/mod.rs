@@ -418,6 +418,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 implicit_receiver_names: vec!["this".to_string()],
                 receiver_state_sources: Vec::new(),
                 return_type: None,
+                is_variadic: false,
             });
             next_symbol += 1;
         }
@@ -457,6 +458,7 @@ pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src:
                 implicit_receiver_names: vec!["this".to_string()],
                 receiver_state_sources: vec![field],
                 return_type: None,
+                is_variadic: false,
             });
             next_symbol += 1;
         }
@@ -727,9 +729,26 @@ fn dedup_call_result_source_names(source_names: &mut Vec<String>) {
 /// fully-qualified and short forms compare equal.
 #[must_use]
 pub fn canonical_simple_type_name(text: &str) -> String {
-    let trimmed = text.trim();
+    // L3: strip the same array / nullable / force-unwrap / pointer /
+    // reference decorations as `canonical_short_type_name`, so a return
+    // type like `User?` / `byte[]` / `*const T` / `&User` resolves to the
+    // class indexed under its bare name for base-class expansion. Without
+    // this the decorated form misses `by_canonical_name` and no bases are
+    // added (a subclass rule `[Base, method]` never fires).
+    let trimmed = text
+        .trim()
+        .trim_start_matches('&')
+        .trim()
+        .trim_start_matches("*const ")
+        .trim_start_matches("*mut ")
+        .trim_start_matches('*')
+        .trim_start_matches("mut ")
+        .trim();
     let head = trimmed.split('<').next().unwrap_or(trimmed);
-    head.rsplit('.').next().unwrap_or(head).trim().to_string()
+    let head = head.split('[').next().unwrap_or(head);
+    let head = head.rsplit('.').next().unwrap_or(head);
+    let head = head.rsplit("::").next().unwrap_or(head).trim();
+    head.trim_end_matches('?').trim_end_matches('!').trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -2982,9 +3001,21 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         // an argument-list RHS (`Repo repo(std::move(env))`). Keep the nested
         // call's argument operands while still skipping the callee name.
         if COMMON_CALL_KINDS.contains(&n.kind()) && n.id() != node.id() {
+            // M8: Kotlin/Swift expose call args under `value_arguments`
+            // (often wrapped in a `call_suffix`) or a Swift `tuple_expression`
+            // rather than `arguments`/`argument_list`. Without these a nested
+            // call inside a compound RHS or call argument contributed NO
+            // operands for Kotlin/Swift, unlike Python/JS/Java/Go. Mirror the
+            // broader arg-list lookup used when building CallArgs.
             if let Some(args_node) = n
                 .child_by_field_name("arguments")
                 .or_else(|| n.child_by_field_name("argument_list"))
+                .or_else(|| first_named_child_of_kind(&n, "value_arguments"))
+                .or_else(|| {
+                    first_named_child_of_kind(&n, "call_suffix")
+                        .and_then(|cs| first_named_child_of_kind(&cs, "value_arguments"))
+                })
+                .or_else(|| first_named_child_of_kind(&n, "tuple_expression"))
             {
                 let mut arg_cursor = args_node.walk();
                 for arg in args_node.named_children(&mut arg_cursor) {
@@ -2994,14 +3025,34 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
             continue;
         }
         if MEMBER_EXPR_KINDS.contains(&n.kind()) {
-            // NOTE: H6 (suppress the member TAIL as a phantom operand) was
-            // reverted to baseline: its targeted object-only descent missed
-            // C# conditional-access (`raw?.Length`) node shapes and dropped
-            // the real receiver `raw`, regressing the C# mega_flow finding.
-            // H6 needs a node-shape-complete descent before re-applying.
             if let Some(name) = normalize_member_name(&n, src) {
                 out.push(name);
             }
+            // H6: suppress the member TAIL (the property / attribute name)
+            // as a standalone bare operand. Consumers only ever strip the
+            // qualified BASE, never the tail, so a bare tail like `field`
+            // makes `y = obj.field` falsely read as tainted whenever an
+            // unrelated local named `field` is tainted -- a name-only FP.
+            // Descend into every child EXCEPT the tail so the real
+            // value-bearing operands (the object/receiver base, plus any
+            // index/argument subexpressions nested in the base) are still
+            // collected. The tail is identified by grammar field name --
+            // NOT by a fixed object-field lookup, which varies across
+            // grammars (C# `member_access_expression` uses
+            // `expression`/`name`; JS `member_expression` uses
+            // `object`/`property`) and previously dropped the C# receiver.
+            let tail_id = n
+                .child_by_field_name("name")
+                .or_else(|| n.child_by_field_name("property"))
+                .or_else(|| n.child_by_field_name("field"))
+                .map(|tail| tail.id());
+            let mut member_cursor = n.walk();
+            for child in n.named_children(&mut member_cursor) {
+                if Some(child.id()) != tail_id {
+                    stack.push(child);
+                }
+            }
+            continue;
         }
         if let Some(place) = argument_place(&n, src) {
             if place.contains('.') {
@@ -3639,14 +3690,82 @@ fn direct_call_wrapper_kind(kind: &str) -> bool {
             // its operand, so `let x = foo()?` binds the `foo` call result
             // just like `let x = foo()` and return-summary taint flows.
             | "try_expression"
-            // NOTE: TS/C# type-assertion wrappers (as_expression /
-            // satisfies_expression / non_null_expression / type_assertion)
-            // were intentionally NOT added here: treating C# `raw!`
-            // (non_null_expression) as a call-wrapper dropped `raw` as an
-            // operand and regressed the C# mega_flow finding (M20 needs a
-            // narrower approach than blanket wrapper-kind treatment).
+            // TS/C# type-assertion wrappers (M20): `const y = f(x) as T`,
+            // `g() satisfies T`, `h()!`, `<T>i()`. These are transparent
+            // single-call wrappers around their operand for the purpose of
+            // the Assign->call source-call binding. `direct_call_wrapper_kind`
+            // feeds ONLY `extract_direct_call_info` (the source_call binding
+            // at the Assign RHS) and param extraction -- NOT
+            // `extract_rhs_expr_operands` -- so this does not drop `raw` from
+            // C# `new List<string>{ raw! }` ctor operands (the earlier
+            // regression came from a broader change; the bare-operand path is
+            // untouched here). For a no-arg transit `g() as T`, binding the
+            // call result keeps `classify_assign_value_kinds` from labeling
+            // the RHS a `Literal` and erasing prior taint.
+            | "as_expression"
+            | "satisfies_expression"
+            | "non_null_expression"
+            | "type_assertion"
             | "dot"
     )
+}
+
+/// True when the function's parameter list ends in a positional variadic
+/// collector (`*args`, `...rest`, `T...`). Combined by callers with the
+/// synthetic `__bonsai_varargs` marker (C-family bare `...`). Checks the
+/// DIRECT children of the parameter container only, so a splat inside a
+/// default-value expression (`def f(x=[*a])`) does not falsely flag the
+/// callee. Keyword collectors (`**kwargs`, Ruby `**opts`) are deliberately
+/// excluded -- they do not absorb overflow POSITIONAL args (audit M1).
+fn parameter_list_is_variadic(fn_node: &Node<'_>) -> bool {
+    const VARIADIC_PARAM_KINDS: &[&str] = &[
+        "variadic_parameter",   // go `...T`, php `...$x`, c `...`
+        "variadic_declaration",
+        "spread_parameter",     // java `T... args`
+        "rest_parameter",       // typescript `...args`
+        "rest_pattern",         // javascript `...args`
+        "list_splat_pattern",   // python `*args`
+        "splat_parameter",      // ruby `*args`
+    ];
+    let Some(container) = fn_node
+        .child_by_field_name("parameters")
+        .or_else(|| first_named_child_of_kind(fn_node, "parameters"))
+        .or_else(|| first_named_child_of_kind(fn_node, "formal_parameters"))
+        .or_else(|| first_named_child_of_kind(fn_node, "parameter_list"))
+        .or_else(|| first_named_child_of_kind(fn_node, "function_value_parameters"))
+        .or_else(|| first_named_child_of_kind(fn_node, "formal_parameter_list"))
+    else {
+        return false;
+    };
+    // Collect into Vecs first: tree-sitter cursors cannot outlive a borrow
+    // inside an `.any()` closure, so the codebase materializes children
+    // before iterating.
+    let mut cursor = container.walk();
+    let params: Vec<Node<'_>> = container.named_children(&mut cursor).collect();
+    for param in params {
+        if VARIADIC_PARAM_KINDS.contains(&param.kind()) {
+            return true;
+        }
+        // A rest element nested inside a DESTRUCTURING pattern parameter
+        // (`function f({a, ...rest}, b)` / `function f([x, ...tail])`) is
+        // NOT a positional overflow collector -- it gathers the remaining
+        // keys/elements of THAT one argument, so it must not flag the whole
+        // callee variadic. Skip the nested scan for destructuring patterns.
+        if matches!(
+            param.kind(),
+            "object_pattern" | "array_pattern" | "object_type" | "tuple_pattern"
+        ) {
+            continue;
+        }
+        // Some grammars wrap the splat one level down (a `parameter` whose
+        // child is a `rest_pattern` / `list_splat_pattern`).
+        let mut inner = param.walk();
+        let nested: Vec<Node<'_>> = param.named_children(&mut inner).collect();
+        if nested.iter().any(|c| VARIADIC_PARAM_KINDS.contains(&c.kind())) {
+            return true;
+        }
+    }
+    false
 }
 
 /// For a C/C++ `function_declarator` (or a definition node wrapping one),
@@ -5047,6 +5166,14 @@ pub fn decl_index_with_handler(
         // call node itself. Use the unwrapped signature node.
         let param_source = elixir_def.as_ref().map(|d| d.signature_call).unwrap_or(node);
         let params = extract_param_names(&param_source, src);
+        // M1: a positional variadic collector (`*args`, `...rest`, `T...`,
+        // C-family bare `...`) absorbs every overflow positional argument.
+        // Flag it so `param_index_for_call_arg` routes those args onto the
+        // collector instead of dropping them. Named splats are stored under
+        // their bare name in `params`, so the engine cannot infer this from
+        // the name alone.
+        let is_variadic = parameter_list_is_variadic(&param_source)
+            || params.last().is_some_and(|p| p == SYNTHETIC_VARARGS_PARAM);
         let param_annotations = extract_param_annotations(&param_source, src);
         let receiver_param_index =
             if matches!(decl_kind, crate::DeclKind::Method | crate::DeclKind::Constructor)
@@ -5113,6 +5240,7 @@ pub fn decl_index_with_handler(
             implicit_receiver_names,
             receiver_state_sources,
             return_type: None,
+            is_variadic,
         });
     }
 
@@ -5218,6 +5346,7 @@ pub fn decl_index_with_handler(
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         });
     }
 
@@ -5265,6 +5394,7 @@ pub fn decl_index_with_handler(
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         });
     }
 
@@ -5324,6 +5454,7 @@ pub fn decl_index_with_handler(
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         });
     }
 

@@ -119,7 +119,7 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "I_13",
         category: Category::Intra,
         polarity: Polarity::Positive,
-        description: "Try → throw → catch propagates",
+        description: "Try -> throw -> catch propagates",
     },
     Scenario {
         id: "I_14",
@@ -307,7 +307,7 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "X_04",
         category: Category::CrossFile,
         polarity: Polarity::Positive,
-        description: "Re-export chain A→B→C",
+        description: "Re-export chain A->B->C",
     },
     Scenario {
         id: "X_05",
@@ -343,13 +343,13 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "X_10",
         category: Category::CrossFile,
         polarity: Polarity::Positive,
-        description: "ES module ↔ CommonJS interop",
+        description: "ES module <-> CommonJS interop",
     },
     Scenario {
         id: "X_11",
         category: Category::CrossFile,
         polarity: Polarity::Negative,
-        description: "Visibility crossing — private blocks",
+        description: "Visibility crossing - private blocks",
     },
     Scenario {
         id: "X_12",
@@ -373,7 +373,7 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "X_15",
         category: Category::CrossFile,
         polarity: Polarity::Positive,
-        description: "Module-level shadow — local wins",
+        description: "Module-level shadow - local wins",
     },
     Scenario {
         id: "X_16",
@@ -381,7 +381,7 @@ pub const SCENARIOS: &[Scenario] = &[
         polarity: Polarity::Positive,
         description: "Multi-file fan-in to same callee",
     },
-    // --- Over-taint (OT_01..OT_20) — ALL Negative ---
+    // --- Over-taint (OT_01..OT_20) - ALL Negative ---
     Scenario {
         id: "OT_01",
         category: Category::OverTaint,
@@ -464,7 +464,7 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "OT_14",
         category: Category::OverTaint,
         polarity: Polarity::Negative,
-        description: "Argparse → eval through hardcoded filter",
+        description: "Argparse -> eval through hardcoded filter",
     },
     Scenario {
         id: "OT_15",
@@ -500,7 +500,7 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "OT_20",
         category: Category::OverTaint,
         polarity: Polarity::Negative,
-        description: "Module qualifier (Task #279) — os.getenv doesn't taint os",
+        description: "Module qualifier (Task #279) - os.getenv doesn't taint os",
     },
 ];
 

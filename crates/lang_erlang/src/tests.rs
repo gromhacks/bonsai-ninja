@@ -98,6 +98,7 @@ fn list_cons_param_pattern_emits_entry_bindings() {
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     };
 
     augment_erlang_param_pattern_bindings(&mut decl, src);

@@ -370,6 +370,7 @@ fn swift_constructor_decl(
         implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     }
 }
 
@@ -881,6 +882,7 @@ fn synthesize_swift_computed_property_decls(
             implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         });
         next += 1;
     }
@@ -1374,6 +1376,7 @@ fn synthesize_swift_memberwise_struct_inits(
             implicit_receiver_names: vec!["self".to_string()],
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         });
         next += 1;
         // Synthesize a zero-arg accessor `Method` per stored property,
@@ -1417,6 +1420,7 @@ fn synthesize_swift_memberwise_struct_inits(
                 implicit_receiver_names: vec!["self".to_string()],
                 receiver_state_sources: vec![field],
                 return_type: None,
+                is_variadic: false,
             });
             next += 1;
         }

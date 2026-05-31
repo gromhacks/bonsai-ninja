@@ -353,6 +353,7 @@ fn scala_constructor_decl(
         implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
+        is_variadic: false,
     }
 }
 
@@ -1404,6 +1405,7 @@ fn synthesize_scala_case_class_accessors(idx: &mut DeclIndex, file: FileId, ctx:
                 implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
                 receiver_state_sources: vec![field],
                 return_type: None,
+                is_variadic: false,
             });
             next += 1;
         }

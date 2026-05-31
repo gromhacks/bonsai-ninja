@@ -400,3 +400,30 @@ fn qualified_seed_base_matches_but_tail_does_not_promote_bare_local() {
         "a qualified seed must not promote an unrelated bare local sharing only the tail name"
     );
 }
+
+// audit M5: the intra pass must match a qualified seed by its BASE only,
+// never its tail field name (mirroring the inter pass). Seed `args`;
+// `obj.x = args` taints `obj.x`. A later call arg `x` (the bare tail of the
+// qualified seed) must NOT be treated as tainted, so `y` stays clean.
+// Probing the full qualified `obj.x` still propagates, so `z` is tainted.
+#[test]
+fn qualified_seed_tail_does_not_taint_unrelated_bare_identifier() {
+    let events = vec![
+        assign("obj.x", Some("args")),
+        assign_call("y", "sanitize", &["x"]),
+        assign_call("z", "sanitize", &["obj.x"]),
+    ];
+    let (result, cfg) = run(events, &config(&["args"], &[]));
+    assert!(
+        result.is_tainted_at_exit(cfg.exit, "obj.x"),
+        "the qualified seed itself must be tainted"
+    );
+    assert!(
+        !result.is_tainted_at_exit(cfg.exit, "y"),
+        "a bare ident matching only the tail field of a qualified seed must not be tainted"
+    );
+    assert!(
+        result.is_tainted_at_exit(cfg.exit, "z"),
+        "probing the full qualified access must still propagate taint"
+    );
+}
