@@ -591,13 +591,16 @@ fn rule_match_with_text_and_span(match_text: &str, start: u32, end: u32) -> Rule
 
 #[test]
 fn nested_sanitizer_inside_tainted_sink_arg_is_dataflow_connected() {
+    let src = rule_match_with_text_and_span("Input", 0, 5);
     let san = rule_match_with_text_and_span("uri_string:quote", 120, 136);
     let sink_tainted_args = [TaintedArgInfo {
         index: 0,
         value_text: "[\"ping \", uri_string:quote(Input)]".to_string(),
     }];
 
-    assert!(sanitizer_is_nested_in_tainted_sink_arg(&san, &sink_tainted_args));
+    // GREEN after fix: the tainted carrier `Input` is wrapped INSIDE the
+    // anchored `uri_string:quote(...)` call, so credit stands.
+    assert!(sanitizer_is_nested_in_tainted_sink_arg(&src, &san, &sink_tainted_args));
 }
 
 #[test]
@@ -977,4 +980,52 @@ description: Writing tainted data into Koa ctx.body without escaping causes refl
         "package-gated regex must not be flagged: {:#?}",
         report.issues
     );
+}
+
+
+// audit re-apply: M4: three regression tests pinning the over-credit fix. `esc
+#[test]
+fn sanitizer_on_static_literal_concatenated_with_taint_does_not_credit() {
+    // M4 regression: `escapeHtml("static") + Input` -- the sanitizer
+    // wraps a STATIC literal and the tainted `Input` is concatenated
+    // OUTSIDE the call. RED before fix (unanchored `contains("escapeHtml")`
+    // credited it, mislabeling a real flow `Sanitized`); GREEN after.
+    let src = rule_match_with_text_and_span("Input", 0, 5);
+    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "escapeHtml(\"static\") + Input".to_string(),
+    }];
+
+    assert!(!sanitizer_is_nested_in_tainted_sink_arg(&src, &san, &sink_tainted_args));
+}
+
+#[test]
+fn sanitizer_callee_as_substring_of_longer_identifier_does_not_credit() {
+    // M4 regression: the callee appears only as the tail of a longer
+    // identifier (`myEscapeHtml`), never as an actual call of `escapeHtml`.
+    // RED before fix (substring `contains`); GREEN after (anchored call form).
+    let src = rule_match_with_text_and_span("Input", 0, 5);
+    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "myEscapeHtml(Input)".to_string(),
+    }];
+
+    assert!(!sanitizer_is_nested_in_tainted_sink_arg(&src, &san, &sink_tainted_args));
+}
+
+#[test]
+fn sanitizer_callee_as_field_name_without_call_does_not_credit() {
+    // M4 regression: the callee text appears as a field/identifier with
+    // no `(` call form (`config.escapeHtml = Input`). RED before fix
+    // (bare substring); GREEN after (call-form anchor required).
+    let src = rule_match_with_text_and_span("Input", 0, 5);
+    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "config.escapeHtml = Input".to_string(),
+    }];
+
+    assert!(!sanitizer_is_nested_in_tainted_sink_arg(&src, &san, &sink_tainted_args));
 }

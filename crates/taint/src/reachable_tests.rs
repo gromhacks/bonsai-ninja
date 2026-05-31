@@ -371,3 +371,62 @@ fn call_result_passthrough_matches_erlang_remote_separator() {
         "rulepack attribute callees and Erlang remote-call callees must normalize to the same qualified shape"
     );
 }
+
+
+// audit re-apply: RED before / GREEN after for M2. `collect_tainted_writes_req
+
+#[test]
+fn collect_tainted_writes_requires_identifier_token_match() {
+    // Tainted local is the short name `id`. The Assign RHS textually
+    // CONTAINS `id` as a substring of `uuid`, but never reads the bare
+    // `id` token. The substring matcher fabricated a Write row here;
+    // the token matcher must not.
+    let mut tainted_names = AHashSet::default();
+    tainted_names.insert("id".to_string());
+
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "row".to_string(),
+        source_name: Some("uuid".to_string()),
+        source_call: None,
+        source_call_args: vec!["sizeof(uuid)".to_string()],
+        source_names: vec!["valid".to_string(), "hidden".to_string()],
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let mut out: Vec<crate::inter::TaintedCall> = Vec::new();
+    collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
+    assert!(
+        out.is_empty(),
+        "substring of a tainted name (`id` in `uuid`/`valid`/`hidden`) must not fabricate a Write row; got {out:#?}"
+    );
+}
+
+#[test]
+fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
+    // Positive guard so the M2 tightening does not drop real Write
+    // rows (the pinned mega_flow `.cmd` pipeline relies on the bare
+    // tainted token `cmd` matching inside the member access `data.cmd`).
+    let mut tainted_names = AHashSet::default();
+    tainted_names.insert("cmd".to_string());
+
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "out".to_string(),
+        source_name: Some("data.cmd".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let mut out: Vec<crate::inter::TaintedCall> = Vec::new();
+    collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
+    assert_eq!(out.len(), 1, "a whole tainted token inside a member access must still emit a Write row; got {out:#?}");
+    assert_eq!(out[0].kind, crate::inter::TaintedCallKind::Write);
+    assert_eq!(out[0].name, "out");
+    assert_eq!(out[0].tainted_args.len(), 1);
+    assert_eq!(out[0].tainted_args[0].value_text, "data.cmd");
+}

@@ -222,7 +222,13 @@ impl LanguageAdapter for LuaAdapter {
 }
 
 fn enrich_lua_factory_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
-    if decl.params.is_empty() || !lua_returns_name(&decl.flow_events, "self") {
+    // Run receiver-field collection whenever the method carries an
+    // explicit `self` param (the dot-def form `function T.m(self, ...)`)
+    // -- not only for factories that `return self`. A plain mutator
+    // `self.field = <param>` must still record a receiver_field_write so
+    // stored taint flows through instance state (audit L6).
+    let has_self_param = decl.params.iter().any(|param| param == "self");
+    if !has_self_param && !lua_returns_name(&decl.flow_events, "self") {
         return;
     }
     let writes = collect_receiver_field_writes(&decl.flow_events, &decl.params, None, &["self"], &[]);

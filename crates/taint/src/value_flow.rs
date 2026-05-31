@@ -547,6 +547,17 @@ fn caller_arg_value_text(
                         return Some(found);
                     }
                 }
+                // H4: a call nested in a `with`/`using` (Using) or
+                // `defer` (Defer) body is the dominant production path;
+                // mirror the intra-entry walker and the IDG transfer
+                // walker so its arg text is recovered (without this the
+                // IDG path synthesises a disconnected CallArg and the
+                // callee param is never reached).
+                FlowEvent::Using { body, .. } | FlowEvent::Defer { body, .. } => {
+                    if let Some(found) = find_call_arg(body, target_span, idx) {
+                        return Some(found);
+                    }
+                }
                 _ => {}
             }
         }
@@ -622,6 +633,47 @@ fn build_intra_entry_graph(
             value_text: name.to_string(),
             kind: ValueFlowNodeKind::Read,
         }]
+    }
+
+    // R3: collect every bare-identifier thrown value reachable in
+    // `events`, descending nested control-flow bodies. The `Try` arm
+    // uses this to wire an edge from a thrown tainted value to the
+    // catch binding so `throw t; catch (e) sink(e)` keeps its lineage.
+    fn collect_thrown_value_names(events: &[FlowEvent]) -> Vec<String> {
+        let mut out = Vec::new();
+        for event in events {
+            match event {
+                FlowEvent::Throw {
+                    value_name: Some(name),
+                    ..
+                } if !name.is_empty() => out.push(name.clone()),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    out.extend(collect_thrown_value_names(then_events));
+                    out.extend(collect_thrown_value_names(else_events));
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Using { body, .. }
+                | FlowEvent::Defer { body, .. } => {
+                    out.extend(collect_thrown_value_names(body));
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    out.extend(collect_thrown_value_names(body));
+                    out.extend(collect_thrown_value_names(catch_events));
+                    out.extend(collect_thrown_value_names(finally_events));
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn walk_events(
@@ -796,6 +848,20 @@ fn build_intra_entry_graph(
                                     kind: ValueFlowNodeKind::Catch,
                                 };
                                 graph.nodes.insert(catch_node.clone());
+                                // R3: wire an edge from each tainted value
+                                // thrown in the body to the catch binding
+                                // so lineage survives `throw t; catch(e)
+                                // sink(e)` on the legacy walker path.
+                                for thrown in collect_thrown_value_names(body) {
+                                    for from_node in source_nodes(&body_env, func, *span, &thrown) {
+                                        graph.add_edge(ValueFlowEdge {
+                                            from: from_node,
+                                            to: catch_node.clone(),
+                                            precision: Precision::Exact,
+                                            via_span: *span,
+                                        });
+                                    }
+                                }
                                 catch_start
                                     .entry(param.to_string())
                                     .or_default()
@@ -812,6 +878,36 @@ fn build_intra_entry_graph(
                 FlowEvent::Defer { body, .. } => {
                     let _ = walk_events(body, graph, func, env.clone());
                 }
+                // R3: `yield v` emits `v` to the generator's consumer;
+                // model it as a Return-kind output node so backward
+                // lineage from the consumer reaches the yielded value's
+                // origins (the catch-all `_` arm used to drop it).
+                FlowEvent::Yield { span, value_text } => {
+                    if let Some(value) = value_text.as_deref() {
+                        if !value.is_empty() {
+                            let yield_node = ValueFlowNode {
+                                func,
+                                span: *span,
+                                value_text: value.to_string(),
+                                kind: ValueFlowNodeKind::Return,
+                            };
+                            graph.nodes.insert(yield_node.clone());
+                            for from_node in source_nodes(&env, func, *span, value) {
+                                graph.add_edge(ValueFlowEdge {
+                                    from: from_node,
+                                    to: yield_node.clone(),
+                                    precision: Precision::Exact,
+                                    via_span: *span,
+                                });
+                            }
+                        }
+                    }
+                }
+                // R3: an awaited value re-enters under the same name, so
+                // the existing env binding already carries its lineage;
+                // handle the arm explicitly (mirroring the inter pass's
+                // informational treatment) rather than via the catch-all.
+                FlowEvent::Await { .. } => {}
                 _ => {}
             }
         }

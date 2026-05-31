@@ -1772,7 +1772,18 @@ fn collect_tainted_writes(
                     if value.is_empty() {
                         return;
                     }
-                    if !tainted_names.iter().any(|n| value.contains(n.as_str())) {
+                    // Token-level membership (mirrors the receiver path
+                    // at the tainted-call site): a tainted local only
+                    // taints this Write when it appears as a whole
+                    // identifier in the RHS, not as a substring. A short
+                    // tainted name like `id` must not match inside
+                    // `uuid` / `valid` / `hidden`, which would fabricate
+                    // a Write row attributed to an assignment that never
+                    // read the tainted value.
+                    if !tokenise_identifiers_outside_strings(value)
+                        .iter()
+                        .any(|t| tainted_names.contains(t))
+                    {
                         return;
                     }
                     if args.iter().any(|a| a.value_text == value) {

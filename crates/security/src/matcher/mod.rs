@@ -3582,7 +3582,7 @@ fn receiver_root_name(receiver: &str) -> Option<String> {
         .trim()
         .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
     let root = receiver
-        .split(['.', ':', '\\', '[', '('])
+        .split(['.', ':', '\\', '[', '(', '?'])
         .next()
         .unwrap_or(receiver)
         .trim();
@@ -3714,6 +3714,25 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                 collect_calls_into(body, out);
                 collect_calls_into(catch_events, out);
                 collect_calls_into(finally_events, out);
+            }
+            // R5: a sink in the yielded value (`yield exec(cmd)`, C#
+            // `yield return Sink(x)`) only surfaces as a Yield event,
+            // never a Call. Lower the yielded expression into a CallFact
+            // when it is a call so sink attribution can see it.
+            FlowEvent::Yield {
+                span,
+                value_text: Some(value_text),
+            } => {
+                if let Some((callee, args)) = receiver_call_with_args(value_text, *span) {
+                    out.push(CallFact {
+                        callee,
+                        span: *span,
+                        args,
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Function,
+                        origin: CallFactOrigin::NestedReceiverCall,
+                    });
+                }
             }
             _ => {}
         }

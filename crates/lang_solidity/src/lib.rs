@@ -160,9 +160,26 @@ impl LanguageAdapter for SolidityAdapter {
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
-            // Phase-6 return-type extraction: `function f() returns (T)` populates
-            // `Decl.return_type` for `apply_assign_call_result_types`.
+            // Phase-6 return-type extraction. The shared walker reads a
+            // `return_type`/`type`/`result` field, but the Solidity grammar
+            // surfaces the return as a bare `return_type_definition` child,
+            // so the call below is a no-op here; the Solidity-specific
+            // back-fill that follows actually populates `Decl.return_type`.
+            // (The shared call is kept for forward-compat if the grammar
+            // later exposes a field.)
             bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
+            let return_types_by_span = collect_solidity_return_types(&tree, file, src);
+            for decl in &mut idx.defs {
+                if decl.return_type.is_some() {
+                    continue;
+                }
+                if let Some(rt) = return_types_by_span
+                    .iter()
+                    .find_map(|(span, rt)| (*span == decl.span).then(|| rt.clone()))
+                {
+                    decl.return_type = Some(rt);
+                }
+            }
             let vis_map = collect_modifier_visibility(tree.root_node(), file, src, &SOLIDITY_VOCAB);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
@@ -1112,6 +1129,39 @@ fn collect_solidity_variable_declarations_under(root: tree_sitter::Node<'_>) -> 
         for child in node.named_children(&mut cursor) {
             stack.push(child);
         }
+    }
+    out
+}
+
+// Solidity surfaces a function's return as a bare `return_type_definition`
+// child (not a `return_type`/`type`/`result` field), so the shared
+// `populate_decl_return_types` walker finds nothing. Back-fill
+// `Decl.return_type` from the first declared return parameter's type:
+// `function f() returns (T)` -> `T`.
+fn collect_solidity_return_types(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String)> {
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(tree, SOLIDITY_TYPE_ALIASES.fn_kinds) {
+        let mut cursor = fn_node.walk();
+        let ret_def = fn_node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "return_type_definition");
+        let Some(ret_def) = ret_def else {
+            continue;
+        };
+        // First declared return parameter's `type` field is the return type.
+        let mut inner = ret_def.walk();
+        let type_node = ret_def
+            .named_children(&mut inner)
+            .filter(|child| child.kind() == "parameter")
+            .find_map(|param| param.child_by_field_name("type"));
+        let Some(type_node) = type_node else {
+            continue;
+        };
+        let type_name = canonical_solidity_type_name(node_text(&type_node, src));
+        if type_name.is_empty() {
+            continue;
+        }
+        out.push((span_of(file, &fn_node), type_name));
     }
     out
 }

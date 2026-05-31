@@ -584,9 +584,11 @@ fn canonical_bare_name(text: &str) -> String {
         .to_string()
 }
 
-/// True when `text` matches either the base or the tail of any
-/// qualified seed in `state`. Catches `obj` and `field` references
-/// when the tracked seed is `obj.field`.
+/// True when `text` matches the BASE of any qualified seed in
+/// `state`. Catches `obj` references when the tracked seed is
+/// `obj.field`. Mirrors the inter helper: base only, never the tail,
+/// so a qualified seed (`obj.field`) does not promote an unrelated
+/// bare local named `field` (M5 precision parity).
 fn state_qualified_token_matches_text(text: &str, state: &TokenSet) -> bool {
     if text.is_empty() {
         return false;
@@ -598,8 +600,7 @@ fn state_qualified_token_matches_text(text: &str, state: &TokenSet) -> bool {
         }
         let mut parts = normalised.split('.');
         let base = parts.next().unwrap_or_default();
-        let tail = normalised.rsplit('.').next().unwrap_or_default();
-        text == base || text == tail
+        text == base
     })
 }
 

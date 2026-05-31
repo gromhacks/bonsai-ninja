@@ -56,6 +56,13 @@ const JAVA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    // Java try-with-resources binds `try (T r = expr) { .. }` as a
+    // `resource` node, which exposes the same `name`/`value` fields the
+    // generic assignment branch reads. Marking it an assignment emits the
+    // `r = expr` Assign so the call-RHS summary can carry return-value
+    // taint into `r`. `is_assignment` ORs this with GENERIC_HANDLER, so the
+    // generic kinds (variable_declarator, etc.) still resolve.
+    assignment_kinds: &["resource"],
     ..with_fn_kinds_and_implicit_receivers(
         &["method_declaration", "constructor_declaration"],
         &["this", "super"],
@@ -222,6 +229,11 @@ fn collect_java_method_type_aliases(
                 "formal_parameter",
                 "local_variable_declaration",
                 "enhanced_for_statement",
+                // Try-with-resources binding `try (T r = expr)` — the
+                // `resource` node exposes the same `type`/`name` fields,
+                // so a JDBC `try (Statement s = ...)` yields `s: Statement`
+                // and the receiver-type SQLi rule resolves.
+                "resource",
             ],
         ));
         dedup_type_aliases(&mut method_aliases);

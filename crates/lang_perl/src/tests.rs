@@ -231,3 +231,69 @@ fn scalar_deref_assignment_stays_compound() {
         } if !source_names.is_empty()
     ));
 }
+
+#[test]
+fn uncaught_die_lowers_to_throw_in_sub_body() {
+    // L1: a `die` outside any `eval {}; if ($@)` region must still
+    // lower to a Throw so the catch param of a native try (and
+    // cross-procedural exception propagation of an uncaught die) is
+    // modelled. RED before: the whole-body lowering does not run, so
+    // `die $msg` stays a plain Call and no Throw is emitted.
+    let src = "sub risky { my ($msg) = @_; die $msg; }\n";
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("app.pl", src)]);
+    let global = ws.db().global_index();
+    let risky = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "risky")
+        .expect("risky decl");
+
+    assert!(
+        risky.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Throw {
+                value_name: Some(value),
+                ..
+            } if value == "$msg"
+        )),
+        "an uncaught die should lower to a Throw at sub-body top level: {:#?}",
+        risky.flow_events
+    );
+}
+
+#[test]
+fn method_call_emits_single_call_event() {
+    // L8: `$obj->method(...)` must produce exactly ONE Call event.
+    // The kit emits a Call for the `method_call_expression`
+    // (name-span = the `method` identifier) and the adapter's
+    // `synthesize_method_call_events` emits a second over the whole
+    // node. The dedup drops the synth duplicate (kit Call's name-span
+    // is CONTAINED in the synth's whole-node span, same name +
+    // receiver). RED before: two `obj->process` Call events.
+    let src = "sub entry { my ($obj) = @_; $obj->process($obj); }\n";
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("app.pl", src)]);
+    let global = ws.db().global_index();
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry decl");
+
+    let process_calls = entry
+        .flow_events
+        .iter()
+        .filter(|event| matches!(
+            event,
+            FlowEvent::Call { name, .. } if name == "obj->process"
+        ))
+        .count();
+    assert_eq!(
+        process_calls, 1,
+        "`$obj->process(...)` should emit exactly one Call event: {:#?}",
+        entry.flow_events
+    );
+}

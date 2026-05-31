@@ -804,7 +804,21 @@ fn run_interprocedural_worklist(
             precision: &mut precision,
             current_trace_id: lineage,
             lineage_history: &lineage_history,
-            resolved_calls: Some(resolved_calls_cache),
+            // Share the resolver memo only when this work item carries no
+            // per-call-path callback bindings. When `dyn_bindings` is
+            // non-empty those bindings were layered into `local_bindings`
+            // above, so the resolver's answer depends on them -- but the
+            // memo key (caller, span, receiver_types) does NOT capture
+            // them. Sharing here would let one call path's callback target
+            // leak into another's resolution, making a warm-cache result
+            // diverge from a cold run (audit C1). Such items resolve
+            // uncached; the shared cache then only ever holds
+            // dyn-independent answers, which are safe to reuse.
+            resolved_calls: if dyn_bindings.is_empty() {
+                Some(resolved_calls_cache)
+            } else {
+                None
+            },
             local_callable_body_calls: &mut local_callable_body_calls,
         };
         propagate_taint_through_events(&decl.flow_events, &mut state, &mut ctx, &caches.summaries_by_func);
@@ -1153,6 +1167,10 @@ struct EffectiveCallArg {
     value_text: String,
     name: Option<String>,
     source_names: Vec<String>,
+    /// Adapter-normalized addressable place, when the argument is a
+    /// mutable location. Carried through so receiver-shifted out-param
+    /// side effects can taint the right call-site slot (audit H2).
+    place: Option<String>,
 }
 
 impl EffectiveCallArg {
@@ -1161,6 +1179,7 @@ impl EffectiveCallArg {
             value_text,
             name: None,
             source_names: Vec::new(),
+            place: None,
         }
     }
 
@@ -1169,6 +1188,7 @@ impl EffectiveCallArg {
             value_text: arg.value_text.clone(),
             name: arg.name.clone(),
             source_names: arg.source_names.clone(),
+            place: arg.place.clone(),
         }
     }
 }
@@ -2365,13 +2385,14 @@ fn propagate_call_event(
             }
         }
         for (arg_index, value_text) in &args_to_propagate_into_callee {
-            // `param_index` is the callee's parameter slot for binding;
-            // shifted by 1 when the callee declares an implicit receiver
-            // parameter (Rust/Python `self`).
-            let param_index = callee_decl
-                .receiver_param_index
-                .filter(|receiver_index| *arg_index >= *receiver_index)
-                .map_or(*arg_index, |_| arg_index + 1);
+            // Map the call-site arg slot to the callee parameter it binds,
+            // honoring keyword/named args and the implicit-receiver shift
+            // (audit H3). Positional-only mapping mis-seeded reordered
+            // keyword calls like `f(b=tainted, a=clean)`.
+            let Some(param_index) = param_index_for_call_arg(callee_decl, &effective_call_args, *arg_index)
+            else {
+                continue;
+            };
             let Some(param_name) = callee_decl.params.get(param_index).cloned() else {
                 continue;
             };
@@ -2394,7 +2415,8 @@ fn propagate_call_event(
             });
         }
         apply_resolved_param_side_effects(
-            call.args,
+            &effective_call_args,
+            Some(callee_decl),
             &tainted_param_indices,
             &summary.taints_params_from,
             state,
@@ -2410,10 +2432,13 @@ fn propagate_call_event(
         let mut dyn_bindings: AHashMap<String, FuncId> = AHashMap::new();
         let mut callee_consts: AHashMap<String, ConstValue> = AHashMap::new();
         for (arg_index, arg) in call.args.iter().enumerate() {
-            let param_index = callee_decl
-                .receiver_param_index
-                .filter(|receiver_index| arg_index >= *receiver_index)
-                .map_or(arg_index, |_| arg_index + 1);
+            // Keyword/receiver-aware arg->param mapping (audit H3): a
+            // callback or constant passed by keyword must bind to the
+            // named parameter, not the positional slot.
+            let Some(param_index) = param_index_for_call_arg(callee_decl, &effective_call_args, arg_index)
+            else {
+                continue;
+            };
             if let Some(param_name) = callee_decl.params.get(param_index) {
                 if !param_name.is_empty() {
                     if let Some(value) = const_value_of_arg(&arg.value_text, ctx.const_bindings) {
@@ -2755,7 +2780,8 @@ fn return_expr_is_super(value: Option<&str>) -> bool {
 }
 
 fn apply_resolved_param_side_effects(
-    args: &[bonsai_lang_api::CallArg],
+    effective_args: &[EffectiveCallArg],
+    callee_decl: Option<&Decl>,
     tainted_param_indices: &[(usize, usize, String)],
     effects: &[ParamSideEffect],
     state: &mut TokenSet,
@@ -2770,7 +2796,12 @@ fn apply_resolved_param_side_effects(
         {
             continue;
         }
-        let Some(arg) = args.get(effect.target_param) else {
+        // `effect.target_param` is a CALLEE parameter index; convert it
+        // to the call-site argument slot via the keyword- and
+        // receiver-shift-aware resolver. Indexing `args` directly tainted
+        // the wrong slot for methods (receiver excluded from call args)
+        // and for keyword calls (audit H2).
+        let Some(arg) = effective_arg_for_param(effective_args, callee_decl, effect.target_param) else {
             continue;
         };
         let Some(place) = arg.place.as_deref() else {
@@ -4050,6 +4081,36 @@ fn effective_arg_value_for_param<'a>(
     effective_arg_for_param(args, decl, param_idx).map(|arg| arg.value_text.as_str())
 }
 
+/// Inverse of [`effective_arg_for_param`]: given a call-site argument
+/// slot, return the callee parameter index it binds to. Honors
+/// keyword/named arguments (`f(b=x, a=y)`) and the implicit-receiver
+/// shift so forward taint seeding lands on the right parameter rather
+/// than the positional slot (audit H3). Returns `None` when the
+/// argument maps to no declared parameter (overflow past a
+/// non-variadic signature, etc.).
+fn param_index_for_call_arg(decl: &Decl, args: &[EffectiveCallArg], arg_index: usize) -> Option<usize> {
+    let arg = args.get(arg_index)?;
+    if let Some(name) = arg.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        if let Some(pos) = decl.params.iter().position(|param| param.trim() == name) {
+            return Some(pos);
+        }
+    }
+    // Positional: this arg's rank among positional (non-keyword) args
+    // maps to the Nth non-receiver parameter slot, in declaration order.
+    let positional_rank = args[..arg_index].iter().filter(|other| other.name.is_none()).count();
+    let mut remaining = positional_rank;
+    for idx in 0..decl.params.len() {
+        if decl.receiver_param_index == Some(idx) {
+            continue;
+        }
+        if remaining == 0 {
+            return Some(idx);
+        }
+        remaining -= 1;
+    }
+    None
+}
+
 fn narrow_overload_candidates_by_arg_types(
     candidates: Vec<ResolvedCallee>,
     args: &[EffectiveCallArg],
@@ -5308,7 +5369,11 @@ fn receiver_expr_is_tainted(receiver: &str, state: &TokenSet) -> bool {
 // here.
 
 pub(super) fn call_receiver_from_name(name: &str) -> Option<String> {
-    let normalised = normalise_qualified_text(&name.replace("->", ".").replace("::", "."));
+    // Fold `::` first (Rust/PHP scope), then a lone `:` (Lua
+    // `obj:method()` colon-call sugar; also Erlang `mod:fun`, where
+    // the lowercase module atom never aliases a tainted variable).
+    let normalised =
+        normalise_qualified_text(&name.replace("->", ".").replace("::", ".").replace(':', "."));
     let (receiver, _) = normalised.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())

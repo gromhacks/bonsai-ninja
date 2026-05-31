@@ -45,14 +45,45 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
     if looks_like_identifier(value_kind) {
         return Some(node_text(&value_node, src).trim().to_string());
     }
-    // Some grammars wrap the value in a single-expression container —
-    // peel one layer.
+    // Some grammars wrap the value in a single-expression container
+    // with no sibling type node — the lone identifier child is the
+    // value, so first-identifier-like is safe here.
     if matches!(
         value_kind,
         "parenthesized_expression" | "expression_statement" | "single_expression"
     ) {
         let unwrapped = first_identifier_like_child(&value_node)?;
         return Some(node_text(&unwrapped, src).trim().to_string());
+    }
+    // TypeScript type-assertion wrappers carry a TYPE node beside the
+    // value (`x as T`, `x satisfies T`, `x!`, `<T>x`). We must peel to
+    // the VALUE child specifically — `first_identifier_like_child`
+    // would otherwise grab the `type_identifier` (e.g. return `T`
+    // instead of `x` for `return f(x) as T;`). The value is fielded as
+    // `expression`/`argument`; fall back to the first named non-type
+    // child. Once peeled, re-apply the same identifier / single-operand
+    // logic so `return f(x) as T;` resolves the call's lone operand `x`
+    // (audit M20).
+    if matches!(
+        value_kind,
+        "as_expression" | "satisfies_expression" | "non_null_expression" | "type_assertion"
+    ) {
+        let inner = value_node
+            .child_by_field_name("expression")
+            .or_else(|| value_node.child_by_field_name("argument"))
+            .or_else(|| {
+                let mut cursor = value_node.walk();
+                let children: Vec<_> = value_node.named_children(&mut cursor).collect();
+                children.into_iter().find(|child| !child.kind().contains("type"))
+            })?;
+        if looks_like_identifier(inner.kind()) {
+            return Some(node_text(&inner, src).trim().to_string());
+        }
+        let operands = super::extract_rhs_expr_operands(&inner, src);
+        if operands.len() == 1 {
+            return operands.into_iter().next();
+        }
+        return None;
     }
     let operands = super::extract_rhs_expr_operands(&value_node, src);
     if operands.len() == 1 {

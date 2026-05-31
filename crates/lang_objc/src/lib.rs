@@ -114,15 +114,14 @@ impl LanguageAdapter for ObjCAdapter {
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
-        // Objective-C convention: methods/selectors prefixed with `_`
-        // are private (Apple naming convention). Mark them
-        // Visibility::Private so the resolver refuses cross-class
-        // calls to internal helpers.
-        for decl in &mut decl_index.defs {
-            if decl.name.starts_with('_') {
-                decl.visibility = bonsai_lang_api::Visibility::Private;
-            }
-        }
+        // The leading `_` on an Objective-C method/selector is an Apple
+        // naming convention, not a linkage boundary: selectors dispatch
+        // dynamically across files. Marking `_`-prefixed decls
+        // Visibility::Private would make the resolver enforce them as
+        // strictly file-scoped, dropping every legitimate cross-file
+        // flow through a `_`-prefixed helper to zero candidates. Leave
+        // visibility at the kit default and let the resolver's name +
+        // receiver-type narrowing do the work instead.
         mark_objc_initializer_methods(&mut decl_index);
         // Per-decl `type_aliases` from typed parameters
         // (`(NSString *)name`, `(HTTPRequest *)req`). Objective-C
@@ -724,7 +723,14 @@ fn push_objc_source_name(out: &mut Vec<String>, value: String) {
 
 fn enrich_objc_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
     let params = decl.params.clone();
-    enrich_objc_receiver_field_writes_inner(&mut decl.receiver_field_writes, &decl.flow_events, &params);
+    // Names declared as locals inside this body. The C-family local
+    // declaration collector already records every typed local (with
+    // the leading underscore preserved, e.g. `_buf`) in `type_aliases`
+    // before this pass runs. An `_`-prefixed name that is a real local
+    // is NOT an ivar, so it must not be rewritten to `self.<field>`.
+    let local_names: std::collections::HashSet<String> =
+        decl.type_aliases.iter().map(|alias| alias.name.clone()).collect();
+    enrich_objc_receiver_field_writes_inner(&mut decl.receiver_field_writes, &decl.flow_events, &params, &local_names);
     decl.receiver_field_writes
         .sort_by_key(|write| (write.span.start, write.target.clone()));
     decl.receiver_field_writes.dedup_by(|a, b| {
@@ -736,6 +742,7 @@ fn enrich_objc_receiver_field_writes_inner(
     out: &mut Vec<FieldWrite>,
     events: &[FlowEvent],
     params: &[String],
+    local_names: &std::collections::HashSet<String>,
 ) {
     for event in events {
         match event {
@@ -745,7 +752,7 @@ fn enrich_objc_receiver_field_writes_inner(
                 source_name,
                 source_names,
                 ..
-            } if objc_target_is_receiver_field(target) => {
+            } if objc_target_is_receiver_field(target, local_names) => {
                 let source_param_indices = params
                     .iter()
                     .enumerate()
@@ -769,11 +776,11 @@ fn enrich_objc_receiver_field_writes_inner(
                 else_events,
                 ..
             } => {
-                enrich_objc_receiver_field_writes_inner(out, then_events, params);
-                enrich_objc_receiver_field_writes_inner(out, else_events, params);
+                enrich_objc_receiver_field_writes_inner(out, then_events, params, local_names);
+                enrich_objc_receiver_field_writes_inner(out, else_events, params, local_names);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                enrich_objc_receiver_field_writes_inner(out, body, params);
+                enrich_objc_receiver_field_writes_inner(out, body, params, local_names);
             }
             FlowEvent::Try {
                 body,
@@ -781,16 +788,21 @@ fn enrich_objc_receiver_field_writes_inner(
                 finally_events,
                 ..
             } => {
-                enrich_objc_receiver_field_writes_inner(out, body, params);
-                enrich_objc_receiver_field_writes_inner(out, catch_events, params);
-                enrich_objc_receiver_field_writes_inner(out, finally_events, params);
+                enrich_objc_receiver_field_writes_inner(out, body, params, local_names);
+                enrich_objc_receiver_field_writes_inner(out, catch_events, params, local_names);
+                enrich_objc_receiver_field_writes_inner(out, finally_events, params, local_names);
             }
             _ => {}
         }
     }
 }
 
-fn objc_target_is_receiver_field(target: &str) -> bool {
+fn objc_target_is_receiver_field(target: &str, local_names: &std::collections::HashSet<String>) -> bool {
+    // A `_`-prefixed name that is declared as a local in this body is a
+    // plain variable, not an ivar — do not treat it as a receiver field.
+    if local_names.contains(target) {
+        return target.starts_with("self.");
+    }
     target
         .strip_prefix('_')
         .is_some_and(|tail| !tail.is_empty() && !tail.starts_with('_'))
