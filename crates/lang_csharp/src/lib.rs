@@ -396,6 +396,7 @@ fn synthesize_csharp_expression_bodied_properties(
             implicit_receiver_names: vec!["this".to_string(), "base".to_string()],
             receiver_state_sources: vec![qualified],
             return_type: None,
+            is_variadic: false,
         });
         next_symbol += 1;
     }

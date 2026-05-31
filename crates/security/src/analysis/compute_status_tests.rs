@@ -1029,3 +1029,54 @@ fn sanitizer_callee_as_field_name_without_call_does_not_credit() {
 
     assert!(!sanitizer_is_nested_in_tainted_sink_arg(&src, &san, &sink_tainted_args));
 }
+
+// audit R2: sanitizer credit must be path-sensitive (must-dominate), not
+// merely value-flow co-occurrence. For `if (c) { y = clean(x); } sink(x)`
+// the branch-local clean(x) is a distinct tainted call on the graph, so a
+// span-overlap gate would credit it though it does not dominate the sink.
+// This pins the dominance-aware predicate added by the R2 fix.
+#[test]
+fn branch_local_sanitizer_does_not_dominate_sink_but_same_block_does() {
+    use bonsai_common::BasicBlockId;
+
+    // Sanitizer call in the `then` arm of `if (c) { y = clean(x); }`.
+    let san_then = BasicBlockId::new(1);
+    // The sink `sink(x)` lives at the join, after the branch.
+    let sink_join = BasicBlockId::new(3);
+    // A straight-line sanitizer in the same block as the sink.
+    let san_same = sink_join;
+
+    assert!(
+        !sanitizer_dominates_sink_on_value_flow(
+            Some(san_then),
+            Some(sink_join),
+            &branch_dominator_query(),
+        ),
+        "a sanitizer in one branch arm must not credit the post-join sink",
+    );
+
+    assert!(
+        sanitizer_dominates_sink_on_value_flow(
+            Some(san_same),
+            Some(sink_join),
+            &branch_dominator_query(),
+        ),
+        "a sanitizer that unconditionally precedes the sink must still credit",
+    );
+}
+
+// Minimal dominator fixture: entry(0) -> then(1) -> join(3), entry(0) ->
+// else(2) -> join(3). join is dominated only by entry; then/else dominate
+// only themselves (besides entry).
+fn branch_dominator_query() -> DominatorQuery {
+    use bonsai_common::BasicBlockId;
+    DominatorQuery::for_cfg(
+        BasicBlockId::new(0),
+        &[
+            (BasicBlockId::new(0), vec![BasicBlockId::new(1), BasicBlockId::new(2)]),
+            (BasicBlockId::new(1), vec![BasicBlockId::new(3)]),
+            (BasicBlockId::new(2), vec![BasicBlockId::new(3)]),
+            (BasicBlockId::new(3), vec![]),
+        ],
+    )
+}

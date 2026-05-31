@@ -261,6 +261,7 @@ impl LanguageAdapter for RubyAdapter {
                 implicit_receiver_names: Vec::new(),
                 receiver_state_sources: Vec::new(),
                 return_type: None,
+                is_variadic: false,
             }]
         } else {
             Vec::new()

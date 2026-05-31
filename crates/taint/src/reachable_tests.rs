@@ -317,6 +317,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
             return_type: None,
+            is_variadic: false,
         }],
     });
 

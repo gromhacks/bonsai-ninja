@@ -44,12 +44,32 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
     }
     // Adapters hand us the WHOLE foreach node (header + body), not a
     // pre-sliced header. A foreach header never legitimately contains a
-    // `{`, so truncate at the first one: this keeps body text (and any
-    // stray `)` inside body calls like `system($cmd)`) out of the paren
-    // `rsplit_once(')')` below, which would otherwise grab a body `)` and
-    // route body identifiers onto the binding side (PHP `as` shape).
-    if let Some(body_open) = after_for.find('{') {
-        after_for = after_for[..body_open].trim_end();
+    // top-level `{`, so truncate at the body brace: this keeps body text
+    // (and any stray `)` inside body calls like `system($cmd)`) out of the
+    // paren `rsplit_once(')')` below, which would otherwise grab a body `)`
+    // and route body identifiers onto the binding side (PHP `as` shape).
+    //
+    // BUT the iterable expression itself may contain a `{` (Lua
+    // `for _, x in ipairs({...})` packs a table literal inside the
+    // iterable). Only truncate at a `{` that sits OUTSIDE any parenthesis
+    // / bracket nesting (paren-depth 0) -- the real body brace -- so a `{`
+    // nested in the iterable's call args is preserved. Lua bodies use
+    // `do ... end` (no `{`), so this leaves Lua headers untouched.
+    let mut depth = 0i32;
+    let mut body_open = None;
+    for (idx, ch) in after_for.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '{' if depth <= 0 => {
+                body_open = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    if let Some(idx) = body_open {
+        after_for = after_for[..idx].trim_end();
     }
     if let Some(paren_body) = after_for
         .strip_prefix('(')

@@ -1,6 +1,6 @@
 //! X_11 — Visibility crossing.
 #![allow(unreachable_pub)]
-use crate::helpers::{run_negative_cell, LangFixture};
+use crate::helpers::{run_negative_cell, run_positive_cell, LangFixture};
 use std::sync::Arc;
 
 #[test]
@@ -224,7 +224,16 @@ fn x_11_lua() {
 
 #[test]
 fn x_11_objc() {
-    run_negative_cell(
+    // Objective-C visibility crossing: the fixture's `_helper` is a plain
+    // C function with EXTERNAL linkage (it is NOT `static`), declared
+    // `extern` in entry.m -- so it is genuinely callable across files. The
+    // leading `_` is an Apple naming convention, not a linkage boundary
+    // (audit H12), so the cross-file taint flow is a true positive. Unlike
+    // C/C++ (which use a real `static` barrier here, see x_11_c), the
+    // Objective-C fixture has no `static`, so the taint legitimately
+    // crosses. Asserting the flow IS found keeps H12 (which correctly
+    // stopped treating `_`-prefix as file-private) and reflects reality.
+    run_positive_cell(
         "X_11",
         LangFixture {
             lang: "objc",

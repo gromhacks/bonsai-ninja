@@ -1038,7 +1038,18 @@ fn propagate_taint_through_events(
                 let mut catch_state = body_state.clone();
                 if let Some(param) = catch_param.as_deref() {
                     if !param.is_empty()
-                        && try_body_throws_tainted_assignable_to(body, &catch_state, catch_types)
+                        && try_body_throws_tainted_including_callees(
+                            body,
+                            &catch_state,
+                            catch_types,
+                            ctx.db,
+                            ctx.aliases,
+                            ctx.alias_targets,
+                            ctx.local_bindings,
+                            ctx.caller,
+                            ctx.config,
+                            summary_cache,
+                        )
                     {
                         catch_state.insert(param.to_string());
                     }
@@ -3184,7 +3195,18 @@ fn walk_events_for_sink(
                 let mut catch_input = body_state;
                 if let Some(param) = catch_param.as_deref() {
                     if !param.is_empty()
-                        && try_body_throws_tainted_assignable_to(body, &catch_input, catch_types)
+                        && try_body_throws_tainted_including_callees(
+                            body,
+                            &catch_input,
+                            catch_types,
+                            ctx.db,
+                            ctx.aliases,
+                            ctx.alias_targets,
+                            ctx.local_bindings,
+                            ctx.caller,
+                            ctx.config,
+                            summary_cache,
+                        )
                     {
                         catch_input.insert(param.to_string());
                     }
@@ -3440,6 +3462,192 @@ fn try_body_throws_tainted_assignable_with_state(
                 }
                 if try_body_throws_tainted_assignable_with_state(finally_events, state, catch_types) {
                     return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// R1 (interprocedural exception flow): like
+/// [`try_body_throws_tainted_assignable_to`], but ALSO seeds when a
+/// `Call` in the try body resolves to a callee whose summary records
+/// `throws_taint_of` for a parameter bound to a tainted argument -- i.e.
+/// the callee re-raises tainted data even though the caller's own body
+/// holds no literal `Throw`. Callee thrown types are not recorded in the
+/// summary, so the interprocedural seed is restricted to the conservative
+/// catchability case (empty / root `catch_types`), mirroring the literal
+/// path's conservative arm. A specific catch arm (`catch (IOException e)`)
+/// keeps the prior behavior (no interprocedural seed) -- a sound FN rather
+/// than an unprovable over-seed.
+#[allow(clippy::too_many_arguments)]
+fn try_body_throws_tainted_including_callees(
+    body: &[FlowEvent],
+    state: &TokenSet,
+    catch_types: &[String],
+    db: &AnalyzerDb,
+    aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    local_bindings: &AHashMap<String, FuncId>,
+    caller: FuncId,
+    config: &InterTaintConfig,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+) -> bool {
+    if try_body_throws_tainted_assignable_to(body, state, catch_types) {
+        return true;
+    }
+    if catch_types.is_empty() || catch_types.iter().any(|t| is_root_exception_type(t)) {
+        let mut local_state = state.clone();
+        return try_body_callee_throws_tainted(
+            body,
+            &mut local_state,
+            db,
+            aliases,
+            alias_targets,
+            local_bindings,
+            caller,
+            config,
+            summary_cache,
+        );
+    }
+    false
+}
+
+/// Walk the try body tracking taint state and return true when a `Call`
+/// resolves to a callee whose `throws_taint_of` names a parameter bound
+/// to a currently-tainted argument (audit R1). Recurses into nested
+/// control-flow regions, mirroring the state-tracking of
+/// `try_body_throws_tainted_with_state`.
+#[allow(clippy::too_many_arguments)]
+fn try_body_callee_throws_tainted(
+    events: &[FlowEvent],
+    state: &mut TokenSet,
+    db: &AnalyzerDb,
+    aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    local_bindings: &AHashMap<String, FuncId>,
+    caller: FuncId,
+    config: &InterTaintConfig,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+) -> bool {
+    let global = db.global_index();
+    for event in events {
+        match event {
+            FlowEvent::Assign { .. } => {
+                apply_event_transfer(event, state, config, Some(db), Some(caller));
+            }
+            FlowEvent::Call { name, args, .. } => {
+                let candidates = resolve_call_candidates_with_caller(
+                    name,
+                    aliases,
+                    alias_targets,
+                    local_bindings,
+                    db,
+                    caller,
+                    config,
+                );
+                if candidates.is_empty() {
+                    continue;
+                }
+                let effective = args
+                    .iter()
+                    .map(EffectiveCallArg::from_call_arg)
+                    .collect::<Vec<_>>();
+                for candidate in &candidates {
+                    let Some(callee_decl) = global.decl_of(SymbolId::new(candidate.func.raw())) else {
+                        continue;
+                    };
+                    let summary = cache_or_insert_with(summary_cache, candidate.func, || {
+                        global
+                            .decl_of(SymbolId::new(candidate.func.raw()))
+                            .map(compute_function_summary)
+                            .unwrap_or_default()
+                    });
+                    for &param_idx in &summary.throws_taint_of {
+                        if let Some(arg_text) =
+                            effective_arg_value_for_param(&effective, Some(callee_decl), param_idx)
+                        {
+                            if arg_text_is_tainted(arg_text, state) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                let mut then_state = state.clone();
+                if try_body_callee_throws_tainted(
+                    then_events,
+                    &mut then_state,
+                    db,
+                    aliases,
+                    alias_targets,
+                    local_bindings,
+                    caller,
+                    config,
+                    summary_cache,
+                ) {
+                    return true;
+                }
+                let mut else_state = state.clone();
+                if try_body_callee_throws_tainted(
+                    else_events,
+                    &mut else_state,
+                    db,
+                    aliases,
+                    alias_targets,
+                    local_bindings,
+                    caller,
+                    config,
+                    summary_cache,
+                ) {
+                    return true;
+                }
+                state.extend(then_state);
+                state.extend(else_state);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => {
+                if try_body_callee_throws_tainted(
+                    body,
+                    state,
+                    db,
+                    aliases,
+                    alias_targets,
+                    local_bindings,
+                    caller,
+                    config,
+                    summary_cache,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                for region in [body, catch_events, finally_events] {
+                    if try_body_callee_throws_tainted(
+                        region,
+                        state,
+                        db,
+                        aliases,
+                        alias_targets,
+                        local_bindings,
+                        caller,
+                        config,
+                        summary_cache,
+                    ) {
+                        return true;
+                    }
                 }
             }
             _ => {}
@@ -4107,6 +4315,26 @@ fn param_index_for_call_arg(decl: &Decl, args: &[EffectiveCallArg], arg_index: u
             return Some(idx);
         }
         remaining -= 1;
+    }
+    // M1: a variadic collector param (Python `*args`, JS `...p`, Go
+    // `...string`, Java `String...`, C-family `...`) absorbs every overflow
+    // positional argument. When the fixed params are exhausted, route the
+    // remaining positional args onto the collector (the last non-receiver
+    // param) instead of dropping them. Recognized by the adapter/kit-set
+    // `is_variadic` flag (named splats are stored under their bare name) or
+    // a trailing synthetic `__bonsai_varargs` param (C-family bare `...`).
+    let is_variadic = decl.is_variadic
+        || decl
+            .params
+            .last()
+            .is_some_and(|last| last == SYNTHETIC_VARARGS_PARAM);
+    if is_variadic {
+        for idx in (0..decl.params.len()).rev() {
+            if decl.receiver_param_index == Some(idx) {
+                continue;
+            }
+            return Some(idx);
+        }
     }
     None
 }

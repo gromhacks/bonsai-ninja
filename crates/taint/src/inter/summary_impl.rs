@@ -85,7 +85,11 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     let mut returns_container_taint_of = Vec::new();
     let mut returns_field_taint_of = Vec::new();
     let mut returns_element_taint_of = Vec::new();
-    // Functions with no params have no transit to record — short-circuit.
+    let mut throws_taint_of = Vec::new();
+    // Functions with no params have no parameter transit to record, but a
+    // zero-arg reader can still forward a tainted module-global / captured
+    // outer local to its return (audit R6). Record that channel before the
+    // short-circuit; the other (param-indexed) fields stay empty.
     if decl.params.is_empty() {
         return FunctionSummary {
             returns_taint_of,
@@ -97,6 +101,8 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
             returns_element_taint_of,
             returns_access_paths: Vec::new(),
             taints_params_from: Vec::new(),
+            throws_taint_of: Vec::new(),
+            reads_global_taint_of: compute_reads_global_taint_of(decl),
         };
     }
     // Prefer ground-truth Return.value_name when the adapter surfaced
@@ -153,6 +159,13 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         };
         if value_contributes {
             returns_taint_of.push(param_idx);
+        }
+        // R1: a param whose taint reaches a `throw` / `raise` lets a caller
+        // doing `try { callee(tainted) } catch (e) { sink(e) }` seed its
+        // catch binding interprocedurally, even though the caller's own try
+        // body holds no literal Throw.
+        if contains_tainted_throw(&decl.flow_events, &value_tainted_at_end) {
+            throws_taint_of.push(param_idx);
         }
         if yield_names.iter().any(|name| value_tainted_at_end.contains(name))
             || contains_tainted_yield(&decl.flow_events, &value_tainted_at_end)
@@ -219,6 +232,10 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         returns_element_taint_of,
         returns_access_paths: compute_return_access_paths(decl),
         taints_params_from: compute_param_side_effects(decl),
+        throws_taint_of,
+        // A function WITH params uses the `returns_taint_of` channel; the
+        // global channel is only meaningful for the zero-arg path above.
+        reads_global_taint_of: Vec::new(),
     }
 }
 
@@ -1274,6 +1291,120 @@ fn contains_tainted_return(events: &[FlowEvent], tainted: &TokenSet) -> bool {
         }
     }
     false
+}
+
+/// True when some `throw` / `raise` in `events` (recursing into nested
+/// control-flow regions) throws a value whose bare name is tainted. Used
+/// to compute `throws_taint_of` so a callee that re-raises a tainted
+/// parameter lets a caller seed its catch binding interprocedurally
+/// (audit R1).
+fn contains_tainted_throw(events: &[FlowEvent], tainted: &TokenSet) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Throw {
+                value_name: Some(name),
+                ..
+            } if arg_text_is_tainted(name, tainted) => return true,
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } if contains_tainted_throw(then_events, tainted)
+                || contains_tainted_throw(else_events, tainted) =>
+            {
+                return true;
+            }
+            FlowEvent::Loop { body, .. } if contains_tainted_throw(body, tainted) => return true,
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } if contains_tainted_throw(body, tainted)
+                || contains_tainted_throw(catch_events, tainted)
+                || contains_tainted_throw(finally_events, tainted) =>
+            {
+                return true;
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
+                if contains_tainted_throw(body, tainted) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// For a parameter-less function, collect the bare-identifier names it
+/// returns that are not assigned locally in its body -- i.e. free reads of
+/// a module-global / captured outer local that transit to the return value
+/// (audit R6). Functions with parameters use `returns_taint_of` instead, so
+/// this is only invoked on the zero-arg path. Qualified accesses, quoted
+/// literals, and names with a local definition are excluded.
+fn compute_reads_global_taint_of(decl: &Decl) -> Vec<String> {
+    let return_names = collect_return_value_names(&decl.flow_events);
+    if return_names.is_empty() {
+        return Vec::new();
+    }
+    let mut local_targets: Vec<String> = Vec::new();
+    collect_assign_targets(&decl.flow_events, &mut local_targets);
+    let mut out: Vec<String> = Vec::new();
+    for name in return_names {
+        let candidate = name.trim();
+        if candidate.is_empty()
+            || text_looks_qualified(candidate)
+            || local_targets.iter().any(|target| target == candidate)
+            || decl.params.iter().any(|param| param == candidate)
+            || !candidate
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+            || !candidate.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == candidate) {
+            out.push(candidate.to_string());
+        }
+    }
+    out
+}
+
+/// Collect every assignment target name in `events`, recursing into nested
+/// control-flow regions. Used by `compute_reads_global_taint_of` to tell a
+/// returned local apart from a free module-global read.
+fn collect_assign_targets(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } if !target.is_empty() => {
+                out.push(target.clone());
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assign_targets(then_events, out);
+                collect_assign_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => collect_assign_targets(body, out),
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assign_targets(body, out);
+                collect_assign_targets(catch_events, out);
+                collect_assign_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn contains_tainted_yield(events: &[FlowEvent], tainted: &TokenSet) -> bool {

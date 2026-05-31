@@ -51,28 +51,28 @@ lives in this matrix.
 
 ## Intra-procedural
 
-| Scenario | Description                            | c    | cpp  | csharp | dart | elixir | erlang | go   | java | javascript | kotlin | lua  | objc | perl | php  | python | ruby | rust | scala | solidity | swift | typescript |
-| -------- | -------------------------------------- | ---- | ---- | ------ | ---- | ------ | ------ | ---- | ---- | ---------- | ------ | ---- | ---- | ---- | ---- | ------ | ---- | ---- | ----- | -------- | ----- | ---------- |
-| `I_01`   | Single assignment propagates           | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_02`   | Clean reassignment overwrites taint    | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_03`   | Augmented assignment propagates        | pass | pass | pass   | pass | n/a    | n/a    | pass | pass | pass       | pass   | n/a  | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_04`   | Tuple/multiple assignment splits taint | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_05`   | Destructure from tainted RHS           | n/a  | pass | pass   | pass | n/a    | n/a    | pass | pass | pass       | pass   | pass | pass | n/a  | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
-| `I_06`   | Ternary / conditional expression       | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_07`   | If-branch merge propagates             | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_08`   | Else-branch merge propagates           | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_09`   | Loop body propagation                  | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_10`   | Loop carry across iterations           | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_11`   | For-each over tainted iterable         | n/a  | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_12`   | While with tainted condition           | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `I_13`   | Try -> throw -> catch propagates       | n/a  | pass | pass   | pass | n/a    | n/a    | n/a  | pass | pass       | pass   | n/a  | pass | n/a  | pass | pass   | pass | n/a  | pass  | pass     | pass  | pass       |
-| `I_14`   | Catch param propagates further         | n/a  | pass | pass   | pass | n/a    | n/a    | n/a  | pass | pass       | pass   | n/a  | pass | n/a  | pass | pass   | pass | n/a  | pass  | n/a      | pass  | pass       |
-| `I_15`   | Finally after taint                    | n/a  | pass | pass   | pass | n/a    | n/a    | n/a  | pass | pass       | pass   | n/a  | pass | n/a  | pass | pass   | pass | n/a  | pass  | n/a      | pass  | pass       |
-| `I_16`   | Pattern match arm body                 | n/a  | n/a  | pass   | pass | pass   | pass   | n/a  | pass | n/a        | pass   | n/a  | n/a  | n/a  | n/a  | pass   | pass | pass | pass  | n/a      | pass  | n/a        |
-| `I_17`   | Switch/case fall-through               | n/a  | n/a  | pass   | pass | n/a    | n/a    | n/a  | pass | pass       | pass   | n/a  | pass | n/a  | pass | n/a    | n/a  | n/a  | n/a   | n/a      | pass  | pass       |
-| `I_18`   | Closure captures tainted local         | n/a  | pass | pass   | pass | pass   | n/a    | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
-| `I_19`   | Lambda body taint                      | n/a  | pass | pass   | pass | pass   | n/a    | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
-| `I_20`   | Lazy init via if-not assignment        | pass | pass | n/a    | pass | pass   | n/a    | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
+| Scenario | Description | c | cpp | csharp | dart | elixir | erlang | go | java | javascript | kotlin | lua | objc | perl | php | python | ruby | rust | scala | solidity | swift | typescript |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `I_01` | Single assignment propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_02` | Clean reassignment overwrites taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_03` | Augmented assignment propagates | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_04` | Tuple/multiple assignment splits taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_05` | Destructure from tainted RHS | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `I_06` | Ternary / conditional expression | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_07` | If-branch merge propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_08` | Else-branch merge propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_09` | Loop body propagation | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_10` | Loop carry across iterations | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_11` | For-each over tainted iterable | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_12` | While with tainted condition | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_13` | Try -> throw -> catch propagates | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | pass | pass | pass |
+| `I_14` | Catch param propagates further | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass |
+| `I_15` | Finally after taint | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass |
+| `I_16` | Pattern match arm body | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a |
+| `I_17` | Switch/case fall-through | n/a | n/a | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | n/a | pass | pass |
+| `I_18` | Closure captures tainted local | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `I_19` | Lambda body taint | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `I_20` | Lazy init via if-not assignment | pass | pass | n/a | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
 
 ## Inter-procedural
 
@@ -101,49 +101,49 @@ lives in this matrix.
 
 ## Cross-file
 
-| Scenario | Description                          | c    | cpp  | csharp | dart | elixir | erlang | go   | java | javascript | kotlin | lua  | objc | perl | php  | python | ruby | rust | scala | solidity | swift | typescript |
-| -------- | ------------------------------------ | ---- | ---- | ------ | ---- | ------ | ------ | ---- | ---- | ---------- | ------ | ---- | ---- | ---- | ---- | ------ | ---- | ---- | ----- | -------- | ----- | ---------- |
-| `X_01`   | Direct import + call                 | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `X_02`   | Aliased import                       | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | n/a  | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
-| `X_03`   | From-import                          | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
-| `X_04`   | Re-export chain A->B->C              | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | n/a      | pass  | pass       |
-| `X_05`   | Default export (JS/TS)               | n/a  | n/a  | n/a    | n/a  | n/a    | n/a    | n/a  | n/a  | pass       | n/a    | n/a  | n/a  | n/a  | n/a  | n/a    | n/a  | n/a  | n/a   | n/a      | n/a   | pass       |
-| `X_06`   | Namespace import (import * as X)     | n/a  | pass | pass   | pass | pass   | n/a    | pass | pass | pass       | pass   | n/a  | n/a  | n/a  | pass | pass   | pass | pass | pass  | n/a      | n/a   | pass       |
-| `X_07`   | Star import (from x import *)        | n/a  | n/a  | n/a    | n/a  | n/a    | n/a    | n/a  | n/a  | n/a        | n/a    | n/a  | n/a  | n/a  | n/a  | n/a    | n/a  | n/a  | n/a   | n/a      | n/a   | n/a        |
-| `X_08`   | Dynamic import (string-driven)       | n/a  | n/a  | n/a    | n/a  | n/a    | n/a    | n/a  | n/a  | pass       | n/a    | n/a  | n/a  | n/a  | n/a  | n/a    | n/a  | n/a  | n/a   | n/a      | n/a   | pass       |
-| `X_09`   | CommonJS require + assign            | n/a  | n/a  | n/a    | n/a  | n/a    | n/a    | n/a  | n/a  | pass       | n/a    | n/a  | n/a  | n/a  | n/a  | n/a    | n/a  | n/a  | n/a   | n/a      | n/a   | pass       |
-| `X_10`   | ES module ↔ CommonJS interop         | n/a  | n/a  | n/a    | n/a  | n/a    | n/a    | n/a  | n/a  | pass       | n/a    | n/a  | n/a  | n/a  | n/a  | n/a    | n/a  | n/a  | n/a   | n/a      | n/a   | pass       |
-| `X_11`   | Visibility crossing - private blocks | pass | pass | pass   | pass | n/a    | n/a    | pass | pass | pass       | pass   | n/a  | pass | n/a  | pass | n/a    | pass | pass | pass  | pass     | pass  | pass       |
-| `X_12`   | Inheritance across files             | n/a  | pass | pass   | pass | n/a    | n/a    | n/a  | pass | pass       | pass   | n/a  | pass | pass | pass | pass   | pass | n/a  | pass  | pass     | pass  | pass       |
-| `X_13`   | Instance method on imported class    | n/a  | pass | pass   | pass | n/a    | n/a    | pass | pass | pass       | pass   | n/a  | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `X_14`   | Static method on imported class      | n/a  | pass | pass   | pass | n/a    | n/a    | n/a  | pass | pass       | pass   | n/a  | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `X_15`   | Module-level shadow - local wins     | pass | pass | pass   | pass | pass   | pass   | n/a  | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | n/a  | pass  | pass     | n/a   | pass       |
-| `X_16`   | Multi-file fan-in to same callee     | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
+| Scenario | Description | c | cpp | csharp | dart | elixir | erlang | go | java | javascript | kotlin | lua | objc | perl | php | python | ruby | rust | scala | solidity | swift | typescript |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `X_01` | Direct import + call | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `X_02` | Aliased import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `X_03` | From-import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `X_04` | Re-export chain A->B->C | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `X_05` | Default export (JS/TS) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
+| `X_06` | Namespace import (import * as X) | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | pass | pass | n/a | n/a | pass |
+| `X_07` | Star import (from x import *) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| `X_08` | Dynamic import (string-driven) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
+| `X_09` | CommonJS require + assign | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
+| `X_10` | ES module <-> CommonJS interop | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
+| `X_11` | Visibility crossing - private blocks | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | pass |
+| `X_12` | Inheritance across files | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass |
+| `X_13` | Instance method on imported class | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `X_14` | Static method on imported class | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `X_15` | Module-level shadow - local wins | pass | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass | n/a | pass |
+| `X_16` | Multi-file fan-in to same callee | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 
 ## Over-taint (negatives)
 
-| Scenario | Description                                               | c    | cpp  | csharp | dart | elixir | erlang | go   | java | javascript | kotlin | lua  | objc | perl | php  | python | ruby | rust | scala | solidity | swift | typescript |
-| -------- | --------------------------------------------------------- | ---- | ---- | ------ | ---- | ------ | ------ | ---- | ---- | ---------- | ------ | ---- | ---- | ---- | ---- | ------ | ---- | ---- | ----- | -------- | ----- | ---------- |
-| `OT_01`  | Sibling field read stays clean                            | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_02`  | Literal containing seed name stays clean                  | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_03`  | Second-arg taint doesn't backflow to first-arg            | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_04`  | Tainted helper param doesn't taint sibling sink arg       | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_05`  | sizeof operand isn't allocator size                       | pass | pass | pass   | n/a  | n/a    | n/a    | pass | pass | n/a        | pass   | n/a  | pass | n/a  | n/a  | n/a    | n/a  | pass | pass  | n/a      | pass  | n/a        |
-| `OT_06`  | Fixed-size pointer copy length stays clean                | pass | pass | pass   | n/a  | n/a    | n/a    | pass | pass | n/a        | pass   | n/a  | pass | n/a  | n/a  | n/a    | n/a  | pass | pass  | n/a      | pass  | n/a        |
-| `OT_07`  | Clean overwrite before sink clears taint                  | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_08`  | Lifecycle / guard path stays clean                        | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_09`  | Field carrier stays field-scoped                          | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_10`  | Field-derived local stays clean                           | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_11`  | Clean return after consume stays clean                    | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_12`  | Unknown call doesn't taint independent later sink         | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_13`  | Sibling key/index reads stay clean                        | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_14`  | Argparse -> eval through hardcoded filter                 | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_15`  | Constant int/bool args don't promote                      | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_16`  | Receiver-only taint doesn't promote to scalar arg         | n/a  | pass | pass   | pass | n/a    | n/a    | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_17`  | Variable named like seed but unrelated                    | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_18`  | Type annotation containing seed name                      | n/a  | pass | pass   | pass | pass   | pass   | n/a  | pass | n/a        | pass   | n/a  | pass | n/a  | n/a  | pass   | n/a  | pass | pass  | n/a      | pass  | pass       |
-| `OT_19`  | Function name with seed substring                         | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
-| `OT_20`  | Module qualifier (Task #279) - os.getenv doesn't taint os | pass | pass | pass   | pass | pass   | pass   | pass | pass | pass       | pass   | pass | pass | pass | pass | pass   | pass | pass | pass  | pass     | pass  | pass       |
+| Scenario | Description | c | cpp | csharp | dart | elixir | erlang | go | java | javascript | kotlin | lua | objc | perl | php | python | ruby | rust | scala | solidity | swift | typescript |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `OT_01` | Sibling field read stays clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_02` | Literal containing seed name stays clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_03` | Second-arg taint doesn't backflow to first-arg | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_04` | Tainted helper param doesn't taint sibling sink arg | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_05` | sizeof operand isn't allocator size | pass | pass | pass | n/a | n/a | n/a | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | pass | pass | n/a | pass | n/a |
+| `OT_06` | Fixed-size pointer copy length stays clean | pass | pass | pass | n/a | n/a | n/a | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | pass | pass | n/a | pass | n/a |
+| `OT_07` | Clean overwrite before sink clears taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_08` | Lifecycle / guard path stays clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_09` | Field carrier stays field-scoped | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_10` | Field-derived local stays clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_11` | Clean return after consume stays clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_12` | Unknown call doesn't taint independent later sink | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_13` | Sibling key/index reads stay clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_14` | Argparse -> eval through hardcoded filter | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_15` | Constant int/bool args don't promote | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_16` | Receiver-only taint doesn't promote to scalar arg | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_17` | Variable named like seed but unrelated | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_18` | Type annotation containing seed name | n/a | pass | pass | pass | pass | pass | n/a | pass | n/a | pass | n/a | pass | n/a | n/a | pass | n/a | pass | pass | n/a | pass | pass |
+| `OT_19` | Function name with seed substring | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_20` | Module qualifier (Task #279) - os.getenv doesn't taint os | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 
 ## Coverage summary
 

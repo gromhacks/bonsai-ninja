@@ -229,6 +229,14 @@ pub struct Decl {
     /// against `T`'s methods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
+    /// True when the final declared parameter is a positional variadic
+    /// collector (`*args`, `...rest`, `T...`, C `...`) that absorbs all
+    /// overflow positional arguments. Adapter / kit fact: named splats are
+    /// still stored under their bare name in `params`, so the engine needs
+    /// this explicit signal to route every extra positional arg onto the
+    /// collector param instead of dropping it (audit M1). Defaults to false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_variadic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
