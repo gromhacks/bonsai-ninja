@@ -1361,7 +1361,9 @@ fn compute_reads_global_taint_of(decl: &Decl) -> Vec<String> {
                 .chars()
                 .next()
                 .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-            || !candidate.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            || !candidate
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
         {
             continue;
         }
@@ -1389,9 +1391,9 @@ fn collect_assign_targets(events: &[FlowEvent], out: &mut Vec<String>) {
                 collect_assign_targets(then_events, out);
                 collect_assign_targets(else_events, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => collect_assign_targets(body, out),
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assign_targets(body, out)
+            }
             FlowEvent::Try {
                 body,
                 catch_events,

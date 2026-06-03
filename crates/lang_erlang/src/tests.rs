@@ -62,6 +62,50 @@ fn fun_ref_assignment_emits_clean_callable_alias() {
     ));
 }
 
+fn call_event(name: &str) -> FlowEvent {
+    FlowEvent::Call {
+        span: bonsai_common::Span::new(FileId::new(0), 0, 1),
+        name: name.to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: Vec::new(),
+    }
+}
+
+#[test]
+fn exception_rewrite_preserves_logger_error_calls() {
+    let mut events = vec![call_event("logger:error")];
+
+    rewrite_erlang_throw_calls(&mut events);
+
+    assert!(matches!(
+        events.as_slice(),
+        [FlowEvent::Call { name, .. }] if name == "logger:error"
+    ));
+}
+
+#[test]
+fn exception_rewrite_keeps_bare_and_erlang_exception_bifs() {
+    for name in [
+        "throw",
+        "error",
+        "exit",
+        "erlang:throw",
+        "erlang:error",
+        "erlang.exit",
+    ] {
+        let mut events = vec![call_event(name)];
+
+        rewrite_erlang_throw_calls(&mut events);
+
+        assert!(
+            matches!(events.as_slice(), [FlowEvent::Throw { .. }]),
+            "expected {name} to rewrite to Throw, got {events:?}"
+        );
+    }
+}
+
 #[test]
 fn zero_arity_clause_has_no_synthetic_param_slot() {
     let src = "load_all_users() -> ok.";

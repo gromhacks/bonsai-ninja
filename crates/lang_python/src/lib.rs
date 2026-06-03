@@ -177,8 +177,7 @@ impl LanguageAdapter for PythonAdapter {
         // `Public` and let the `__name` -> Private dunder rule above be
         // the only visibility filter. Precise wildcard-import narrowing
         // (consult `__all__` only on the `from module import *` path)
-        // belongs in the resolver as a separate exported-names fact;
-        // `collect_python_dunder_all` is retained for that future use.
+        // belongs in the resolver as a separate exported-names fact.
         // Per-decl `type_aliases`: walk the tree and record
         // `param: Type` annotations plus FastAPI-style binder
         // markers (`param: T = Body(...)` / `Depends(...)` /
@@ -1942,69 +1941,6 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
     }
     out
-}
-
-/// Walk the file for a top-level `__all__ = [...]` (or tuple form)
-/// assignment and return the listed name strings. Returns `None` when
-/// the file doesn't declare `__all__`, or when the RHS isn't a
-/// literal list/tuple of strings (e.g. computed `__all__` such as
-/// `__all__ = list(_MODULE_NAMES)`); the public surface is then not
-/// narrowed.
-// Retained for the future resolver-side wildcard-import (`from m
-// import *`) narrowing fact; no longer drives `Visibility::Module`
-// (see extract_declarations and audit finding H21).
-#[allow(dead_code)]
-fn collect_python_dunder_all(tree: &Tree, src: &[u8]) -> Option<Vec<String>> {
-    let root = tree.root_node();
-    let mut cursor = root.walk();
-    for node in root.named_children(&mut cursor) {
-        // tree-sitter-python parses bare `__all__ = [...]` as a direct
-        // `assignment` child of `module` (no `expression_statement`
-        // wrapper for top-level assignments). Match either shape so
-        // future grammar tweaks don't silently break narrowing.
-        let assign = match node.kind() {
-            "assignment" => node,
-            "expression_statement" => match node.named_child(0) {
-                Some(child) if child.kind() == "assignment" => child,
-                _ => continue,
-            },
-            _ => continue,
-        };
-        let Some(target) = assign.child_by_field_name("left") else {
-            continue;
-        };
-        if node_text(&target, src) != "__all__" {
-            continue;
-        }
-        let rhs = assign.child_by_field_name("right")?;
-        if !matches!(rhs.kind(), "list" | "tuple") {
-            return None;
-        }
-        let mut out = Vec::new();
-        let mut rhs_cursor = rhs.walk();
-        for elem in rhs.named_children(&mut rhs_cursor) {
-            if elem.kind() != "string" {
-                return None;
-            }
-            // Tree-sitter-python wraps string content in a
-            // `string_content` named child; outer `string` node spans
-            // include the quotes. Prefer the inner content; fall back
-            // to a quote-stripping read.
-            let mut inner_cursor = elem.walk();
-            let content = elem
-                .named_children(&mut inner_cursor)
-                .find(|c| c.kind() == "string_content");
-            if let Some(content) = content {
-                out.push(node_text(&content, src).to_string());
-            } else {
-                let raw = node_text(&elem, src);
-                let trimmed = raw.trim_matches(|c| c == '"' || c == '\'');
-                out.push(trimmed.to_string());
-            }
-        }
-        return Some(out);
-    }
-    None
 }
 
 /// Rewrite Python's reflective `getattr(obj, "literal", default)` /

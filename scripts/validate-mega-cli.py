@@ -51,8 +51,9 @@ EXPECTED_FINDINGS = {
     # canonical `security_pipeline_regressions::mega_flow` baselines
     # (`expected_mega_flow_findings_with_inferred_sources`). Refreshed
     # 2026-05-29: the FN-language construct gaps closed (cpp/csharp/
-    # dart/elixir/java/scala 0→1, swift 0→2, php 0→2); go 2→1 and
-    # objc 2→1 after redundant-inferred / xxe-over-claim removal;
+    # dart/elixir/java/scala 0→1, php 0→2); swift settled at 1 after
+    # the redundant inferred-source over-claim was filtered; go 2→1
+    # and objc 2→1 after redundant-inferred / xxe-over-claim removal;
     # python 5→3 and dart→1 after the combiner's group_id+sink-site
     # dedup collapsed duplicate entry-chain rows.
     "c": 1,
@@ -77,7 +78,7 @@ EXPECTED_FINDINGS = {
     "rust": 1,
     "scala": 1,
     "solidity": 2,
-    "swift": 2,
+    "swift": 1,
     "typescript": 1,
 }
 

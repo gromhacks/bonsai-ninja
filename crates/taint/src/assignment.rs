@@ -39,9 +39,9 @@
 
 use crate::{
     text::{
-        is_quoted_literal, normalise_qualified_text, qualified_access_bases, text_looks_qualified,
-        value_bearing_identifier_text,
+        normalise_qualified_text, qualified_access_bases, text_looks_qualified, value_bearing_identifier_text,
     },
+    tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_has_descendant_shape},
     TokenSet,
 };
 use bonsai_lang_api::FlowEvent;
@@ -285,7 +285,7 @@ fn text_is_tainted(text: &str, tainted: &TokenSet) -> bool {
         return true;
     }
     let normalised = normalise_qualified_text(trimmed);
-    if receiver_method_projection_is_tainted(trimmed, tainted) {
+    if crate::tokens::receiver_method_projection_is_tainted(trimmed, tainted, false) {
         return true;
     }
     // Wildcard seeds like `obj.*` only match qualified accesses,
@@ -330,86 +330,6 @@ fn insert_descendant_target_taint(tainted: &mut TokenSet, target: &str) {
     tainted.insert(format!("{target}.*"));
 }
 
-/// True when the RHS surface contains at least two distinct bare
-/// identifiers — the heuristic that distinguishes a "constructed"
-/// value (which warrants `target.*` propagation) from a single-name
-/// alias (which doesn't).
-fn rhs_has_descendant_shape(source_names: &[String]) -> bool {
-    let mut distinct = Vec::new();
-    for name in source_names {
-        let name = name.trim();
-        if name.is_empty() || is_quoted_literal(name) {
-            continue;
-        }
-        let canonical = canonical_bare_name(name);
-        if canonical.is_empty() || distinct.iter().any(|existing| existing == &canonical) {
-            continue;
-        }
-        distinct.push(canonical);
-    }
-    distinct.len() > 1
-}
-
-/// True when any seed in `tainted` is a wildcard form (`prefix.*`)
-/// that matches `normalised_text` either exactly at the prefix or as
-/// a strict descendant (`prefix.field`, `prefix.a.b`).
-fn qualified_wildcard_seed_matches(normalised_text: &str, tainted: &TokenSet) -> bool {
-    tainted.iter().any(|seed| {
-        let Some(prefix) = seed.strip_suffix(".*") else {
-            return false;
-        };
-        let prefix = normalise_qualified_text(prefix);
-        !prefix.is_empty()
-            && (normalised_text == prefix
-                || normalised_text
-                    .strip_prefix(prefix.as_str())
-                    .is_some_and(|rest| rest.starts_with('.')))
-    })
-}
-
-/// True when `text` contains a `receiver.method(...)` shape whose
-/// receiver is tainted. Catches `tainted.format(...)` patterns where
-/// the call expression as a whole isn't a tracked identifier but the
-/// receiver alone propagates taint.
-fn receiver_method_projection_is_tainted(text: &str, tainted: &TokenSet) -> bool {
-    for open_paren in text.match_indices('(').map(|(idx, _)| idx) {
-        let before_call = text[..open_paren].trim_end();
-        // Walk back to the start of the callee expression. `char_indices`
-        // keeps us on UTF-8 boundaries — `rfind` would slice mid-char on
-        // non-ASCII text (e.g. an em dash) and panic.
-        let start = before_call
-            .char_indices()
-            .rev()
-            .find(|&(_, c)| {
-                !(c == '.'
-                    || c == '_'
-                    || c == '$'
-                    || c == '@'
-                    || c == '%'
-                    || c == ']'
-                    || c == '['
-                    || c == '\''
-                    || c == '"'
-                    || c.is_ascii_alphanumeric())
-            })
-            .map_or(0, |(idx, c)| idx + c.len_utf8());
-        let candidate = before_call[start..].trim();
-        let Some((receiver, method)) = candidate.rsplit_once('.') else {
-            continue;
-        };
-        if receiver.trim().is_empty() || method.trim().is_empty() {
-            continue;
-        }
-        let receiver = normalise_qualified_text(receiver);
-        if !receiver.is_empty()
-            && (tainted.contains(&receiver) || qualified_wildcard_seed_matches(&receiver, tainted))
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// Collect every qualified-access base (the leftmost identifier of
 /// each `a.b.c` form) appearing in `source_names`. Used to mask
 /// structural occurrences of identifiers from the bare-token taint
@@ -422,16 +342,6 @@ fn qualified_source_bases(source_names: &[String]) -> ahash::AHashSet<String> {
         }
     }
     bases
-}
-
-/// Strip qualifier sigils (`$`, `@`, `%`) and surrounding whitespace
-/// to produce the canonical bare identifier form used for set
-/// membership and de-duplication.
-fn canonical_bare_name(text: &str) -> String {
-    normalise_qualified_text(text)
-        .trim_start_matches(&['$', '@', '%'][..])
-        .trim()
-        .to_string()
 }
 
 /// Lex `text` into identifier tokens, skipping content that lies

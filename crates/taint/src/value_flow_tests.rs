@@ -286,7 +286,6 @@ fn call_arg_edges_merge_branch_definitions_at_call_site() {
     }
 }
 
-
 // audit re-apply: R3
 
 #[test]

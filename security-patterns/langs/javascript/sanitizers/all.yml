@@ -1442,6 +1442,65 @@
     expect_match_text: [unescape]
   description: "unescape(s) - legacy, deprecated decode; preserves taint."
 
+- id: javascript.passthrough.path_resolve
+  enabled: true
+  language: javascript
+  tag: passthrough-transform
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, resolve]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: path resolve passthrough
+    code: |
+      const path = require("path");
+      function resolve(input) {
+        return path.resolve("/srv/uploads", input);
+      }
+    expect_match_text: [path.resolve]
+  description: "path.resolve(...) canonicalizes path text but does not enforce trusted-root containment; preserve taint through the returned path."
+
+- id: javascript.passthrough.buffer_from
+  enabled: true
+  language: javascript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [Buffer, from]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: Buffer.from passthrough
+    code: |
+      function decode(input) {
+        return Buffer.from(input, "base64");
+      }
+    expect_match_text: [Buffer.from]
+  description: "Buffer.from(input, ...) changes representation but preserves attacker-controlled bytes; preserve taint through the returned Buffer."
+
+- id: javascript.passthrough.to_string_receiver
+  enabled: true
+  language: javascript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.toString$"
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: toString receiver passthrough
+    code: |
+      function stringify(input) {
+        return input.toString();
+      }
+    expect_match_text: [input.toString]
+  description: "receiver.toString(...) changes representation but preserves receiver-controlled content; preserve taint through the returned string."
+
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
 # class. Reviewer enumerates with `security sanitizers --tag

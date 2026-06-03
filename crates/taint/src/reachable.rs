@@ -897,14 +897,28 @@ fn source_seed_nodes_from_idg(
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
     let mut seed_nodes: Vec<bonsai_idg::WsNodeId> = Vec::new();
+    let seed_names: Vec<String> = seeds.iter().cloned().collect();
     if let Some(anchor) = source_anchor {
-        seed_nodes.extend(idg.source_seed_nodes_at_span(source_func, anchor));
+        let anchor_nodes = idg.source_seed_nodes_at_span(source_func, anchor);
+        let anchor_has_call_return = anchor_nodes.iter().any(|node| {
+            idg.resolve_point(*node)
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::CallRet)
+        });
+        if !anchor_has_call_return && !seed_names.is_empty() {
+            let named_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
+            if named_nodes.is_empty() {
+                seed_nodes.extend(anchor_nodes);
+            } else {
+                seed_nodes.extend(named_nodes);
+            }
+        } else {
+            seed_nodes.extend(anchor_nodes);
+        }
     }
     if !output_arg_names.is_empty() && source_anchor.is_none() {
         seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, output_arg_names));
     }
     if seed_nodes.is_empty() {
-        let seed_names: Vec<String> = seeds.iter().cloned().collect();
         if seed_names.is_empty() {
             seed_nodes.extend(idg.param_nodes_of(source_func));
         } else {
@@ -975,6 +989,7 @@ pub fn source_seed_reaches_return_from_idg_with_max_precision(
             global.as_ref(),
             idg,
             max_precision,
+            None,
         );
     }
     let Some(return_node) = idg.return_node_of(source_func) else {
@@ -1102,6 +1117,7 @@ pub fn entry_taint_call_records_from_idg_with_max_precision(
             global.as_ref(),
             idg,
             max_precision,
+            None,
         );
     }
     let closure_nodes = idg.forward_closure_with_max_precision(&seed_nodes, max_precision);
@@ -1202,6 +1218,68 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
+    entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
+        source_func,
+        seeds,
+        source_anchor,
+        output_arg_names,
+        receiver_state_propagations,
+        call_result_passthroughs,
+        output_arg_flows,
+        None,
+        max_precision,
+        db,
+        idg,
+    )
+}
+
+#[must_use]
+#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, targets, precision, db, and service context.
+pub fn entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
+    source_func: FuncId,
+    seeds: &TokenSet,
+    source_anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
+    output_arg_flows: &[crate::inter::OutputArgFlow],
+    target_funcs: Option<&AHashSet<FuncId>>,
+    max_precision: Option<Precision>,
+    db: &AnalyzerDb,
+    idg: &bonsai_idg::IdgQueryService,
+) -> EntryTaintGraph {
+    entry_taint_graph_from_idg_with_target_filters_and_max_precision(
+        source_func,
+        seeds,
+        source_anchor,
+        output_arg_names,
+        receiver_state_propagations,
+        call_result_passthroughs,
+        output_arg_flows,
+        target_funcs,
+        None,
+        max_precision,
+        db,
+        idg,
+    )
+}
+
+#[must_use]
+#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, targets, precision, db, and service context.
+pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
+    source_func: FuncId,
+    seeds: &TokenSet,
+    source_anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
+    output_arg_flows: &[crate::inter::OutputArgFlow],
+    target_funcs: Option<&AHashSet<FuncId>>,
+    lineage_funcs: Option<&AHashSet<FuncId>>,
+    max_precision: Option<Precision>,
+    db: &AnalyzerDb,
+    idg: &bonsai_idg::IdgQueryService,
+) -> EntryTaintGraph {
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
@@ -1273,6 +1351,7 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
         global.as_ref(),
         idg,
         max_precision,
+        lineage_funcs.or(target_funcs),
     );
     let closure_nodes = idg.forward_closure_with_max_precision(&seed_nodes, max_precision);
     let closure_set: ahash::AHashSet<bonsai_idg::WsNodeId> = closure_nodes.iter().copied().collect();
@@ -1284,8 +1363,11 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
     // processed, otherwise lineage chains reconstructed from
     // parent_trace_id come out reversed.
     let cross_calls = {
-        let mut edges =
-            idg.cross_call_edges_in_reachable_nodes_with_max_precision(&closure_nodes, max_precision);
+        let mut edges = idg.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
+            &closure_nodes,
+            max_precision,
+            lineage_funcs,
+        );
         // Topological sort: walk from source_func outward, ordering
         // edges by their distance from source_func. Edges whose
         // caller hasn't been visited yet come later. This is
@@ -1342,10 +1424,14 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
         }
         worst = worst.meet(ce.precision);
 
-        let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()));
-        let call_summary =
-            cached_call_event_summary(ce.caller, ce.call_span, global.as_ref(), &mut call_summary_cache);
-        let tainted_args = tainted_args_for_cross_call_edge(ce, callee_decl, call_summary);
+        let tainted_args = if target_funcs.is_some() {
+            Vec::new()
+        } else {
+            let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()));
+            let call_summary =
+                cached_call_event_summary(ce.caller, ce.call_span, global.as_ref(), &mut call_summary_cache);
+            tainted_args_for_cross_call_edge(ce, callee_decl, call_summary)
+        };
         call_records.push(TaintedCallEdge {
             trace_id,
             parent_trace_id,
@@ -1358,9 +1444,13 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
     }
 
     // Tainted call sites in closure → tainted_calls.
-    let tainted_args_by_site = idg.tainted_call_args_in_reachable_nodes(&closure_nodes);
+    let tainted_args_by_site =
+        idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure_nodes, target_funcs);
     let mut by_site: ahash::AHashMap<(FuncId, bonsai_common::Span), Vec<u8>> = ahash::AHashMap::new();
     for (caller, call_span, arg_idx) in &tainted_args_by_site {
+        if target_funcs.is_some_and(|targets| !targets.contains(caller)) {
+            continue;
+        }
         by_site.entry((*caller, *call_span)).or_default().push(*arg_idx);
     }
 
@@ -1454,6 +1544,9 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
     {
         let return_funcs: Vec<FuncId> = idg.funcs_with_return_nodes_in_reachable_nodes(&closure_nodes);
         for func in return_funcs {
+            if target_funcs.is_some_and(|targets| !targets.contains(&func)) {
+                continue;
+            }
             let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
                 continue;
             };
@@ -1496,6 +1589,9 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
         let mut sorted_funcs: Vec<FuncId> = funcs_in_closure.into_iter().collect();
         sorted_funcs.sort_by_key(|f| f.raw());
         for func in sorted_funcs {
+            if target_funcs.is_some_and(|targets| !targets.contains(&func)) {
+                continue;
+            }
             let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
                 continue;
             };
@@ -1634,6 +1730,7 @@ pub fn apply_configured_transfer_fixpoint(
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
+    func_filter: Option<&AHashSet<FuncId>>,
 ) {
     if !receiver_state_propagations.is_empty() {
         apply_receiver_state_fixpoint(
@@ -1642,11 +1739,12 @@ pub fn apply_configured_transfer_fixpoint(
             global,
             idg,
             max_precision,
+            func_filter,
         );
     }
     loop {
         let mut grew = false;
-        grew |= apply_typed_constructor_result_fixpoint(seed_nodes, global, idg, max_precision);
+        grew |= apply_typed_constructor_result_fixpoint(seed_nodes, global, idg, max_precision, func_filter);
         if !call_result_passthroughs.is_empty() {
             grew |= apply_call_result_passthrough_fixpoint(
                 seed_nodes,
@@ -1654,10 +1752,18 @@ pub fn apply_configured_transfer_fixpoint(
                 global,
                 idg,
                 max_precision,
+                func_filter,
             );
         }
         if !output_arg_flows.is_empty() {
-            grew |= apply_output_arg_flow_fixpoint(seed_nodes, output_arg_flows, global, idg, max_precision);
+            grew |= apply_output_arg_flow_fixpoint(
+                seed_nodes,
+                output_arg_flows,
+                global,
+                idg,
+                max_precision,
+                func_filter,
+            );
         }
         if !grew {
             break;
@@ -1678,13 +1784,14 @@ fn apply_typed_constructor_result_fixpoint(
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
+    func_filter: Option<&AHashSet<FuncId>>,
 ) -> bool {
     let mut seeded: ahash::AHashSet<bonsai_idg::WsNodeId> = seed_nodes.iter().copied().collect();
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, u8, String)> = ahash::AHashSet::default();
     let mut any_grew = false;
     loop {
         let closure = idg.forward_closure_with_max_precision(seed_nodes, max_precision);
-        let tainted_args = idg.tainted_call_args_in_reachable_nodes(&closure);
+        let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let mut call_summary_cache: ahash::AHashMap<
             FuncId,
             ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
@@ -1892,6 +1999,7 @@ fn apply_receiver_state_fixpoint(
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
+    func_filter: Option<&AHashSet<FuncId>>,
 ) {
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, String)> = ahash::AHashSet::default();
     bonsai_diagnostics::debug_log!(
@@ -1902,7 +2010,8 @@ fn apply_receiver_state_fixpoint(
     let mut iter = 0usize;
     loop {
         iter += 1;
-        let tainted = idg.tainted_call_args_in_closure_with_max_precision(seed_nodes, max_precision);
+        let closure = idg.forward_closure_with_max_precision(seed_nodes, max_precision);
+        let tainted = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let mut grew = false;
         // Per-caller, look up flow events once and walk them to find
         // the call event matching each tainted (caller, call_span).
@@ -1963,15 +2072,36 @@ fn apply_call_result_passthrough_fixpoint(
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
+    func_filter: Option<&AHashSet<FuncId>>,
 ) -> bool {
+    let passthroughs: Vec<CompiledCallResultPassthrough<'_>> = passthroughs
+        .iter()
+        .map(|passthrough| CompiledCallResultPassthrough {
+            passthrough,
+            callee: ConfiguredCalleeMatcher::new(&passthrough.callee),
+        })
+        .collect();
+    let mut passthroughs_by_arg: ahash::AHashMap<u8, Vec<usize>> = ahash::AHashMap::default();
+    let mut receiver_passthroughs: Vec<usize> = Vec::new();
+    for (idx, configured) in passthroughs.iter().enumerate() {
+        if configured.passthrough.input_receiver {
+            receiver_passthroughs.push(idx);
+        }
+        for &arg_idx in &configured.passthrough.input_arg_indices {
+            if let Ok(arg_idx) = u8::try_from(arg_idx) {
+                passthroughs_by_arg.entry(arg_idx).or_default().push(idx);
+            }
+        }
+    }
     let mut seeded: ahash::AHashSet<bonsai_idg::WsNodeId> = seed_nodes.iter().copied().collect();
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, u8, String)> = ahash::AHashSet::default();
+    let mut callee_name_cache = CalleeNameCache::default();
     let mut iter = 0usize;
     let mut any_grew = false;
     loop {
         iter += 1;
         let closure = idg.forward_closure_with_max_precision(seed_nodes, max_precision);
-        let tainted_args = idg.tainted_call_args_in_reachable_nodes(&closure);
+        let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let mut call_summary_cache: ahash::AHashMap<
             FuncId,
             ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
@@ -1982,12 +2112,15 @@ fn apply_call_result_passthrough_fixpoint(
             else {
                 continue;
             };
-            for passthrough in passthroughs {
-                let is_configured_arg = passthrough.input_arg_indices.contains(&(arg_idx as usize));
-                let is_configured_receiver = passthrough.input_receiver && arg_idx == u8::MAX;
-                if !(is_configured_arg || is_configured_receiver)
-                    || !call_result_passthrough_matches(&summary.name, &passthrough.callee)
-                {
+            let candidate_indices = if arg_idx == u8::MAX {
+                receiver_passthroughs.as_slice()
+            } else {
+                passthroughs_by_arg.get(&arg_idx).map_or(&[][..], Vec::as_slice)
+            };
+            for &configured_idx in candidate_indices {
+                let configured = &passthroughs[configured_idx];
+                let passthrough = configured.passthrough;
+                if !configured.callee.matches(&summary.name, &mut callee_name_cache) {
                     continue;
                 }
                 let key = (caller, call_span, arg_idx, passthrough.callee.clone());
@@ -2030,16 +2163,41 @@ fn apply_output_arg_flow_fixpoint(
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     max_precision: Option<Precision>,
+    func_filter: Option<&AHashSet<FuncId>>,
 ) -> bool {
+    let flows: Vec<CompiledOutputArgFlow<'_>> = flows
+        .iter()
+        .map(|flow| CompiledOutputArgFlow {
+            flow,
+            callee: ConfiguredCalleeMatcher::new(&flow.callee),
+        })
+        .collect();
+    let mut flows_by_arg: ahash::AHashMap<u8, Vec<usize>> = ahash::AHashMap::default();
+    let mut flows_by_start_arg: Vec<usize> = Vec::new();
+    for (idx, configured) in flows.iter().enumerate() {
+        let start_arg = configured.flow.value_start_arg_index;
+        if start_arg.is_some() {
+            flows_by_start_arg.push(idx);
+        }
+        for &arg_idx in &configured.flow.value_arg_indices {
+            if start_arg.is_some_and(|start| arg_idx >= start) {
+                continue;
+            }
+            if let Ok(arg_idx) = u8::try_from(arg_idx) {
+                flows_by_arg.entry(arg_idx).or_default().push(idx);
+            }
+        }
+    }
     let mut seeded: ahash::AHashSet<bonsai_idg::WsNodeId> = seed_nodes.iter().copied().collect();
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, usize, String)> =
         ahash::AHashSet::default();
+    let mut callee_name_cache = CalleeNameCache::default();
     let mut iter = 0usize;
     let mut any_grew = false;
     loop {
         iter += 1;
         let closure = idg.forward_closure_with_max_precision(seed_nodes, max_precision);
-        let tainted_args = idg.tainted_call_args_in_reachable_nodes(&closure);
+        let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
         let mut call_summary_cache: ahash::AHashMap<
             FuncId,
             ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
@@ -2050,9 +2208,40 @@ fn apply_output_arg_flow_fixpoint(
             else {
                 continue;
             };
-            for flow in flows {
-                if !output_arg_flow_input_matches(flow, arg_idx as usize)
-                    || !call_result_passthrough_matches(&summary.name, &flow.callee)
+            for &configured_idx in flows_by_arg.get(&arg_idx).map_or(&[][..], Vec::as_slice) {
+                let configured = &flows[configured_idx];
+                let flow = configured.flow;
+                if (arg_idx as usize) == flow.output_arg_index {
+                    continue;
+                }
+                if !configured.callee.matches(&summary.name, &mut callee_name_cache) {
+                    continue;
+                }
+                let Some(output) = summary.output_arg_target(flow.output_arg_index) else {
+                    continue;
+                };
+                let key = (caller, call_span, flow.output_arg_index, flow.callee.clone());
+                if !applied.insert(key) {
+                    continue;
+                }
+                for node in idg.nodes_for_name_after_span(caller, &output, call_span) {
+                    if seeded.insert(node) {
+                        seed_nodes.push(node);
+                        grew = true;
+                        any_grew = true;
+                    }
+                }
+            }
+            for &configured_idx in &flows_by_start_arg {
+                let configured = &flows[configured_idx];
+                let flow = configured.flow;
+                if (arg_idx as usize) == flow.output_arg_index {
+                    continue;
+                }
+                if !flow
+                    .value_start_arg_index
+                    .is_some_and(|start| (arg_idx as usize) >= start)
+                    || !configured.callee.matches(&summary.name, &mut callee_name_cache)
                 {
                     continue;
                 }
@@ -2088,24 +2277,165 @@ fn apply_output_arg_flow_fixpoint(
     any_grew
 }
 
-fn output_arg_flow_input_matches(flow: &crate::inter::OutputArgFlow, arg_idx: usize) -> bool {
-    arg_idx != flow.output_arg_index
-        && (flow.value_arg_indices.contains(&arg_idx)
-            || flow.value_start_arg_index.is_some_and(|start| arg_idx >= start))
+#[cfg(test)]
+fn call_result_passthrough_matches(call_name: &str, configured: &str) -> bool {
+    ConfiguredCalleeMatcher::new(configured).matches(call_name, &mut CalleeNameCache::default())
 }
 
-fn call_result_passthrough_matches(call_name: &str, configured: &str) -> bool {
-    if let Some(regex) = configured.trim().strip_prefix("regex:") {
-        return passthrough_regex_matches(regex, call_name);
+struct CompiledCallResultPassthrough<'a> {
+    passthrough: &'a crate::inter::CallResultPassthrough,
+    callee: ConfiguredCalleeMatcher,
+}
+
+struct CompiledOutputArgFlow<'a> {
+    flow: &'a crate::inter::OutputArgFlow,
+    callee: ConfiguredCalleeMatcher,
+}
+
+enum ConfiguredCalleeMatcher {
+    Regex {
+        regex: Option<regex::Regex>,
+        terminal: Option<String>,
+    },
+    Name {
+        normalised: String,
+        terminal: Option<String>,
+    },
+}
+
+#[derive(Default)]
+struct CalleeNameCache {
+    trimmed: ahash::AHashMap<String, String>,
+    normalised: ahash::AHashMap<String, String>,
+}
+
+impl CalleeNameCache {
+    fn trimmed(&mut self, value: &str) -> &str {
+        self.trimmed
+            .entry(value.to_string())
+            .or_insert_with(|| value.trim().trim_end_matches("()").to_string())
+            .as_str()
     }
-    let call = normalise_passthrough_callee(call_name);
-    let configured = normalise_passthrough_callee(configured);
-    if call.is_empty() || configured.is_empty() {
-        return false;
+
+    fn normalised(&mut self, value: &str) -> &str {
+        self.normalised
+            .entry(value.to_string())
+            .or_insert_with(|| normalise_passthrough_callee(value))
+            .as_str()
     }
-    call == configured
-        || call.ends_with(&format!(".{configured}"))
-        || configured.ends_with(&format!(".{call}"))
+}
+
+impl ConfiguredCalleeMatcher {
+    fn new(configured: &str) -> Self {
+        if let Some(regex) = configured.trim().strip_prefix("regex:") {
+            return Self::Regex {
+                regex: regex::Regex::new(regex).ok(),
+                terminal: regex_terminal_literal(regex),
+            };
+        }
+        let normalised = normalise_passthrough_callee(configured);
+        Self::Name {
+            terminal: callee_terminal_literal(&normalised),
+            normalised,
+        }
+    }
+
+    fn matches(&self, call_name: &str, cache: &mut CalleeNameCache) -> bool {
+        match self {
+            Self::Regex {
+                regex: Some(regex),
+                terminal,
+            } => {
+                if !callee_terminal_prefilter_matches(call_name, terminal.as_deref()) {
+                    return false;
+                }
+                passthrough_compiled_regex_matches(regex, call_name, cache)
+            }
+            Self::Regex { regex: None, .. } => false,
+            Self::Name {
+                normalised: configured,
+                terminal,
+            } => {
+                if !callee_terminal_prefilter_matches(call_name, terminal.as_deref()) {
+                    return false;
+                }
+                let call = cache.normalised(call_name);
+                if call.is_empty() || configured.is_empty() {
+                    return false;
+                }
+                call == *configured
+                    || call
+                        .strip_suffix(configured)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+                    || configured
+                        .strip_suffix(&call)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+        }
+    }
+}
+
+fn callee_terminal_prefilter_matches(call_name: &str, terminal: Option<&str>) -> bool {
+    terminal.is_none_or(|needle| needle.is_empty() || call_name.contains(needle))
+}
+
+fn callee_terminal_literal(normalised: &str) -> Option<String> {
+    normalised
+        .rsplit('.')
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+}
+
+fn regex_terminal_literal(pattern: &str) -> Option<String> {
+    if has_unescaped_regex_alternation(pattern) {
+        return None;
+    }
+    let mut current = String::new();
+    let mut last = None;
+    let mut escaped = false;
+    for ch in pattern.chars() {
+        if escaped {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                current.push(ch);
+            } else if !current.is_empty() {
+                last = Some(std::mem::take(&mut current));
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            last = Some(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        last = Some(current);
+    }
+    last
+}
+
+fn has_unescaped_regex_alternation(pattern: &str) -> bool {
+    let mut escaped = false;
+    let mut in_class = false;
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '|' if !in_class => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn normalise_passthrough_callee(value: &str) -> String {
@@ -2161,15 +2491,19 @@ fn canonical_type_tail(value: &str) -> Option<String> {
     Some(short.to_string())
 }
 
-fn passthrough_regex_matches(regex: &str, call_name: &str) -> bool {
-    let Ok(regex) = regex::Regex::new(regex) else {
-        return false;
-    };
-    let call_name = call_name.trim().trim_end_matches("()");
-    if call_name.is_empty() {
+fn passthrough_compiled_regex_matches(
+    regex: &regex::Regex,
+    call_name: &str,
+    cache: &mut CalleeNameCache,
+) -> bool {
+    let trimmed = cache.trimmed(call_name);
+    if trimmed.is_empty() {
         return false;
     }
-    regex.is_match(call_name) || regex.is_match(&normalise_passthrough_callee(call_name))
+    if regex.is_match(trimmed) {
+        return true;
+    }
+    regex.is_match(cache.normalised(call_name))
 }
 
 /// Recursive walker that finds Call events whose span is in

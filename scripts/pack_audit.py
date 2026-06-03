@@ -56,6 +56,9 @@ CANONICAL_SINK_FAMILIES: dict[str, tuple[str, ...]] = {
     "header_injection": ("header_injection", "header", "hdr"),
 }
 
+ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS = {"solidity"}
+FAMILY_NOT_APPLICABLE = {("c", "deserialization")}
+
 FAMILY_FILE_ALIASES: dict[str, tuple[str, ...]] = {
     "cache_poisoning": ("cache",),
     "cors_csrf": ("cors",),
@@ -103,6 +106,26 @@ BARE_NAME_VERBS = {
     "put", "delete", "patch", "call", "invoke", "spawn",
 }
 
+# Bare-name rules that have been manually reviewed and are intentionally
+# package-less. These are language builtins, POSIX/PHP stdlib globals, or
+# lifecycle-state uses where the precise guard is the taint/state constraint,
+# not an import/package signal.
+REVIEWED_BARE_NAME_RULES = {
+    "c.path.open",
+    "cpp.path.open",
+    "erlang.memory.gen_server_stop",
+    "perl.cmdi.exec",
+    "perl.eval.builtin_eval",
+    "php.path.copy",
+    "php.path.copy_dest",
+    "python.eval.builtin_exec",
+    "ruby.cmdi.kernel_exec",
+    "ruby.eval.builtin_eval",
+    "ruby.memory.io_close",
+    "ruby.memory.file_close",
+    "solidity.reentrancy.send",
+}
+
 
 def load_yaml(path: Path) -> list[dict]:
     try:
@@ -144,6 +167,26 @@ def rule_family_from_id(rule: dict) -> str:
     rid = str(rule.get("id") or "")
     parts = rid.split(".")
     return parts[1] if len(parts) >= 2 else "<missing>"
+
+
+def canonical_family_from_id(rule_id: str) -> str:
+    parts = str(rule_id or "").split(".")
+    family = parts[1] if len(parts) >= 2 else "<missing>"
+    for canonical, aliases in CANONICAL_SINK_FAMILIES.items():
+        if family == canonical or family in aliases:
+            return canonical
+    for canonical, aliases in FAMILY_FILE_ALIASES.items():
+        if family == canonical or family in aliases:
+            return canonical
+    return family
+
+
+def rule_coverage_families(rule: dict) -> set[str]:
+    ids = [str(rule.get("id") or "")]
+    aliases = rule.get("aliases") or []
+    if isinstance(aliases, list):
+        ids.extend(str(alias) for alias in aliases)
+    return {canonical_family_from_id(rule_id) for rule_id in ids if rule_id}
 
 
 def normalise_for_signature(value):
@@ -382,6 +425,8 @@ def is_fragile(rule: dict) -> tuple[bool, str | None]:
                 break
     if bare is None:
         return False, None
+    if str(rule.get("id") or "") in REVIEWED_BARE_NAME_RULES:
+        return False, None
     has_scope = any(rule.get(k) for k in ("packages", "imports", "frameworks", "namespace"))
     if has_scope:
         return False, None
@@ -404,13 +449,14 @@ def summarize_lang_category(lang: str, cat: str) -> dict:
     enabled = [r for r in rules if r.get("enabled", True)]
     disabled = [r for r in rules if r.get("enabled") is False]
 
-    # rule-id family from id like "<lang>.<family>.<name>"
+    # rule-id family from id/aliases like "<lang>.<family>.<name>".
+    # Aliases are coverage evidence for intentionally merged rules (for
+    # example, upload findings covered by path writes), so count them here
+    # the same way the built-in pack audit does.
     families: Counter[str] = Counter()
     for r in enabled:
-        rid = r.get("id", "") or ""
-        parts = rid.split(".")
-        if len(parts) >= 2:
-            families[parts[1]] += 1
+        for family in rule_coverage_families(r):
+            families[family] += 1
 
     shapes = Counter(classify_match_shape(r) for r in enabled)
     precisions = Counter(classify_precision(r) for r in enabled)
@@ -435,10 +481,12 @@ def summarize_lang_category(lang: str, cat: str) -> dict:
             })
 
     missing_families = []
-    if cat == "sinks":
+    if cat == "sinks" and lang not in ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS:
         present = set(families)
-        for canonical, aliases in CANONICAL_SINK_FAMILIES.items():
-            if not any(a in present for a in aliases):
+        for canonical in CANONICAL_SINK_FAMILIES:
+            if (lang, canonical) in FAMILY_NOT_APPLICABLE:
+                continue
+            if canonical not in present:
                 missing_families.append(canonical)
 
     return {

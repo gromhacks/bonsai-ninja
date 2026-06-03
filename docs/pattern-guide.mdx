@@ -494,6 +494,14 @@ The matcher normalizes common qualified-name separators (`.`, `::`, `->`,
 and Erlang `:`), so structured callee attributes can represent language
 surface syntax without hardcoding that API in Rust code.
 
+Formatter constructors and builders are passthrough transforms when the
+returned value is composed from later arguments. Keep the contributing
+argument slots in the rulepack, for example Objective-C
+`NSString.stringWithFormat` preserves taint from its formatted value
+arguments with `call_result_passthrough_args: [1, 2, 3, 4, 5]`. The rule
+should carry a passthrough tag such as `passthrough-transform` so it
+extends flow without granting sanitizer clearance.
+
 For receiver-return transforms, use
 `taint_semantics.call_result_passthrough_receiver: true` instead of a
 sentinel argument index:
@@ -578,6 +586,28 @@ Disabled rules must declare a reason:
 - `pending-adapter-fact` - needs an adapter capability not yet exposed.
 
 The `subsumed_by` chain must terminate at an enabled rule.
+
+## Merged Families And Aliases
+
+Use `aliases` when one enabled rule intentionally covers another historical
+rule id or a second vulnerability family without duplicating the same API
+shape:
+
+```yaml
+- id: lua.path.io_open_read
+  aliases:
+    - lua.upload_io_open_client_filename
+  enabled: true
+  tag: path-traversal
+  cwe: [CWE-22, CWE-434]
+```
+
+Aliases count as coverage in `security pack --audit`, so a path write rule
+that also covers a client-supplied upload filename can satisfy both `path`
+and `file_upload` audit cells. Keep the primary `id` in the file that owns
+the canonical match shape, and keep the alias only when it preserves a real
+security-family attribution. Do not duplicate enabled rules with identical
+match/constraint shapes just to fill a second audit column.
 
 ## Receiver Context
 

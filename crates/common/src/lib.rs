@@ -28,7 +28,7 @@ pub use names::{
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;
 pub use span::{LineCol, Span, SpanMap};
-pub use span_cache::cached_span_map;
+pub use span_cache::{cached_span_map, cached_span_map_arc};
 
 // Note: a previous version of this crate exposed `FxHasher`,
 // `FxHashMap`, `FxHashSet`, `fx_hash_map`, `fx_hash_set` as a

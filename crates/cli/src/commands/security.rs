@@ -13,7 +13,7 @@
 
 #![allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 
-use crate::args::{BrowseFormat, PrecisionFilter, SecurityAction};
+use crate::args::{BrowseFormat, PrecisionFilter, SecurityAction, SourceAnalysisFormat};
 use crate::commands::{
     emit_json_paged_cached, open_project_index_only, page_info_to_json, paged_json_incomplete_reasons,
     paging_from_cli, short_file,
@@ -23,7 +23,7 @@ use crate::page_cache;
 use crate::paging;
 use crate::ui::{extension_for, Ui};
 use crate::{cli_println, progress, ui};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_sdk::{
     load_rulepack, load_workspace_local_rules, parse_severity, security_match_rows, tree_file_rel,
@@ -328,7 +328,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 &mut context,
                 /* set_severity = */ false,
             )?;
-            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format.into())?;
             cmd_source_analysis(
                 workspace,
                 &pack,
@@ -1159,8 +1159,13 @@ fn cmd_source_analysis(
     inferred_sources: bool,
     paging_cfg: paging::PagingConfig,
     no_compact: bool,
-    format: BrowseFormat,
+    format: SourceAnalysisFormat,
 ) -> Result<()> {
+    if matches!(format, SourceAnalysisFormat::Sarif) {
+        bail!(
+            "security source-analysis does not emit SARIF; use `security taint-analysis --format sarif` for SARIF 2.1.0 output"
+        );
+    }
     let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let ws = project.workspace();
     let mut analysis_progress = SecurityAnalysisProgress::new();
@@ -1206,12 +1211,7 @@ fn cmd_source_analysis(
     };
 
     match format {
-        BrowseFormat::Sarif => {
-            anyhow::bail!(
-                "security source-analysis does not emit SARIF; use --format json for source-flow data or security taint-analysis --format sarif for SARIF findings"
-            );
-        }
-        BrowseFormat::Json => {
+        SourceAnalysisFormat::Json => {
             if paging_cfg.json_wrapped() {
                 page_cache::emit_paged_text(
                     workspace,
@@ -1248,7 +1248,7 @@ fn cmd_source_analysis(
             }
             Ok(())
         }
-        BrowseFormat::Text => {
+        SourceAnalysisFormat::Text => {
             let function_costs =
                 function_costs_for_paths(ws, candidates.iter().flat_map(|c| c.path.iter().copied()), true);
             let text_cost = |f: &CombinedSourceAnalysisCandidate| {
@@ -1306,6 +1306,9 @@ fn cmd_source_analysis(
                 page_cache::emit_cached_text(&page.text)?;
             }
             Ok(())
+        }
+        SourceAnalysisFormat::Sarif => {
+            unreachable!("SARIF source-analysis format is rejected before rendering")
         }
     }
 }
@@ -2060,11 +2063,7 @@ fn render_finding_block_compact(
         }
         for step in &f.taint_path {
             let loc = format!("{}:{}", short_file(&step.file), step.line);
-            let args: Vec<&str> = step
-                .tainted_args
-                .iter()
-                .map(|a| a.value_text.as_str())
-                .collect();
+            let args: Vec<&str> = step.tainted_args.iter().map(|a| a.value_text.as_str()).collect();
             let arg_note = if args.is_empty() {
                 String::new()
             } else {

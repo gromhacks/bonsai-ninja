@@ -153,7 +153,7 @@ fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
             "perform",
             "execute",
         ],
-        "solidity" => &["handle", "audit"],
+        "solidity" => &["handle", "orchestrate", "persist"],
         _ => &[],
     }
 }
@@ -163,9 +163,11 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
     // `expected_mega_flow_findings_with_inferred_sources` and
     // scripts/validate-mega-cli.py `EXPECTED_FINDINGS`. Refreshed
     // 2026-05-29: FN-language gaps closed (cpp/csharp/dart/elixir/java/
-    // scala 0→1, swift 0→2, php 0→2); go 2→1 + objc 2→1 (redundant-
-    // inferred / xxe over-claim removed); python 5→3 + dart→1 (combiner
-    // group_id+sink-site dedup collapsed duplicate entry-chain rows).
+    // scala 0→1, php 0→2); swift settled at 1 once the redundant
+    // inferred-source over-claim was filtered; go 2→1 + objc 2→1
+    // (redundant-inferred / xxe over-claim removed); python 5→3 +
+    // dart→1 (combiner group_id+sink-site dedup collapsed duplicate
+    // entry-chain rows).
     match lang {
         "c" => 1,
         "cpp" => 1,
@@ -186,7 +188,7 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "rust" => 1,
         "scala" => 1,
         "solidity" => 2,
-        "swift" => 2,
+        "swift" => 1,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
     }
@@ -2877,5 +2879,62 @@ fn pack_audit_marks_solidity_as_ecosystem_specific() {
     assert!(
         out.contains("\"canonical_sink_families_applicable\": false"),
         "solidity should be marked outside the canonical web-family audit:\n{out}"
+    );
+}
+
+#[test]
+fn pack_audit_has_no_unexplained_canonical_family_gaps() {
+    let rules = rules_dir();
+    let out = run(&[
+        "security",
+        &rules,
+        "--rules-dir",
+        &rules,
+        "pack",
+        "--audit",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("pack audit JSON");
+    let languages = parsed
+        .get("languages")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("missing languages array:\n{out}"));
+    let mut gaps = Vec::new();
+    for lang in languages {
+        if lang
+            .get("canonical_sink_families_applicable")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        {
+            continue;
+        }
+        let language = lang
+            .get("language")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>");
+        let sinks = lang
+            .get("sinks")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{language}: missing sinks object:\n{out}"));
+        for (family, entry) in sinks {
+            let not_applicable = entry
+                .get("not_applicable")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let enabled = entry
+                .get("enabled")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if !not_applicable && enabled == 0 {
+                gaps.push(format!("{language}/{family}"));
+            }
+        }
+    }
+    assert!(
+        gaps.is_empty(),
+        "pack audit has unexplained canonical family gaps: {}\n{out}",
+        gaps.join(", ")
     );
 }

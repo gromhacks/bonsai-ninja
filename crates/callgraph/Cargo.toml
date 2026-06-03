@@ -13,6 +13,7 @@ bonsai_lang_api = { workspace = true }
 bonsai_index = { workspace = true }
 bonsai_resolve = { workspace = true }
 ahash = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 
 [lints]

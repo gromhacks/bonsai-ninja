@@ -102,11 +102,7 @@ fn cached_span_map(
     file: bonsai_common::FileId,
 ) -> Option<std::sync::Arc<bonsai_common::SpanMap>> {
     let snap = ws.vfs().snapshot(file).ok()?;
-    Some(bonsai_common::cached_span_map(
-        file,
-        snap.version,
-        snap.text.as_ref(),
-    ))
+    Some(bonsai_common::cached_span_map_arc(file, snap.version, &snap.text))
 }
 
 /// Find the enclosing function/method name for a given path + line.

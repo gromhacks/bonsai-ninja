@@ -6,7 +6,7 @@
 //! corresponding `bonsai_sdk` facade call.
 
 use bonsai_common::Precision;
-use bonsai_sdk::{Severity, SourceAnalysisOptions, TaintAnalysisOptions};
+use bonsai_sdk::{Severity, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -565,6 +565,13 @@ fn sdk_source_sigs(project: &bonsai_sdk::Project, options: SourceAnalysisOptions
         .collect()
 }
 
+fn source_analysis_all_options() -> SourceAnalysisOptions {
+    SourceAnalysisOptions {
+        lineage_limits: SourceLineageLimits::unbounded(),
+        ..Default::default()
+    }
+}
+
 fn cli_source_json(workspace: &str, extra: &[&str]) -> Value {
     run_cli(&security_cli_args(workspace, "source-analysis", extra))
 }
@@ -609,13 +616,13 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
     let workspace = "examples/python/micro";
 
     let cases = [
-        ("default/all", vec!["--all"], SourceAnalysisOptions::default()),
+        ("default/all", vec!["--all"], source_analysis_all_options()),
         (
             "source regex",
             vec!["--all", "--source", "^python\\.flask\\."],
             SourceAnalysisOptions {
                 source: Some("^python\\.flask\\.".to_string()),
-                ..Default::default()
+                ..source_analysis_all_options()
             },
         ),
         (
@@ -623,7 +630,7 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             vec!["--all", "--trust", "remote"],
             SourceAnalysisOptions {
                 trust: Some("remote".to_string()),
-                ..Default::default()
+                ..source_analysis_all_options()
             },
         ),
         (
@@ -631,7 +638,7 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             vec!["--all", "--category", "inferred"],
             SourceAnalysisOptions {
                 category: Some("inferred".to_string()),
-                ..Default::default()
+                ..source_analysis_all_options()
             },
         ),
         (
@@ -639,7 +646,7 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             vec!["--all", "--tag", "http-input"],
             SourceAnalysisOptions {
                 tag: Some("http-input".to_string()),
-                ..Default::default()
+                ..source_analysis_all_options()
             },
         ),
         (
@@ -647,7 +654,7 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             vec!["--all", "--file", "gateway.py"],
             SourceAnalysisOptions {
                 files: vec!["gateway.py".to_string()],
-                ..Default::default()
+                ..source_analysis_all_options()
             },
         ),
         (
@@ -655,13 +662,13 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             vec!["--all", "--exclude-file", "gateway.py"],
             SourceAnalysisOptions {
                 exclude_files: vec!["gateway.py".to_string()],
-                ..Default::default()
+                ..source_analysis_all_options()
             },
         ),
         (
             "rendering no-compact does not affect JSON analysis",
             vec!["--all", "--no-compact"],
-            SourceAnalysisOptions::default(),
+            source_analysis_all_options(),
         ),
     ];
 

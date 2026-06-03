@@ -2054,10 +2054,7 @@ def entry(user_input):
     let entry = func_id_of(&db, "entry");
     let result = interprocedural_taint(entry, &seed(&["user_input"]), &config(&[]), &db);
     assert!(
-        result
-            .tainted_calls
-            .iter()
-            .any(|call| call.name == "os_system"),
+        result.tainted_calls.iter().any(|call| call.name == "os_system"),
         "callee that re-raises a tainted param must seed the caller's \
          catch binding so the catch-block sink is tainted; got {:?}",
         result.tainted_calls,

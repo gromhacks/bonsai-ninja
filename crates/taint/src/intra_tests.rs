@@ -363,21 +363,24 @@ fn configured_sanitizer_inside_loop_then_reassigned_in_body_keeps_taint() {
 fn receiver_method_projection_handles_unicode_boundaries() {
     let state = seed(&["schema"]);
     assert!(
-        !receiver_method_projection_is_tainted(
+        !crate::tokens::receiver_method_projection_is_tainted(
             r#"expect(result.error.issues[0].message).toBe("קטן מדי: הקבוצה")"#,
-            &state
+            &state,
+            false,
         ),
         "unicode string text before a call must not panic or invent receiver taint"
     );
     assert!(
-        !receiver_method_projection_is_tainted(r#"requests.Request("PUT", data="ööö".encode())"#, &state),
+        !crate::tokens::receiver_method_projection_is_tainted(
+            r#"requests.Request("PUT", data="ööö".encode())"#,
+            &state,
+            false,
+        ),
         "multibyte text inside call expressions must keep byte slicing on char boundaries"
     );
 }
 
-
 // audit re-apply: M5: direct unit test of `text_is_tainted` (private fn, visib
-
 
 #[test]
 fn qualified_seed_base_matches_but_tail_does_not_promote_bare_local() {

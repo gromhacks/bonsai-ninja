@@ -963,7 +963,12 @@ fn body_context_region(
     })?;
     let start = body.lines.first()?.n;
     let end = body.lines.last()?.n;
-    let text = body.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let text = body
+        .lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(serde_json::json!({
         "startLine": start,
         "endLine": end,
@@ -999,7 +1004,9 @@ fn match_to_sarif_location(
             "snippet": { "text": finding_match.text },
         },
     });
-    if let Some(context) = body_context_region(hops, finding_match.enclosing_fn.as_deref(), finding_match.line) {
+    if let Some(context) =
+        body_context_region(hops, finding_match.enclosing_fn.as_deref(), finding_match.line)
+    {
         physical["contextRegion"] = context;
     }
     serde_json::json!({

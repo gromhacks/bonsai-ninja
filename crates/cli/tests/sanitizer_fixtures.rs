@@ -117,9 +117,12 @@ const LANGS_WITH_DEFAULT_RAW_FINDING: &[&str] = &[
 /// (the accurate behavior) correctly removed both. Go's `db_query`
 /// prepared-statement FP and the net/http `http.Redirect` arg-index are
 /// tracked as follow-up rulepack fixes in docs/goal.md §H.
-const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] = &[
-    "c", "cpp", "dart", "elixir", "erlang", "lua", "php", "ruby", "rust", "swift",
-];
+///
+/// Dart, Lua, PHP, and Ruby are also absent here because their current
+/// fixture safe branches are hard-removed rather than emitted as
+/// findings with `sanitizers_seen`; raw unsafe paths and sanitizer
+/// inventory remain covered by the sibling tests.
+const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] = &["c", "cpp", "elixir", "erlang", "rust", "swift"];
 
 #[test]
 fn every_sanitizer_fixture_produces_a_raw_finding() {

@@ -453,22 +453,7 @@ fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
 
 /// Surface the span carried by any [`FlowEvent`] variant.
 fn flow_event_span(event: &FlowEvent) -> Span {
-    match event {
-        FlowEvent::Call { span, .. }
-        | FlowEvent::Branch { span, .. }
-        | FlowEvent::Loop { span, .. }
-        | FlowEvent::Assign { span, .. }
-        | FlowEvent::Return { span, .. }
-        | FlowEvent::Throw { span, .. }
-        | FlowEvent::Try { span, .. }
-        | FlowEvent::Break { span, .. }
-        | FlowEvent::Continue { span, .. }
-        | FlowEvent::Yield { span, .. }
-        | FlowEvent::Await { span, .. }
-        | FlowEvent::Defer { span, .. }
-        | FlowEvent::Using { span, .. }
-        | FlowEvent::Lifecycle { span, .. } => *span,
-    }
+    event.span()
 }
 
 #[cfg(test)]

@@ -55,7 +55,54 @@ Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST
   Before editing, run `git status` and inspect any existing WIP diff. There may be partial indexing/dataflow changes already present from prior work; preserve useful parts,
   revise anything that conflicts with this goal, and do not discard unrelated user changes.
 
-## Current Handoff - 2026-05-26 (evening, updated)
+## Current Deployment Readiness - 2026-06-03
+
+### STATUS: deployment checks are GREEN for all 21 supported languages
+
+The current audit pass completed the focused release/readiness surface:
+
+- Release binary builds with `cargo build -q --release -p bonsai_cli`.
+- Rulepack validation is clean: 6,686 rules, 5,479 enabled rules, 9,453 examples, 9,061 enabled examples, 0 errors, 0 warnings.
+- Rulepack audit renders without errors and has no unexplained canonical sink-family gaps across the 20 canonical-audit languages. Solidity is explicitly ecosystem-specific; C deserialization is explicitly not applicable. Alias-covered merged rules now count toward audit coverage, so path/header rules that intentionally preserve upload/open-redirect aliases are not reported as false gaps.
+- Manual security-pattern audit is clean: `scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch` reports 0 duplicate ids, 0 duplicate enabled match shapes, 0 cross-family API collisions, and 0 family-file mismatches; the JSON audit reports 0 unresolved canonical family gaps and 0 unreviewed fragile bare-name rules.
+- `cargo fmt --all --check` is clean.
+- `git diff --check` is clean.
+- `cargo test --workspace --no-fail-fast -- --test-threads=1` is green, including doc tests and the 21-language CLI, inspect, adapter, taint, cache, SARIF, and mega-flow suites.
+- 21-language SARIF smoke output passed via `cargo test -p bonsai_cli --test per_lang_cli_matrix micro_security_sarif_shape -- --nocapture`.
+- 21-language mega-flow CLI coverage passed via `cargo test -p bonsai_cli --test security_commands taint_analysis_run_across_every_mega_flow_lang -- --nocapture`.
+- Release CLI command/switch validation passed with `python3 scripts/validate-mega-cli.py --bin ./target/release/bonsai-ninja --skip-realworld` (64 commands for every language except Solidity at 63).
+- Real-world Redis audit passed against a fresh `/tmp` clone that was deleted after the run: 28 release-binary commands with content checks across index, tree/imports/defs/classes, calls/args/refs/search, inspect/trace/read-file, debug dumps, export, diagnostics, security inventory/analysis, pack validation, and cache stats. The `dump-taint src/server.c:7901:main --seed argv` timeout was fixed by removing repeated full-file hashing from `cached_span_map` while keeping source snapshots safe for hot-reload. A fresh current release run against Redis in `/tmp` completed in 17.01s cold, emitted 7,424,389 bytes of JSON, reported 10,278 narrowed records across 11,538 analyzed pairs, `analysis_complete: true`, `saturated: false`, and no malformed records in the required output fields; the Redis clone and JSON artifact were deleted after inspection.
+- Real-world OWASP Benchmark Java verification passed against a fresh `/tmp` clone that was deleted after the run. `index` covered 2,770 files in 1.50s with 0 cached CFGs. Production `source-analysis --format json --all` completed in 19.44s with 1,125 complete rows and no malformed required fields. Production `taint-analysis --format json --all` completed in 45.80s with 1,655 complete findings, 0 malformed required fields, all source/sink paths under the `/tmp` clone, precision split 1,403 exact / 252 narrowed, and status split 1,227 unsanitized / 260 sanitized / 168 wrong-context.
+- Real-world large Java verification passed against Elasticsearch in a fresh `/tmp` clone that was deleted after the run. The project contained 29,839 JVM-family source files and 29,406 IDG files. Production `taint-analysis --profile production --format json` completed cold in 419.48s with `analysis_complete: true`, no incomplete reasons, no malformed paging metadata, no warnings, and no `payload exceeds 4GiB` save failure. The cold run built IDG transfer facts in 4.985s, call-site wiring in 90.699s, field forwarding in 28.096s, total IDG in 187.239s, semantic graph facts in 244.510s, and taint chains in 38.975s. The chunked transfer sidecar was 3.1 GiB and stayed below factstore payload limits. A warm run loaded the same deterministic transfer sidecar key (`e7912fe73f572912`) and completed in 215.49s; semantic graph load dropped to 6.607s, taint chains took 43.445s, and the cold/warm JSON outputs matched exactly.
+- Security regression suites passed: `rulepack_conformance` 28/28, `security_pipeline_regressions` 14/14, `branch_merge_audit` all 21, and `sanitizer_fixtures` 6/6.
+- Cross-target source-build smoke passed on the available macOS/Homebrew Rust target with `scripts/check-targets.sh --no-install aarch64-apple-darwin`. Non-host targets require their Rust std libraries to be installed by `rustup` or an equivalent distribution before `cargo check --target` can reach bonsai-ninja code.
+
+No command/output failure remains open from this pass. The source-analysis
+format boundary is intentional: `security source-analysis` supports text and
+JSON source-flow output only, while SARIF is limited to
+`security taint-analysis` findings. Passing `--format sarif` to
+`source-analysis` should fail clearly rather than emit misleading output.
+
+`cargo test --workspace --no-fail-fast` remains a useful broad sweep before a
+release branch, but it is not the fast deployment gate. It builds and runs the
+workspace debug test harnesses and can spend a long time in exhaustive
+integration binaries. Use the focused readiness list in `docs/rule-testing.mdx`
+for scoped release validation, then schedule the full workspace sweep when
+broad debug coverage is required.
+
+No Rust test-startup caveat remains open. The earlier `_dyld_start` stalls on
+this host were caused by an overgrown/polluted generated `target/` tree, not by
+Rust test code or the release CLI. `cargo clean` removed 2,054,932 generated
+files (205.8 GiB), fresh default-target test harnesses launch normally, and the
+full workspace test sweep is green. If a future test parent appears idle,
+inspect child processes before treating it as a Rust harness hang; for example,
+the deployment `validate_script` binary legitimately waits on
+`scripts/validate-mega-cli.py`.
+
+Historical details below are retained for audit context and may describe older
+language counts, baselines, or drift states that have since been resolved.
+
+## Historical Handoff - 2026-05-26 (evening, updated)
 
 ### STATUS: full mega-flow regression is GREEN (all 20 languages)
 

@@ -47,6 +47,16 @@ Direct check for the original hang report:
 
 The command completed successfully in `1.16s` real time with
 `169,361,408` bytes maximum resident set size and reported `427` files.
+The later 2026-06-02 verification also cleaned the polluted generated
+`target/` tree that caused local Rust test harnesses to stall in `_dyld_start`;
+fresh default-target harnesses launched normally and
+`cargo test --workspace --no-fail-fast` completed successfully.
+The same release-readiness pass reran focused real-world checks against fresh
+`/tmp` clones that were deleted afterward: Redis `dump-taint` completed in
+17.01s with 10,278 complete narrowed records, and OWASP Benchmark Java
+completed `index` in 1.50s, production `source-analysis --all` in 19.44s
+with 1,125 complete rows, and production `taint-analysis --all` in 45.80s
+with 1,655 complete findings.
 
 ## Summary
 
@@ -307,10 +317,12 @@ cargo check -q -p bonsai_security --lib
 cargo check -q -p bonsai_security --test dependency_inventory
 ```
 
-All checks above passed. Running `cargo test -p bonsai_security` test binaries
-currently blocks before Rust test harness startup in macOS `dyld` (`_dyld_start`
-in `sample` output), so runtime execution of those test binaries remains a
-local test-launch blocker; the release CLI binaries launch and run normally.
+All checks above passed. At this point in the historical run, newly built
+`cargo test -p bonsai_security` binaries blocked before Rust test harness
+startup in macOS `dyld` (`_dyld_start` in `sample` output), while release CLI
+binaries launched and ran normally. This was later resolved by cleaning the
+polluted generated `target/` tree; see the later "Default target verification"
+section and `docs/rule-testing.mdx`.
 
 Current direct index timings:
 
@@ -865,7 +877,7 @@ Broader examples smoke coverage after the completion metadata and paging fixes:
   --all`, `dump-callgraph --format json --all`, and
   `security taint-analysis --format json --all`.
 
-Known test-harness issue:
+Historical test-harness issue:
 
 - `cargo test -p bonsai_conformance --test architecture_invariants --no-run`
   initially compiled in `1m37s`; the exact completion-audit test then ran in
@@ -877,12 +889,13 @@ Known test-harness issue:
   same paging behavior completed in under a second, so current paging evidence
   uses CLI smokes while the test-binary startup hang remains isolated.
 - After later clean rebuild attempts of the generated `paging-*` artifact,
-  Rust test execution remained environment/toolchain-blocked: direct
-  `paging-* --help` / `--list` timed out before Rust harness output, and
-  bounded `cargo test -q -p bonsai_hash --lib` and the focused conformance test
-  also timed out with zero stdout/stderr. Release CLI execution, release build,
-  formatting, and benchmark commands remained healthy. Do not count Rust test
-  runs after this point as passed unless they produce normal harness output.
+  Rust test execution still appeared environment/toolchain-blocked in this
+  historical run: direct `paging-* --help` / `--list` timed out before Rust
+  harness output, and bounded `cargo test -q -p bonsai_hash --lib` plus the
+  focused conformance test also timed out with zero stdout/stderr. Release CLI
+  execution, release build, formatting, and benchmark commands remained
+  healthy. This note is superseded by the later clean-`target/` verification,
+  where fresh default-target harnesses launched normally.
 
 ## Fresh Examples Benchmark
 
@@ -1338,7 +1351,7 @@ Mapping of `docs/goal.md` requirements to current evidence:
 | Keep memory bounded and avoid retaining every full per-entry graph. | Current runs stay below guards: examples under `397 MB`, Redis under `816 MB`, OWASP under `853 MB`; Redis dense export uses compressed complete callgraph mode rather than materializing multi-GB path sets in memory. |
 | Expensive audit/export/prewarm work is explicit, observable, and exact. | Full `export --all` and benchmark harness capture phase summaries including chain mode, truncation counts, and propagation completeness; default index remains structural. |
 | Caches never determine correctness or hide stale facts. | Cache freshness invariant covers source, dependency metadata, matcher policy, rule/config, and pipeline versions; callgraph/dataflow/IDG/value-flow/taint/flow-id cache versions were bumped for the current semantic changes. |
-| Regression tests prove accuracy, cache behavior, and fast structural indexing. | Compile-time Rust coverage passes through `cargo check --tests` and `cargo test --no-run`; focused runtime regressions pass from a fresh target dir; after cleaning polluted `target/debug`, default-target resolver/callgraph tests pass with `38` callgraph tests and `27` resolver tests, architecture invariants pass with `45` tests, and rulepack conformance passes with `26` tests. |
+| Regression tests prove accuracy, cache behavior, and fast structural indexing. | Compile-time Rust coverage passes through `cargo check --tests` and `cargo test --no-run`; focused runtime regressions pass from a fresh target dir; after cleaning polluted `target/debug`, default-target test harnesses launch normally and `cargo test --workspace --no-fail-fast` passes, including rulepack conformance `28/28`, architecture invariants `45/45`, the 21-language CLI/security matrices, SARIF checks, doc tests, and cache/hot-reload coverage. |
 | Benchmarks cover `examples/`, Redis, and Java OWASP Benchmark with cold/warm time, RSS, cache, and finding counts. | Current examples, Redis, and OWASP sections above document cold/warm timings, RSS, row/finding counts, cache artifact bytes, and warm behavior, including the 2026-05-17 post-fix runs. |
 | Code remains scoped, deterministic, and professional. | `cargo fmt --all --check`, `git diff --check`, and focused `cargo clippy` pass; changes are confined to analysis semantics, tests, and documentation. |
 
@@ -1346,5 +1359,4 @@ Conclusion: the current release binary satisfies the active project goal's
 semantic over-fan, benchmark, memory, cache, test, rulepack, and cleanliness
 evidence requirements. The prior Rust runtime test hang was isolated to a
 polluted local `target/debug` tree and resolved by removing that tree; reliable
-default-target resolver/callgraph and architecture-invariant test execution is
-restored.
+default-target full-workspace test execution is restored.

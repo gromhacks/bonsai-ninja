@@ -209,7 +209,7 @@ impl DataFlowCache {
         if let Some(hit) = cached {
             return hit;
         }
-        let built = Arc::new(snapshot_call_graph(db));
+        let built = Arc::new(crate::build_resolved_call_graph_snapshot(db));
         let mut slot = self.cached_call_graph.write();
         if let Some(existing) = slot.as_ref().cloned() {
             return existing;
@@ -1231,36 +1231,6 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
         bonsai_factstore::FactStoreError::Io(e) => e,
         other => std::io::Error::other(other),
     }
-}
-
-fn snapshot_call_graph(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
-    let global = db.global_index();
-    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
-        global.as_ref(),
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-        |file| {
-            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                .into_iter()
-                .collect()
-        },
-        |file| {
-            db.vfs()
-                .path(file)
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-        },
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities().module_export_aliases)
-                .unwrap_or(&[])
-        },
-        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-        |file| {
-            db.adapter_for(file)
-                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
-        },
-    )
 }
 
 impl DataFlowCache {

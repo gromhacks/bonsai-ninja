@@ -221,11 +221,16 @@ fn syntect_cache() -> &'static SyntectCache {
 }
 
 impl SyntectCache {
-    fn highlight(&self, code: &str, extension: &str, theme: Theme) -> String {
-        let syntax: &SyntaxReference = self
-            .syntaxes
+    fn syntax_for_extension(&self, extension: &str) -> Option<&SyntaxReference> {
+        let extension = syntax_extension_alias(extension);
+        self.syntaxes
             .find_syntax_by_extension(extension)
             .or_else(|| self.syntaxes.find_syntax_by_name(extension))
+    }
+
+    fn highlight(&self, code: &str, extension: &str, theme: Theme) -> String {
+        let syntax: &SyntaxReference = self
+            .syntax_for_extension(extension)
             .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text());
         let theme_obj = self
             .themes
@@ -257,6 +262,14 @@ impl SyntectCache {
         }
         out.push_str("\x1b[0m");
         out
+    }
+}
+
+fn syntax_extension_alias(extension: &str) -> &str {
+    match extension {
+        "mjs" | "cjs" | "jsx" => "js",
+        "mts" | "cts" | "tsx" => "ts",
+        _ => extension,
     }
 }
 

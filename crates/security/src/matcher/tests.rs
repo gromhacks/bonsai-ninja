@@ -20,6 +20,21 @@ fn rule_from_yaml(yaml: &str, kind: crate::rule::RuleKind) -> Rule {
 }
 
 #[test]
+fn flow_read_attribute_match_requires_actual_qualified_token() {
+    let split_callback_tokens = split_read_token("function (req) { res.send(err.path); }");
+    assert!(
+        !tokens_contain_attribute(&split_callback_tokens, "req.path"),
+        "separate `req` and `err.path` tokens must not synthesize `req.path`"
+    );
+
+    let query_tokens = split_read_token("if (req.query.wsdl === \"\") { return req.query; }");
+    assert!(
+        tokens_contain_attribute(&query_tokens, "req.query"),
+        "real qualified request reads should still match their source rule"
+    );
+}
+
+#[test]
 fn collect_calls_includes_assignment_source_call_metadata() {
     let events = vec![FlowEvent::Assign {
         span: span(),
@@ -573,7 +588,6 @@ fn arg_int_compare_out_of_bounds_fails() {
     assert!(!super::arg_int_compare(&args, 1, |_| true));
 }
 
-
 // audit re-apply: R5 RED-before/GREEN-after: before the Yield arm, collect_cal
 
 #[test]
@@ -612,8 +626,7 @@ fn collect_calls_ignores_non_call_yield_value() {
     assert!(collect_calls(&events).is_empty());
 }
 
-
-// audit re-apply: H10 RED-before/GREEN-after (matcher portion): before adding 
+// audit re-apply: H10 RED-before/GREEN-after (matcher portion): before adding
 
 #[test]
 fn receiver_root_name_strips_kotlin_safe_call_sigil() {

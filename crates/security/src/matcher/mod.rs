@@ -9,11 +9,17 @@
 use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FileId, Span};
-use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, RefKind, TypeAliasBinding};
+use bonsai_lang_api::{
+    AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, ImportSpec, RefKind, TypeAliasBinding,
+};
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::Workspace;
 use regex::Regex;
 use std::{cell::RefCell, sync::Arc};
+
+const LOCAL_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_local_import_pkg__";
+const FILE_USES_REQ_FILES_MARKER: &str = "__bonsai_file_uses_req_files__";
+const MATCHER_FILE_FACT_CACHE_CAP: usize = 65_536;
 
 /// Current matcher policy fingerprint. The dataflow sidecar stores
 /// this value so matcher-policy upgrades invalidate cached graph
@@ -319,6 +325,29 @@ where
         &mut on_file_done,
         ConstraintMode::Strict,
         None,
+        None,
+    )
+}
+
+/// Batch matcher over a caller-filtered file set. Security production
+/// profile paths use this to avoid matching files that will be dropped
+/// by path filters anyway.
+pub(crate) fn match_rules_against_facts_with_progress_on_files<F>(
+    ws: &Workspace,
+    rules: &[&Rule],
+    files: &[FileId],
+    mut on_file_done: F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(),
+{
+    match_rules_against_facts_with_progress_and_mode(
+        ws,
+        rules,
+        &mut on_file_done,
+        ConstraintMode::Strict,
+        None,
+        Some(files),
     )
 }
 
@@ -338,6 +367,7 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
         &mut on_file_done,
         ConstraintMode::Strict,
         Some(taint_view),
+        None,
     )
 }
 
@@ -624,9 +654,10 @@ pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_ind
 /// semantic taint graph is authoritative for whether user-controlled
 /// data reaches a sink, so sink-side constraints are ignored in this
 /// mode.
-pub(crate) fn match_rules_against_facts_for_taint_with_progress<F>(
+pub(crate) fn match_rules_against_facts_for_taint_with_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
+    files: &[FileId],
     mut on_file_done: F,
 ) -> Vec<RuleMatch>
 where
@@ -638,6 +669,7 @@ where
         &mut on_file_done,
         ConstraintMode::TaintEndpoint,
         None,
+        Some(files),
     )
 }
 
@@ -645,9 +677,10 @@ where
 /// inventory lists every potential sink site, regardless of whether
 /// the current workspace has data flowing into it). All other
 /// constraints still apply.
-pub(crate) fn match_rules_against_facts_for_sink_inventory(
+pub(crate) fn match_rules_against_facts_for_sink_inventory_on_files(
     ws: &Workspace,
     rules: &[&Rule],
+    files: &[FileId],
 ) -> Vec<RuleMatch> {
     let mut on_file_done = || {};
     match_rules_against_facts_with_progress_and_mode(
@@ -656,6 +689,7 @@ pub(crate) fn match_rules_against_facts_for_sink_inventory(
         &mut on_file_done,
         ConstraintMode::SinkInventory,
         None,
+        Some(files),
     )
 }
 
@@ -665,6 +699,7 @@ fn match_rules_against_facts_with_progress_and_mode<F>(
     on_file_done: &mut F,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
+    scan_files: Option<&[FileId]>,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(),
@@ -672,8 +707,15 @@ where
     use rayon::prelude::*;
     let db = ws.db();
     let global = db.global_index();
+    let files: Vec<_> = scan_files
+        .map(|files| files.to_vec())
+        .unwrap_or_else(|| global.all_files().collect());
+    let total = files.len();
     let prepared: Vec<PreparedRule<'_>> = rules.iter().filter_map(|rule| PreparedRule::new(rule)).collect();
     if prepared.is_empty() {
+        for _ in 0..total {
+            on_file_done();
+        }
         return Vec::new();
     }
     let constructor_names = if prepared.iter().any(|r| r.rule.match_spec.kind == MatchKind::New) {
@@ -688,8 +730,6 @@ where
     // join. Match collection order is non-deterministic across
     // runs, but downstream callers already invoke `sort_matches` on
     // the returned Vec before emission to keep finding ids stable.
-    let files: Vec<_> = global.all_files().collect();
-    let total = files.len();
     let out: Vec<RuleMatch> = files
         .par_iter()
         .flat_map_iter(|&file| {
@@ -853,6 +893,15 @@ impl<'a> PreparedRule<'a> {
         if !self.requires_call_package_signal {
             return true;
         }
+        if self.request_object_source_allows_without_package(callee) {
+            return true;
+        }
+        if self.express_response_sink_allows_without_package(callee) {
+            return true;
+        }
+        if self.express_fileupload_mv_allows_without_package(callee, file_packages) {
+            return true;
+        }
         let mut candidates = Vec::new();
         push_unique_package_candidate(&mut candidates, callee);
         let push_target = |out: &mut Vec<String>, target: &AliasTarget| {
@@ -916,9 +965,90 @@ impl<'a> PreparedRule<'a> {
             (file_level_package_evidence_allowed && file_packages.contains(*signal))
                 || candidates
                     .iter()
+                    .any(|candidate| local_import_package_allows(file_packages, candidate, signal))
+                || candidates
+                    .iter()
                     .any(|candidate| crate::pkg::import_matches_package(candidate, signal))
         });
         allowed
+    }
+
+    fn request_object_source_allows_without_package(&self, callee: &str) -> bool {
+        if self.rule.kind != crate::rule::RuleKind::Source || self.rule.language != "javascript" {
+            return false;
+        }
+        let target = match self.rule.match_spec.kind {
+            MatchKind::Call | MatchKind::New | MatchKind::Missing => self.rule.match_spec.callee.as_ref(),
+            MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+                self.rule.match_spec.target.as_ref()
+            }
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        let is_express_signal = self
+            .package_signals
+            .iter()
+            .any(|signal| matches!(*signal, "express" | "@nestjs/platform-express"));
+        if !is_express_signal {
+            return false;
+        }
+        let target_is_req_member = target
+            .attribute
+            .as_ref()
+            .is_some_and(|attr| attr.first().is_some_and(|head| head == "req"))
+            || target.base_name_in.iter().any(|base| base == "req")
+            || target
+                .regex
+                .as_deref()
+                .is_some_and(|regex| regex.starts_with("^req\\."));
+        target_is_req_member && callee.starts_with("req.")
+    }
+
+    fn express_response_sink_allows_without_package(&self, callee: &str) -> bool {
+        if self.rule.kind != crate::rule::RuleKind::Sink || self.rule.language != "javascript" {
+            return false;
+        }
+        let target = match self.rule.match_spec.kind {
+            MatchKind::Call | MatchKind::New | MatchKind::Missing => self.rule.match_spec.callee.as_ref(),
+            MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+                self.rule.match_spec.target.as_ref()
+            }
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        let is_express_signal = self.package_signals.iter().any(|signal| *signal == "express");
+        if !is_express_signal {
+            return false;
+        }
+        let target_is_res_member = target
+            .attribute
+            .as_ref()
+            .is_some_and(|attr| attr.first().is_some_and(|head| head == "res"))
+            || target
+                .regex
+                .as_deref()
+                .is_some_and(|regex| regex.starts_with("^res\\."));
+        target_is_res_member && callee.starts_with("res.")
+    }
+
+    fn express_fileupload_mv_allows_without_package(
+        &self,
+        callee: &str,
+        file_packages: &AHashSet<String>,
+    ) -> bool {
+        if self.rule.kind != crate::rule::RuleKind::Sink || self.rule.language != "javascript" {
+            return false;
+        }
+        if self.rule.id != "javascript.upload.express_fileupload_mv_any_file" {
+            return false;
+        }
+        self.package_signals
+            .iter()
+            .any(|signal| *signal == "express-fileupload")
+            && callee.ends_with(".mv")
+            && file_packages.contains(FILE_USES_REQ_FILES_MARKER)
     }
 
     fn file_level_package_evidence_allowed(&self) -> bool {
@@ -1019,6 +1149,16 @@ fn push_unique_package_candidate(out: &mut Vec<String>, value: &str) {
     if !value.is_empty() && !out.iter().any(|existing| existing == value) {
         out.push(value.to_string());
     }
+}
+
+fn local_import_package_marker(module: &str, package: &str) -> String {
+    format!("{LOCAL_IMPORT_PACKAGE_PREFIX}:{module}:{package}")
+}
+
+fn local_import_package_allows(file_packages: &AHashSet<String>, candidate: &str, signal: &str) -> bool {
+    file_packages.contains(&local_import_package_marker(candidate, signal))
+        || split_call_head_tail(candidate)
+            .is_some_and(|(head, _)| file_packages.contains(&local_import_package_marker(head, signal)))
 }
 
 fn match_base_name(text: &str) -> Option<&str> {
@@ -1445,6 +1585,28 @@ fn scan_calls_batch(
     let decls = global.decls_in(file);
     let bundle = decl_match_facts_for(ws, file);
     let mut decl_call_keys: AHashSet<(String, u64)> = AHashSet::new();
+    let mut wildcard_rules = Vec::new();
+    let mut keyed_rules: AHashMap<String, Vec<&PreparedRule<'_>>> = AHashMap::new();
+    for &rule in rules {
+        if rule.regex.is_some() {
+            wildcard_rules.push(rule);
+            continue;
+        }
+        let mut inserted = false;
+        if let Some(name) = rule.name {
+            insert_call_rule_key(&mut keyed_rules, name, rule);
+            inserted = true;
+        }
+        if let Some(attribute) = rule.attribute {
+            for part in attribute {
+                insert_call_rule_key(&mut keyed_rules, part, rule);
+                inserted = true;
+            }
+        }
+        if !inserted {
+            wildcard_rules.push(rule);
+        }
+    }
 
     for decl in decls {
         let fn_name = decl.name.clone();
@@ -1453,7 +1615,18 @@ fn scan_calls_batch(
         };
         for call in &facts.calls {
             decl_call_keys.insert((call.callee.clone(), call.span.start));
-            for prepared in rules {
+            let mut candidate_rules = Vec::new();
+            for &rule in &wildcard_rules {
+                push_unique_prepared_rule(&mut candidate_rules, rule);
+            }
+            for key in call_candidate_keys(&call.callee, &facts.alias_map) {
+                if let Some(bucket) = keyed_rules.get(&key) {
+                    for &rule in bucket {
+                        push_unique_prepared_rule(&mut candidate_rules, rule);
+                    }
+                }
+            }
+            for prepared in candidate_rules {
                 if !decl_target_context_allows(
                     global.as_ref(),
                     Some(decl),
@@ -1628,6 +1801,71 @@ fn scan_calls_batch(
             });
         }
     }
+}
+
+fn insert_call_rule_key<'r, 'rule>(
+    keyed_rules: &mut AHashMap<String, Vec<&'r PreparedRule<'rule>>>,
+    key: &str,
+    rule: &'r PreparedRule<'rule>,
+) {
+    let key = key.trim();
+    if key.is_empty() {
+        return;
+    }
+    let bucket = keyed_rules.entry(key.to_string()).or_default();
+    push_unique_prepared_rule(bucket, rule);
+}
+
+fn push_unique_prepared_rule<'r, 'rule>(
+    out: &mut Vec<&'r PreparedRule<'rule>>,
+    rule: &'r PreparedRule<'rule>,
+) {
+    if !out.iter().any(|existing| std::ptr::eq(*existing, rule)) {
+        out.push(rule);
+    }
+}
+
+fn call_candidate_keys(
+    callee: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_call_candidate_keys(callee, &mut out);
+    if !alias_map.is_empty() {
+        if let Some(bare) = callee.split(&['.', ':'][..]).next() {
+            if let Some(target) = alias_map.get(bare) {
+                let tail = &callee[bare.len()..];
+                let expanded = match target {
+                    AliasTarget::Member { module, member } => format!("{module}.{member}{tail}"),
+                    AliasTarget::Namespace { module } => format!("{module}{tail}"),
+                    AliasTarget::Type { type_name } => format!("{type_name}{tail}"),
+                };
+                collect_call_candidate_keys(&expanded, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn collect_call_candidate_keys(callee: &str, out: &mut Vec<String>) {
+    let normalized = normalize_callee_for_matching(callee);
+    push_unique_call_key(out, &normalized);
+    for sep in [".", "::", "->", "\\", ":", "/"] {
+        if let Some(tail) = normalized.rsplit(sep).next() {
+            push_unique_call_key(out, tail);
+        }
+    }
+    for token in normalized.split(|ch: char| !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())) {
+        push_unique_call_key(out, token);
+    }
+}
+
+fn push_unique_call_key(out: &mut Vec<String>, key: &str) {
+    let key = key.trim().trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+    if key.is_empty() || out.iter().any(|existing| existing == key) {
+        return;
+    }
+    out.push(key.to_string());
 }
 
 /// Fire each Missing rule on every function-shaped decl in `file`
@@ -1996,17 +2234,108 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
             {
                 insert_import_target_prefixes(&mut out, stripped);
             }
+            if let Some(imported_file) = resolve_relative_import_file(ws, file, &spec.module) {
+                for package in direct_package_imports_for_file(ws, imported_file) {
+                    insert_local_import_package_markers(&mut out, spec, &package);
+                }
+            }
         }
+    }
+    if ws
+        .db()
+        .vfs()
+        .snapshot(file)
+        .is_ok_and(|snapshot| snapshot.text.contains("req.files"))
+    {
+        out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
     }
     if let Some(workspace_packages) = workspace_packages {
         out.extend(workspace_packages.packages.iter().cloned());
     }
     let out = Arc::new(out);
     let mut write = FILE_PACKAGE_SET_CACHE.write();
-    if write.len() >= 4096 {
+    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
         write.clear();
     }
     write.entry(key).or_insert_with(|| out.clone()).clone()
+}
+
+fn direct_package_imports_for_file(ws: &Workspace, file: FileId) -> AHashSet<String> {
+    let mut out = AHashSet::new();
+    let Some(imports) = ws.db().import_index(file) else {
+        return out;
+    };
+    for spec in &imports.imports {
+        if spec.module.starts_with('.') {
+            continue;
+        }
+        insert_import_target_prefixes(&mut out, &spec.module);
+    }
+    out
+}
+
+fn insert_local_import_package_markers(out: &mut AHashSet<String>, spec: &ImportSpec, package: &str) {
+    out.insert(local_import_package_marker(&spec.module, package));
+    if let Some(alias) = &spec.alias {
+        out.insert(local_import_package_marker(alias, package));
+    }
+    if let Some(original_name) = &spec.original_name {
+        out.insert(local_import_package_marker(original_name, package));
+    }
+    if let Some(stem) = spec
+        .module
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.split('.').next())
+        .filter(|stem| !stem.is_empty())
+    {
+        out.insert(local_import_package_marker(stem, package));
+    }
+}
+
+fn resolve_relative_import_file(ws: &Workspace, importer: FileId, module: &str) -> Option<FileId> {
+    if !module.starts_with('.') {
+        return None;
+    }
+    let importer_path = ws.vfs().path(importer).ok()?;
+    let base_dir = importer_path.parent()?;
+    let raw = normalize_path(&base_dir.join(module));
+    let candidates = relative_import_candidates(&raw);
+    ws.vfs().all_files().into_iter().find(|file| {
+        let Ok(path) = ws.vfs().path(*file) else {
+            return false;
+        };
+        candidates.iter().any(|candidate| path.as_ref() == candidate)
+    })
+}
+
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            _ => out.push(component.as_os_str()),
+        }
+    }
+    out
+}
+
+fn relative_import_candidates(raw: &std::path::Path) -> Vec<std::path::PathBuf> {
+    const EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
+    let mut out = Vec::new();
+    out.push(raw.to_path_buf());
+    if raw.extension().is_none() {
+        for ext in EXTENSIONS {
+            out.push(raw.with_extension(ext));
+        }
+        for ext in EXTENSIONS {
+            out.push(raw.join(format!("index.{ext}")));
+        }
+    }
+    out
 }
 
 fn workspace_manifest_package_context_allowed(ws: &Workspace, file: FileId) -> bool {
@@ -2123,7 +2452,7 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle
     }
     let bundle = Arc::new(FileDeclFactsBundle { by_decl_span });
     let mut write = DECL_FACTS_CACHE.write();
-    if write.len() >= 1024 {
+    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
         write.clear();
     }
     write.entry(key).or_insert_with(|| bundle.clone()).clone()
@@ -2440,9 +2769,7 @@ fn flow_read_rule_match(prepared: &PreparedRule<'_>, tokens: &[String]) -> Optio
     }
     if let Some(attr) = prepared.attribute {
         let joined = attr.join(".");
-        if prepared.base_name_allows(&joined)
-            && attr.iter().all(|part| tokens.iter().any(|token| token == part))
-        {
+        if prepared.base_name_allows(&joined) && tokens_contain_attribute(tokens, &joined) {
             return Some(joined);
         }
     }
@@ -2461,6 +2788,15 @@ fn flow_read_rule_match(prepared: &PreparedRule<'_>, tokens: &[String]) -> Optio
         }
     }
     None
+}
+
+fn tokens_contain_attribute(tokens: &[String], joined: &str) -> bool {
+    tokens.iter().any(|token| {
+        token == joined
+            || token
+                .strip_prefix(joined)
+                .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
+    })
 }
 
 fn base_param_index_allows(
@@ -2600,18 +2936,25 @@ fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String
             FlowEvent::Call {
                 span, receiver, args, ..
             } => {
-                let mut tokens = Vec::new();
                 if let Some(receiver) = receiver {
+                    let mut tokens = Vec::new();
                     tokens.extend(split_read_token(receiver));
+                    if !tokens.is_empty() {
+                        out.push((*span, tokens));
+                    }
                 }
                 for arg in args {
+                    let mut tokens = Vec::new();
                     tokens.extend(split_read_token(&arg.value_text));
                     if let Some(place) = &arg.place {
                         tokens.extend(split_read_token(place));
                     }
-                }
-                if !tokens.is_empty() {
-                    out.push((*span, tokens));
+                    for source in &arg.source_names {
+                        tokens.extend(split_read_token(source));
+                    }
+                    if !tokens.is_empty() {
+                        out.push((arg.span, tokens));
+                    }
                 }
             }
             FlowEvent::Assign {
@@ -2693,17 +3036,28 @@ fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String
 }
 
 /// Tokenize an expression into identifier tokens. Splits on every
-/// non-identifier char so `obj.field[i]` yields `[obj, field, i]`.
+/// non-identifier char so `obj.field[i]` yields `[obj, field, i]`,
+/// while also preserving qualified chains such as `obj.field`.
 /// Used by `flow_read_rule_match` to detect read-rule hits inside
 /// argument expressions.
 fn split_read_token(value: &str) -> Vec<String> {
-    value
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
-        .filter_map(|part| {
-            let part = part.trim().trim_start_matches('$');
-            (!part.is_empty()).then(|| part.to_string())
-        })
-        .collect()
+    let mut out = Vec::new();
+    fn push_unique(out: &mut Vec<String>, part: &str) {
+        let part = part.trim().trim_start_matches('$').trim_matches('.');
+        if part.is_empty() || out.iter().any(|existing| existing == part) {
+            return;
+        }
+        out.push(part.to_string());
+    }
+    for part in value.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '.')) {
+        if part.contains('.') {
+            push_unique(&mut out, part);
+        }
+    }
+    for part in value.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')) {
+        push_unique(&mut out, part);
+    }
+    out
 }
 
 /// Tokenize a `return EXPR` value. When the expression is a call,
@@ -3347,22 +3701,7 @@ fn collect_runtime_type_narrowings(events: &[FlowEvent]) -> Vec<RuntimeTypeNarro
 /// event in `events`. Returns `None` for an empty list.
 fn events_span(events: &[FlowEvent]) -> Option<(u64, u64)> {
     fn flow_span(event: &FlowEvent) -> (u64, u64) {
-        let span = match event {
-            FlowEvent::Call { span, .. }
-            | FlowEvent::Branch { span, .. }
-            | FlowEvent::Loop { span, .. }
-            | FlowEvent::Assign { span, .. }
-            | FlowEvent::Return { span, .. }
-            | FlowEvent::Throw { span, .. }
-            | FlowEvent::Try { span, .. }
-            | FlowEvent::Break { span, .. }
-            | FlowEvent::Continue { span, .. }
-            | FlowEvent::Yield { span, .. }
-            | FlowEvent::Await { span, .. }
-            | FlowEvent::Defer { span, .. }
-            | FlowEvent::Using { span, .. }
-            | FlowEvent::Lifecycle { span, .. } => span,
-        };
+        let span = event.span();
         (span.start, span.end)
     }
     let mut start: Option<u64> = None;
@@ -4823,7 +5162,7 @@ fn resolve_span(ws: &Workspace, file: FileId, span: Span) -> (String, u32, u32) 
         .map(|file_path| file_path.to_string_lossy().into_owned())
         .unwrap_or_default();
     if let Ok(snapshot) = ws.vfs().snapshot(file) {
-        let span_map = bonsai_common::cached_span_map(file, snapshot.version, snapshot.text.as_ref());
+        let span_map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
         let line_col = span_map.line_col(span.start);
         return (path, line_col.line, line_col.column);
     }
@@ -4968,17 +5307,17 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
                     let mut sorted: Vec<&String> = fields.iter().collect();
                     sorted.sort();
                     for field_name in sorted {
-                        if !flow_reads_token(&decl.flow_events, field_name) {
+                        let Some(read_span) = flow_read_token_span(&decl.flow_events, field_name) else {
                             continue;
-                        }
-                        let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
+                        };
+                        let (file_path, line, col) = resolve_span(ws, file, read_span);
                         out.push(RuleMatch {
                             rule_id: "entry-point.class_field.inherited".to_string(),
                             language: language.clone(),
                             file: file_path,
                             line,
                             column: col,
-                            span: decl.name_span,
+                            span: read_span,
                             match_text: field_name.clone(),
                             enclosing_fn: Some(decl.name.clone()),
                         });
@@ -4990,19 +5329,22 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
     out
 }
 
-fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
+fn flow_read_token_span(events: &[FlowEvent], token: &str) -> Option<Span> {
     for event in events {
         match event {
-            FlowEvent::Call { receiver, args, .. } => {
+            FlowEvent::Call {
+                span, receiver, args, ..
+            } => {
                 if receiver.as_deref() == Some(token)
                     || args
                         .iter()
                         .any(|arg| arg.place.as_deref() == Some(token) || arg.value_text.trim() == token)
                 {
-                    return true;
+                    return Some(*span);
                 }
             }
             FlowEvent::Assign {
+                span,
                 source_name,
                 source_names,
                 source_call_args,
@@ -5012,26 +5354,27 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
                     || source_names.iter().any(|name| name == token)
                     || source_call_args.iter().any(|arg| arg.trim() == token)
                 {
-                    return true;
+                    return Some(*span);
                 }
             }
             FlowEvent::Return {
+                span,
                 value_text,
                 value_name,
                 ..
             } => {
                 if value_text.as_deref() == Some(token) || value_name.as_deref() == Some(token) {
-                    return true;
+                    return Some(*span);
                 }
             }
-            FlowEvent::Throw { value_name, .. } => {
+            FlowEvent::Throw { span, value_name, .. } => {
                 if value_name.as_deref() == Some(token) {
-                    return true;
+                    return Some(*span);
                 }
             }
-            FlowEvent::Yield { value_text, .. } => {
+            FlowEvent::Yield { span, value_text } => {
                 if value_text.as_deref() == Some(token) {
-                    return true;
+                    return Some(*span);
                 }
             }
             FlowEvent::Branch {
@@ -5039,13 +5382,15 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
                 else_events,
                 ..
             } => {
-                if flow_reads_token(then_events, token) || flow_reads_token(else_events, token) {
-                    return true;
+                if let Some(span) = flow_read_token_span(then_events, token)
+                    .or_else(|| flow_read_token_span(else_events, token))
+                {
+                    return Some(span);
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if flow_reads_token(body, token) {
-                    return true;
+                if let Some(span) = flow_read_token_span(body, token) {
+                    return Some(span);
                 }
             }
             FlowEvent::Try {
@@ -5054,17 +5399,17 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
                 finally_events,
                 ..
             } => {
-                if flow_reads_token(body, token)
-                    || flow_reads_token(catch_events, token)
-                    || flow_reads_token(finally_events, token)
+                if let Some(span) = flow_read_token_span(body, token)
+                    .or_else(|| flow_read_token_span(catch_events, token))
+                    .or_else(|| flow_read_token_span(finally_events, token))
                 {
-                    return true;
+                    return Some(span);
                 }
             }
             _ => {}
         }
     }
-    false
+    None
 }
 
 /// Scan every class's methods for `Assign { target: qualified_field_name,

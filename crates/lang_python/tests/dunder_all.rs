@@ -1,7 +1,7 @@
-//! P1.1: `__all__` public-surface narrowing. A top-level
-//! `__all__ = [...]` declares the module's explicit exports; decls
-//! whose name isn't in the list become `Visibility::Module` so the
-//! resolver narrows cross-module candidate sets.
+//! `__all__` is a wildcard-import surface, not a visibility boundary.
+//! Omitted top-level helpers remain explicitly importable and
+//! module-qualified, so the adapter must not downgrade them to
+//! `Visibility::Module` and hide source-to-sink flows through helpers.
 
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{LanguageRegistry, Visibility};
@@ -30,7 +30,7 @@ fn visibility_of(db: &AnalyzerDb, name: &str) -> Visibility {
 }
 
 #[test]
-fn dunder_all_narrows_unlisted_top_level_decls() {
+fn dunder_all_keeps_unlisted_top_level_decls_public() {
     let src = r#"
 __all__ = ["public_api"]
 
@@ -48,8 +48,8 @@ def helper(x):
     );
     assert_eq!(
         visibility_of(&db, "helper"),
-        Visibility::Module,
-        "top-level name absent from __all__ becomes Module-private"
+        Visibility::Public,
+        "top-level name absent from __all__ remains explicitly importable"
     );
 }
 
@@ -65,7 +65,7 @@ def internal(): pass
     let db = db_with(src);
     assert_eq!(visibility_of(&db, "api_a"), Visibility::Public);
     assert_eq!(visibility_of(&db, "api_b"), Visibility::Public);
-    assert_eq!(visibility_of(&db, "internal"), Visibility::Module);
+    assert_eq!(visibility_of(&db, "internal"), Visibility::Public);
 }
 
 #[test]
@@ -98,8 +98,8 @@ def helper(): pass
 
 #[test]
 fn dunder_all_does_not_affect_class_methods() {
-    // Class methods are nested decls; __all__ controls module-level
-    // surface only.
+    // Class methods are nested decls; __all__ controls wildcard
+    // imports only.
     let src = r#"
 __all__ = ["Cls"]
 
@@ -114,6 +114,6 @@ def utility(): pass
     // Methods stay at Public since __all__ doesn't gate them.
     assert_eq!(visibility_of(&db, "public_method"), Visibility::Public);
     assert_eq!(visibility_of(&db, "helper_method"), Visibility::Public);
-    // utility (top-level, not in __all__) becomes Module.
-    assert_eq!(visibility_of(&db, "utility"), Visibility::Module);
+    // utility (top-level, not in __all__) remains explicitly importable.
+    assert_eq!(visibility_of(&db, "utility"), Visibility::Public);
 }

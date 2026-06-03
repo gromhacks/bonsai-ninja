@@ -432,7 +432,10 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     // unwrap to the `left` binding first. Mirror the TS routing through
     // `binding_tokens_from_pattern` so both languages expand identically.
     let mut pattern_node = param;
-    if matches!(pattern_node.kind(), "assignment_pattern" | "object_assignment_pattern") {
+    if matches!(
+        pattern_node.kind(),
+        "assignment_pattern" | "object_assignment_pattern"
+    ) {
         if let Some(left) = pattern_node.child_by_field_name("left") {
             pattern_node = left;
         }

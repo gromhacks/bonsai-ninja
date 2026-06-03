@@ -287,26 +287,8 @@ fn identifier_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-/// Span lookup for any `FlowEvent` variant. Centralizes the match so the
-/// caller doesn't repeat it whenever we need to compare or partition events
-/// by source position.
 fn event_span(event: &FlowEvent) -> Option<Span> {
-    match event {
-        FlowEvent::Call { span, .. }
-        | FlowEvent::Branch { span, .. }
-        | FlowEvent::Loop { span, .. }
-        | FlowEvent::Assign { span, .. }
-        | FlowEvent::Return { span, .. }
-        | FlowEvent::Throw { span, .. }
-        | FlowEvent::Try { span, .. }
-        | FlowEvent::Break { span, .. }
-        | FlowEvent::Continue { span, .. }
-        | FlowEvent::Yield { span, .. }
-        | FlowEvent::Await { span, .. }
-        | FlowEvent::Defer { span, .. }
-        | FlowEvent::Using { span, .. }
-        | FlowEvent::Lifecycle { span, .. } => Some(*span),
-    }
+    Some(event.span())
 }
 
 /// Find the first occurrence of `keyword` that isn't part of a longer

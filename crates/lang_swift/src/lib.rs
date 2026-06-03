@@ -1,15 +1,16 @@
 //! Swift language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_assign_targets, collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler,
+    extract_imports_via,
     kit::{
-        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
-        first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
-        walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes, first_named_child_of_kind,
+        language_from_pack, node_text, parse_with, span_of, walk_flow_events,
+        with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, AssignValueKind, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
-    LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
+    FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
 
@@ -767,28 +768,15 @@ fn strip_swift_import_attribute_prefixes(text: &str) -> &str {
 /// access (`data.cmd`) so the 1-level receiver-field bridge can
 /// thread taint to the record/component accessor; otherwise it's a
 /// single `Return` with the body text.
-fn synthesize_swift_computed_property_decls(
-    idx: &mut DeclIndex,
-    file: FileId,
-    tree: &Tree,
-    src: &[u8],
-) {
-    let mut next = idx
-        .defs
-        .iter()
-        .map(|d| d.symbol.raw())
-        .max()
-        .map_or(1, |m| m + 1);
+fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
+    let mut next = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(1, |m| m + 1);
     let mut synthesized: Vec<Decl> = Vec::new();
     for prop in collect_kinds(tree, &["property_declaration"]) {
         // Only handle computed properties — a `computed_value:
         // computed_property` child. Stored properties (no body) are
         // already represented via `let x: T` field bindings.
         let mut pw = prop.walk();
-        let Some(computed) = prop
-            .children(&mut pw)
-            .find(|c| c.kind() == "computed_property")
-        else {
+        let Some(computed) = prop.children(&mut pw).find(|c| c.kind() == "computed_property") else {
             continue;
         };
         // Property name lives under `name: pattern > bound_identifier:
@@ -806,58 +794,53 @@ fn synthesize_swift_computed_property_decls(
         let body_span = span_of(file, &computed);
         // Find enclosing class/struct/protocol/extension decl for
         // parent + module path + visibility lookup.
-        let Some((parent, module_path, visibility)) =
-            swift_enclosing_type_decl(idx, prop, file)
-        else {
+        let Some((parent, module_path, visibility)) = swift_enclosing_type_decl(idx, prop, file) else {
             continue;
         };
         // Skip if a sibling decl with the same name + zero-arg
         // already exists (e.g. an explicit `get` accessor).
-        if idx
-            .defs
-            .iter()
-            .chain(synthesized.iter())
-            .any(|d| {
-                d.parent == parent && d.name == name && d.params.is_empty()
-                    && matches!(d.kind, DeclKind::Method | DeclKind::Function)
-            })
-        {
+        if idx.defs.iter().chain(synthesized.iter()).any(|d| {
+            d.parent == parent
+                && d.name == name
+                && d.params.is_empty()
+                && matches!(d.kind, DeclKind::Method | DeclKind::Function)
+        }) {
             continue;
         }
         // Body shape: Call+Return when it's a dotted member access,
         // else single Return with the body text.
-        let flow_events = if let Some((call_receiver, call_name)) =
-            swift_dotted_member_access_parts(&body_text)
-        {
-            let receiver_types =
-                swift_lookup_member_type(prop, &call_receiver, src).into_iter().collect();
-            vec![
-                FlowEvent::Call {
-                    span: body_span,
-                    name: call_name.clone(),
-                    receiver: Some(call_receiver),
-                    receiver_types,
-                    call_kind: CallKind::Method,
-                    args: Vec::new(),
-                },
-                FlowEvent::Return {
-                    span: body_span,
-                    value_text: Some(format!("{call_name}()")),
-                    value_name: None,
-                },
-            ]
-        } else {
-            let qualified = if body_text.starts_with("self.") || body_text.starts_with("super.") {
-                body_text.clone()
+        let flow_events =
+            if let Some((call_receiver, call_name)) = swift_dotted_member_access_parts(&body_text) {
+                let receiver_types = swift_lookup_member_type(prop, &call_receiver, src)
+                    .into_iter()
+                    .collect();
+                vec![
+                    FlowEvent::Call {
+                        span: body_span,
+                        name: call_name.clone(),
+                        receiver: Some(call_receiver),
+                        receiver_types,
+                        call_kind: CallKind::Method,
+                        args: Vec::new(),
+                    },
+                    FlowEvent::Return {
+                        span: body_span,
+                        value_text: Some(format!("{call_name}()")),
+                        value_name: None,
+                    },
+                ]
             } else {
-                format!("self.{body_text}")
+                let qualified = if body_text.starts_with("self.") || body_text.starts_with("super.") {
+                    body_text.clone()
+                } else {
+                    format!("self.{body_text}")
+                };
+                vec![FlowEvent::Return {
+                    span: body_span,
+                    value_text: Some(qualified.clone()),
+                    value_name: Some(qualified),
+                }]
             };
-            vec![FlowEvent::Return {
-                span: body_span,
-                value_text: Some(qualified.clone()),
-                value_name: Some(qualified),
-            }]
-        };
         // Name span: the simple_identifier under `name: pattern`.
         let name_span = swift_property_name_span(prop, file).unwrap_or(body_span);
         synthesized.push(Decl {
@@ -946,9 +929,7 @@ fn swift_property_name_span(prop: Node<'_>, file: FileId) -> Option<Span> {
 /// expression we want.
 fn swift_computed_body_text(computed: Node<'_>, src: &[u8]) -> Option<String> {
     let mut cw = computed.walk();
-    let stmts = computed
-        .children(&mut cw)
-        .find(|c| c.kind() == "statements")?;
+    let stmts = computed.children(&mut cw).find(|c| c.kind() == "statements")?;
     let mut sw = stmts.walk();
     let named: Vec<_> = stmts.children(&mut sw).filter(|c| c.is_named()).collect();
     let expr = named.last().copied()?;
@@ -982,7 +963,10 @@ fn swift_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
     for seg in &segments {
         if seg.is_empty()
             || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || !seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !seg
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         {
             return None;
         }
@@ -1051,7 +1035,9 @@ fn swift_lookup_member_type(prop: Node<'_>, member: &str, src: &[u8]) -> Option<
         if child.kind() != "property_declaration" {
             continue;
         }
-        let Some(name) = swift_property_name(child, src) else { continue };
+        let Some(name) = swift_property_name(child, src) else {
+            continue;
+        };
         if name != member {
             continue;
         }
@@ -1083,7 +1069,11 @@ fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
     let getter_names: HashSet<String> = index
         .defs
         .iter()
-        .filter(|d| matches!(d.kind, DeclKind::Method | DeclKind::Function) && d.params.is_empty() && !d.name.is_empty())
+        .filter(|d| {
+            matches!(d.kind, DeclKind::Method | DeclKind::Function)
+                && d.params.is_empty()
+                && !d.name.is_empty()
+        })
         .map(|d| d.name.clone())
         .collect();
     if getter_names.is_empty() {
@@ -1094,160 +1084,15 @@ fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
             continue;
         }
         let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
-        swift_collect_assign_targets(&decl.flow_events, &mut locals);
-        swift_rewrite_member_reads(&mut decl.flow_events, &getter_names, &locals);
-    }
-}
-
-/// Walk the flow-event tree and collect every assignment target name
-/// — used to mask shadowing locals out of the qualify pass below.
-fn swift_collect_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
-    for event in events {
-        match event {
-            FlowEvent::Assign { target, .. } => {
-                if !target.is_empty() {
-                    out.insert(target.trim().to_string());
-                }
-            }
-            // Recurse through nested-vec variants so a `let c = cmd`
-            // hidden inside an if/guard/do-catch arm isn't missed.
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                swift_collect_assign_targets(then_events, out);
-                swift_collect_assign_targets(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                swift_collect_assign_targets(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                swift_collect_assign_targets(body, out);
-                swift_collect_assign_targets(catch_events, out);
-                swift_collect_assign_targets(finally_events, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Rewrite each bare-property read (`let c = cmd`) into a
-/// `Call{name:"cmd"} + Assign{source_call:"cmd"}` pair so the
-/// interprocedural receiver-field bridge can route caller-receiver
-/// taint through the computed property. See
-/// `qualify_swift_implicit_member_reads`.
-fn swift_rewrite_member_reads(
-    events: &mut Vec<FlowEvent>,
-    getters: &std::collections::HashSet<String>,
-    locals: &std::collections::HashSet<String>,
-) {
-    // Pass 1: recurse first so insertions in pass 2 don't shift
-    // indices the inner walks would have used.
-    for event in events.iter_mut() {
-        match event {
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                swift_rewrite_member_reads(then_events, getters, locals);
-                swift_rewrite_member_reads(else_events, getters, locals);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                swift_rewrite_member_reads(body, getters, locals);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                swift_rewrite_member_reads(body, getters, locals);
-                swift_rewrite_member_reads(catch_events, getters, locals);
-                swift_rewrite_member_reads(finally_events, getters, locals);
-            }
-            _ => {}
-        }
-    }
-    // Pass 2: walk this level with an explicit index so insertions
-    // don't invalidate the loop.
-    let mut idx = 0usize;
-    while idx < events.len() {
-        // Decide qualify-eligibility without holding a mut borrow yet.
-        let (qualify_name, span) = match &events[idx] {
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_call,
-                span,
-                ..
-            } => {
-                if source_call.is_some() {
-                    // Already converted — skip.
-                    (None, *span)
-                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
-                    // Only qualify zero-arg-member reads that aren't
-                    // shadowed locals and aren't self-assigns.
-                    if getters.contains(&name)
-                        && !locals.contains(&name)
-                        && name != target.trim()
-                    {
-                        (Some(name), *span)
-                    } else {
-                        (None, *span)
-                    }
-                } else {
-                    (None, *span)
-                }
-            }
-            _ => {
-                idx += 1;
-                continue;
-            }
-        };
-        let Some(name) = qualify_name else {
-            idx += 1;
-            continue;
-        };
-        // Step A — Assign goes to a `source_call` shape so c gets
-        // bridged from the cmd-call's CallRet.
-        if let FlowEvent::Assign {
-            source_name,
-            source_call,
-            source_call_args,
-            source_names,
-            value_kind,
-            ..
-        } = &mut events[idx]
-        {
-            *source_call = Some(name.clone());
-            *source_call_args = Vec::new();
-            *source_name = None;
-            source_names.retain(|s| s.trim() != name);
-            *value_kind = Some(AssignValueKind::CallResult);
-        }
-        // Step B — explicit Call event before the Assign; its
-        // args-empty fallback synthesizes the recv-slot the bridge
-        // needs (mirrors Java's `String c = cmd();` shape).
-        events.insert(
-            idx,
-            FlowEvent::Call {
-                span,
-                name: name.clone(),
+        collect_assign_targets(&decl.flow_events, &mut locals);
+        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
+            ImplicitMemberReadCall {
+                source_call: name.to_string(),
+                call_name: name.to_string(),
                 receiver: None,
-                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
-                args: Vec::new(),
-            },
-        );
-        // Skip past both the inserted Call and the modified Assign.
-        idx += 2;
+            }
+        });
     }
 }
 
@@ -1257,19 +1102,9 @@ fn swift_rewrite_member_reads(
 /// `var`/`let` property; without surfacing this to the IDG,
 /// `Envelope(kind:, cmd:, ...)` resolves to nothing and field-
 /// projection never reaches the caller's allocation.
-fn synthesize_swift_memberwise_struct_inits(
-    idx: &mut DeclIndex,
-    file: FileId,
-    tree: &Tree,
-    src: &[u8],
-) {
+fn synthesize_swift_memberwise_struct_inits(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     use bonsai_lang_api::FieldWrite;
-    let mut next = idx
-        .defs
-        .iter()
-        .map(|d| d.symbol.raw())
-        .max()
-        .map_or(1, |m| m + 1);
+    let mut next = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(1, |m| m + 1);
     let mut synthesized: Vec<Decl> = Vec::new();
     // Tree-sitter-swift unifies `class`, `struct`, `enum`, and
     // `actor` under `class_declaration`. Disambiguate by inspecting
@@ -1331,13 +1166,13 @@ fn synthesize_swift_memberwise_struct_inits(
             // Skip computed properties (they have a `computed_value`
             // child) — those aren't part of the memberwise init.
             let mut pw = child.walk();
-            let has_computed = child
-                .children(&mut pw)
-                .any(|c| c.kind() == "computed_property");
+            let has_computed = child.children(&mut pw).any(|c| c.kind() == "computed_property");
             if has_computed {
                 continue;
             }
-            let Some(name) = swift_property_name(child, src) else { continue };
+            let Some(name) = swift_property_name(child, src) else {
+                continue;
+            };
             let span = swift_property_name_span(child, file).unwrap_or(span_of(file, &child));
             params.push((name, span));
         }
@@ -1387,7 +1222,9 @@ fn synthesize_swift_memberwise_struct_inits(
         // Method on `Envelope` and the chain stops at the struct boundary.
         for (name, span) in &params {
             let already = idx.defs.iter().chain(synthesized.iter()).any(|d| {
-                d.parent == Some(parent_sym) && d.name == *name && d.params.is_empty()
+                d.parent == Some(parent_sym)
+                    && d.name == *name
+                    && d.params.is_empty()
                     && matches!(d.kind, DeclKind::Method | DeclKind::Function)
             });
             if already {
@@ -1441,7 +1278,11 @@ fn synthesize_swift_constructor_implicit_returns(index: &mut DeclIndex) {
         if !matches!(decl.kind, DeclKind::Constructor) {
             continue;
         }
-        if decl.flow_events.iter().any(|e| matches!(e, FlowEvent::Return { .. })) {
+        if decl
+            .flow_events
+            .iter()
+            .any(|e| matches!(e, FlowEvent::Return { .. }))
+        {
             continue;
         }
         if decl.params.is_empty() {

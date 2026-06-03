@@ -46,10 +46,26 @@ pub(crate) enum OutputFormat {
 pub(crate) enum BrowseFormat {
     Json,
     Text,
-    /// SARIF 2.1.0. Only meaningful for `security taint-analysis` /
-    /// `security source-analysis`; non-finding-bearing browse
-    /// commands silently fall back to JSON.
+    /// SARIF 2.1.0. Only meaningful for `security taint-analysis`;
+    /// non-finding-bearing browse commands silently fall back to JSON.
     Sarif,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SourceAnalysisFormat {
+    Json,
+    Text,
+    Sarif,
+}
+
+impl From<SourceAnalysisFormat> for BrowseFormat {
+    fn from(value: SourceAnalysisFormat) -> Self {
+        match value {
+            SourceAnalysisFormat::Json => Self::Json,
+            SourceAnalysisFormat::Text => Self::Text,
+            SourceAnalysisFormat::Sarif => Self::Sarif,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -2732,8 +2748,8 @@ pub(crate) enum SecurityAction {
         no_compact: bool,
         /// Output shape — `text` for the paginated source-flow report,
         /// `json` for machine-readable output.
-        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
-        format: BrowseFormat,
+        #[arg(long, value_enum, default_value_t = SourceAnalysisFormat::Text)]
+        format: SourceAnalysisFormat,
     },
 
     /// Inspect the loaded rulepack itself (no workspace scan). Lists

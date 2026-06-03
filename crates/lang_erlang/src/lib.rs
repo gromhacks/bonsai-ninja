@@ -407,10 +407,20 @@ fn erlang_throw_from_call(event: &FlowEvent) -> Option<FlowEvent> {
     let FlowEvent::Call { span, name, args, .. } = event else {
         return None;
     };
-    // Match both bare (`throw`) and module-qualified (`erlang:error`,
-    // `erlang.exit`) forms by taking the trailing name segment.
-    let short = name.trim().rsplit([':', '.']).next().unwrap_or("").trim();
+    // Match bare exception BIFs (`throw`, `error`, `exit`) and their
+    // explicit `erlang:` / `erlang.` forms only. Other modules expose
+    // ordinary functions with the same tail (`logger:error`) and must
+    // remain call events for security rules and call inventory output.
+    let trimmed = name.trim();
+    let (module, short) = trimmed
+        .rsplit_once([':', '.'])
+        .map_or((None, trimmed), |(module, short)| {
+            (Some(module.trim()), short.trim())
+        });
     if !matches!(short, "throw" | "error" | "exit") {
+        return None;
+    }
+    if module.is_some_and(|module| module != "erlang") {
         return None;
     }
     let value_name = args.first().and_then(|arg| {

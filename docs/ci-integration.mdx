@@ -11,6 +11,11 @@ Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progre
 
 Repository releases are built from `v*.*.*` tags by `.github/workflows/release.yml`. The workflow builds Linux x64, Linux arm64, macOS Intel, macOS Apple Silicon, Windows x64, and Windows arm64 archives, includes `security-patterns/`, `docs/`, `README.md`, `AGENTS.md`, `SKILLS.md`, and checksum files, then publishes them with `softprops/action-gh-release`.
 
+For source-build target checks outside that release artifact matrix, use
+`scripts/check-targets.sh`; see
+[Platform And Architecture Support](platform-support.mdx) for the parser
+bundle constraints that affect non-mainstream CPU architectures.
+
 ```bash
 curl -L -o bonsai.tar.gz \
   https://github.com/gromhacks/bonsai-ninja/releases/download/v0.1.0/bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz

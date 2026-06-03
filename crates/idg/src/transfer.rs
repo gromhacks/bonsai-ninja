@@ -89,19 +89,66 @@ pub(crate) const YIELD_FIELD_BASE: &str = "__bonsai_yield";
 /// Security analysis may pass declarative shapes extracted from an
 /// editable rulepack; ordinary code-intelligence callers use the empty
 /// default.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferOptions {
     /// Configured output-argument overwrite shapes.
     pub clean_output_overwrites: Vec<CleanOutputOverwriteSpec>,
     /// Configured source calls that write untrusted data into output arguments.
     pub source_output_args: Vec<SourceOutputArgSpec>,
+    /// Whether to add diagnostic, over-approximate receiver-field
+    /// propagation. Security/default semantic queries cap precision at
+    /// `Narrowed`, so they can skip this expensive graph expansion.
+    pub include_diagnostic_field_flows: bool,
+    /// Whether to add broad implicit-receiver method propagation. The
+    /// default graph keeps this compatibility heuristic; large security
+    /// scans can skip it and rely on exact call/arg/return propagation.
+    pub include_receiver_method_propagation: bool,
+}
+
+impl Default for TransferOptions {
+    fn default() -> Self {
+        Self {
+            clean_output_overwrites: Vec::new(),
+            source_output_args: Vec::new(),
+            include_diagnostic_field_flows: true,
+            include_receiver_method_propagation: true,
+        }
+    }
 }
 
 impl TransferOptions {
     /// True when no optional transfer behavior is configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.clean_output_overwrites.is_empty() && self.source_output_args.is_empty()
+        self.clean_output_overwrites.is_empty()
+            && self.source_output_args.is_empty()
+            && self.include_diagnostic_field_flows
+            && self.include_receiver_method_propagation
+    }
+
+    /// Return a semantically equivalent option set in deterministic
+    /// order. Rulepack extraction can traverse hash-backed maps, so
+    /// callers should canonicalize before hashing, persisting, or
+    /// building a graph from configured transfer shapes.
+    #[must_use]
+    pub fn canonicalized(mut self) -> Self {
+        self.clean_output_overwrites.sort_by(|a, b| {
+            (&a.callee, a.output_arg_index, a.value_start_arg_index).cmp(&(
+                &b.callee,
+                b.output_arg_index,
+                b.value_start_arg_index,
+            ))
+        });
+        self.clean_output_overwrites.dedup();
+
+        for spec in &mut self.source_output_args {
+            spec.output_arg_indices.sort_unstable();
+            spec.output_arg_indices.dedup();
+        }
+        self.source_output_args
+            .sort_by(|a, b| (&a.callee, &a.output_arg_indices).cmp(&(&b.callee, &b.output_arg_indices)));
+        self.source_output_args.dedup();
+        self
     }
 }
 

@@ -1393,6 +1393,24 @@
           return reduce(lambda a, b: a + b, items, "")
     expect_match_text: [reduce]
   description: "functools.reduce(func, iterable, initial) - folded value derives from iterable elements; preserves taint from the iterable argument."
+- id: python.passthrough.os_path_join
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [os, path, join]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5]
+  match_examples:
+  - name: os path join preserves tainted segment
+    code: |
+      import os
+      def example(base, name):
+          return os.path.join(base, name)
+    expect_match_text: [os.path.join]
+  description: "os.path.join(...) - path construction preserves taint from every path segment; validation must happen separately."
 - id: python.passthrough.str_split_receiver
   enabled: true
   language: python

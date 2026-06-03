@@ -64,7 +64,9 @@
 # emits for function parameters) provides cross-fn coverage of the
 # `conn.params["body"]` access pattern via the parameter identifier.
 - id: elixir.source.plug_conn_params
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: elixir
   trust: remote
   tag: http-input
@@ -84,7 +86,7 @@
           conn
         end
       end
-  description: "Plug action `conn` parameter - first arg of every Plug callback. Bare-name match: also fires on any other function with a `conn` parameter; treat findings on non-Plug modules as audit hints. Used to seed `conn.params[...]` access flows that the read-shape rule cannot model."
+  description: "Disabled - whole Plug.Conn taint is field-insensitive and over-taints safe config/control fields such as rewrite tuples. Re-enable only when the adapter can seed params/query/body/header field reads precisely."
 
   imports:
   - Plug
@@ -149,7 +151,9 @@
   description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.req_headers`."
 
 - id: elixir.plug.fetch_query_params
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: elixir
   trust: remote
   tag: http-input
@@ -169,12 +173,14 @@
           Plug.Conn.fetch_query_params(input)
         end
       end
-  description: "Plug.Conn.fetch_query_params/2 - parses the raw query string into conn.query_params; the returned conn carries attacker-controlled query data."
+  description: "Disabled - this returns a Plug.Conn with attacker-controlled conn.query_params, but field-insensitive return taint over-taints unrelated conn fields. Re-enable when conn.query_params field reads can be seeded precisely."
 
   imports:
   - Plug
 - id: elixir.plug.fetch_cookies
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: elixir
   trust: remote
   tag: http-input
@@ -194,12 +200,14 @@
           Plug.Conn.fetch_cookies(input)
         end
       end
-  description: "Plug.Conn.fetch_cookies/2 - parses request cookies into conn.cookies/req_cookies; values are attacker-controlled."
+  description: "Disabled - this returns a Plug.Conn with attacker-controlled cookie fields, but field-insensitive return taint over-taints unrelated conn fields. Re-enable when conn.cookies/req_cookies field reads can be seeded precisely."
 
   imports:
   - Plug
 - id: elixir.plug.fetch_session
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: elixir
   trust: remote
   tag: http-input
@@ -219,7 +227,7 @@
           Plug.Conn.fetch_session(input)
         end
       end
-  description: "Plug.Conn.fetch_session/2 - loads session data from a (potentially attacker-supplied) cookie; values originate from the request."
+  description: "Disabled - this returns a Plug.Conn with request-derived session fields, but field-insensitive return taint over-taints unrelated conn fields. Re-enable when session field reads can be seeded precisely."
 
   imports:
   - Plug

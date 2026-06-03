@@ -17,7 +17,7 @@
 //! [`stitch_idg`] core from this code, so unit tests still don't
 //! need a workspace.
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{FileId, FuncId};
 use bonsai_index::GlobalIndex;
@@ -28,6 +28,9 @@ use std::time::Instant;
 use crate::builder::{stitch_idg, CalleeResolver, FuncToSegment, ResolvedCallee};
 use crate::transfer::{transfer_function_for_with_options, TransferOptions, TransferOutput};
 use crate::workspace::{IdgWorkspace, SegmentId};
+
+const LARGE_DIAGNOSTIC_FIELD_FLOW_FUNC_LIMIT: usize = 50_000;
+const LARGE_RECEIVER_METHOD_FUNC_LIMIT: usize = 50_000;
 
 /// Pre-computed maps that the [`WorkspaceIdgBuilder`] uses for
 /// `FuncId → file → SegmentId` lookups during stitching.
@@ -49,6 +52,9 @@ struct WorkspaceMaps {
     /// tests that do not provide language metadata leave entries
     /// absent, and the resolver then keeps legacy permissive behavior.
     func_to_language: AHashMap<FuncId, &'static str>,
+    /// Callback binding lookup: stripped callback argument name /
+    /// declared-name tail → candidate functions.
+    funcs_by_callback_name: AHashMap<String, Vec<FuncId>>,
     /// `FileId → language id`, used for class/constructor fallback
     /// where the candidate is still a `SymbolId` rather than a
     /// `FuncId`.
@@ -56,17 +62,25 @@ struct WorkspaceMaps {
 }
 
 impl WorkspaceMaps {
-    fn build_with_languages<F>(global: &GlobalIndex, language_for_file: F) -> Self
+    fn build_with_languages_for_files<F>(
+        global: &GlobalIndex,
+        language_for_file: F,
+        included_files: Option<&AHashSet<FileId>>,
+    ) -> Self
     where
         F: Fn(FileId) -> Option<&'static str>,
     {
         let mut func_to_seg: AHashMap<FuncId, SegmentId> = AHashMap::new();
         let mut func_to_name: AHashMap<FuncId, String> = AHashMap::new();
         let mut func_to_language: AHashMap<FuncId, &'static str> = AHashMap::new();
+        let mut funcs_by_callback_name: AHashMap<String, Vec<FuncId>> = AHashMap::new();
         let mut file_to_language: AHashMap<FileId, &'static str> = AHashMap::new();
         let mut file_to_seg: AHashMap<FileId, SegmentId> = AHashMap::new();
         let mut next_seg = 0u32;
         for file in global.all_files() {
+            if included_files.is_some_and(|files| !files.contains(&file)) {
+                continue;
+            }
             let language = language_for_file(file);
             if let Some(language) = language {
                 file_to_language.insert(file, language);
@@ -78,6 +92,7 @@ impl WorkspaceMaps {
                 let func = FuncId::new(decl.symbol.raw());
                 func_to_seg.insert(func, seg);
                 func_to_name.insert(func, decl.name.clone());
+                add_callback_name_index_entries(&mut funcs_by_callback_name, func, &decl.name);
                 if let Some(language) = language {
                     func_to_language.insert(func, language);
                 }
@@ -87,8 +102,27 @@ impl WorkspaceMaps {
             func_to_seg,
             func_to_name,
             func_to_language,
+            funcs_by_callback_name,
             file_to_language,
         }
+    }
+}
+
+fn add_callback_name_index_entries(index: &mut AHashMap<String, Vec<FuncId>>, func: FuncId, decl_name: &str) {
+    add_callback_name_index_entry(index, func, decl_name);
+    if let Some((_, tail)) = decl_name.rsplit_once(['.', ':']) {
+        add_callback_name_index_entry(index, func, tail);
+    }
+}
+
+fn add_callback_name_index_entry(index: &mut AHashMap<String, Vec<FuncId>>, func: FuncId, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    let funcs = index.entry(name.to_string()).or_default();
+    if !funcs.contains(&func) {
+        funcs.push(func);
     }
 }
 
@@ -111,19 +145,48 @@ struct WorkspaceCalleeResolver<'a> {
     /// already resolved the edge.
     func_to_call_names: &'a AHashMap<FuncId, Vec<String>>,
     func_to_language: &'a AHashMap<FuncId, &'static str>,
+    funcs_by_callback_name: &'a AHashMap<String, Vec<FuncId>>,
+    call_edges_by_site: &'a AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>>,
     file_to_language: &'a AHashMap<FileId, &'static str>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
-    resolve_cache: RwLock<AHashMap<ResolveCacheKey, Vec<ResolvedCallee>>>,
+    class_constructors_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<FuncId>>,
     callback_cache: RwLock<AHashMap<(FuncId, u8), Vec<ResolvedCallee>>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ResolveCacheKey {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CallSiteEdgeKey {
     caller: FuncId,
     site: bonsai_common::Span,
-    callee_name: String,
-    receiver: Option<String>,
-    receiver_types: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IndexedCallEdge {
+    to: FuncId,
+    edge_kind: bonsai_callgraph::EdgeKind,
+    precision: bonsai_common::Precision,
+}
+
+fn call_edges_by_site_for_funcs(
+    call_graph: &ResolvedCallGraph,
+    included_funcs: Option<&AHashSet<FuncId>>,
+) -> AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>> {
+    let mut out: AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>> = AHashMap::new();
+    for edge in &call_graph.inner().edges {
+        if included_funcs.is_some_and(|funcs| !funcs.contains(&edge.from) || !funcs.contains(&edge.to)) {
+            continue;
+        }
+        out.entry(CallSiteEdgeKey {
+            caller: edge.from,
+            site: edge.span,
+        })
+        .or_default()
+        .push(IndexedCallEdge {
+            to: edge.to,
+            edge_kind: edge.kind,
+            precision: edge.precision,
+        });
+    }
+    out
 }
 
 impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
@@ -132,73 +195,49 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         caller: FuncId,
         site: bonsai_common::Span,
         callee_name: &str,
-        receiver: Option<&str>,
-        receiver_types: &[String],
+        _receiver: Option<&str>,
+        _receiver_types: &[String],
     ) -> Vec<ResolvedCallee> {
-        let cache_key = ResolveCacheKey {
-            caller,
-            site,
-            callee_name: callee_name.to_string(),
-            receiver: receiver.map(str::to_string),
-            receiver_types: receiver_types.to_vec(),
-        };
-        if let Some(cached) = self.resolve_cache.read().get(&cache_key).cloned() {
-            return cached;
-        }
         let mut out = Vec::new();
         let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)> =
             ahash::AHashSet::default();
-        for edge in self.call_graph.callees_of(caller) {
-            if !call_site_spans_match(edge.span, site) {
-                continue;
-            }
-            if !edge.precision.is_semantic() {
-                continue;
-            }
-            if !self.funcs_share_language(caller, edge.to) {
-                continue;
-            }
-            // Filter by callee name. The call graph's span is a
-            // necessary selector, but not a sufficient one: some
-            // adapters emit multiple semantic candidates on the same
-            // expression span (receiver bridges, synthetic return
-            // hops, class-object helpers). If exact span equality
-            // bypasses the textual callee check, IDG stitching can
-            // wire `Type.method(arg)` into an unrelated peer method
-            // that happens to share the span. Alias/default export
-            // cases are handled by `func_to_call_names` below.
-            // Adapters surface call events
-            // with whatever syntactic form the source used — bare
-            // (`runPipeline(x)`), qualified (`Pipeline.runPipeline(x)`,
-            // `Module::func(x)`), or arity-suffixed (`foo/2`). Match
-            // against the decl's bare name, the callee event's bare
-            // tail, or with arity stripped. The callgraph already
-            // narrowed receiver types, so any name match here is a
-            // legitimate dispatch target.
-            if let Some(decl_name) = self.func_to_name.get(&edge.to) {
-                let mut matched = names_match_for_callee(decl_name, callee_name);
-                if !matched {
-                    // Alias-aware fallback: each FuncId tracks
-                    // every textual name it can be called as,
-                    // built from import-alias maps. The callgraph
-                    // already resolved this edge through the same
-                    // alias maps, so when the bare decl name
-                    // doesn't match, an alias-name match is
-                    // legitimate.
-                    if let Some(call_names) = self.func_to_call_names.get(&edge.to) {
-                        matched = call_names.iter().any(|n| names_match_for_callee(n, callee_name));
-                    }
+        let exact_key = CallSiteEdgeKey { caller, site };
+        if let Some(edges) = self.call_edges_by_site.get(&exact_key) {
+            for edge in edges {
+                if !edge.precision.is_semantic() {
+                    continue;
                 }
-                if matched {
-                    let candidate_key = (edge.to, edge.kind, edge.precision);
-                    if seen.insert(candidate_key) {
-                        out.push(ResolvedCallee {
-                            func: edge.to,
-                            edge_kind: edge.kind,
-                            precision: edge.precision,
-                        });
-                    }
+                if !self.funcs_share_language(caller, edge.to) {
+                    continue;
                 }
+                self.push_resolved_edge_if_name_matches(
+                    &mut out,
+                    &mut seen,
+                    edge.to,
+                    edge.edge_kind,
+                    edge.precision,
+                    callee_name,
+                );
+            }
+        } else {
+            for edge in self.call_graph.callees_of(caller) {
+                if !call_site_spans_match(edge.span, site) {
+                    continue;
+                }
+                if !edge.precision.is_semantic() {
+                    continue;
+                }
+                if !self.funcs_share_language(caller, edge.to) {
+                    continue;
+                }
+                self.push_resolved_edge_if_name_matches(
+                    &mut out,
+                    &mut seen,
+                    edge.to,
+                    edge.kind,
+                    edge.precision,
+                    callee_name,
+                );
             }
         }
         // Constructor fallback: when `callee_name` resolves to a
@@ -214,11 +253,66 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         if out.is_empty() {
             self.resolve_class_constructor_fallback(caller, callee_name, &mut out);
         }
-        self.resolve_cache.write().insert(cache_key, out.clone());
         out
     }
 
     fn callback_bindings(&self, host: FuncId, param_idx: u8) -> Vec<ResolvedCallee> {
+        self.callback_bindings_indexed(host, param_idx)
+    }
+
+    fn receiver_type_for(&self, func: FuncId) -> Option<String> {
+        let decl = self.global.decl_of(bonsai_common::SymbolId::new(func.raw()))?;
+        let parent = decl.parent?;
+        self.global.decl_of(parent).map(|decl| decl.name.clone())
+    }
+
+    fn is_constructor_func(&self, func: FuncId) -> bool {
+        use bonsai_lang_api::DeclKind;
+        let Some(decl) = self.global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+            return false;
+        };
+        matches!(decl.kind, DeclKind::Constructor)
+            || matches!(decl.name.as_str(), "constructor" | "__init__" | "initialize")
+    }
+}
+
+impl WorkspaceCalleeResolver<'_> {
+    fn push_resolved_edge_if_name_matches(
+        &self,
+        out: &mut Vec<ResolvedCallee>,
+        seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)>,
+        to: FuncId,
+        edge_kind: bonsai_callgraph::EdgeKind,
+        precision: bonsai_common::Precision,
+        callee_name: &str,
+    ) {
+        let Some(decl_name) = self.func_to_name.get(&to) else {
+            return;
+        };
+        let mut matched = names_match_for_callee(decl_name, callee_name);
+        if !matched {
+            // Alias-aware fallback: each FuncId tracks every textual
+            // name it can be called as, built from import-alias maps.
+            // The callgraph already resolved this edge through the
+            // same alias maps, so when the bare decl name doesn't
+            // match, an alias-name match is legitimate.
+            if let Some(call_names) = self.func_to_call_names.get(&to) {
+                matched = call_names.iter().any(|n| names_match_for_callee(n, callee_name));
+            }
+        }
+        let candidate_key = (to, edge_kind, precision);
+        if matched && seen.insert(candidate_key) {
+            out.push(ResolvedCallee {
+                func: to,
+                edge_kind,
+                precision,
+            });
+        }
+    }
+}
+
+impl WorkspaceCalleeResolver<'_> {
+    fn callback_bindings_indexed(&self, host: FuncId, param_idx: u8) -> Vec<ResolvedCallee> {
         let cache_key = (host, param_idx);
         if let Some(cached) = self.callback_cache.read().get(&cache_key).cloned() {
             return cached;
@@ -228,7 +322,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         // argument at `param_idx`. The arg's text might be a
         // function name (e.g., `run(executor, t)` → arg 0 text is
         // "executor"). Resolve that name through the workspace's
-        // func name index to get the bound FuncId. Each
+        // callback-name index to get the bound FuncId. Each
         // resolution becomes a callback ResolvedCallee that the
         // IDG stitcher can use to wire CallArg(callback-call) →
         // bound-func.Param edges.
@@ -270,15 +364,16 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                 if bound_name.is_empty() {
                     continue;
                 }
-                for (&candidate_func, candidate_name) in self.func_to_name.iter() {
+                let Some(candidate_funcs) = self.funcs_by_callback_name.get(bound_name) else {
+                    continue;
+                };
+                for &candidate_func in candidate_funcs {
                     if !self.funcs_share_language(host, candidate_func)
                         || !self.funcs_share_language(caller, candidate_func)
                     {
                         continue;
                     }
-                    if (candidate_name == bound_name || matches_qualified_tail(candidate_name, bound_name))
-                        && seen.insert(candidate_func)
-                    {
+                    if seen.insert(candidate_func) {
                         out.push(ResolvedCallee {
                             func: candidate_func,
                             edge_kind: bonsai_callgraph::EdgeKind::Indirect,
@@ -290,21 +385,6 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         }
         self.callback_cache.write().insert(cache_key, out.clone());
         out
-    }
-
-    fn receiver_type_for(&self, func: FuncId) -> Option<String> {
-        let decl = self.global.decl_of(bonsai_common::SymbolId::new(func.raw()))?;
-        let parent = decl.parent?;
-        self.global.decl_of(parent).map(|decl| decl.name.clone())
-    }
-
-    fn is_constructor_func(&self, func: FuncId) -> bool {
-        use bonsai_lang_api::DeclKind;
-        let Some(decl) = self.global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
-            return false;
-        };
-        matches!(decl.kind, DeclKind::Constructor)
-            || matches!(decl.name.as_str(), "constructor" | "__init__" | "initialize")
     }
 }
 
@@ -348,7 +428,6 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         callee_name: &str,
         out: &mut Vec<ResolvedCallee>,
     ) {
-        use bonsai_lang_api::DeclKind;
         let trimmed = callee_name.trim();
         if trimmed.is_empty() {
             return;
@@ -375,20 +454,8 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             let Some(class_decl) = self.global.decl_of(class_sym) else {
                 continue;
             };
-            for file in self.global.all_files() {
-                for decl in self.global.decls_in(file) {
-                    if decl.parent != Some(class_sym) {
-                        continue;
-                    }
-                    let is_ctor = matches!(decl.kind, DeclKind::Constructor)
-                        || (matches!(decl.kind, DeclKind::Function | DeclKind::Method)
-                            && (decl.name == "constructor"
-                                || decl.name == "__init__"
-                                || decl.name == "initialize"));
-                    if !is_ctor {
-                        continue;
-                    }
-                    let func = FuncId::new(decl.symbol.raw());
+            if let Some(constructors) = self.class_constructors_by_parent.get(&class_sym) {
+                for &func in constructors {
                     if !self.funcs_share_language(caller, func) {
                         continue;
                     }
@@ -535,9 +602,15 @@ fn symbol_language(
         .and_then(|file| file_language(file_to_language, file))
 }
 
-fn class_symbols_by_name(global: &GlobalIndex) -> AHashMap<String, Vec<bonsai_common::SymbolId>> {
+fn class_symbols_by_name_for_files(
+    global: &GlobalIndex,
+    included_files: Option<&AHashSet<FileId>>,
+) -> AHashMap<String, Vec<bonsai_common::SymbolId>> {
     let mut out: AHashMap<String, Vec<bonsai_common::SymbolId>> = AHashMap::new();
     for file in global.all_files() {
+        if included_files.is_some_and(|files| !files.contains(&file)) {
+            continue;
+        }
         for decl in global.decls_in(file) {
             if matches!(decl.kind, bonsai_lang_api::DeclKind::Class) {
                 out.entry(decl.name.clone()).or_default().push(decl.symbol);
@@ -545,6 +618,45 @@ fn class_symbols_by_name(global: &GlobalIndex) -> AHashMap<String, Vec<bonsai_co
         }
     }
     out
+}
+
+fn class_constructors_by_parent_for_files(
+    global: &GlobalIndex,
+    included_files: Option<&AHashSet<FileId>>,
+) -> AHashMap<bonsai_common::SymbolId, Vec<FuncId>> {
+    let mut out: AHashMap<bonsai_common::SymbolId, Vec<FuncId>> = AHashMap::new();
+    for file in global.all_files() {
+        if included_files.is_some_and(|files| !files.contains(&file)) {
+            continue;
+        }
+        for decl in global.functions_in(file) {
+            let Some(parent) = decl.parent else {
+                continue;
+            };
+            if is_constructor_decl(global, decl) {
+                out.entry(parent)
+                    .or_default()
+                    .push(FuncId::new(decl.symbol.raw()));
+            }
+        }
+    }
+    out
+}
+
+fn is_constructor_decl(global: &GlobalIndex, decl: &bonsai_lang_api::Decl) -> bool {
+    use bonsai_lang_api::DeclKind;
+    if matches!(decl.kind, DeclKind::Constructor) {
+        return true;
+    }
+    if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+        return false;
+    }
+    if matches!(decl.name.as_str(), "constructor" | "__init__" | "initialize") {
+        return true;
+    }
+    decl.parent
+        .and_then(|parent| global.decl_of(parent))
+        .is_some_and(|parent_decl| decl.name == parent_decl.name)
 }
 
 /// Strip adapter-specific callback-binding syntax from `text`,
@@ -806,7 +918,7 @@ where
 pub fn build_with_file_info_and_options<F, G>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
-    mut aliases_for_file: F,
+    aliases_for_file: F,
     language_for_file: G,
     transfer_options: &TransferOptions,
 ) -> IdgWorkspace
@@ -814,9 +926,59 @@ where
     F: FnMut(FileId) -> AHashMap<String, String>,
     G: Fn(FileId) -> Option<&'static str>,
 {
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        aliases_for_file,
+        language_for_file,
+        transfer_options,
+        None,
+    )
+}
+
+/// Build with per-file aliases, language ids, transfer options, and
+/// a caller-provided file scope. Security production scans use this
+/// to keep excluded files out of the semantic graph before transfer
+/// and stitching, while unscoped callers continue to build a full
+/// workspace IDG.
+pub fn build_with_file_info_and_options_for_files<F, G>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    aliases_for_file: F,
+    language_for_file: G,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+) -> IdgWorkspace
+where
+    F: FnMut(FileId) -> AHashMap<String, String>,
+    G: Fn(FileId) -> Option<&'static str>,
+{
+    let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        aliases_for_file,
+        language_for_file,
+        transfer_options,
+        Some(&included_files),
+    )
+}
+
+fn build_with_file_info_and_options_scoped<F, G>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    mut aliases_for_file: F,
+    language_for_file: G,
+    transfer_options: &TransferOptions,
+    included_files: Option<&AHashSet<FileId>>,
+) -> IdgWorkspace
+where
+    F: FnMut(FileId) -> AHashMap<String, String>,
+    G: Fn(FileId) -> Option<&'static str>,
+{
     let total_started = Instant::now();
     let phase_started = Instant::now();
-    let maps = WorkspaceMaps::build_with_languages(global, language_for_file);
+    let maps = WorkspaceMaps::build_with_languages_for_files(global, language_for_file, included_files);
     idg_build_log(format_args!(
         "maps: {:.3}s funcs={} files={}",
         phase_started.elapsed().as_secs_f64(),
@@ -824,7 +986,7 @@ where
         maps.file_to_language.len()
     ));
     let phase_started = Instant::now();
-    let outputs = run_transfer_in_parallel(global, transfer_options);
+    let outputs = run_transfer_in_parallel_for_files(global, transfer_options, included_files);
     if idg_build_enabled() {
         let places: usize = outputs.iter().map(|out| out.places.len()).sum();
         let nodes: usize = outputs.iter().map(|out| out.nodes.len()).sum();
@@ -856,6 +1018,9 @@ where
     let module_prefixes = module_prefixes_by_file(global);
     let module_default_exports = module_default_export_funcs_by_module(global, &module_prefixes);
     for file in global.all_files() {
+        if included_files.is_some_and(|files| !files.contains(&file)) {
+            continue;
+        }
         let aliases = aliases_for_file(file);
         let caller_module = module_prefixes.get(&file).map(String::as_str);
         for (alias, original) in aliases {
@@ -868,6 +1033,9 @@ where
                 for module_name in import_module_candidates(caller_module, &original) {
                     if let Some(funcs) = module_default_exports.get(&module_name) {
                         for func in funcs {
+                            if !maps.func_to_seg.contains_key(func) {
+                                continue;
+                            }
                             add_func_call_alias(&mut func_to_call_names, *func, &alias);
                         }
                     }
@@ -887,6 +1055,9 @@ where
     let local_callable_bindings = bonsai_callgraph::collect_workspace_local_callable_bindings(global);
     for bindings in local_callable_bindings.values() {
         for (alias, func) in bindings {
+            if !maps.func_to_seg.contains_key(func) {
+                continue;
+            }
             add_func_call_alias(&mut func_to_call_names, *func, alias);
         }
     }
@@ -898,13 +1069,27 @@ where
         alias_count
     ));
     let phase_started = Instant::now();
-    let class_symbols_by_name = class_symbols_by_name(global);
+    let class_symbols_by_name = class_symbols_by_name_for_files(global, included_files);
     let class_symbol_count: usize = class_symbols_by_name.values().map(Vec::len).sum();
+    let class_constructors_by_parent = class_constructors_by_parent_for_files(global, included_files);
+    let class_constructor_count: usize = class_constructors_by_parent.values().map(Vec::len).sum();
     idg_build_log(format_args!(
-        "class index: {:.3}s names={} classes={}",
+        "class index: {:.3}s names={} classes={} constructor_parents={} constructors={}",
         phase_started.elapsed().as_secs_f64(),
         class_symbols_by_name.len(),
-        class_symbol_count
+        class_symbol_count,
+        class_constructors_by_parent.len(),
+        class_constructor_count
+    ));
+    let phase_started = Instant::now();
+    let included_funcs: AHashSet<FuncId> = maps.func_to_seg.keys().copied().collect();
+    let call_edges_by_site = call_edges_by_site_for_funcs(call_graph, Some(&included_funcs));
+    let call_edge_site_count: usize = call_edges_by_site.values().map(Vec::len).sum();
+    idg_build_log(format_args!(
+        "call-edge site index: {:.3}s sites={} edges={}",
+        phase_started.elapsed().as_secs_f64(),
+        call_edges_by_site.len(),
+        call_edge_site_count
     ));
     let resolver = WorkspaceCalleeResolver {
         call_graph,
@@ -912,9 +1097,11 @@ where
         global,
         func_to_call_names: &func_to_call_names,
         func_to_language: &maps.func_to_language,
+        funcs_by_callback_name: &maps.funcs_by_callback_name,
+        call_edges_by_site: &call_edges_by_site,
         file_to_language: &maps.file_to_language,
         class_symbols_by_name: &class_symbols_by_name,
-        resolve_cache: RwLock::new(AHashMap::new()),
+        class_constructors_by_parent: &class_constructors_by_parent,
         callback_cache: RwLock::new(AHashMap::new()),
     };
     let f2s = WorkspaceFuncToSegment {
@@ -931,36 +1118,70 @@ where
         ws.cross_file().len(),
         ws.field_flow().len()
     ));
-    let phase_started = Instant::now();
-    let before_edges = ws.total_edge_count();
-    let before_field_links = ws.field_flow().len();
-    stitch_receiver_field_flow(&mut ws, global, &maps.func_to_language, &maps.file_to_language);
-    idg_build_log(format_args!(
-        "receiver-field-flow: {:.3}s edge_delta={} field_link_delta={} total_edges={} field_links={}",
-        phase_started.elapsed().as_secs_f64(),
-        ws.total_edge_count().saturating_sub(before_edges),
-        ws.field_flow().len().saturating_sub(before_field_links),
-        ws.total_edge_count(),
-        ws.field_flow().len()
-    ));
-    let phase_started = Instant::now();
-    let before_edges = ws.total_edge_count();
-    let before_field_links = ws.field_flow().len();
-    stitch_receiver_method_propagation(
-        &mut ws,
-        global,
-        call_graph,
-        &maps.func_to_language,
-        &maps.file_to_language,
-    );
-    idg_build_log(format_args!(
-        "receiver-method-propagation: {:.3}s edge_delta={} field_link_delta={} total_edges={} field_links={}",
-        phase_started.elapsed().as_secs_f64(),
-        ws.total_edge_count().saturating_sub(before_edges),
-        ws.field_flow().len().saturating_sub(before_field_links),
-        ws.total_edge_count(),
-        ws.field_flow().len()
-    ));
+    let skip_large_diagnostic_field_flow = ws.func_count() > LARGE_DIAGNOSTIC_FIELD_FLOW_FUNC_LIMIT;
+    if transfer_options.include_diagnostic_field_flows && !skip_large_diagnostic_field_flow {
+        let phase_started = Instant::now();
+        let before_edges = ws.total_edge_count();
+        let before_field_links = ws.field_flow().len();
+        stitch_receiver_field_flow(&mut ws, global, &maps.func_to_language, &maps.file_to_language);
+        idg_build_log(format_args!(
+            "receiver-field-flow: {:.3}s edge_delta={} field_link_delta={} total_edges={} field_links={}",
+            phase_started.elapsed().as_secs_f64(),
+            ws.total_edge_count().saturating_sub(before_edges),
+            ws.field_flow().len().saturating_sub(before_field_links),
+            ws.total_edge_count(),
+            ws.field_flow().len()
+        ));
+    } else if skip_large_diagnostic_field_flow {
+        idg_build_log(format_args!(
+            "receiver-field-flow: skipped large graph funcs={} limit={} total_edges={} field_links={}",
+            ws.func_count(),
+            LARGE_DIAGNOSTIC_FIELD_FLOW_FUNC_LIMIT,
+            ws.total_edge_count(),
+            ws.field_flow().len()
+        ));
+    } else {
+        idg_build_log(format_args!(
+            "receiver-field-flow: skipped diagnostic-only phase total_edges={} field_links={}",
+            ws.total_edge_count(),
+            ws.field_flow().len()
+        ));
+    }
+    let skip_large_receiver_method_propagation = ws.func_count() > LARGE_RECEIVER_METHOD_FUNC_LIMIT;
+    if transfer_options.include_receiver_method_propagation && !skip_large_receiver_method_propagation {
+        let phase_started = Instant::now();
+        let before_edges = ws.total_edge_count();
+        let before_field_links = ws.field_flow().len();
+        stitch_receiver_method_propagation(
+            &mut ws,
+            global,
+            call_graph,
+            &maps.func_to_language,
+            &maps.file_to_language,
+        );
+        idg_build_log(format_args!(
+            "receiver-method-propagation: {:.3}s edge_delta={} field_link_delta={} total_edges={} field_links={}",
+            phase_started.elapsed().as_secs_f64(),
+            ws.total_edge_count().saturating_sub(before_edges),
+            ws.field_flow().len().saturating_sub(before_field_links),
+            ws.total_edge_count(),
+            ws.field_flow().len()
+        ));
+    } else if skip_large_receiver_method_propagation {
+        idg_build_log(format_args!(
+            "receiver-method-propagation: skipped large semantic graph funcs={} limit={} total_edges={} field_links={}",
+            ws.func_count(),
+            LARGE_RECEIVER_METHOD_FUNC_LIMIT,
+            ws.total_edge_count(),
+            ws.field_flow().len()
+        ));
+    } else {
+        idg_build_log(format_args!(
+            "receiver-method-propagation: skipped broad receiver heuristic total_edges={} field_links={}",
+            ws.total_edge_count(),
+            ws.field_flow().len()
+        ));
+    }
     idg_build_log(format_args!(
         "total: {:.3}s segments={} funcs={} total_edges={} field_links={}",
         total_started.elapsed().as_secs_f64(),
@@ -1115,6 +1336,19 @@ fn idg_build_log(args: std::fmt::Arguments<'_>) {
     }
 }
 
+fn propagation_scope_files(
+    global: &GlobalIndex,
+    file_to_language: &AHashMap<FileId, &'static str>,
+) -> Vec<FileId> {
+    let mut files: Vec<FileId> = if file_to_language.is_empty() {
+        global.all_files().collect()
+    } else {
+        file_to_language.keys().copied().collect()
+    };
+    files.sort_by_key(|file| file.raw());
+    files
+}
+
 /// Phase 3d: implicit-receiver propagation through method calls.
 /// When a caller calls a method with a tainted receiver, the
 /// closure needs to enter the callee and taint its reads of class
@@ -1138,14 +1372,16 @@ fn stitch_receiver_method_propagation(
     use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
+    let scope_files = propagation_scope_files(global, file_to_language);
     // Group decls by parent so we know each class's known fields.
     // Reuse the field-flow scoping (parent-only buckets) so we
     // don't over-link free functions. Walk the inheritance chain
     // via `decl.bases` so a subclass method that reads a base
     // class's field still finds the field-write in the base
     // class's bucket. Mirror Phase 3c's traversal.
-    let class_by_name: ahash::AHashMap<(Option<&'static str>, String), SymbolId> = global
-        .all_files()
+    let class_by_name: ahash::AHashMap<(Option<&'static str>, String), SymbolId> = scope_files
+        .iter()
+        .copied()
         .flat_map(|file| {
             let language = file_language(file_to_language, file);
             global
@@ -1156,7 +1392,8 @@ fn stitch_receiver_method_propagation(
         })
         .collect();
     let mut by_class: ahash::AHashMap<SymbolId, Vec<FuncId>> = ahash::AHashMap::default();
-    for file in global.all_files() {
+    for file in &scope_files {
+        let file = *file;
         for decl in global.decls_in(file) {
             if !matches!(
                 decl.kind,
@@ -1195,6 +1432,7 @@ fn stitch_receiver_method_propagation(
     }
     let mut sorted_classes: Vec<SymbolId> = by_class.keys().copied().collect();
     sorted_classes.sort_by_key(|s| s.raw());
+    let mut delegates_by_func: ahash::AHashMap<FuncId, bool> = ahash::AHashMap::default();
     for class_sym in sorted_classes {
         let funcs = match by_class.get(&class_sym) {
             Some(v) => v.clone(),
@@ -1258,7 +1496,9 @@ fn stitch_receiver_method_propagation(
             // pass emits caller→ancestor-callee edges too, so the
             // chain renderer surfaces the canonical super-resolved
             // call sequence.
-            let delegates = callee_body_delegates_via_super(global, callee);
+            let delegates = *delegates_by_func
+                .entry(callee)
+                .or_insert_with(|| callee_body_delegates_via_super(global, callee));
             let mut super_chain_funcs: Vec<FuncId> = Vec::new();
             if read_nodes.is_empty() || delegates {
                 let extras = collect_super_chain_read_nodes_and_funcs(
@@ -1269,6 +1509,7 @@ fn stitch_receiver_method_propagation(
                     &field_names,
                     func_to_language,
                     file_to_language,
+                    &scope_files,
                 );
                 for (n, f) in extras {
                     if !read_nodes.contains(&n) {
@@ -1375,11 +1616,10 @@ fn collect_field_write_names(ws: &IdgWorkspace, func: FuncId, out: &mut ahash::A
                 if !is_implicit_receiver_name(s) {
                     continue;
                 }
-                let head_id = path[0];
-                let Some(head) = segment.strings.get(head_id) else {
+                let Some(projected) = canonical_projected_path(segment, path) else {
                     continue;
                 };
-                head.to_string()
+                projected
             }
             _ => continue,
         };
@@ -1395,6 +1635,36 @@ fn collect_field_write_names(ws: &IdgWorkspace, func: FuncId, out: &mut ahash::A
             out.insert(canonical);
         }
     }
+}
+
+fn field_read_head(segment: &crate::segment::IdgSegment, place: &crate::place::Place) -> Option<String> {
+    let crate::place::Place::Read { name, path } = place else {
+        return None;
+    };
+    let s = segment.strings.get(*name)?;
+    if path.is_empty() {
+        let canonical = canonical_field_name(s);
+        let head = canonical.split('.').next().unwrap_or(&canonical);
+        Some(head.to_string())
+    } else if is_implicit_receiver_name(s) {
+        canonical_projected_path(segment, path)
+    } else {
+        None
+    }
+}
+
+fn canonical_projected_path(
+    segment: &crate::segment::IdgSegment,
+    path: &smallvec::SmallVec<[bonsai_factstore::StrId; 4]>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    for part in path {
+        let canonical = canonical_field_name(segment.strings.get(*part)?);
+        if !canonical.is_empty() {
+            parts.push(canonical);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("."))
 }
 
 /// Collect every `Place::Read{name, path: []}` ws_node in `func`'s
@@ -1415,40 +1685,15 @@ fn collect_field_read_nodes(
     };
     let mut out = Vec::new();
     for (pid_idx, place) in segment.places.places.iter().enumerate() {
-        let Place::Read { name, path } = place else {
-            continue;
-        };
-        // The bridge matches when the read's "head field" — the first
-        // dot-segment of a canonical name (`this.Data.Cmd` → `Data`)
-        // OR `path[0]` for a structured `Read{name=this, path=[..]}` —
-        // lies in `field_names`. Without the nested case the bridge
-        // collapses to one level and getters whose body reads a nested
-        // receiver field (`Cmd => Data.Cmd`) never connect to the
-        // caller's tainted `recv.Data.Cmd`, which is the FN root cause
-        // for the csharp/dart/scala/swift mega_flows.
-        let Some(s) = segment.strings.get(*name) else {
-            continue;
-        };
-        let head_field = if path.is_empty() {
-            let canonical = canonical_field_name(s);
-            // first dot-segment of the (sigil/`this.`-stripped) name
-            let head = canonical.split('.').next().unwrap_or(&canonical);
-            head.to_string()
-        } else if is_implicit_receiver_name(s) {
-            // `Read{name=this/self, path=[f, sub, ...]}` — the head
-            // field is `path[0]`; canonicalise to bucket onto the same
-            // key as a write.
-            let head_id = path[0];
-            let Some(head) = segment.strings.get(head_id) else {
-                continue;
-            };
-            canonical_field_name(head)
-        } else {
+        let Some(head_field) = field_read_head(segment, place) else {
             continue;
         };
         if head_field.is_empty() || !field_names.contains(&head_field) {
             continue;
         }
+        let Place::Read { .. } = place else {
+            continue;
+        };
         let pid = crate::node::PlaceId(pid_idx as u32);
         let Some(local) = segment.nodes.lookup(func, pid) else {
             continue;
@@ -1463,25 +1708,6 @@ fn collect_field_read_nodes(
     out
 }
 
-/// Collect every `Place::CallArg{site, idx=u8::MAX or 0}` ws_node
-/// in `func`'s segment. Used by Phase 3d to bridge receiver state
-/// through methods whose body is a one-liner like
-/// `return super.method()` — they have no field reads of their own,
-/// but their downstream recv-slots need to inherit the caller's
-/// taint so the next-level `(method, super.method)` pair sees its
-/// recv-slot in the closure.
-///
-/// Returns every recv-slot in the body (idx = `u8::MAX` or 0).
-/// Earlier work attempted to narrow this to "implicit-receiver
-/// shapes only" (calls whose receiver is `self` / `this` /
-/// `super` / a class field), but field-name heuristics across the
-/// 21-language surface couldn't reliably distinguish receiver-
-/// shared shapes (csharp `_repo.Run()`, python free-function
-/// `pipeline = Pipeline(); pipeline.run()`) from incidental
-/// `helper.format()`-style locals. The broad inclusion is
-/// load-bearing for the mega_flow chains; the worst-case over-link
-/// only propagates taint into fields the IDG can prove exist, so
-/// the practical inflation is bounded.
 /// True when `callee`'s body delegates via `super` / `super()` —
 /// the body either contains a `FlowEvent::Call { name: "super"|... }`
 /// event OR is essentially empty (no field reads, no recv slots) and
@@ -1578,6 +1804,7 @@ fn collect_super_chain_read_nodes_and_funcs(
     field_names: &ahash::AHashSet<String>,
     func_to_language: &AHashMap<FuncId, &'static str>,
     file_to_language: &AHashMap<FileId, &'static str>,
+    scope_files: &[FileId],
 ) -> Vec<(crate::WsNodeId, FuncId)> {
     let Some(callee_decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
         return Vec::new();
@@ -1603,7 +1830,8 @@ fn collect_super_chain_read_nodes_and_funcs(
     while let Some(class_sym) = frontier.pop() {
         // For every method in this class with the same name as
         // `callee`, fold in its read_nodes.
-        for file in global.all_files() {
+        for file in scope_files {
+            let file = *file;
             for decl in global.decls_in(file) {
                 if decl.parent != Some(class_sym) {
                     continue;
@@ -1766,6 +1994,7 @@ fn stitch_receiver_field_flow(
     use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
+    let scope_files = propagation_scope_files(global, file_to_language);
     // Group function-shaped decls by parent symbol id. Decls
     // without a parent collapse into a single "no-parent" bucket
     // keyed by file (an adapter that doesn't surface class parents
@@ -1784,8 +2013,9 @@ fn stitch_receiver_field_flow(
     // skipped — module-level free functions don't share fields.
     let mut by_class: ahash::AHashMap<(Option<SymbolId>, bonsai_common::FileId), Vec<FuncId>> =
         ahash::AHashMap::default();
-    let class_by_name: ahash::AHashMap<(Option<&'static str>, String), SymbolId> = global
-        .all_files()
+    let class_by_name: ahash::AHashMap<(Option<&'static str>, String), SymbolId> = scope_files
+        .iter()
+        .copied()
         .flat_map(|file| {
             let language = file_language(file_to_language, file);
             global
@@ -1795,7 +2025,8 @@ fn stitch_receiver_field_flow(
                 .map(move |decl| ((language, decl.name.clone()), decl.symbol))
         })
         .collect();
-    for file in global.all_files() {
+    for file in &scope_files {
+        let file = *file;
         for decl in global.decls_in(file) {
             if !matches!(
                 decl.kind,
@@ -1927,7 +2158,7 @@ fn stitch_receiver_field_flow(
                         *w_ws,
                         *r_ws,
                         IdgEdgeKind::IntraAssign,
-                        bonsai_common::Precision::OverApproximate,
+                        bonsai_common::Precision::Narrowed,
                     );
                     // Record the link so the query layer can lift
                     // it into a synthetic CrossCallEdge for the
@@ -1949,7 +2180,7 @@ fn stitch_receiver_field_flow(
                         writer_ws_node: w_ws.0,
                         reader_ws_node: r_ws.0,
                         via_span: writer_span,
-                        precision: bonsai_common::Precision::OverApproximate,
+                        precision: bonsai_common::Precision::Narrowed,
                     });
                 }
             }
@@ -1985,12 +2216,12 @@ fn collect_field_nodes(
         //     Bare locals fall through.
         //   * `Place::Write { name = "self"/"this"/etc, path = ["field", ..] }`
         //     — `this.cmd = X` style assignments. Canonical key is
-        //     the FIRST path segment.
-        //   * `Place::Read { name, path: [] }` — accepts both
-        //     sigil'd and bare names because adapters tokenise
-        //     receiver-field reads inconsistently. Bare-tail reads
-        //     only pair with sigil'd / qualified writes via the
-        //     canonical key at edge-emit time.
+        //     the full projected path, so `self._data.cmd` does not
+        //     collapse into sibling `self._data.user`.
+        //   * `Place::Read` accepts both path-empty sigil/bare names
+        //     and projected receiver paths. Bare-tail reads only pair
+        //     with sigil'd / qualified writes via the canonical key at
+        //     edge-emit time.
         let (is_write, canonical) = match place {
             Place::Write { name, path, .. } if path.is_empty() => {
                 // Accept bare-name Writes in any class-grouped
@@ -2012,26 +2243,34 @@ fn collect_field_nodes(
                 (true, canonical_field_name(s))
             }
             Place::Write { name, path, .. } if !path.is_empty() => {
-                // Qualified writes (`this.cmd = X`, `self.cmd = X`)
-                // canonicalize to the first path segment so peer
-                // methods reading bare `cmd` match.
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
                 if !is_implicit_receiver_name(s) {
                     continue;
                 }
-                let head_id = path[0];
-                let Some(head) = segment.strings.get(head_id) else {
+                let Some(projected) = canonical_projected_path(segment, path) else {
                     continue;
                 };
-                (true, head.to_string())
+                (true, projected)
             }
             Place::Read { name, path } if path.is_empty() => {
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
                 (false, canonical_field_name(s))
+            }
+            Place::Read { name, path } if !path.is_empty() => {
+                let Some(s) = segment.strings.get(*name) else {
+                    continue;
+                };
+                if !is_implicit_receiver_name(s) {
+                    continue;
+                }
+                let Some(projected) = canonical_projected_path(segment, path) else {
+                    continue;
+                };
+                (false, projected)
             }
             _ => continue,
         };
@@ -2204,7 +2443,11 @@ fn ws_node_to_local(
 /// parallel. Each function's transfer is independent (it only
 /// reads its own `Decl`), so this is embarrassingly parallel via
 /// rayon.
-fn run_transfer_in_parallel(global: &GlobalIndex, transfer_options: &TransferOptions) -> Vec<TransferOutput> {
+fn run_transfer_in_parallel_for_files(
+    global: &GlobalIndex,
+    transfer_options: &TransferOptions,
+    included_files: Option<&AHashSet<FileId>>,
+) -> Vec<TransferOutput> {
     // Collect every (FileId, decl-index) pair so rayon can split
     // them across threads. Each transfer call produces a
     // `TransferOutput` with its own embedded name pool — the
@@ -2212,6 +2455,9 @@ fn run_transfer_in_parallel(global: &GlobalIndex, transfer_options: &TransferOpt
     // so per-call name spaces don't conflict.
     let mut funcs: Vec<(FileId, &bonsai_lang_api::Decl)> = Vec::new();
     for file in global.all_files() {
+        if included_files.is_some_and(|files| !files.contains(&file)) {
+            continue;
+        }
         for decl in global.functions_in(file) {
             funcs.push((file, decl));
         }

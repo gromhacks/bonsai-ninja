@@ -171,6 +171,13 @@ ls target/release/bonsai-ninja
 
 The binary is statically linked aside from the system C library.
 
+Release artifacts are built for Linux, macOS, and Windows on x64 and
+arm64. Source builds for other CPU architectures need the Rust target
+std library, a suitable native toolchain, and a parser bundle or parser
+source build path for that platform. See
+[Platform And Architecture Support](docs/platform-support.mdx) and run
+`scripts/check-targets.sh` before publishing a new target.
+
 ## Quickstart
 
 ```sh
@@ -216,7 +223,9 @@ surface.
 
 `--format text` renders themed terminal output, `--format json` emits a
 stable machine-consumable schema, and `--format sarif` is available for
-`security taint-analysis` findings.
+`security taint-analysis` findings. `security source-analysis` is
+text/json-only source-flow mapping; requesting SARIF for it fails clearly
+instead of emitting a misleading vulnerability report.
 
 Text output names the evidence type directly: `inspect` renders generic
 `FLOW` call paths, `security source-analysis` renders `SOURCE FLOW`, and

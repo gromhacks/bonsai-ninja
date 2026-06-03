@@ -45,19 +45,12 @@ fn main() {
 
     let head = run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "ungitted".to_string());
     let dirty = run_git(&["status", "--porcelain"]).map_or(String::new(), |out| out);
-    let dirty_marker = if dirty.trim().is_empty() {
-        "clean"
-    } else {
-        "dirty"
-    };
+    let dirty_marker = if dirty.trim().is_empty() { "clean" } else { "dirty" };
     let dirty_hash = fnv1a64(dirty.as_bytes());
 
     // Compose deterministically so two builds at the same commit with
     // identical dirty state produce identical fingerprints.
-    let fingerprint = format!(
-        "{}@{}:{}:{:016x}",
-        pkg_version, head, dirty_marker, dirty_hash
-    );
+    let fingerprint = format!("{}@{}:{}:{:016x}", pkg_version, head, dirty_marker, dirty_hash);
     emit_fingerprint(&fingerprint);
 }
 

@@ -322,10 +322,12 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        // The js micro fixture models 3 source matches (two `req.query`
-        // reads + the route getter); the earlier floor of 5 over-counted.
-        min_sources_micro: 3,
-        min_source_flows_micro: 7,
+        // The js micro fixture models 2 source matches (the two
+        // `req.query` reads). Source-analysis emits 5 distinct
+        // source-lineage chains after duplicate source rows collapse
+        // into `additional_sources`.
+        min_sources_micro: 2,
+        min_source_flows_micro: 5,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
@@ -387,7 +389,7 @@ pub const LANGS: &[LangExp] = &[
         min_sources_micro: 0,
         min_source_flows_micro: 0,
         min_deps_micro: 1,
-        min_sanitizers_micro: 0,
+        min_sanitizers_micro: 2,
     },
     LangExp {
         lang: "perl",
@@ -437,10 +439,11 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "os.system",
         sqli_sink: "cursor.execute",
         min_findings_micro: 2,
-        // Tightening the Python httpx variable-client SSRF rule removed
-        // three dict `.get(...)` false positives from this fixture while
-        // preserving the real `http_client.get(...)` SSRF row.
-        min_findings_complex: 64,
+        // Tightening Python source attribution and inferred-entry
+        // filtering removed duplicate/overclaim rows from this fixture
+        // while preserving the real command-injection, SQLi, template,
+        // path, SSRF, eval, and pickle findings.
+        min_findings_complex: 63,
         min_complex_decls: 200,
         refs_populated: true,
         has_classes: false,
@@ -461,12 +464,10 @@ pub const LANGS: &[LangExp] = &[
         min_findings_micro: 0,
         // Receiver-name-gating the Ruby SQL execute rule drops two
         // unrelated `.execute(...)` complex-fixture matches while
-        // preserving the real `db.execute(...)` SQL sink. Floor lowered
-        // 29→26 (2026-05-29) when the combiner's group_id+sink-site dedup
-        // collapsed 6 duplicate rows that earlier chain/flow-split keying
-        // had emitted for the same flow; the 26 distinct findings each
-        // resolve to a unique (group, sink site).
-        min_findings_complex: 26,
+        // preserving the real `db.execute(...)` SQL sink. The floor is
+        // 25 after dedup: 21 command-injection, 2 eval, 1 file-read,
+        // and 1 ERB template finding.
+        min_findings_complex: 25,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: true,
@@ -569,10 +570,11 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        // The ts micro fixture models 5 source matches; the earlier floor
-        // of 9 over-counted.
+        // The ts micro fixture models 5 source matches and 12 distinct
+        // source-lineage chains after duplicate source rows collapse
+        // into `additional_sources`.
         min_sources_micro: 5,
-        min_source_flows_micro: 14,
+        min_source_flows_micro: 12,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
@@ -1001,7 +1003,7 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
     // `--inferred-sources` shows its real flow (see the parallel
     // `expected_mega_flow_findings_with_inferred_sources` in
     // security_pipeline_regressions.rs). The cpp/csharp/dart/elixir/java/
-    // scala/swift entries went 0→{1,2} when d332009 closed the FN-language
+    // scala/swift entries went 0→1 when d332009 closed the FN-language
     // construct gaps; objc went 2→1 when the xxe over-claim was removed;
     // solidity went 1→0 once its concrete-source FP was dropped (its real
     // flow seeds from an inferred entry param); dart settled at 1 after
@@ -1035,9 +1037,12 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         // Concrete-source empty: real flow needs an inferred entry source.
         "rust" => 0,
         "scala" => 1,
-        // Concrete-source empty: both real sources are inferred entry
-        // points (`entry-point.*`), surfaced only under --inferred-sources.
-        "solidity" => 0,
+        // One concrete information-exposure finding from `msg.sender`
+        // in the audit modifier. The reentrancy chain through
+        // `handle -> orchestrate -> persist` still needs
+        // `--inferred-sources` because its payload starts at an entry
+        // parameter.
+        "solidity" => 1,
         "swift" => 1,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
@@ -1491,8 +1496,8 @@ fn dependency_signal_value(signal: &str) -> Option<&str> {
 }
 
 /// Assert `security sanitizers` has the expected inventory count. Most
-/// micro fixtures intentionally have no sanitizer; Solidity currently
-/// exercises the positive path.
+/// micro fixtures intentionally have no sanitizer; Objective-C and
+/// Solidity currently exercise positive passthrough/sanitizer paths.
 fn check_security_sanitizers(ws: &str, lang: &str, expected_min: usize) {
     let Some((out, _, code)) = run(&["security", ws, "sanitizers", "--format", "json"]) else {
         return;

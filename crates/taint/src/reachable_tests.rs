@@ -339,6 +339,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         &global,
         &service,
         Some(Precision::Narrowed),
+        None,
     );
 
     assert!(
@@ -357,6 +358,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
         &global,
         &service,
         Some(Precision::Narrowed),
+        None,
     );
 
     assert!(
@@ -373,6 +375,16 @@ fn call_result_passthrough_matches_erlang_remote_separator() {
     );
 }
 
+#[test]
+fn call_result_passthrough_regex_alternatives_do_not_prefilter_to_last_branch() {
+    assert!(
+        call_result_passthrough_matches(
+            "NSString.stringWithFormat",
+            r"regex:^(?:.*\.)?(stringWithFormat|localizedStringWithFormat|initWithFormat|stringByAppendingFormat)$",
+        ),
+        "regex passthrough prefilter must not reject earlier alternation branches"
+    );
+}
 
 // audit re-apply: RED before / GREEN after for M2. `collect_tainted_writes_req
 
@@ -425,7 +437,11 @@ fn collect_tainted_writes_keeps_whole_identifier_and_dotted_member() {
 
     let mut out: Vec<crate::inter::TaintedCall> = Vec::new();
     collect_tainted_writes(&events, FuncId::new(0), &tainted_names, None, &mut out);
-    assert_eq!(out.len(), 1, "a whole tainted token inside a member access must still emit a Write row; got {out:#?}");
+    assert_eq!(
+        out.len(),
+        1,
+        "a whole tainted token inside a member access must still emit a Write row; got {out:#?}"
+    );
     assert_eq!(out[0].kind, crate::inter::TaintedCallKind::Write);
     assert_eq!(out[0].name, "out");
     assert_eq!(out[0].tainted_args.len(), 1);

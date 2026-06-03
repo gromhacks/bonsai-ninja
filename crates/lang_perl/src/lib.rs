@@ -847,22 +847,7 @@ fn rewrite_perl_eval_exception_regions(
 }
 
 fn event_span(event: &FlowEvent) -> Option<Span> {
-    match event {
-        FlowEvent::Call { span, .. }
-        | FlowEvent::Branch { span, .. }
-        | FlowEvent::Loop { span, .. }
-        | FlowEvent::Assign { span, .. }
-        | FlowEvent::Return { span, .. }
-        | FlowEvent::Throw { span, .. }
-        | FlowEvent::Try { span, .. }
-        | FlowEvent::Break { span, .. }
-        | FlowEvent::Continue { span, .. }
-        | FlowEvent::Yield { span, .. }
-        | FlowEvent::Await { span, .. }
-        | FlowEvent::Defer { span, .. }
-        | FlowEvent::Using { span, .. }
-        | FlowEvent::Lifecycle { span, .. } => Some(*span),
-    }
+    Some(event.span())
 }
 
 fn span_inside_eval_body(span: Span, block: PerlEvalBlockRange) -> bool {
@@ -1150,7 +1135,7 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                 }
             }
             FlowEvent::Call { args, .. } => {
-                for arg in args {
+                for arg in &mut *args {
                     // Rewrite call arguments only — `value_text` and
                     // `place` should stay in sync.
                     if let Some(access) = perl_hash_deref_access(&arg.value_text) {
@@ -1687,7 +1672,7 @@ fn rewrite_perl_call_arg_texts(events: &mut [FlowEvent], source: &str) {
     for event in events {
         match event {
             FlowEvent::Call { args, .. } => {
-                for arg in args {
+                for arg in &mut *args {
                     let start = usize::try_from(arg.span.start).unwrap_or(usize::MAX);
                     let end = usize::try_from(arg.span.end).unwrap_or(usize::MAX);
                     if start == usize::MAX || end > source.len() || start > end {
@@ -1726,6 +1711,7 @@ fn rewrite_perl_call_arg_texts(events: &mut [FlowEvent], source: &str) {
                         arg.place = Some(arg.value_text.clone());
                     }
                 }
+                combine_perl_fat_comma_call_args(args, source);
             }
             FlowEvent::Branch {
                 then_events,
@@ -1751,6 +1737,56 @@ fn rewrite_perl_call_arg_texts(events: &mut [FlowEvent], source: &str) {
             _ => {}
         }
     }
+}
+
+fn combine_perl_fat_comma_call_args(args: &mut Vec<CallArg>, source: &str) {
+    if args.len() < 2 {
+        return;
+    }
+    let mut combined = Vec::with_capacity(args.len());
+    let mut idx = 0usize;
+    while idx < args.len() {
+        if idx + 1 < args.len() && perl_args_have_fat_comma_between(&args[idx], &args[idx + 1], source) {
+            let key = args[idx].value_text.trim().to_string();
+            let value = &args[idx + 1];
+            let start = usize::try_from(args[idx].span.start).unwrap_or(usize::MAX);
+            let end = usize::try_from(value.span.end).unwrap_or(usize::MAX);
+            let value_text = if start != usize::MAX && end <= source.len() && start <= end {
+                source[start..end].trim().to_string()
+            } else {
+                format!("{key} => {}", value.value_text.trim())
+            };
+            combined.push(CallArg {
+                span: Span::new(args[idx].span.file, args[idx].span.start, value.span.end),
+                name: (!key.is_empty()).then_some(key),
+                value_text,
+                place: value.place.clone(),
+                source_names: value.source_names.clone(),
+            });
+            idx += 2;
+        } else {
+            combined.push(args[idx].clone());
+            idx += 1;
+        }
+    }
+    *args = combined;
+}
+
+fn perl_args_have_fat_comma_between(left: &CallArg, right: &CallArg, source: &str) -> bool {
+    if left.span.file != right.span.file || left.span.end > right.span.start {
+        return false;
+    }
+    let start = usize::try_from(left.span.end).unwrap_or(usize::MAX);
+    let end = usize::try_from(right.span.start).unwrap_or(usize::MAX);
+    if start == usize::MAX || end > source.len() || start > end {
+        return false;
+    }
+    let key = left.value_text.trim();
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric() || ch == ':')
+        && source[start..end].contains("=>")
 }
 
 /// Starting at `end`, advance past any chained `->{k}`, `->ident`, or
@@ -2807,11 +2843,7 @@ fn attach_synthesized_calls_to_decls(idx: &mut DeclIndex, events: Vec<(Span, Flo
 /// identical spans is required because the two spans deliberately
 /// differ. Recurses into nested bodies since a kit Call inside an
 /// `if`/`while`/`try` lands in a child event list.
-fn perl_synth_call_duplicates_kit_call(
-    existing: &[FlowEvent],
-    synth_span: Span,
-    event: &FlowEvent,
-) -> bool {
+fn perl_synth_call_duplicates_kit_call(existing: &[FlowEvent], synth_span: Span, event: &FlowEvent) -> bool {
     let FlowEvent::Call {
         name: synth_name,
         receiver: synth_receiver,
@@ -2838,10 +2870,7 @@ fn perl_flow_has_contained_call(
     for event in events {
         match event {
             FlowEvent::Call {
-                span,
-                name,
-                receiver,
-                ..
+                span, name, receiver, ..
             } => {
                 let contained = span.file == synth_span.file
                     && span.start >= synth_span.start

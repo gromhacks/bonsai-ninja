@@ -116,6 +116,7 @@ use crate::text::{
     is_quoted_literal, normalise_qualified_text, qualified_access_bases, text_looks_qualified,
     value_bearing_identifier_text,
 };
+use crate::tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_has_descendant_shape};
 
 /// Run the intraprocedural analysis on a function's CFG.
 ///
@@ -391,7 +392,7 @@ fn strict_operand_is_tainted(text: &str, state: &TokenSet) -> bool {
     if sigil_stripped != trimmed && state.contains(sigil_stripped) {
         return true;
     }
-    if receiver_method_projection_is_tainted(trimmed, state) {
+    if crate::tokens::receiver_method_projection_is_tainted(trimmed, state, false) {
         return true;
     }
     let normalised = normalise_qualified_text(trimmed);
@@ -491,26 +492,6 @@ fn is_identifier_byteish(ch: char) -> bool {
     ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_ascii_alphanumeric()
 }
 
-/// True when the RHS surface contains at least two distinct bare
-/// identifiers — the gate that promotes a target to wildcard
-/// descendant taint (`target.*`) for "constructed" values vs. plain
-/// aliasing.
-fn rhs_has_descendant_shape(source_names: &[String]) -> bool {
-    let mut distinct = Vec::new();
-    for name in source_names {
-        let name = name.trim();
-        if name.is_empty() || is_quoted_literal(name) {
-            continue;
-        }
-        let canonical = canonical_bare_name(name);
-        if canonical.is_empty() || distinct.iter().any(|existing| existing == &canonical) {
-            continue;
-        }
-        distinct.push(canonical);
-    }
-    distinct.len() > 1
-}
-
 /// Strip pointer / reference prefixes (`*`, `&`) from a target after
 /// general qualified-text normalisation. Used so `*raw` and `&raw`
 /// alias to the same `raw` identifier in the state.
@@ -533,7 +514,7 @@ fn text_is_tainted(text: &str, state: &TokenSet) -> bool {
     if tainted_receiver_access(trimmed, state) {
         return true;
     }
-    if receiver_method_projection_is_tainted(trimmed, state) {
+    if crate::tokens::receiver_method_projection_is_tainted(trimmed, state, false) {
         return true;
     }
     if state.contains(trimmed) {
@@ -575,15 +556,6 @@ fn qualified_source_bases(source_names: &[String]) -> ahash::AHashSet<String> {
     bases
 }
 
-/// Strip qualifier sigils and whitespace to produce the canonical
-/// bare-identifier form used for de-duplication and set membership.
-fn canonical_bare_name(text: &str) -> String {
-    normalise_qualified_text(text)
-        .trim_start_matches(&['$', '@', '%'][..])
-        .trim()
-        .to_string()
-}
-
 /// True when `text` matches the BASE of any qualified seed in
 /// `state`. Catches `obj` references when the tracked seed is
 /// `obj.field`. Mirrors the inter helper: base only, never the tail,
@@ -621,65 +593,6 @@ fn tainted_receiver_access(text: &str, state: &TokenSet) -> bool {
             && (normalised == seed
                 || normalised
                     .strip_prefix(seed.as_str())
-                    .is_some_and(|rest| rest.starts_with('.')))
-    })
-}
-
-/// True when `text` contains a `receiver.method(...)` call shape and
-/// the receiver is tainted. Catches `tainted.format(...)` patterns
-/// where the call expression as a whole isn't a tracked identifier
-/// but the receiver alone propagates taint.
-fn receiver_method_projection_is_tainted(text: &str, state: &TokenSet) -> bool {
-    for open_paren in text.match_indices('(').map(|(idx, _)| idx) {
-        let before_call = text[..open_paren].trim_end();
-        // Walk back from the `(` over identifier-ish characters to find the
-        // start of the callee expression. char_indices keeps us on UTF-8 boundaries.
-        let start = before_call
-            .char_indices()
-            .rev()
-            .find(|&(_, c)| {
-                !(c == '.'
-                    || c == '_'
-                    || c == '$'
-                    || c == '@'
-                    || c == '%'
-                    || c == ']'
-                    || c == '['
-                    || c == '\''
-                    || c == '"'
-                    || c.is_ascii_alphanumeric())
-            })
-            .map_or(0, |(idx, c)| idx + c.len_utf8());
-        let candidate = before_call[start..].trim();
-        let Some((receiver, method)) = candidate.rsplit_once('.') else {
-            continue;
-        };
-        if receiver.trim().is_empty() || method.trim().is_empty() {
-            continue;
-        }
-        let receiver = normalise_qualified_text(receiver);
-        if !receiver.is_empty()
-            && (state.contains(&receiver) || qualified_wildcard_seed_matches(&receiver, state))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// True when any seed in `state` is the wildcard form `prefix.*` and
-/// `normalised_text` matches that prefix exactly or is a strict
-/// descendant (`prefix.field`, `prefix.a.b`).
-fn qualified_wildcard_seed_matches(normalised_text: &str, state: &TokenSet) -> bool {
-    state.iter().any(|seed| {
-        let Some(prefix) = seed.strip_suffix(".*") else {
-            return false;
-        };
-        let prefix = normalise_qualified_text(prefix);
-        !prefix.is_empty()
-            && (normalised_text == prefix
-                || normalised_text
-                    .strip_prefix(prefix.as_str())
                     .is_some_and(|rest| rest.starts_with('.')))
     })
 }

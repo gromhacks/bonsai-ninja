@@ -13,7 +13,8 @@ Rule testing has two layers: rulepack validation proves the YAML matches the sch
 2. Run rulepack validation.
 3. Run match-example collision auditing.
 4. Add a fixture when propagation behavior changes.
-5. Run focused security tests before the full workspace suite.
+5. Run the deployment readiness checks that cover the affected command
+   surface.
 
 </Steps>
 
@@ -56,10 +57,111 @@ Use `examples/<lang>/micro` for small command-surface checks, `mega_flow` for co
   --all
 ```
 
-## Cargo Tests
+## Deployment Readiness Checks
 
 ```bash
-cargo test -q -p bonsai_cli --test security_commands
-cargo test -q -p bonsai_cli --test validate_script
-cargo test --workspace
+cargo fmt --all --check
+git diff --check
+cargo build -q --release -p bonsai_cli
+
+./target/release/bonsai-ninja security . pack --validate \
+  --format json \
+  --no-color \
+  --no-progress
+
+./target/release/bonsai-ninja security . pack --audit \
+  --context 16k \
+  --no-color \
+  --no-progress
+
+cargo test -p bonsai_security --test rulepack_conformance -- --test-threads=1
+cargo test -p bonsai_security --test security_pipeline_regressions -- --test-threads=1
+cargo test -p bonsai_security --test branch_merge_audit -- --nocapture
+
+cargo test -p bonsai_cli --test sanitizer_fixtures -- --nocapture
+cargo test -p bonsai_cli --test security_commands \
+  taint_analysis_run_across_every_mega_flow_lang \
+  -- --nocapture
+cargo test -p bonsai_cli --test per_lang_cli_matrix \
+  micro_security_sarif_shape \
+  -- --nocapture
+
+python3 scripts/validate-mega-cli.py \
+  --bin ./target/release/bonsai-ninja \
+  --skip-realworld
 ```
+
+## Large-Codebase Performance Checks
+
+For large Java or JVM-family repositories, validate both cold and warm runs.
+Keep the real codebase in `/tmp`, delete it after the audit, and run the
+release binary with progress disabled for machine-readable logs:
+
+```bash
+env BONSAI_DEBUG=security-phase,idg-build \
+  ./target/release/bonsai-ninja security /tmp/large-java-project taint-analysis \
+  --profile production \
+  --format json \
+  --no-color \
+  --no-progress > /tmp/bonsai-large-java-taint.json
+```
+
+The 2026-06-03 Elasticsearch smoke covered 29,839 JVM-family source files and
+completed cold in 419.48s, then warm in 215.49s with byte-identical JSON. The
+warm run loaded the deterministic transfer sidecar key and avoided rebuilding
+the 3.1 GiB chunked IDG factstore. A valid large-codebase run should have
+`analysis_complete: true`, no incomplete reasons, no malformed page metadata,
+no `payload exceeds 4GiB` warning, and no `save_to_disk failed` warning.
+
+## Security Pattern Audit
+
+Use this stricter pass when reviewing the checked-in rulepack end to end:
+
+```bash
+./target/release/bonsai-ninja security . pack --validate \
+  --format json \
+  --no-color \
+  --no-progress
+
+./target/release/bonsai-ninja security . pack --audit \
+  --format json \
+  --no-color \
+  --no-progress
+
+python3 scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch
+python3 scripts/pack_audit.py --json > /tmp/bonsai-pack-audit.json
+
+cargo test -p bonsai_security --test rulepack_conformance -- --test-threads=1
+cargo test -p bonsai_security --test false_positive_guards -- --nocapture
+cargo test -p bonsai_security --test validate_pack_constraint_coverage -- --nocapture
+cargo test -p bonsai_security --test validate_pack_negative_examples -- --nocapture
+cargo test -p bonsai_security --test pack_constraint_coverage_property -- --nocapture
+cargo test -p bonsai_security --test vuln_class_regression -- --nocapture
+cargo test -p bonsai_cli --test sanitizer_fixtures -- --nocapture
+```
+
+For the audit to be clean, `pack --validate` must report zero warnings and
+errors, `pack --audit` must have no unexplained canonical family gaps, and
+`pack_audit.py` must report zero duplicate ids, zero duplicate enabled match
+shapes, zero cross-family API collisions, zero family-file mismatches, zero
+unreviewed fragile bare-name rules, and no unresolved canonical sink-family
+gaps. The intentional exceptions are the same as the CLI audit: Solidity uses
+an ecosystem-specific taxonomy, and C deserialization is not applicable.
+
+`cargo test --workspace --no-fail-fast` is the broad local sweep used for
+release-confidence runs. It is much slower than the focused deployment pass
+because it builds and runs every debug test target, including integration
+matrices, inspect matrices, cache/hot-reload tests, SARIF tests, doc tests, and
+21-language command/content suites. Run it periodically before a release branch
+or overnight validation; after scoped rulepack, formatter, or command-output
+changes, the focused checks above cover schema validity, SARIF shape,
+21-language mega-flow behavior, sanitizer fixtures, and the release CLI command
+surface.
+
+No Rust test-startup caveat remains open from the 2026-06-03 deployment pass.
+The earlier `_dyld_start` stalls on the local macOS host were fixed by cleaning
+an overgrown generated `target/` tree; fresh default-target test harnesses then
+launched normally, and `cargo test --workspace --no-fail-fast -- --test-threads=1`
+completed successfully. If a future test parent appears idle,
+inspect child processes before treating it as a Rust harness hang; some harnesses
+legitimately wait on child scripts such as `scripts/validate-mega-cli.py`.

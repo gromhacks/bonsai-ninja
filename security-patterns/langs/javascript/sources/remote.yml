@@ -253,6 +253,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(get|header)$"
+      base_name_in: [req]
   constraints:
   - min_args: 1
   match_examples:

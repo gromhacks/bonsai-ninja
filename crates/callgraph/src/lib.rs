@@ -20,12 +20,13 @@ use bonsai_lang_api::{
     AliasTarget, AssignValueKind, CallArg, CallKind, Decl, DeclKind, FlowEvent, ModulePath,
 };
 use bonsai_resolve::{
-    callee_without_call_args, collect_method_candidates_for_class, enclosing_class_for_decl,
+    callee_without_call_args, collect_method_candidates_for_class_cached, enclosing_class_for_decl,
     export_name_variants, extend_alias_targets_with_declared_types, is_super_receiver_with_tokens,
-    module_target_matches_decl_module_path, module_target_matches_path, namespace_alias_target_tail,
+    module_path_parts, module_target_matches_decl_module_path, module_target_matches_path,
+    module_target_parts, module_target_parts_match_path_parts, namespace_alias_target_tail,
     prune_receiver_type_names_for_dispatch, push_unique_func, push_unique_string,
     qualified_module_alias_call, resolve_callable_with_context, resolve_class, split_qualified_head_tail,
-    visibility_allows, ResolveContext,
+    visibility_allows, MethodCandidateCache, ResolveContext,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -264,6 +265,120 @@ impl BuildTargetIndex {
         *candidates = retained;
         true
     }
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceModuleTargetCache {
+    targets: AHashMap<WorkspaceModuleTargetKey, Vec<FuncId>>,
+    path_matches: AHashMap<(String, FileId), bool>,
+    target_parts: AHashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WorkspaceModuleTargetKey {
+    alias_target: String,
+    alias_tail: String,
+    caller_file: FileId,
+    caller_module: ModulePath,
+}
+
+#[derive(Debug, Default)]
+struct CallableTargetCache {
+    targets: AHashMap<CallableTargetKey, Vec<FuncId>>,
+    path_matches: AHashMap<(String, FileId), bool>,
+    target_parts: AHashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CallableTargetKey {
+    name: String,
+    caller_file: FileId,
+    caller_module: ModulePath,
+}
+
+impl CallableTargetKey {
+    fn new(name: &str, caller_file: FileId, caller_module: &ModulePath) -> Self {
+        Self {
+            name: name.to_string(),
+            caller_file,
+            caller_module: caller_module.clone(),
+        }
+    }
+}
+
+impl WorkspaceModuleTargetKey {
+    fn new(alias_target: &str, alias_tail: &str, caller_file: FileId, caller_module: &ModulePath) -> Self {
+        Self {
+            alias_target: alias_target.to_string(),
+            alias_tail: alias_tail.to_string(),
+            caller_file,
+            caller_module: caller_module.clone(),
+        }
+    }
+}
+
+impl WorkspaceModuleTargetCache {
+    fn path_matches(
+        &mut self,
+        alias_target: &str,
+        file: FileId,
+        file_path_parts: &AHashMap<FileId, Vec<String>>,
+        path_for_file: &dyn Fn(FileId) -> Option<String>,
+    ) -> bool {
+        cached_module_target_path_match(
+            &mut self.path_matches,
+            &mut self.target_parts,
+            alias_target,
+            file,
+            file_path_parts,
+            path_for_file,
+        )
+    }
+}
+
+impl CallableTargetCache {
+    fn path_matches(
+        &mut self,
+        alias_target: &str,
+        file: FileId,
+        file_path_parts: &AHashMap<FileId, Vec<String>>,
+        path_for_file: &dyn Fn(FileId) -> Option<String>,
+    ) -> bool {
+        cached_module_target_path_match(
+            &mut self.path_matches,
+            &mut self.target_parts,
+            alias_target,
+            file,
+            file_path_parts,
+            path_for_file,
+        )
+    }
+}
+
+fn cached_module_target_path_match(
+    path_matches: &mut AHashMap<(String, FileId), bool>,
+    target_parts_cache: &mut AHashMap<String, Vec<String>>,
+    alias_target: &str,
+    file: FileId,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+) -> bool {
+    let key = (alias_target.to_string(), file);
+    if let Some(cached) = path_matches.get(&key) {
+        return *cached;
+    }
+    let target_parts = target_parts_cache
+        .entry(alias_target.to_string())
+        .or_insert_with(|| module_target_parts(alias_target));
+    let matched = match file_path_parts.get(&file) {
+        Some(path_parts) => module_target_parts_match_path_parts(&target_parts, path_parts),
+        None => path_for_file(file).is_some_and(|path| {
+            let path_parts = module_path_parts(&path);
+            module_target_parts_match_path_parts(&target_parts, &path_parts)
+        }),
+    };
+    path_matches.insert(key, matched);
+    matched
 }
 
 fn normalize_fs_path(path: PathBuf) -> PathBuf {
@@ -620,8 +735,8 @@ impl ResolvedCallGraph {
     /// meaningful.
     pub fn build_with_file_info_and_super_tokens<F, T, P, L, G, S>(
         global: &GlobalIndex,
-        mut aliases_for_file: F,
-        mut alias_targets_for_file: T,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
         path_for_file: P,
         export_aliases_for_file: L,
         language_for_file: G,
@@ -635,55 +750,172 @@ impl ResolvedCallGraph {
         G: Fn(FileId) -> Option<&'static str>,
         S: Fn(FileId) -> &'static [&'static str],
     {
-        let mut cg = CallGraph::new();
+        Self::build_with_file_info_and_super_tokens_scoped(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            path_for_file,
+            export_aliases_for_file,
+            language_for_file,
+            super_receiver_tokens_for_file,
+            None,
+        )
+    }
+
+    /// Build the resolved call graph for a subset of caller files.
+    ///
+    /// Resolution still consults the workspace-wide symbol, path, and
+    /// language indexes, but only declarations in `included_files`
+    /// contribute outgoing call edges. Security scans use this to keep
+    /// production-scope runs from walking tests, fixtures, and generated
+    /// trees before the file-scoped IDG build.
+    pub fn build_with_file_info_and_super_tokens_for_files<F, T, P, L, G, S>(
+        global: &GlobalIndex,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
+        path_for_file: P,
+        export_aliases_for_file: L,
+        language_for_file: G,
+        super_receiver_tokens_for_file: S,
+        included_files: &[FileId],
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        P: Fn(FileId) -> Option<String>,
+        L: Fn(FileId) -> &'static [&'static str],
+        G: Fn(FileId) -> Option<&'static str>,
+        S: Fn(FileId) -> &'static [&'static str],
+    {
+        Self::build_with_file_info_and_super_tokens_scoped(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            path_for_file,
+            export_aliases_for_file,
+            language_for_file,
+            super_receiver_tokens_for_file,
+            Some(included_files),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors the public builder shape and adds the optional file scope.
+    fn build_with_file_info_and_super_tokens_scoped<F, T, P, L, G, S>(
+        global: &GlobalIndex,
+        mut aliases_for_file: F,
+        mut alias_targets_for_file: T,
+        path_for_file: P,
+        export_aliases_for_file: L,
+        language_for_file: G,
+        super_receiver_tokens_for_file: S,
+        included_files: Option<&[FileId]>,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        P: Fn(FileId) -> Option<String>,
+        L: Fn(FileId) -> &'static [&'static str],
+        G: Fn(FileId) -> Option<&'static str>,
+        S: Fn(FileId) -> &'static [&'static str],
+    {
         let alias_index = WorkspaceAliasIndex::build(global);
-        let files = global.all_files().collect::<Vec<_>>();
-        let file_paths: AHashMap<FileId, String> = files
+        let all_files = global.all_files().collect::<Vec<_>>();
+        let files = if let Some(included_files) = included_files {
+            let mut files = included_files.to_vec();
+            files.sort_by_key(|file| file.raw());
+            files.dedup();
+            files
+        } else {
+            all_files.clone()
+        };
+        let file_paths: AHashMap<FileId, String> = all_files
             .iter()
             .filter_map(|&file| path_for_file(file).map(|path| (file, path)))
             .collect();
+        let file_path_parts: AHashMap<FileId, Vec<String>> = file_paths
+            .iter()
+            .map(|(&file, path)| (file, module_path_parts(path)))
+            .collect();
         let build_targets =
             BuildTargetIndex::from_file_paths(file_paths.iter().map(|(&file, path)| (file, path.clone())));
-        let path_lookup = |file| file_paths.get(&file).cloned();
-        for file in files {
-            let aliases = aliases_for_file(file);
-            let file_alias_targets = alias_targets_for_file(file);
-            let export_aliases = export_aliases_for_file(file);
-            let super_receiver_tokens = super_receiver_tokens_for_file(file);
-            let caller_language = language_for_file(file);
-            for decl in global.decls_in(file) {
-                if !matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) {
-                    continue;
+        let file_languages: AHashMap<FileId, Option<&'static str>> = all_files
+            .iter()
+            .map(|&file| (file, language_for_file(file)))
+            .collect();
+        struct FileCallgraphInfo {
+            file: FileId,
+            aliases: AHashMap<String, String>,
+            alias_targets: AHashMap<String, AliasTarget>,
+            export_aliases: &'static [&'static str],
+            super_receiver_tokens: &'static [&'static str],
+            language: Option<&'static str>,
+        }
+        let file_infos = files
+            .into_iter()
+            .map(|file| FileCallgraphInfo {
+                file,
+                aliases: aliases_for_file(file),
+                alias_targets: alias_targets_for_file(file),
+                export_aliases: export_aliases_for_file(file),
+                super_receiver_tokens: super_receiver_tokens_for_file(file),
+                language: language_for_file(file),
+            })
+            .collect::<Vec<_>>();
+        use rayon::prelude::*;
+        let edge_chunks = file_infos
+            .par_iter()
+            .map(|info| {
+                let path_lookup = |file| file_paths.get(&file).cloned();
+                let language_lookup = |file| file_languages.get(&file).copied().flatten();
+                let mut method_candidate_cache = MethodCandidateCache::default();
+                let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
+                let mut callable_target_cache = CallableTargetCache::default();
+                let mut local_cg = CallGraph::new();
+                for decl in global.decls_in(info.file) {
+                    if !matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) {
+                        continue;
+                    }
+                    let from = FuncId::new(decl.symbol.raw());
+                    let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
+                    let local_bindings = collect_local_callable_bindings_with_alias_index(
+                        &decl.flow_events,
+                        global,
+                        decl,
+                        &alias_targets,
+                        &alias_index,
+                    );
+                    add_resolved_call_edges(
+                        &decl.flow_events,
+                        from,
+                        decl,
+                        global,
+                        &info.aliases,
+                        &alias_targets,
+                        &local_bindings,
+                        &path_lookup,
+                        &file_path_parts,
+                        info.export_aliases,
+                        info.super_receiver_tokens,
+                        info.language,
+                        &language_lookup,
+                        &alias_index,
+                        &build_targets,
+                        &mut method_candidate_cache,
+                        &mut workspace_module_cache,
+                        &mut callable_target_cache,
+                        &mut local_cg,
+                    );
                 }
-                let from = FuncId::new(decl.symbol.raw());
-                let alias_targets = alias_targets_for_decl(&file_alias_targets, decl);
-                let local_bindings = collect_local_callable_bindings_with_alias_index(
-                    &decl.flow_events,
-                    global,
-                    decl,
-                    &alias_targets,
-                    &alias_index,
-                );
-                add_resolved_call_edges(
-                    &decl.flow_events,
-                    from,
-                    decl,
-                    global,
-                    &aliases,
-                    &alias_targets,
-                    &local_bindings,
-                    &path_lookup,
-                    export_aliases,
-                    super_receiver_tokens,
-                    caller_language,
-                    &language_for_file,
-                    &alias_index,
-                    &build_targets,
-                    &mut cg,
-                );
+                local_cg.edges
+            })
+            .collect::<Vec<_>>();
+        let mut cg = CallGraph::new();
+        for edges in edge_chunks {
+            for edge in edges {
+                cg.add_edge(edge);
             }
         }
         Self { cg }
@@ -721,12 +953,16 @@ fn add_resolved_call_edges(
     alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_export_aliases: &[&'static str],
     caller_super_receiver_tokens: &[&'static str],
     caller_language: Option<&'static str>,
     language_for_file: &dyn Fn(FileId) -> Option<&'static str>,
     alias_index: &WorkspaceAliasIndex,
     build_targets: &BuildTargetIndex,
+    method_candidate_cache: &mut MethodCandidateCache,
+    workspace_module_cache: &mut WorkspaceModuleTargetCache,
+    callable_target_cache: &mut CallableTargetCache,
     cg: &mut CallGraph,
 ) {
     for event in events {
@@ -775,15 +1011,29 @@ fn add_resolved_call_edges(
                         name,
                         *span,
                         caller_super_receiver_tokens,
+                        method_candidate_cache,
                     );
                 }
                 if candidates.is_empty() {
-                    candidates =
-                        collect_type_qualified_method_targets(global, caller_decl, alias_targets, name);
+                    candidates = collect_type_qualified_method_targets(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        name,
+                        method_candidate_cache,
+                    );
                 }
-                if candidates.is_empty() {
-                    candidates =
-                        collect_constructor_targets_for_class_call(global, caller_decl, alias_targets, name);
+                if candidates.is_empty()
+                    && (*call_kind == CallKind::Constructor || caller_language != Some("java"))
+                {
+                    candidates = collect_constructor_targets_for_class_call(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        name,
+                        caller_language,
+                        method_candidate_cache,
+                    );
                 }
                 let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
                 if candidates.is_empty() && !typed_receiver_method {
@@ -793,8 +1043,10 @@ fn add_resolved_call_edges(
                         Some(aliases),
                         alias_targets,
                         path_for_file,
+                        file_path_parts,
                         caller_export_aliases,
                         caller_decl,
+                        workspace_module_cache,
                     );
                 }
                 let unresolved_method_receiver = candidates.is_empty()
@@ -810,6 +1062,8 @@ fn add_resolved_call_edges(
                         caller_decl,
                         alias_targets,
                         path_for_file,
+                        file_path_parts,
+                        callable_target_cache,
                     );
                 }
                 if candidates.is_empty()
@@ -832,9 +1086,11 @@ fn add_resolved_call_edges(
                             alias_target,
                             alias_tail,
                             path_for_file,
+                            file_path_parts,
                             caller_export_aliases,
                             caller_decl,
                             alias_targets,
+                            workspace_module_cache,
                         );
                     }
                 }
@@ -896,6 +1152,8 @@ fn add_resolved_call_edges(
                                 caller_decl,
                                 alias_targets,
                                 path_for_file,
+                                file_path_parts,
+                                callable_target_cache,
                             );
                         }
                     }
@@ -927,6 +1185,7 @@ fn add_resolved_call_edges(
                         alias_targets,
                         semantic_receiver,
                         *span,
+                        method_candidate_cache,
                         &mut candidates,
                     );
                 }
@@ -942,6 +1201,7 @@ fn add_resolved_call_edges(
                         alias_qualified_call,
                         path_for_file,
                         caller_super_receiver_tokens,
+                        method_candidate_cache,
                         &mut candidates,
                     );
                 }
@@ -1020,8 +1280,13 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     *span,
+                    caller_language,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                 );
                 if !candidates.is_empty() {
                     retain_same_language_candidates(
@@ -1044,6 +1309,7 @@ fn add_resolved_call_edges(
                         caller_decl,
                         alias_targets,
                         span,
+                        method_candidate_cache,
                         &mut candidates,
                     );
                 }
@@ -1062,6 +1328,7 @@ fn add_resolved_call_edges(
                         alias_qualified_call,
                         path_for_file,
                         caller_super_receiver_tokens,
+                        method_candidate_cache,
                         &mut candidates,
                     );
                 }
@@ -1130,12 +1397,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
                 add_resolved_call_edges(
@@ -1147,12 +1418,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
             }
@@ -1166,12 +1441,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
             }
@@ -1190,12 +1469,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
                 add_resolved_call_edges(
@@ -1207,12 +1490,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
                 add_resolved_call_edges(
@@ -1224,12 +1511,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
             }
@@ -1243,12 +1534,16 @@ fn add_resolved_call_edges(
                     alias_targets,
                     local_bindings,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    method_candidate_cache,
+                    workspace_module_cache,
+                    callable_target_cache,
                     cg,
                 );
             }
@@ -1348,8 +1643,13 @@ fn collect_assign_source_call_targets(
     alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_export_aliases: &[&'static str],
     call_span: Span,
+    caller_language: Option<&'static str>,
+    method_candidate_cache: &mut MethodCandidateCache,
+    workspace_module_cache: &mut WorkspaceModuleTargetCache,
+    callable_target_cache: &mut CallableTargetCache,
 ) -> Vec<FuncId> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -1377,6 +1677,8 @@ fn collect_assign_source_call_targets(
             caller_decl,
             alias_targets,
             path_for_file,
+            file_path_parts,
+            callable_target_cache,
         );
     }
     if targets.is_empty() {
@@ -1386,9 +1688,11 @@ fn collect_assign_source_call_targets(
                 alias_target,
                 alias_tail,
                 path_for_file,
+                file_path_parts,
                 caller_export_aliases,
                 caller_decl,
                 alias_targets,
+                workspace_module_cache,
             );
         }
     }
@@ -1399,10 +1703,19 @@ fn collect_assign_source_call_targets(
             caller_decl,
             alias_targets,
             path_for_file,
+            file_path_parts,
+            callable_target_cache,
         );
     }
     if targets.is_empty() {
-        targets = collect_constructor_targets_for_class_call(global, caller_decl, alias_targets, trimmed);
+        targets = collect_constructor_targets_for_class_call(
+            global,
+            caller_decl,
+            alias_targets,
+            trimmed,
+            caller_language,
+            method_candidate_cache,
+        );
     }
     targets
 }
@@ -1990,7 +2303,17 @@ pub fn collect_local_callable_bindings_with_aliases(
     alias_targets: &AHashMap<String, AliasTarget>,
 ) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
-    collect_local_callable_bindings_into(events, global, caller_decl, alias_targets, None, &mut bindings);
+    let mut callable_uses = AHashSet::new();
+    collect_local_callable_binding_uses(events, &mut callable_uses);
+    collect_local_callable_bindings_into(
+        events,
+        global,
+        caller_decl,
+        alias_targets,
+        None,
+        &callable_uses,
+        &mut bindings,
+    );
     bindings
 }
 
@@ -2009,15 +2332,81 @@ fn collect_local_callable_bindings_with_alias_index(
     alias_index: &WorkspaceAliasIndex,
 ) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
+    let mut callable_uses = AHashSet::new();
+    collect_local_callable_binding_uses(events, &mut callable_uses);
     collect_local_callable_bindings_into(
         events,
         global,
         caller_decl,
         alias_targets,
         Some(alias_index),
+        &callable_uses,
         &mut bindings,
     );
     bindings
+}
+
+fn collect_local_callable_binding_uses(events: &[FlowEvent], out: &mut AHashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name, receiver, args, ..
+            } => {
+                insert_local_callable_binding_use(out, name);
+                if let Some(receiver) = receiver.as_deref() {
+                    insert_local_callable_binding_use(out, receiver);
+                }
+                for arg in args {
+                    if call_arg_can_be_callable_reference(&arg.value_text) {
+                        insert_local_callable_binding_use(out, &arg.value_text);
+                    }
+                    for source_name in &arg.source_names {
+                        insert_local_callable_binding_use(out, source_name);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_local_callable_binding_uses(then_events, out);
+                collect_local_callable_binding_uses(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } => collect_local_callable_binding_uses(body, out),
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_local_callable_binding_uses(body, out);
+                collect_local_callable_binding_uses(catch_events, out);
+                collect_local_callable_binding_uses(finally_events, out);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_local_callable_binding_uses(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn insert_local_callable_binding_use(out: &mut AHashSet<String>, raw: &str) {
+    for variant in callable_reference_variants(raw) {
+        let trimmed = variant
+            .trim()
+            .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+            .trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        out.insert(trimmed.to_string());
+        let short = short_callee(trimmed);
+        if short != trimmed {
+            out.insert(short.to_string());
+        }
+    }
 }
 
 fn collect_local_callable_bindings_into(
@@ -2026,6 +2415,7 @@ fn collect_local_callable_bindings_into(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     alias_index: Option<&WorkspaceAliasIndex>,
+    callable_uses: &AHashSet<String>,
     bindings: &mut AHashMap<String, FuncId>,
 ) {
     for event in events {
@@ -2039,6 +2429,9 @@ fn collect_local_callable_bindings_into(
                 value_kind,
                 ..
             } => {
+                if !local_callable_binding_target_is_used(target, callable_uses) {
+                    continue;
+                }
                 if let Some(sym) = resolve_assigned_lambda_binding(global, caller_decl, target, *span) {
                     bindings.insert(target.clone(), sym);
                     continue;
@@ -2122,6 +2515,7 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
                 collect_local_callable_bindings_into(
@@ -2130,6 +2524,7 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
             }
@@ -2140,6 +2535,7 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
             }
@@ -2155,6 +2551,7 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
                 collect_local_callable_bindings_into(
@@ -2163,6 +2560,7 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
                 collect_local_callable_bindings_into(
@@ -2171,6 +2569,7 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
             }
@@ -2181,12 +2580,18 @@ fn collect_local_callable_bindings_into(
                     caller_decl,
                     alias_targets,
                     alias_index,
+                    callable_uses,
                     bindings,
                 );
             }
             _ => {}
         }
     }
+}
+
+fn local_callable_binding_target_is_used(target: &str, callable_uses: &AHashSet<String>) -> bool {
+    let trimmed = target.trim();
+    !trimmed.is_empty() && (callable_uses.contains(trimmed) || callable_uses.contains(short_callee(trimmed)))
 }
 
 fn resolve_assigned_lambda_binding(
@@ -2452,6 +2857,7 @@ fn collect_receiver_method_targets(
     call_name: &str,
     call_span: Span,
     super_receiver_tokens: &[&str],
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     if call_kind != CallKind::Method {
         return Vec::new();
@@ -2461,10 +2867,22 @@ fn collect_receiver_method_targets(
     };
     let method_name = short_callee(call_name);
     if is_super_receiver_with_tokens(receiver, super_receiver_tokens) {
-        return collect_super_method_targets(global, caller_decl, alias_targets, method_name);
+        return collect_super_method_targets(
+            global,
+            caller_decl,
+            alias_targets,
+            method_name,
+            method_candidate_cache,
+        );
     }
-    let assigned_type_names =
-        assigned_receiver_type_names(global, caller_decl, alias_targets, receiver, Some(call_span));
+    let assigned_type_names = assigned_receiver_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        receiver,
+        Some(call_span),
+        method_candidate_cache,
+    );
     let mut receiver_type_names = if assigned_type_names.is_empty() {
         receiver_types.to_vec()
     } else {
@@ -2476,9 +2894,14 @@ fn collect_receiver_method_targets(
     for type_name in receiver_class_type_names_for_expr(global, caller_decl, alias_targets, receiver) {
         push_unique_string(&mut receiver_type_names, type_name);
     }
-    for type_name in
-        receiver_call_return_type_names(global, caller_decl, alias_targets, receiver, Some(call_span))
-    {
+    for type_name in receiver_call_return_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        receiver,
+        Some(call_span),
+        method_candidate_cache,
+    ) {
         push_unique_string(&mut receiver_type_names, type_name);
     }
     for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, receiver) {
@@ -2514,7 +2937,15 @@ fn collect_receiver_method_targets(
     let mut targets = Vec::new();
     let mut seen = AHashSet::new();
     for class_sym in class_candidates {
-        collect_method_candidates_for_class(global, class_sym, method_name, ctx, &mut seen, &mut targets);
+        collect_method_candidates_for_class_cached(
+            global,
+            class_sym,
+            method_name,
+            ctx,
+            &mut seen,
+            &mut targets,
+            method_candidate_cache,
+        );
     }
     targets
 }
@@ -2524,6 +2955,7 @@ fn collect_super_method_targets(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     method_name: &str,
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
@@ -2536,13 +2968,14 @@ fn collect_super_method_targets(
     let mut seen = AHashSet::new();
     for base in &class_decl.bases {
         for class_sym in resolve_class(global, base, &ctx) {
-            collect_method_candidates_for_class(
+            collect_method_candidates_for_class_cached(
                 global,
                 class_sym,
                 method_name,
                 &ctx,
                 &mut seen,
                 &mut targets,
+                method_candidate_cache,
             );
         }
     }
@@ -2554,6 +2987,7 @@ fn collect_type_qualified_method_targets(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     call_name: &str,
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     let Some((type_name, method_name)) = type_qualified_method_tail(call_name) else {
         return Vec::new();
@@ -2569,7 +3003,15 @@ fn collect_type_qualified_method_targets(
     let mut targets = Vec::new();
     let mut seen = AHashSet::new();
     for class_sym in class_candidates {
-        collect_method_candidates_for_class(global, class_sym, method_name, &ctx, &mut seen, &mut targets);
+        collect_method_candidates_for_class_cached(
+            global,
+            class_sym,
+            method_name,
+            &ctx,
+            &mut seen,
+            &mut targets,
+            method_candidate_cache,
+        );
     }
     targets
 }
@@ -2579,6 +3021,8 @@ fn collect_constructor_targets_for_class_call(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     call_name: &str,
+    caller_language: Option<&'static str>,
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
@@ -2601,25 +3045,42 @@ fn collect_constructor_targets_for_class_call(
         let Some(class_decl) = global.decl_of(class_sym) else {
             continue;
         };
-        for method_name in [
-            class_decl.name.as_str(),
-            "__init__",
-            "constructor",
-            "__construct",
-            "init",
-            "new",
-        ] {
-            collect_method_candidates_for_class(
+        for method_name in constructor_method_names_for_language(class_decl.name.as_str(), caller_language) {
+            collect_method_candidates_for_class_cached(
                 global,
                 class_sym,
                 method_name,
                 &ctx,
                 &mut seen,
                 &mut targets,
+                method_candidate_cache,
             );
         }
     }
     targets
+}
+
+fn constructor_method_names_for_language<'a>(
+    class_name: &'a str,
+    caller_language: Option<&'static str>,
+) -> Vec<&'a str> {
+    match caller_language {
+        Some("java" | "csharp" | "kotlin" | "scala") => vec![class_name],
+        Some("javascript" | "typescript") => vec!["constructor"],
+        Some("python") => vec!["__init__"],
+        Some("php") => vec!["__construct"],
+        Some("swift") => vec!["init"],
+        Some("ruby") => vec!["initialize", "new"],
+        Some("perl") => vec!["new"],
+        _ => vec![
+            class_name,
+            "__init__",
+            "constructor",
+            "__construct",
+            "init",
+            "new",
+        ],
+    }
 }
 
 fn type_qualified_method_tail(call_name: &str) -> Option<(&str, &str)> {
@@ -2640,6 +3101,7 @@ fn receiver_call_return_type_names(
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: &str,
     _call_span: Option<Span>,
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<String> {
     let mut out = receiver_constructed_type_names(global, caller_decl, alias_targets, receiver);
     let Some(inner_call) = receiver_inner_call_name(receiver) else {
@@ -2663,13 +3125,14 @@ fn receiver_call_return_type_names(
         if !receiver_type.is_empty() && !resolve_class(global, receiver_type, &ctx).is_empty() {
             let mut seen = AHashSet::new();
             for class_sym in resolve_class(global, receiver_type, &ctx) {
-                collect_method_candidates_for_class(
+                collect_method_candidates_for_class_cached(
                     global,
                     class_sym,
                     method_name,
                     &ctx,
                     &mut seen,
                     &mut funcs,
+                    method_candidate_cache,
                 );
             }
         }
@@ -3018,6 +3481,7 @@ fn assigned_receiver_type_names(
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: &str,
     call_span: Option<Span>,
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<String> {
     let receiver = normalize_receiver_alias_text(receiver);
     let mut out = Vec::new();
@@ -3029,6 +3493,7 @@ fn assigned_receiver_type_names(
         &caller_decl.flow_events,
         &receiver,
         call_span,
+        method_candidate_cache,
         &mut out,
         &mut best_distance,
     );
@@ -3041,6 +3506,7 @@ fn retain_assigned_receiver_method_candidates(
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: Option<&str>,
     call_span: Span,
+    method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.len() <= 1 {
@@ -3049,8 +3515,14 @@ fn retain_assigned_receiver_method_candidates(
     let Some(receiver) = receiver else {
         return;
     };
-    let assigned =
-        assigned_receiver_type_names(global, caller_decl, alias_targets, receiver, Some(call_span));
+    let assigned = assigned_receiver_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        receiver,
+        Some(call_span),
+        method_candidate_cache,
+    );
     if assigned.is_empty() {
         return;
     }
@@ -3086,6 +3558,7 @@ fn retain_semantic_receiver_evidenced_candidates(
     alias_qualified_call: bool,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     super_receiver_tokens: &[&str],
+    method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.is_empty() || call_kind != CallKind::Method || alias_qualified_call {
@@ -3115,8 +3588,10 @@ fn retain_semantic_receiver_evidenced_candidates(
         &receiver,
         receiver_types,
         call_span,
+        method_candidate_cache,
     );
     dedup_symbols(&mut receiver_class_symbols);
+    let mut receiver_ancestor_cache: AHashMap<SymbolId, AHashSet<SymbolId>> = AHashMap::default();
     candidates.retain(|func| {
         let sym = SymbolId::new(func.raw());
         let Some(decl) = global.decl_of(sym) else {
@@ -3128,9 +3603,15 @@ fn retain_semantic_receiver_evidenced_candidates(
         if receiver_matches_decl_module(&receiver, decl, file, path_for_file) {
             return true;
         }
-        receiver_class_symbols
-            .iter()
-            .any(|class_sym| method_decl_reachable_from_receiver_class(global, decl, *class_sym))
+        let Some(method_parent) = decl.parent else {
+            return false;
+        };
+        receiver_class_symbols.iter().any(|class_sym| {
+            receiver_ancestor_cache
+                .entry(*class_sym)
+                .or_insert_with(|| receiver_class_ancestors(global, *class_sym))
+                .contains(&method_parent)
+        })
     });
 }
 
@@ -3142,9 +3623,16 @@ fn semantic_receiver_class_symbols(
     receiver: &str,
     receiver_types: &[String],
     call_span: Span,
+    method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<SymbolId> {
-    let mut type_names =
-        assigned_receiver_type_names(global, caller_decl, alias_targets, receiver, Some(call_span));
+    let mut type_names = assigned_receiver_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        receiver,
+        Some(call_span),
+        method_candidate_cache,
+    );
     for type_name in receiver_types {
         push_unique_string(&mut type_names, type_name.clone());
     }
@@ -3154,9 +3642,14 @@ fn semantic_receiver_class_symbols(
     for type_name in receiver_class_type_names_for_expr(global, caller_decl, alias_targets, receiver) {
         push_unique_string(&mut type_names, type_name);
     }
-    for type_name in
-        receiver_call_return_type_names(global, caller_decl, alias_targets, receiver, Some(call_span))
-    {
+    for type_name in receiver_call_return_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        receiver,
+        Some(call_span),
+        method_candidate_cache,
+    ) {
         push_unique_string(&mut type_names, type_name);
     }
     let mut out = Vec::new();
@@ -3177,23 +3670,15 @@ fn receiver_matches_decl_module(
         || path_for_file(file).is_some_and(|path| module_target_matches_path(receiver, &path))
 }
 
-fn method_decl_reachable_from_receiver_class(
-    global: &GlobalIndex,
-    method_decl: &Decl,
-    receiver_class: SymbolId,
-) -> bool {
-    let Some(method_parent) = method_decl.parent else {
-        return false;
-    };
-    if method_parent == receiver_class {
-        return true;
-    }
+fn receiver_class_ancestors(global: &GlobalIndex, receiver_class: SymbolId) -> AHashSet<SymbolId> {
+    let mut out = AHashSet::new();
     let mut seen = AHashSet::new();
     let mut stack = vec![receiver_class];
     while let Some(class_sym) = stack.pop() {
         if !seen.insert(class_sym) {
             continue;
         }
+        out.insert(class_sym);
         let Some(class_decl) = global.decl_of(class_sym) else {
             continue;
         };
@@ -3203,14 +3688,11 @@ fn method_decl_reachable_from_receiver_class(
         let base_ctx = ResolveContext::new(class_file, &class_decl.module_path);
         for base in &class_decl.bases {
             for base_sym in resolve_class(global, base, &base_ctx) {
-                if base_sym == method_parent {
-                    return true;
-                }
                 stack.push(base_sym);
             }
         }
     }
-    false
+    out
 }
 
 fn retain_assigned_receiver_constructor_candidates(
@@ -3218,12 +3700,20 @@ fn retain_assigned_receiver_constructor_candidates(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     assign_span: &Span,
+    method_candidate_cache: &mut MethodCandidateCache,
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.len() <= 1 {
         return;
     }
-    let assigned = assigned_receiver_type_names(global, caller_decl, alias_targets, "", Some(*assign_span));
+    let assigned = assigned_receiver_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        "",
+        Some(*assign_span),
+        method_candidate_cache,
+    );
     if assigned.is_empty() {
         return;
     }
@@ -3258,6 +3748,7 @@ fn collect_assigned_receiver_type_names(
     events: &[FlowEvent],
     receiver: &str,
     call_span: Option<Span>,
+    method_candidate_cache: &mut MethodCandidateCache,
     out: &mut Vec<String>,
     best_distance: &mut Option<u64>,
 ) {
@@ -3288,6 +3779,7 @@ fn collect_assigned_receiver_type_names(
                         alias_targets,
                         &format!("{source_call}()"),
                         Some(*span),
+                        method_candidate_cache,
                     ) {
                         push_assigned_receiver_type(out, best_distance, type_name, distance);
                     }
@@ -3318,6 +3810,7 @@ fn collect_assigned_receiver_type_names(
                     then_events,
                     receiver,
                     call_span,
+                    method_candidate_cache,
                     out,
                     best_distance,
                 );
@@ -3328,6 +3821,7 @@ fn collect_assigned_receiver_type_names(
                     else_events,
                     receiver,
                     call_span,
+                    method_candidate_cache,
                     out,
                     best_distance,
                 );
@@ -3340,6 +3834,7 @@ fn collect_assigned_receiver_type_names(
                     body,
                     receiver,
                     call_span,
+                    method_candidate_cache,
                     out,
                     best_distance,
                 );
@@ -3357,6 +3852,7 @@ fn collect_assigned_receiver_type_names(
                     body,
                     receiver,
                     call_span,
+                    method_candidate_cache,
                     out,
                     best_distance,
                 );
@@ -3367,6 +3863,7 @@ fn collect_assigned_receiver_type_names(
                     catch_events,
                     receiver,
                     call_span,
+                    method_candidate_cache,
                     out,
                     best_distance,
                 );
@@ -3377,6 +3874,7 @@ fn collect_assigned_receiver_type_names(
                     finally_events,
                     receiver,
                     call_span,
+                    method_candidate_cache,
                     out,
                     best_distance,
                 );
@@ -3543,9 +4041,11 @@ fn collect_workspace_module_targets(
     alias_target: &str,
     alias_tail: &str,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_export_aliases: &[&'static str],
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
+    workspace_module_cache: &mut WorkspaceModuleTargetCache,
 ) -> Vec<FuncId> {
     if alias_target.is_empty() || alias_tail.is_empty() {
         return Vec::new();
@@ -3553,6 +4053,11 @@ fn collect_workspace_module_targets(
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
+    let cache_key =
+        WorkspaceModuleTargetKey::new(alias_target, alias_tail, caller_file, &caller_decl.module_path);
+    if let Some(cached) = workspace_module_cache.targets.get(&cache_key) {
+        return cached.clone();
+    }
     let caller_ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
     let mut seen_spans = AHashSet::new();
     let mut targets = Vec::new();
@@ -3581,7 +4086,7 @@ fn collect_workspace_module_targets(
         // adapters populate `module_path`.
         let semantic_match = module_target_matches_decl_module_path(alias_target, &decl.module_path);
         let in_target_file = semantic_match
-            || path_for_file(file).is_some_and(|path| module_target_matches_path(alias_target, &path));
+            || workspace_module_cache.path_matches(alias_target, file, file_path_parts, path_for_file);
         if !in_target_file {
             continue;
         }
@@ -3589,6 +4094,7 @@ fn collect_workspace_module_targets(
             targets.push(func);
         }
     }
+    workspace_module_cache.targets.insert(cache_key, targets.clone());
     targets
 }
 
@@ -3598,9 +4104,11 @@ fn collect_workspace_targets_for_alias_entry(
     alias_target: &AliasTarget,
     alias_tail: &str,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_export_aliases: &[&'static str],
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
+    workspace_module_cache: &mut WorkspaceModuleTargetCache,
 ) -> Vec<FuncId> {
     match alias_target {
         AliasTarget::Namespace { module } => collect_workspace_module_targets(
@@ -3608,9 +4116,11 @@ fn collect_workspace_targets_for_alias_entry(
             module,
             alias_tail,
             path_for_file,
+            file_path_parts,
             caller_export_aliases,
             caller_decl,
             alias_targets,
+            workspace_module_cache,
         ),
         AliasTarget::Member { module, member } => {
             let mut targets = collect_workspace_module_targets(
@@ -3618,9 +4128,11 @@ fn collect_workspace_targets_for_alias_entry(
                 module,
                 alias_tail,
                 path_for_file,
+                file_path_parts,
                 caller_export_aliases,
                 caller_decl,
                 alias_targets,
+                workspace_module_cache,
             );
             if targets.is_empty() {
                 targets = collect_workspace_module_targets(
@@ -3628,9 +4140,11 @@ fn collect_workspace_targets_for_alias_entry(
                     member,
                     alias_tail,
                     path_for_file,
+                    file_path_parts,
                     caller_export_aliases,
                     caller_decl,
                     alias_targets,
+                    workspace_module_cache,
                 );
             }
             targets
@@ -3646,8 +4160,10 @@ fn collect_qualified_workspace_targets(
     aliases: Option<&AHashMap<String, String>>,
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_export_aliases: &[&'static str],
     caller_decl: &Decl,
+    workspace_module_cache: &mut WorkspaceModuleTargetCache,
 ) -> Vec<FuncId> {
     if let Some(alias_target) = alias_targets.get(name) {
         let alias_tail = match alias_target {
@@ -3661,9 +4177,11 @@ fn collect_qualified_workspace_targets(
                 alias_target,
                 alias_tail,
                 path_for_file,
+                file_path_parts,
                 caller_export_aliases,
                 caller_decl,
                 alias_targets,
+                workspace_module_cache,
             );
             if !candidates.is_empty() {
                 return candidates;
@@ -3676,9 +4194,11 @@ fn collect_qualified_workspace_targets(
             alias_target,
             alias_tail,
             path_for_file,
+            file_path_parts,
             caller_export_aliases,
             caller_decl,
             alias_targets,
+            workspace_module_cache,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -3690,9 +4210,11 @@ fn collect_qualified_workspace_targets(
             alias_target,
             alias_tail,
             path_for_file,
+            file_path_parts,
             caller_export_aliases,
             caller_decl,
             alias_targets,
+            workspace_module_cache,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -3706,9 +4228,11 @@ fn collect_qualified_workspace_targets(
             alias_target,
             alias_tail,
             path_for_file,
+            file_path_parts,
             caller_export_aliases,
             caller_decl,
             alias_targets,
+            workspace_module_cache,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -3720,9 +4244,11 @@ fn collect_qualified_workspace_targets(
             module_target,
             module_tail,
             path_for_file,
+            file_path_parts,
             caller_export_aliases,
             caller_decl,
             alias_targets,
+            workspace_module_cache,
         );
         if !candidates.is_empty() {
             return candidates;
@@ -3780,9 +4306,16 @@ pub fn collect_callable_targets_with_context_and_aliases(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
 ) -> Vec<FuncId> {
-    collect_callable_targets_with_context_aliases_and_paths(global, name, caller_decl, alias_targets, &|_| {
-        None
-    })
+    let mut callable_target_cache = CallableTargetCache::default();
+    collect_callable_targets_with_context_aliases_and_paths(
+        global,
+        name,
+        caller_decl,
+        alias_targets,
+        &|_| None,
+        &AHashMap::new(),
+        &mut callable_target_cache,
+    )
 }
 
 fn collect_callable_targets_with_context_aliases_and_paths(
@@ -3791,6 +4324,8 @@ fn collect_callable_targets_with_context_aliases_and_paths(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
+    callable_target_cache: &mut CallableTargetCache,
 ) -> Vec<FuncId> {
     let mut targets = collect_implicit_receiver_method_targets(global, caller_decl, name);
     if !targets.is_empty() {
@@ -3799,15 +4334,29 @@ fn collect_callable_targets_with_context_aliases_and_paths(
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
-        .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
-    targets = resolve_callable_with_context(global, name, &ctx);
-    if targets.is_empty() {
-        if let Some(no_bang) = name.strip_suffix('!') {
-            targets = resolve_callable_with_context(global, no_bang, &ctx);
+    let key = CallableTargetKey::new(name, caller_file, &caller_decl.module_path);
+    if let Some(cached) = callable_target_cache.targets.get(&key) {
+        return cached.clone();
+    }
+    {
+        let path_match_cache = std::cell::RefCell::new(&mut *callable_target_cache);
+        let path_matches = |target_module: &str, file: FileId| {
+            path_match_cache
+                .borrow_mut()
+                .path_matches(target_module, file, file_path_parts, path_for_file)
+        };
+        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
+            .with_alias_map(alias_targets)
+            .with_file_path_lookup(path_for_file)
+            .with_file_path_match_lookup(&path_matches);
+        targets = resolve_callable_with_context(global, name, &ctx);
+        if targets.is_empty() {
+            if let Some(no_bang) = name.strip_suffix('!') {
+                targets = resolve_callable_with_context(global, no_bang, &ctx);
+            }
         }
     }
+    callable_target_cache.targets.insert(key, targets.clone());
     targets
 }
 
@@ -3944,6 +4493,10 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     } else {
         Vec::new()
     };
+    let mut method_candidate_cache = MethodCandidateCache::default();
+    let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
+    let mut callable_target_cache = CallableTargetCache::default();
+    let file_path_parts: AHashMap<FileId, Vec<String>> = AHashMap::new();
     if targets.is_empty() {
         targets = collect_receiver_method_targets(
             global,
@@ -3955,10 +4508,17 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             name,
             call_span,
             caller_super_receiver_tokens,
+            &mut method_candidate_cache,
         );
     }
     if targets.is_empty() {
-        targets = collect_type_qualified_method_targets(global, caller_decl, alias_targets, name);
+        targets = collect_type_qualified_method_targets(
+            global,
+            caller_decl,
+            alias_targets,
+            name,
+            &mut method_candidate_cache,
+        );
     }
     let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
     if targets.is_empty() && !typed_receiver_method {
@@ -3968,8 +4528,10 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             None,
             alias_targets,
             path_for_file,
+            &file_path_parts,
             caller_export_aliases,
             caller_decl,
+            &mut workspace_module_cache,
         );
     }
     let unresolved_method_receiver =
@@ -3983,6 +4545,8 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             caller_decl,
             alias_targets,
             path_for_file,
+            &file_path_parts,
+            &mut callable_target_cache,
         );
     }
     if targets.is_empty() && !unresolved_method_receiver && !local_value_shadow {
@@ -4021,6 +4585,8 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
                 caller_decl,
                 alias_targets,
                 path_for_file,
+                &file_path_parts,
+                &mut callable_target_cache,
             );
         }
     }
@@ -4031,6 +4597,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             alias_targets,
             semantic_receiver,
             call_span,
+            &mut method_candidate_cache,
             &mut targets,
         );
         let receiver_supplied = semantic_receiver.is_some() || call_kind == CallKind::Method;

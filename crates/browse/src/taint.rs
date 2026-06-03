@@ -322,6 +322,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         global.as_ref(),
         idg.as_ref(),
         Some(SEMANTIC_FLOW_MAX_PRECISION),
+        None,
     );
 
     let closure_nodes =
@@ -667,7 +668,7 @@ fn source_line_text(ws: &Workspace, span: &bonsai_common::Span) -> String {
         return String::new();
     };
     let src = snapshot.text.as_ref();
-    let span_map = bonsai_common::cached_span_map(span.file, snapshot.version, src);
+    let span_map = bonsai_common::cached_span_map_arc(span.file, snapshot.version, &snapshot.text);
     let line = span_map.line_col(span.start).line;
     src.split('\n')
         .nth(line.saturating_sub(1) as usize)

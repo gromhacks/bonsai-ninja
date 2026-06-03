@@ -9,6 +9,7 @@ description = "Security rulepack loader, matcher, and source/sink/sanitizer wrap
 
 [dependencies]
 bonsai_common = { workspace = true }
+bonsai_callgraph = { workspace = true }
 bonsai_diagnostics = { workspace = true }
 bonsai_hash = { workspace = true }
 bonsai_lang_api = { workspace = true }
