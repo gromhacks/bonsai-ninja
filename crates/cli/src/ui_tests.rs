@@ -17,7 +17,7 @@ fn every_supported_lang_has_a_syntect_grammar() {
             "adapter `{name}` must declare at least one file extension",
         );
         for ext in extensions {
-            let found = cache.syntaxes.find_syntax_by_extension(ext);
+            let found = cache.syntax_for_extension(ext);
             assert!(
                 found.is_some(),
                 "no syntect grammar registered for .{ext} ({name}) — \

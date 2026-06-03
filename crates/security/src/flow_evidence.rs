@@ -4,7 +4,7 @@
 //! event - the same code and annotations the terminal view prints, so
 //! machine-readable output embeds the evidence rather than just the chain.
 
-use bonsai_common::{cached_span_map, FuncId, SymbolId};
+use bonsai_common::{cached_span_map_arc, FuncId, SymbolId};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -80,7 +80,7 @@ pub fn build_flow_bodies(
             continue;
         };
         let src = snapshot.text.as_ref();
-        let span_map = cached_span_map(file, snapshot.version, src);
+        let span_map = cached_span_map_arc(file, snapshot.version, &snapshot.text);
         let body_span = decl.body_span.unwrap_or(decl.span);
         let header_line = span_map.line_col(decl.name_span.start).line;
         let start_line = span_map.line_col(body_span.start).line;
@@ -109,7 +109,11 @@ pub fn build_flow_bodies(
         // The call that leaves this hop; the final step is the sink.
         if let Some(call) = taint_path.get(idx) {
             step += 1;
-            let role = if idx == last_step { terminal_role } else { FlowRole::Taint };
+            let role = if idx == last_step {
+                terminal_role
+            } else {
+                FlowRole::Taint
+            };
             annotate_line(&mut lines, call.line, role, step);
         }
 

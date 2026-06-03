@@ -253,27 +253,8 @@ fn peel_match_arms(flat: Vec<crate::FlowEvent>, arm_spans: &[bonsai_common::Span
     nested_else
 }
 
-/// Single match-arm helper: the byte span on every FlowEvent variant
-/// is in the same field, but Rust's enum-variant matching makes us
-/// spell every shape out. Centralising it keeps the call sites tidy.
 fn flow_event_span(event: &crate::FlowEvent) -> bonsai_common::Span {
-    use crate::FlowEvent;
-    match event {
-        FlowEvent::Call { span, .. }
-        | FlowEvent::Assign { span, .. }
-        | FlowEvent::Return { span, .. }
-        | FlowEvent::Throw { span, .. }
-        | FlowEvent::Branch { span, .. }
-        | FlowEvent::Loop { span, .. }
-        | FlowEvent::Try { span, .. }
-        | FlowEvent::Defer { span, .. }
-        | FlowEvent::Using { span, .. }
-        | FlowEvent::Yield { span, .. }
-        | FlowEvent::Await { span, .. }
-        | FlowEvent::Break { span, .. }
-        | FlowEvent::Continue { span, .. }
-        | FlowEvent::Lifecycle { span, .. } => *span,
-    }
+    event.span()
 }
 
 /// Walk a tree in pre-order, collecting every node whose kind is in `want`.
@@ -291,6 +272,36 @@ pub fn collect_kinds<'a>(tree: &'a Tree, want: &[&str]) -> Vec<Node<'a>> {
         }
     }
     out
+}
+
+pub fn c_family_preproc_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<crate::ImportSpec> {
+    let mut imports = Vec::new();
+    for include_node in collect_kinds(tree, &["preproc_include"]) {
+        let Some(path_node) = include_node.child_by_field_name("path") else {
+            continue;
+        };
+        let module = match path_node.kind() {
+            "system_lib_string" => node_text(&path_node, src)
+                .trim_matches(|c: char| matches!(c, '<' | '>'))
+                .to_string(),
+            "string_literal" => first_named_child_of_kind(&path_node, "string_content")
+                .map(|content_node| node_text(&content_node, src).to_string())
+                .unwrap_or_else(|| node_text(&path_node, src).trim_matches('"').to_string()),
+            _ => node_text(&path_node, src).to_string(),
+        };
+        if module.is_empty() {
+            continue;
+        }
+        imports.push(crate::ImportSpec {
+            span: span_of(file, &include_node),
+            module,
+            alias: None,
+            is_wildcard: false,
+            original_name: None,
+            scope: crate::ImportScope::Module,
+        });
+    }
+    imports
 }
 
 #[must_use]
@@ -748,7 +759,10 @@ pub fn canonical_simple_type_name(text: &str) -> String {
     let head = head.split('[').next().unwrap_or(head);
     let head = head.rsplit('.').next().unwrap_or(head);
     let head = head.rsplit("::").next().unwrap_or(head).trim();
-    head.trim_end_matches('?').trim_end_matches('!').trim().to_string()
+    head.trim_end_matches('?')
+        .trim_end_matches('!')
+        .trim()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1754,7 +1768,9 @@ fn walk_into(
         }
         if is_compound
             && !target.is_empty()
-            && !source_names.iter().any(|name| same_identifier_name(name, &target))
+            && !source_names
+                .iter()
+                .any(|name| same_identifier_name(name, &target))
         {
             source_names.push(target.clone());
         }
@@ -3559,8 +3575,7 @@ pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(O
         // compound RHS (`a + f()`) or a multi-value list (`f(), g()`)
         // must NOT collapse to its first call — it falls through to
         // `source_names`.
-        let single_expr_grouping =
-            grouping_list_kind(node.kind()) && node.named_child_count() == 1;
+        let single_expr_grouping = grouping_list_kind(node.kind()) && node.named_child_count() == 1;
         if !direct_call_wrapper_kind(node.kind())
             && !single_expr_grouping
             && !lambda_closure_kind(node.kind())
@@ -3719,13 +3734,13 @@ fn direct_call_wrapper_kind(kind: &str) -> bool {
 /// excluded -- they do not absorb overflow POSITIONAL args (audit M1).
 fn parameter_list_is_variadic(fn_node: &Node<'_>) -> bool {
     const VARIADIC_PARAM_KINDS: &[&str] = &[
-        "variadic_parameter",   // go `...T`, php `...$x`, c `...`
+        "variadic_parameter", // go `...T`, php `...$x`, c `...`
         "variadic_declaration",
-        "spread_parameter",     // java `T... args`
-        "rest_parameter",       // typescript `...args`
-        "rest_pattern",         // javascript `...args`
-        "list_splat_pattern",   // python `*args`
-        "splat_parameter",      // ruby `*args`
+        "spread_parameter",   // java `T... args`
+        "rest_parameter",     // typescript `...args`
+        "rest_pattern",       // javascript `...args`
+        "list_splat_pattern", // python `*args`
+        "splat_parameter",    // ruby `*args`
     ];
     let Some(container) = fn_node
         .child_by_field_name("parameters")
@@ -5868,11 +5883,11 @@ fn collect_receiver_state_sources(
     out.into_iter().collect()
 }
 
-fn collect_assign_targets(events: &[crate::FlowEvent], out: &mut std::collections::HashSet<String>) {
+pub fn collect_assign_targets(events: &[crate::FlowEvent], out: &mut std::collections::HashSet<String>) {
     for event in events {
         match event {
             crate::FlowEvent::Assign { target, .. } if !target.is_empty() => {
-                out.insert(target.clone());
+                out.insert(target.trim().to_string());
             }
             crate::FlowEvent::Branch {
                 then_events,
@@ -5897,6 +5912,115 @@ fn collect_assign_targets(events: &[crate::FlowEvent], out: &mut std::collection
             }
             _ => {}
         }
+    }
+}
+
+pub struct ImplicitMemberReadCall {
+    pub source_call: String,
+    pub call_name: String,
+    pub receiver: Option<String>,
+    pub call_kind: crate::CallKind,
+}
+
+pub fn rewrite_implicit_member_reads<F>(
+    events: &mut Vec<crate::FlowEvent>,
+    getters: &std::collections::HashSet<String>,
+    locals: &std::collections::HashSet<String>,
+    call_for_name: F,
+) where
+    F: Fn(&str) -> ImplicitMemberReadCall + Copy,
+{
+    for event in events.iter_mut() {
+        match event {
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_implicit_member_reads(then_events, getters, locals, call_for_name);
+                rewrite_implicit_member_reads(else_events, getters, locals, call_for_name);
+            }
+            crate::FlowEvent::Loop { body, .. }
+            | crate::FlowEvent::Defer { body, .. }
+            | crate::FlowEvent::Using { body, .. } => {
+                rewrite_implicit_member_reads(body, getters, locals, call_for_name);
+            }
+            crate::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_implicit_member_reads(body, getters, locals, call_for_name);
+                rewrite_implicit_member_reads(catch_events, getters, locals, call_for_name);
+                rewrite_implicit_member_reads(finally_events, getters, locals, call_for_name);
+            }
+            _ => {}
+        }
+    }
+
+    let mut idx = 0usize;
+    while idx < events.len() {
+        let (qualify_name, span) = match &events[idx] {
+            crate::FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                span,
+                ..
+            } => {
+                if source_call.is_some() {
+                    (None, *span)
+                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    if getters.contains(&name) && !locals.contains(&name) && name != target.trim() {
+                        (Some(name), *span)
+                    } else {
+                        (None, *span)
+                    }
+                } else {
+                    (None, *span)
+                }
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        let Some(name) = qualify_name else {
+            idx += 1;
+            continue;
+        };
+        let call = call_for_name(&name);
+        if let crate::FlowEvent::Assign {
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut events[idx]
+        {
+            *source_call = Some(call.source_call.clone());
+            *source_call_args = Vec::new();
+            *source_name = None;
+            source_names.retain(|s| {
+                let trimmed = s.trim();
+                trimmed != name && trimmed != call.source_call
+            });
+            *value_kind = Some(crate::AssignValueKind::CallResult);
+        }
+        events.insert(
+            idx,
+            crate::FlowEvent::Call {
+                span,
+                name: call.call_name,
+                receiver: call.receiver,
+                receiver_types: Vec::new(),
+                call_kind: call.call_kind,
+                args: Vec::new(),
+            },
+        );
+        idx += 2;
     }
 }
 
@@ -8366,10 +8490,8 @@ fn extract_elixir_generator_binding_assigns(file: FileId, node: &Node<'_>, src: 
         if arg.kind() != "binary_operator" || !elixir_binary_operator_is(&arg, src, "<-") {
             continue;
         }
-        let (Some(pattern), Some(rhs)) = (
-            arg.child_by_field_name("left"),
-            arg.child_by_field_name("right"),
-        ) else {
+        let (Some(pattern), Some(rhs)) = (arg.child_by_field_name("left"), arg.child_by_field_name("right"))
+        else {
             continue;
         };
         let rhs_text = node_text(&rhs, src);

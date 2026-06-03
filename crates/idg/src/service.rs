@@ -604,6 +604,9 @@ impl IdgQueryService {
                 if !spans_overlap(edge.meta.via_span, match_span) {
                     continue;
                 }
+                if !segment.nodes.get(edge.from).is_some_and(|node| node.func == func) {
+                    continue;
+                }
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.from) {
                     out.push(ws_node);
                 }
@@ -644,6 +647,16 @@ impl IdgQueryService {
     /// set; accepting the closure avoids re-running the bitvector
     /// fixpoint for every view.
     pub fn tainted_call_args_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<(FuncId, Span, u8)> {
+        self.tainted_call_args_in_reachable_nodes_for_funcs(closure, None)
+    }
+
+    /// Same as [`Self::tainted_call_args_in_reachable_nodes`], but keeps
+    /// only call sites owned by `target_funcs` when a filter is supplied.
+    pub fn tainted_call_args_in_reachable_nodes_for_funcs(
+        &self,
+        closure: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+    ) -> Vec<(FuncId, Span, u8)> {
         let unified = self.ensure_unified();
         let mut out = Vec::new();
         for ws_node in closure {
@@ -660,6 +673,9 @@ impl IdgQueryService {
                 continue;
             };
             if let Place::CallArg { site, idx } = place {
+                if target_funcs.is_some_and(|targets| !targets.contains(&node.func)) {
+                    continue;
+                }
                 out.push((node.func, site.0, *idx));
             }
         }
@@ -995,15 +1011,44 @@ impl IdgQueryService {
         closure: &[WsNodeId],
         max_precision: Option<Precision>,
     ) -> Vec<CrossCallEdge> {
+        self.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(closure, max_precision, None)
+    }
+
+    /// Same as [`Self::cross_call_edges_in_reachable_nodes_with_max_precision`],
+    /// but keeps only rows whose caller and callee are both inside
+    /// `lineage_funcs` when supplied.
+    pub fn cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
+        &self,
+        closure: &[WsNodeId],
+        max_precision: Option<Precision>,
+        lineage_funcs: Option<&AHashSet<FuncId>>,
+    ) -> Vec<CrossCallEdge> {
         let unified = self.ensure_unified();
         let cross_calls_by_from = self.ensure_cross_calls_by_from(&unified);
         let mut out = Vec::new();
         for ws_node in closure {
             if let Some(rows) = cross_calls_by_from.get(ws_node) {
                 if let Some(max_precision) = max_precision {
-                    out.extend(rows.iter().filter(|row| row.precision <= max_precision).copied());
+                    out.extend(
+                        rows.iter()
+                            .filter(|row| row.precision <= max_precision)
+                            .filter(|row| {
+                                lineage_funcs.is_none_or(|funcs| {
+                                    funcs.contains(&row.caller) && funcs.contains(&row.callee)
+                                })
+                            })
+                            .copied(),
+                    );
                 } else {
-                    out.extend_from_slice(rows);
+                    out.extend(
+                        rows.iter()
+                            .filter(|row| {
+                                lineage_funcs.is_none_or(|funcs| {
+                                    funcs.contains(&row.caller) && funcs.contains(&row.callee)
+                                })
+                            })
+                            .copied(),
+                    );
                 }
             }
         }

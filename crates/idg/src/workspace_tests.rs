@@ -225,6 +225,51 @@ fn save_load_round_trip_preserves_segments_and_indexes() {
 }
 
 #[test]
+fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
+    let mut w = IdgWorkspace::new();
+    let mut seg_a = IdgSegment::new();
+    populate_segment(&mut seg_a, FuncId::new(11));
+    let mut seg_b = IdgSegment::new();
+    populate_segment(&mut seg_b, FuncId::new(22));
+    let id_a = w.register_segment(seg_a);
+    let id_b = w.register_segment(seg_b);
+
+    for idx in 0..3 {
+        w.cross_file_mut().push(CrossFileEdge {
+            from_segment: id_a,
+            to_segment: id_b,
+            edge: IdgEdge::inter_call_arg(
+                NodeId(idx),
+                NodeId(idx),
+                Span::new(FileId::new(0), idx as u64, idx as u64 + 1),
+                Precision::Exact,
+                CallEdgeKind::Direct,
+            ),
+        });
+        w.field_flow_mut().push(FieldFlowLink {
+            writer: FuncId::new(11),
+            reader: FuncId::new(22),
+            writer_ws_node: idx,
+            reader_ws_node: idx + 10,
+            via_span: Span::new(FileId::new(0), idx as u64, idx as u64 + 1),
+            precision: Precision::Exact,
+        });
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("idg.factstore");
+    w.save_to_disk(&path, 0xCAFE).expect("save succeeds");
+    let restored = IdgWorkspace::load_from_disk(&path, 0xCAFE)
+        .expect("load Ok")
+        .expect("Some workspace");
+
+    assert_eq!(restored.cross_file().len(), 3);
+    assert_eq!(restored.cross_file().outgoing_from_segment(id_a).count(), 3);
+    assert_eq!(restored.cross_file().incoming_to_segment(id_b).count(), 3);
+    assert_eq!(restored.field_flow().len(), 3);
+}
+
+#[test]
 fn load_rejects_pipeline_hash_mismatch() {
     let mut w = IdgWorkspace::new();
     let mut seg = IdgSegment::new();

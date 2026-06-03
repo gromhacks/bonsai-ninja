@@ -34,8 +34,7 @@ use tree_sitter::Node;
 
 use super::{
     argument_place, extract_rhs_expr_operands, first_named_child, looks_like_bare_identifier,
-    looks_like_identifier, node_text, normalize_call_name_whitespace, span_of, CallArg, CallKind,
-    FlowEvent,
+    looks_like_identifier, node_text, normalize_call_name_whitespace, span_of, CallArg, CallKind, FlowEvent,
 };
 
 pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {

@@ -1,13 +1,13 @@
 //! C# language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
+    collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        canonical_simple_type_name, collect_kinds, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes, language_from_pack,
+        node_text, parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, AssignValueKind, CallKind, DeclIndex, DeclKind, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
     LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
@@ -233,13 +233,17 @@ impl LanguageAdapter for CSharpAdapter {
             // 1-level receiver-field bridge carry it.
             synthesize_csharp_constructor_implicit_returns(&mut idx, &tree, &src, file);
         }
-        // Resolve bare implicit-`this` property reads. C# accesses a
+        // Resolve bare implicit-`this` property reads/writes. C# accesses a
         // zero-arg property/getter by its bare name (`var c = Cmd;` for
-        // `string Cmd => Data.Cmd;`), which the generic walker emits as a
-        // plain identifier read — so taint never flows out of the
-        // property. Rewrite such reads into getter calls so the IDG
-        // stitches the property's return into the assignment.
-        qualify_csharp_implicit_member_reads(&mut idx);
+        // `string Cmd => Data.Cmd;`) and writes instance properties as
+        // `Data = data;` inside constructors. Rewrite those implicit
+        // receiver accesses so the IDG can stitch property returns and
+        // constructor field writes onto object instances.
+        qualify_csharp_implicit_member_accesses(&mut idx);
+        for decl in &mut idx.defs {
+            enrich_csharp_receiver_field_writes(decl);
+        }
+        propagate_csharp_base_constructor_field_writes(&mut idx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -313,9 +317,7 @@ fn synthesize_csharp_expression_bodied_properties(
         } else {
             format!("this.{body}")
         };
-        let Some((parent, module_path, visibility)) =
-            csharp_enclosing_type_decl(index, prop, file)
-        else {
+        let Some((parent, module_path, visibility)) = csharp_enclosing_type_decl(index, prop, file) else {
             continue;
         };
         // A property with an explicit getter/field of the same name
@@ -341,39 +343,40 @@ fn synthesize_csharp_expression_bodied_properties(
         // already handles — the call resolves to the receiver-typed
         // member (e.g. the record component's synthesized accessor),
         // and that 1-level hop forwards the tainted field.
-        let flow_events = if let Some((call_receiver, call_name)) =
-            dotted_member_access_call_parts(&body)
-        {
-            // Look up the receiver's static type from sibling
-            // `property_declaration` / `field_declaration` siblings in
-            // the same class so the resolver can disambiguate the
-            // call's `name` against the receiver's class instead of
-            // resolving back to the synthesizing property itself
-            // (which would self-recurse).
-            let receiver_types =
-                csharp_lookup_member_type(prop, &call_receiver, src).into_iter().collect();
-            vec![
-                FlowEvent::Call {
+        let flow_events =
+            if let Some((call_receiver, call_name)) = dotted_member_access_call_parts(&qualified) {
+                // Look up the receiver's static type from sibling
+                // `property_declaration` / `field_declaration` siblings in
+                // the same class so the resolver can disambiguate the
+                // call's `name` against the receiver's class instead of
+                // resolving back to the synthesizing property itself
+                // (which would self-recurse).
+                let lookup_member = csharp_receiver_member_lookup_name(&call_receiver);
+                let receiver_types = csharp_lookup_member_type(prop, lookup_member, src)
+                    .into_iter()
+                    .collect();
+                vec![
+                    FlowEvent::Call {
+                        span: body_span,
+                        name: call_name.clone(),
+                        receiver: Some(call_receiver),
+                        receiver_types,
+                        call_kind: CallKind::Method,
+                        args: Vec::new(),
+                    },
+                    FlowEvent::Return {
+                        span: body_span,
+                        value_text: Some(call_name.clone()),
+                        value_name: Some(call_name),
+                    },
+                ]
+            } else {
+                vec![FlowEvent::Return {
                     span: body_span,
-                    name: call_name.clone(),
-                    receiver: Some(call_receiver),
-                    receiver_types,
-                    call_kind: CallKind::Method,
-                    args: Vec::new(),
-                },
-                FlowEvent::Return {
-                    span: body_span,
-                    value_text: Some(format!("{call_name}()")),
-                    value_name: None,
-                },
-            ]
-        } else {
-            vec![FlowEvent::Return {
-                span: body_span,
-                value_text: Some(qualified.clone()),
-                value_name: Some(qualified.clone()),
-            }]
-        };
+                    value_text: Some(qualified.clone()),
+                    value_name: Some(qualified.clone()),
+                }]
+            };
         synthesized.push(bonsai_lang_api::Decl {
             symbol: bonsai_common::SymbolId::new(next_symbol),
             kind: DeclKind::Method,
@@ -420,31 +423,84 @@ fn synthesize_csharp_constructor_implicit_returns(
     src: &[u8],
     file: FileId,
 ) {
+    let class_info_by_symbol: std::collections::HashMap<_, _> = index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.symbol, (decl.name.clone(), decl.bases.clone())))
+        .collect();
     for ctor_node in collect_kinds(tree, &["constructor_declaration"]) {
         let ctor_span = span_of(file, &ctor_node);
-        let Some(decl) = index.defs.iter_mut().find(|d| {
-            matches!(d.kind, DeclKind::Constructor) && d.span == ctor_span
-        }) else {
+        let Some(decl) = index
+            .defs
+            .iter_mut()
+            .find(|d| matches!(d.kind, DeclKind::Constructor) && d.span == ctor_span)
+        else {
             continue;
         };
-        if decl.flow_events.iter().any(|e| matches!(e, FlowEvent::Return { .. })) {
-            continue;
-        }
+        let parent_info = decl.parent.and_then(|parent| class_info_by_symbol.get(&parent));
         // Build value_text from the constructor_initializer + body
         // texts. Concatenating both surfaces param identifiers from
         // either side (`: base(data)` or `{ Data = data; }`) so
         // tokenization can bridge them.
         let mut parts: Vec<String> = Vec::new();
+        let mut initializer_call: Option<FlowEvent> = None;
         let mut cw = ctor_node.walk();
         for child in ctor_node.children(&mut cw) {
-            if matches!(child.kind(), "constructor_initializer" | "block") {
+            if child.kind() == "constructor_initializer" {
+                let t = node_text(&child, src).trim().to_string();
+                if let Some((callee, args)) = csharp_constructor_initializer_call(&t, parent_info) {
+                    let span = span_of(file, &child);
+                    initializer_call = Some(FlowEvent::Call {
+                        span,
+                        name: callee,
+                        receiver: None,
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Constructor,
+                        args: args
+                            .into_iter()
+                            .map(|arg| CallArg {
+                                span,
+                                name: None,
+                                place: csharp_bare_identifier(&arg).map(str::to_string),
+                                source_names: csharp_bare_identifier(&arg)
+                                    .map(|name| vec![name.to_string()])
+                                    .unwrap_or_default(),
+                                value_text: arg,
+                            })
+                            .collect(),
+                    });
+                }
+                if !t.is_empty() {
+                    parts.push(t);
+                }
+            } else if child.kind() == "block" {
                 let t = node_text(&child, src).trim().to_string();
                 if !t.is_empty() {
                     parts.push(t);
                 }
             }
         }
-        if parts.is_empty() {
+        if let Some(call) = initializer_call {
+            let already_present = decl.flow_events.iter().any(|event| {
+                matches!(
+                    (event, &call),
+                    (
+                        FlowEvent::Call { span: existing_span, name: existing_name, .. },
+                        FlowEvent::Call { span, name, .. }
+                    ) if existing_span == span && existing_name == name
+                )
+            });
+            if !already_present {
+                decl.flow_events.insert(0, call);
+            }
+        }
+        if decl
+            .flow_events
+            .iter()
+            .any(|e| matches!(e, FlowEvent::Return { .. }))
+            || parts.is_empty()
+        {
             continue;
         }
         let value_text = parts.join(" ");
@@ -460,26 +516,104 @@ fn synthesize_csharp_constructor_implicit_returns(
     }
 }
 
+fn csharp_constructor_initializer_call(
+    text: &str,
+    parent_info: Option<&(String, Vec<String>)>,
+) -> Option<(String, Vec<String>)> {
+    let init = text.trim().strip_prefix(':').unwrap_or(text).trim();
+    let (callee, rest) = if let Some(rest) = init.strip_prefix("base") {
+        (parent_info.and_then(|(_, bases)| bases.first()).cloned()?, rest)
+    } else if let Some(rest) = init.strip_prefix("this") {
+        (parent_info.map(|(name, _)| name.clone())?, rest)
+    } else {
+        return None;
+    };
+    let open = rest.find('(')?;
+    let close = rest.rfind(')')?;
+    let inner = &rest[open + 1..close];
+    let args = split_csharp_initializer_args(inner);
+    Some((callee, args))
+}
+
+fn split_csharp_initializer_args(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let piece = text[start..idx].trim();
+                if !piece.is_empty() {
+                    parts.push(piece.to_string());
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_string());
+    }
+    parts
+}
+
+fn csharp_bare_identifier(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        Some(trimmed)
+    } else {
+        None
+    }
+}
+
+fn csharp_receiver_member_lookup_name(receiver: &str) -> &str {
+    receiver
+        .trim()
+        .strip_prefix("this.")
+        .or_else(|| receiver.trim().strip_prefix("base."))
+        .unwrap_or_else(|| receiver.trim())
+        .rsplit('.')
+        .next()
+        .unwrap_or_else(|| receiver.trim())
+}
+
 /// Find a sibling `property_declaration` / `field_declaration` named
 /// `member` in the type that lexically encloses `prop`, returning its
 /// declared (canonical) type name. Used to set `receiver_types` on a
 /// synthesized member-access Call so the resolver dispatches against
 /// the receiver's class — without this, `Cmd => Data.Cmd` resolves
 /// `Data.Cmd` back to the same `Cmd` property and self-recurses.
-fn csharp_lookup_member_type(
-    prop: tree_sitter::Node<'_>,
-    member: &str,
-    src: &[u8],
-) -> Option<String> {
+fn csharp_lookup_member_type(prop: tree_sitter::Node<'_>, member: &str, src: &[u8]) -> Option<String> {
     let mut cur = prop.parent();
     let mut class_node = None;
     while let Some(n) = cur {
         if matches!(
             n.kind(),
-            "class_declaration"
-                | "struct_declaration"
-                | "record_declaration"
-                | "interface_declaration"
+            "class_declaration" | "struct_declaration" | "record_declaration" | "interface_declaration"
         ) {
             class_node = Some(n);
             break;
@@ -539,30 +673,25 @@ fn csharp_lookup_member_type(
 
 /// If `body` is a simple dotted member-access of identifiers
 /// (`Data.Cmd`, optionally prefixed `this.`/`base.`), return
-/// `(receiver, call_name)` modeling it as a method call — `Data.Cmd`
-/// becomes `(receiver="Data", call_name="Data.Cmd")` so the IDG's
-/// 1-level receiver-field bridge resolves it to the receiver-typed
-/// member (e.g. a record component's synthesized accessor). Returns
-/// `None` for any non-trivial body (call, indexer, literal, complex
-/// expression) so those keep the Return-only fallback.
+/// `(receiver, call_name)` modeling it as a method call — `this.Data.Cmd`
+/// becomes `(receiver="this.Data", call_name="this.Data.Cmd")` so the
+/// IDG's receiver-state bridge preserves exact field taint while still
+/// resolving to the receiver-typed member (e.g. a record component's
+/// synthesized accessor). Returns `None` for any non-trivial body (call,
+/// indexer, literal, complex expression) so those keep the Return-only
+/// fallback.
 fn dotted_member_access_call_parts(body: &str) -> Option<(String, String)> {
     let trimmed = body.trim();
-    // Strip a leading receiver qualifier; the remaining text must be a
-    // pure dotted identifier path of at least two segments
-    // (`A.B`/`A.B.C`/...).
-    let inner = trimmed
-        .strip_prefix("this.")
-        .or_else(|| trimmed.strip_prefix("base."))
-        .unwrap_or(trimmed);
+    // The text must be a pure dotted identifier path of at least two
+    // segments (`A.B`/`this.A.B`/`A.B.C`/...).
+    let inner = trimmed;
     let segments: Vec<&str> = inner.split('.').collect();
     if segments.len() < 2 {
         return None;
     }
     for seg in &segments {
         if seg.is_empty()
-            || !seg
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || !seg
                 .chars()
                 .next()
@@ -594,10 +723,7 @@ fn csharp_enclosing_type_decl(
     while let Some(n) = cur {
         if matches!(
             n.kind(),
-            "class_declaration"
-                | "struct_declaration"
-                | "record_declaration"
-                | "interface_declaration"
+            "class_declaration" | "struct_declaration" | "record_declaration" | "interface_declaration"
         ) {
             let span = span_of(file, &n);
             return index
@@ -620,7 +746,7 @@ fn csharp_enclosing_type_decl(
 /// bare RHS name matches a zero-arg member decl in this file and is NOT
 /// a local/param of the method, convert it into a `source_call` so the
 /// IDG resolves the getter and forwards its return into the assignment.
-fn qualify_csharp_implicit_member_reads(index: &mut DeclIndex) {
+fn qualify_csharp_implicit_member_accesses(index: &mut DeclIndex) {
     use std::collections::HashSet;
     let getter_names: HashSet<String> = index
         .defs
@@ -638,60 +764,32 @@ fn qualify_csharp_implicit_member_reads(index: &mut DeclIndex) {
         // A local binding (param or assignment target) shadows the
         // member, so those names must keep their plain-read semantics.
         let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
-        collect_csharp_assign_targets(&decl.flow_events, &mut locals);
-        rewrite_csharp_member_reads(&mut decl.flow_events, &getter_names, &locals);
-    }
-}
-
-/// Walk the flow-event tree and collect every assignment target name
-/// — used to mask shadowing locals out of the qualify pass below.
-fn collect_csharp_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
-    for event in events {
-        match event {
-            FlowEvent::Assign { target, .. } => {
-                // Bare-name targets become locals; nested `target.field`
-                // shapes don't shadow getters (the field is what's read).
-                if !target.is_empty() {
-                    out.insert(target.trim().to_string());
-                }
-            }
-            // Recurse through every nested-vec variant — assigns can
-            // hide arbitrarily deep inside conditionals/loops/try.
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_csharp_assign_targets(then_events, out);
-                collect_csharp_assign_targets(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_csharp_assign_targets(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_csharp_assign_targets(body, out);
-                collect_csharp_assign_targets(catch_events, out);
-                collect_csharp_assign_targets(finally_events, out);
-            }
-            _ => {}
-        }
+        collect_assign_targets(&decl.flow_events, &mut locals);
+        let mut member_names = getter_names.clone();
+        member_names.extend(decl.type_aliases.iter().map(|alias| alias.name.clone()));
+        let params: HashSet<String> = decl.params.iter().cloned().collect();
+        rewrite_csharp_member_accesses(
+            &mut decl.flow_events,
+            &getter_names,
+            &member_names,
+            &locals,
+            &params,
+        );
     }
 }
 
 /// Rewrite each bare-property read (`var c = Cmd;`) into the Java-
 /// shaped `Call{name:"Cmd"} + Assign{source_call:"Cmd"}` pair so the
 /// interprocedural receiver-field bridge can route caller-receiver
-/// taint through the getter. See `qualify_csharp_implicit_member_reads`
-/// for the full rationale; this is the recursive worker.
-fn rewrite_csharp_member_reads(
+/// taint through the getter. It also qualifies implicit field/property
+/// writes (`Data = data`) as `this.Data = data` so constructor receiver
+/// writes describe the object state being initialized.
+fn rewrite_csharp_member_accesses(
     events: &mut Vec<FlowEvent>,
     getters: &std::collections::HashSet<String>,
+    members: &std::collections::HashSet<String>,
     locals: &std::collections::HashSet<String>,
+    params: &std::collections::HashSet<String>,
 ) {
     // Pass 1: recurse into nested-vec variants. We do this BEFORE
     // walking this level so insertions below don't shift indices the
@@ -703,11 +801,11 @@ fn rewrite_csharp_member_reads(
                 else_events,
                 ..
             } => {
-                rewrite_csharp_member_reads(then_events, getters, locals);
-                rewrite_csharp_member_reads(else_events, getters, locals);
+                rewrite_csharp_member_accesses(then_events, getters, members, locals, params);
+                rewrite_csharp_member_accesses(else_events, getters, members, locals, params);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_csharp_member_reads(body, getters, locals);
+                rewrite_csharp_member_accesses(body, getters, members, locals, params);
             }
             FlowEvent::Try {
                 body,
@@ -715,9 +813,9 @@ fn rewrite_csharp_member_reads(
                 finally_events,
                 ..
             } => {
-                rewrite_csharp_member_reads(body, getters, locals);
-                rewrite_csharp_member_reads(catch_events, getters, locals);
-                rewrite_csharp_member_reads(finally_events, getters, locals);
+                rewrite_csharp_member_accesses(body, getters, members, locals, params);
+                rewrite_csharp_member_accesses(catch_events, getters, members, locals, params);
+                rewrite_csharp_member_accesses(finally_events, getters, members, locals, params);
             }
             _ => {}
         }
@@ -726,6 +824,12 @@ fn rewrite_csharp_member_reads(
     // `events.insert(idx, ...)` without invalidating the loop.
     let mut idx = 0usize;
     while idx < events.len() {
+        if let FlowEvent::Assign { target, .. } = &mut events[idx] {
+            let name = target.trim().to_string();
+            if csharp_bare_identifier(&name).is_some() && members.contains(&name) && !params.contains(&name) {
+                *target = format!("this.{name}");
+            }
+        }
         // Decide whether THIS event is a qualify-eligible Assign,
         // without holding a mutable borrow into `events` yet.
         let (qualify_name, span) = match &events[idx] {
@@ -743,10 +847,7 @@ fn rewrite_csharp_member_reads(
                     // Eligible only when the bare RHS name resolves
                     // to a zero-arg member of the class, isn't
                     // shadowed by a local, and isn't a self-assign.
-                    if getters.contains(&name)
-                        && !locals.contains(&name)
-                        && name != target.trim()
-                    {
+                    if getters.contains(&name) && !locals.contains(&name) && name != target.trim() {
                         (Some(name), *span)
                     } else {
                         (None, *span)
@@ -775,10 +876,14 @@ fn rewrite_csharp_member_reads(
             ..
         } = &mut events[idx]
         {
-            *source_call = Some(name.clone());
+            let call_name = format!("this.{name}");
+            *source_call = Some(call_name.clone());
             *source_call_args = Vec::new();
             *source_name = None;
-            source_names.retain(|s| s.trim() != name);
+            source_names.retain(|s| {
+                let trimmed = s.trim();
+                trimmed != name && trimmed != call_name
+            });
             *value_kind = Some(AssignValueKind::CallResult);
         }
         // Step B — insert the explicit Call event before the Assign.
@@ -790,16 +895,153 @@ fn rewrite_csharp_member_reads(
             idx,
             FlowEvent::Call {
                 span,
-                name: name.clone(),
-                receiver: None,
+                name: format!("this.{name}"),
+                receiver: Some("this".to_string()),
                 receiver_types: Vec::new(),
-                call_kind: CallKind::Function,
+                call_kind: CallKind::Method,
                 args: Vec::new(),
             },
         );
         // Skip past both the inserted Call and the modified Assign.
         idx += 2;
     }
+}
+
+fn enrich_csharp_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
+    if !matches!(decl.kind, DeclKind::Constructor | DeclKind::Method) {
+        return;
+    }
+    let writes = collect_receiver_field_writes(
+        &decl.flow_events,
+        &decl.params,
+        decl.receiver_param_index,
+        &["this", "base"],
+        &[],
+    );
+    decl.receiver_field_writes.extend(writes);
+    dedup_csharp_receiver_field_writes(&mut decl.receiver_field_writes);
+}
+
+fn propagate_csharp_base_constructor_field_writes(index: &mut DeclIndex) {
+    for _ in 0..8 {
+        let snapshot = index.defs.clone();
+        let mut changed = false;
+        for decl in index
+            .defs
+            .iter_mut()
+            .filter(|decl| matches!(decl.kind, DeclKind::Constructor))
+        {
+            let mut inherited = csharp_inherited_constructor_field_writes(decl, &snapshot);
+            if inherited.is_empty() {
+                continue;
+            }
+            let before = decl.receiver_field_writes.len();
+            decl.receiver_field_writes.append(&mut inherited);
+            dedup_csharp_receiver_field_writes(&mut decl.receiver_field_writes);
+            changed |= decl.receiver_field_writes.len() != before;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn csharp_inherited_constructor_field_writes(
+    decl: &bonsai_lang_api::Decl,
+    snapshot: &[bonsai_lang_api::Decl],
+) -> Vec<FieldWrite> {
+    let mut out = Vec::new();
+    collect_csharp_inherited_constructor_field_writes(&decl.flow_events, decl, snapshot, &mut out);
+    dedup_csharp_receiver_field_writes(&mut out);
+    out
+}
+
+fn collect_csharp_inherited_constructor_field_writes(
+    events: &[FlowEvent],
+    decl: &bonsai_lang_api::Decl,
+    snapshot: &[bonsai_lang_api::Decl],
+    out: &mut Vec<FieldWrite>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                call_kind,
+                args,
+                ..
+            } if *call_kind == CallKind::Constructor => {
+                let Some(callee) = snapshot.iter().find(|candidate| {
+                    matches!(candidate.kind, DeclKind::Constructor) && candidate.name == *name
+                }) else {
+                    continue;
+                };
+                for write in &callee.receiver_field_writes {
+                    let mut mapped_sources = Vec::new();
+                    for source_param in &write.source_param_indices {
+                        let Some(arg) = args.get(*source_param) else {
+                            continue;
+                        };
+                        if let Some(current_param) = csharp_param_index_for_bare_arg(decl, &arg.value_text) {
+                            if !mapped_sources.contains(&current_param) {
+                                mapped_sources.push(current_param);
+                            }
+                        }
+                    }
+                    if !mapped_sources.is_empty() {
+                        out.push(FieldWrite {
+                            span: write.span,
+                            target: write.target.clone(),
+                            source_param_indices: mapped_sources,
+                        });
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_csharp_inherited_constructor_field_writes(then_events, decl, snapshot, out);
+                collect_csharp_inherited_constructor_field_writes(else_events, decl, snapshot, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_csharp_inherited_constructor_field_writes(body, decl, snapshot, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_csharp_inherited_constructor_field_writes(body, decl, snapshot, out);
+                collect_csharp_inherited_constructor_field_writes(catch_events, decl, snapshot, out);
+                collect_csharp_inherited_constructor_field_writes(finally_events, decl, snapshot, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn csharp_param_index_for_bare_arg(decl: &bonsai_lang_api::Decl, arg: &str) -> Option<usize> {
+    let bare = csharp_bare_identifier(arg)?;
+    decl.params.iter().position(|param| param == bare)
+}
+
+fn dedup_csharp_receiver_field_writes(writes: &mut Vec<FieldWrite>) {
+    for write in writes.iter_mut() {
+        write.source_param_indices.sort_unstable();
+        write.source_param_indices.dedup();
+    }
+    writes.sort_by_key(|write| {
+        (
+            write.span.start,
+            write.target.clone(),
+            write.source_param_indices.clone(),
+        )
+    });
+    writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
 }
 
 /// C# lifecycle transitions: IDisposable / CancellationTokenSource / lock release.

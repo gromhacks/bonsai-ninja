@@ -48,6 +48,7 @@ fn combined() -> CombinedFindingWithChain {
                 column: 1,
                 tainted_args: Vec::new(),
             }],
+            hops: Vec::new(),
             tag: Some("command-injection".to_string()),
             severity: Some(Severity::High),
             precision: "exact".to_string(),

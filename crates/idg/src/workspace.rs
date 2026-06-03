@@ -346,17 +346,22 @@ impl IdgWorkspace {
     /// path needed that much RAM again during the write, OOM'ing
     /// processes that the in-memory build had already cleared.
     ///
-    /// Entry 0 holds the per-workspace metadata
-    /// (`cross_file` edges + `field_flow` links + segment count). The
-    /// reader reconstructs `by_func` and the directional indexes from
-    /// the per-segment `funcs` lists during [`Self::load_from_disk`].
+    /// Entry 0 holds the per-workspace metadata and chunk counts.
+    /// Segments, cross-file edges, and field-flow links are written as
+    /// separate entries so no individual factstore payload needs to
+    /// approach the factstore format's 4GiB per-entry limit.
     ///
     /// `pipeline_hash` is folded into the factstore header so a
     /// matcher-policy bump (or any consumer that wants the IDG
     /// invalidated together) naturally rejects a stale sidecar.
     pub fn save_to_disk(&self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
         use bonsai_factstore::FactStoreWriter;
-        let entry_count = self.segments.len() + 1;
+        let cross_file_chunk_count = chunk_count(self.cross_file.edges.len(), IDG_WORKSPACE_EDGE_CHUNK_LEN);
+        let field_flow_chunk_count = chunk_count(self.field_flow.len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
+        let entry_count = 1usize
+            .saturating_add(self.segments.len())
+            .saturating_add(cross_file_chunk_count)
+            .saturating_add(field_flow_chunk_count);
         let writer = FactStoreWriter::create_with_capacity(
             path,
             IDG_WORKSPACE_TABLE_ID,
@@ -368,8 +373,10 @@ impl IdgWorkspace {
         let metadata = IdgWorkspaceMetadata {
             version: IDG_WORKSPACE_VERSION,
             segment_count: self.segments.len() as u32,
-            cross_file: &self.cross_file,
-            field_flow: &self.field_flow,
+            cross_file_edge_count: self.cross_file.edges.len() as u64,
+            cross_file_chunk_count: cross_file_chunk_count as u32,
+            field_flow_count: self.field_flow.len() as u64,
+            field_flow_chunk_count: field_flow_chunk_count as u32,
         };
         let meta_bytes = bincode::serialize(&metadata)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
@@ -378,6 +385,28 @@ impl IdgWorkspace {
             let segment_bytes = bincode::serialize(segment)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             writer.add((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, &segment_bytes)?;
+        }
+        let cross_base = first_cross_file_chunk_key(self.segments.len() as u32);
+        for (idx, chunk) in self
+            .cross_file
+            .edges
+            .chunks(IDG_WORKSPACE_EDGE_CHUNK_LEN)
+            .enumerate()
+        {
+            let bytes = bincode::serialize(chunk)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            writer.add(cross_base + idx as u64, IDG_WORKSPACE_VERSION as u64, &bytes)?;
+        }
+        let field_base =
+            first_field_flow_chunk_key(self.segments.len() as u32, cross_file_chunk_count as u32);
+        for (idx, chunk) in self
+            .field_flow
+            .chunks(IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN)
+            .enumerate()
+        {
+            let bytes = bincode::serialize(chunk)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            writer.add(field_base + idx as u64, IDG_WORKSPACE_VERSION as u64, &bytes)?;
         }
         writer.finish()?;
         Ok(())
@@ -390,32 +419,72 @@ impl IdgWorkspace {
     /// and each segment's reverse-lookup dictionaries.
     pub fn load_from_disk(path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<Option<Self>> {
         if !path.exists() {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=missing",
+                path.display()
+            );
             return Ok(None);
         }
-        let Ok(reader) = bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash)
-        else {
-            return Ok(None);
-        };
+        let reader =
+            match bonsai_factstore::FactStoreReader::open(path, IDG_WORKSPACE_TABLE_ID, pipeline_hash) {
+                Ok(reader) => reader,
+                Err(err) => {
+                    bonsai_diagnostics::debug_log!(
+                        "idg-build",
+                        "workspace sidecar miss: path={} reason=open-error error={} expected_pipeline={:#x}",
+                        path.display(),
+                        err,
+                        pipeline_hash
+                    );
+                    return Ok(None);
+                }
+            };
         let Some(metadata_hit) = reader.get(0)? else {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=missing-metadata",
+                path.display()
+            );
             return Ok(None);
         };
         if metadata_hit.body_hash != IDG_WORKSPACE_VERSION as u64 {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=metadata-version body_hash={} expected={}",
+                path.display(),
+                metadata_hit.body_hash,
+                IDG_WORKSPACE_VERSION
+            );
             return Ok(None);
         }
         let metadata: IdgWorkspaceMetadataOwned = bincode::deserialize(&metadata_hit.payload)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         if metadata.version != IDG_WORKSPACE_VERSION {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=metadata-payload-version version={} expected={}",
+                path.display(),
+                metadata.version,
+                IDG_WORKSPACE_VERSION
+            );
             return Ok(None);
         }
         let mut ws = Self {
             segments: Vec::with_capacity(metadata.segment_count as usize),
             by_func: AHashMap::new(),
-            cross_file: metadata.cross_file,
-            field_flow: metadata.field_flow,
+            cross_file: CrossFileEdges::new(),
+            field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
         };
         for idx in 0..metadata.segment_count {
             let Some(hit) = reader.get((idx + 1) as u64)? else {
                 // Truncated sidecar — fail-closed so the caller rebuilds.
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "workspace sidecar miss: path={} reason=missing-segment segment={}",
+                    path.display(),
+                    idx
+                );
                 return Ok(None);
             };
             let mut segment: IdgSegment = bincode::deserialize(&hit.payload)
@@ -429,20 +498,83 @@ impl IdgWorkspace {
             }
             ws.segments.push(segment);
         }
+        let cross_base = first_cross_file_chunk_key(metadata.segment_count);
+        for chunk_idx in 0..metadata.cross_file_chunk_count {
+            let Some(hit) = reader.get(cross_base + u64::from(chunk_idx))? else {
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "workspace sidecar miss: path={} reason=missing-cross-file-chunk chunk={}",
+                    path.display(),
+                    chunk_idx
+                );
+                return Ok(None);
+            };
+            let chunk: Vec<CrossFileEdge> = bincode::deserialize(&hit.payload)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            for edge in chunk {
+                ws.cross_file.push(edge);
+            }
+        }
+        if ws.cross_file.len() as u64 != metadata.cross_file_edge_count {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=cross-file-count loaded={} expected={}",
+                path.display(),
+                ws.cross_file.len(),
+                metadata.cross_file_edge_count
+            );
+            return Ok(None);
+        }
+        let field_base = first_field_flow_chunk_key(metadata.segment_count, metadata.cross_file_chunk_count);
+        for chunk_idx in 0..metadata.field_flow_chunk_count {
+            let Some(hit) = reader.get(field_base + u64::from(chunk_idx))? else {
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "workspace sidecar miss: path={} reason=missing-field-flow-chunk chunk={}",
+                    path.display(),
+                    chunk_idx
+                );
+                return Ok(None);
+            };
+            let chunk: Vec<FieldFlowLink> = bincode::deserialize(&hit.payload)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            ws.field_flow.extend(chunk);
+        }
+        if ws.field_flow.len() as u64 != metadata.field_flow_count {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=field-flow-count loaded={} expected={}",
+                path.display(),
+                ws.field_flow.len(),
+                metadata.field_flow_count
+            );
+            return Ok(None);
+        }
         ws.cross_file.rebuild_indexes();
+        bonsai_diagnostics::debug_log!(
+            "idg-build",
+            "workspace sidecar loaded: path={} segments={} funcs={} total_edges={} field_links={}",
+            path.display(),
+            ws.segment_count(),
+            ws.by_func.len(),
+            ws.total_edge_count(),
+            ws.field_flow.len()
+        );
         Ok(Some(ws))
     }
 }
 
-/// Borrowed view of the per-workspace metadata written at entry 0 of
-/// the streamed IDG sidecar. Bincode `Serialize` borrows the source's
-/// cross-file and field-flow vecs directly, sparing a clone.
+/// Per-workspace metadata written at entry 0 of the streamed IDG
+/// sidecar. Large edge/link payloads are stored in fixed-size chunks
+/// after the segment entries.
 #[derive(serde::Serialize)]
-struct IdgWorkspaceMetadata<'a> {
+struct IdgWorkspaceMetadata {
     version: u32,
     segment_count: u32,
-    cross_file: &'a CrossFileEdges,
-    field_flow: &'a Vec<FieldFlowLink>,
+    cross_file_edge_count: u64,
+    cross_file_chunk_count: u32,
+    field_flow_count: u64,
+    field_flow_chunk_count: u32,
 }
 
 /// Owned mirror of [`IdgWorkspaceMetadata`] used by the load path.
@@ -450,8 +582,10 @@ struct IdgWorkspaceMetadata<'a> {
 struct IdgWorkspaceMetadataOwned {
     version: u32,
     segment_count: u32,
-    cross_file: CrossFileEdges,
-    field_flow: Vec<FieldFlowLink>,
+    cross_file_edge_count: u64,
+    cross_file_chunk_count: u32,
+    field_flow_count: u64,
+    field_flow_chunk_count: u32,
 }
 
 /// Factstore table id for the workspace-wide IDG sidecar. Distinct
@@ -462,13 +596,50 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 /// Wire-format version for the workspace IDG sidecar. Bump on any
 /// incompatible change to the persisted shape (e.g. new field on
 /// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]).
-const IDG_WORKSPACE_VERSION: u32 = 3;
+const IDG_WORKSPACE_VERSION: u32 = 7;
+
+#[cfg(not(test))]
+const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;
+#[cfg(test)]
+const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 2;
+#[cfg(not(test))]
+const IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN: usize = 100_000;
+#[cfg(test)]
+const IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN: usize = 2;
+
+fn chunk_count(len: usize, chunk_len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        len.div_ceil(chunk_len)
+    }
+}
+
+fn first_cross_file_chunk_key(segment_count: u32) -> u64 {
+    1 + u64::from(segment_count)
+}
+
+fn first_field_flow_chunk_key(segment_count: u32, cross_file_chunk_count: u32) -> u64 {
+    first_cross_file_chunk_key(segment_count) + u64::from(cross_file_chunk_count)
+}
 
 /// Conventional sidecar path under `<workspace>/.bonsai/`.
 #[must_use]
 pub fn idg_sidecar_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
     bonsai_common::workspace_bonsai_dir(workspace_root)
         .join(format!("idg.v{IDG_WORKSPACE_VERSION}.factstore"))
+}
+
+/// Rulepack-transfer-specific sidecar path under `<workspace>/.bonsai/`.
+///
+/// Transfer options alter IDG edges, so security analysis cannot reuse
+/// the default source-structure sidecar. The caller supplies a stable
+/// fingerprint of the configured transfer semantics.
+#[must_use]
+pub fn idg_transfer_sidecar_path(workspace_root: &std::path::Path, transfer_hash: u64) -> std::path::PathBuf {
+    bonsai_common::workspace_bonsai_dir(workspace_root).join(format!(
+        "idg.v{IDG_WORKSPACE_VERSION}.transfer.{transfer_hash:016x}.factstore"
+    ))
 }
 
 #[cfg(test)]

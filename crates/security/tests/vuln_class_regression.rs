@@ -64,6 +64,19 @@ fn ws_for_language(file_name: &str, source: &str) -> Workspace {
     ws
 }
 
+fn ws_for_files(files: &[(&str, &str)]) -> Workspace {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    for (file_name, source) in files {
+        ws.vfs()
+            .write((*file_name).to_string(), Arc::<str>::from(*source));
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 #[derive(Debug, Clone)]
 struct TaggedFinding {
     tag: String,
@@ -296,6 +309,156 @@ function helper(args, other) {
         &outcome,
         "sql-injection",
         "first-argument helper named args must stay clean",
+    );
+}
+
+#[test]
+fn javascript_express_controller_req_params_reports_without_local_express_import() {
+    let src = r#"
+const { exec } = require("child_process");
+function get_sysinfo(req, res) {
+    return exec(req.params.command + " -a");
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("controllers/notebook.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(
+        &outcome,
+        "command-injection",
+        "Express routed controller req.params should be a remote source without importing express locally",
+    );
+}
+
+#[test]
+fn javascript_express_route_registration_is_not_header_source() {
+    let src = r#"
+const express = require("express");
+const app = express();
+app.get("/health", function(req, res) {
+    res.set("Cache-Control", "private");
+    return res.send("ok");
+});
+"#;
+    let outcome = analyse_with_options(&ws_for_language("app.js", src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "header-injection",
+        "Express app.get/router.get route registration must not be modeled as req.get(header)",
+    );
+}
+
+#[test]
+fn sqli_js_express_req_params_multiline_template_sink_reports_without_inferred_sources() {
+    let src = r#"
+const sequelize = require("sequelize");
+function get(req, res) {
+    const result = sequelize.query(
+        `SELECT * FROM passphrases WHERE username = '${req.params.username}'`
+    );
+    return result;
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("controllers/passphrase.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(
+        &outcome,
+        "sql-injection",
+        "Express req.params inside a multiline SQL template sink argument",
+    );
+}
+
+#[test]
+fn path_js_express_res_download_reports_without_local_express_import() {
+    let src = r#"
+const path = require("path");
+function fetch(req, res) {
+    const filename = path.resolve("/srv/uploads/" + req.body.filename);
+    return res.download(filename);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("controllers/storage.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(
+        &outcome,
+        "path-traversal",
+        "Express res.download should be a sink in routed controllers without importing express locally",
+    );
+}
+
+#[test]
+fn nosql_js_graphql_args_to_local_mongoose_model_import_reports() {
+    let ws = ws_for_files(&[
+        (
+            "graphql/schema.js",
+            r#"
+const _gql = require("graphql");
+const User = require("../models/users");
+function userSearchByUsername(parent, args, context, info) {
+    return User.find({ username: args.username });
+}
+"#,
+        ),
+        (
+            "models/users.js",
+            r#"
+const mongoose = require("mongoose");
+const schema = new mongoose.Schema({ username: String });
+module.exports = mongoose.model("User", schema);
+"#,
+        ),
+    ]);
+    let outcome = analyse_with_options(&ws, TaintAnalysisOptions::default());
+    assert_tag_reported(
+        &outcome,
+        "nosql-injection",
+        "GraphQL args flowing into a locally imported mongoose model query",
+    );
+}
+
+#[test]
+fn path_js_graphql_args_to_fs_promise_writefile_reports() {
+    let src = r#"
+const _gql = require("graphql");
+const fsPromise = require("fs").promises;
+function updateUserUploadFile(parent, args, context, info) {
+    const filePath = "/srv/uploads/" + args.filePath;
+    return fsPromise.writeFile(filePath, args.fileContent);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("graphql/schema.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(
+        &outcome,
+        "path-traversal",
+        "GraphQL filePath args flowing into fsPromise.writeFile",
+    );
+}
+
+#[test]
+fn upload_js_req_files_mv_reports_without_local_fileupload_import() {
+    let src = r#"
+function post(req, res) {
+    const sampleFile = req.files.file;
+    const filePath = "/srv/uploads/" + sampleFile.name;
+    return sampleFile.mv(filePath);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("controllers/storage.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(
+        &outcome,
+        "file-upload",
+        "express-fileupload mv destination should be a sink when the controller uses req.files",
     );
 }
 

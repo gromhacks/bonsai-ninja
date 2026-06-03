@@ -92,6 +92,7 @@ use crate::{
         is_quoted_literal, normalise_qualified_text, qualified_access_bases, qualified_accesses,
         text_looks_qualified, value_bearing_identifier_text,
     },
+    tokens::{canonical_bare_name, rhs_has_descendant_shape},
     IntraTaintResult, TaintConfig, TokenSet,
 };
 mod summary;
@@ -107,6 +108,7 @@ pub use summary::{
     ReturnFieldTaint,
 };
 
+pub(super) use crate::tokens::qualified_wildcard_seed_matches;
 pub(super) use summary_impl::compute_function_summary;
 use summary_impl::{access_alias_keys, implicit_receiver_return_is_tainted, receiver_state_names_for_decl};
 
@@ -3611,9 +3613,7 @@ fn try_body_callee_throws_tainted(
                 state.extend(then_state);
                 state.extend(else_state);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if try_body_callee_throws_tainted(
                     body,
                     state,
@@ -4305,7 +4305,10 @@ fn param_index_for_call_arg(decl: &Decl, args: &[EffectiveCallArg], arg_index: u
     }
     // Positional: this arg's rank among positional (non-keyword) args
     // maps to the Nth non-receiver parameter slot, in declaration order.
-    let positional_rank = args[..arg_index].iter().filter(|other| other.name.is_none()).count();
+    let positional_rank = args[..arg_index]
+        .iter()
+        .filter(|other| other.name.is_none())
+        .count();
     let mut remaining = positional_rank;
     for idx in 0..decl.params.len() {
         if decl.receiver_param_index == Some(idx) {
@@ -5600,8 +5603,7 @@ pub(super) fn call_receiver_from_name(name: &str) -> Option<String> {
     // Fold `::` first (Rust/PHP scope), then a lone `:` (Lua
     // `obj:method()` colon-call sugar; also Erlang `mod:fun`, where
     // the lowercase module atom never aliases a tainted variable).
-    let normalised =
-        normalise_qualified_text(&name.replace("->", ".").replace("::", ".").replace(':', "."));
+    let normalised = normalise_qualified_text(&name.replace("->", ".").replace("::", ".").replace(':', "."));
     let (receiver, _) = normalised.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())
@@ -8604,22 +8606,6 @@ fn actual_has_descendant_taint(actual_text: &str, state: &TokenSet) -> bool {
     !actual.is_empty() && qualified_wildcard_seed_matches(&actual, state)
 }
 
-fn rhs_has_descendant_shape(source_names: &[String]) -> bool {
-    let mut distinct = Vec::new();
-    for name in source_names {
-        let name = name.trim();
-        if name.is_empty() || is_quoted_literal(name) {
-            continue;
-        }
-        let canonical = canonical_bare_name(name);
-        if canonical.is_empty() || distinct.iter().any(|existing| existing == &canonical) {
-            continue;
-        }
-        distinct.push(canonical);
-    }
-    distinct.len() > 1
-}
-
 pub(super) fn normalise_target_text(target: &str) -> String {
     use bonsai_common::REFERENCE_SIGILS;
     normalise_qualified_text(target)
@@ -8763,13 +8749,6 @@ fn is_identifier_byteish(ch: char) -> bool {
     ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_ascii_alphanumeric()
 }
 
-fn canonical_bare_name(text: &str) -> String {
-    normalise_qualified_text(text)
-        .trim_start_matches(&['$', '@', '%'][..])
-        .trim()
-        .to_string()
-}
-
 /// Mirror of [`insert_target_taint`] that REMOVES the same set of
 /// canonicalized aliases. When a clean reassignment removes
 /// `$x` from state, the bare-form `x` (which `insert_target_taint`
@@ -8850,61 +8829,7 @@ fn tainted_receiver_access(text: &str, state: &TokenSet) -> bool {
 }
 
 fn receiver_method_projection_is_tainted(text: &str, state: &TokenSet) -> bool {
-    if receiver_method_projection_in_text_is_tainted(text, state) {
-        return true;
-    }
-    let normalised = normalise_qualified_text(&text.replace("::", "."));
-    normalised != text && receiver_method_projection_in_text_is_tainted(&normalised, state)
-}
-
-fn receiver_method_projection_in_text_is_tainted(text: &str, state: &TokenSet) -> bool {
-    for open_paren in text.match_indices('(').map(|(idx, _)| idx) {
-        let before_call = text[..open_paren].trim_end();
-        let start = before_call
-            .char_indices()
-            .rev()
-            .find(|&(_, c)| {
-                !(c == '.'
-                    || c == '_'
-                    || c == '$'
-                    || c == '@'
-                    || c == '%'
-                    || c == ']'
-                    || c == '['
-                    || c == '\''
-                    || c == '"'
-                    || c.is_ascii_alphanumeric())
-            })
-            .map_or(0, |(idx, c)| idx + c.len_utf8());
-        let candidate = before_call[start..].trim();
-        let Some((receiver, method)) = candidate.rsplit_once('.') else {
-            continue;
-        };
-        if receiver.trim().is_empty() || method.trim().is_empty() {
-            continue;
-        }
-        let receiver = normalise_qualified_text(receiver);
-        if !receiver.is_empty()
-            && (state.contains(&receiver) || qualified_wildcard_seed_matches(&receiver, state))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-pub(super) fn qualified_wildcard_seed_matches(normalised_text: &str, state: &TokenSet) -> bool {
-    state.iter().any(|seed| {
-        let Some(prefix) = seed.strip_suffix(".*") else {
-            return false;
-        };
-        let prefix = normalise_qualified_text(prefix);
-        !prefix.is_empty()
-            && (normalised_text == prefix
-                || normalised_text
-                    .strip_prefix(prefix.as_str())
-                    .is_some_and(|rest| rest.starts_with('.')))
-    })
+    crate::tokens::receiver_method_projection_is_tainted(text, state, true)
 }
 
 fn const_value_of_arg(text: &str, const_bindings: &AHashMap<String, ConstValue>) -> Option<ConstValue> {

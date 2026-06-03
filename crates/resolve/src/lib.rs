@@ -10,6 +10,7 @@ use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     AliasTarget, DeclKind, ImportSpec, ModulePath, Visibility, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
+use std::borrow::Cow;
 
 /// Caller-side context the resolver consults when narrowing a
 /// candidate set. Built by callgraph / taint / matcher at edge-
@@ -42,6 +43,7 @@ pub struct ResolveContext<'a> {
     pub receiver_type: Option<SymbolId>,
     pub alias_map: Option<&'a AHashMap<String, AliasTarget>>,
     pub file_path_lookup: Option<FilePathLookup<'a>>,
+    pub file_path_match_lookup: Option<FilePathMatchLookup<'a>>,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -53,6 +55,7 @@ impl<'a> ResolveContext<'a> {
             receiver_type: None,
             alias_map: None,
             file_path_lookup: None,
+            file_path_match_lookup: None,
         }
     }
 
@@ -73,6 +76,12 @@ impl<'a> ResolveContext<'a> {
         self.file_path_lookup = Some(FilePathLookup { lookup });
         self
     }
+
+    #[must_use]
+    pub fn with_file_path_match_lookup(mut self, lookup: &'a dyn Fn(&str, FileId) -> bool) -> Self {
+        self.file_path_match_lookup = Some(FilePathMatchLookup { lookup });
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +98,23 @@ impl<'a> FilePathLookup<'a> {
 impl std::fmt::Debug for FilePathLookup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("FilePathLookup(..)")
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FilePathMatchLookup<'a> {
+    lookup: &'a dyn Fn(&str, FileId) -> bool,
+}
+
+impl<'a> FilePathMatchLookup<'a> {
+    fn matches(self, target_module: &str, file: FileId) -> bool {
+        (self.lookup)(target_module, file)
+    }
+}
+
+impl std::fmt::Debug for FilePathMatchLookup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FilePathMatchLookup(..)")
     }
 }
 
@@ -442,10 +468,7 @@ fn resolve_workspace_rooted_call(
             continue;
         }
         if !module_target_matches_decl_module_path(mod_path, &decl.module_path)
-            && !ctx
-                .file_path_lookup
-                .and_then(|lookup| lookup.path_for(decl_file))
-                .is_some_and(|path| module_target_matches_path(mod_path, &path))
+            && !alias_target_matches_file(ctx, mod_path, decl_file)
         {
             continue;
         }
@@ -741,7 +764,11 @@ pub fn module_target_matches_decl_module_path(
     // `::` bytes before splitting). The decl's `module_path`
     // is already canonical-segment-form so the only normalization
     // needed here is on the alias text.
-    let normalized: String = target_module.replace("::", ".");
+    let normalized: Cow<'_, str> = if target_module.contains("::") {
+        Cow::Owned(target_module.replace("::", "."))
+    } else {
+        Cow::Borrowed(target_module)
+    };
     let target_segments: Vec<&str> = normalized
         .split(['.', '/', '\\'])
         .map(str::trim)
@@ -809,8 +836,15 @@ fn symbol_in_alias_target(
     let Some(decl_file) = global.declaring_file(symbol) else {
         return false;
     };
+    alias_target_matches_file(ctx, target_module, decl_file)
+}
+
+fn alias_target_matches_file(ctx: &ResolveContext<'_>, target_module: &str, file: FileId) -> bool {
+    if let Some(lookup) = ctx.file_path_match_lookup {
+        return lookup.matches(target_module, file);
+    }
     ctx.file_path_lookup
-        .and_then(|lookup| lookup.path_for(decl_file))
+        .and_then(|lookup| lookup.path_for(file))
         .is_some_and(|path| module_target_matches_path(target_module, &path))
 }
 
@@ -1115,6 +1149,159 @@ pub fn collect_method_candidates_for_class(
     );
 }
 
+/// Per-callgraph-build cache for class-method dispatch candidate walks.
+///
+/// Large Java workspaces can ask the resolver for the same
+/// `(class, method, caller context)` thousands of times while building
+/// the resolved call graph. Caching the completed hierarchy walk keeps
+/// typed dispatch semantic without recomputing inherited method
+/// candidates for every call site.
+#[derive(Debug, Default)]
+pub struct MethodCandidateCache {
+    entries: AHashMap<MethodCandidateCacheKey, Vec<bonsai_common::FuncId>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MethodCandidateCacheKey {
+    class_sym: SymbolId,
+    method_name: String,
+    caller_file: FileId,
+    caller_module: ModulePath,
+}
+
+impl MethodCandidateCacheKey {
+    fn new(class_sym: SymbolId, method_name: &str, ctx: &ResolveContext<'_>) -> Self {
+        Self {
+            class_sym,
+            method_name: method_name.to_string(),
+            caller_file: ctx.caller_file,
+            caller_module: ctx.caller_module.clone(),
+        }
+    }
+}
+
+/// Cached variant of [`collect_method_candidates_for_class`].
+pub fn collect_method_candidates_for_class_cached(
+    global: &GlobalIndex,
+    class_sym: bonsai_common::SymbolId,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen: &mut AHashSet<bonsai_common::SymbolId>,
+    out: &mut Vec<bonsai_common::FuncId>,
+    cache: &mut MethodCandidateCache,
+) {
+    let mut seen_classes = AHashSet::new();
+    for func in collect_method_candidates_for_class_cached_inner(
+        global,
+        class_sym,
+        method_name,
+        ctx,
+        &mut seen_classes,
+        cache,
+    ) {
+        let sym = SymbolId::new(func.raw());
+        if seen.insert(sym) {
+            out.push(func);
+        }
+    }
+}
+
+fn collect_method_candidates_for_class_cached_inner(
+    global: &GlobalIndex,
+    class_sym: bonsai_common::SymbolId,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen_classes: &mut AHashSet<bonsai_common::SymbolId>,
+    cache: &mut MethodCandidateCache,
+) -> Vec<bonsai_common::FuncId> {
+    if !seen_classes.insert(class_sym) {
+        return Vec::new();
+    }
+    let key = MethodCandidateCacheKey::new(class_sym, method_name, ctx);
+    if let Some(cached) = cache.entries.get(&key) {
+        return cached.clone();
+    }
+    let Some(class_decl) = global.decl_of(class_sym) else {
+        return Vec::new();
+    };
+    if !matches!(
+        class_decl.kind,
+        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+    ) {
+        return Vec::new();
+    }
+    let Some(class_file) = global.declaring_file(class_sym) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut local_fallback = Vec::new();
+    for decl in global.decls_in(class_file) {
+        if decl.name != method_name {
+            continue;
+        }
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some(decl_file) = global.declaring_file(decl.symbol) else {
+            continue;
+        };
+        if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
+            continue;
+        }
+        if decl_belongs_to_class(decl, class_sym, class_decl) {
+            let func = bonsai_common::FuncId::new(decl.symbol.raw());
+            if callable_decl_has_body(decl) {
+                push_unique_func(&mut out, func);
+            } else {
+                push_unique_func(&mut local_fallback, func);
+            }
+        }
+    }
+    if !out.is_empty() {
+        cache.entries.insert(key, out.clone());
+        return out;
+    }
+    if !class_decl_has_owned_callable_body(global, class_sym, class_decl) {
+        collect_peer_partial_class_method_candidates_cached(
+            global,
+            class_sym,
+            class_decl,
+            method_name,
+            ctx,
+            seen_classes,
+            &mut out,
+            cache,
+        );
+        if !out.is_empty() {
+            cache.entries.insert(key, out.clone());
+            return out;
+        }
+    }
+    let base_ctx = class_decl_context(ctx, class_file, &class_decl.module_path);
+    for base in &class_decl.bases {
+        for base_sym in resolve_class(global, base, &base_ctx) {
+            for func in collect_method_candidates_for_class_cached_inner(
+                global,
+                base_sym,
+                method_name,
+                ctx,
+                seen_classes,
+                cache,
+            ) {
+                push_unique_func(&mut out, func);
+            }
+        }
+    }
+    if out.is_empty() {
+        out = local_fallback;
+    }
+    cache.entries.insert(key, out.clone());
+    out
+}
+
 fn collect_method_candidates_for_class_inner(
     global: &GlobalIndex,
     class_sym: bonsai_common::SymbolId,
@@ -1140,7 +1327,9 @@ fn collect_method_candidates_for_class_inner(
     let Some(class_file) = global.declaring_file(class_sym) else {
         return;
     };
+    let before = out.len();
     let mut matched_local_method = false;
+    let mut local_fallback = Vec::new();
     for decl in global.decls_in(class_file) {
         if decl.name != method_name {
             continue;
@@ -1157,15 +1346,21 @@ fn collect_method_candidates_for_class_inner(
         if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
-        if decl_belongs_to_class(decl, class_sym, class_decl) && seen_methods.insert(decl.symbol) {
-            matched_local_method = true;
-            out.push(bonsai_common::FuncId::new(decl.symbol.raw()));
+        if decl_belongs_to_class(decl, class_sym, class_decl) {
+            if callable_decl_has_body(decl) {
+                if seen_methods.insert(decl.symbol) {
+                    matched_local_method = true;
+                    out.push(bonsai_common::FuncId::new(decl.symbol.raw()));
+                }
+            } else {
+                local_fallback.push(decl.symbol);
+            }
         }
     }
     if matched_local_method {
         return;
     }
-    if !class_decl_has_owned_callable(global, class_sym, class_decl)
+    if !class_decl_has_owned_callable_body(global, class_sym, class_decl)
         && collect_peer_partial_class_method_candidates(
             global,
             class_sym,
@@ -1191,6 +1386,13 @@ fn collect_method_candidates_for_class_inner(
                 seen_classes,
                 out,
             );
+        }
+    }
+    if out.len() == before {
+        for symbol in local_fallback {
+            if seen_methods.insert(symbol) {
+                out.push(bonsai_common::FuncId::new(symbol.raw()));
+            }
         }
     }
 }
@@ -1225,6 +1427,7 @@ fn collect_peer_partial_class_method_candidates(
             peer_decl.kind,
             DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
         ) || peer_decl.name != class_decl.name
+            || !peer_partial_class_matches(class_decl, class_sym, peer_decl, peer_sym, global)
             || !visibility_allows(peer_decl, peer_file, &peer_decl.module_path, ctx)
         {
             continue;
@@ -1242,7 +1445,73 @@ fn collect_peer_partial_class_method_candidates(
     out.len() > before
 }
 
-fn class_decl_has_owned_callable(
+#[allow(clippy::too_many_arguments)] // Mirrors the cached recursive class walk state.
+fn collect_peer_partial_class_method_candidates_cached(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    class_decl: &bonsai_lang_api::Decl,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen_classes: &mut AHashSet<SymbolId>,
+    out: &mut Vec<bonsai_common::FuncId>,
+    cache: &mut MethodCandidateCache,
+) {
+    // CONTEXTLESS_LOOKUP_JUSTIFICATION: peer partial-class stitching
+    // only runs after a same-symbol class has no owned callable; the
+    // candidates are narrowed to the same class-like name, visibility,
+    // and semantic method ownership before any method leaves this helper.
+    for peer_sym in global.find_by_name(&class_decl.name).iter().copied() {
+        if peer_sym == class_sym || seen_classes.contains(&peer_sym) {
+            continue;
+        }
+        let Some(peer_decl) = global.decl_of(peer_sym) else {
+            continue;
+        };
+        let Some(peer_file) = global.declaring_file(peer_sym) else {
+            continue;
+        };
+        if !matches!(
+            peer_decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        ) || peer_decl.name != class_decl.name
+            || !peer_partial_class_matches(class_decl, class_sym, peer_decl, peer_sym, global)
+            || !visibility_allows(peer_decl, peer_file, &peer_decl.module_path, ctx)
+        {
+            continue;
+        }
+        for func in collect_method_candidates_for_class_cached_inner(
+            global,
+            peer_sym,
+            method_name,
+            ctx,
+            seen_classes,
+            cache,
+        ) {
+            push_unique_func(out, func);
+        }
+    }
+}
+
+fn peer_partial_class_matches(
+    class_decl: &bonsai_lang_api::Decl,
+    class_sym: SymbolId,
+    peer_decl: &bonsai_lang_api::Decl,
+    peer_sym: SymbolId,
+    global: &GlobalIndex,
+) -> bool {
+    let Some(class_file) = global.declaring_file(class_sym) else {
+        return false;
+    };
+    let Some(peer_file) = global.declaring_file(peer_sym) else {
+        return false;
+    };
+    if class_file == peer_file {
+        return true;
+    }
+    class_decl.module_path.matches(&peer_decl.module_path)
+}
+
+fn class_decl_has_owned_callable_body(
     global: &GlobalIndex,
     class_sym: SymbolId,
     class_decl: &bonsai_lang_api::Decl,
@@ -1254,8 +1523,13 @@ fn class_decl_has_owned_callable(
         matches!(
             decl.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-        ) && decl_belongs_to_class(decl, class_sym, class_decl)
+        ) && callable_decl_has_body(decl)
+            && decl_belongs_to_class(decl, class_sym, class_decl)
     })
+}
+
+fn callable_decl_has_body(decl: &bonsai_lang_api::Decl) -> bool {
+    decl.body_span.is_some() || !decl.flow_events.is_empty()
 }
 
 fn decl_belongs_to_class(
@@ -1283,6 +1557,9 @@ fn class_decl_context<'a>(
     }
     if let Some(file_path_lookup) = inherited.file_path_lookup {
         ctx = ctx.with_file_path_lookup(file_path_lookup.lookup);
+    }
+    if let Some(file_path_match_lookup) = inherited.file_path_match_lookup {
+        ctx = ctx.with_file_path_match_lookup(file_path_match_lookup.lookup);
     }
     ctx
 }
@@ -1319,10 +1596,30 @@ pub fn extend_alias_targets_with_declared_types(
 /// matching `com/example/Utils.java`.
 #[must_use]
 pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
-    let target = alias_target.replace('\\', "/");
-    let path = file_path.replace('\\', "/");
-    let target_parts = module_import_parts(&target);
-    let path_parts = module_path_parts(&path);
+    let target_parts = module_target_parts(alias_target);
+    let path_parts = module_path_parts(file_path);
+    module_target_parts_match_path_parts(&target_parts, &path_parts)
+}
+
+/// Split an alias target into the same normalized parts used by
+/// [`module_target_matches_path`]. Callers that compare the same target
+/// against many files can cache this vector and use
+/// [`module_target_parts_match_path_parts`] directly.
+#[must_use]
+pub fn module_target_parts(alias_target: &str) -> Vec<String> {
+    let target: Cow<'_, str> = if alias_target.contains('\\') {
+        Cow::Owned(alias_target.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(alias_target)
+    };
+    module_import_parts(&target)
+}
+
+/// Match pre-split module target parts against pre-split file path
+/// parts. This is the allocation-free hot-path companion to
+/// [`module_target_matches_path`].
+#[must_use]
+pub fn module_target_parts_match_path_parts(target_parts: &[String], path_parts: &[String]) -> bool {
     let Some(target_leaf) = target_parts.last() else {
         return false;
     };
@@ -1399,7 +1696,11 @@ fn path_parts_contains_workspace_suffix(path_parts: &[String], suffix: &[String]
 /// Trailing extensions and `.` / `..` segments are dropped.
 #[must_use]
 pub fn module_import_parts(text: &str) -> Vec<String> {
-    let normalized = text.replace("::", ".");
+    let normalized: Cow<'_, str> = if text.contains("::") {
+        Cow::Owned(text.replace("::", "."))
+    } else {
+        Cow::Borrowed(text)
+    };
     let parts: Vec<&str> = if normalized.contains('/') {
         normalized.split('/').collect()
     } else {
@@ -1435,7 +1736,7 @@ fn absolute_module_prefix_variants(parts: &[String]) -> Vec<&[String]> {
 /// dotted module form against slash-formed file path.
 #[must_use]
 pub fn module_path_parts(text: &str) -> Vec<String> {
-    text.split('/')
+    text.split(['/', '\\'])
         .filter_map(|part| {
             let part = part.trim();
             (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
@@ -1532,10 +1833,7 @@ pub fn resolve_class(
                             global.decl_of(*sym).is_some_and(|decl| {
                                 let path_match = global
                                     .declaring_file(*sym)
-                                    .and_then(|file| {
-                                        ctx.file_path_lookup.and_then(|lookup| lookup.path_for(file))
-                                    })
-                                    .is_some_and(|path| module_target_matches_path(target_module, &path));
+                                    .is_some_and(|file| alias_target_matches_file(ctx, target_module, file));
                                 module_target_matches_decl_module_path_from_context(
                                     target_module,
                                     &decl.module_path,

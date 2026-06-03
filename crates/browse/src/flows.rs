@@ -146,7 +146,7 @@ impl<'ws> FlowAnnotator<'ws> {
         let Ok(snap) = self.ws.vfs().snapshot(file_id) else {
             return Vec::new();
         };
-        let map = bonsai_common::cached_span_map(file_id, snap.version, snap.text.as_ref());
+        let map = bonsai_common::cached_span_map_arc(file_id, snap.version, &snap.text);
         let global = self.ws.db().global_index();
         let mut ranges = Vec::new();
         for decl in global.decls_in(file_id) {

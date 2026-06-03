@@ -187,8 +187,10 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // qualified with an explicit `Call` event for walk_call's recv-slot
         // fallback; constructor implicit-Return synthesis so the init's param
         // tokens propagate to the caller's `repo` allocation at object level).
-        // Two findings = real flow + 1 inferred unreferenced-entry over-approximation.
-        "swift" => 2,
+        // One real flow. The old inferred unreferenced-entry
+        // over-approximation is now filtered once the concrete
+        // readLine source covers the same sink site.
+        "swift" => 1,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
     }

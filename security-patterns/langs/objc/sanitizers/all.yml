@@ -1,4 +1,23 @@
 # Objective-C sanitizers (canonical tags: url-sanitizer, sql-sanitizer, xss-sanitizer, crypto-sanitizer).
+- id: objc.passthrough.nsstring_format
+  enabled: true
+  language: objc
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(stringWithFormat|localizedStringWithFormat|initWithFormat|stringByAppendingFormat)$"
+  taint_semantics:
+    call_result_passthrough_args: [1, 2, 3, 4, 5]
+  match_examples:
+  - name: nsstring format carries formatted input
+    code: |
+      void example(id input) {
+        NSString *q = [NSString stringWithFormat:@"SELECT %@", input];
+      }
+    expect_match_text: [NSString.stringWithFormat]
+  description: "NSString format constructors preserve taint from formatted values in the returned string."
+
 - id: objc.sanitizer.snprintf_bounded
   enabled: true
   language: objc
@@ -19,6 +38,27 @@
       }
     expect_match_text: [snprintf]
   description: "snprintf - bounded format; configured as a clean output overwrite only when value-bearing inputs are clean."
+
+- id: objc.passthrough.strncpy_copy
+  enabled: true
+  language: objc
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: strncpy
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_arg_indices: [1]
+  match_examples:
+  - name: source buffer copied into destination
+    code: |
+      void example(char *dst, const char *src, unsigned long n) {
+        strncpy(dst, src, n);
+      }
+    expect_match_text: [strncpy]
+  description: "strncpy(dst, src, n) - value-preserving copy from src to dst for taint transfer; not sanitizer credit and not a memory-safety finding by itself."
 
 - id: objc.sanitizer.adding_percent_encoding
   enabled: true

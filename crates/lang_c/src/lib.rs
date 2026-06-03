@@ -3,11 +3,11 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, collect_param_type_aliases, first_named_child_of_kind, language_from_pack, node_text,
-        parse_with, span_of,
+        c_family_preproc_imports, collect_kinds, collect_param_type_aliases, first_named_child_of_kind,
+        language_from_pack, node_text, parse_with, span_of,
     },
-    with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -289,42 +289,8 @@ fn extract_function_identifier(node: &Node<'_>, src: &[u8]) -> Option<String> {
     None
 }
 
-/// Translate every `#include` directive into an `ImportSpec`. Both
-/// angle-bracketed system headers and quoted local headers map onto
-/// `ImportScope::Module`; downstream resolvers don't care about the
-/// distinction.
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
-    let mut imports = Vec::new();
-    // `#include <X.h>` -> path: system_lib_string
-    // `#include "X.h"` -> path: string_literal > string_content
-    for include_node in collect_kinds(tree, &["preproc_include"]) {
-        let Some(path_node) = include_node.child_by_field_name("path") else {
-            continue;
-        };
-        let module = match path_node.kind() {
-            "system_lib_string" => node_text(&path_node, src)
-                .trim_matches(|c: char| matches!(c, '<' | '>'))
-                .to_string(),
-            "string_literal" => first_named_child_of_kind(&path_node, "string_content")
-                .map(|content_node| node_text(&content_node, src).to_string())
-                .unwrap_or_else(|| node_text(&path_node, src).trim_matches('"').to_string()),
-            _ => node_text(&path_node, src).to_string(),
-        };
-        // Skip syntactically present but empty includes — usually the
-        // result of a partial macro expansion or preprocessor edge case.
-        if module.is_empty() {
-            continue;
-        }
-        imports.push(ImportSpec {
-            span: span_of(file, &include_node),
-            module,
-            alias: None,
-            is_wildcard: false,
-            original_name: None,
-            scope: ImportScope::Module,
-        });
-    }
-    imports
+    c_family_preproc_imports(tree, src, file)
 }
 
 /// C lifecycle transitions for `inject_lifecycle_events`.

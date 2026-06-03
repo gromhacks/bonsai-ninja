@@ -47,6 +47,16 @@ cargo build --release -p bonsai_cli
 ./target/release/bonsai-ninja --version
 ```
 
+For non-release CPU architectures, validate the target toolchain and
+parser-pack path before relying on a build:
+
+```bash
+scripts/check-targets.sh --extra
+```
+
+See [Platform And Architecture Support](platform-support.mdx) for the
+release target matrix and parser bundle constraints.
+
 ## First Scan
 
 ```bash

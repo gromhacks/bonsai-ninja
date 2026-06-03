@@ -344,6 +344,34 @@ fn read_or_write_nodes_for_names_locates_local_assign_target() {
 }
 
 #[test]
+fn source_seed_span_fallback_does_not_cross_functions_in_same_segment() {
+    let f = empty_decl(1, 0, "f");
+    let mut g = empty_decl(2, 0, "g");
+    g.flow_events = vec![FlowEvent::Call {
+        span: span(0, 30, 40),
+        name: "helper".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(0, 35, 39),
+            name: None,
+            value_text: "other".to_string(),
+            place: Some("other".to_string()),
+            source_names: vec!["other".to_string()],
+        }],
+    }];
+    let (idx, ws) = build(vec![f, g]);
+    let svc = IdgQueryService::new(ws, idx);
+
+    let nodes = svc.source_seed_nodes_at_span(func_id(&svc.global, "f"), span(0, 32, 36));
+    assert!(
+        nodes.is_empty(),
+        "fallback seed lookup for f must not return g's same-file read nodes"
+    );
+}
+
+#[test]
 fn read_or_write_nodes_for_names_maps_wildcard_seed_to_projected_read_only() {
     let mut f = empty_decl(1, 0, "f");
     f.params = vec!["args".to_string()];

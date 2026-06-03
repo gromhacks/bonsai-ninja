@@ -422,6 +422,36 @@
     expect_no_match: true
   description: fs/promises writeFile (import-alias `fsp`) - tainted path enables arbitrary-file write.
 
+- id: javascript.path.fs_promises_writefile_fspromise_alias
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fsPromise, writeFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs promises writefile fsPromise alias
+    code: |
+      const fsPromise = require("fs").promises;
+      function demo(input, req, obj) {
+        return fsPromise.writeFile(input);
+      }
+  - name: literal fs promises writefile fsPromise alias negative
+    code: |
+      const fsPromise = require("fs").promises;
+      function demo(input) {
+        return fsPromise.writeFile("/var/app/output.txt", input);
+      }
+    expect_no_match: true
+  description: fs.promises writeFile bound to `fsPromise` - tainted path enables arbitrary-file write.
+
 - id: javascript.path.fs_promises_readfile_chain
   enabled: true
   language: javascript

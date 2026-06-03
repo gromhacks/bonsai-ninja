@@ -492,6 +492,29 @@ pub enum FlowEvent {
     },
 }
 
+impl FlowEvent {
+    /// Source span carried by this event.
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            FlowEvent::Call { span, .. }
+            | FlowEvent::Branch { span, .. }
+            | FlowEvent::Loop { span, .. }
+            | FlowEvent::Assign { span, .. }
+            | FlowEvent::Return { span, .. }
+            | FlowEvent::Throw { span, .. }
+            | FlowEvent::Try { span, .. }
+            | FlowEvent::Break { span, .. }
+            | FlowEvent::Continue { span, .. }
+            | FlowEvent::Yield { span, .. }
+            | FlowEvent::Await { span, .. }
+            | FlowEvent::Defer { span, .. }
+            | FlowEvent::Using { span, .. }
+            | FlowEvent::Lifecycle { span, .. } => *span,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallKind {

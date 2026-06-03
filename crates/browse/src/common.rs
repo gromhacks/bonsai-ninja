@@ -203,9 +203,8 @@ pub fn format_span(span: &Span, ws: &Workspace) -> (String, u32, u32) {
         .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
     let snapshot = ws.vfs().snapshot(span.file).ok();
     let (line, column) = if let Some(snap) = snapshot {
-        // `cached_span_map` is keyed on `(file, version)` so we
-        // share the line index across calls for the same snapshot.
-        let map = bonsai_common::cached_span_map(span.file, snap.version, snap.text.as_ref());
+        // Share the line index across calls for the same immutable snapshot.
+        let map = bonsai_common::cached_span_map_arc(span.file, snap.version, &snap.text);
         let line_col = map.line_col(span.start);
         (line_col.line, line_col.column)
     } else {

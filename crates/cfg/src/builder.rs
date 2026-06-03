@@ -342,22 +342,7 @@ fn append_finally_path<'a>(
 /// Every `FlowEvent` carries a span; surface it so the builder can
 /// set `BasicBlock::span` on the first event landing in a block.
 fn flow_event_span(event: &FlowEvent) -> Span {
-    match event {
-        FlowEvent::Call { span, .. }
-        | FlowEvent::Branch { span, .. }
-        | FlowEvent::Loop { span, .. }
-        | FlowEvent::Assign { span, .. }
-        | FlowEvent::Return { span, .. }
-        | FlowEvent::Throw { span, .. }
-        | FlowEvent::Try { span, .. }
-        | FlowEvent::Break { span, .. }
-        | FlowEvent::Continue { span, .. }
-        | FlowEvent::Yield { span, .. }
-        | FlowEvent::Await { span, .. }
-        | FlowEvent::Defer { span, .. }
-        | FlowEvent::Using { span, .. }
-        | FlowEvent::Lifecycle { span, .. } => *span,
-    }
+    event.span()
 }
 
 /// Set a block's `span` to its first real event. Later events don't

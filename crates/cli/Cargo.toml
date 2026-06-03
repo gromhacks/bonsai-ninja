@@ -35,9 +35,11 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 # bat's curated syntax set: syntect's bundled defaults miss Swift,
 # Kotlin, and TypeScript (among others). two-face ships a drop-in
 # SyntaxSet covering everything bat supports, including the three
-# we were missing — so `inspect`'s inlined source gets real
-# syntax highlighting across all 15 supported languages.
-two-face = "0.4"
+# we were missing, so `inspect`'s inlined source gets real syntax
+# highlighting across all 21 supported languages. Keep two-face on
+# syntect's pure-Rust fancy-regex backend; the default enables onig_sys,
+# which adds an avoidable native C dependency for non-mainstream arches.
+two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
 
 # tree-sitter is used at runtime by `dump-ast` to walk the parse tree;
 # other commands access trees indirectly via `bonsai_parser` /

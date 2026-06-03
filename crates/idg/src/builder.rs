@@ -84,6 +84,115 @@ struct FieldArgStitch {
     call_kind: CallEdgeKind,
 }
 
+const MAX_FIELD_ARG_STITCHES_PER_SOURCE_KEY: usize = 4;
+const MAX_RETURN_FIELD_STITCHES_PER_SOURCE_KEY: usize = 4;
+const MAX_CONSTRUCTOR_RETURN_STITCHES_PER_SOURCE_KEY: usize = 8;
+const MAX_FIELD_COPY_STITCHES_PER_SOURCE_KEY: usize = 4;
+const MIN_FIELD_FORWARD_WORKLIST_WRITES: usize = 200_000;
+const MIN_FIELD_FORWARD_TRANSFORM_APPS: usize = 400_000;
+const FIELD_FORWARD_WORKLIST_FACTOR: usize = 4;
+const FIELD_FORWARD_TRANSFORM_FACTOR: usize = 8;
+
+#[derive(Default, Debug)]
+struct FieldArgSiteQueue {
+    sites: Vec<FieldArgStitch>,
+    by_source_key: AHashMap<FieldPlaceKey, usize>,
+}
+
+impl FieldArgSiteQueue {
+    fn push(&mut self, site: FieldArgStitch) {
+        if !field_forwarding_base_allowed(&site.actual_arg)
+            || !field_forwarding_base_allowed(&site.param_name)
+        {
+            return;
+        }
+        let key = field_write_key(site.caller_seg, site.caller, &site.actual_arg);
+        if key.base.is_empty() {
+            return;
+        }
+        let count = self.by_source_key.entry(key).or_default();
+        if *count >= MAX_FIELD_ARG_STITCHES_PER_SOURCE_KEY {
+            return;
+        }
+        *count += 1;
+        self.sites.push(site);
+    }
+
+    fn as_slice(&self) -> &[FieldArgStitch] {
+        &self.sites
+    }
+
+    fn len(&self) -> usize {
+        self.sites.len()
+    }
+}
+
+#[derive(Default, Debug)]
+struct ReturnFieldSiteQueue {
+    sites: Vec<ReturnFieldStitch>,
+    by_source_key: AHashMap<FieldPlaceKey, usize>,
+}
+
+impl ReturnFieldSiteQueue {
+    fn push(&mut self, site: ReturnFieldStitch) {
+        if !field_forwarding_base_allowed(&site.target_base) {
+            return;
+        }
+        let key = field_write_key(site.callee_seg, site.callee, &site.source_base);
+        if key.base.is_empty() {
+            return;
+        }
+        let count = self.by_source_key.entry(key).or_default();
+        if *count >= MAX_RETURN_FIELD_STITCHES_PER_SOURCE_KEY {
+            return;
+        }
+        *count += 1;
+        self.sites.push(site);
+    }
+
+    fn as_slice(&self) -> &[ReturnFieldStitch] {
+        &self.sites
+    }
+
+    fn len(&self) -> usize {
+        self.sites.len()
+    }
+}
+
+#[derive(Default, Debug)]
+struct ConstructorReturnSiteQueue {
+    sites: Vec<ConstructorReturnStitch>,
+    by_source_key: AHashMap<FieldPlaceKey, usize>,
+}
+
+impl ConstructorReturnSiteQueue {
+    fn push(&mut self, site: ConstructorReturnStitch) {
+        if !field_forwarding_base_allowed(&site.target_base)
+            || !field_forwarding_base_allowed(&site.receiver_param_name)
+        {
+            return;
+        }
+        let key = field_write_key(site.callee_seg, site.callee, &site.receiver_param_name);
+        if key.base.is_empty() {
+            return;
+        }
+        let count = self.by_source_key.entry(key).or_default();
+        if *count >= MAX_CONSTRUCTOR_RETURN_STITCHES_PER_SOURCE_KEY {
+            return;
+        }
+        *count += 1;
+        self.sites.push(site);
+    }
+
+    fn as_slice(&self) -> &[ConstructorReturnStitch] {
+        &self.sites
+    }
+
+    fn len(&self) -> usize {
+        self.sites.len()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ConstructorReturnStitch {
     caller: FuncId,
@@ -143,6 +252,7 @@ struct FieldPlaceKey {
 #[derive(Default, Debug)]
 struct FieldPlaceIndex {
     by_base: AHashMap<FieldPlaceKey, Vec<FieldPlaceHit>>,
+    seen: AHashSet<(FieldPlaceKey, FieldPlaceHit)>,
 }
 
 #[derive(Default, Debug)]
@@ -398,9 +508,9 @@ pub fn stitch_idg(
     let call_started = Instant::now();
     let collect_stats = stitch_debug_enabled();
     let mut stats = StitchStats::default();
-    let mut field_arg_sites: Vec<FieldArgStitch> = Vec::new();
-    let mut return_field_sites: Vec<ReturnFieldStitch> = Vec::new();
-    let mut constructor_return_sites: Vec<ConstructorReturnStitch> = Vec::new();
+    let mut field_arg_sites = FieldArgSiteQueue::default();
+    let mut return_field_sites = ReturnFieldSiteQueue::default();
+    let mut constructor_return_sites = ConstructorReturnSiteQueue::default();
     let mut receiver_mutation_sites: Vec<ReceiverMutationStitch> = Vec::new();
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
     // AHashMap whose iteration order is randomised per process —
@@ -446,9 +556,9 @@ pub fn stitch_idg(
         receiver_mutation_sites.len()
     ));
     stitch_field_argument_forwarding(
-        &field_arg_sites,
-        &return_field_sites,
-        &constructor_return_sites,
+        field_arg_sites.as_slice(),
+        return_field_sites.as_slice(),
+        constructor_return_sites.as_slice(),
         &receiver_mutation_sites,
         &mut ws,
     );
@@ -716,9 +826,9 @@ fn stitch_call_site(
     resolver: &dyn CalleeResolver,
     callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
     ws: &mut IdgWorkspace,
-    field_arg_sites: &mut Vec<FieldArgStitch>,
-    return_field_sites: &mut Vec<ReturnFieldStitch>,
-    constructor_return_sites: &mut Vec<ConstructorReturnStitch>,
+    field_arg_sites: &mut FieldArgSiteQueue,
+    return_field_sites: &mut ReturnFieldSiteQueue,
+    constructor_return_sites: &mut ConstructorReturnSiteQueue,
     receiver_mutation_sites: &mut Vec<ReceiverMutationStitch>,
     mut stats: Option<&mut StitchStats>,
 ) {
@@ -1123,7 +1233,7 @@ fn is_super_receiver(receiver: &str) -> bool {
 
 #[allow(clippy::too_many_arguments)] // Mirrors the explicit FieldArgStitch metadata.
 fn push_receiver_field_arg_site(
-    sites: &mut Vec<FieldArgStitch>,
+    sites: &mut FieldArgSiteQueue,
     caller: FuncId,
     caller_seg: SegmentId,
     callee: FuncId,
@@ -1214,6 +1324,16 @@ fn stitch_field_argument_forwarding(
         receiver_mutation_sites,
         &copy_sites,
     );
+    let transform_count = transforms.values().map(Vec::len).sum::<usize>();
+    let max_worklist_writes = field_index
+        .seen
+        .len()
+        .saturating_add(transform_count)
+        .saturating_mul(FIELD_FORWARD_WORKLIST_FACTOR)
+        .max(MIN_FIELD_FORWARD_WORKLIST_WRITES);
+    let max_transform_apps = transform_count
+        .saturating_mul(FIELD_FORWARD_TRANSFORM_FACTOR)
+        .max(MIN_FIELD_FORWARD_TRANSFORM_APPS);
     let mut pending = VecDeque::new();
     let mut enqueued = AHashSet::default();
     seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
@@ -1224,12 +1344,21 @@ fn stitch_field_argument_forwarding(
         stitch_field_argument_fallbacks(sites, ws, &mut known_edges, &field_index, &inter_call_arg_entries);
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
+    let mut budget_hit = false;
     while let Some(write) = pending.pop_front() {
+        if processed >= max_worklist_writes {
+            budget_hit = true;
+            break;
+        }
         processed += 1;
         let Some(sites) = transforms.get(&write.key) else {
             continue;
         };
         for site in sites {
+            if processed_transforms >= max_transform_apps {
+                budget_hit = true;
+                break;
+            }
             processed_transforms += 1;
             apply_field_write_transform(
                 site,
@@ -1244,17 +1373,24 @@ fn stitch_field_argument_forwarding(
                 &mut enqueued,
             );
         }
+        if budget_hit {
+            break;
+        }
     }
     let added_edges = ws.total_edge_count().saturating_sub(before_edges);
     stitch_debug_log(format_args!(
-        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} fallback_edges={} added_edges={} total_edges={}",
+        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} max_processed={} max_transform_apps={} fallback_edges={} added_edges={} total_edges={} budget_hit={} pending_remaining={}",
         phase_started.elapsed().as_secs_f64(),
         processed,
         processed_transforms,
-        transforms.values().map(Vec::len).sum::<usize>(),
+        transform_count,
+        max_worklist_writes,
+        max_transform_apps,
         fallback_edges,
         added_edges,
         ws.total_edge_count(),
+        budget_hit,
+        pending.len(),
     ));
 }
 
@@ -1306,12 +1442,15 @@ fn build_field_write_transforms(
             FieldWriteTransform::ReceiverMutation(site.clone()),
         );
     }
+    let mut copy_counts: AHashMap<FieldPlaceKey, usize> = AHashMap::default();
     for site in copy_sites {
-        push_field_write_transform(
-            &mut out,
-            field_write_key(site.seg_id, site.func, &site.source_base),
-            FieldWriteTransform::Copy(site.clone()),
-        );
+        let key = field_write_key(site.seg_id, site.func, &site.source_base);
+        let count = copy_counts.entry(key.clone()).or_default();
+        if *count >= MAX_FIELD_COPY_STITCHES_PER_SOURCE_KEY {
+            continue;
+        }
+        *count += 1;
+        push_field_write_transform(&mut out, key, FieldWriteTransform::Copy(site.clone()));
     }
     out
 }
@@ -1508,6 +1647,7 @@ fn apply_field_argument_write(
         &source.field,
         param_field_span,
         param_field_write,
+        transforms,
     );
     if place_inter_edge_if_absent(
         site.caller_seg,
@@ -1694,6 +1834,16 @@ fn apply_outbound_field_write(
     if !is_forwardable_field(&source.field) {
         return;
     }
+    if !field_write_has_storage_path_consumer(
+        field_index,
+        transforms,
+        to_seg,
+        to_func,
+        target_base,
+        &source.field,
+    ) {
+        return;
+    }
     let Some(target_field_write) =
         ensure_field_write_node(ws, to_seg, to_func, target_base, &source.field, write_span)
     else {
@@ -1706,6 +1856,7 @@ fn apply_outbound_field_write(
         &source.field,
         write_span,
         target_field_write,
+        transforms,
     );
     if !(skip_self_edge && from_seg == to_seg && source.node == target_field_write) {
         place_inter_edge_if_absent(
@@ -1843,6 +1994,18 @@ fn call_ret_assignment_targets(
 fn is_forwardable_field(field: &str) -> bool {
     let parts = storage_segments(field);
     !parts.is_empty() && parts.len() <= 2
+}
+
+fn field_forwarding_base_allowed(base: &str) -> bool {
+    let parts = storage_segments(base);
+    !parts.is_empty()
+        && parts.len() <= 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '@'))
+        })
 }
 
 fn collect_field_copy_sites(ws: &IdgWorkspace) -> Vec<FieldCopySite> {
@@ -2000,6 +2163,45 @@ fn connect_field_write_to_reads(
     changed
 }
 
+fn field_write_has_consumer(
+    field_index: &FieldPlaceIndex,
+    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    seg_id: SegmentId,
+    func: FuncId,
+    base: &str,
+    field: &str,
+) -> bool {
+    transforms.contains_key(&field_write_key(seg_id, func, base))
+        || field_index.has_field_read_for_base_field(seg_id, func, base, field)
+}
+
+fn field_write_has_storage_path_consumer(
+    field_index: &FieldPlaceIndex,
+    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    seg_id: SegmentId,
+    func: FuncId,
+    base: &str,
+    field: &str,
+) -> bool {
+    let Some((name, path_parts)) = storage_path_parts(base, field) else {
+        return false;
+    };
+    if path_parts.is_empty() {
+        return field_write_has_consumer(field_index, transforms, seg_id, func, &name, field);
+    }
+    let mut parts = Vec::with_capacity(path_parts.len() + 1);
+    parts.push(name);
+    parts.extend(path_parts);
+    for split in 1..parts.len() {
+        let base = parts[..split].join(".");
+        let field = parts[split..].join(".");
+        if field_write_has_consumer(field_index, transforms, seg_id, func, &base, &field) {
+            return true;
+        }
+    }
+    false
+}
+
 fn ensure_field_write_node(
     ws: &mut IdgWorkspace,
     seg_id: SegmentId,
@@ -2147,6 +2349,24 @@ impl FieldPlaceIndex {
             .collect()
     }
 
+    fn has_field_read_for_base_field(
+        &self,
+        seg_id: SegmentId,
+        func: FuncId,
+        base: &str,
+        field: &str,
+    ) -> bool {
+        let key = FieldPlaceKey {
+            seg_id,
+            func,
+            base: normalize_storage_base(base),
+            writes: false,
+        };
+        self.by_base
+            .get(&key)
+            .is_some_and(|hits| hits.iter().any(|hit| hit.field == field))
+    }
+
     fn field_hits_for_base(
         &self,
         seg_id: SegmentId,
@@ -2171,21 +2391,39 @@ impl FieldPlaceIndex {
         field: &str,
         span: Span,
         node: NodeId,
+        transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     ) -> Vec<(FieldPlaceKey, FieldPlaceHit)> {
-        let Some((name, path_parts)) = storage_path_parts(base, field) else {
+        let mut parts = Vec::new();
+        push_storage_segments(base, &mut parts);
+        push_storage_segments(field, &mut parts);
+        if parts.len() < 2 {
             return Vec::new();
         };
-        let full_name = if path_parts.is_empty() {
-            name
-        } else {
-            let mut full_name = name;
-            for part in path_parts {
-                full_name.push('.');
-                full_name.push_str(&part);
+        let mut added = Vec::new();
+        for split in 1..parts.len() {
+            let field_parts = &parts[split..];
+            if field_parts.len() > 2 {
+                continue;
             }
-            full_name
-        };
-        self.record_full_storage_place(seg_id, func, &full_name, true, Some(span), node)
+            let base = parts[..split].join(".");
+            let field = field_parts.join(".");
+            if base.is_empty() || field.is_empty() {
+                continue;
+            }
+            let key = FieldPlaceKey {
+                seg_id,
+                func,
+                base: base.clone(),
+                writes: true,
+            };
+            if !transforms.contains_key(&key)
+                && !self.has_field_read_for_base_field(seg_id, func, &base, &field)
+            {
+                continue;
+            }
+            added.extend(self.record_storage_hit(seg_id, func, base, field, true, Some(span), node));
+        }
+        added
     }
 
     fn record_full_storage_place(
@@ -2212,20 +2450,34 @@ impl FieldPlaceIndex {
             if base.is_empty() || field.is_empty() {
                 continue;
             }
-            let key = FieldPlaceKey {
-                seg_id,
-                func,
-                base,
-                writes,
-            };
-            let hit = FieldPlaceHit { field, node, span };
-            let hits = self.by_base.entry(key.clone()).or_default();
-            if !hits.iter().any(|existing| existing == &hit) {
-                hits.push(hit.clone());
-                added.push((key, hit));
-            }
+            added.extend(self.record_storage_hit(seg_id, func, base, field, writes, span, node));
         }
         added
+    }
+
+    fn record_storage_hit(
+        &mut self,
+        seg_id: SegmentId,
+        func: FuncId,
+        base: String,
+        field: String,
+        writes: bool,
+        span: Option<Span>,
+        node: NodeId,
+    ) -> Vec<(FieldPlaceKey, FieldPlaceHit)> {
+        let key = FieldPlaceKey {
+            seg_id,
+            func,
+            base,
+            writes,
+        };
+        let hit = FieldPlaceHit { field, node, span };
+        if self.seen.insert((key.clone(), hit.clone())) {
+            self.by_base.entry(key.clone()).or_default().push(hit.clone());
+            vec![(key, hit)]
+        } else {
+            Vec::new()
+        }
     }
 
     fn sort_and_dedup(&mut self) {

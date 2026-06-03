@@ -3589,7 +3589,7 @@ fn render_function_source(
     let src = snapshot.text.as_ref();
     let module_path = snapshot.path.display().to_string();
 
-    let span_map = bonsai_common::cached_span_map(file, snapshot.version, src);
+    let span_map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
     let body_span = decl.body_span.unwrap_or(decl.span);
     let start_line = span_map.line_col(body_span.start).line;
     let end_line = span_map.line_col(body_span.end.saturating_sub(1)).line;

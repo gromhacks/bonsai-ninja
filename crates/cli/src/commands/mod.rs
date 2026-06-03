@@ -219,7 +219,7 @@ pub(crate) fn format_span(span: &bonsai_common::Span, ws: &Workspace) -> (String
         .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
     let snapshot = ws.vfs().snapshot(span.file).ok();
     let (line, col) = if let Some(s) = snapshot {
-        let map = bonsai_common::cached_span_map(span.file, s.version, s.text.as_ref());
+        let map = bonsai_common::cached_span_map_arc(span.file, s.version, &s.text);
         let lc = map.line_col(span.start);
         (lc.line, lc.column)
     } else {

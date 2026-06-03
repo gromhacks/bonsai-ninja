@@ -31,7 +31,8 @@ Examples that follow this rule:
 - Python FastAPI binder annotation merging — `lang_python`.
 - Python `getattr(obj, "literal")` reflection rewriting —
   `lang_python::rewrite_python_constant_reflection`.
-- Python `__all__` public-surface narrowing — `lang_python`.
+- Python `__all__` literal parsing for future wildcard-import narrowing;
+  it is not a visibility boundary for explicit imports — `lang_python`.
 - Python `gen.send(value)` coroutine resume forwarding —
   `lang_python::rewrite_python_generator_send`.
 - Perl `\&foo` coderef invocation lowering — `lang_perl`.

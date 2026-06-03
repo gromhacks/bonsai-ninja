@@ -286,10 +286,12 @@ fn method_call_emits_single_call_event() {
     let process_calls = entry
         .flow_events
         .iter()
-        .filter(|event| matches!(
-            event,
-            FlowEvent::Call { name, .. } if name == "obj->process"
-        ))
+        .filter(|event| {
+            matches!(
+                event,
+                FlowEvent::Call { name, .. } if name == "obj->process"
+            )
+        })
         .count();
     assert_eq!(
         process_calls, 1,

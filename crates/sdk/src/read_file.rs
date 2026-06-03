@@ -379,7 +379,7 @@ fn read_file_with_taint_options(
         .iter()
         .map(|d| {
             let loc = Locator::from_span(d.span, ws);
-            let span_map = bonsai_common::cached_span_map(file_id, snapshot.version, snapshot.text.as_ref());
+            let span_map = bonsai_common::cached_span_map_arc(file_id, snapshot.version, &snapshot.text);
             let start = span_map.line_col(d.span.start).line;
             let end = span_map.line_col(d.span.end).line;
             LineDeclSpan {

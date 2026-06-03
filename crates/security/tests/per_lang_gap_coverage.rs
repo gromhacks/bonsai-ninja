@@ -84,6 +84,33 @@ fn write_sink_rule(tmp: &Path, lang: &str, rule_id: &str, name: &str) -> PathBuf
     tmp.join("security-patterns")
 }
 
+fn write_call_result_passthrough_rule(
+    tmp: &Path,
+    lang: &str,
+    rule_id: &str,
+    name: &str,
+    arg_indices: &[usize],
+) {
+    let rules = tmp
+        .join("security-patterns")
+        .join("langs")
+        .join(lang)
+        .join("sanitizers");
+    fs::create_dir_all(&rules).expect("mkdir passthrough rules");
+    let args = arg_indices
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    fs::write(
+        rules.join(format!("{rule_id}.yml")),
+        format!(
+            "- id: {rule_id}\n  enabled: true\n  tag: passthrough-transform\n  match:\n    kind: call\n    callee:\n      name: {name}\n  taint_semantics:\n    call_result_passthrough_args: [{args}]\n  description: coverage passthrough\n"
+        ),
+    )
+    .expect("write passthrough rule");
+}
+
 fn write_fixture(tmp: &Path, name: &str, contents: &str) {
     fs::write(tmp.join(name), contents).expect("write fixture");
 }
@@ -867,9 +894,29 @@ g2_test!(g2_c_concat, "g2-c", "c", "app.c",
 g2_test!(g2_cpp_concat, "g2-cpp", "cpp", "app.cpp",
     "#include <string>\nvoid sink(const std::string&);\nvoid handle(const std::string& token) { std::string s = std::string(\"prefix \") + token; sink(s); }\n",
     "cpp.sink", "sink");
-g2_test!(g2_objc_concat, "g2-objc", "objc", "App.m",
-    "#import <Foundation/Foundation.h>\nvoid sink(NSString* s);\nvoid handle(NSString* token) { NSString* s = [NSString stringWithFormat:@\"prefix %@\", token]; sink(s); }\n",
-    "objc.sink", "sink");
+#[test]
+fn g2_objc_concat() {
+    let Some(_) = bin_path() else { return };
+    let tmp = fresh_tmp("g2-objc");
+    let rules = write_sink_rule(&tmp, "objc", "objc.sink", "sink");
+    write_call_result_passthrough_rule(
+        &tmp,
+        "objc",
+        "objc.passthrough.nsstring_format",
+        "NSString.stringWithFormat",
+        &[1],
+    );
+    write_fixture(
+        &tmp,
+        "App.m",
+        "#import <Foundation/Foundation.h>\nvoid sink(NSString* s);\nvoid handle(NSString* token) { NSString* s = [NSString stringWithFormat:@\"prefix %@\", token]; sink(s); }\n",
+    );
+    assert!(
+        flows_count(&tmp, &rules) >= 1,
+        "G2 (objc): NSString.stringWithFormat passthrough must propagate formatted input"
+    );
+    cleanup(&tmp);
+}
 g2_test!(g2_elixir_interp, "g2-ex", "elixir", "app.ex",
     "defmodule App do\n  def handle(token) do\n    y = \"prefix \" <> token\n    sink(y)\n  end\n  def sink(_), do: :ok\nend\n",
     "ex.sink", "sink");
@@ -1347,6 +1394,13 @@ fn indirection_python_joined_path_variable_to_open() {
     let Some(_) = bin_path() else { return };
     let tmp = fresh_tmp("indir-py-path");
     let rules = write_sink_rule(&tmp, "python", "py.open", "open");
+    write_call_result_passthrough_rule(
+        &tmp,
+        "python",
+        "python.passthrough.os_path_join",
+        "os.path.join",
+        &[0, 1],
+    );
     write_fixture(
         &tmp,
         "app.py",

@@ -196,7 +196,7 @@ fn split_callable_spec(spec: &str) -> CallableSpec<'_> {
     }
     let path_like = |value: &str| value.contains(['/', '\\']);
     if let Some((path, maybe_line)) = head.rsplit_once(':') {
-        if path_like(path) {
+        if !path.is_empty() {
             if let Ok(line) = maybe_line.parse::<u32>() {
                 return CallableSpec {
                     file: Some(path),
@@ -311,5 +311,26 @@ fn dump_candidate(ws: &Workspace, decl: &Decl) -> DumpCallableCandidate {
         file,
         line,
         column,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basename_line_name_is_file_qualified_callable() {
+        let spec = split_callable_spec("json.lua:189:codepoint_to_utf8");
+        assert_eq!(spec.file, Some("json.lua"));
+        assert_eq!(spec.line, Some(189));
+        assert_eq!(spec.name, "codepoint_to_utf8");
+    }
+
+    #[test]
+    fn module_style_colon_without_line_stays_bare_callable_name() {
+        let spec = split_callable_spec("My.Module:run");
+        assert_eq!(spec.file, None);
+        assert_eq!(spec.line, None);
+        assert_eq!(spec.name, "My.Module:run");
     }
 }

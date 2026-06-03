@@ -1,9 +1,9 @@
 use super::{
-    apply_assign_call_result_types, canonical_simple_type_name,
-    normalize_call_result_assignment_sources, receiver_projected_alias_matches,
+    apply_assign_call_result_types, canonical_simple_type_name, normalize_call_result_assignment_sources,
+    receiver_projected_alias_matches,
 };
 use crate::{
-    AssignValueKind, CallArg, CallKind, Decl, DeclKind, DeclIndex, FlowEvent, ModulePath, Visibility,
+    AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
 
@@ -126,8 +126,7 @@ fn call(name: &str, args: &[&str]) -> FlowEvent {
     }
 }
 
-
-// audit re-apply: H1 + H7-guard: pure-helper unit tests matching the existing 
+// audit re-apply: H1 + H7-guard: pure-helper unit tests matching the existing
 
 #[test]
 fn compound_assignment_operators_detected() {
@@ -138,7 +137,10 @@ fn compound_assignment_operators_detected() {
         assert!(is_compound_assignment_operator(op), "{op} should be compound");
     }
     for op in ["=", "==", "!=", "<=", ">=", ":=", "=>"] {
-        assert!(!is_compound_assignment_operator(op), "{op} should NOT be compound");
+        assert!(
+            !is_compound_assignment_operator(op),
+            "{op} should NOT be compound"
+        );
     }
 }
 

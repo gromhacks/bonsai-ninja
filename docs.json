@@ -9,7 +9,7 @@
     "groups": [
       {
         "group": "Get Started",
-        "pages": ["docs/index", "docs/getting-started"]
+        "pages": ["docs/index", "docs/getting-started", "docs/platform-support"]
       },
       {
         "group": "Concepts",

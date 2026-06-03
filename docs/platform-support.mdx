@@ -1,0 +1,65 @@
+---
+title: "Platform And Architecture Support"
+description: "Supported CPU/OS targets, cross-target checks, and parser-pack constraints."
+---
+
+# Platform And Architecture Support
+
+Publishing to crates.io does not by itself make bonsai-ninja work on every CPU architecture. The Rust workspace is architecture-neutral: it forbids unsafe code, uses no inline assembly, and only has small OS-gated filesystem/process shims. The effective support boundary is the Rust target std library, the native C toolchain required by dependencies, and the parser bundle used by `tree-sitter-language-pack`.
+
+## Release Targets
+
+GitHub releases build and smoke-run the CLI on these artifact targets:
+
+| OS | CPU | Rust target |
+|---|---|---|
+| Linux | x64 | `x86_64-unknown-linux-gnu` |
+| Linux | arm64 | `aarch64-unknown-linux-gnu` |
+| macOS | Intel | `x86_64-apple-darwin` |
+| macOS | Apple Silicon | `aarch64-apple-darwin` |
+| Windows | x64 | `x86_64-pc-windows-msvc` |
+| Windows | arm64 | `aarch64-pc-windows-msvc` |
+
+Those are the deployment targets with first-class binary artifacts. Other CPUs, including RISC-V, are source-build targets unless a release workflow is added for them.
+
+## Parser Bundle Constraint
+
+bonsai-ninja gets tree-sitter grammars through `tree-sitter-language-pack` with runtime dynamic loading and parser downloads enabled. That keeps normal builds small and lets the binary download only the parsers it uses, but it also means runtime parsing needs a prebuilt parser bundle for the current OS/CPU platform key.
+
+When a platform bundle is missing, the Rust code can still compile, but the first parse for a missing language can fail with a clear parser-download error. Non-release CPU architectures should be validated with the exact parser delivery mode planned for deployment: either an upstream parser bundle for that platform, or a build from parser sources selected with `TSLP_LANGUAGES` in an environment that has those parser sources available.
+
+## Target Checks
+
+Use `rustup` when available so target std libraries are installed before checking:
+
+```bash
+rustup target add \
+  x86_64-unknown-linux-gnu \
+  aarch64-unknown-linux-gnu \
+  x86_64-pc-windows-msvc \
+  aarch64-apple-darwin
+```
+
+Then run the workspace checks:
+
+```bash
+scripts/check-targets.sh
+```
+
+For an extra source-build architecture smoke check:
+
+```bash
+scripts/check-targets.sh --extra
+```
+
+If `rustup` is not installed, use a Rust distribution that already includes the target std libraries. A failure like `can't find crate for core` or `can't find crate for std` is a local toolchain setup failure, not a bonsai-ninja compile failure.
+
+## Local Verification Note
+
+On the 2026-06-03 macOS/Homebrew Rust environment, the explicit host target check passed:
+
+```bash
+scripts/check-targets.sh --no-install aarch64-apple-darwin
+```
+
+Non-host target checks could not reach bonsai-ninja code on that machine because Homebrew Rust only had `aarch64-apple-darwin` std installed and `rustup` was not present to add more targets.

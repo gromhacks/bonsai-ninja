@@ -7,9 +7,12 @@
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
+    kit::{
+        c_family_preproc_imports, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
+        parse_with, span_of,
+    },
     AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    GrammarHandler, ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
     TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
@@ -114,6 +117,7 @@ impl LanguageAdapter for ObjCAdapter {
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
+        apply_objc_class_semantic_identity(&mut decl_index);
         // The leading `_` on an Objective-C method/selector is an Apple
         // naming convention, not a linkage boundary: selectors dispatch
         // dynamically across files. Marking `_`-prefixed decls
@@ -268,40 +272,21 @@ impl LanguageAdapter for ObjCAdapter {
     }
 }
 
-/// Translate `#import` / `#include` directives into `ImportSpec`s.
-fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
-    let mut imports = Vec::new();
-    // Both `#import` and `#include` parse as `preproc_include` with a
-    // `path` field — either `system_lib_string` (`<X.h>`) or
-    // `string_literal > string_content` (`"X.h"`). tree-sitter-objc
-    // doesn't distinguish import vs include in the kind name; both are
-    // semantically equivalent for cross-module symbol lookup.
-    for include_node in collect_kinds(tree, &["preproc_include"]) {
-        let Some(path_node) = include_node.child_by_field_name("path") else {
-            continue;
-        };
-        let module = match path_node.kind() {
-            "system_lib_string" => node_text(&path_node, src)
-                .trim_matches(|c: char| matches!(c, '<' | '>'))
-                .to_string(),
-            "string_literal" => first_named_child_of_kind(&path_node, "string_content")
-                .map(|content_node| node_text(&content_node, src).to_string())
-                .unwrap_or_else(|| node_text(&path_node, src).trim_matches('"').to_string()),
-            _ => node_text(&path_node, src).to_string(),
-        };
-        if module.is_empty() {
+fn apply_objc_class_semantic_identity(decl_index: &mut DeclIndex) {
+    for decl in &mut decl_index.defs {
+        if !matches!(
+            decl.kind,
+            DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct
+        ) {
             continue;
         }
-        imports.push(ImportSpec {
-            span: span_of(file, &include_node),
-            module,
-            alias: None,
-            is_wildcard: false,
-            original_name: None,
-            scope: ImportScope::Module,
-        });
+        decl.module_path = ModulePath::from_segments([decl.name.clone()]);
+        decl.qualified_name = Some(format!("{}::{}", decl.name, decl.name));
     }
-    imports
+}
+
+fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
+    c_family_preproc_imports(tree, src, file)
 }
 
 /// Walk a decl's flow events and populate
@@ -730,7 +715,12 @@ fn enrich_objc_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
     // is NOT an ivar, so it must not be rewritten to `self.<field>`.
     let local_names: std::collections::HashSet<String> =
         decl.type_aliases.iter().map(|alias| alias.name.clone()).collect();
-    enrich_objc_receiver_field_writes_inner(&mut decl.receiver_field_writes, &decl.flow_events, &params, &local_names);
+    enrich_objc_receiver_field_writes_inner(
+        &mut decl.receiver_field_writes,
+        &decl.flow_events,
+        &params,
+        &local_names,
+    );
     decl.receiver_field_writes
         .sort_by_key(|write| (write.span.start, write.target.clone()));
     decl.receiver_field_writes.dedup_by(|a, b| {

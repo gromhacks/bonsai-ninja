@@ -46,3 +46,68 @@ fn idg_pipeline_hash_tracks_dependency_metadata() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn idg_transfer_fingerprint_is_order_stable() {
+    let left = bonsai_idg::TransferOptions {
+        clean_output_overwrites: vec![
+            bonsai_idg::CleanOutputOverwriteSpec {
+                callee: "z.clean".to_string(),
+                output_arg_index: 2,
+                value_start_arg_index: 0,
+            },
+            bonsai_idg::CleanOutputOverwriteSpec {
+                callee: "a.clean".to_string(),
+                output_arg_index: 1,
+                value_start_arg_index: 0,
+            },
+            bonsai_idg::CleanOutputOverwriteSpec {
+                callee: "a.clean".to_string(),
+                output_arg_index: 1,
+                value_start_arg_index: 0,
+            },
+        ],
+        source_output_args: vec![
+            bonsai_idg::SourceOutputArgSpec {
+                callee: "source.two".to_string(),
+                output_arg_indices: vec![3, 1, 3],
+            },
+            bonsai_idg::SourceOutputArgSpec {
+                callee: "source.one".to_string(),
+                output_arg_indices: vec![2, 0],
+            },
+        ],
+        ..bonsai_idg::TransferOptions::default()
+    };
+    let right = bonsai_idg::TransferOptions {
+        clean_output_overwrites: vec![
+            bonsai_idg::CleanOutputOverwriteSpec {
+                callee: "a.clean".to_string(),
+                output_arg_index: 1,
+                value_start_arg_index: 0,
+            },
+            bonsai_idg::CleanOutputOverwriteSpec {
+                callee: "z.clean".to_string(),
+                output_arg_index: 2,
+                value_start_arg_index: 0,
+            },
+        ],
+        source_output_args: vec![
+            bonsai_idg::SourceOutputArgSpec {
+                callee: "source.one".to_string(),
+                output_arg_indices: vec![0, 2],
+            },
+            bonsai_idg::SourceOutputArgSpec {
+                callee: "source.two".to_string(),
+                output_arg_indices: vec![1, 3],
+            },
+        ],
+        ..bonsai_idg::TransferOptions::default()
+    };
+
+    assert_eq!(
+        idg_transfer_options_fingerprint(&left),
+        idg_transfer_options_fingerprint(&right),
+        "equivalent rulepack transfer shapes must reuse the same IDG sidecar"
+    );
+}

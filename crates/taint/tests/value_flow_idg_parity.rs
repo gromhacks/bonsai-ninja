@@ -158,7 +158,6 @@ fn idg_parity_assigned_local_then_call() {
     );
 }
 
-
 // audit re-apply: H4
 
 #[test]

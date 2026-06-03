@@ -31,7 +31,7 @@ use bonsai_abstract_interp::TraceLimits;
 use bonsai_common::{FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
-use bonsai_hash::fnv1a_bytes64;
+use bonsai_hash::{fnv1a_bytes64, Hasher as StableHasher};
 use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
@@ -56,6 +56,70 @@ pub use cross_module::CrossModuleOptions;
 #[must_use]
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
     bonsai_idg::workspace::idg_sidecar_path(workspace_root)
+}
+
+pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
+    let global = db.global_index();
+    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
+        global.as_ref(),
+        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| {
+            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                .into_iter()
+                .collect()
+        },
+        |file| {
+            db.vfs()
+                .path(file)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        },
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().module_export_aliases)
+                .unwrap_or(&[])
+        },
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+        },
+    )
+}
+
+pub(crate) fn build_resolved_call_graph_snapshot_for_files(
+    db: &AnalyzerDb,
+    included_files: &[FileId],
+) -> bonsai_callgraph::ResolvedCallGraph {
+    let global = db.global_index();
+    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files(
+        global.as_ref(),
+        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| {
+            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                .into_iter()
+                .collect()
+        },
+        |file| {
+            db.vfs()
+                .path(file)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        },
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().module_export_aliases)
+                .unwrap_or(&[])
+        },
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+        },
+        included_files,
+    )
 }
 
 #[derive(Debug, Error)]
@@ -540,34 +604,7 @@ impl Workspace {
     }
 
     fn build_resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
-        let db = &self.inner.db;
-        let global = db.global_index();
-        bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
-            global.as_ref(),
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-            |file| {
-                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
-                    .into_iter()
-                    .collect()
-            },
-            |file| {
-                db.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            },
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().module_export_aliases)
-                    .unwrap_or(&[])
-            },
-            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            |file| {
-                db.adapter_for(file)
-                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                    .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
-            },
-        )
+        build_resolved_call_graph_snapshot(&self.inner.db)
     }
 
     /// Build the workspace-wide IDG once and seed it onto
@@ -646,18 +683,32 @@ impl Workspace {
     /// Build a workspace IDG with caller-supplied transfer options
     /// and seed it onto [`AnalyzerDb`].
     ///
-    /// Configured transfer options are intentionally not loaded from
-    /// or saved to the default IDG sidecar: the sidecar represents
-    /// source structure only, while these options come from the
-    /// editable security rulepack.
+    /// Configured transfer options use a distinct sidecar keyed by a
+    /// stable fingerprint of those options. The default IDG sidecar
+    /// represents source structure only, while transfer options come
+    /// from the editable security rulepack and can alter graph edges.
     pub fn build_and_seed_idg_service_with_transfer_options(
         &self,
         transfer_options: &bonsai_idg::TransferOptions,
     ) -> Arc<bonsai_idg::IdgQueryService> {
+        let transfer_options = transfer_options.clone().canonicalized();
         if transfer_options.is_empty() {
             return self.build_and_seed_idg_service();
         }
         let global = self.inner.db.global_index();
+        let root_path = self.root_path();
+        let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
+        let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), transfer_hash);
+        if let Some(root) = root_path.as_deref() {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
+            if let Ok(Some(loaded)) =
+                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+            {
+                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                self.inner.db.set_idg_service(service.clone());
+                return service;
+            }
+        }
         let cg = self.cached_resolved_call_graph();
         let db = &self.inner.db;
         let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options(
@@ -665,8 +716,73 @@ impl Workspace {
             cg.as_ref(),
             |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-            transfer_options,
+            &transfer_options,
         );
+        if let Some(root) = root_path.as_deref() {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
+            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %err,
+                    "workspace transfer IDG save_to_disk failed"
+                );
+            }
+        }
+        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
+        self.inner.db.set_idg_service(service.clone());
+        service
+    }
+
+    /// Build a file-scoped workspace IDG with caller-supplied transfer
+    /// options and seed it onto [`AnalyzerDb`].
+    ///
+    /// Security production scans use this to keep excluded files out
+    /// of the semantic graph before transfer/stitching. The persisted
+    /// sidecar key includes both transfer options and the sorted file
+    /// scope, so a scoped graph can never be loaded as the full graph
+    /// or as a different scoped graph.
+    pub fn build_and_seed_idg_service_with_transfer_options_for_files(
+        &self,
+        transfer_options: &bonsai_idg::TransferOptions,
+        included_files: &[FileId],
+    ) -> Arc<bonsai_idg::IdgQueryService> {
+        let transfer_options = transfer_options.clone().canonicalized();
+        let global = self.inner.db.global_index();
+        let root_path = self.root_path();
+        let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
+        let scope_hash = idg_file_scope_fingerprint(included_files);
+        let scoped_hash = transfer_hash ^ scope_hash ^ 0x5C0F_ED1D_65C0_9E5D_u64;
+        let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), scoped_hash);
+        if let Some(root) = root_path.as_deref() {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+            if let Ok(Some(loaded)) =
+                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+            {
+                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                self.inner.db.set_idg_service(service.clone());
+                return service;
+            }
+        }
+        let cg = build_resolved_call_graph_snapshot_for_files(&self.inner.db, included_files);
+        let db = &self.inner.db;
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files(
+            global.as_ref(),
+            &cg,
+            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            &transfer_options,
+            included_files,
+        );
+        if let Some(root) = root_path.as_deref() {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %err,
+                    "workspace scoped transfer IDG save_to_disk failed"
+                );
+            }
+        }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
@@ -694,6 +810,25 @@ impl Workspace {
     fn delete_idg_sidecar(&self) {
         if let Some(root) = self.root_path() {
             let _ = std::fs::remove_file(bonsai_idg::workspace::idg_sidecar_path(&root));
+            let bonsai_dir = bonsai_common::workspace_bonsai_dir(&root);
+            if let Ok(entries) = std::fs::read_dir(bonsai_dir) {
+                for entry in entries.flatten() {
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("idg.v")
+                        && name.contains(".transfer.")
+                        && name.ends_with(".factstore")
+                    {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
         }
     }
 
@@ -1305,8 +1440,7 @@ impl Workspace {
 
     fn decl_name_line(&self, decl: &Decl) -> Option<u32> {
         let snapshot = self.inner.db.vfs().snapshot(decl.name_span.file).ok()?;
-        let map =
-            bonsai_common::cached_span_map(decl.name_span.file, snapshot.version, snapshot.text.as_ref());
+        let map = bonsai_common::cached_span_map_arc(decl.name_span.file, snapshot.version, &snapshot.text);
         Some(map.line_col(decl.name_span.start).line)
     }
 
@@ -1576,7 +1710,7 @@ fn split_symbol_lookup_spec(spec: &str) -> SymbolLookupSpec<'_> {
     }
     let path_like = |value: &str| value.contains(['/', '\\']);
     if let Some((path, maybe_line)) = head.rsplit_once(':') {
-        if path_like(path) {
+        if !path.is_empty() {
             if let Ok(line) = maybe_line.parse::<u32>() {
                 return SymbolLookupSpec {
                     file: Some(path),
@@ -1703,10 +1837,7 @@ fn idg_pipeline_hash() -> u64 {
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
-    lo ^ hi
-        ^ 0xBEEF_C0DE_DEAD_FACE_u64
-        ^ IDG_STITCHING_SEMANTIC_VERSION
-        ^ build_fingerprint_hash()
+    lo ^ hi ^ 0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION ^ build_fingerprint_hash()
 }
 
 /// Build-time fingerprint emitted by `build.rs` — combines
@@ -1730,6 +1861,76 @@ fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
         pipeline_hash ^= crate::cache_fingerprint::dependency_metadata_fingerprint(root);
     }
     pipeline_hash
+}
+
+fn idg_transfer_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>, transfer_hash: u64) -> u64 {
+    idg_workspace_pipeline_hash(db, root) ^ transfer_hash ^ 0x71A1_57E7_1D6D_A7A5_u64
+}
+
+fn idg_transfer_options_fingerprint(options: &bonsai_idg::TransferOptions) -> u64 {
+    fn absorb_u64(hasher: &mut StableHasher, value: u64) {
+        hasher.absorb(&value.to_le_bytes());
+        hasher.absorb_separator();
+    }
+
+    fn absorb_str(hasher: &mut StableHasher, value: &str) {
+        hasher.absorb(value.as_bytes());
+        hasher.absorb_separator();
+    }
+
+    let options = options.clone().canonicalized();
+    let mut hasher = StableHasher::new();
+    absorb_str(&mut hasher, "bonsai-idg-transfer-options-v2");
+    absorb_u64(
+        &mut hasher,
+        if options.include_diagnostic_field_flows {
+            1
+        } else {
+            0
+        },
+    );
+    absorb_u64(
+        &mut hasher,
+        if options.include_receiver_method_propagation {
+            1
+        } else {
+            0
+        },
+    );
+    absorb_u64(&mut hasher, options.clean_output_overwrites.len() as u64);
+    for spec in &options.clean_output_overwrites {
+        absorb_str(&mut hasher, "clean-output-overwrite");
+        absorb_str(&mut hasher, &spec.callee);
+        absorb_u64(&mut hasher, spec.output_arg_index as u64);
+        absorb_u64(&mut hasher, spec.value_start_arg_index as u64);
+    }
+    absorb_u64(&mut hasher, options.source_output_args.len() as u64);
+    for spec in &options.source_output_args {
+        absorb_str(&mut hasher, "source-output-args");
+        absorb_str(&mut hasher, &spec.callee);
+        absorb_u64(&mut hasher, spec.output_arg_indices.len() as u64);
+        for index in &spec.output_arg_indices {
+            absorb_u64(&mut hasher, *index as u64);
+        }
+    }
+    hasher.finish()
+}
+
+fn idg_file_scope_fingerprint(files: &[FileId]) -> u64 {
+    let mut file_ids: Vec<u32> = files.iter().map(|file| file.raw()).collect();
+    file_ids.sort_unstable();
+    file_ids.dedup();
+
+    let mut hasher = StableHasher::new();
+    hasher.absorb(b"bonsai-idg-file-scope-v1");
+    hasher.absorb_separator();
+    hasher.absorb(&(file_ids.len() as u64).to_le_bytes());
+    hasher.absorb_separator();
+    for file in file_ids {
+        hasher.absorb(&file.to_le_bytes());
+        hasher.absorb_separator();
+    }
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -1993,3 +2194,24 @@ pub fn content_looks_minified(text: &str) -> bool {
 #[cfg(test)]
 #[path = "minified_tests.rs"]
 mod minified_tests;
+
+#[cfg(test)]
+mod symbol_lookup_spec_tests {
+    use super::*;
+
+    #[test]
+    fn basename_line_name_is_file_qualified_lookup() {
+        let spec = split_symbol_lookup_spec("json.lua:189:codepoint_to_utf8");
+        assert_eq!(spec.file, Some("json.lua"));
+        assert_eq!(spec.line, Some(189));
+        assert_eq!(spec.name, "codepoint_to_utf8");
+    }
+
+    #[test]
+    fn module_style_colon_without_line_stays_bare_name() {
+        let spec = split_symbol_lookup_spec("My.Module:run");
+        assert_eq!(spec.file, None);
+        assert_eq!(spec.line, None);
+        assert_eq!(spec.name, "My.Module:run");
+    }
+}

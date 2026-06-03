@@ -3,7 +3,9 @@ use bonsai_security::rule::{
     ArgRegexSpec, ConstraintKind, KeywordArgEqualsSpec, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
     RuleTarget, Severity,
 };
-use bonsai_security::{match_rule_against_facts, match_rules_against_facts};
+use bonsai_security::{
+    match_rule_against_facts, match_rules_against_facts, match_rules_against_facts_with_progress,
+};
 use bonsai_workspace::Workspace;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -109,6 +111,23 @@ fn solidity_ws(source: &str) -> Workspace {
         let _ = ws.db().import_index(file);
     }
     ws
+}
+
+#[test]
+fn empty_rule_batches_still_report_file_progress() {
+    let ws = python_ws("print('ok')\n");
+    let mut ticks = 0usize;
+
+    let matches = match_rules_against_facts_with_progress(&ws, &[], || {
+        ticks += 1;
+    });
+
+    assert!(matches.is_empty());
+    assert_eq!(
+        ticks,
+        ws.db().global_index().all_files().count(),
+        "empty rule selections should still complete the per-file progress bar"
+    );
 }
 
 #[test]
