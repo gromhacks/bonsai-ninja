@@ -113,6 +113,16 @@ the 3.1 GiB chunked IDG factstore. A valid large-codebase run should have
 `analysis_complete: true`, no incomplete reasons, no malformed page metadata,
 no `payload exceeds 4GiB` warning, and no `save_to_disk failed` warning.
 
+The 2026-06-03 synthetic Python scale smoke copied `examples/python/mega_flow`
+into 10,000 valid flows across 80,000 source files, then deleted the generated
+workspace from `/tmp`. Expected content checks were exact: 20,000 Flask
+`request.args.get` source rows, 20,000 `os.system` sink rows, 300,000 function
+definition rows, and 10,000 taint findings with one verified source-to-sink
+finding per copied flow. Cold taint completed in 124.49s, warm taint completed
+in 64.15s, and cold/warm JSON matched byte-for-byte. The same no-warning
+requirements apply: no `payload exceeds 4GiB` warning and no `save_to_disk
+failed` warning.
+
 ## Security Pattern Audit
 
 Use this stricter pass when reviewing the checked-in rulepack end to end:

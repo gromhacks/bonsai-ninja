@@ -29,9 +29,6 @@ use crate::builder::{stitch_idg, CalleeResolver, FuncToSegment, ResolvedCallee};
 use crate::transfer::{transfer_function_for_with_options, TransferOptions, TransferOutput};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
-const LARGE_DIAGNOSTIC_FIELD_FLOW_FUNC_LIMIT: usize = 50_000;
-const LARGE_RECEIVER_METHOD_FUNC_LIMIT: usize = 50_000;
-
 /// Pre-computed maps that the [`WorkspaceIdgBuilder`] uses for
 /// `FuncId → file → SegmentId` lookups during stitching.
 struct WorkspaceMaps {
@@ -1118,8 +1115,7 @@ where
         ws.cross_file().len(),
         ws.field_flow().len()
     ));
-    let skip_large_diagnostic_field_flow = ws.func_count() > LARGE_DIAGNOSTIC_FIELD_FLOW_FUNC_LIMIT;
-    if transfer_options.include_diagnostic_field_flows && !skip_large_diagnostic_field_flow {
+    if transfer_options.include_diagnostic_field_flows {
         let phase_started = Instant::now();
         let before_edges = ws.total_edge_count();
         let before_field_links = ws.field_flow().len();
@@ -1132,14 +1128,6 @@ where
             ws.total_edge_count(),
             ws.field_flow().len()
         ));
-    } else if skip_large_diagnostic_field_flow {
-        idg_build_log(format_args!(
-            "receiver-field-flow: skipped large graph funcs={} limit={} total_edges={} field_links={}",
-            ws.func_count(),
-            LARGE_DIAGNOSTIC_FIELD_FLOW_FUNC_LIMIT,
-            ws.total_edge_count(),
-            ws.field_flow().len()
-        ));
     } else {
         idg_build_log(format_args!(
             "receiver-field-flow: skipped diagnostic-only phase total_edges={} field_links={}",
@@ -1147,8 +1135,7 @@ where
             ws.field_flow().len()
         ));
     }
-    let skip_large_receiver_method_propagation = ws.func_count() > LARGE_RECEIVER_METHOD_FUNC_LIMIT;
-    if transfer_options.include_receiver_method_propagation && !skip_large_receiver_method_propagation {
+    if transfer_options.include_receiver_method_propagation {
         let phase_started = Instant::now();
         let before_edges = ws.total_edge_count();
         let before_field_links = ws.field_flow().len();
@@ -1164,14 +1151,6 @@ where
             phase_started.elapsed().as_secs_f64(),
             ws.total_edge_count().saturating_sub(before_edges),
             ws.field_flow().len().saturating_sub(before_field_links),
-            ws.total_edge_count(),
-            ws.field_flow().len()
-        ));
-    } else if skip_large_receiver_method_propagation {
-        idg_build_log(format_args!(
-            "receiver-method-propagation: skipped large semantic graph funcs={} limit={} total_edges={} field_links={}",
-            ws.func_count(),
-            LARGE_RECEIVER_METHOD_FUNC_LIMIT,
             ws.total_edge_count(),
             ws.field_flow().len()
         ));
@@ -1349,6 +1328,26 @@ fn propagation_scope_files(
     files
 }
 
+struct SegmentOffsets {
+    by_segment: AHashMap<crate::SegmentId, u32>,
+    ranges: Vec<(u32, u32, crate::SegmentId)>,
+}
+
+impl SegmentOffsets {
+    fn new(ws: &IdgWorkspace) -> Self {
+        let mut by_segment = AHashMap::new();
+        let mut ranges = Vec::new();
+        let mut offset = 0u32;
+        for (seg_id, segment) in ws.segments() {
+            let len = segment.nodes.len() as u32;
+            by_segment.insert(seg_id, offset);
+            ranges.push((offset, offset.saturating_add(len), seg_id));
+            offset = offset.saturating_add(len);
+        }
+        Self { by_segment, ranges }
+    }
+}
+
 /// Phase 3d: implicit-receiver propagation through method calls.
 /// When a caller calls a method with a tainted receiver, the
 /// closure needs to enter the callee and taint its reads of class
@@ -1373,6 +1372,7 @@ fn stitch_receiver_method_propagation(
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
     let scope_files = propagation_scope_files(global, file_to_language);
+    let offsets = SegmentOffsets::new(ws);
     // Group decls by parent so we know each class's known fields.
     // Reuse the field-flow scoping (parent-only buckets) so we
     // don't over-link free functions. Walk the inheritance chain
@@ -1392,6 +1392,8 @@ fn stitch_receiver_method_propagation(
         })
         .collect();
     let mut by_class: ahash::AHashMap<SymbolId, Vec<FuncId>> = ahash::AHashMap::default();
+    let mut methods_by_class_and_name: ahash::AHashMap<(SymbolId, String), Vec<FuncId>> =
+        ahash::AHashMap::default();
     for file in &scope_files {
         let file = *file;
         for decl in global.decls_in(file) {
@@ -1403,6 +1405,10 @@ fn stitch_receiver_method_propagation(
             }
             let Some(parent) = decl.parent else { continue };
             let func = FuncId::new(decl.symbol.raw());
+            methods_by_class_and_name
+                .entry((parent, decl.name.clone()))
+                .or_default()
+                .push(func);
             by_class.entry(parent).or_default().push(func);
             // Climb the inheritance chain so the func appears in
             // each ancestor's bucket too — a `Repository#run`
@@ -1433,41 +1439,60 @@ fn stitch_receiver_method_propagation(
     let mut sorted_classes: Vec<SymbolId> = by_class.keys().copied().collect();
     sorted_classes.sort_by_key(|s| s.raw());
     let mut delegates_by_func: ahash::AHashMap<FuncId, bool> = ahash::AHashMap::default();
+    let mut field_write_names_by_func: ahash::AHashMap<FuncId, ahash::AHashSet<String>> =
+        ahash::AHashMap::default();
+    let mut field_read_nodes_by_func: ahash::AHashMap<FuncId, ahash::AHashMap<String, Vec<crate::WsNodeId>>> =
+        ahash::AHashMap::default();
+    let mut recv_nodes_by_func: ahash::AHashMap<FuncId, Vec<crate::WsNodeId>> = ahash::AHashMap::default();
+    let mut recv_slots_by_call: ahash::AHashMap<
+        (FuncId, bonsai_common::Span),
+        Vec<(crate::WsNodeId, Option<crate::WsNodeId>)>,
+    > = ahash::AHashMap::default();
     for class_sym in sorted_classes {
-        let funcs = match by_class.get(&class_sym) {
+        let mut funcs = match by_class.get(&class_sym) {
             Some(v) => v.clone(),
             None => continue,
         };
+        funcs.sort_by_key(|f| f.raw());
+        funcs.dedup();
         // Discover the class's writable field set. Use the same
         // canonicalisation as Phase 3c so sigil'd / qualified
         // writes bucket onto the same key as bare-name reads.
         let mut field_names: ahash::AHashSet<String> = ahash::AHashSet::default();
         for func in &funcs {
-            collect_field_write_names(ws, *func, &mut field_names);
-            // Also include the function's own decl name as a
-            // potential field key — getters / property
-            // accessors (`def cmd; @data[:cmd]; end`,
-            // `get cmd() => this._data.cmd`) return values that
-            // peers consume by name. Without this, a peer
-            // method's `Read("cmd")` doesn't pair with the
-            // getter's Return.
-            if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
-                let canonical = canonical_field_name(&decl.name);
-                if !canonical.is_empty() {
-                    field_names.insert(canonical);
+            let names = field_write_names_by_func.entry(*func).or_insert_with(|| {
+                let mut names: ahash::AHashSet<String> = ahash::AHashSet::default();
+                collect_field_write_names(ws, *func, &mut names);
+                // Also include the function's own decl name as a
+                // potential field key — getters / property
+                // accessors (`def cmd; @data[:cmd]; end`,
+                // `get cmd() => this._data.cmd`) return values that
+                // peers consume by name. Without this, a peer
+                // method's `Read("cmd")` doesn't pair with the
+                // getter's Return.
+                if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
+                    let canonical = canonical_field_name(&decl.name);
+                    if !canonical.is_empty() {
+                        names.insert(canonical);
+                    }
                 }
-            }
+                names
+            });
+            field_names.extend(names.iter().cloned());
         }
         if field_names.is_empty() {
             continue;
         }
-        let mut sorted_funcs = funcs;
-        sorted_funcs.sort_by_key(|f| f.raw());
-        for callee in sorted_funcs {
+        for callee in funcs {
             // Locate every `Place::Read{name, path: []}` ws_node in
             // `callee` whose canonical name is one of the class's
             // writable fields.
-            let mut read_nodes = collect_field_read_nodes(ws, callee, &field_names);
+            let mut read_nodes = {
+                let reads_by_name = field_read_nodes_by_func
+                    .entry(callee)
+                    .or_insert_with(|| collect_field_read_nodes_by_name(ws, &offsets, callee));
+                field_read_nodes_matching(reads_by_name, &field_names)
+            };
             // Also include every recv-slot CallArg in the callee's
             // body. This carries the receiver-tainted state through
             // intermediate methods that don't read class fields
@@ -1476,7 +1501,10 @@ fn stitch_receiver_method_propagation(
             // recv-slot needs to be tainted so the next Phase 3d
             // pair `(run, super.run)` finds the recv-slot in the
             // closure).
-            let recv_targets = collect_recv_slot_nodes(ws, global, callee);
+            let recv_targets = recv_nodes_by_func
+                .entry(callee)
+                .or_insert_with(|| collect_recv_slot_nodes(ws, &offsets, global, callee))
+                .clone();
             for n in &recv_targets {
                 if !read_nodes.contains(n) {
                     read_nodes.push(*n);
@@ -1506,10 +1534,13 @@ fn stitch_receiver_method_propagation(
                     global,
                     callee,
                     &class_by_name,
+                    &methods_by_class_and_name,
                     &field_names,
                     func_to_language,
                     file_to_language,
-                    &scope_files,
+                    &offsets,
+                    &mut field_read_nodes_by_func,
+                    &mut recv_nodes_by_func,
                 );
                 for (n, f) in extras {
                     if !read_nodes.contains(&n) {
@@ -1532,12 +1563,16 @@ fn stitch_receiver_method_propagation(
                 if !funcs_share_language(func_to_language, caller, callee) {
                     continue;
                 }
-                let recv_slots = recv_slots_for_call_span(ws, global, caller, edge.span);
+                let recv_slots = recv_slots_by_call
+                    .entry((caller, edge.span))
+                    .or_insert_with(|| recv_slots_for_call_span(ws, &offsets, global, caller, edge.span))
+                    .clone();
                 let mut emitted_link_for_call = false;
                 for (recv_ws, callee_target) in recv_slots {
                     if let Some(target) = callee_target {
                         add_edge_between_ws_nodes(
                             ws,
+                            &offsets,
                             recv_ws,
                             target,
                             IdgEdgeKind::IntraRead,
@@ -1547,6 +1582,7 @@ fn stitch_receiver_method_propagation(
                         for read_ws in &read_nodes {
                             add_edge_between_ws_nodes(
                                 ws,
+                                &offsets,
                                 recv_ws,
                                 *read_ws,
                                 IdgEdgeKind::IntraRead,
@@ -1555,7 +1591,7 @@ fn stitch_receiver_method_propagation(
                         }
                     }
                     if !emitted_link_for_call {
-                        let recv_span = ws_node_span(ws, recv_ws)
+                        let recv_span = ws_node_span(ws, &offsets, recv_ws)
                             .or_else(|| func_name_span(global, caller))
                             .unwrap_or_else(|| bonsai_common::Span::empty(bonsai_common::FileId::INVALID, 0));
                         // Super-chain pick: if the callee delegates
@@ -1667,28 +1703,24 @@ fn canonical_projected_path(
     (!parts.is_empty()).then(|| parts.join("."))
 }
 
-/// Collect every `Place::Read{name, path: []}` ws_node in `func`'s
-/// segment whose canonical name lies in `field_names`. Used by
-/// Phase 3d to find receiver-state targets to wire from method
-/// callers.
-fn collect_field_read_nodes(
+fn collect_field_read_nodes_by_name(
     ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
     func: FuncId,
-    field_names: &ahash::AHashSet<String>,
-) -> Vec<crate::WsNodeId> {
+) -> ahash::AHashMap<String, Vec<crate::WsNodeId>> {
     use crate::place::Place;
     let Some(seg_id) = ws.segment_for_func(func) else {
-        return Vec::new();
+        return ahash::AHashMap::default();
     };
     let Some(segment) = ws.segment(seg_id) else {
-        return Vec::new();
+        return ahash::AHashMap::default();
     };
-    let mut out = Vec::new();
+    let mut out: ahash::AHashMap<String, Vec<crate::WsNodeId>> = ahash::AHashMap::default();
     for (pid_idx, place) in segment.places.places.iter().enumerate() {
         let Some(head_field) = field_read_head(segment, place) else {
             continue;
         };
-        if head_field.is_empty() || !field_names.contains(&head_field) {
+        if head_field.is_empty() {
             continue;
         }
         let Place::Read { .. } = place else {
@@ -1698,10 +1730,27 @@ fn collect_field_read_nodes(
         let Some(local) = segment.nodes.lookup(func, pid) else {
             continue;
         };
-        let Some(ws_node) = ws_node_for(ws, seg_id, local) else {
+        let Some(ws_node) = ws_node_for(offsets, seg_id, local) else {
             continue;
         };
-        out.push(ws_node);
+        out.entry(head_field).or_default().push(ws_node);
+    }
+    for nodes in out.values_mut() {
+        nodes.sort();
+        nodes.dedup();
+    }
+    out
+}
+
+fn field_read_nodes_matching(
+    reads_by_name: &ahash::AHashMap<String, Vec<crate::WsNodeId>>,
+    field_names: &ahash::AHashSet<String>,
+) -> Vec<crate::WsNodeId> {
+    let mut out = Vec::new();
+    for field in field_names {
+        if let Some(nodes) = reads_by_name.get(field) {
+            out.extend(nodes.iter().copied());
+        }
     }
     out.sort();
     out.dedup();
@@ -1801,10 +1850,13 @@ fn collect_super_chain_read_nodes_and_funcs(
     global: &GlobalIndex,
     callee: FuncId,
     class_by_name: &ahash::AHashMap<(Option<&'static str>, String), bonsai_common::SymbolId>,
+    methods_by_class_and_name: &ahash::AHashMap<(bonsai_common::SymbolId, String), Vec<FuncId>>,
     field_names: &ahash::AHashSet<String>,
     func_to_language: &AHashMap<FuncId, &'static str>,
     file_to_language: &AHashMap<FileId, &'static str>,
-    scope_files: &[FileId],
+    offsets: &SegmentOffsets,
+    field_read_nodes_by_func: &mut ahash::AHashMap<FuncId, ahash::AHashMap<String, Vec<crate::WsNodeId>>>,
+    recv_nodes_by_func: &mut ahash::AHashMap<FuncId, Vec<crate::WsNodeId>>,
 ) -> Vec<(crate::WsNodeId, FuncId)> {
     let Some(callee_decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
         return Vec::new();
@@ -1830,21 +1882,22 @@ fn collect_super_chain_read_nodes_and_funcs(
     while let Some(class_sym) = frontier.pop() {
         // For every method in this class with the same name as
         // `callee`, fold in its read_nodes.
-        for file in scope_files {
-            let file = *file;
-            for decl in global.decls_in(file) {
-                if decl.parent != Some(class_sym) {
-                    continue;
-                }
-                if decl.name != method_name {
-                    continue;
-                }
-                let other = FuncId::new(decl.symbol.raw());
+        if let Some(methods) = methods_by_class_and_name.get(&(class_sym, method_name.clone())) {
+            for other in methods {
+                let other = *other;
                 if !funcs_share_language(func_to_language, callee, other) {
                     continue;
                 }
-                let mut nodes = collect_field_read_nodes(ws, other, field_names);
-                let recv = collect_recv_slot_nodes(ws, global, other);
+                let mut nodes = {
+                    let reads_by_name = field_read_nodes_by_func
+                        .entry(other)
+                        .or_insert_with(|| collect_field_read_nodes_by_name(ws, offsets, other));
+                    field_read_nodes_matching(reads_by_name, field_names)
+                };
+                let recv = recv_nodes_by_func
+                    .entry(other)
+                    .or_insert_with(|| collect_recv_slot_nodes(ws, offsets, global, other))
+                    .clone();
                 for n in recv {
                     if !nodes.contains(&n) {
                         nodes.push(n);
@@ -1871,7 +1924,12 @@ fn collect_super_chain_read_nodes_and_funcs(
     out
 }
 
-fn collect_recv_slot_nodes(ws: &IdgWorkspace, global: &GlobalIndex, func: FuncId) -> Vec<crate::WsNodeId> {
+fn collect_recv_slot_nodes(
+    ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
+    global: &GlobalIndex,
+    func: FuncId,
+) -> Vec<crate::WsNodeId> {
     use crate::place::Place;
     let Some(seg_id) = ws.segment_for_func(func) else {
         return Vec::new();
@@ -1891,7 +1949,7 @@ fn collect_recv_slot_nodes(ws: &IdgWorkspace, global: &GlobalIndex, func: FuncId
         let Some(local) = segment.nodes.lookup(func, pid) else {
             continue;
         };
-        let Some(ws_node) = ws_node_for(ws, seg_id, local) else {
+        let Some(ws_node) = ws_node_for(offsets, seg_id, local) else {
             continue;
         };
         out.push(ws_node);
@@ -1910,6 +1968,7 @@ fn collect_recv_slot_nodes(ws: &IdgWorkspace, global: &GlobalIndex, func: FuncId
 /// precisely.
 fn recv_slots_for_call_span(
     ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
     global: &GlobalIndex,
     caller: FuncId,
     span: bonsai_common::Span,
@@ -1942,7 +2001,7 @@ fn recv_slots_for_call_span(
         let Some(local) = segment.nodes.lookup(caller, pid) else {
             continue;
         };
-        let Some(ws_node) = ws_node_for(ws, seg_id, local) else {
+        let Some(ws_node) = ws_node_for(offsets, seg_id, local) else {
             continue;
         };
         out.push((ws_node, None));
@@ -1995,6 +2054,7 @@ fn stitch_receiver_field_flow(
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
     let scope_files = propagation_scope_files(global, file_to_language);
+    let offsets = SegmentOffsets::new(ws);
     // Group function-shaped decls by parent symbol id. Decls
     // without a parent collapse into a single "no-parent" bucket
     // keyed by file (an adapter that doesn't surface class parents
@@ -2090,7 +2150,7 @@ fn stitch_receiver_field_flow(
         let mut reads_by_field: ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>> =
             ahash::AHashMap::default();
         for func in &funcs {
-            collect_field_nodes(ws, *func, &mut writes_by_field, &mut reads_by_field);
+            collect_field_nodes(ws, &offsets, *func, &mut writes_by_field, &mut reads_by_field);
         }
         // Property-getter return values that match a canonical
         // field name. C# / TypeScript / Python expose
@@ -2123,7 +2183,7 @@ fn stitch_receiver_field_flow(
             let Some(local) = segment.nodes.lookup(*func, pid) else {
                 continue;
             };
-            let Some(ws_node) = ws_node_for(ws, seg_id, local) else {
+            let Some(ws_node) = ws_node_for(&offsets, seg_id, local) else {
                 continue;
             };
             let entry = writes_by_field.entry(canonical).or_default();
@@ -2155,6 +2215,7 @@ fn stitch_receiver_field_flow(
                     }
                     add_edge_between_ws_nodes(
                         ws,
+                        &offsets,
                         *w_ws,
                         *r_ws,
                         IdgEdgeKind::IntraAssign,
@@ -2171,7 +2232,7 @@ fn stitch_receiver_field_flow(
                     // edge fills that role with `arg_idx = u8::MAX`
                     // and `param_idx = u8::MAX` so it can't be
                     // confused with a real positional-arg edge.
-                    let writer_span = ws_node_span(ws, *w_ws)
+                    let writer_span = ws_node_span(ws, &offsets, *w_ws)
                         .or_else(|| func_name_span(global, *w_func))
                         .unwrap_or_else(|| bonsai_common::Span::empty(bonsai_common::FileId::INVALID, 0));
                     ws.field_flow_mut().push(crate::workspace::FieldFlowLink {
@@ -2198,6 +2259,7 @@ fn stitch_receiver_field_flow(
 /// methods of the same class.
 fn collect_field_nodes(
     ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
     func: FuncId,
     writes_by_field: &mut ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>>,
     reads_by_field: &mut ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>>,
@@ -2281,7 +2343,7 @@ fn collect_field_nodes(
         let Some(local) = segment.nodes.lookup(func, pid) else {
             continue;
         };
-        let Some(ws_node) = ws_node_for(ws, seg_id, local) else {
+        let Some(ws_node) = ws_node_for(offsets, seg_id, local) else {
             continue;
         };
         if is_write {
@@ -2296,28 +2358,16 @@ fn collect_field_nodes(
 }
 
 /// Resolve a segment-local `(SegmentId, crate::node::NodeId)` to its workspace
-/// `Wscrate::node::NodeId` via the IDG service's unified address space.
-/// Implemented inline because the workspace doesn't itself expose
-/// the unified map — only [`IdgQueryService`] does, and the
-/// adapter runs before service construction. Falls through to the
-/// segment's nodes vector to recover the workspace position.
+/// `WsNodeId` via the same unified address space as [`IdgQueryService`].
 fn ws_node_for(
-    ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
     seg_id: crate::SegmentId,
     local: crate::node::NodeId,
 ) -> Option<crate::WsNodeId> {
-    // Walk segments in order, summing counts up to seg_id, and
-    // adding the local node index. Mirrors `build_unified` in
-    // [`IdgQueryService`] — both must agree on the address-space
-    // layout.
-    let mut offset: u32 = 0;
-    for (other_id, other_seg) in ws.segments() {
-        if other_id == seg_id {
-            return Some(crate::WsNodeId(offset + local.0));
-        }
-        offset = offset.saturating_add(other_seg.nodes.len() as u32);
-    }
-    None
+    offsets
+        .by_segment
+        .get(&seg_id)
+        .map(|base| crate::WsNodeId(base.saturating_add(local.0)))
 }
 
 /// True when `name` is one of the language-specific implicit
@@ -2363,15 +2413,16 @@ fn canonical_field_name(name: &str) -> String {
 /// segment-local crate::node::NodeIds.
 fn add_edge_between_ws_nodes(
     ws: &mut IdgWorkspace,
+    offsets: &SegmentOffsets,
     from: crate::WsNodeId,
     to: crate::WsNodeId,
     kind: crate::edge::IdgEdgeKind,
     precision: bonsai_common::Precision,
 ) {
-    let Some((from_seg, from_local)) = ws_node_to_local(ws, from) else {
+    let Some((from_seg, from_local)) = ws_node_to_local(ws, offsets, from) else {
         return;
     };
-    let Some((to_seg, to_local)) = ws_node_to_local(ws, to) else {
+    let Some((to_seg, to_local)) = ws_node_to_local(ws, offsets, to) else {
         return;
     };
     let edge = crate::edge::IdgEdge {
@@ -2401,9 +2452,13 @@ fn add_edge_between_ws_nodes(
 /// by the field-flow stitcher to attribute the synthetic
 /// CrossCallEdge to the writer's assignment site, so the
 /// downstream lineage `via_span` reads coherently in find rendering.
-fn ws_node_span(ws: &IdgWorkspace, ws_node: crate::WsNodeId) -> Option<bonsai_common::Span> {
+fn ws_node_span(
+    ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
+    ws_node: crate::WsNodeId,
+) -> Option<bonsai_common::Span> {
     use crate::place::Place;
-    let (seg_id, local) = ws_node_to_local(ws, ws_node)?;
+    let (seg_id, local) = ws_node_to_local(ws, offsets, ws_node)?;
     let segment = ws.segment(seg_id)?;
     let node = segment.nodes.get(local)?;
     let place = segment.places.places.get(node.place.0 as usize)?;
@@ -2421,22 +2476,20 @@ fn func_name_span(global: &GlobalIndex, func: FuncId) -> Option<bonsai_common::S
 }
 
 /// Reverse [`ws_node_for`] — given a workspace `WsNodeId`, find
-/// the (segment, local) pair it lives in. Walks segments in order
-/// and subtracts each segment's node count until the offset
-/// places `ws_node` within the current segment.
+/// the (segment, local) pair it lives in.
 fn ws_node_to_local(
     ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
     ws_node: crate::WsNodeId,
 ) -> Option<(crate::SegmentId, crate::node::NodeId)> {
-    let mut remaining = ws_node.0;
-    for (seg_id, segment) in ws.segments() {
-        let count = segment.nodes.len() as u32;
-        if remaining < count {
-            return Some((seg_id, crate::node::NodeId(remaining)));
-        }
-        remaining = remaining.saturating_sub(count);
+    let idx = offsets.ranges.partition_point(|(_, end, _)| *end <= ws_node.0);
+    let (start, end, seg_id) = *offsets.ranges.get(idx)?;
+    if ws_node.0 >= end {
+        return None;
     }
-    None
+    let local = crate::node::NodeId(ws_node.0.saturating_sub(start));
+    let segment = ws.segment(seg_id)?;
+    (local.0 < segment.nodes.len() as u32).then_some((seg_id, local))
 }
 
 /// Run the transfer pass on every function in the workspace, in
