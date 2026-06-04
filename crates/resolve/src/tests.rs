@@ -644,6 +644,113 @@ fn type_alias_member_call_does_not_fall_back_to_bare_method() {
 }
 
 #[test]
+fn class_resolution_uses_import_target_before_bare_duplicate_scan() {
+    let mut global = GlobalIndex::new();
+    for i in 0..256 {
+        let file = FileId::new(i + 1);
+        insert_one(
+            &mut global,
+            file,
+            decl(
+                file,
+                DeclKind::Class,
+                "CommandRunner",
+                &[&format!("shard_{i:03}"), &format!("flow_{i:05}_executor")],
+                u64::from(i) * 10,
+            ),
+        );
+    }
+
+    let caller_file = FileId::new(999);
+    let caller_module = ModulePath::from_segments(["shard_042", "flow_00042_storage"]);
+    let aliases = AHashMap::from_iter([(
+        "CommandRunner".to_string(),
+        AliasTarget::Member {
+            module: "shard_042.flow_00042_executor".to_string(),
+            member: "CommandRunner".to_string(),
+        },
+    )]);
+    let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(&aliases);
+    let hits = resolve_class(&global, "CommandRunner", &ctx);
+
+    assert_eq!(hits.len(), 1);
+    let hit = global.decl_of(hits[0]).expect("resolved class");
+    assert_eq!(
+        hit.qualified_name.as_deref(),
+        Some("shard_042.flow_00042_executor.CommandRunner")
+    );
+}
+
+#[test]
+fn class_resolution_keeps_same_file_class_precedence_over_import() {
+    let mut global = GlobalIndex::new();
+    let caller_file = FileId::new(1);
+    let imported_file = FileId::new(2);
+    insert_one(
+        &mut global,
+        caller_file,
+        decl(
+            caller_file,
+            DeclKind::Class,
+            "CommandRunner",
+            &["app", "storage"],
+            10,
+        ),
+    );
+    insert_one(
+        &mut global,
+        imported_file,
+        decl(
+            imported_file,
+            DeclKind::Class,
+            "CommandRunner",
+            &["app", "executor"],
+            20,
+        ),
+    );
+
+    let caller_module = ModulePath::from_segments(["app", "storage"]);
+    let aliases = AHashMap::from_iter([(
+        "CommandRunner".to_string(),
+        AliasTarget::Member {
+            module: "app.executor".to_string(),
+            member: "CommandRunner".to_string(),
+        },
+    )]);
+    let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(&aliases);
+    let hits = resolve_class(&global, "CommandRunner", &ctx);
+
+    assert_eq!(hits.len(), 1);
+    let hit = global.decl_of(hits[0]).expect("resolved class");
+    assert_eq!(hit.qualified_name.as_deref(), Some("app.storage.CommandRunner"));
+}
+
+#[test]
+fn type_alias_rewrite_cycle_does_not_loop() {
+    let global = GlobalIndex::new();
+    let caller_file = FileId::new(1);
+    let caller_module = ModulePath::from_segments(["app"]);
+    let aliases = AHashMap::from_iter([
+        (
+            "Foo".to_string(),
+            AliasTarget::Type {
+                type_name: "Bar".to_string(),
+            },
+        ),
+        (
+            "Bar".to_string(),
+            AliasTarget::Type {
+                type_name: "Foo".to_string(),
+            },
+        ),
+    ]);
+    let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(&aliases);
+    let hits = resolve_class(&global, "Foo", &ctx);
+
+    assert!(hits.is_empty());
+}
+
+#[test]
 fn redundant_alias_equal_to_original_is_skipped() {
     // `from x import y as y` would produce a no-op binding.
     // We skip redundant entries to keep the map tight.

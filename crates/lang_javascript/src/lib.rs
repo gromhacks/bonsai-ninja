@@ -410,7 +410,7 @@ pub fn apply_js_ts_commonjs_named_export_aliases(
         let (Some(left), Some(right)) = (left, right) else {
             continue;
         };
-        let Some(export_name) = commonjs_named_export_member(&node_text(&left, src)) else {
+        let Some(export_name) = commonjs_named_export_member(node_text(&left, src)) else {
             if node_text(&left, src).trim() == "module.exports" {
                 collect_commonjs_object_export_aliases(
                     decl_index,

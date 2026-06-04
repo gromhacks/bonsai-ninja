@@ -123,6 +123,16 @@ in 64.15s, and cold/warm JSON matched byte-for-byte. The same no-warning
 requirements apply: no `payload exceeds 4GiB` warning and no `save_to_disk
 failed` warning.
 
+The sharded duplicate-class scale smoke generated 10,000 valid Python flows
+across 80,100 source files, then deleted the generated workspace from `/tmp`.
+Every flow imported its own executor module while all flows reused the same
+`CommandRunner.execute` class/method names. Exact checks passed: 10,000
+`perform_* -> execute` edges in 43.64s with no cross-flow targets, 20,000
+Flask `request.args.get` source rows in 27.50s, 20,000 `os.system` sink rows
+in 28.35s, 10,000 cold taint findings in 94.32s, and 10,000 warm taint
+findings in 58.05s. No `payload exceeds 4GiB` warning and no `save_to_disk
+failed` warning occurred.
+
 ## Security Pattern Audit
 
 Use this stricter pass when reviewing the checked-in rulepack end to end:

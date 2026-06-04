@@ -2383,6 +2383,7 @@ impl FieldPlaceIndex {
         self.by_base.get(&key).cloned().unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)] // Field write recording carries segment, function, span, node, and transform state.
     fn record_write(
         &mut self,
         seg_id: SegmentId,
@@ -2398,7 +2399,7 @@ impl FieldPlaceIndex {
         push_storage_segments(field, &mut parts);
         if parts.len() < 2 {
             return Vec::new();
-        };
+        }
         let mut added = Vec::new();
         for split in 1..parts.len() {
             let field_parts = &parts[split..];
@@ -2455,6 +2456,7 @@ impl FieldPlaceIndex {
         added
     }
 
+    #[allow(clippy::too_many_arguments)] // Keeps the field-place key and hit metadata explicit at the write site.
     fn record_storage_hit(
         &mut self,
         seg_id: SegmentId,

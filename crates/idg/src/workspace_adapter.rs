@@ -29,6 +29,11 @@ use crate::builder::{stitch_idg, CalleeResolver, FuncToSegment, ResolvedCallee};
 use crate::transfer::{transfer_function_for_with_options, TransferOptions, TransferOutput};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
+type FieldReadNodesByFunc = AHashMap<FuncId, AHashMap<String, Vec<crate::WsNodeId>>>;
+type RecvNodesByFunc = AHashMap<FuncId, Vec<crate::WsNodeId>>;
+type RecvSlot = (crate::WsNodeId, Option<crate::WsNodeId>);
+type RecvSlotsByCall = AHashMap<(FuncId, bonsai_common::Span), Vec<RecvSlot>>;
+
 /// Pre-computed maps that the [`WorkspaceIdgBuilder`] uses for
 /// `FuncId → file → SegmentId` lookups during stitching.
 struct WorkspaceMaps {
@@ -1441,13 +1446,9 @@ fn stitch_receiver_method_propagation(
     let mut delegates_by_func: ahash::AHashMap<FuncId, bool> = ahash::AHashMap::default();
     let mut field_write_names_by_func: ahash::AHashMap<FuncId, ahash::AHashSet<String>> =
         ahash::AHashMap::default();
-    let mut field_read_nodes_by_func: ahash::AHashMap<FuncId, ahash::AHashMap<String, Vec<crate::WsNodeId>>> =
-        ahash::AHashMap::default();
-    let mut recv_nodes_by_func: ahash::AHashMap<FuncId, Vec<crate::WsNodeId>> = ahash::AHashMap::default();
-    let mut recv_slots_by_call: ahash::AHashMap<
-        (FuncId, bonsai_common::Span),
-        Vec<(crate::WsNodeId, Option<crate::WsNodeId>)>,
-    > = ahash::AHashMap::default();
+    let mut field_read_nodes_by_func: FieldReadNodesByFunc = ahash::AHashMap::default();
+    let mut recv_nodes_by_func: RecvNodesByFunc = ahash::AHashMap::default();
+    let mut recv_slots_by_call: RecvSlotsByCall = ahash::AHashMap::default();
     for class_sym in sorted_classes {
         let mut funcs = match by_class.get(&class_sym) {
             Some(v) => v.clone(),
@@ -1845,6 +1846,7 @@ fn callee_body_delegates_via_super(global: &GlobalIndex, callee: FuncId) -> bool
 /// override in its callgraph adjacency, but the actual taint flow
 /// reaches the parent body via `super`. Walks `decl.bases`
 /// transitively.
+#[allow(clippy::too_many_arguments)] // Super-chain collection needs workspace, language, cache, and receiver-node state.
 fn collect_super_chain_read_nodes_and_funcs(
     ws: &IdgWorkspace,
     global: &GlobalIndex,
@@ -1855,8 +1857,8 @@ fn collect_super_chain_read_nodes_and_funcs(
     func_to_language: &AHashMap<FuncId, &'static str>,
     file_to_language: &AHashMap<FileId, &'static str>,
     offsets: &SegmentOffsets,
-    field_read_nodes_by_func: &mut ahash::AHashMap<FuncId, ahash::AHashMap<String, Vec<crate::WsNodeId>>>,
-    recv_nodes_by_func: &mut ahash::AHashMap<FuncId, Vec<crate::WsNodeId>>,
+    field_read_nodes_by_func: &mut FieldReadNodesByFunc,
+    recv_nodes_by_func: &mut RecvNodesByFunc,
 ) -> Vec<(crate::WsNodeId, FuncId)> {
     let Some(callee_decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
         return Vec::new();

@@ -364,7 +364,7 @@ fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
 /// raise via plain `call` nodes, so the walker emits them as `Call`
 /// events; without this pass `throw(X)` is never a Throw and try/catch
 /// taint seeding (G8) can't link the thrown value to the catch binding.
-fn rewrite_erlang_throw_calls(events: &mut Vec<FlowEvent>) {
+fn rewrite_erlang_throw_calls(events: &mut [FlowEvent]) {
     // Recurse into nested bodies first so throws inside branch / loop /
     // try regions are rewritten too.
     for event in events.iter_mut() {

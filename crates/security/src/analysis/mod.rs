@@ -6612,10 +6612,8 @@ fn collect_source_seed_targets(
                     || spans_overlap(*span, src.span)
                     || security_text_matches_source_strict(name, &src.match_text);
                 let _ = receiver;
-                if call_matches {
-                    if !source_output_args.is_empty() {
-                        seed_source_output_call_args(out, args, source_output_args);
-                    }
+                if call_matches && !source_output_args.is_empty() {
+                    seed_source_output_call_args(out, args, source_output_args);
                 }
             }
             FlowEvent::Branch {
@@ -7416,7 +7414,7 @@ fn source_output_args_from_rulepack_for_languages(
 }
 
 fn call_result_passthroughs_from_rulepack(pack: &Rulepack) -> Vec<CallResultPassthrough> {
-    call_result_passthroughs_from_rules(pack.all_rules().into_iter())
+    call_result_passthroughs_from_rules(pack.all_rules())
 }
 
 fn call_result_passthroughs_from_rulepack_for_languages(
@@ -7463,7 +7461,7 @@ fn call_result_passthroughs_from_rules<'a>(
 }
 
 fn output_arg_flows_from_rulepack(pack: &Rulepack) -> Vec<OutputArgFlow> {
-    output_arg_flows_from_rules(pack.all_rules().into_iter())
+    output_arg_flows_from_rules(pack.all_rules())
 }
 
 fn output_arg_flows_from_rulepack_for_languages(
@@ -7521,7 +7519,7 @@ fn semantic_transfer_callee(target: &RuleTarget) -> Option<String> {
 }
 
 fn receiver_state_propagations_from_rulepack(pack: &Rulepack) -> Vec<ReceiverStatePropagation> {
-    receiver_state_propagations_from_rules(pack.all_rules().into_iter())
+    receiver_state_propagations_from_rules(pack.all_rules())
 }
 
 fn receiver_state_propagations_from_rulepack_for_languages(

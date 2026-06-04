@@ -332,6 +332,199 @@ fn typed_projected_receiver_resolves_method_without_bare_fanout() {
 }
 
 #[test]
+fn typed_receiver_import_alias_path_prevents_duplicate_class_fanout() {
+    let exec_a_file = FileId::new(1);
+    let exec_b_file = FileId::new(2);
+    let storage_a_file = FileId::new(3);
+    let storage_b_file = FileId::new(4);
+    let mut global = GlobalIndex::new();
+
+    let runner_a = with_module_path(
+        decl_with(
+            exec_a_file,
+            10,
+            "CommandRunner",
+            DeclKind::Class,
+            None,
+            Vec::new(),
+        ),
+        &["flow_00000_executor"],
+    );
+    let execute_a = with_params(
+        with_module_path(
+            decl_with(
+                exec_a_file,
+                11,
+                "execute",
+                DeclKind::Function,
+                Some(10),
+                Vec::new(),
+            ),
+            &["flow_00000_executor"],
+        ),
+        &["self", "cmd"],
+    );
+    let runner_b = with_module_path(
+        decl_with(
+            exec_b_file,
+            20,
+            "CommandRunner",
+            DeclKind::Class,
+            None,
+            Vec::new(),
+        ),
+        &["flow_00001_executor"],
+    );
+    let execute_b = with_params(
+        with_module_path(
+            decl_with(
+                exec_b_file,
+                21,
+                "execute",
+                DeclKind::Function,
+                Some(20),
+                Vec::new(),
+            ),
+            &["flow_00001_executor"],
+        ),
+        &["self", "cmd"],
+    );
+    let tx_a = with_module_path(
+        decl_with(
+            storage_a_file,
+            30,
+            "Transaction",
+            DeclKind::Class,
+            None,
+            Vec::new(),
+        ),
+        &["flow_00000_storage"],
+    );
+    let perform_a = with_params(
+        with_module_path(
+            decl_with(
+                storage_a_file,
+                31,
+                "perform",
+                DeclKind::Function,
+                Some(30),
+                vec![method_call(
+                    storage_a_file,
+                    "self.runner.execute",
+                    "self.runner",
+                    &["CommandRunner"],
+                )],
+            ),
+            &["flow_00000_storage"],
+        ),
+        &["self", "cmd"],
+    );
+    let tx_b = with_module_path(
+        decl_with(
+            storage_b_file,
+            40,
+            "Transaction",
+            DeclKind::Class,
+            None,
+            Vec::new(),
+        ),
+        &["flow_00001_storage"],
+    );
+    let perform_b = with_params(
+        with_module_path(
+            decl_with(
+                storage_b_file,
+                41,
+                "perform",
+                DeclKind::Function,
+                Some(40),
+                vec![method_call(
+                    storage_b_file,
+                    "self.runner.execute",
+                    "self.runner",
+                    &["CommandRunner"],
+                )],
+            ),
+            &["flow_00001_storage"],
+        ),
+        &["self", "cmd"],
+    );
+    insert_file(&mut global, exec_a_file, vec![runner_a, execute_a]);
+    insert_file(&mut global, exec_b_file, vec![runner_b, execute_b]);
+    insert_file(&mut global, storage_a_file, vec![tx_a, perform_a]);
+    insert_file(&mut global, storage_b_file, vec![tx_b, perform_b]);
+
+    let path_for_file = |file: FileId| match file.raw() {
+        1 => Some("/tmp/work/shard_000/flow_00000_executor.py".to_string()),
+        2 => Some("/tmp/work/shard_001/flow_00001_executor.py".to_string()),
+        3 => Some("/tmp/work/shard_000/flow_00000_storage.py".to_string()),
+        4 => Some("/tmp/work/shard_001/flow_00001_storage.py".to_string()),
+        _ => None,
+    };
+    let aliases_a = AHashMap::from_iter([(
+        "CommandRunner".to_string(),
+        AliasTarget::Member {
+            module: "shard_000.flow_00000_executor".to_string(),
+            member: "CommandRunner".to_string(),
+        },
+    )]);
+    let storage_a_module = ModulePath::from_segments(["flow_00000_storage"]);
+    {
+        let ctx = ResolveContext::new(storage_a_file, &storage_a_module)
+            .with_alias_map(&aliases_a)
+            .with_file_path_lookup(&path_for_file);
+        let hits = resolve_class(&global, "CommandRunner", &ctx);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(global.declaring_file(hits[0]), Some(exec_a_file));
+    }
+
+    let cg = ResolvedCallGraph::build_with_file_info(
+        &global,
+        |_| AHashMap::new(),
+        |file| match file.raw() {
+            3 => AHashMap::from_iter([(
+                "CommandRunner".to_string(),
+                AliasTarget::Member {
+                    module: "shard_000.flow_00000_executor".to_string(),
+                    member: "CommandRunner".to_string(),
+                },
+            )]),
+            4 => AHashMap::from_iter([(
+                "CommandRunner".to_string(),
+                AliasTarget::Member {
+                    module: "shard_001.flow_00001_executor".to_string(),
+                    member: "CommandRunner".to_string(),
+                },
+            )]),
+            _ => AHashMap::new(),
+        },
+        path_for_file,
+        |_| &[],
+        |_| Some("python"),
+    );
+    let func_id_in_file = |name: &str, file: FileId| {
+        global
+            .find_by_name(name)
+            .iter()
+            .copied()
+            .find(|symbol| global.declaring_file(*symbol) == Some(file))
+            .map(|symbol| FuncId::new(symbol.raw()))
+            .expect("function in file")
+    };
+    let perform_a_id = func_id_in_file("perform", storage_a_file);
+    let perform_b_id = func_id_in_file("perform", storage_b_file);
+    let execute_a_id = func_id_in_file("execute", exec_a_file);
+    let execute_b_id = func_id_in_file("execute", exec_b_file);
+    let edges_a = cg.callees_of(perform_a_id).collect::<Vec<_>>();
+    let edges_b = cg.callees_of(perform_b_id).collect::<Vec<_>>();
+
+    assert_eq!(edges_a.len(), 1, "flow A must not fan out: {edges_a:?}");
+    assert_eq!(edges_a[0].to, execute_a_id);
+    assert_eq!(edges_b.len(), 1, "flow B must not fan out: {edges_b:?}");
+    assert_eq!(edges_b[0].to, execute_b_id);
+}
+
+#[test]
 fn elixir_function_clauses_emit_narrowed_virtual_edges() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();

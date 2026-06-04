@@ -1722,6 +1722,7 @@ pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
 /// through the same adapter-backed constructor-result transfer plus
 /// configured receiver-state, call-result, and output-argument
 /// transfers.
+#[allow(clippy::too_many_arguments)] // Shared transfer surface carries seed, transfer tables, IDG, precision, and scope.
 pub fn apply_configured_transfer_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
     receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
@@ -2238,9 +2239,9 @@ fn apply_output_arg_flow_fixpoint(
                 if (arg_idx as usize) == flow.output_arg_index {
                     continue;
                 }
-                if !flow
+                if flow
                     .value_start_arg_index
-                    .is_some_and(|start| (arg_idx as usize) >= start)
+                    .is_none_or(|start| (arg_idx as usize) < start)
                     || !configured.callee.matches(&summary.name, &mut callee_name_cache)
                 {
                     continue;

@@ -604,7 +604,7 @@ impl IdgQueryService {
                 if !spans_overlap(edge.meta.via_span, match_span) {
                     continue;
                 }
-                if !segment.nodes.get(edge.from).is_some_and(|node| node.func == func) {
+                if segment.nodes.get(edge.from).is_none_or(|node| node.func != func) {
                     continue;
                 }
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.from) {
