@@ -1018,7 +1018,7 @@ impl<'a> PreparedRule<'a> {
         let Some(target) = target else {
             return false;
         };
-        let is_express_signal = self.package_signals.iter().any(|signal| *signal == "express");
+        let is_express_signal = self.package_signals.contains(&"express");
         if !is_express_signal {
             return false;
         }
@@ -1044,10 +1044,8 @@ impl<'a> PreparedRule<'a> {
         if self.rule.id != "javascript.upload.express_fileupload_mv_any_file" {
             return false;
         }
-        self.package_signals
-            .iter()
-            .any(|signal| *signal == "express-fileupload")
-            && callee.ends_with(".mv")
+        self.package_signals.contains(&"express-fileupload")
+            && callee.rsplit_once('.').is_some_and(|(_, tail)| tail == "mv")
             && file_packages.contains(FILE_USES_REQ_FILES_MARKER)
     }
 

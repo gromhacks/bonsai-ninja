@@ -5883,7 +5883,10 @@ fn collect_receiver_state_sources(
     out.into_iter().collect()
 }
 
-pub fn collect_assign_targets(events: &[crate::FlowEvent], out: &mut std::collections::HashSet<String>) {
+pub fn collect_assign_targets<S: std::hash::BuildHasher>(
+    events: &[crate::FlowEvent],
+    out: &mut std::collections::HashSet<String, S>,
+) {
     for event in events {
         match event {
             crate::FlowEvent::Assign { target, .. } if !target.is_empty() => {
@@ -5922,13 +5925,15 @@ pub struct ImplicitMemberReadCall {
     pub call_kind: crate::CallKind,
 }
 
-pub fn rewrite_implicit_member_reads<F>(
+pub fn rewrite_implicit_member_reads<F, SG, SL>(
     events: &mut Vec<crate::FlowEvent>,
-    getters: &std::collections::HashSet<String>,
-    locals: &std::collections::HashSet<String>,
+    getters: &std::collections::HashSet<String, SG>,
+    locals: &std::collections::HashSet<String, SL>,
     call_for_name: F,
 ) where
     F: Fn(&str) -> ImplicitMemberReadCall + Copy,
+    SG: std::hash::BuildHasher,
+    SL: std::hash::BuildHasher,
 {
     for event in events.iter_mut() {
         match event {
@@ -7447,6 +7452,7 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
             };
             match map.get(target) {
                 Some(existing) if existing == &resolved => continue,
+                Some(_) => continue,
                 _ => {
                     map.insert(target.clone(), resolved);
                     changed = true;

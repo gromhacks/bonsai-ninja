@@ -635,15 +635,38 @@ fn rewrite_through_alias_map_with_mode(
     let map = ctx.alias_map?;
     // Whole-name alias: `req` → `flask.request`.
     if let Some(target) = map.get(name) {
-        let rewritten = match mode {
-            AliasRewriteMode::Callable => target.callable_target_text(),
-            AliasRewriteMode::Type => target.target_text(),
-        };
-        return Some(AliasRewrite::from_target(target, rewritten));
+        return Some(alias_rewrite_from_target(target, None, mode, map));
     }
     let (head, tail) = split_alias_head_tail(name)?;
     let target = map.get(head)?;
-    Some(AliasRewrite::from_target(target, target.rewrite_with_tail(tail)))
+    Some(alias_rewrite_from_target(target, Some(tail), mode, map))
+}
+
+fn alias_rewrite_from_target(
+    target: &AliasTarget,
+    tail: Option<&str>,
+    mode: AliasRewriteMode,
+    map: &AHashMap<String, AliasTarget>,
+) -> AliasRewrite {
+    let mut current = target;
+    let mut seen_type_names = AHashSet::new();
+    while let AliasTarget::Type { type_name } = current {
+        if !seen_type_names.insert(type_name.as_str()) {
+            break;
+        }
+        let Some(resolved) = map.get(type_name) else {
+            break;
+        };
+        current = resolved;
+    }
+    let rewritten = match tail {
+        Some(tail) => current.rewrite_with_tail(tail),
+        None => match mode {
+            AliasRewriteMode::Callable => current.callable_target_text(),
+            AliasRewriteMode::Type => current.target_text(),
+        },
+    };
+    AliasRewrite::from_target(current, rewritten)
 }
 
 /// Split `name` into (head, tail) using the longest-form module
@@ -1630,7 +1653,7 @@ pub fn module_target_parts_match_path_parts(target_parts: &[String], path_parts:
         {
             return true;
         }
-        for stripped in absolute_module_prefix_variants(&target_parts) {
+        for stripped in absolute_module_prefix_variants(target_parts) {
             if !stripped.is_empty()
                 && stripped.len() <= path_parts.len()
                 && path_parts
@@ -1650,7 +1673,7 @@ pub fn module_target_parts_match_path_parts(target_parts: &[String], path_parts:
             let suffix = &target_parts[suffix_start..];
             if !suffix.is_empty()
                 && suffix.len() <= path_parts.len()
-                && path_parts_contains_workspace_suffix(&path_parts, suffix)
+                && path_parts_contains_workspace_suffix(path_parts, suffix)
             {
                 return true;
             }
@@ -1791,64 +1814,94 @@ pub fn resolve_class(
         retain_caller_lexical_symbol_candidates(global, &mut candidates, ctx);
         candidates
     };
+    let collect_caller_file_scope = |lookup: &str| {
+        global
+            .decls_in(ctx.caller_file)
+            .iter()
+            .filter(|decl| {
+                decl.name == lookup
+                    || decl
+                        .qualified_name
+                        .as_deref()
+                        .is_some_and(|qualified| qualified == lookup)
+            })
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                )
+            })
+            .filter(|decl| visibility_allows(decl, ctx.caller_file, &decl.module_path, ctx))
+            .map(|decl| decl.symbol)
+            .collect::<Vec<_>>()
+    };
     let mut out = Vec::new();
     for lookup in type_lookup_variants(name) {
-        out.extend(collect_caller_lexical_scope(&lookup));
+        out.extend(collect_caller_file_scope(&lookup));
         if !out.is_empty() {
             dedup_symbols(&mut out);
             return out;
         }
     }
-    if out.is_empty() {
-        if let Some(rewrite) = rewrite_through_alias_map_with_type_target(name, ctx) {
-            for lookup in type_lookup_variants(&rewrite.rewritten) {
-                // Exact rewrite trusts the alias map — if the
-                // resolver finds a class decl named exactly this,
-                // that IS the alias's target.
-                out.extend(collect(&lookup));
+    if let Some(rewrite) = rewrite_through_alias_map_with_type_target(name, ctx) {
+        for lookup in type_lookup_variants(&rewrite.rewritten) {
+            // Exact rewrite trusts the alias map — if the
+            // resolver finds a class decl named exactly this,
+            // that IS the alias's target. Trying this before the
+            // workspace-wide bare-name fallback avoids scanning
+            // thousands of same-named classes for imported types.
+            out.extend(collect(&lookup));
+            if !out.is_empty() {
+                dedup_symbols(&mut out);
+                return out;
+            }
+            if let Some(target_module) = rewrite.target_module.as_deref() {
+                for alias_lookup in alias_bound_class_lookup_names(name, &lookup) {
+                    let mut candidates = collect(&alias_lookup);
+                    candidates.retain(|sym| symbol_in_alias_target(global, *sym, target_module, ctx));
+                    out.extend(candidates);
+                }
                 if !out.is_empty() {
                     dedup_symbols(&mut out);
                     return out;
                 }
+            }
+            if let Some((_, tail)) = lookup.rsplit_once(['.', ':']) {
+                // Bare-name fallback: workspace-wide lookup of
+                // the leaf identifier. Constrain to the alias
+                // target's module so an unrelated class with
+                // the same leaf identifier doesn't get stitched
+                // in as a spurious candidate.
+                let mut candidates: Vec<SymbolId> = collect(tail);
                 if let Some(target_module) = rewrite.target_module.as_deref() {
-                    for alias_lookup in alias_bound_class_lookup_names(name, &lookup) {
-                        let mut candidates = collect(&alias_lookup);
-                        candidates.retain(|sym| symbol_in_alias_target(global, *sym, target_module, ctx));
-                        out.extend(candidates);
-                    }
-                    if !out.is_empty() {
-                        dedup_symbols(&mut out);
-                        return out;
-                    }
+                    candidates.retain(|sym| {
+                        global.decl_of(*sym).is_some_and(|decl| {
+                            let path_match = global
+                                .declaring_file(*sym)
+                                .is_some_and(|file| alias_target_matches_file(ctx, target_module, file));
+                            module_target_matches_decl_module_path_from_context(
+                                target_module,
+                                &decl.module_path,
+                                ctx.caller_module,
+                            ) || path_match
+                        })
+                    });
                 }
-                if let Some((_, tail)) = lookup.rsplit_once(['.', ':']) {
-                    // Bare-name fallback: workspace-wide lookup of
-                    // the leaf identifier. Constrain to the alias
-                    // target's module so an unrelated class with
-                    // the same leaf identifier doesn't get stitched
-                    // in as a spurious candidate.
-                    let mut candidates: Vec<SymbolId> = collect(tail);
-                    if let Some(target_module) = rewrite.target_module.as_deref() {
-                        candidates.retain(|sym| {
-                            global.decl_of(*sym).is_some_and(|decl| {
-                                let path_match = global
-                                    .declaring_file(*sym)
-                                    .is_some_and(|file| alias_target_matches_file(ctx, target_module, file));
-                                module_target_matches_decl_module_path_from_context(
-                                    target_module,
-                                    &decl.module_path,
-                                    ctx.caller_module,
-                                ) || path_match
-                            })
-                        });
-                    }
-                    out.extend(candidates);
-                    if !out.is_empty() {
-                        dedup_symbols(&mut out);
-                        return out;
-                    }
+                out.extend(candidates);
+                if !out.is_empty() {
+                    dedup_symbols(&mut out);
+                    return out;
                 }
             }
+        }
+        dedup_symbols(&mut out);
+        return out;
+    }
+    for lookup in type_lookup_variants(name) {
+        out.extend(collect_caller_lexical_scope(&lookup));
+        if !out.is_empty() {
+            dedup_symbols(&mut out);
+            return out;
         }
     }
     if out.is_empty() && unqualified_lookup_name(name) {

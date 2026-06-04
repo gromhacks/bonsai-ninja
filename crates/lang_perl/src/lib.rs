@@ -2731,9 +2731,9 @@ fn synthesize_map_grep_topic_call_events(tree: &Tree, src: &[u8], file: FileId) 
             for arg in &mut args {
                 if perl_arg_uses_topic_var(&arg.value_text) {
                     arg.span = list_span;
-                    arg.value_text = primary_source.clone();
+                    arg.value_text.clone_from(&primary_source);
                     arg.place = Some(primary_source.clone());
-                    arg.source_names = source_names.clone();
+                    arg.source_names.clone_from(&source_names);
                     rewrote_topic_arg = true;
                 }
             }

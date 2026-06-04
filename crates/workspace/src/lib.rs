@@ -1881,21 +1881,10 @@ fn idg_transfer_options_fingerprint(options: &bonsai_idg::TransferOptions) -> u6
     let options = options.clone().canonicalized();
     let mut hasher = StableHasher::new();
     absorb_str(&mut hasher, "bonsai-idg-transfer-options-v2");
+    absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
     absorb_u64(
         &mut hasher,
-        if options.include_diagnostic_field_flows {
-            1
-        } else {
-            0
-        },
-    );
-    absorb_u64(
-        &mut hasher,
-        if options.include_receiver_method_propagation {
-            1
-        } else {
-            0
-        },
+        u64::from(options.include_receiver_method_propagation),
     );
     absorb_u64(&mut hasher, options.clean_output_overwrites.len() as u64);
     for spec in &options.clean_output_overwrites {

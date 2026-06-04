@@ -1392,7 +1392,7 @@ fn collect_assign_targets(events: &[FlowEvent], out: &mut Vec<String>) {
                 collect_assign_targets(else_events, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_assign_targets(body, out)
+                collect_assign_targets(body, out);
             }
             FlowEvent::Try {
                 body,
