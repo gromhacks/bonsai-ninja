@@ -5013,35 +5013,15 @@ where
         max_edge_precision: max_precision,
         ..Default::default()
     };
-    let source_sink_prefilter_enabled = source_work.iter().any(|(src, _, _)| src.language == "java");
     let sink_func_set: AHashSet<FuncId> = sink_by_func.keys().copied().collect();
-    let source_sink_call_graph = source_sink_prefilter_enabled.then(|| ws.cached_resolved_call_graph());
-    let chain_call_graph = source_sink_call_graph
-        .clone()
-        .unwrap_or_else(|| ws.cached_resolved_call_graph());
-    let source_funcs_that_can_reach_sinks = source_sink_call_graph.as_ref().map(|call_graph| {
-        let mut reachable: AHashSet<FuncId> = sink_func_set.clone();
-        let mut frontier: Vec<FuncId> = reachable.iter().copied().collect();
-        frontier.sort_by_key(|func| func.raw());
-        for _ in 0..config.budget {
-            let mut next = Vec::new();
-            for callee in &frontier {
-                let mut callers: Vec<FuncId> = call_graph.callers_of(*callee).map(|edge| edge.from).collect();
-                callers.sort_by_key(|func| func.raw());
-                callers.dedup();
-                for caller in callers {
-                    if reachable.insert(caller) {
-                        next.push(caller);
-                    }
-                }
-            }
-            if next.is_empty() {
-                break;
-            }
-            frontier = next;
-        }
-        reachable
+    let source_sink_prefilter_enabled = !source_work.is_empty() && !sink_func_set.is_empty();
+    let semantic_function_graph = source_sink_prefilter_enabled.then(|| {
+        SemanticFunctionGraph::new(idg.semantic_function_edges_with_max_precision(config.max_edge_precision))
     });
+    let chain_call_graph = ws.cached_resolved_call_graph();
+    let source_funcs_that_can_reach_sinks = semantic_function_graph
+        .as_ref()
+        .map(|graph| graph.funcs_that_can_reach(&sink_func_set));
     let taint_caches = ws.inter_taint_caches();
     // Workspace-wide source-seeded graph index. The resident cache is
     // bounded and guarded by a rule/config fingerprint, so reuse
@@ -5058,6 +5038,9 @@ where
     // resulting finding fingerprints are stable across runs.
     let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> =
         source_groups.iter().map(|(k, v)| (*k, v)).collect();
+    if let Some(reachable) = source_funcs_that_can_reach_sinks.as_ref() {
+        source_groups_sorted.retain(|(func, _)| reachable.contains(func));
+    }
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
     bonsai_diagnostics::debug_log!(
         "security-phase",
@@ -5088,22 +5071,28 @@ where
         let mut sink_matches = 0usize;
         let mut lineage_misses = 0usize;
         let mut group_out: Vec<FindingWithChain> = Vec::new();
-        let group_corridor = source_sink_call_graph.as_ref().and_then(|call_graph| {
-            let corridor = source_sink_corridor_from_source(
-                call_graph.as_ref(),
-                src_func_id,
-                &sink_func_set,
-                config.budget,
-            );
-            // The callgraph slice is a performance hint, not a
-            // correctness proof. Some semantic flows are only visible
-            // after IDG receiver/callback/field propagation, so an
-            // empty callgraph-only corridor must fall back to the full
-            // exact source graph instead of dropping the source group.
+        let Some(group_corridor) = semantic_function_graph.as_ref().and_then(|graph| {
+            let reachable_to_sink = source_funcs_that_can_reach_sinks.as_ref()?;
+            let corridor = graph.source_sink_corridor(src_func_id, &sink_func_set, reachable_to_sink);
             (!corridor.terminal_sinks.is_empty()).then_some(corridor)
-        });
-        let group_sink_func_targets = group_corridor.as_ref().map(|corridor| &corridor.terminal_sinks);
-        let group_lineage_func_targets = group_corridor.as_ref().map(|corridor| &corridor.lineage_funcs);
+        }) else {
+            if debug_taint_phase {
+                let name = global
+                    .decl_of(SymbolId::new(src_func_id.raw()))
+                    .map(|decl| decl.name.clone())
+                    .unwrap_or_default();
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "group func={}({}) sources={} skipped=no_sink_corridor",
+                    name,
+                    src_func_id.raw(),
+                    indices.len()
+                );
+            }
+            return group_out;
+        };
+        let group_sink_func_targets = Some(&group_corridor.lineage_funcs);
+        let group_lineage_func_targets = Some(&group_corridor.lineage_funcs);
         let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
             AHashSet::new();
         // Bounded L1 for this one source function. Several
@@ -5514,85 +5503,103 @@ struct SourceSinkCorridor {
     lineage_funcs: AHashSet<FuncId>,
 }
 
-fn source_sink_corridor_from_source(
-    call_graph: &bonsai_callgraph::ResolvedCallGraph,
-    source_func: FuncId,
-    sink_funcs: &AHashSet<FuncId>,
-    budget: u32,
-) -> SourceSinkCorridor {
-    let mut forward_seen = AHashSet::default();
-    let mut frontier = vec![source_func];
-    forward_seen.insert(source_func);
-    for _ in 0..=budget {
-        let mut next = Vec::new();
-        for func in frontier {
-            let mut callees: Vec<FuncId> = call_graph.callees_of(func).map(|edge| edge.to).collect();
-            callees.sort_by_key(|callee: &FuncId| callee.raw());
-            callees.dedup();
-            for callee in callees {
-                if forward_seen.insert(callee) {
-                    next.push(callee);
+struct SemanticFunctionGraph {
+    callees: AHashMap<FuncId, Vec<FuncId>>,
+    callers: AHashMap<FuncId, Vec<FuncId>>,
+}
+
+impl SemanticFunctionGraph {
+    fn new(edges: Vec<(FuncId, FuncId)>) -> Self {
+        let mut callees: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
+        let mut callers: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
+        for (caller, callee) in edges {
+            callees.entry(caller).or_default().push(callee);
+            callers.entry(callee).or_default().push(caller);
+        }
+        for funcs in callees.values_mut().chain(callers.values_mut()) {
+            funcs.sort_by_key(|func| func.raw());
+            funcs.dedup();
+        }
+        Self { callees, callers }
+    }
+
+    fn funcs_that_can_reach(&self, sink_funcs: &AHashSet<FuncId>) -> AHashSet<FuncId> {
+        let mut reachable: AHashSet<FuncId> = sink_funcs.clone();
+        let mut frontier: Vec<FuncId> = reachable.iter().copied().collect();
+        frontier.sort_by_key(|func| func.raw());
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for callee in &frontier {
+                let Some(callers) = self.callers.get(callee) else {
+                    continue;
+                };
+                for caller in callers {
+                    if reachable.insert(*caller) {
+                        next.push(*caller);
+                    }
                 }
             }
+            next.sort_by_key(|func| func.raw());
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
         }
-        if next.is_empty() {
-            break;
-        }
-        frontier = next;
+        reachable
     }
-    let terminal_sinks: AHashSet<FuncId> = forward_seen
-        .iter()
-        .copied()
-        .filter(|func| sink_funcs.contains(func))
-        .collect();
-    if terminal_sinks.is_empty() {
-        return SourceSinkCorridor {
+
+    fn source_sink_corridor(
+        &self,
+        source_func: FuncId,
+        sink_funcs: &AHashSet<FuncId>,
+        funcs_that_can_reach_sinks: &AHashSet<FuncId>,
+    ) -> SourceSinkCorridor {
+        let mut forward_seen = AHashSet::default();
+        let mut frontier = vec![source_func];
+        forward_seen.insert(source_func);
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for func in frontier {
+                let Some(callees) = self.callees.get(&func) else {
+                    continue;
+                };
+                for callee in callees {
+                    if !funcs_that_can_reach_sinks.contains(callee) {
+                        continue;
+                    }
+                    if forward_seen.insert(*callee) {
+                        next.push(*callee);
+                    }
+                }
+            }
+            next.sort_by_key(|func| func.raw());
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        let terminal_sinks: AHashSet<FuncId> = forward_seen
+            .iter()
+            .copied()
+            .filter(|func| sink_funcs.contains(func))
+            .collect();
+        if terminal_sinks.is_empty() {
+            return SourceSinkCorridor {
+                terminal_sinks,
+                lineage_funcs: AHashSet::default(),
+            };
+        }
+
+        let mut lineage_funcs: AHashSet<FuncId> = forward_seen
+            .intersection(funcs_that_can_reach_sinks)
+            .copied()
+            .collect();
+        lineage_funcs.insert(source_func);
+        lineage_funcs.extend(terminal_sinks.iter().copied());
+        SourceSinkCorridor {
             terminal_sinks,
-            lineage_funcs: AHashSet::default(),
-        };
-    }
-
-    let mut reverse_seen = terminal_sinks.clone();
-    let mut frontier: Vec<FuncId> = terminal_sinks.iter().copied().collect();
-    frontier.sort_by_key(|func| func.raw());
-    for _ in 0..=budget {
-        let mut next = Vec::new();
-        for func in frontier {
-            let mut callers: Vec<FuncId> = call_graph.callers_of(func).map(|edge| edge.from).collect();
-            callers.sort_by_key(|caller| caller.raw());
-            callers.dedup();
-            for caller in callers {
-                if reverse_seen.insert(caller) {
-                    next.push(caller);
-                }
-            }
+            lineage_funcs,
         }
-        if next.is_empty() {
-            break;
-        }
-        frontier = next;
-    }
-
-    let mut lineage_funcs: AHashSet<FuncId> = forward_seen.intersection(&reverse_seen).copied().collect();
-    lineage_funcs.insert(source_func);
-    lineage_funcs.extend(terminal_sinks.iter().copied());
-    // Higher-order calls can make the semantic callgraph look like
-    // `source -> callback_target` while the IDG's actual taint path
-    // is `source -> callback_host -> callback_target`. If the reverse
-    // intersection collapsed to only source/sink and the forward slice
-    // is small, keep that bounded slice as lineage evidence so IDG
-    // callback records are not filtered out before reporting.
-    if lineage_funcs.len() <= terminal_sinks.len().saturating_add(1) && forward_seen.len() <= 2048 {
-        lineage_funcs.extend(forward_seen.iter().copied());
-    } else {
-        let mut immediate: Vec<FuncId> = call_graph.callees_of(source_func).map(|edge| edge.to).collect();
-        immediate.sort_by_key(|func| func.raw());
-        immediate.dedup();
-        lineage_funcs.extend(immediate);
-    }
-    SourceSinkCorridor {
-        terminal_sinks,
-        lineage_funcs,
     }
 }
 

@@ -28,6 +28,7 @@ use bonsai_index::GlobalIndex;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::bitset::NodeBitSet;
 use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use crate::place::Place;
@@ -144,9 +145,29 @@ struct UnifiedAddressSpace {
     /// those queries proportional to the seed closure instead of
     /// rescanning every segment edge and every cross-file edge.
     cross_calls_by_from: RwLock<Option<Arc<CrossCallsByFrom>>>,
+    /// Backward closures from sink target function sets. Large Java
+    /// scans often have many controllers feeding the same sink-bearing
+    /// helper; caching the sink side keeps each source query from
+    /// walking the same reverse graph again.
+    target_func_backward: RwLock<AHashMap<TargetFuncCutKey, Arc<NodeBitSet>>>,
 }
 
 type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TargetFuncCutKey {
+    max_precision: Option<Precision>,
+    funcs: Vec<u32>,
+}
+
+impl TargetFuncCutKey {
+    fn new(max_precision: Option<Precision>, funcs: &AHashSet<FuncId>) -> Self {
+        let mut funcs: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
+        funcs.sort_unstable();
+        funcs.dedup();
+        Self { max_precision, funcs }
+    }
+}
 
 /// Service handle for IDG queries. Wraps an [`IdgWorkspace`] and a
 /// reference to the workspace's [`GlobalIndex`] (needed to
@@ -243,6 +264,40 @@ impl IdgQueryService {
             .into_iter()
             .map(|n| WsNodeId(n.0))
             .collect()
+    }
+
+    /// Source-to-target cut: every node on at least one path from
+    /// `seeds` to any node owned by `target_funcs`, within the
+    /// requested precision scope.
+    ///
+    /// Security taint analysis uses this instead of a plain forward
+    /// closure once it has already narrowed candidate sink functions
+    /// with the resolved callgraph. This keeps per-source work
+    /// proportional to the source-to-sink corridor rather than every
+    /// value reachable from the source in a large workspace.
+    pub fn forward_target_func_cut_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        target_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        if seeds.is_empty() || target_funcs.is_empty() {
+            return Vec::new();
+        }
+        let unified = self.ensure_unified();
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
+        let backward = self.target_func_backward_closure(&unified, target_funcs, max_precision);
+        if backward.is_zero() {
+            return Vec::new();
+        }
+        let mut cut = if let Some(precision) = max_precision {
+            self.ensure_precision_reach(&unified, precision)
+                .forward_closure(&seed_nodes)
+        } else {
+            unified.reach.forward_closure(&seed_nodes)
+        };
+        cut.intersect_inplace(&backward);
+        cut.iter().map(|node| WsNodeId(node.0)).collect()
     }
 
     /// Backward closure: which nodes flow *into* `targets`?
@@ -1055,6 +1110,35 @@ impl IdgQueryService {
         out
     }
 
+    /// Every semantic function-to-function dataflow edge known to the
+    /// IDG, in source-to-sink/dataflow order.
+    ///
+    /// Unlike the resolved callgraph, this includes callback
+    /// bindings, return-to-caller propagation, and cross-method field
+    /// links that the IDG stitcher proves. Security source scheduling
+    /// uses this as its function-level reachability graph so it can
+    /// avoid per-source full dataflow walks without dropping
+    /// higher-order flows.
+    pub fn semantic_function_edges_with_max_precision(
+        &self,
+        max_precision: Option<Precision>,
+    ) -> Vec<(FuncId, FuncId)> {
+        let unified = self.ensure_unified();
+        let cross_calls_by_from = self.ensure_cross_calls_by_from(&unified);
+        let mut out = Vec::new();
+        for rows in cross_calls_by_from.values() {
+            for row in rows {
+                if max_precision.is_some_and(|precision| row.precision > precision) {
+                    continue;
+                }
+                out.push((row.caller, row.callee));
+            }
+        }
+        out.sort_by_key(|(caller, callee)| (caller.raw(), callee.raw()));
+        out.dedup();
+        out
+    }
+
     /// Build the unified address space if it isn't cached yet.
     fn ensure_unified(&self) -> Arc<UnifiedAddressSpace> {
         {
@@ -1133,11 +1217,60 @@ impl IdgQueryService {
             reach,
             precision_reach: RwLock::new(AHashMap::new()),
             cross_calls_by_from: RwLock::new(None),
+            target_func_backward: RwLock::new(AHashMap::new()),
         }
     }
 
     fn ws_node_for(unified: &UnifiedAddressSpace, seg_id: SegmentId, local_node: NodeId) -> Option<WsNodeId> {
         unified.forward.get(&(seg_id, local_node)).copied()
+    }
+
+    fn ws_nodes_for_funcs(&self, unified: &UnifiedAddressSpace, funcs: &AHashSet<FuncId>) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for func in funcs {
+            let Some(seg_id) = self.workspace.segment_for_func(*func) else {
+                continue;
+            };
+            let Some(segment) = self.workspace.segment(seg_id) else {
+                continue;
+            };
+            for (idx, node) in segment.nodes.nodes.iter().enumerate() {
+                if node.func != *func {
+                    continue;
+                }
+                let local = NodeId(idx as u32);
+                if let Some(ws_node) = Self::ws_node_for(unified, seg_id, local) {
+                    out.push(NodeId(ws_node.0));
+                }
+            }
+        }
+        out.sort_by_key(|node| node.0);
+        out.dedup();
+        out
+    }
+
+    fn target_func_backward_closure(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+        funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> Arc<NodeBitSet> {
+        let key = TargetFuncCutKey::new(max_precision, funcs);
+        if let Some(hit) = unified.target_func_backward.read().get(&key).cloned() {
+            return hit;
+        }
+        let target_nodes = self.ws_nodes_for_funcs(unified, funcs);
+        let computed = if target_nodes.is_empty() {
+            NodeBitSet::zeros(unified.reverse.len())
+        } else if let Some(precision) = max_precision {
+            self.ensure_precision_reach(unified, precision)
+                .backward_closure(&target_nodes)
+        } else {
+            unified.reach.backward_closure(&target_nodes)
+        };
+        let computed = Arc::new(computed);
+        let mut write = unified.target_func_backward.write();
+        write.entry(key).or_insert(computed).clone()
     }
 
     fn ensure_precision_reach(

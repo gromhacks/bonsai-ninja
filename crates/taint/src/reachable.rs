@@ -1353,7 +1353,12 @@ pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
         max_precision,
         lineage_funcs.or(target_funcs),
     );
-    let closure_nodes = idg.forward_closure_with_max_precision(&seed_nodes, max_precision);
+    let closure_nodes = target_funcs
+        .map(|targets| idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision))
+        .unwrap_or_else(|| idg.forward_closure_with_max_precision(&seed_nodes, max_precision));
+    if closure_nodes.is_empty() {
+        return graph;
+    }
     let closure_set: ahash::AHashSet<bonsai_idg::WsNodeId> = closure_nodes.iter().copied().collect();
 
     // Cross-call edges in closure → call_records. Sort
@@ -1424,14 +1429,10 @@ pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
         }
         worst = worst.meet(ce.precision);
 
-        let tainted_args = if target_funcs.is_some() {
-            Vec::new()
-        } else {
-            let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()));
-            let call_summary =
-                cached_call_event_summary(ce.caller, ce.call_span, global.as_ref(), &mut call_summary_cache);
-            tainted_args_for_cross_call_edge(ce, callee_decl, call_summary)
-        };
+        let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()));
+        let call_summary =
+            cached_call_event_summary(ce.caller, ce.call_span, global.as_ref(), &mut call_summary_cache);
+        let tainted_args = tainted_args_for_cross_call_edge(ce, callee_decl, call_summary);
         call_records.push(TaintedCallEdge {
             trace_id,
             parent_trace_id,
