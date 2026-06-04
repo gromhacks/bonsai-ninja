@@ -38,7 +38,6 @@ use std::time::{Duration, Instant};
 
 type RankedCallPath = std::cmp::Reverse<(i64, u32, u32, Vec<FuncId>)>;
 type InventoryMatchIdentity = (String, String, u32, u32, String, String, Option<String>);
-const LARGE_SOURCE_SINK_PREFILTER_GROUPS: usize = 1024;
 
 /// Phase-aware progress event emitted by `run_taint_analysis_with_phase_progress`
 /// and `run_source_analysis_with_phase_progress`. Long-running phases
@@ -5014,8 +5013,7 @@ where
         max_edge_precision: max_precision,
         ..Default::default()
     };
-    let source_sink_prefilter_enabled = source_groups.len() > LARGE_SOURCE_SINK_PREFILTER_GROUPS
-        || source_work.iter().any(|(src, _, _)| src.language == "java");
+    let source_sink_prefilter_enabled = source_work.iter().any(|(src, _, _)| src.language == "java");
     let sink_func_set: AHashSet<FuncId> = sink_by_func.keys().copied().collect();
     let source_sink_call_graph = source_sink_prefilter_enabled.then(|| ws.cached_resolved_call_graph());
     let chain_call_graph = source_sink_call_graph
@@ -5058,15 +5056,8 @@ where
     // AHashMap iteration order is hash-randomized per process. Sort
     // by FuncId.raw() so the per-source-group analysis order and
     // resulting finding fingerprints are stable across runs.
-    let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> = source_groups
-        .iter()
-        .filter(|(func, _)| {
-            source_funcs_that_can_reach_sinks
-                .as_ref()
-                .is_none_or(|reachable| reachable.contains(func))
-        })
-        .map(|(k, v)| (*k, v))
-        .collect();
+    let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> =
+        source_groups.iter().map(|(k, v)| (*k, v)).collect();
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
     bonsai_diagnostics::debug_log!(
         "security-phase",
@@ -5097,15 +5088,20 @@ where
         let mut sink_matches = 0usize;
         let mut lineage_misses = 0usize;
         let mut group_out: Vec<FindingWithChain> = Vec::new();
-        let group_corridor = source_sink_call_graph.as_ref().map(|call_graph| {
-            source_sink_corridor_from_source(call_graph.as_ref(), src_func_id, &sink_func_set, config.budget)
+        let group_corridor = source_sink_call_graph.as_ref().and_then(|call_graph| {
+            let corridor = source_sink_corridor_from_source(
+                call_graph.as_ref(),
+                src_func_id,
+                &sink_func_set,
+                config.budget,
+            );
+            // The callgraph slice is a performance hint, not a
+            // correctness proof. Some semantic flows are only visible
+            // after IDG receiver/callback/field propagation, so an
+            // empty callgraph-only corridor must fall back to the full
+            // exact source graph instead of dropping the source group.
+            (!corridor.terminal_sinks.is_empty()).then_some(corridor)
         });
-        if group_corridor
-            .as_ref()
-            .is_some_and(|corridor| corridor.terminal_sinks.is_empty())
-        {
-            return group_out;
-        }
         let group_sink_func_targets = group_corridor.as_ref().map(|corridor| &corridor.terminal_sinks);
         let group_lineage_func_targets = group_corridor.as_ref().map(|corridor| &corridor.lineage_funcs);
         let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
