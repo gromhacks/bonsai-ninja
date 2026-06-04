@@ -747,6 +747,73 @@ fn taint_analysis_does_not_stop_after_scan_wide_pair_budget() {
 }
 
 #[test]
+fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.vfs().write(
+        "/app/Real.java".to_string(),
+        Arc::<str>::from(
+            "package app;\n\
+             class Real {\n\
+             \n  String source() { return \"\"; }\n\
+             \n  static void sink(String value) {}\n\
+             \n  void handle() { sink(source()); }\n\
+             }\n",
+        ),
+    );
+    for i in 0..64 {
+        ws.vfs().write(
+            format!("/app/Unreachable{i:02}.java"),
+            Arc::<str>::from(format!(
+                "package app;\n\
+                 class Unreachable{i:02} {{\n\
+                 \n  String source() {{ return \"\"; }}\n\
+                 \n  String handle() {{ String value = source(); return value; }}\n\
+                 }}\n"
+            )),
+        );
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+
+    let mut current_phase: Option<&'static str> = None;
+    let mut taint_chain_total = None;
+    let mut taint_chain_ticks = 0u64;
+    let report = bonsai_security::run_taint_analysis_with_phase_progress(
+        &ws,
+        &rulepack("java", "source", "sink"),
+        TaintAnalysisOptions::default(),
+        |event| match event {
+            bonsai_security::AnalysisProgress::PhaseStarted { label, total } => {
+                current_phase = Some(label);
+                if label == "building taint chains" {
+                    taint_chain_total = Some(total);
+                }
+            }
+            bonsai_security::AnalysisProgress::PhaseTicked => {
+                if current_phase == Some("building taint chains") {
+                    taint_chain_ticks += 1;
+                }
+            }
+            bonsai_security::AnalysisProgress::PhaseFinished => {
+                current_phase = None;
+            }
+        },
+    )
+    .expect("taint analysis");
+
+    assert_eq!(taint_chain_total, Some(1));
+    assert_eq!(taint_chain_ticks, 1);
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    assert!(
+        report.findings[0].finding.source.file.contains("Real.java"),
+        "unreachable source-only files must not be walked into findings: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn call_argument_lambda_body_has_single_finding_owner() {
     let ws = workspace(&[(
         "/app/app.js",
