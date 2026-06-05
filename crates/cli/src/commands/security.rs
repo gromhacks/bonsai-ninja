@@ -86,10 +86,6 @@ fn open_security_project(
 /// rulepack once, merges any project-local overrides, then forwards
 /// to the per-action handler.
 pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<()> {
-    if page_cache::replay_if_hit(workspace)? {
-        return Ok(());
-    }
-
     // Extract --rules-dir from whichever action variant carries it.
     // Same shape on every variant; clap-derive forces a per-variant
     // field (`global = true` would route the flag but wouldn't show
@@ -581,7 +577,10 @@ fn cmd_sources(
         exclude_files: exclude_files.clone(),
         ..Default::default()
     };
-    let matches = project.security().sources(options)?;
+    let mut analysis_progress = SecurityAnalysisProgress::new();
+    let matches = project
+        .security()
+        .sources_with_progress(options, |event| analysis_progress.handle(event))?;
     render_match_table(
         workspace,
         "sources",
@@ -621,16 +620,20 @@ fn cmd_sinks(
 ) -> Result<()> {
     let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
-    let matches = project.security().sinks(SecurityInventoryOptions {
-        rule: rule.clone(),
-        rule_regex: rule_regex.clone(),
-        severity: sev_floor,
-        tag: tag.clone(),
-        category: category.clone(),
-        files: files.clone(),
-        exclude_files: exclude_files.clone(),
-        ..Default::default()
-    })?;
+    let mut analysis_progress = SecurityAnalysisProgress::new();
+    let matches = project.security().sinks_with_progress(
+        SecurityInventoryOptions {
+            rule: rule.clone(),
+            rule_regex: rule_regex.clone(),
+            severity: sev_floor,
+            tag: tag.clone(),
+            category: category.clone(),
+            files: files.clone(),
+            exclude_files: exclude_files.clone(),
+            ..Default::default()
+        },
+        |event| analysis_progress.handle(event),
+    )?;
     render_match_table(
         workspace,
         "sinks",
@@ -670,16 +673,20 @@ fn cmd_sanitizers(
 ) -> Result<()> {
     let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
-    let matches = project.security().sanitizers(SecurityInventoryOptions {
-        rule: rule.clone(),
-        rule_regex: rule_regex.clone(),
-        tag: tag.clone(),
-        severity: sev_floor,
-        category: category.clone(),
-        files: files.clone(),
-        exclude_files: exclude_files.clone(),
-        ..Default::default()
-    })?;
+    let mut analysis_progress = SecurityAnalysisProgress::new();
+    let matches = project.security().sanitizers_with_progress(
+        SecurityInventoryOptions {
+            rule: rule.clone(),
+            rule_regex: rule_regex.clone(),
+            tag: tag.clone(),
+            severity: sev_floor,
+            category: category.clone(),
+            files: files.clone(),
+            exclude_files: exclude_files.clone(),
+            ..Default::default()
+        },
+        |event| analysis_progress.handle(event),
+    )?;
     render_match_table(
         workspace,
         "sanitizers",
@@ -715,12 +722,14 @@ fn cmd_deps(
     format: BrowseFormat,
 ) -> Result<()> {
     let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let collect_progress = ScopedProgress::new("collecting dependency inventory");
     let inv = project.security().deps(DependencyInventoryOptions {
         framework: framework.clone(),
         severity: parse_severity_flag(severity.as_deref())?,
         files: files.clone(),
         exclude_files: exclude_files.clone(),
     })?;
+    collect_progress.finish();
 
     let filters_hash = filter_signature(&[
         ("kind", "deps"),
@@ -739,6 +748,7 @@ fn cmd_deps(
 
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
+            let render_progress = ScopedProgress::new("rendering deps JSON");
             emit_json_paged_cached(
                 workspace,
                 &inv.rows,
@@ -747,8 +757,10 @@ fn cmd_deps(
                 filters_hash,
                 cost,
             )?;
+            render_progress.finish();
         }
         BrowseFormat::Text => {
+            let render_progress = ScopedProgress::new("rendering deps page");
             page_cache::emit_paged_text(
                 workspace,
                 &inv.rows,
@@ -781,6 +793,7 @@ fn cmd_deps(
                     Ok(())
                 },
             )?;
+            render_progress.finish();
         }
     }
     Ok(())
@@ -946,6 +959,7 @@ fn cmd_flows(
     // accidental full-report render. JSON `--all` remains the complete
     // machine-readable path.
     let indexed: Vec<usize> = (0..findings.len()).collect();
+    let cost_progress = ScopedProgress::new("estimating taint page costs");
     let function_costs = function_costs_for_paths(
         ws,
         findings
@@ -953,10 +967,12 @@ fn cmd_flows(
             .flat_map(|finding| finding.chain_funcs.iter().copied()),
         true,
     );
+    cost_progress.finish();
     let cost_finding_text = |finding_index: &usize| {
         finding_text_cost_bytes(&findings[*finding_index], pack, &function_costs)
             + paging::TABLE_ROW_CHROME_BYTES
     };
+    let pagination_progress = ScopedProgress::new("paginating taint findings");
     let (_current_idx, current_info) = paging::paginate(
         &indexed,
         &paging_cfg,
@@ -966,6 +982,8 @@ fn cmd_flows(
     );
     let total_pages = current_info.total_pages;
     let current_page = current_info.page_number;
+    pagination_progress.finish();
+    let page_render_progress = ScopedProgress::new("rendering taint page window");
     let mut cached_pages = Vec::new();
     for page_number in page_cache::eager_window(current_page, total_pages) {
         let mut page_cfg = paging_cfg.clone();
@@ -999,6 +1017,7 @@ fn cmd_flows(
             text,
         });
     }
+    page_render_progress.finish();
     let _ = paging::paginate(
         &indexed,
         &paging_cfg,
@@ -1006,9 +1025,11 @@ fn cmd_flows(
         filters_hash,
         cost_finding_text,
     );
+    let cache_progress = ScopedProgress::new("saving taint page cache");
     if let Err(e) = page_cache::save_pages(workspace, cached_pages.clone()) {
         tracing::debug!("page cache save failed: {e}");
     }
+    cache_progress.finish();
     render_progress.finish();
     if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
         page_cache::emit_cached_text(&page.text)?;
@@ -1258,11 +1279,14 @@ fn cmd_source_analysis(
         }
         SourceAnalysisFormat::Text => {
             let render_progress = ScopedProgress::new("rendering source page");
+            let cost_progress = ScopedProgress::new("estimating source page costs");
             let function_costs =
                 function_costs_for_paths(ws, candidates.iter().flat_map(|c| c.path.iter().copied()), true);
+            cost_progress.finish();
             let text_cost = |f: &CombinedSourceAnalysisCandidate| {
                 source_analysis_text_cost_bytes(f, pack, &function_costs) + paging::TABLE_ROW_CHROME_BYTES
             };
+            let pagination_progress = ScopedProgress::new("paginating source flows");
             let (_current, current_info) = paging::paginate(
                 &candidates,
                 &paging_cfg,
@@ -1272,6 +1296,8 @@ fn cmd_source_analysis(
             );
             let total_pages = current_info.total_pages;
             let current_page = current_info.page_number;
+            pagination_progress.finish();
+            let page_render_progress = ScopedProgress::new("rendering source page window");
             let mut cached_pages = Vec::new();
             for page_number in page_cache::eager_window(current_page, total_pages) {
                 let mut page_cfg = paging_cfg.clone();
@@ -1301,6 +1327,7 @@ fn cmd_source_analysis(
                     text,
                 });
             }
+            page_render_progress.finish();
             let _ = paging::paginate(
                 &candidates,
                 &paging_cfg,
@@ -1308,9 +1335,11 @@ fn cmd_source_analysis(
                 filters_hash,
                 text_cost,
             );
+            let cache_progress = ScopedProgress::new("saving source page cache");
             if let Err(e) = page_cache::save_pages(workspace, cached_pages.clone()) {
                 tracing::debug!("page cache save failed: {e}");
             }
+            cache_progress.finish();
             render_progress.finish();
             if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
                 page_cache::emit_cached_text(&page.text)?;
@@ -2310,24 +2339,45 @@ struct SecurityAnalysisProgress {
 
 struct ScopedProgress {
     bar: Option<ProgressBar>,
+    label: String,
+    started: Instant,
+    finished: bool,
 }
 
 impl ScopedProgress {
     fn new(label: &str) -> Self {
         Self {
             bar: Some(progress::spinner(label)),
+            label: label.to_string(),
+            started: Instant::now(),
+            finished: false,
         }
     }
 
     fn finish(mut self) {
+        self.log_timing();
+        self.finished = true;
         if let Some(bar) = self.bar.take() {
             bar.finish_and_clear();
+        }
+    }
+
+    fn log_timing(&self) {
+        if debug_category_enabled("security-phase") {
+            eprintln!(
+                "[security-phase] {}: {:.3}s",
+                self.label,
+                self.started.elapsed().as_secs_f64()
+            );
         }
     }
 }
 
 impl Drop for ScopedProgress {
     fn drop(&mut self) {
+        if !self.finished {
+            self.log_timing();
+        }
         if let Some(bar) = self.bar.take() {
             bar.finish_and_clear();
         }
@@ -2527,6 +2577,8 @@ fn render_match_table(
 
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
+            let render_label = format!("rendering {label} JSON");
+            let render_progress = ScopedProgress::new(&render_label);
             let rows = security_match_rows(pack, matches);
             let cost_row = |_: &SecurityMatchRow| 512u64;
             let command = format!("security/{label}");
@@ -2549,8 +2601,11 @@ fn render_match_table(
                     Ok(())
                 },
             )?;
+            render_progress.finish();
         }
         BrowseFormat::Text => {
+            let render_label = format!("rendering {label} page");
+            let render_progress = ScopedProgress::new(&render_label);
             let command = format!("security/{label}");
             page_cache::emit_paged_text(
                 workspace,
@@ -2589,6 +2644,7 @@ fn render_match_table(
                     Ok(())
                 },
             )?;
+            render_progress.finish();
         }
     }
     Ok(())

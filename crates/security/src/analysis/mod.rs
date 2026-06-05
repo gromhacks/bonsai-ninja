@@ -12,7 +12,7 @@ use crate::finding::{
 };
 use crate::loader::Rulepack;
 use crate::matcher::{
-    infer_entry_point_sources, match_rules_against_facts_for_sink_inventory_on_files,
+    infer_entry_point_sources, match_rules_against_facts_for_sink_inventory_with_progress_on_files,
     match_rules_against_facts_for_taint_with_progress_on_files,
     match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
     InterTaintView, RuleMatch,
@@ -1435,6 +1435,18 @@ pub fn source_inventory(
     pack: &Rulepack,
     options: SecurityInventoryOptions,
 ) -> Result<Vec<RuleMatch>> {
+    source_inventory_with_progress(ws, pack, options, |_| {})
+}
+
+pub fn source_inventory_with_progress<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: SecurityInventoryOptions,
+    mut on_progress: F,
+) -> Result<Vec<RuleMatch>>
+where
+    F: FnMut(AnalysisProgress),
+{
     let mut selected = select_rules(
         pack,
         RuleKind::Source,
@@ -1453,10 +1465,23 @@ pub fn source_inventory(
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
-    let mut matches = match_rules_against_facts_with_progress_on_files(ws, &selected, &scan_files, || {});
+    let total_files = scan_files.len() as u64;
+    let mut matches = gather_matches_phased(
+        ws,
+        &selected,
+        "matching source rules",
+        &scan_files,
+        total_files,
+        &mut on_progress,
+    );
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "finalizing matches",
+        total: 0,
+    });
     filter_by_path(&mut matches, &options.files, &options.exclude_files);
     sort_matches(&mut matches);
     dedup_inventory_matches(&mut matches);
+    on_progress(AnalysisProgress::PhaseFinished);
     Ok(matches)
 }
 
@@ -1465,6 +1490,18 @@ pub fn sink_inventory(
     pack: &Rulepack,
     options: SecurityInventoryOptions,
 ) -> Result<Vec<RuleMatch>> {
+    sink_inventory_with_progress(ws, pack, options, |_| {})
+}
+
+pub fn sink_inventory_with_progress<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: SecurityInventoryOptions,
+    mut on_progress: F,
+) -> Result<Vec<RuleMatch>>
+where
+    F: FnMut(AnalysisProgress),
+{
     let mut selected = select_rules(
         pack,
         RuleKind::Sink,
@@ -1490,10 +1527,25 @@ pub fn sink_inventory(
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
-    let mut matches = match_rules_against_facts_for_sink_inventory_on_files(ws, &selected, &scan_files);
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "matching sink rules",
+        total: scan_files.len() as u64,
+    });
+    let mut matches = match_rules_against_facts_for_sink_inventory_with_progress_on_files(
+        ws,
+        &selected,
+        &scan_files,
+        || on_progress(AnalysisProgress::PhaseTicked),
+    );
+    on_progress(AnalysisProgress::PhaseFinished);
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "finalizing matches",
+        total: 0,
+    });
     filter_by_path(&mut matches, &options.files, &options.exclude_files);
     sort_matches(&mut matches);
     dedup_inventory_matches(&mut matches);
+    on_progress(AnalysisProgress::PhaseFinished);
     Ok(matches)
 }
 
@@ -1502,6 +1554,18 @@ pub fn sanitizer_inventory(
     pack: &Rulepack,
     options: SecurityInventoryOptions,
 ) -> Result<Vec<RuleMatch>> {
+    sanitizer_inventory_with_progress(ws, pack, options, |_| {})
+}
+
+pub fn sanitizer_inventory_with_progress<F>(
+    ws: &Workspace,
+    pack: &Rulepack,
+    options: SecurityInventoryOptions,
+    mut on_progress: F,
+) -> Result<Vec<RuleMatch>>
+where
+    F: FnMut(AnalysisProgress),
+{
     let mut selected = select_rules(
         pack,
         RuleKind::Sanitizer,
@@ -1527,10 +1591,23 @@ pub fn sanitizer_inventory(
     )?;
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
-    let mut matches = match_rules_against_facts_with_progress_on_files(ws, &selected, &scan_files, || {});
+    let total_files = scan_files.len() as u64;
+    let mut matches = gather_matches_phased(
+        ws,
+        &selected,
+        "matching sanitizer rules",
+        &scan_files,
+        total_files,
+        &mut on_progress,
+    );
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "finalizing matches",
+        total: 0,
+    });
     filter_by_path(&mut matches, &options.files, &options.exclude_files);
     sort_matches(&mut matches);
     dedup_inventory_matches(&mut matches);
+    on_progress(AnalysisProgress::PhaseFinished);
     Ok(matches)
 }
 

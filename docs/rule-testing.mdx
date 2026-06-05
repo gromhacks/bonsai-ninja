@@ -113,6 +113,36 @@ the 3.1 GiB chunked IDG factstore. A valid large-codebase run should have
 `analysis_complete: true`, no incomplete reasons, no malformed page metadata,
 no `payload exceeds 4GiB` warning, and no `save_to_disk failed` warning.
 
+`BONSAI_DEBUG=security-phase` writes phase timing to stderr even when
+`--no-progress` keeps stdout clean. For taint-analysis, expect separate timings
+for rule matching, semantic graph construction, taint-chain building,
+finding finalization, and JSON/text rendering. Text output also reports page
+cost estimation, pagination, page-window rendering, and page-cache save time.
+The rendered page cache reuses the indexed source fingerprint from the opened
+workspace, so a first-page render should not perform a second full source-tree
+content scan after analysis completes.
+Rendered-page caching is intentionally opportunistic: it renders the first four
+pages plus the current page and up to the next three pages. This keeps
+`--page 2` cheap without making large source-body reports wait for dozens of
+future pages to render before stdout is returned.
+
+Add `idg-build` when a run is slow after rule matching. That expands the
+semantic graph phase into map construction, transfer, call-name aliases,
+call-edge site indexing, IDG stitching, field forwarding, and receiver
+propagation. For package-oriented languages, call-edge site counts should stay
+proportional to real call sites. A sibling-package same-name explosion means
+module/package narrowing regressed.
+
+The 2026-06-05 synthetic Java mega-flow clone benchmark generated 2,500 unique
+Java packages, each with the four-file servlet-to-command-injection mega-flow
+fixture: 10,000 valid `.java` files, 50,000 functions, and 2,500 expected
+findings. Release `index` completed in 2.25s. Release `security taint-analysis
+--format json --all` completed cold in 30.81s with 2,500 findings. In the fixed
+run, the IDG call-edge site index had 40,000 edges and call-name aliasing took
+0.025s. The pre-fix shape retained sibling-package candidates and was still
+CPU-bound after several minutes; a 400-file diagnostic clone showed 51,100
+call-edge site edges before the fix versus 1,600 after it.
+
 The 2026-06-04 source-to-sink scheduler regression pass verifies that
 taint-analysis does not analyze every source in a large project when most
 sources cannot reach any sink. Source eligibility is computed to fixpoint over

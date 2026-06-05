@@ -19,7 +19,6 @@
 //! per-lang `Expected::Pass` (no findings is the success
 //! condition).
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -117,7 +116,7 @@ fn audit_one(lang: &'static str) -> LangAuditResult {
 #[test]
 fn no_false_positives_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -143,7 +142,7 @@ fn no_false_positives_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pass => {
                 if let Some(reason) = r.skipped.as_deref() {

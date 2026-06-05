@@ -15,7 +15,6 @@
 //! (and shouldn't try). This audit pins which adapters have the
 //! capability today and locks the gap-list in for follow-up.
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -108,7 +107,7 @@ fn audit_one(lang: &'static str) -> LangAuditResult {
 #[test]
 fn receiver_type_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -140,7 +139,7 @@ fn receiver_type_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pass => {
                 if let Some(reason) = r.skipped.as_deref() {

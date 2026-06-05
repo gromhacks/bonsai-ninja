@@ -15,7 +15,6 @@
 //! is responsible for resolving `<callback_arg>(t)` against
 //! workspace functions and propagating taint.
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -108,7 +107,7 @@ fn audit_one(lang: &'static str) -> Result_ {
 #[test]
 fn callback_flow_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -135,7 +134,7 @@ fn callback_flow_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pending => None,
             Expected::Pass => {

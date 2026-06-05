@@ -19,7 +19,6 @@
 //! the adapter / resolver / callgraph layers — not in rules. This
 //! test gives each adapter a deterministic, locked-in audit row.
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -113,7 +112,7 @@ fn audit_one(lang: &'static str) -> LangAuditResult {
     // `Executor.cs`; Lua/Erlang/etc use `executor.lua`.
     let sink_in_executor = report
         .findings
-        .par_iter()
+        .iter()
         .any(|f| f.finding.sink.file.to_ascii_lowercase().contains("executor"));
     LangAuditResult {
         lang,
@@ -126,7 +125,7 @@ fn audit_one(lang: &'static str) -> LangAuditResult {
 #[test]
 fn cross_file_chain_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -161,7 +160,7 @@ fn cross_file_chain_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pending => None,
             Expected::Pass => {

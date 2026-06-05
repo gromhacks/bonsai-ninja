@@ -14,7 +14,6 @@
 //! evidence, not propagation blockers. This audit exercises the
 //! reporting credit on a per-language sample.
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -114,14 +113,14 @@ fn audit_one(lang: &'static str) -> Result_ {
     let unsanitized_fired = report.findings.iter().any(|f| {
         f.finding
             .chain_display
-            .par_iter()
+            .iter()
             .any(|hop| hop.to_ascii_lowercase().contains("unsanitized"))
     });
     // Detect the sanitized leg by chain entry name containing
     // "sanitized" but not "unsanitized".
     let sanitized_statuses = report
         .findings
-        .par_iter()
+        .iter()
         .filter_map(|f| {
             let is_sanitized_leg = f.finding.chain_display.iter().any(|hop| {
                 let lower = hop.to_ascii_lowercase();
@@ -142,7 +141,7 @@ fn audit_one(lang: &'static str) -> Result_ {
 #[test]
 fn sanitizer_credit_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -165,7 +164,7 @@ fn sanitizer_credit_audit_per_language() {
         } else {
             let sanitized_has_bad_status = r
                 .sanitized_statuses
-                .par_iter()
+                .iter()
                 .any(|status| *status != bonsai_security::FindingStatus::Sanitized);
             match (expected, r.unsanitized_fired, sanitized_has_bad_status) {
                 (Expected::Pass, true, false) => "ok",
@@ -178,7 +177,7 @@ fn sanitizer_credit_audit_per_language() {
                 (Expected::WrongContext, true, _) => {
                     let all_wrong_context = r
                         .sanitized_statuses
-                        .par_iter()
+                        .iter()
                         .all(|status| *status == bonsai_security::FindingStatus::WrongContext);
                     if all_wrong_context {
                         "ok"
@@ -204,7 +203,7 @@ fn sanitizer_credit_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pending => None,
             Expected::Pass => {
@@ -214,8 +213,8 @@ fn sanitizer_credit_audit_per_language() {
                     Some(format!("{}: unsanitized leg missing", r.lang))
                 } else {
                     r.sanitized_statuses
-                        .par_iter()
-                        .find_any(|status| **status != bonsai_security::FindingStatus::Sanitized)
+                        .iter()
+                        .find(|status| **status != bonsai_security::FindingStatus::Sanitized)
                         .map(|status| {
                             format!(
                                 "{}: sanitized leg reported with {} status",
@@ -234,8 +233,8 @@ fn sanitizer_credit_audit_per_language() {
                     Some(format!("{}: wrong-context sanitizer leg missing", r.lang))
                 } else {
                     r.sanitized_statuses
-                        .par_iter()
-                        .find_any(|status| **status != bonsai_security::FindingStatus::WrongContext)
+                        .iter()
+                        .find(|status| **status != bonsai_security::FindingStatus::WrongContext)
                         .map(|status| {
                             format!(
                                 "{}: wrong-context sanitizer leg reported with {} status",

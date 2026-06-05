@@ -1175,6 +1175,14 @@ fn add_resolved_call_edges(
                         &mut candidates,
                     );
                 }
+                if !candidates.is_empty() {
+                    retain_same_module_candidates_when_present(
+                        global,
+                        caller_decl,
+                        caller_language,
+                        &mut candidates,
+                    );
+                }
                 if c_family_linked_language(caller_language) && !candidates.is_empty() {
                     build_targets.retain_candidates_linked_with(
                         global,
@@ -1297,6 +1305,14 @@ fn add_resolved_call_edges(
                         global,
                         caller_language,
                         language_for_file,
+                        &mut candidates,
+                    );
+                }
+                if !candidates.is_empty() {
+                    retain_same_module_candidates_when_present(
+                        global,
+                        caller_decl,
+                        caller_language,
                         &mut candidates,
                     );
                 }
@@ -2285,6 +2301,9 @@ pub fn collect_workspace_local_callable_bindings(
             ) {
                 continue;
             }
+            if !flow_events_contain_callable_reference_assignment(&decl.flow_events) {
+                continue;
+            }
             let alias_targets = alias_targets_for_decl(&empty_file_alias_targets, decl);
             let bindings = collect_local_callable_bindings_with_alias_index(
                 &decl.flow_events,
@@ -2299,6 +2318,57 @@ pub fn collect_workspace_local_callable_bindings(
         }
     }
     out
+}
+
+fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                source_call,
+                source_name,
+                source_names,
+                value_kind,
+                ..
+            } => {
+                if source_call.is_none()
+                    && assign_rhs_is_callable_reference(source_name.as_deref(), source_names, *value_kind)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if flow_events_contain_callable_reference_assignment(then_events)
+                    || flow_events_contain_callable_reference_assignment(else_events)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if flow_events_contain_callable_reference_assignment(body) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if flow_events_contain_callable_reference_assignment(body)
+                    || flow_events_contain_callable_reference_assignment(catch_events)
+                    || flow_events_contain_callable_reference_assignment(finally_events)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub fn collect_local_callable_bindings_with_aliases(
@@ -3980,6 +4050,43 @@ fn func_language_matches(
         return true;
     };
     caller_language == callee_language
+}
+
+fn retain_same_module_candidates_when_present(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    caller_language: Option<&'static str>,
+    candidates: &mut Vec<FuncId>,
+) {
+    if candidates.len() <= 1
+        || caller_decl.module_path.is_empty()
+        || !module_local_resolution_language(caller_language)
+    {
+        return;
+    }
+    let same_module = candidates
+        .iter()
+        .filter(|func| {
+            global
+                .decl_of(SymbolId::new(func.raw()))
+                .is_some_and(|decl| decl.module_path.matches(&caller_decl.module_path))
+        })
+        .count();
+    if same_module == 0 || same_module == candidates.len() {
+        return;
+    }
+    candidates.retain(|func| {
+        global
+            .decl_of(SymbolId::new(func.raw()))
+            .is_some_and(|decl| decl.module_path.matches(&caller_decl.module_path))
+    });
+}
+
+fn module_local_resolution_language(language: Option<&'static str>) -> bool {
+    matches!(
+        language,
+        Some("java" | "kotlin" | "scala" | "csharp" | "go" | "php")
+    )
 }
 
 fn colon_remote_call(name: &str) -> bool {

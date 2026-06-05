@@ -114,7 +114,10 @@ fn open_project_with_bonsai_and_options(
     options: bonsai_sdk::OpenOptions,
 ) -> Result<(Project, WorkspaceFooter)> {
     let progress = workspace_open_progress();
-    let project = bonsai.open_with_options_and_progress(root, options, progress)?;
+    let project = bonsai
+        .open_with_options_and_progress(root, options, progress)?
+        .with_auto_refresh(false);
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     let footer = WorkspaceFooter::new();
     Ok((project, footer))
 }

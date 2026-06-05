@@ -34,7 +34,6 @@
 //! callgraph, field/container facts, or taint propagation — not
 //! something a rule should patch.
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -191,7 +190,7 @@ fn audit_one(lang: &'static str) -> LangAuditResult {
 #[test]
 fn assignment_chain_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -221,7 +220,7 @@ fn assignment_chain_audit_per_language() {
     // Both "regression" and "gap closed" fail — the second forces
     // the table to be updated when an adapter team fixes a gap.
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pending => None,
             Expected::Pass => {

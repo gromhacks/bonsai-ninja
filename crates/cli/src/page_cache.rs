@@ -3,11 +3,11 @@
 //! Pagination cursors are useful only if turning the page is cheap. The
 //! row/flow analysis has already happened on page 1, so page 2 should
 //! not reopen a large workspace and recompute the same report. This
-//! module stores fully rendered pages under `.bonsai/page-cache.v3`
-//! keyed by the normalized command line (with `--page` removed) and a
-//! cheap workspace freshness fingerprint.
+//! module stores fully rendered pages under `.bonsai/page-cache.v5`
+//! keyed by the normalized command line (with `--page` removed) and
+//! source/rulepack/dependency freshness fingerprints.
 
-use crate::{out_count, paging};
+use crate::{out_count, paging, progress};
 use bonsai_common::dependency_metadata::collect_dependency_metadata_fingerprints;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -15,15 +15,19 @@ use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static PAGE_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static REMEMBERED_WORKSPACE_FINGERPRINT: OnceLock<
+    Mutex<Option<(PathBuf, bonsai_sdk::WorkspaceContentFingerprint)>>,
+> = OnceLock::new();
 
 thread_local! {
     static CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-const EAGER_PAGE_LIMIT: u64 = 32;
-const RENDER_CACHE_VERSION: u32 = 3;
+const EAGER_PAGE_LIMIT: u64 = 4;
+const RENDER_CACHE_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
@@ -37,7 +41,7 @@ struct PageCacheFile {
     version: u32,
     binary_version: String,
     matcher_policy_fingerprint: u128,
-    workspace_fingerprint: u64,
+    workspace_fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
     dependency_metadata_fingerprint: u64,
     rulepack_fingerprint: Option<u64>,
     normalized_argv_hash: u64,
@@ -79,19 +83,47 @@ pub(crate) fn emit_cached_text(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn remember_workspace_fingerprint(
+    workspace: &Path,
+    fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
+) {
+    let stable_workspace = stable_root_path(workspace);
+    *REMEMBERED_WORKSPACE_FINGERPRINT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("page-cache fingerprint lock") = Some((stable_workspace, fingerprint));
+}
+
+fn remembered_workspace_fingerprint(workspace: &Path) -> Option<bonsai_sdk::WorkspaceContentFingerprint> {
+    let stable_workspace = stable_root_path(workspace);
+    REMEMBERED_WORKSPACE_FINGERPRINT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("page-cache fingerprint lock")
+        .as_ref()
+        .and_then(|(remembered_root, fingerprint)| {
+            (remembered_root == &stable_workspace).then_some(*fingerprint)
+        })
+}
+
 pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
     if requested_page_arg().is_none() {
         return Ok(false);
     }
+    let bar = progress::spinner("validating rendered page cache");
     let Some(cache) = read_cache(workspace)? else {
+        bar.finish_and_clear();
         return Ok(false);
     };
     if !cache_is_fresh(workspace, &cache)? {
+        bar.finish_and_clear();
         return Ok(false);
     }
     let Some(page) = requested_page(&cache.pages) else {
+        bar.finish_and_clear();
         return Ok(false);
     };
+    bar.finish_and_clear();
     emit_cached_text(&page.text)?;
     Ok(true)
 }
@@ -106,7 +138,10 @@ pub(crate) fn save_pages(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Re
         version: RENDER_CACHE_VERSION,
         binary_version: binary_cache_fingerprint().to_string(),
         matcher_policy_fingerprint: bonsai_common::MATCHER_POLICY_FINGERPRINT,
-        workspace_fingerprint: workspace_fingerprint(workspace)?,
+        workspace_fingerprint: match remembered_workspace_fingerprint(workspace) {
+            Some(fingerprint) => fingerprint,
+            None => workspace_fingerprint(workspace)?,
+        },
         dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
         rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
         normalized_argv_hash: normalized_argv_hash(),
@@ -180,6 +215,8 @@ where
     let (_, current_info) = paging::paginate(rows, cfg, command, filters_hash, &row_cost_bytes);
     let current_page = current_info.page_number;
     let mut cached_pages = Vec::new();
+    let render_label = format!("rendering {command} page");
+    let render_bar = progress::spinner(&render_label);
     for page_number in eager_window(current_page, current_info.total_pages) {
         let mut page_cfg = cfg.clone();
         if page_number != current_page {
@@ -193,9 +230,12 @@ where
             text,
         });
     }
+    render_bar.finish_and_clear();
+    let cache_bar = progress::spinner("saving rendered page cache");
     if let Err(e) = save_pages(workspace, cached_pages.clone()) {
         tracing::debug!("page cache save failed: {e}");
     }
+    cache_bar.finish_and_clear();
     if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
         emit_cached_text(&page.text)?;
     }
@@ -285,7 +325,7 @@ fn cache_is_fresh(workspace: &Path, cache: &PageCacheFile) -> anyhow::Result<boo
 }
 
 fn cache_dir(workspace: &Path) -> PathBuf {
-    bonsai_common::workspace_bonsai_dir(workspace).join("page-cache.v3")
+    bonsai_common::workspace_bonsai_dir(workspace).join("page-cache.v5")
 }
 
 fn cache_path(workspace: &Path) -> PathBuf {
@@ -317,79 +357,12 @@ fn normalized_argv_without_page() -> Vec<String> {
     out
 }
 
-fn workspace_fingerprint(root: &Path) -> anyhow::Result<u64> {
-    // Per docs/contributing/design-patterns.mdx::Lossless Caches — cached and
-    // uncached results must be bit-for-bit equal. The dataflow
-    // sidecar invalidates by file content hash; the page cache must
-    // do the same so an mtime-preserving rewrite (cp -p, git
-    // checkout, rsync) cannot leave a stale rendered page over a
-    // refreshed dataflow graph.
-    let mut entries = Vec::new();
-    collect_file_fingerprints(root, root, &mut entries)?;
-    entries.sort();
-    let mut h = bonsai_hash::Hasher::new();
-    h.absorb(stable_root_path(root).to_string_lossy().as_bytes());
-    h.absorb_separator();
-    for item in entries {
-        h.absorb(item.as_bytes());
-        h.absorb_separator();
-    }
-    Ok(h.finish())
-}
-
-fn collect_file_fingerprints(root: &Path, dir: &Path, out: &mut Vec<String>) -> anyhow::Result<()> {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in read_dir {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        if file_name == ".git" || file_name == ".bonsai" || file_name == "target" {
-            continue;
-        }
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_file_fingerprints(root, &path, out)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let md = match entry.metadata() {
-            Ok(md) => md,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let rel = path.strip_prefix(root).unwrap_or(&path).display();
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                tracing::debug!(
-                    path = %path.display(),
-                    error = %error,
-                    "page-cache fingerprint skipped unreadable file"
-                );
-                continue;
-            }
-        };
-        let hash = page_cache_content_hash(&bytes);
-        out.push(format!("{rel}\0{}\0{hash:016x}", md.len()));
-    }
-    Ok(())
+fn workspace_fingerprint(root: &Path) -> anyhow::Result<bonsai_sdk::WorkspaceContentFingerprint> {
+    // Rendered CLI output is derived from indexed source files, dependency
+    // metadata, rulepacks, and command args. Use the SDK's supported-source
+    // fingerprint so first-page cache saves do not recursively re-read every
+    // file in large workspaces after analysis has already completed.
+    bonsai_sdk::workspace_source_fingerprint_from_disk(root)
 }
 
 /// FNV-1a 64-bit, the same digest the dataflow sidecar uses
