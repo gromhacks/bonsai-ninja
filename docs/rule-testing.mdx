@@ -113,14 +113,19 @@ the 3.1 GiB chunked IDG factstore. A valid large-codebase run should have
 `analysis_complete: true`, no incomplete reasons, no malformed page metadata,
 no `payload exceeds 4GiB` warning, and no `save_to_disk failed` warning.
 
-The 2026-06-04 Java source-to-sink scheduler regression pass verifies that
-taint-analysis does not walk every source in a large project when most sources
-cannot reach any sink. Source eligibility is computed to fixpoint over semantic
-IDG function edges, including callback, return, receiver, and field-propagation
-edges. The taint budget must not cap this eligibility check. Once a source group
-is eligible, the per-source IDG walk is cut to the proven source-to-sink
-corridor; if no semantic corridor exists, the group is skipped instead of
-falling back to a whole-graph walk.
+The 2026-06-04 source-to-sink scheduler regression pass verifies that
+taint-analysis does not analyze every source in a large project when most
+sources cannot reach any sink. Source eligibility is computed to fixpoint over
+semantic IDG function edges for every supported language, including callback,
+return, receiver, and field-propagation edges. The taint budget must not cap
+this eligibility check. Once a source group is eligible, the per-source IDG
+graph build is cut to the proven source-to-sink function corridor; if no
+semantic corridor exists, the group is skipped instead of falling back to a
+workspace-wide graph. Same-file source batches also get a concrete seed-node to
+sink-node reachability prefilter so adapter module wrappers or dense files do
+not schedule source-only calls. Cross-file node-cut uncertainty stays scheduled
+and is decided by the normal corridor-scoped semantic taint graph to avoid false
+negatives.
 
 Release-binary Java scale checks from the same pass:
 

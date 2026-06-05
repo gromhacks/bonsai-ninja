@@ -22,11 +22,12 @@ use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recog
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AssignValueKind, LanguageRegistry};
 use bonsai_taint::{
-    CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig,
-    OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
-    ValueFlowGraph,
+    apply_configured_transfer_fixpoint, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph,
+    InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs,
+    TaintedCall, TaintedCallEdge, TokenSet, ValueFlowGraph,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -38,6 +39,8 @@ use std::time::{Duration, Instant};
 
 type RankedCallPath = std::cmp::Reverse<(i64, u32, u32, Vec<FuncId>)>;
 type InventoryMatchIdentity = (String, String, u32, u32, String, String, Option<String>);
+type SourceMatchDedupeKey = (String, String, u64, u64, String);
+type SourceMatchDedupeValue<'a> = (usize, &'a RuleMatch, FuncId, u64);
 
 /// Phase-aware progress event emitted by `run_taint_analysis_with_phase_progress`
 /// and `run_source_analysis_with_phase_progress`. Long-running phases
@@ -4929,11 +4932,34 @@ where
         index: usize,
         src: &'a RuleMatch,
     }
-    let mut sources_by_func: AHashMap<FuncId, Vec<SourceForFunction<'_>>> = AHashMap::new();
+    let mut best_sources: AHashMap<SourceMatchDedupeKey, SourceMatchDedupeValue<'_>> = AHashMap::new();
     for (idx, src) in source_hits.iter().enumerate() {
         let Some(src_func_id) = func_id_for_match(ws, src) else {
             continue;
         };
+        let specificity = global
+            .decl_of(SymbolId::new(src_func_id.raw()))
+            .map(|decl| decl.span.len())
+            .unwrap_or(u64::MAX);
+        let key = (
+            src.rule_id.clone(),
+            src.file.clone(),
+            src.span.start,
+            src.span.end,
+            src.match_text.clone(),
+        );
+        match best_sources.get_mut(&key) {
+            Some(existing) if specificity < existing.3 || (specificity == existing.3 && idx < existing.0) => {
+                *existing = (idx, src, src_func_id, specificity);
+            }
+            Some(_) => {}
+            None => {
+                best_sources.insert(key, (idx, src, src_func_id, specificity));
+            }
+        }
+    }
+    let mut sources_by_func: AHashMap<FuncId, Vec<SourceForFunction<'_>>> = AHashMap::new();
+    for (_, (idx, src, src_func_id, _)) in best_sources {
         sources_by_func
             .entry(src_func_id)
             .or_default()
@@ -5042,35 +5068,16 @@ where
         source_groups_sorted.retain(|(func, _)| reachable.contains(func));
     }
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
-    bonsai_diagnostics::debug_log!(
-        "security-phase",
-        "source groups scheduled total={} filtered={} prefilter_enabled={} reachable_funcs={}",
-        source_groups.len(),
-        source_groups_sorted.len(),
-        source_sink_prefilter_enabled,
-        source_funcs_that_can_reach_sinks
-            .as_ref()
-            .map_or(0, |reachable| reachable.len())
-    );
-    let total_groups = source_groups_sorted.len();
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "building taint chains",
-        total: total_groups as u64,
-    });
+
+    struct ScheduledSourceGroup {
+        src_func_id: FuncId,
+        indices: Vec<usize>,
+        corridor: SourceSinkCorridor,
+    }
+
     let debug_taint_phase = bonsai_diagnostics::debug::is_enabled("security-taint");
-    let build_source_group = |&(src_func_id, indices): &(FuncId, &Vec<usize>)| {
-        let group_started = debug_taint_phase.then(Instant::now);
-        let mut graph_nanos = 0u128;
-        let mut attribution_nanos = 0u128;
-        let mut graph_builds = 0usize;
-        let mut group_graph_hits = 0usize;
-        let mut workspace_graph_hits = 0usize;
-        let mut empty_graphs = 0usize;
-        let mut tainted_calls_seen = 0usize;
-        let mut sink_candidate_checks = 0usize;
-        let mut sink_matches = 0usize;
-        let mut lineage_misses = 0usize;
-        let mut group_out: Vec<FindingWithChain> = Vec::new();
+    let mut scheduled_source_groups = Vec::new();
+    for (src_func_id, indices) in source_groups_sorted {
         let Some(group_corridor) = semantic_function_graph.as_ref().and_then(|graph| {
             let reachable_to_sink = source_funcs_that_can_reach_sinks.as_ref()?;
             let corridor = graph.source_sink_corridor(src_func_id, &sink_func_set, reachable_to_sink);
@@ -5089,10 +5096,84 @@ where
                     indices.len()
                 );
             }
-            return group_out;
+            continue;
         };
-        let group_sink_func_targets = Some(&group_corridor.lineage_funcs);
-        let group_lineage_func_targets = Some(&group_corridor.lineage_funcs);
+        let target_nodes = sink_target_nodes_for_corridor(idg.as_ref(), &sink_by_func, &group_corridor);
+        let filtered_indices = if target_nodes.is_empty() {
+            indices.clone()
+        } else {
+            indices
+                .iter()
+                .copied()
+                .filter(|idx| {
+                    source_index_reaches_target_nodes(
+                        *idx,
+                        &source_work,
+                        pack,
+                        &config,
+                        global.as_ref(),
+                        idg.as_ref(),
+                        &target_nodes,
+                        Some(&group_corridor.lineage_funcs),
+                    )
+                })
+                .collect()
+        };
+        if filtered_indices.is_empty() {
+            if debug_taint_phase {
+                let name = global
+                    .decl_of(SymbolId::new(src_func_id.raw()))
+                    .map(|decl| decl.name.clone())
+                    .unwrap_or_default();
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "group func={}({}) sources={} skipped=no_seed_to_sink_node_cut",
+                    name,
+                    src_func_id.raw(),
+                    indices.len()
+                );
+            }
+            continue;
+        }
+        scheduled_source_groups.push(ScheduledSourceGroup {
+            src_func_id,
+            indices: filtered_indices,
+            corridor: group_corridor,
+        });
+    }
+
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "source groups scheduled total={} filtered={} prefilter_enabled={} reachable_funcs={}",
+        source_groups.len(),
+        scheduled_source_groups.len(),
+        source_sink_prefilter_enabled,
+        source_funcs_that_can_reach_sinks
+            .as_ref()
+            .map_or(0, |reachable| reachable.len())
+    );
+    let total_groups = scheduled_source_groups.len();
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building taint chains",
+        total: total_groups as u64,
+    });
+    let build_source_group = |group: &ScheduledSourceGroup| {
+        let src_func_id = group.src_func_id;
+        let indices = &group.indices;
+        let group_started = debug_taint_phase.then(Instant::now);
+        let mut graph_nanos = 0u128;
+        let mut attribution_nanos = 0u128;
+        let mut graph_builds = 0usize;
+        let mut group_graph_hits = 0usize;
+        let mut workspace_graph_hits = 0usize;
+        let mut empty_graphs = 0usize;
+        let mut tainted_calls_seen = 0usize;
+        let mut sink_candidate_checks = 0usize;
+        let mut sink_matches = 0usize;
+        let mut lineage_misses = 0usize;
+        let mut group_out: Vec<FindingWithChain> = Vec::new();
+        let group_sink_func_targets = Some(&group.corridor.lineage_funcs);
+        let group_lineage_func_targets = Some(&group.corridor.lineage_funcs);
         let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
             AHashSet::new();
         // Bounded L1 for this one source function. Several
@@ -5141,6 +5222,7 @@ where
                     ws,
                     anchor,
                     &output_arg_names,
+                    None,
                     group_sink_func_targets,
                     group_lineage_func_targets,
                 ));
@@ -5332,7 +5414,8 @@ where
         group_out
     };
     let worker_count = security_taint_worker_count();
-    let parallel_groups: Vec<Vec<FindingWithChain>> = if worker_count > 1 && source_groups_sorted.len() > 1 {
+    let parallel_groups: Vec<Vec<FindingWithChain>> = if worker_count > 1 && scheduled_source_groups.len() > 1
+    {
         match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
             Ok(pool) => {
                 let (tx, rx) = mpsc::channel();
@@ -5340,7 +5423,7 @@ where
                 std::thread::scope(|scope| {
                     let worker = scope.spawn(|| {
                         pool.install(|| {
-                            source_groups_sorted
+                            scheduled_source_groups
                                 .par_iter()
                                 .map(|group| {
                                     let out = build_source_group(group);
@@ -5374,8 +5457,8 @@ where
                 groups.unwrap_or_default()
             }
             Err(_) => {
-                let mut groups = Vec::with_capacity(source_groups_sorted.len());
-                for group in &source_groups_sorted {
+                let mut groups = Vec::with_capacity(scheduled_source_groups.len());
+                for group in &scheduled_source_groups {
                     groups.push(build_source_group(group));
                     on_progress(AnalysisProgress::PhaseTicked);
                 }
@@ -5383,8 +5466,8 @@ where
             }
         }
     } else {
-        let mut groups = Vec::with_capacity(source_groups_sorted.len());
-        for group in &source_groups_sorted {
+        let mut groups = Vec::with_capacity(scheduled_source_groups.len());
+        for group in &scheduled_source_groups {
             groups.push(build_source_group(group));
             on_progress(AnalysisProgress::PhaseTicked);
         }
@@ -5617,6 +5700,82 @@ fn append_taint_target_key(seed_key: &mut Vec<String>, label: &str, target_funcs
     seed_key.push(format!("__{label}@{encoded}"));
 }
 
+fn sink_target_nodes_for_corridor(
+    idg: &bonsai_idg::IdgQueryService,
+    sink_by_func: &AHashMap<FuncId, Vec<&RuleMatch>>,
+    corridor: &SourceSinkCorridor,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let mut out = Vec::new();
+    for func in &corridor.terminal_sinks {
+        let Some(sinks) = sink_by_func.get(func) else {
+            continue;
+        };
+        for sink in sinks {
+            out.extend(idg.nodes_at_span(*func, sink.span));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors exact graph seed resolution plus configured transfer overlays.
+fn source_index_reaches_target_nodes(
+    idx: usize,
+    source_work: &[(&RuleMatch, FuncId, TokenSet)],
+    pack: &Rulepack,
+    config: &InterTaintConfig,
+    global: &GlobalIndex,
+    idg: &bonsai_idg::IdgQueryService,
+    target_nodes: &[bonsai_idg::WsNodeId],
+    lineage_funcs: Option<&AHashSet<FuncId>>,
+) -> bool {
+    if target_nodes.is_empty() {
+        return true;
+    }
+    let Some((src, src_func_id, seeds)) = source_work.get(idx) else {
+        return false;
+    };
+    let output_arg_names = global
+        .decl_of(SymbolId::new(src_func_id.raw()))
+        .map(|d| output_arg_names_for_match(pack, src, d))
+        .unwrap_or_default();
+    let anchor = if rule_match_kind_is_param(pack, &src.rule_id) || src.rule_id.starts_with("entry-point.") {
+        None
+    } else {
+        Some(src.span)
+    };
+    let mut seed_nodes = effective_source_seed_nodes(*src_func_id, seeds, anchor, &output_arg_names, idg);
+    if seed_nodes.is_empty() {
+        return true;
+    }
+    apply_configured_transfer_fixpoint(
+        &mut seed_nodes,
+        &config.receiver_state_propagations,
+        &config.call_result_passthroughs,
+        &config.output_arg_flows,
+        global,
+        idg,
+        config.max_edge_precision,
+        lineage_funcs,
+    );
+    if !idg
+        .forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, config.max_edge_precision)
+        .is_empty()
+    {
+        return true;
+    }
+    let Some(source_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
+        return true;
+    };
+    let source_file = source_decl.span.file;
+    let same_file_target = target_nodes.iter().any(|node| {
+        idg.resolve_point(*node)
+            .is_some_and(|point| point.span.file == source_file)
+    });
+    !same_file_target
+}
+
 fn source_analysis_worker_count() -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
@@ -5662,44 +5821,56 @@ fn effective_source_seed_key(
     output_arg_names: &[String],
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<String> {
-    if let Some(span) = anchor {
-        let mut seed_nodes = Vec::new();
-        if !output_arg_names.is_empty() {
-            for arg_name in output_arg_names {
-                if arg_name.is_empty() {
-                    continue;
-                }
-                seed_nodes.extend(idg.nodes_for_name_after_span(source_func, arg_name, span));
-            }
-        }
-        if seed_nodes.is_empty() {
-            let anchor_nodes = idg.source_seed_nodes_at_span(source_func, span);
-            let anchor_has_call_return = anchor_nodes.iter().any(|node| {
-                idg.resolve_point(*node)
-                    .is_some_and(|point| point.kind == bonsai_idg::PointKind::CallRet)
-            });
-            if anchor_has_call_return {
-                seed_nodes = anchor_nodes;
-            } else {
-                let seed_names: Vec<String> = seeds.iter().cloned().collect();
-                seed_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
-                if seed_nodes.is_empty() {
-                    seed_nodes = anchor_nodes;
-                }
-            }
-        }
-        if !seed_nodes.is_empty() {
-            seed_nodes.sort();
-            seed_nodes.dedup();
-            let node_ids = seed_nodes
-                .iter()
-                .map(|node| node.0.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            return vec![format!("__idg_seed_nodes@{node_ids}")];
-        }
+    let seed_nodes = effective_source_seed_nodes(source_func, seeds, anchor, output_arg_names, idg);
+    if !seed_nodes.is_empty() {
+        let node_ids = seed_nodes
+            .iter()
+            .map(|node| node.0.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        return vec![format!("__idg_seed_nodes@{node_ids}")];
     }
     sorted_seed_key_with_anchor(seeds, anchor, output_arg_names)
+}
+
+fn effective_source_seed_nodes(
+    source_func: FuncId,
+    seeds: &TokenSet,
+    anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let Some(span) = anchor else {
+        return Vec::new();
+    };
+    let mut seed_nodes = Vec::new();
+    if !output_arg_names.is_empty() {
+        for arg_name in output_arg_names {
+            if arg_name.is_empty() {
+                continue;
+            }
+            seed_nodes.extend(idg.nodes_for_name_after_span(source_func, arg_name, span));
+        }
+    }
+    if seed_nodes.is_empty() {
+        let anchor_nodes = idg.source_seed_nodes_at_span(source_func, span);
+        let anchor_has_call_return = anchor_nodes.iter().any(|node| {
+            idg.resolve_point(*node)
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::CallRet)
+        });
+        if anchor_has_call_return {
+            seed_nodes = anchor_nodes;
+        } else {
+            let seed_names: Vec<String> = seeds.iter().cloned().collect();
+            seed_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
+            if seed_nodes.is_empty() {
+                seed_nodes = anchor_nodes;
+            }
+        }
+    }
+    seed_nodes.sort();
+    seed_nodes.dedup();
+    seed_nodes
 }
 
 fn sorted_seed_key_with_anchor(
@@ -5734,6 +5905,7 @@ fn exact_source_seed_graph(
     ws: &Workspace,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
     target_funcs: Option<&AHashSet<FuncId>>,
     lineage_funcs: Option<&AHashSet<FuncId>>,
 ) -> EntryTaintGraph {
@@ -5752,7 +5924,7 @@ fn exact_source_seed_graph(
     let idg = db
         .idg_service()
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
-    bonsai_taint::entry_taint_graph_from_idg_with_target_filters_and_max_precision(
+    bonsai_taint::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
         source_func,
         seeds,
         source_anchor,
@@ -5760,6 +5932,7 @@ fn exact_source_seed_graph(
         &config.receiver_state_propagations,
         &config.call_result_passthroughs,
         &config.output_arg_flows,
+        target_nodes,
         target_funcs,
         lineage_funcs,
         config.max_edge_precision,
