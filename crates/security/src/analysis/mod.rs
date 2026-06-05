@@ -811,6 +811,10 @@ where
         options.max_precision,
         &mut on_progress,
     );
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "finalizing findings",
+        total: 0,
+    });
     let taint_sink_sites: AHashSet<(String, String, u32, u32)> = findings_raw
         .iter()
         .map(|finding| {
@@ -894,6 +898,7 @@ where
             crate::flow_evidence::FlowRole::Sink,
         );
     }
+    on_progress(AnalysisProgress::PhaseFinished);
 
     Ok(TaintAnalysisReport {
         findings,
@@ -1056,10 +1061,6 @@ where
         max_edge_precision: Some(Precision::Narrowed),
         ..Default::default()
     };
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "enumerating source paths",
-        total: source_hits.len() as u64,
-    });
     // Exact source-seeded graphs are cached through the workspace
     // `TaintGraphIndex`, which is bounded in memory and keyed by a
     // rule/config fingerprint. Disk persistence is opt-in because
@@ -1154,6 +1155,11 @@ where
         }
     }
     source_groups.sort_by_key(|group| group.first_index);
+    let total_source_path_ticks = source_hits.len();
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "enumerating source paths",
+        total: total_source_path_ticks as u64,
+    });
     let build_group_candidates = |group: &SourceGraphGroup| -> Vec<SourceAnalysisCandidate> {
         let graph = workspace_taint_index
             .get(group.start, &group.graph_key)
@@ -1239,24 +1245,71 @@ where
     let mut grouped_candidates: Vec<(usize, Vec<SourceAnalysisCandidate>)> =
         if worker_count > 1 && source_groups.len() > 1 {
             match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
-                Ok(pool) => pool.install(|| {
-                    source_groups
-                        .par_iter()
-                        .enumerate()
-                        .map(|(idx, group)| (idx, build_group_candidates(group)))
-                        .collect()
-                }),
+                Ok(pool) => {
+                    let (tx, rx) = mpsc::channel();
+                    let mut groups = None;
+                    std::thread::scope(|scope| {
+                        let worker = scope.spawn(|| {
+                            pool.install(|| {
+                                source_groups
+                                    .par_iter()
+                                    .enumerate()
+                                    .map(|(idx, group)| {
+                                        let candidates = build_group_candidates(group);
+                                        let _ = tx.send(group.jobs.len());
+                                        (idx, candidates)
+                                    })
+                                    .collect()
+                            })
+                        });
+                        let mut completed = 0usize;
+                        while completed < total_source_path_ticks {
+                            match rx.recv_timeout(Duration::from_millis(250)) {
+                                Ok(ticks) => {
+                                    for _ in 0..ticks {
+                                        completed = completed.saturating_add(1);
+                                        on_progress(AnalysisProgress::PhaseTicked);
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {
+                                    if worker.is_finished() {
+                                        break;
+                                    }
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        groups = Some(worker.join().unwrap_or_default());
+                        while completed < total_source_path_ticks {
+                            on_progress(AnalysisProgress::PhaseTicked);
+                            completed += 1;
+                        }
+                    });
+                    groups.unwrap_or_default()
+                }
                 Err(_) => source_groups
                     .iter()
                     .enumerate()
-                    .map(|(idx, group)| (idx, build_group_candidates(group)))
+                    .map(|(idx, group)| {
+                        let candidates = build_group_candidates(group);
+                        for _ in 0..group.jobs.len() {
+                            on_progress(AnalysisProgress::PhaseTicked);
+                        }
+                        (idx, candidates)
+                    })
                     .collect(),
             }
         } else {
             source_groups
                 .iter()
                 .enumerate()
-                .map(|(idx, group)| (idx, build_group_candidates(group)))
+                .map(|(idx, group)| {
+                    let candidates = build_group_candidates(group);
+                    for _ in 0..group.jobs.len() {
+                        on_progress(AnalysisProgress::PhaseTicked);
+                    }
+                    (idx, candidates)
+                })
                 .collect()
         };
     grouped_candidates.sort_by_key(|(idx, _)| *idx);
@@ -1295,7 +1348,8 @@ where
             candidates.push(candidate);
         }
     }
-    for _ in 0..source_hits.len() {
+    let emitted_source_path_ticks: usize = source_groups.iter().map(|group| group.jobs.len()).sum();
+    for _ in emitted_source_path_ticks..total_source_path_ticks {
         on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
