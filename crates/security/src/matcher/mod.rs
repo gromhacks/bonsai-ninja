@@ -15,7 +15,10 @@ use bonsai_lang_api::{
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::Workspace;
 use regex::Regex;
-use std::{cell::RefCell, sync::Arc};
+use std::{
+    cell::RefCell,
+    sync::{mpsc, Arc},
+};
 
 const LOCAL_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_local_import_pkg__";
 const FILE_USES_REQ_FILES_MARKER: &str = "__bonsai_file_uses_req_files__";
@@ -730,40 +733,51 @@ where
     // join. Match collection order is non-deterministic across
     // runs, but downstream callers already invoke `sort_matches` on
     // the returned Vec before emission to keep finding ids stable.
-    let out: Vec<RuleMatch> = files
-        .par_iter()
-        .flat_map_iter(|&file| {
-            let mut file_out: Vec<RuleMatch> = Vec::new();
-            if let Some(adapter) = ws.db().adapter_for(file) {
-                let language = adapter.language_id();
-                let file_rules: Vec<&PreparedRule<'_>> = prepared
-                    .iter()
-                    .filter(|rule| rule.rule.language == language.as_str())
-                    .collect();
-                if !file_rules.is_empty() {
-                    scan_file_rules(
-                        ws,
-                        file,
-                        &file_rules,
-                        &constructor_names,
-                        mode,
-                        taint_view,
-                        &mut file_out,
-                    );
+    let (tick_tx, tick_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            files
+                .par_iter()
+                .flat_map_iter(|&file| {
+                    let mut file_out: Vec<RuleMatch> = Vec::new();
+                    if let Some(adapter) = ws.db().adapter_for(file) {
+                        let language = adapter.language_id();
+                        let file_rules: Vec<&PreparedRule<'_>> = prepared
+                            .iter()
+                            .filter(|rule| rule.rule.language == language.as_str())
+                            .collect();
+                        if !file_rules.is_empty() {
+                            scan_file_rules(
+                                ws,
+                                file,
+                                &file_rules,
+                                &constructor_names,
+                                mode,
+                                taint_view,
+                                &mut file_out,
+                            );
+                        }
+                    }
+                    let _ = tick_tx.send(());
+                    file_out
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut completed = 0usize;
+        while completed < total {
+            match tick_rx.recv() {
+                Ok(()) => {
+                    completed += 1;
+                    on_file_done();
                 }
+                Err(_) => break,
             }
-            file_out
-        })
-        .collect();
-    // Drain progress ticks after the parallel work completes.
-    // `on_file_done` is `FnMut` and not Sync; a per-tick callback
-    // mid-scan would force serialisation. Bulk-replaying the count
-    // here keeps the progress UI in sync without sacrificing the
-    // parallel speedup.
-    for _ in 0..total {
-        on_file_done();
-    }
-    out
+        }
+        match worker.join() {
+            Ok(out) => out,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

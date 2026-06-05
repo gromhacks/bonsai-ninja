@@ -891,6 +891,7 @@ fn cmd_flows(
 
     match format {
         BrowseFormat::Json => {
+            let render_progress = ScopedProgress::new("rendering taint JSON");
             emit_json_paged_cached(
                 workspace,
                 &findings,
@@ -899,9 +900,11 @@ fn cmd_flows(
                 filters_hash,
                 cost_finding_shallow,
             )?;
+            render_progress.finish();
             return Ok(());
         }
         BrowseFormat::Sarif => {
+            let render_progress = ScopedProgress::new("rendering SARIF");
             // SARIF 2.1.0 — direct serialization, no pagination.
             // Standardised SAST output expected by IDE integrations,
             // GitHub code scanning, and the CVEBench-SAST harness.
@@ -921,10 +924,12 @@ fn cmd_flows(
                 .and_then(|path| path.to_str().map(str::to_owned))
                 .unwrap_or_else(|| workspace.to_string_lossy().into_owned());
             cli_println!("{}", report.sarif_json_with_workspace_root(&workspace_root));
+            render_progress.finish();
             return Ok(());
         }
         BrowseFormat::Text => {}
     }
+    let render_progress = ScopedProgress::new("rendering taint page");
 
     // Text path: `security taint-analysis` is a rulepack-driven
     // wrapper around `inspect`. Each finding gets a security header
@@ -1004,6 +1009,7 @@ fn cmd_flows(
     if let Err(e) = page_cache::save_pages(workspace, cached_pages.clone()) {
         tracing::debug!("page cache save failed: {e}");
     }
+    render_progress.finish();
     if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
         page_cache::emit_cached_text(&page.text)?;
     }
@@ -1212,6 +1218,7 @@ fn cmd_source_analysis(
 
     match format {
         SourceAnalysisFormat::Json => {
+            let render_progress = ScopedProgress::new("rendering source JSON");
             if paging_cfg.json_wrapped() {
                 page_cache::emit_paged_text(
                     workspace,
@@ -1246,9 +1253,11 @@ fn cmd_source_analysis(
                 let rendered = render_source_analysis_candidates(ws, &candidates);
                 cli_println!("{}", serde_json::to_string_pretty(&rendered)?);
             }
+            render_progress.finish();
             Ok(())
         }
         SourceAnalysisFormat::Text => {
+            let render_progress = ScopedProgress::new("rendering source page");
             let function_costs =
                 function_costs_for_paths(ws, candidates.iter().flat_map(|c| c.path.iter().copied()), true);
             let text_cost = |f: &CombinedSourceAnalysisCandidate| {
@@ -1302,6 +1311,7 @@ fn cmd_source_analysis(
             if let Err(e) = page_cache::save_pages(workspace, cached_pages.clone()) {
                 tracing::debug!("page cache save failed: {e}");
             }
+            render_progress.finish();
             if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
                 page_cache::emit_cached_text(&page.text)?;
             }
@@ -2296,6 +2306,32 @@ struct SecurityAnalysisProgress {
     phase_label: Option<&'static str>,
     phase_started: Option<Instant>,
     phase_ticks: u64,
+}
+
+struct ScopedProgress {
+    bar: Option<ProgressBar>,
+}
+
+impl ScopedProgress {
+    fn new(label: &str) -> Self {
+        Self {
+            bar: Some(progress::spinner(label)),
+        }
+    }
+
+    fn finish(mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for ScopedProgress {
+    fn drop(&mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
+        }
+    }
 }
 
 impl SecurityAnalysisProgress {
