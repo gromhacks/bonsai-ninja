@@ -15,7 +15,7 @@ use bonsai_security::{
     RuleTarget, Rulepack, TaintAnalysisOptions, TrustClass,
 };
 use bonsai_workspace::Workspace;
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, fmt::Write as _, path::PathBuf, sync::Arc};
 
 const ALL_LANGS: &[&str] = &[
     "c",
@@ -208,6 +208,18 @@ fn workspace(files: &[(&str, &str)]) -> Workspace {
     let ws = Workspace::new(bonsai_adapters::all_languages_registry());
     for (path, src) in files {
         ws.vfs().write((*path).to_string(), Arc::<str>::from(*src));
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn workspace_owned(files: Vec<(String, String)>) -> Workspace {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    for (path, src) in files {
+        ws.vfs().write(path, Arc::<str>::from(src));
     }
     for file in ws.vfs().all_files() {
         let _ = ws.db().decl_index(file);
@@ -811,6 +823,319 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
         "unreachable source-only files must not be walked into findings: {:#?}",
         report.findings
     );
+}
+
+#[test]
+fn taint_analysis_source_to_sink_scheduler_filters_unreachable_sources_for_every_language() {
+    for lang in ALL_LANGS {
+        let ws = workspace_owned(scheduler_filter_fixture(lang, 8));
+        let mut current_phase: Option<&'static str> = None;
+        let mut taint_chain_total = None;
+        let mut taint_chain_ticks = 0u64;
+        let report = bonsai_security::run_taint_analysis_with_phase_progress(
+            &ws,
+            &rulepack(lang, "source", "sink"),
+            TaintAnalysisOptions::default(),
+            |event| match event {
+                bonsai_security::AnalysisProgress::PhaseStarted { label, total } => {
+                    current_phase = Some(label);
+                    if label == "building taint chains" {
+                        taint_chain_total = Some(total);
+                    }
+                }
+                bonsai_security::AnalysisProgress::PhaseTicked => {
+                    if current_phase == Some("building taint chains") {
+                        taint_chain_ticks += 1;
+                    }
+                }
+                bonsai_security::AnalysisProgress::PhaseFinished => {
+                    current_phase = None;
+                }
+            },
+        )
+        .unwrap_or_else(|err| panic!("{lang}: taint analysis failed: {err}"));
+
+        assert_eq!(
+            taint_chain_total,
+            Some(1),
+            "{lang}: source-to-sink scheduler must not schedule unreachable source-only groups; findings={:#?}",
+            report.findings
+        );
+        assert_eq!(
+            taint_chain_ticks, 1,
+            "{lang}: source-to-sink scheduler walked more groups than the semantic corridor"
+        );
+        assert!(
+            !report.findings.is_empty(),
+            "{lang}: real source-to-sink flow must still be reported"
+        );
+        assert!(
+            report.findings.iter().all(|finding| {
+                !finding.finding.source.file.contains("Unreachable")
+                    && !finding.finding.sink.file.contains("Unreachable")
+            }),
+            "{lang}: unreachable source-only functions leaked into findings: {:#?}",
+            report.findings
+        );
+    }
+}
+
+fn scheduler_filter_fixture(lang: &str, unreachable_count: usize) -> Vec<(String, String)> {
+    let unreachable_names: Vec<String> = (0..unreachable_count)
+        .map(|idx| format!("unreachable_{idx}"))
+        .collect();
+    match lang {
+        "c" => vec![(
+            "/app/main.c".to_string(),
+            c_like_scheduler_fixture("", "", &unreachable_names),
+        )],
+        "cpp" => vec![(
+            "/app/main.cpp".to_string(),
+            c_like_scheduler_fixture(
+                "#include <string>\n",
+                "std::string",
+                &unreachable_names,
+            ),
+        )],
+        "csharp" => vec![(
+            "/app/App.cs".to_string(),
+            class_method_scheduler_fixture(
+                "class App {\n",
+                "  string source() { return \"\"; }\n  void sink(string value) {}\n  void handle() { sink(source()); }\n",
+                "  string",
+                &unreachable_names,
+                "}\n",
+            ),
+        )],
+        "dart" => vec![(
+            "/app/app.dart".to_string(),
+            top_level_scheduler_fixture(
+                "String source() => \"\";\nvoid sink(String value) {}\nvoid handle() { sink(source()); }\n",
+                "String",
+                &unreachable_names,
+                "() => source();\n",
+            ),
+        )],
+        "elixir" => vec![(
+            "/app/app.ex".to_string(),
+            format!(
+                "defmodule App do\n  def source(), do: \"\"\n  def sink(_value), do: :ok\n  def handle(), do: sink(source())\n{}end\n",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "  def {name}(), do: source()").unwrap();
+                })
+            ),
+        )],
+        "erlang" => {
+            let exports = std::iter::once("handle/0".to_string())
+                .chain(std::iter::once("source/0".to_string()))
+                .chain(std::iter::once("sink/1".to_string()))
+                .chain(unreachable_names.iter().map(|name| format!("{name}/0")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            vec![(
+                "/app/app.erl".to_string(),
+                format!(
+                    "-module(app).\n-export([{exports}]).\nsource() -> \"\".\nsink(_Value) -> ok.\nhandle() -> sink(source()).\n{}",
+                    render_unreachable_defs(&unreachable_names, |out, name| {
+                        writeln!(out, "{name}() -> source().").unwrap();
+                    })
+                ),
+            )]
+        }
+        "go" => vec![(
+            "/app/main.go".to_string(),
+            top_level_scheduler_fixture(
+                "package main\nfunc source() string { return \"\" }\nfunc sink(value string) {}\nfunc handle() { sink(source()) }\n",
+                "func",
+                &unreachable_names,
+                "() string { return source() }\n",
+            ),
+        )],
+        "java" => vec![(
+            "/app/App.java".to_string(),
+            class_method_scheduler_fixture(
+                "class App {\n",
+                "  String source() { return \"\"; }\n  static void sink(String value) {}\n  void handle() { sink(source()); }\n",
+                "  String",
+                &unreachable_names,
+                "}\n",
+            ),
+        )],
+        "javascript" => vec![(
+            "/app/app.js".to_string(),
+            js_like_scheduler_fixture("", "", &unreachable_names),
+        )],
+        "kotlin" => vec![(
+            "/app/App.kt".to_string(),
+            top_level_scheduler_fixture(
+                "fun source(): String = \"\"\nfun sink(value: String) {}\nfun handle() { sink(source()) }\n",
+                "fun",
+                &unreachable_names,
+                "(): String = source()\n",
+            ),
+        )],
+        "lua" => vec![(
+            "/app/app.lua".to_string(),
+            format!(
+                "local function source() return \"\" end\nlocal function sink(value) end\nlocal function handle() sink(source()) end\n{}",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "local function {name}() return source() end").unwrap();
+                })
+            ),
+        )],
+        "objc" => vec![(
+            "/app/main.m".to_string(),
+            c_like_scheduler_fixture("", "", &unreachable_names),
+        )],
+        "perl" => vec![(
+            "/app/app.pl".to_string(),
+            format!(
+                "sub source {{ return \"\"; }}\nsub sink {{ my ($value) = @_; }}\nsub handle {{ sink(source()); }}\n{}1;\n",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "sub {name} {{ return source(); }}").unwrap();
+                })
+            ),
+        )],
+        "php" => vec![(
+            "/app/app.php".to_string(),
+            format!(
+                "<?php\nfunction source() {{ return \"\"; }}\nfunction sink($value) {{}}\nfunction handle() {{ sink(source()); }}\n{}",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "function {name}() {{ return source(); }}").unwrap();
+                })
+            ),
+        )],
+        "python" => vec![(
+            "/app/app.py".to_string(),
+            format!(
+                "def source():\n    return \"\"\n\ndef sink(value):\n    pass\n\ndef handle():\n    sink(source())\n\n{}",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "def {name}():\n    return source()\n").unwrap();
+                })
+            ),
+        )],
+        "ruby" => vec![(
+            "/app/app.rb".to_string(),
+            format!(
+                "def source; \"\"; end\ndef sink(value); end\ndef handle; sink(source()); end\n{}",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "def {name}; source(); end").unwrap();
+                })
+            ),
+        )],
+        "rust" => vec![(
+            "/app/main.rs".to_string(),
+            top_level_scheduler_fixture(
+                "fn source() -> String { String::new() }\nfn sink(value: String) {}\nfn handle() { sink(source()); }\n",
+                "fn",
+                &unreachable_names,
+                "() -> String { source() }\n",
+            ),
+        )],
+        "scala" => vec![(
+            "/app/App.scala".to_string(),
+            format!(
+                "object App {{\n  def source(): String = \"\"\n  def sink(value: String): Unit = ()\n  def handle(): Unit = sink(source())\n{} }}\n",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(out, "  def {name}(): String = source()").unwrap();
+                })
+            ),
+        )],
+        "solidity" => vec![(
+            "/app/App.sol".to_string(),
+            format!(
+                "pragma solidity ^0.8.0;\ncontract App {{\n  function source() internal pure returns (bytes memory) {{ return \"\"; }}\n  function sink(bytes memory value) internal pure {{}}\n  function handle() external {{ sink(source()); }}\n{} }}\n",
+                render_unreachable_defs(&unreachable_names, |out, name| {
+                    writeln!(
+                        out,
+                        "  function {name}() external pure returns (bytes memory) {{ return source(); }}"
+                    )
+                    .unwrap();
+                })
+            ),
+        )],
+        "swift" => vec![(
+            "/app/App.swift".to_string(),
+            top_level_scheduler_fixture(
+                "func source() -> String { return \"\" }\nfunc sink(_ value: String) {}\nfunc handle() { sink(source()) }\n",
+                "func",
+                &unreachable_names,
+                "() -> String { return source() }\n",
+            ),
+        )],
+        "typescript" => vec![(
+            "/app/app.ts".to_string(),
+            js_like_scheduler_fixture(": string", ": void", &unreachable_names),
+        )],
+        other => panic!("missing scheduler fixture for {other}"),
+    }
+}
+
+fn c_like_scheduler_fixture(prefix: &str, string_type: &str, unreachable_names: &[String]) -> String {
+    let ty = if string_type.is_empty() {
+        "char *"
+    } else {
+        string_type
+    };
+    format!(
+        "{prefix}{ty} source(void) {{ return \"\"; }}\nvoid sink({ty} value) {{}}\nvoid handle(void) {{ sink(source()); }}\n{}",
+        render_unreachable_defs(unreachable_names, |out, name| {
+            writeln!(out, "{ty} {name}(void) {{ return source(); }}").unwrap();
+        })
+    )
+}
+
+fn class_method_scheduler_fixture(
+    prefix: &str,
+    body: &str,
+    return_type_prefix: &str,
+    unreachable_names: &[String],
+    suffix: &str,
+) -> String {
+    format!(
+        "{prefix}{body}{}{suffix}",
+        render_unreachable_defs(unreachable_names, |out, name| {
+            writeln!(out, "{return_type_prefix} {name}() {{ return source(); }}").unwrap();
+        })
+    )
+}
+
+fn top_level_scheduler_fixture(
+    prefix: &str,
+    keyword_or_type: &str,
+    unreachable_names: &[String],
+    suffix: &str,
+) -> String {
+    format!(
+        "{prefix}{}",
+        render_unreachable_defs(unreachable_names, |out, name| {
+            write!(out, "{keyword_or_type} {name}{suffix}").unwrap();
+        })
+    )
+}
+
+fn js_like_scheduler_fixture(
+    source_return_type: &str,
+    sink_return_type: &str,
+    unreachable_names: &[String],
+) -> String {
+    format!(
+        "function source(){source_return_type} {{ return \"\"; }}\nfunction sink(value{source_return_type}){sink_return_type} {{}}\nfunction handle(){sink_return_type} {{ sink(source()); }}\n{}",
+        render_unreachable_defs(unreachable_names, |out, name| {
+            writeln!(out, "function {name}(){source_return_type} {{ return source(); }}").unwrap();
+        })
+    )
+}
+
+fn render_unreachable_defs<F>(unreachable_names: &[String], mut render: F) -> String
+where
+    F: FnMut(&mut String, &str),
+{
+    let mut out = String::new();
+    for name in unreachable_names {
+        render(&mut out, name);
+    }
+    out
 }
 
 #[test]

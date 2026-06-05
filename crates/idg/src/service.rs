@@ -150,6 +150,11 @@ struct UnifiedAddressSpace {
     /// helper; caching the sink side keeps each source query from
     /// walking the same reverse graph again.
     target_func_backward: RwLock<AHashMap<TargetFuncCutKey, Arc<NodeBitSet>>>,
+    /// Backward closures from concrete sink target node sets. This is
+    /// stricter than `target_func_backward` for same-function or
+    /// module-pseudo-function scans where many source calls share an
+    /// enclosing function but only a few can reach a real sink site.
+    target_node_backward: RwLock<AHashMap<TargetNodeCutKey, Arc<NodeBitSet>>>,
 }
 
 type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
@@ -160,12 +165,27 @@ struct TargetFuncCutKey {
     funcs: Vec<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TargetNodeCutKey {
+    max_precision: Option<Precision>,
+    nodes: Vec<u32>,
+}
+
 impl TargetFuncCutKey {
     fn new(max_precision: Option<Precision>, funcs: &AHashSet<FuncId>) -> Self {
         let mut funcs: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
         funcs.sort_unstable();
         funcs.dedup();
         Self { max_precision, funcs }
+    }
+}
+
+impl TargetNodeCutKey {
+    fn new(max_precision: Option<Precision>, nodes: &[WsNodeId]) -> Self {
+        let mut nodes: Vec<u32> = nodes.iter().map(|node| node.0).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        Self { max_precision, nodes }
     }
 }
 
@@ -287,6 +307,33 @@ impl IdgQueryService {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
         let backward = self.target_func_backward_closure(&unified, target_funcs, max_precision);
+        if backward.is_zero() {
+            return Vec::new();
+        }
+        let mut cut = if let Some(precision) = max_precision {
+            self.ensure_precision_reach(&unified, precision)
+                .forward_closure(&seed_nodes)
+        } else {
+            unified.reach.forward_closure(&seed_nodes)
+        };
+        cut.intersect_inplace(&backward);
+        cut.iter().map(|node| WsNodeId(node.0)).collect()
+    }
+
+    /// Source-to-target cut where targets are concrete IDG nodes,
+    /// usually sink call arguments / receiver slots / returns.
+    pub fn forward_target_nodes_cut_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        target_nodes: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        if seeds.is_empty() || target_nodes.is_empty() {
+            return Vec::new();
+        }
+        let unified = self.ensure_unified();
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
+        let backward = self.target_nodes_backward_closure(&unified, target_nodes, max_precision);
         if backward.is_zero() {
             return Vec::new();
         }
@@ -663,6 +710,53 @@ impl IdgQueryService {
                     continue;
                 }
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.from) {
+                    out.push(ws_node);
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Find every span-bearing IDG node in `func` anchored at
+    /// `match_span`. Unlike [`Self::source_seed_nodes_at_span`], this
+    /// keeps call arguments because sink reachability targets are
+    /// usually the argument / receiver slots at the sink site.
+    pub fn nodes_at_span(&self, func: FuncId, match_span: Span) -> Vec<WsNodeId> {
+        let unified = self.ensure_unified();
+        let Some(seg_id) = self.workspace.segment_for_func(func) else {
+            return Vec::new();
+        };
+        let Some(segment) = self.workspace.segment(seg_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (pid_idx, place) in segment.places.places.iter().enumerate() {
+            let span = match place {
+                Place::Write { span, .. } => *span,
+                Place::CallRet { site } | Place::CallArg { site, .. } => site.0,
+                _ => continue,
+            };
+            if !spans_overlap(span, match_span) {
+                continue;
+            }
+            let pid = crate::node::PlaceId(pid_idx as u32);
+            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
+                    out.push(ws_node);
+                }
+            }
+        }
+        if out.is_empty() {
+            for edge in &segment.edges {
+                if !spans_overlap(edge.meta.via_span, match_span) {
+                    continue;
+                }
+                if segment.nodes.get(edge.to).is_none_or(|node| node.func != func) {
+                    continue;
+                }
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.to) {
                     out.push(ws_node);
                 }
             }
@@ -1218,6 +1312,7 @@ impl IdgQueryService {
             precision_reach: RwLock::new(AHashMap::new()),
             cross_calls_by_from: RwLock::new(None),
             target_func_backward: RwLock::new(AHashMap::new()),
+            target_node_backward: RwLock::new(AHashMap::new()),
         }
     }
 
@@ -1270,6 +1365,32 @@ impl IdgQueryService {
         };
         let computed = Arc::new(computed);
         let mut write = unified.target_func_backward.write();
+        write.entry(key).or_insert(computed).clone()
+    }
+
+    fn target_nodes_backward_closure(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+        nodes: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> Arc<NodeBitSet> {
+        let key = TargetNodeCutKey::new(max_precision, nodes);
+        if let Some(hit) = unified.target_node_backward.read().get(&key).cloned() {
+            return hit;
+        }
+        let mut target_nodes: Vec<NodeId> = nodes.iter().map(|node| NodeId(node.0)).collect();
+        target_nodes.sort_by_key(|node| node.0);
+        target_nodes.dedup();
+        let computed = if target_nodes.is_empty() {
+            NodeBitSet::zeros(unified.reverse.len())
+        } else if let Some(precision) = max_precision {
+            self.ensure_precision_reach(unified, precision)
+                .backward_closure(&target_nodes)
+        } else {
+            unified.reach.backward_closure(&target_nodes)
+        };
+        let computed = Arc::new(computed);
+        let mut write = unified.target_node_backward.write();
         write.entry(key).or_insert(computed).clone()
     }
 

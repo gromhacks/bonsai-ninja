@@ -1280,6 +1280,40 @@ pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
+    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
+        source_func,
+        seeds,
+        source_anchor,
+        output_arg_names,
+        receiver_state_propagations,
+        call_result_passthroughs,
+        output_arg_flows,
+        None,
+        target_funcs,
+        lineage_funcs,
+        max_precision,
+        db,
+        idg,
+    )
+}
+
+#[must_use]
+#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, node targets, function targets, precision, db, and service context.
+pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
+    source_func: FuncId,
+    seeds: &TokenSet,
+    source_anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
+    output_arg_flows: &[crate::inter::OutputArgFlow],
+    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
+    target_funcs: Option<&AHashSet<FuncId>>,
+    lineage_funcs: Option<&AHashSet<FuncId>>,
+    max_precision: Option<Precision>,
+    db: &AnalyzerDb,
+    idg: &bonsai_idg::IdgQueryService,
+) -> EntryTaintGraph {
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
@@ -1353,9 +1387,13 @@ pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
         max_precision,
         lineage_funcs.or(target_funcs),
     );
-    let closure_nodes = target_funcs
-        .map(|targets| idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision))
-        .unwrap_or_else(|| idg.forward_closure_with_max_precision(&seed_nodes, max_precision));
+    let closure_nodes = if let Some(target_nodes) = target_nodes.filter(|nodes| !nodes.is_empty()) {
+        idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, max_precision)
+    } else if let Some(targets) = target_funcs {
+        idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision)
+    } else {
+        idg.forward_closure_with_max_precision(&seed_nodes, max_precision)
+    };
     if closure_nodes.is_empty() {
         return graph;
     }
