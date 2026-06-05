@@ -17,7 +17,6 @@
 //! through clean overwrite after taint." This audit pins both
 //! sides of branch-merge precision.
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -107,7 +106,7 @@ fn audit_one(lang: &'static str) -> Result_ {
     let overwritten_fired = report.findings.iter().any(|f| {
         f.finding
             .chain_display
-            .par_iter()
+            .iter()
             .any(|hop| hop.to_ascii_lowercase().contains("overwritten"))
     });
     Result_ {
@@ -121,7 +120,7 @@ fn audit_one(lang: &'static str) -> Result_ {
 #[test]
 fn branch_merge_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -155,7 +154,7 @@ fn branch_merge_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pass => {
                 if let Some(reason) = r.skipped.as_deref() {

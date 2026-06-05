@@ -1587,6 +1587,83 @@ fn module_qualified_receiver_method_resolves_by_module_path_without_bare_fanout(
 }
 
 #[test]
+fn java_package_local_static_calls_do_not_fan_out_to_sibling_packages() {
+    let mut global = GlobalIndex::new();
+    let caller_file = FileId::new(1);
+    let caller_pkg = ["mega", "flow0"];
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![with_module_path(
+            decl(
+                caller_file,
+                1,
+                "handle",
+                vec![
+                    method_call(caller_file, "Pipeline.orchestrate", "Pipeline", &[]),
+                    assign_call(caller_file, "r", "Pipeline.orchestrate"),
+                ],
+            ),
+            &caller_pkg,
+        )],
+    );
+
+    for idx in 0..16u32 {
+        let file = FileId::new(10 + idx);
+        let class_symbol = 100 + idx * 10;
+        let method_symbol = class_symbol + 1;
+        let pkg_tail = format!("flow{idx}");
+        let pkg = ["mega", pkg_tail.as_str()];
+        insert_file(
+            &mut global,
+            file,
+            vec![
+                with_module_path(
+                    decl_with(file, class_symbol, "Pipeline", DeclKind::Class, None, Vec::new()),
+                    &pkg,
+                ),
+                with_module_path(
+                    decl_with(
+                        file,
+                        method_symbol,
+                        "orchestrate",
+                        DeclKind::Function,
+                        Some(class_symbol),
+                        Vec::new(),
+                    ),
+                    &pkg,
+                ),
+            ],
+        );
+    }
+
+    let cg = build_graph(&global, |_| Some("java"));
+    let handle = FuncId::new(global.find_by_name("handle")[0].raw());
+    let same_package_orchestrate = global
+        .find_by_name("orchestrate")
+        .iter()
+        .copied()
+        .find(|symbol| {
+            global
+                .decl_of(*symbol)
+                .is_some_and(|decl| decl.module_path.matches(&ModulePath::from_segments(caller_pkg)))
+        })
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("same-package orchestrate");
+
+    let edges = cg.callees_of(handle).collect::<Vec<_>>();
+    assert_eq!(
+        edges.len(),
+        2,
+        "explicit call and assignment-source call should each keep one same-package target: {edges:?}"
+    );
+    assert!(
+        edges.iter().all(|edge| edge.to == same_package_orchestrate),
+        "sibling packages must not be retained as Java same-language candidates: {edges:?}"
+    );
+}
+
+#[test]
 fn typed_local_receiver_chain_does_not_fall_back_to_module_path() {
     let caller_file = FileId::new(1);
     let cache_module_file = FileId::new(2);

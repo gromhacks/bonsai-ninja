@@ -1082,7 +1082,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("security-page-cache");
     let ws = tmp.path();
-    let cache_dir = ws.join(".bonsai/page-cache.v3");
+    let cache_dir = ws.join(".bonsai/page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
     let Some(first) = run(&[
@@ -1133,7 +1133,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
 }
 
 fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
-    let cache_dir = ws.join(".bonsai/page-cache.v3");
+    let cache_dir = ws.join(".bonsai/page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let first = run(args)?;
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
@@ -1169,7 +1169,7 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
 }
 
 fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
-    let cache_dir = ws.join(".bonsai/page-cache.v3");
+    let cache_dir = ws.join(".bonsai/page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let first = run(args)?;
     let first_json: serde_json::Value =
@@ -1222,7 +1222,7 @@ fn corrupt_rendered_page_cache_is_a_miss_not_a_command_failure() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("corrupt-page-cache");
     let ws = tmp.path();
-    let cache_dir = ws.join(".bonsai/page-cache.v3");
+    let cache_dir = ws.join(".bonsai/page-cache.v5");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
     let args = ["calls", ws_str, "--context", "1k"];

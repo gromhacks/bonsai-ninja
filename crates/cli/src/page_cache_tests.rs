@@ -1,6 +1,6 @@
 use super::{
-    cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, rulepack_dir_skipped,
-    workspace_fingerprint, PageCacheFile, RENDER_CACHE_VERSION,
+    cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, eager_window,
+    rulepack_dir_skipped, workspace_fingerprint, PageCacheFile, RENDER_CACHE_VERSION,
 };
 use std::path::PathBuf;
 
@@ -12,6 +12,15 @@ fn tempdir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("bonsai-page-cache-{name}-{}-{stamp}", std::process::id()));
     std::fs::create_dir(&path).expect("create temp dir");
     path
+}
+
+#[test]
+fn eager_window_keeps_page_cache_opportunistic() {
+    let window = eager_window(10, 100);
+    assert_eq!(
+        window.into_iter().collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 10, 11, 12, 13]
+    );
 }
 
 #[test]

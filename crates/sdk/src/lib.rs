@@ -296,14 +296,16 @@ impl Bonsai {
     /// Wrap an opened workspace in the [`Project`] facade with the
     /// SDK's current registry and rulepack handles attached.
     fn project(&self, root: &Path, workspace: Workspace, open_options: WorkspaceOpenOptions) -> Project {
+        let fingerprints = workspace_fingerprints_from_vfs(&workspace);
         Project {
             root: root.to_path_buf(),
             workspace,
             registry: self.registry.clone(),
             rulepack: self.rulepack.clone(),
             rulepack_root: self.rulepack_root.clone(),
-            fingerprints: Arc::new(Mutex::new(initial_fingerprints(root, &self.registry))),
+            fingerprints: Arc::new(Mutex::new(fingerprints)),
             refresh_options: open_options,
+            auto_refresh: true,
         }
     }
 
@@ -354,6 +356,7 @@ pub struct Project {
     rulepack_root: Option<PathBuf>,
     fingerprints: Arc<Mutex<AHashMap<PathBuf, u64>>>,
     refresh_options: WorkspaceOpenOptions,
+    auto_refresh: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -390,14 +393,16 @@ impl Project {
         registry: Arc<LanguageRegistry>,
     ) -> Self {
         let root = root.as_ref();
+        let fingerprints = workspace_fingerprints_from_vfs(&workspace);
         Self {
             root: root.to_path_buf(),
             workspace,
-            fingerprints: Arc::new(Mutex::new(initial_fingerprints(root, &registry))),
+            fingerprints: Arc::new(Mutex::new(fingerprints)),
             registry,
             rulepack: None,
             rulepack_root: None,
             refresh_options: WorkspaceOpenOptions::default(),
+            auto_refresh: true,
         }
     }
 
@@ -406,6 +411,18 @@ impl Project {
     pub fn with_loaded_rulepack(mut self, root: impl AsRef<Path>, rulepack: Rulepack) -> Self {
         self.rulepack_root = Some(root.as_ref().to_path_buf());
         self.rulepack = Some(Arc::new(rulepack));
+        self
+    }
+
+    /// Control automatic save-time refreshes performed by SDK facades.
+    ///
+    /// One-shot CLI commands open a fresh workspace from disk, then keep
+    /// analysis/rendering on that stable snapshot. Long-lived SDK clients
+    /// keep the default `true` so saved edits are picked up before facade
+    /// calls.
+    #[must_use]
+    pub fn with_auto_refresh(mut self, enabled: bool) -> Self {
+        self.auto_refresh = enabled;
         self
     }
 
@@ -445,6 +462,14 @@ impl Project {
     pub fn diagnostics(&self) -> Vec<bonsai_diagnostics::Diagnostic> {
         self.refresh_from_disk_best_effort();
         self.workspace.diagnostics()
+    }
+
+    /// Fingerprint of the source files known to this project's current
+    /// workspace snapshot. This is O(files) over the SDK's existing
+    /// path/hash map and does not re-read files from disk.
+    #[must_use]
+    pub fn source_content_fingerprint(&self) -> WorkspaceContentFingerprint {
+        self.current_source_fingerprint()
     }
 
     /// Refresh this long-lived project from the current on-disk source
@@ -510,6 +535,9 @@ impl Project {
     }
 
     fn refresh_from_disk_best_effort(&self) {
+        if !self.auto_refresh {
+            return;
+        }
         let _ = self.refresh_from_disk();
     }
 
@@ -578,13 +606,20 @@ impl Project {
     }
 }
 
-fn initial_fingerprints(root: &Path, registry: &Arc<LanguageRegistry>) -> AHashMap<PathBuf, u64> {
-    let workspace = Workspace::new(registry.clone());
+fn workspace_fingerprints_from_vfs(workspace: &Workspace) -> AHashMap<PathBuf, u64> {
     workspace
-        .source_file_fingerprints(root)
-        .unwrap_or_default()
+        .db()
+        .vfs()
+        .all_files()
         .into_iter()
-        .map(|file| (file.path, file.hash))
+        .filter_map(|file| {
+            let path = workspace.db().vfs().path(file).ok()?;
+            let snapshot = workspace.db().vfs().snapshot(file).ok()?;
+            Some((
+                path.to_path_buf(),
+                bonsai_hash::fnv1a_bytes64(snapshot.text.as_bytes()),
+            ))
+        })
         .collect()
 }
 
@@ -879,11 +914,13 @@ fn unique_default_export_tmp_path(cache: &Path) -> PathBuf {
     cache.with_file_name(name)
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ExportCacheContentFingerprint {
-    files: usize,
-    digest: u64,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkspaceContentFingerprint {
+    pub files: usize,
+    pub digest: u64,
 }
+
+type ExportCacheContentFingerprint = WorkspaceContentFingerprint;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ExportCacheMetadata {
@@ -1072,7 +1109,7 @@ fn current_exe_is_newer_than_cache(cache_metadata: &fs::Metadata) -> bool {
     exe_modified > cache_modified
 }
 
-fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<ExportCacheContentFingerprint> {
+pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceContentFingerprint> {
     let registry = bonsai_adapters::all_languages_registry();
     let workspace = Workspace::new(registry);
     let fingerprints = workspace
@@ -1651,14 +1688,65 @@ impl Security<'_> {
         bonsai_security::source_inventory(&self.project.workspace, self.pack()?, options)
     }
 
+    pub fn sources_with_progress<F>(
+        &self,
+        options: SecurityInventoryOptions,
+        on_progress: F,
+    ) -> Result<Vec<bonsai_security::RuleMatch>>
+    where
+        F: FnMut(bonsai_security::AnalysisProgress),
+    {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_security::source_inventory_with_progress(
+            &self.project.workspace,
+            self.pack()?,
+            options,
+            on_progress,
+        )
+    }
+
     pub fn sinks(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
         self.project.refresh_from_disk_best_effort();
         bonsai_security::sink_inventory(&self.project.workspace, self.pack()?, options)
     }
 
+    pub fn sinks_with_progress<F>(
+        &self,
+        options: SecurityInventoryOptions,
+        on_progress: F,
+    ) -> Result<Vec<bonsai_security::RuleMatch>>
+    where
+        F: FnMut(bonsai_security::AnalysisProgress),
+    {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_security::sink_inventory_with_progress(
+            &self.project.workspace,
+            self.pack()?,
+            options,
+            on_progress,
+        )
+    }
+
     pub fn sanitizers(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
         self.project.refresh_from_disk_best_effort();
         bonsai_security::sanitizer_inventory(&self.project.workspace, self.pack()?, options)
+    }
+
+    pub fn sanitizers_with_progress<F>(
+        &self,
+        options: SecurityInventoryOptions,
+        on_progress: F,
+    ) -> Result<Vec<bonsai_security::RuleMatch>>
+    where
+        F: FnMut(bonsai_security::AnalysisProgress),
+    {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_security::sanitizer_inventory_with_progress(
+            &self.project.workspace,
+            self.pack()?,
+            options,
+            on_progress,
+        )
     }
 
     pub fn source_rows(

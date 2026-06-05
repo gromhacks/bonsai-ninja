@@ -680,12 +680,15 @@ where
 /// inventory lists every potential sink site, regardless of whether
 /// the current workspace has data flowing into it). All other
 /// constraints still apply.
-pub(crate) fn match_rules_against_facts_for_sink_inventory_on_files(
+pub(crate) fn match_rules_against_facts_for_sink_inventory_with_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
-) -> Vec<RuleMatch> {
-    let mut on_file_done = || {};
+    mut on_file_done: F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(),
+{
     match_rules_against_facts_with_progress_and_mode(
         ws,
         rules,

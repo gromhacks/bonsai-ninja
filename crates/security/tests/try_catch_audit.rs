@@ -11,7 +11,6 @@
 //! tracks values through ... exceptions, finally/defer/ensure-style
 //! cleanup, and throws."
 
-use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -102,7 +101,7 @@ fn audit_one(lang: &'static str) -> Result_ {
 #[test]
 fn try_catch_audit_per_language() {
     let results: Vec<_> = LANG_TABLE
-        .par_iter()
+        .iter()
         .copied()
         .map(|(lang, expected)| (audit_one(lang), expected))
         .collect();
@@ -125,7 +124,7 @@ fn try_catch_audit_per_language() {
     }
 
     let regressions: Vec<String> = results
-        .par_iter()
+        .iter()
         .filter_map(|(r, expected)| match expected {
             Expected::Pass => {
                 if r.skipped.is_some() {
