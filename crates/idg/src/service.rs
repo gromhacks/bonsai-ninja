@@ -1463,13 +1463,16 @@ impl IdgQueryService {
         unified: &UnifiedAddressSpace,
     ) -> AHashMap<WsNodeId, Vec<CrossCallEdge>> {
         let mut cross_calls_by_from: AHashMap<WsNodeId, Vec<CrossCallEdge>> = AHashMap::new();
+        let mut field_index = FieldCrossCallIndex::default();
         for (seg_id, segment) in self.workspace.segments() {
             let seg_id = SegmentId(seg_id.0);
             for edge in &segment.edges {
                 let Some(from_ws) = Self::ws_node_for(unified, seg_id, edge.from) else {
                     continue;
                 };
-                if let Some(row) = lift_call_arg_edge(segment, segment, edge) {
+                if let Some(row) =
+                    lift_call_arg_edge(seg_id, segment, seg_id, segment, edge, &mut field_index)
+                {
                     cross_calls_by_from.entry(from_ws).or_default().push(row);
                 }
             }
@@ -1505,7 +1508,14 @@ impl IdgQueryService {
             let Some(to_seg) = self.workspace.segment(cfe.to_segment) else {
                 continue;
             };
-            if let Some(row) = lift_call_arg_edge(from_seg, to_seg, &cfe.edge) {
+            if let Some(row) = lift_call_arg_edge(
+                cfe.from_segment,
+                from_seg,
+                cfe.to_segment,
+                to_seg,
+                &cfe.edge,
+                &mut field_index,
+            ) {
                 cross_calls_by_from.entry(from_ws).or_default().push(row);
             }
         }
@@ -1642,9 +1652,12 @@ fn span_after(a: Span, b: Span) -> bool {
 /// a return/yield output edge, or any other cross-call propagation
 /// edge the lineage layer can report.
 fn lift_call_arg_edge(
+    from_seg_id: SegmentId,
     from_seg: &crate::segment::IdgSegment,
+    to_seg_id: SegmentId,
     to_seg: &crate::segment::IdgSegment,
     edge: &IdgEdge,
+    field_index: &mut FieldCrossCallIndex,
 ) -> Option<CrossCallEdge> {
     let from_node = from_seg.nodes.get(edge.from)?;
     let to_node = to_seg.nodes.get(edge.to)?;
@@ -1672,7 +1685,10 @@ fn lift_call_arg_edge(
     // is tainted.
     if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg && from_node.func != to_node.func {
         let (arg_idx, param_idx) = field_cross_call_arg_and_param_indices(
+            field_index,
+            from_seg_id,
             from_seg,
+            to_seg_id,
             to_seg,
             from_node.func,
             to_node.func,
@@ -1722,8 +1738,52 @@ fn lift_call_arg_edge(
     None
 }
 
+#[derive(Default)]
+struct FieldCrossCallIndex {
+    call_arg: AHashMap<(SegmentId, FuncId, Span, String), Option<u8>>,
+    param: AHashMap<(SegmentId, FuncId, String), Option<u8>>,
+}
+
+impl FieldCrossCallIndex {
+    fn call_arg_index(
+        &mut self,
+        segment_id: SegmentId,
+        segment: &crate::segment::IdgSegment,
+        caller: FuncId,
+        call_span: Span,
+        base: &str,
+    ) -> Option<u8> {
+        let key = (segment_id, caller, call_span, base.to_string());
+        if let Some(value) = self.call_arg.get(&key) {
+            return *value;
+        }
+        let value = call_arg_index_for_storage_base(segment, caller, call_span, base);
+        self.call_arg.insert(key, value);
+        value
+    }
+
+    fn param_index(
+        &mut self,
+        segment_id: SegmentId,
+        segment: &crate::segment::IdgSegment,
+        callee: FuncId,
+        base: &str,
+    ) -> Option<u8> {
+        let key = (segment_id, callee, base.to_string());
+        if let Some(value) = self.param.get(&key) {
+            return *value;
+        }
+        let value = param_index_for_storage_base(segment, callee, base);
+        self.param.insert(key, value);
+        value
+    }
+}
+
 fn field_cross_call_arg_and_param_indices(
+    field_index: &mut FieldCrossCallIndex,
+    from_seg_id: SegmentId,
     from_seg: &crate::segment::IdgSegment,
+    to_seg_id: SegmentId,
     to_seg: &crate::segment::IdgSegment,
     caller: FuncId,
     callee: FuncId,
@@ -1733,8 +1793,12 @@ fn field_cross_call_arg_and_param_indices(
 ) -> Option<(u8, u8)> {
     let from_base = storage_base_from_place(from_seg, from_place)?;
     let to_base = storage_base_from_place(to_seg, to_place)?;
-    let arg_idx = call_arg_index_for_storage_base(from_seg, caller, call_span, &from_base).unwrap_or(u8::MAX);
-    let param_idx = param_index_for_storage_base(to_seg, callee, &to_base).unwrap_or(u8::MAX);
+    let arg_idx = field_index
+        .call_arg_index(from_seg_id, from_seg, caller, call_span, &from_base)
+        .unwrap_or(u8::MAX);
+    let param_idx = field_index
+        .param_index(to_seg_id, to_seg, callee, &to_base)
+        .unwrap_or(u8::MAX);
     Some((arg_idx, param_idx))
 }
 
