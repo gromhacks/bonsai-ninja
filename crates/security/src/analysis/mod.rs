@@ -42,7 +42,6 @@ type RankedCallPath = std::cmp::Reverse<(i64, u32, u32, Vec<FuncId>)>;
 type InventoryMatchIdentity = (String, String, u32, u32, String, String, Option<String>);
 type SourceMatchDedupeKey = (String, String, u64, u64, String);
 type SourceMatchDedupeValue<'a> = (usize, &'a RuleMatch, FuncId, u64);
-const SOURCE_SINK_NODE_PREFILTER_MAX_CANDIDATES: u64 = 512;
 
 /// Phase-aware progress event emitted by `run_taint_analysis_with_phase_progress`
 /// and `run_source_analysis_with_phase_progress`. Long-running phases
@@ -5201,25 +5200,8 @@ where
     let chain_call_graph = ws.cached_resolved_call_graph();
     let sink_func_set: AHashSet<FuncId> = sink_by_func.keys().copied().collect();
     let source_sink_prefilter_enabled = !source_work.is_empty() && !sink_func_set.is_empty();
-    if source_sink_prefilter_enabled {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "building source-sink reachability",
-            total: 2,
-        });
-    }
-    let semantic_function_graph = source_sink_prefilter_enabled.then(|| {
-        SemanticFunctionGraph::new(prefilter_function_edges(idg.as_ref(), config.max_edge_precision))
-    });
-    if source_sink_prefilter_enabled {
-        on_progress(AnalysisProgress::PhaseTicked);
-    }
-    let source_funcs_that_can_reach_sinks = semantic_function_graph
-        .as_ref()
-        .map(|graph| graph.funcs_that_can_reach(&sink_func_set));
-    if source_sink_prefilter_enabled {
-        on_progress(AnalysisProgress::PhaseTicked);
-        on_progress(AnalysisProgress::PhaseFinished);
-    }
+    let sink_target_nodes = source_sink_prefilter_enabled
+        .then(|| sink_target_nodes_for_funcs(idg.as_ref(), &sink_by_func, &sink_func_set));
     let taint_caches = ws.inter_taint_caches();
     taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
     // Workspace-wide source-seeded graph index. The resident cache is
@@ -5237,19 +5219,17 @@ where
     // resulting finding fingerprints are stable across runs.
     let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> =
         source_groups.iter().map(|(k, v)| (*k, v)).collect();
-    if let Some(reachable) = source_funcs_that_can_reach_sinks.as_ref() {
-        source_groups_sorted.retain(|(func, _)| reachable.contains(func));
-    }
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
     let scheduling_total = source_groups_sorted
         .iter()
         .map(|(_, indices)| indices.len() as u64)
         .sum();
-    let use_source_sink_node_prefilter = scheduling_total <= SOURCE_SINK_NODE_PREFILTER_MAX_CANDIDATES;
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "scheduling taint sources",
-        total: scheduling_total,
-    });
+    if source_sink_prefilter_enabled {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "building source-sink reachability",
+            total: scheduling_total,
+        });
+    }
 
     struct ScheduledSourceGroup {
         src_func_id: FuncId,
@@ -5259,74 +5239,31 @@ where
 
     let debug_taint_phase = bonsai_diagnostics::debug::is_enabled("security-taint");
     let mut scheduled_source_groups = Vec::new();
-    let mut sink_target_node_cache: AHashMap<Vec<u32>, Vec<bonsai_idg::WsNodeId>> = AHashMap::new();
     for (src_func_id, indices) in source_groups_sorted {
-        let Some(group_corridor) = semantic_function_graph.as_ref().and_then(|graph| {
-            let reachable_to_sink = source_funcs_that_can_reach_sinks.as_ref()?;
-            let corridor = graph.source_sink_corridor(src_func_id, &sink_func_set, reachable_to_sink);
-            if !corridor.terminal_sinks.is_empty() {
-                return Some(corridor);
-            }
-            if !reachable_to_sink.contains(&src_func_id) {
-                return None;
-            }
-            Some(SourceSinkCorridor {
-                terminal_sinks: sink_func_set.clone(),
-                lineage_funcs: reachable_to_sink.clone(),
-            })
-        }) else {
-            if debug_taint_phase {
-                let name = global
-                    .decl_of(SymbolId::new(src_func_id.raw()))
-                    .map(|decl| decl.name.clone())
-                    .unwrap_or_default();
-                bonsai_diagnostics::debug_log!(
-                    "security-taint",
-                    "group func={}({}) sources={} skipped=no_sink_corridor",
-                    name,
-                    src_func_id.raw(),
-                    indices.len()
-                );
-            }
-            for _ in indices {
-                on_progress(AnalysisProgress::PhaseTicked);
-            }
-            continue;
-        };
-        let filtered_indices = if use_source_sink_node_prefilter {
-            let mut sink_target_key: Vec<u32> = group_corridor
-                .terminal_sinks
-                .iter()
-                .map(|func| func.raw())
-                .collect();
-            sink_target_key.sort();
-            sink_target_key.dedup();
-            let sink_target_nodes = sink_target_node_cache.entry(sink_target_key).or_insert_with(|| {
-                sink_target_nodes_for_corridor(idg.as_ref(), &sink_by_func, &group_corridor)
-            });
-            let mut filtered_indices = Vec::with_capacity(indices.len());
-            for idx in indices.iter().copied() {
-                if source_index_reaches_sink_target_nodes(
+        let mut filtered_indices = Vec::with_capacity(indices.len());
+        let mut group_corridor = SourceSinkCorridor::default();
+        for idx in indices.iter().copied() {
+            let corridor = sink_target_nodes.as_deref().and_then(|target_nodes| {
+                source_index_sink_corridor(
                     idx,
                     &source_work,
                     pack,
                     &config,
                     global.as_ref(),
                     idg.as_ref(),
-                    sink_target_nodes,
-                    &group_corridor.lineage_funcs,
-                ) {
-                    filtered_indices.push(idx);
-                }
+                    target_nodes,
+                    &sink_func_set,
+                    chain_call_graph.as_ref(),
+                )
+            });
+            if let Some(corridor) = corridor {
+                filtered_indices.push(idx);
+                group_corridor.extend(corridor);
+            }
+            if source_sink_prefilter_enabled {
                 on_progress(AnalysisProgress::PhaseTicked);
             }
-            filtered_indices
-        } else {
-            for _ in indices {
-                on_progress(AnalysisProgress::PhaseTicked);
-            }
-            indices.clone()
-        };
+        }
         if filtered_indices.is_empty() {
             if debug_taint_phase {
                 let name = global
@@ -5343,11 +5280,23 @@ where
             }
             continue;
         }
+        group_corridor.lineage_funcs.insert(src_func_id);
         scheduled_source_groups.push(ScheduledSourceGroup {
             src_func_id,
             indices: filtered_indices,
             corridor: group_corridor,
         });
+    }
+    if source_sink_prefilter_enabled {
+        on_progress(AnalysisProgress::PhaseFinished);
+    }
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "scheduling taint sources",
+        total: scheduling_total,
+    });
+    for _ in 0..scheduling_total {
+        on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
@@ -5357,9 +5306,11 @@ where
         source_groups.len(),
         scheduled_source_groups.len(),
         source_sink_prefilter_enabled,
-        source_funcs_that_can_reach_sinks
-            .as_ref()
-            .map_or(0, |reachable| reachable.len())
+        scheduled_source_groups
+            .iter()
+            .flat_map(|group| group.corridor.lineage_funcs.iter().copied())
+            .collect::<AHashSet<_>>()
+            .len()
     );
     let total_groups = scheduled_source_groups.len();
     on_progress(AnalysisProgress::PhaseStarted {
@@ -5815,30 +5766,28 @@ fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {
     sorted
 }
 
+#[derive(Default)]
 struct SourceSinkCorridor {
     terminal_sinks: AHashSet<FuncId>,
     lineage_funcs: AHashSet<FuncId>,
 }
 
-fn prefilter_function_edges(
-    idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
-) -> Vec<(FuncId, FuncId)> {
-    let mut edges = idg.semantic_function_edges_with_max_precision(max_precision);
-    edges.sort_by_key(|(caller, callee)| (caller.raw(), callee.raw()));
-    edges.dedup();
-    edges
+impl SourceSinkCorridor {
+    fn extend(&mut self, other: SourceSinkCorridor) {
+        self.terminal_sinks.extend(other.terminal_sinks);
+        self.lineage_funcs.extend(other.lineage_funcs);
+    }
 }
 
-fn sink_target_nodes_for_corridor(
+fn sink_target_nodes_for_funcs(
     idg: &bonsai_idg::IdgQueryService,
     sink_by_func: &AHashMap<FuncId, Vec<&RuleMatch>>,
-    corridor: &SourceSinkCorridor,
+    sink_funcs: &AHashSet<FuncId>,
 ) -> Vec<bonsai_idg::WsNodeId> {
-    let mut sink_funcs: Vec<FuncId> = corridor.terminal_sinks.iter().copied().collect();
-    sink_funcs.sort_by_key(|func| func.raw());
+    let mut sorted_sink_funcs: Vec<FuncId> = sink_funcs.iter().copied().collect();
+    sorted_sink_funcs.sort_by_key(|func| func.raw());
     let mut out = Vec::new();
-    for sink_func in sink_funcs {
+    for sink_func in sorted_sink_funcs {
         let Some(sinks) = sink_by_func.get(&sink_func) else {
             continue;
         };
@@ -5852,7 +5801,7 @@ fn sink_target_nodes_for_corridor(
 }
 
 #[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
-fn source_index_reaches_sink_target_nodes(
+fn source_index_sink_corridor(
     index: usize,
     source_work: &[(&RuleMatch, FuncId, TokenSet)],
     pack: &Rulepack,
@@ -5860,35 +5809,31 @@ fn source_index_reaches_sink_target_nodes(
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     sink_target_nodes: &[bonsai_idg::WsNodeId],
-    lineage_func_filter: &AHashSet<FuncId>,
-) -> bool {
+    sink_func_set: &AHashSet<FuncId>,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+) -> Option<SourceSinkCorridor> {
+    let (src, source_func, seeds) = source_work.get(index)?;
     if sink_target_nodes.is_empty() {
-        return true;
-    }
-    let Some((src, source_func, seeds)) = source_work.get(index) else {
-        return true;
-    };
-    // Parameter and inferred-entry sources are intentionally unanchored:
-    // the source span points at a declaration, not a value-producing
-    // expression. Keep them on the function-level corridor and let the
-    // exact graph builder seed the declaration parameters.
-    if src.rule_id.starts_with("entry-point.") || rule_match_kind_is_param(pack, &src.rule_id) {
-        return true;
+        return callgraph_source_sink_corridor(
+            *source_func,
+            sink_func_set,
+            call_graph,
+            config.max_edge_precision,
+        );
     }
     let output_arg_names = global
         .decl_of(SymbolId::new(source_func.raw()))
         .map(|decl| output_arg_names_for_match(pack, src, decl))
         .unwrap_or_default();
-    let mut seed_nodes = effective_source_seed_nodes(
-        *source_func,
-        seeds,
-        Some(src.span),
-        &output_arg_names,
-        global,
-        idg,
-    );
+    let anchor = if rule_match_kind_is_param(pack, &src.rule_id) || src.rule_id.starts_with("entry-point.") {
+        None
+    } else {
+        Some(src.span)
+    };
+    let mut seed_nodes =
+        effective_source_seed_nodes(*source_func, seeds, anchor, &output_arg_names, global, idg);
     if seed_nodes.is_empty() {
-        return true;
+        return None;
     }
     apply_configured_transfer_fixpoint(
         &mut seed_nodes,
@@ -5898,114 +5843,110 @@ fn source_index_reaches_sink_target_nodes(
         global,
         idg,
         config.max_edge_precision,
-        Some(lineage_func_filter),
+        None,
     );
-    !idg.forward_target_nodes_cut_with_max_precision(
+    let cut = idg.forward_target_nodes_cut_with_max_precision(
         &seed_nodes,
         sink_target_nodes,
         config.max_edge_precision,
-    )
-    .is_empty()
+    );
+    if cut.is_empty() {
+        return callgraph_source_sink_corridor(
+            *source_func,
+            sink_func_set,
+            call_graph,
+            config.max_edge_precision,
+        );
+    }
+    let mut corridor = SourceSinkCorridor::default();
+    for node in &cut {
+        let Some(point) = idg.resolve_point(*node) else {
+            continue;
+        };
+        corridor.lineage_funcs.insert(point.func);
+        if sink_func_set.contains(&point.func) {
+            corridor.terminal_sinks.insert(point.func);
+        }
+    }
+    if corridor.terminal_sinks.is_empty() {
+        return None;
+    }
+    corridor.lineage_funcs.insert(*source_func);
+    corridor
+        .lineage_funcs
+        .extend(corridor.terminal_sinks.iter().copied());
+    Some(corridor)
 }
 
-struct SemanticFunctionGraph {
-    callees: AHashMap<FuncId, Vec<FuncId>>,
-    callers: AHashMap<FuncId, Vec<FuncId>>,
-}
-
-impl SemanticFunctionGraph {
-    fn new(edges: Vec<(FuncId, FuncId)>) -> Self {
-        let mut callees: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
-        let mut callers: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
-        for (caller, callee) in edges {
-            callees.entry(caller).or_default().push(callee);
-            callers.entry(callee).or_default().push(caller);
-        }
-        for funcs in callees.values_mut().chain(callers.values_mut()) {
-            funcs.sort_by_key(|func| func.raw());
-            funcs.dedup();
-        }
-        Self { callees, callers }
+fn callgraph_source_sink_corridor(
+    source_func: FuncId,
+    sink_func_set: &AHashSet<FuncId>,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+) -> Option<SourceSinkCorridor> {
+    if sink_func_set.is_empty() {
+        return None;
     }
-
-    fn funcs_that_can_reach(&self, sink_funcs: &AHashSet<FuncId>) -> AHashSet<FuncId> {
-        let mut reachable: AHashSet<FuncId> = sink_funcs.clone();
-        let mut frontier: Vec<FuncId> = reachable.iter().copied().collect();
-        frontier.sort_by_key(|func| func.raw());
-        while !frontier.is_empty() {
-            let mut next = Vec::new();
-            for callee in &frontier {
-                let Some(callers) = self.callers.get(callee) else {
-                    continue;
-                };
-                for caller in callers {
-                    if reachable.insert(*caller) {
-                        next.push(*caller);
-                    }
-                }
-            }
-            next.sort_by_key(|func| func.raw());
-            if next.is_empty() {
-                break;
-            }
-            frontier = next;
-        }
-        reachable
-    }
-
-    fn source_sink_corridor(
-        &self,
-        source_func: FuncId,
-        sink_funcs: &AHashSet<FuncId>,
-        funcs_that_can_reach_sinks: &AHashSet<FuncId>,
-    ) -> SourceSinkCorridor {
-        let mut forward_seen = AHashSet::default();
-        let mut frontier = vec![source_func];
-        forward_seen.insert(source_func);
-        while !frontier.is_empty() {
-            let mut next = Vec::new();
-            for func in frontier {
-                let Some(callees) = self.callees.get(&func) else {
-                    continue;
-                };
-                for callee in callees {
-                    if !funcs_that_can_reach_sinks.contains(callee) {
-                        continue;
-                    }
-                    if forward_seen.insert(*callee) {
-                        next.push(*callee);
-                    }
-                }
-            }
-            next.sort_by_key(|func| func.raw());
-            if next.is_empty() {
-                break;
-            }
-            frontier = next;
-        }
-        let terminal_sinks: AHashSet<FuncId> = forward_seen
-            .iter()
-            .copied()
-            .filter(|func| sink_funcs.contains(func))
+    let mut seen = AHashSet::default();
+    let mut forward: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
+    let mut stack = vec![source_func];
+    seen.insert(source_func);
+    while let Some(func) = stack.pop() {
+        let mut next: Vec<FuncId> = call_graph
+            .callees_of(func)
+            .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+            .map(|edge| edge.to)
             .collect();
-        if terminal_sinks.is_empty() {
-            return SourceSinkCorridor {
-                terminal_sinks,
-                lineage_funcs: AHashSet::default(),
-            };
+        next.sort_by_key(|callee| callee.raw());
+        next.dedup();
+        for callee in &next {
+            forward.entry(func).or_default().push(*callee);
         }
-
-        let mut lineage_funcs: AHashSet<FuncId> = forward_seen
-            .intersection(funcs_that_can_reach_sinks)
-            .copied()
-            .collect();
-        lineage_funcs.insert(source_func);
-        lineage_funcs.extend(terminal_sinks.iter().copied());
-        SourceSinkCorridor {
-            terminal_sinks,
-            lineage_funcs,
+        for callee in next.into_iter().rev() {
+            if seen.insert(callee) {
+                stack.push(callee);
+            }
         }
     }
+    let terminal_sinks: AHashSet<FuncId> = seen
+        .iter()
+        .copied()
+        .filter(|func| sink_func_set.contains(func))
+        .collect();
+    if terminal_sinks.is_empty() {
+        return None;
+    }
+    let mut reverse: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
+    for (caller, callees) in &forward {
+        for callee in callees {
+            if seen.contains(callee) {
+                reverse.entry(*callee).or_default().push(*caller);
+            }
+        }
+    }
+    let mut lineage_funcs = terminal_sinks.clone();
+    let mut frontier: Vec<FuncId> = terminal_sinks.iter().copied().collect();
+    frontier.sort_by_key(|func| func.raw());
+    while let Some(func) = frontier.pop() {
+        let Some(callers) = reverse.get(&func) else {
+            continue;
+        };
+        let mut sorted_callers = callers.clone();
+        sorted_callers.sort_by_key(|caller| caller.raw());
+        for caller in sorted_callers.into_iter().rev() {
+            if lineage_funcs.insert(caller) {
+                frontier.push(caller);
+            }
+        }
+    }
+    if !lineage_funcs.contains(&source_func) {
+        return None;
+    }
+    lineage_funcs.extend(terminal_sinks.iter().copied());
+    Some(SourceSinkCorridor {
+        terminal_sinks,
+        lineage_funcs,
+    })
 }
 
 fn append_taint_target_key(seed_key: &mut Vec<String>, label: &str, target_funcs: Option<&AHashSet<FuncId>>) {
@@ -6091,7 +6032,11 @@ fn effective_source_seed_nodes(
     let mut seed_nodes = Vec::new();
     let seed_names: Vec<String> = seeds.iter().cloned().collect();
     if anchor.is_none() {
-        seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
+        if seed_names.is_empty() {
+            seed_nodes.extend(idg.param_nodes_of(source_func));
+        } else {
+            seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
+        }
         if seed_nodes.is_empty() {
             seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
         }
@@ -6125,6 +6070,11 @@ fn effective_source_seed_nodes(
     }
     seed_nodes.sort();
     seed_nodes.dedup();
+    if seed_nodes.is_empty() && seed_names.is_empty() {
+        seed_nodes.extend(idg.param_nodes_of(source_func));
+        seed_nodes.sort();
+        seed_nodes.dedup();
+    }
     seed_nodes
 }
 

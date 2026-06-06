@@ -178,19 +178,20 @@ taint-path files stayed inside the same generated copy.
 | Swift | 10,000 | 2,500 | 3.50s | 38.26s |
 | TypeScript | 10,000 | 2,000 | 2.74s | 25.19s |
 
-The 2026-06-04 source-to-sink scheduler regression pass verifies that
-taint-analysis does not analyze every source in a large project when most
-sources cannot reach any sink. Source eligibility is computed to fixpoint over
-semantic IDG function edges for every supported language, including callback,
-return, receiver, and field-propagation edges. The taint budget must not cap
-this eligibility check. Once a source group is eligible, the per-source IDG
-graph build is cut to the proven source-to-sink function corridor; if no
-semantic corridor exists, the group is skipped instead of falling back to a
-workspace-wide graph. Same-file source batches also get a concrete seed-node to
-sink-node reachability prefilter so adapter module wrappers or dense files do
-not schedule source-only calls. Cross-file node-cut uncertainty stays scheduled
-and is decided by the normal corridor-scoped semantic taint graph to avoid false
-negatives.
+The 2026-06-04 and 2026-06-06 source-to-sink scheduler regression passes verify
+that taint-analysis does not analyze every source in a large project when most
+sources cannot reach any sink. Source eligibility is source-scoped: the
+scheduler first uses concrete source-seed to sink-node IDG cuts, then only falls
+back to a source-origin resolved-callgraph corridor when the concrete node cut
+cannot prove a path. It must not materialize all semantic function edges before
+source filtering, and the taint budget must not cap source eligibility. Once a
+source group is eligible, the per-source IDG graph build is cut to the proven
+source-to-sink corridor; if no semantic corridor exists, the group is skipped
+instead of falling back to a workspace-wide graph. Same-file source batches also
+get a concrete seed-node to sink-node reachability prefilter so adapter module
+wrappers or dense files do not schedule source-only calls. Cross-file node-cut
+uncertainty stays scheduled and is decided by the normal corridor-scoped
+semantic taint graph to avoid false negatives.
 
 Release-binary Java scale checks from the same pass:
 
@@ -207,6 +208,10 @@ Release-binary Java scale checks from the same pass:
 - OWASP Benchmark production taint-analysis default page: 1,745 total findings
   in 12.83s, with source groups filtered from 2,562 to 2,558 and taint chains
   built in 1.954s.
+- `dvws-node` release taint-analysis with `--context 512k`: 50 JavaScript
+  findings in 3.44s; source-sink reachability completed in 0.191s and taint
+  chains in 0.523s on the dense cached IDG sidecar that previously hung while
+  building source-sink reachability.
 
 The 2026-06-03 synthetic Python scale smoke copied `examples/python/mega_flow`
 into 10,000 valid flows across 80,000 source files, then deleted the generated
