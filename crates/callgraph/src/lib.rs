@@ -20,16 +20,17 @@ use bonsai_lang_api::{
     AliasTarget, AssignValueKind, CallArg, CallKind, Decl, DeclKind, FlowEvent, ModulePath,
 };
 use bonsai_resolve::{
-    callee_without_call_args, collect_method_candidates_for_class_cached, enclosing_class_for_decl,
-    export_name_variants, extend_alias_targets_with_declared_types, is_super_receiver_with_tokens,
-    module_path_parts, module_target_matches_decl_module_path, module_target_matches_path,
-    module_target_parts, module_target_parts_match_path_parts, namespace_alias_target_tail,
-    prune_receiver_type_names_for_dispatch, push_unique_func, push_unique_string,
-    qualified_module_alias_call, resolve_callable_with_context, resolve_class, split_qualified_head_tail,
-    visibility_allows, MethodCandidateCache, ResolveContext,
+    build_shared_peer_class_index, callee_without_call_args, collect_method_candidates_for_class_cached,
+    enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
+    is_super_receiver_with_tokens, module_path_parts, module_target_matches_decl_module_path,
+    module_target_matches_path, module_target_parts, module_target_parts_match_path_parts,
+    namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
+    push_unique_string, qualified_module_alias_call, resolve_callable_with_context, resolve_class,
+    split_qualified_head_tail, visibility_allows, MethodCandidateCache, PeerClassIndex, ResolveContext,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// What kind of dispatch produced a call edge. The resolver
 /// classifies every edge during graph construction so downstream
@@ -296,7 +297,7 @@ struct CallableTargetKey {
     caller_module: ModulePath,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct WorkspaceCallableBindingIndex {
     by_module: AHashMap<(String, ModulePath), Option<FuncId>>,
     by_file: AHashMap<(String, FileId), Option<FuncId>>,
@@ -717,6 +718,17 @@ pub struct ResolvedCallGraph {
     cg: CallGraph,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResolvedCallGraphBuildContext {
+    alias_index: WorkspaceAliasIndex,
+    callable_index: WorkspaceCallableBindingIndex,
+    file_paths: AHashMap<FileId, String>,
+    file_path_parts: AHashMap<FileId, Vec<String>>,
+    build_targets: BuildTargetIndex,
+    file_languages: AHashMap<FileId, Option<&'static str>>,
+    peer_class_index: Arc<PeerClassIndex>,
+}
+
 impl ResolvedCallGraph {
     /// Wrap a pre-built call graph when the caller already has
     /// semantically resolved edges.
@@ -867,6 +879,144 @@ impl ResolvedCallGraph {
         )
     }
 
+    pub fn build_context<P, G>(
+        global: &GlobalIndex,
+        path_for_file: P,
+        language_for_file: G,
+    ) -> ResolvedCallGraphBuildContext
+    where
+        P: Fn(FileId) -> Option<String>,
+        G: Fn(FileId) -> Option<&'static str>,
+    {
+        let alias_index = WorkspaceAliasIndex::build(global);
+        let callable_index = WorkspaceCallableBindingIndex::build(global);
+        let all_files = global.all_files().collect::<Vec<_>>();
+        let file_paths: AHashMap<FileId, String> = all_files
+            .iter()
+            .filter_map(|&file| path_for_file(file).map(|path| (file, path)))
+            .collect();
+        let file_path_parts: AHashMap<FileId, Vec<String>> = file_paths
+            .iter()
+            .map(|(&file, path)| (file, module_path_parts(path)))
+            .collect();
+        let build_targets =
+            BuildTargetIndex::from_file_paths(file_paths.iter().map(|(&file, path)| (file, path.clone())));
+        let file_languages: AHashMap<FileId, Option<&'static str>> = all_files
+            .iter()
+            .map(|&file| (file, language_for_file(file)))
+            .collect();
+        let peer_class_index = build_shared_peer_class_index(global);
+        ResolvedCallGraphBuildContext {
+            alias_index,
+            callable_index,
+            file_paths,
+            file_path_parts,
+            build_targets,
+            file_languages,
+            peer_class_index,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // Scoped iterative callers prebuild the expensive workspace context once.
+    pub fn build_with_file_info_and_super_tokens_for_files_with_context<F, T, L, S>(
+        global: &GlobalIndex,
+        mut aliases_for_file: F,
+        mut alias_targets_for_file: T,
+        export_aliases_for_file: L,
+        super_receiver_tokens_for_file: S,
+        included_files: &[FileId],
+        context: &ResolvedCallGraphBuildContext,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        L: Fn(FileId) -> &'static [&'static str],
+        S: Fn(FileId) -> &'static [&'static str],
+    {
+        let mut files = included_files.to_vec();
+        files.sort_by_key(|file| file.raw());
+        files.dedup();
+        struct FileCallgraphInfo {
+            file: FileId,
+            aliases: AHashMap<String, String>,
+            alias_targets: AHashMap<String, AliasTarget>,
+            export_aliases: &'static [&'static str],
+            super_receiver_tokens: &'static [&'static str],
+            language: Option<&'static str>,
+        }
+        let file_infos = files
+            .into_iter()
+            .map(|file| FileCallgraphInfo {
+                file,
+                aliases: aliases_for_file(file),
+                alias_targets: alias_targets_for_file(file),
+                export_aliases: export_aliases_for_file(file),
+                super_receiver_tokens: super_receiver_tokens_for_file(file),
+                language: context.file_languages.get(&file).copied().flatten(),
+            })
+            .collect::<Vec<_>>();
+        use rayon::prelude::*;
+        let edge_chunks = file_infos
+            .par_iter()
+            .map(|info| {
+                let path_lookup = |file| context.file_paths.get(&file).cloned();
+                let language_lookup = |file| context.file_languages.get(&file).copied().flatten();
+                let mut method_candidate_cache =
+                    MethodCandidateCache::with_peer_class_index(context.peer_class_index.clone());
+                let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
+                let mut callable_target_cache = CallableTargetCache::default();
+                let mut local_cg = CallGraph::new();
+                for decl in global.decls_in(info.file) {
+                    if !matches!(
+                        decl.kind,
+                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                    ) {
+                        continue;
+                    }
+                    let from = FuncId::new(decl.symbol.raw());
+                    let alias_targets = alias_targets_for_decl(&info.alias_targets, decl);
+                    let local_bindings = collect_local_callable_bindings_with_alias_index(
+                        &decl.flow_events,
+                        global,
+                        decl,
+                        &alias_targets,
+                        &context.alias_index,
+                        Some(&context.callable_index),
+                    );
+                    add_resolved_call_edges(
+                        &decl.flow_events,
+                        from,
+                        decl,
+                        global,
+                        &info.aliases,
+                        &alias_targets,
+                        &local_bindings,
+                        &path_lookup,
+                        &context.file_path_parts,
+                        info.export_aliases,
+                        info.super_receiver_tokens,
+                        info.language,
+                        &language_lookup,
+                        &context.alias_index,
+                        &context.build_targets,
+                        &mut method_candidate_cache,
+                        &mut workspace_module_cache,
+                        &mut callable_target_cache,
+                        &mut local_cg,
+                    );
+                }
+                local_cg.edges
+            })
+            .collect::<Vec<_>>();
+        let mut cg = CallGraph::new();
+        for edges in edge_chunks {
+            for edge in edges {
+                cg.add_edge(edge);
+            }
+        }
+        Self { cg }
+    }
+
     #[allow(clippy::too_many_arguments)] // Mirrors the public builder shape and adds the optional file scope.
     fn build_with_file_info_and_super_tokens_scoped<F, T, P, L, G, S>(
         global: &GlobalIndex,
@@ -930,13 +1080,15 @@ impl ResolvedCallGraph {
                 language: language_for_file(file),
             })
             .collect::<Vec<_>>();
+        let peer_class_index = build_shared_peer_class_index(global);
         use rayon::prelude::*;
         let edge_chunks = file_infos
             .par_iter()
             .map(|info| {
                 let path_lookup = |file| file_paths.get(&file).cloned();
                 let language_lookup = |file| file_languages.get(&file).copied().flatten();
-                let mut method_candidate_cache = MethodCandidateCache::default();
+                let mut method_candidate_cache =
+                    MethodCandidateCache::with_peer_class_index(peer_class_index.clone());
                 let mut workspace_module_cache = WorkspaceModuleTargetCache::default();
                 let mut callable_target_cache = CallableTargetCache::default();
                 let mut local_cg = CallGraph::new();
@@ -1673,6 +1825,7 @@ fn add_callback_arg_edges(
             local_bindings,
             &arg.value_text,
             caller_decl,
+            caller_language,
         );
         let [to] = targets.as_slice() else {
             continue;
@@ -2273,8 +2426,9 @@ fn resolve_callable_arg(
     local_bindings: &AHashMap<String, FuncId>,
     raw: &str,
     caller_decl: &Decl,
+    caller_language: Option<&'static str>,
 ) -> Vec<FuncId> {
-    if !call_arg_can_be_callable_reference(raw) {
+    if !call_arg_can_be_callable_reference(raw, caller_language) {
         return Vec::new();
     }
     let variants = callable_reference_variants(raw);
@@ -2324,10 +2478,13 @@ fn resolve_callable_arg(
     Vec::new()
 }
 
-fn call_arg_can_be_callable_reference(raw: &str) -> bool {
+fn call_arg_can_be_callable_reference(raw: &str, caller_language: Option<&'static str>) -> bool {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || is_exact_quoted_literal(trimmed) {
+    if trimmed.is_empty() {
         return false;
+    }
+    if is_exact_quoted_literal(trimmed) {
+        return caller_language == Some("php") && quoted_bare_callable_reference(trimmed).is_some();
     }
     if trimmed.contains("=>") || trimmed.starts_with('`') {
         return false;
@@ -2341,6 +2498,23 @@ fn call_arg_can_be_callable_reference(raw: &str) -> bool {
 fn is_exact_quoted_literal(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 2 && matches!(bytes[0], b'\'' | b'"' | b'`') && bytes.last().copied() == Some(bytes[0])
+}
+
+fn quoted_bare_callable_reference(value: &str) -> Option<&str> {
+    let quote = value.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || value.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let inner = value.get(1..value.len().saturating_sub(1))?.trim();
+    if inner.is_empty()
+        || inner
+            .chars()
+            .any(|ch| !(ch == '_' || ch == '\\' || ch == ':' || ch.is_ascii_alphanumeric()))
+        || inner.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(inner)
 }
 
 /// Build a `local_name → FuncId` map for callable assignments
@@ -2518,7 +2692,7 @@ fn collect_local_callable_binding_uses(events: &[FlowEvent], out: &mut AHashSet<
                     insert_local_callable_binding_use(out, receiver);
                 }
                 for arg in args {
-                    if call_arg_can_be_callable_reference(&arg.value_text) {
+                    if call_arg_can_be_callable_reference(&arg.value_text, None) {
                         insert_local_callable_binding_use(out, &arg.value_text);
                     }
                     for source_name in &arg.source_names {
@@ -5034,7 +5208,7 @@ pub fn short_callee(name: &str) -> &str {
 ///   resolve. Stored as `(canonical, leading_segment)` so the
 ///   suffix-match in `is_workspace_alias_target` doesn't have to
 ///   call `ends_with(&format!(...))` per candidate.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct WorkspaceAliasIndex {
     class_names: ahash::AHashSet<String>,
     /// Pairs of (canonical_module_path, language_separator).

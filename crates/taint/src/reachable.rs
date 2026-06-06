@@ -913,6 +913,9 @@ fn source_seed_nodes_from_idg(
             }
         } else {
             seed_nodes.extend(anchor_nodes);
+            if anchor_has_call_return && !seed_names.is_empty() {
+                seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
+            }
         }
     }
     if !output_arg_names.is_empty() && source_anchor.is_none() {
@@ -1498,6 +1501,8 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     }
 
     let mut tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
+    let compiled_call_result_passthroughs = compile_call_result_passthroughs(call_result_passthroughs);
+    let mut passthrough_callee_cache = CalleeNameCache::default();
     let mut tainted_names_by_caller: ahash::AHashMap<FuncId, ahash::AHashSet<String>> =
         ahash::AHashMap::new();
     let mut function_summary_cache: ahash::AHashMap<FuncId, crate::inter::FunctionSummary> =
@@ -1531,6 +1536,8 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
                     global.as_ref(),
                     &mut call_summary_cache,
                     &mut function_summary_cache,
+                    &compiled_call_result_passthroughs,
+                    &mut passthrough_callee_cache,
                 ) {
                     return None;
                 }
@@ -2053,13 +2060,7 @@ fn apply_call_result_passthrough_fixpoint(
     max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) -> bool {
-    let passthroughs: Vec<CompiledCallResultPassthrough<'_>> = passthroughs
-        .iter()
-        .map(|passthrough| CompiledCallResultPassthrough {
-            passthrough,
-            callee: ConfiguredCalleeMatcher::new(&passthrough.callee),
-        })
-        .collect();
+    let passthroughs = compile_call_result_passthroughs(passthroughs);
     let mut passthroughs_by_arg: ahash::AHashMap<u8, Vec<usize>> = ahash::AHashMap::default();
     let mut receiver_passthroughs: Vec<usize> = Vec::new();
     for (idx, configured) in passthroughs.iter().enumerate() {
@@ -2522,6 +2523,18 @@ fn call_result_passthrough_matches(call_name: &str, configured: &str) -> bool {
 struct CompiledCallResultPassthrough<'a> {
     passthrough: &'a crate::inter::CallResultPassthrough,
     callee: ConfiguredCalleeMatcher,
+}
+
+fn compile_call_result_passthroughs(
+    passthroughs: &[crate::inter::CallResultPassthrough],
+) -> Vec<CompiledCallResultPassthrough<'_>> {
+    passthroughs
+        .iter()
+        .map(|passthrough| CompiledCallResultPassthrough {
+            passthrough,
+            callee: ConfiguredCalleeMatcher::new(&passthrough.callee),
+        })
+        .collect()
 }
 
 struct CompiledOutputArgFlow<'a> {
@@ -3143,6 +3156,8 @@ fn tainted_arg_is_clean_nested_call_return(
     global: &GlobalIndex,
     call_summary_cache: &mut ahash::AHashMap<FuncId, ahash::AHashMap<bonsai_common::Span, CallEventSummary>>,
     function_summary_cache: &mut ahash::AHashMap<FuncId, crate::inter::FunctionSummary>,
+    call_result_passthroughs: &[CompiledCallResultPassthrough<'_>],
+    callee_name_cache: &mut CalleeNameCache,
 ) -> bool {
     let idx = usize::from(arg_idx);
     let Some(value_text) = call_summary.args_value_text.get(idx).map(String::as_str) else {
@@ -3151,9 +3166,17 @@ fn tainted_arg_is_clean_nested_call_return(
     let Some(arg_span) = call_summary.args_span.get(idx).copied() else {
         return false;
     };
-    let Some((callee_text, _)) = crate::inter::direct_call_expression_parts(value_text) else {
+    let Some((callee_text, nested_args)) = crate::inter::direct_call_expression_parts(value_text) else {
         return false;
     };
+    if nested_call_return_matches_configured_passthrough(
+        &callee_text,
+        nested_args.len(),
+        call_result_passthroughs,
+        callee_name_cache,
+    ) {
+        return false;
+    }
 
     let mut tainted_params_by_callee: ahash::AHashMap<FuncId, ahash::AHashSet<usize>> =
         ahash::AHashMap::default();
@@ -3179,7 +3202,7 @@ fn tainted_arg_is_clean_nested_call_return(
     }
 
     if tainted_params_by_callee.is_empty() {
-        return false;
+        return !nested_args.is_empty();
     }
 
     for (callee, tainted_params) in tainted_params_by_callee {
@@ -3198,6 +3221,23 @@ fn tainted_arg_is_clean_nested_call_return(
     }
 
     true
+}
+
+fn nested_call_return_matches_configured_passthrough(
+    callee_text: &str,
+    nested_arg_count: usize,
+    passthroughs: &[CompiledCallResultPassthrough<'_>],
+    callee_name_cache: &mut CalleeNameCache,
+) -> bool {
+    passthroughs.iter().any(|configured| {
+        configured.callee.matches(callee_text, callee_name_cache)
+            && (configured.passthrough.input_receiver
+                || configured
+                    .passthrough
+                    .input_arg_indices
+                    .iter()
+                    .any(|idx| *idx < nested_arg_count))
+    })
 }
 
 fn function_summary_returns_any_tainted_param(

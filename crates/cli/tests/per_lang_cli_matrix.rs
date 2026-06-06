@@ -444,7 +444,7 @@ pub const LANGS: &[LangExp] = &[
         // overclaim rows from this fixture while preserving the real
         // command-injection, SQLi, template, path, SSRF, eval, and
         // pickle findings.
-        min_findings_complex: 62,
+        min_findings_complex: 61,
         min_complex_decls: 200,
         refs_populated: true,
         has_classes: false,

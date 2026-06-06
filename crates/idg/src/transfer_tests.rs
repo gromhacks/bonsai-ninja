@@ -1300,6 +1300,7 @@ fn configured_clean_output_overwrite_commits_fresh_output_writer() {
         source_output_args: Vec::new(),
         include_diagnostic_field_flows: true,
         include_receiver_method_propagation: true,
+        include_field_argument_forwarding: true,
     };
     let out = transfer_function_for_with_options(&decl, &options);
 

@@ -1,4 +1,5 @@
 use super::*;
+use ahash::AHashMap;
 use bonsai_common::{FileId, Span};
 use bonsai_idg::{segment::IdgSegment, CallSiteId, IdgEdge, IdgQueryService, IdgWorkspace, Place};
 use bonsai_lang_api::LanguageRegistry;
@@ -502,6 +503,76 @@ fn call_result_passthrough_regex_alternatives_do_not_prefilter_to_last_branch() 
             r"regex:^(?:.*\.)?(stringWithFormat|localizedStringWithFormat|initWithFormat|stringByAppendingFormat)$",
         ),
         "regex passthrough prefilter must not reject earlier alternation branches"
+    );
+}
+
+#[test]
+fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
+    let db = empty_db();
+    let global = db.global_index();
+    let call_summary = CallEventSummary {
+        name: ":os.cmd".to_string(),
+        args_value_text: vec!["String.to_charlist(cmd)".to_string()],
+        args_span: vec![span()],
+        args_place: vec![None],
+        receiver: None,
+    };
+    let passthroughs = vec![crate::inter::CallResultPassthrough {
+        callee: "String.to_charlist".to_string(),
+        input_arg_indices: vec![0],
+        input_receiver: false,
+    }];
+    let compiled = compile_call_result_passthroughs(&passthroughs);
+    let mut call_summary_cache = AHashMap::default();
+    let mut function_summary_cache = AHashMap::default();
+    let mut callee_name_cache = CalleeNameCache::default();
+
+    assert!(
+        !tainted_arg_is_clean_nested_call_return(
+            FuncId::new(0),
+            0,
+            &call_summary,
+            &[],
+            &db,
+            global.as_ref(),
+            &mut call_summary_cache,
+            &mut function_summary_cache,
+            &compiled,
+            &mut callee_name_cache,
+        ),
+        "configured passthrough calls preserve taint and must remain visible to sink arg constraints"
+    );
+}
+
+#[test]
+fn unmodeled_nested_call_return_is_pruned_as_clean() {
+    let db = empty_db();
+    let global = db.global_index();
+    let call_summary = CallEventSummary {
+        name: "sink".to_string(),
+        args_value_text: vec!["clean_return(cmd)".to_string()],
+        args_span: vec![span()],
+        args_place: vec![None],
+        receiver: None,
+    };
+    let mut call_summary_cache = AHashMap::default();
+    let mut function_summary_cache = AHashMap::default();
+    let mut callee_name_cache = CalleeNameCache::default();
+
+    assert!(
+        tainted_arg_is_clean_nested_call_return(
+            FuncId::new(0),
+            0,
+            &call_summary,
+            &[],
+            &db,
+            global.as_ref(),
+            &mut call_summary_cache,
+            &mut function_summary_cache,
+            &[],
+            &mut callee_name_cache,
+        ),
+        "unresolved and unmodeled nested call returns should still be treated as clean"
     );
 }
 

@@ -40,8 +40,8 @@ pub(crate) use diagnostics::{cmd_diagnostics, cmd_dump_cfg, cmd_dump_hir, cmd_in
 pub(crate) use dump::{cmd_dump_ast, cmd_dump_callgraph, cmd_dump_edges, cmd_dump_resolve, cmd_dump_taint};
 pub(crate) use export::cmd_export;
 pub(crate) use inspect::{
-    cmd_inspect, render_flow_block_with_heading, render_flow_with_cached_call_spans,
-    render_flow_with_filters, BodySet, InspectFilters, InspectFlowRendered, InspectRenderOptions,
+    cmd_inspect, render_flow_block_with_heading, render_flow_with_cached_call_spans, BodySet, InspectFilters,
+    InspectFlowRendered, InspectRenderOptions,
 };
 pub(crate) use trace::{cmd_trace, nearest_names, not_found_with_suggestions};
 

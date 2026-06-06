@@ -726,6 +726,7 @@ where
         }
         return Vec::new();
     }
+    let prepared_by_language = build_prepared_rule_batches(&prepared);
     let constructor_names = if prepared.iter().any(|r| r.rule.match_spec.kind == MatchKind::New) {
         collect_constructor_names(global.as_ref())
     } else {
@@ -747,15 +748,11 @@ where
                     let mut file_out: Vec<RuleMatch> = Vec::new();
                     if let Some(adapter) = ws.db().adapter_for(file) {
                         let language = adapter.language_id();
-                        let file_rules: Vec<&PreparedRule<'_>> = prepared
-                            .iter()
-                            .filter(|rule| rule.rule.language == language.as_str())
-                            .collect();
-                        if !file_rules.is_empty() {
+                        if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
                             scan_file_rules(
                                 ws,
                                 file,
-                                &file_rules,
+                                file_rules,
                                 &constructor_names,
                                 mode,
                                 taint_view,
@@ -1188,66 +1185,115 @@ fn match_base_name(text: &str) -> Option<&str> {
     (!base.is_empty()).then_some(base)
 }
 
+struct PreparedRuleBatch<'p, 'rule> {
+    call_rules: Vec<&'p PreparedRule<'rule>>,
+    call_wildcard_rules: Vec<&'p PreparedRule<'rule>>,
+    call_keyed_rules: AHashMap<String, Vec<&'p PreparedRule<'rule>>>,
+    read_rules: Vec<&'p PreparedRule<'rule>>,
+    write_rules: Vec<&'p PreparedRule<'rule>>,
+    param_rules: Vec<&'p PreparedRule<'rule>>,
+    return_rules: Vec<&'p PreparedRule<'rule>>,
+    missing_rules: Vec<&'p PreparedRule<'rule>>,
+}
+
+impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
+    fn new(rules: &[&'p PreparedRule<'rule>]) -> Self {
+        let mut out = Self {
+            call_rules: Vec::new(),
+            call_wildcard_rules: Vec::new(),
+            call_keyed_rules: AHashMap::new(),
+            read_rules: Vec::new(),
+            write_rules: Vec::new(),
+            param_rules: Vec::new(),
+            return_rules: Vec::new(),
+            missing_rules: Vec::new(),
+        };
+        for &rule in rules {
+            match rule.rule.match_spec.kind {
+                MatchKind::Call | MatchKind::New => {
+                    out.call_rules.push(rule);
+                    insert_call_rule_index(&mut out.call_keyed_rules, &mut out.call_wildcard_rules, rule);
+                }
+                MatchKind::Read => out.read_rules.push(rule),
+                MatchKind::Write => out.write_rules.push(rule),
+                MatchKind::Param => out.param_rules.push(rule),
+                MatchKind::Return => out.return_rules.push(rule),
+                MatchKind::Missing => out.missing_rules.push(rule),
+            }
+        }
+        out
+    }
+}
+
+fn build_prepared_rule_batches<'p, 'rule>(
+    prepared: &'p [PreparedRule<'rule>],
+) -> AHashMap<String, PreparedRuleBatch<'p, 'rule>> {
+    let mut by_language: AHashMap<String, Vec<&'p PreparedRule<'rule>>> = AHashMap::new();
+    for rule in prepared {
+        by_language
+            .entry(rule.rule.language.clone())
+            .or_default()
+            .push(rule);
+    }
+    by_language
+        .into_iter()
+        .map(|(language, rules)| (language, PreparedRuleBatch::new(&rules)))
+        .collect()
+}
+
+fn insert_call_rule_index<'p, 'rule>(
+    keyed_rules: &mut AHashMap<String, Vec<&'p PreparedRule<'rule>>>,
+    wildcard_rules: &mut Vec<&'p PreparedRule<'rule>>,
+    rule: &'p PreparedRule<'rule>,
+) {
+    if rule.regex.is_some() {
+        wildcard_rules.push(rule);
+        return;
+    }
+    let mut inserted = false;
+    if let Some(name) = rule.name {
+        insert_call_rule_key(keyed_rules, name, rule);
+        inserted = true;
+    }
+    if let Some(attribute) = rule.attribute {
+        for part in attribute {
+            insert_call_rule_key(keyed_rules, part, rule);
+            inserted = true;
+        }
+    }
+    if !inserted {
+        wildcard_rules.push(rule);
+    }
+}
+
 fn scan_file_rules(
     ws: &Workspace,
     file: FileId,
-    rules: &[&PreparedRule<'_>],
+    rules: &PreparedRuleBatch<'_, '_>,
     constructor_names: &AHashSet<String>,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
     out: &mut Vec<RuleMatch>,
 ) {
-    let active_rules: Vec<&PreparedRule<'_>> = rules.to_vec();
-    let call_rules: Vec<&PreparedRule<'_>> = active_rules
-        .iter()
-        .copied()
-        .filter(|r| matches!(r.rule.match_spec.kind, MatchKind::Call | MatchKind::New))
-        .collect();
-    let read_rules: Vec<&PreparedRule<'_>> = active_rules
-        .iter()
-        .copied()
-        .filter(|r| r.rule.match_spec.kind == MatchKind::Read)
-        .collect();
-    let write_rules: Vec<&PreparedRule<'_>> = active_rules
-        .iter()
-        .copied()
-        .filter(|r| r.rule.match_spec.kind == MatchKind::Write)
-        .collect();
-    let param_rules: Vec<&PreparedRule<'_>> = active_rules
-        .iter()
-        .copied()
-        .filter(|r| r.rule.match_spec.kind == MatchKind::Param)
-        .collect();
-    let return_rules: Vec<&PreparedRule<'_>> = active_rules
-        .iter()
-        .copied()
-        .filter(|r| r.rule.match_spec.kind == MatchKind::Return)
-        .collect();
-    let missing_rules: Vec<&PreparedRule<'_>> = active_rules
-        .iter()
-        .copied()
-        .filter(|r| r.rule.match_spec.kind == MatchKind::Missing)
-        .collect();
-
-    if !call_rules.is_empty() {
-        scan_calls_batch(ws, file, &call_rules, constructor_names, mode, taint_view, out);
+    if !rules.call_rules.is_empty() {
+        scan_calls_batch(ws, file, rules, constructor_names, mode, taint_view, out);
     }
-    if !read_rules.is_empty() {
-        scan_refs_batch(ws, file, &read_rules, RefKind::Read, out);
-        scan_flow_reads_batch(ws, file, &read_rules, out);
+    if !rules.read_rules.is_empty() {
+        scan_refs_batch(ws, file, &rules.read_rules, RefKind::Read, out);
+        scan_flow_reads_batch(ws, file, &rules.read_rules, out);
     }
-    if !write_rules.is_empty() {
-        scan_writes_batch(ws, file, &write_rules, mode, taint_view, out);
-        scan_ref_writes_batch(ws, file, &write_rules, mode, taint_view, out);
+    if !rules.write_rules.is_empty() {
+        scan_writes_batch(ws, file, &rules.write_rules, mode, taint_view, out);
+        scan_ref_writes_batch(ws, file, &rules.write_rules, mode, taint_view, out);
     }
-    if !param_rules.is_empty() {
-        scan_params_batch(ws, file, &param_rules, out);
+    if !rules.param_rules.is_empty() {
+        scan_params_batch(ws, file, &rules.param_rules, out);
     }
-    if !return_rules.is_empty() {
-        scan_returns_batch(ws, file, &return_rules, out);
+    if !rules.return_rules.is_empty() {
+        scan_returns_batch(ws, file, &rules.return_rules, out);
     }
-    if !missing_rules.is_empty() {
-        scan_missing_batch(ws, file, &missing_rules, mode, taint_view, out);
+    if !rules.missing_rules.is_empty() {
+        scan_missing_batch(ws, file, &rules.missing_rules, mode, taint_view, out);
     }
 }
 
@@ -1590,7 +1636,7 @@ fn decl_target_context_allows(
 fn scan_calls_batch(
     ws: &Workspace,
     file: FileId,
-    rules: &[&PreparedRule<'_>],
+    rules: &PreparedRuleBatch<'_, '_>,
     constructor_names: &AHashSet<String>,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
@@ -1602,28 +1648,6 @@ fn scan_calls_batch(
     let decls = global.decls_in(file);
     let bundle = decl_match_facts_for(ws, file);
     let mut decl_call_keys: AHashSet<(String, u64)> = AHashSet::new();
-    let mut wildcard_rules = Vec::new();
-    let mut keyed_rules: AHashMap<String, Vec<&PreparedRule<'_>>> = AHashMap::new();
-    for &rule in rules {
-        if rule.regex.is_some() {
-            wildcard_rules.push(rule);
-            continue;
-        }
-        let mut inserted = false;
-        if let Some(name) = rule.name {
-            insert_call_rule_key(&mut keyed_rules, name, rule);
-            inserted = true;
-        }
-        if let Some(attribute) = rule.attribute {
-            for part in attribute {
-                insert_call_rule_key(&mut keyed_rules, part, rule);
-                inserted = true;
-            }
-        }
-        if !inserted {
-            wildcard_rules.push(rule);
-        }
-    }
 
     for decl in decls {
         let fn_name = decl.name.clone();
@@ -1633,16 +1657,7 @@ fn scan_calls_batch(
         for call in &facts.calls {
             decl_call_keys.insert((call.callee.clone(), call.span.start));
             let mut candidate_rules = Vec::new();
-            for &rule in &wildcard_rules {
-                push_unique_prepared_rule(&mut candidate_rules, rule);
-            }
-            for key in call_candidate_keys(&call.callee, &facts.alias_map) {
-                if let Some(bucket) = keyed_rules.get(&key) {
-                    for &rule in bucket {
-                        push_unique_prepared_rule(&mut candidate_rules, rule);
-                    }
-                }
-            }
+            push_call_candidate_rules(&mut candidate_rules, rules, &call.callee, &facts.alias_map);
             for prepared in candidate_rules {
                 if !decl_target_context_allows(
                     global.as_ref(),
@@ -1760,7 +1775,9 @@ fn scan_calls_batch(
                     None
                 }
             });
-        for prepared in rules {
+        let mut candidate_rules = Vec::new();
+        push_call_candidate_rules(&mut candidate_rules, rules, &r.name, &import_aliases);
+        for prepared in candidate_rules {
             if mode == ConstraintMode::Strict && !prepared.rule.constraints.0.is_empty() {
                 continue;
             }
@@ -1839,6 +1856,24 @@ fn push_unique_prepared_rule<'r, 'rule>(
 ) {
     if !out.iter().any(|existing| std::ptr::eq(*existing, rule)) {
         out.push(rule);
+    }
+}
+
+fn push_call_candidate_rules<'batch, 'p, 'rule>(
+    out: &mut Vec<&'p PreparedRule<'rule>>,
+    rules: &'batch PreparedRuleBatch<'p, 'rule>,
+    callee: &str,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+) {
+    for &rule in &rules.call_wildcard_rules {
+        push_unique_prepared_rule(out, rule);
+    }
+    for key in call_candidate_keys(callee, alias_map) {
+        if let Some(bucket) = rules.call_keyed_rules.get(&key) {
+            for &rule in bucket {
+                push_unique_prepared_rule(out, rule);
+            }
+        }
     }
 }
 

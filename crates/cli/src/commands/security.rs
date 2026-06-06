@@ -950,7 +950,7 @@ fn cmd_flows(
     // OWASP, category, packages, and the rule's description) followed
     // by an inspect-style FLOW block rendered from the finding's
     // chain, with full source bodies inlined. We call `inspect`'s own
-    // `render_flow_with_filters` + `render_flow_block` helpers
+    // `render_flow_with_cached_call_spans` + `render_flow_block` helpers
     // directly so the body layout is byte-identical to
     // `bonsai-ninja inspect --query X`.
     // Paginate before rendering inspect-style FLOW bodies. Large
@@ -1085,14 +1085,20 @@ fn render_taint_analysis_text_page(
                 in_fn: None,
             };
             let label = format!("{}", *i + 1);
-            let mut flow = crate::commands::render_flow_with_filters(
+            let chain_names = finding_chain_names(ws, fc);
+            let call_spans =
+                security_flow_call_spans(ws, &fc.chain_funcs, &chain_names, &fc.finding.taint_path);
+            let mut flow = crate::commands::render_flow_with_cached_call_spans(
                 ws,
                 &fc.chain_funcs,
+                &call_spans,
                 (*i + 1) as u32,
                 &label,
                 precision_from_finding_label(&fc.finding.precision),
                 None,
                 filters,
+                false,
+                false,
             )?;
             if let Some(flow_id) = fc.finding.representative_flow_id.as_deref() {
                 flow.flow_id = flow_id.to_string();
@@ -1435,7 +1441,7 @@ fn render_source_analysis_candidate(
     item: &CombinedSourceAnalysisCandidate,
 ) -> Option<CombinedSourceAnalysisFlow> {
     let label = (idx + 1).to_string();
-    let call_spans = source_analysis_call_spans(ws, item);
+    let call_spans = security_flow_call_spans(ws, &item.path, &item.chain_names, &item.taint_path);
     let mut flow = crate::commands::render_flow_with_cached_call_spans(
         ws,
         &item.path,
@@ -1484,28 +1490,42 @@ fn source_lineage_incomplete_reasons(lineage: SourceLineageStatus) -> Vec<String
     reasons
 }
 
-fn source_analysis_call_spans(
+fn finding_chain_names(ws: &bonsai_sdk::Workspace, finding: &CombinedFindingWithChain) -> Vec<String> {
+    if finding.finding.chain_display.len() == finding.chain_funcs.len() {
+        return finding.finding.chain_display.clone();
+    }
+    let global = ws.db().global_index();
+    finding
+        .chain_funcs
+        .iter()
+        .map(|func| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                .map(|decl| decl.name.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn security_flow_call_spans(
     ws: &bonsai_sdk::Workspace,
-    item: &CombinedSourceAnalysisCandidate,
+    path: &[FuncId],
+    chain_names: &[String],
+    taint_path: &[TaintPropagationStep],
 ) -> Vec<Option<Span>> {
-    if item.path.is_empty() {
+    if path.is_empty() {
         return Vec::new();
     }
-    let mut spans = vec![None; item.path.len()];
+    let mut spans = vec![None; path.len()];
     let mut step_cursor = 0usize;
-    for (edge_idx, span_slot) in spans
-        .iter_mut()
-        .enumerate()
-        .take(item.path.len().saturating_sub(1))
-    {
-        let Some(caller) = item.chain_names.get(edge_idx) else {
+    for (edge_idx, span_slot) in spans.iter_mut().enumerate().take(path.len().saturating_sub(1)) {
+        let Some(caller) = chain_names.get(edge_idx) else {
             continue;
         };
-        let Some(callee) = item.chain_names.get(edge_idx + 1) else {
+        let Some(callee) = chain_names.get(edge_idx + 1) else {
             continue;
         };
-        let Some((step_idx, step)) = item
-            .taint_path
+        let Some((step_idx, step)) = taint_path
             .iter()
             .enumerate()
             .skip(step_cursor)
@@ -2082,7 +2102,7 @@ fn render_finding_block_compact(
 ) {
     let f = &combined.finding;
     cli_println!();
-    // The full per-function body render (`render_flow_with_filters`)
+    // The full per-function body render (`render_flow_with_cached_call_spans`)
     // couldn't resolve every hop — e.g. an inheritance `super` hop that
     // the canonical chain collapses (`run → run → execute` rendered as
     // `run → execute`, leaving no direct `run → execute` call edge), or a

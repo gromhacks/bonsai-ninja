@@ -2204,7 +2204,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             name: "cmd".to_string(),
             receiver: None,
             receiver_types: vec!["Repository".to_string()],
-            call_kind: bonsai_lang_api::CallKind::Method,
+            call_kind: bonsai_lang_api::CallKind::Function,
             args: Vec::new(),
         },
         FlowEvent::Assign {
@@ -2213,7 +2213,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             source_name: None,
             source_call: Some("cmd".to_string()),
             source_call_args: Vec::new(),
-            source_names: vec!["cmd".to_string()],
+            source_names: Vec::new(),
             declares_new_binding: false,
             value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
         },
@@ -2239,7 +2239,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
     cmd.flow_events = vec![FlowEvent::Return {
         span: span(1, 440, 455),
         value_name: None,
-        value_text: Some("data.cmd()".to_string()),
+        value_text: Some("data.cmd".to_string()),
     }];
 
     let mut execute = empty_decl(12, 2, "execute");

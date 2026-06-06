@@ -26,7 +26,9 @@ use parking_lot::RwLock;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
-use crate::builder::{stitch_idg, CalleeResolver, FuncToSegment, ResolvedCallee};
+use crate::builder::{
+    stitch_idg_with_field_argument_forwarding, CalleeResolver, FuncToSegment, ResolvedCallee,
+};
 use crate::transfer::{transfer_function_for_with_options, TransferOptions, TransferOutput};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
@@ -100,6 +102,7 @@ impl WorkspaceMaps {
         language_for_file: F,
         path_for_file: &dyn Fn(FileId) -> Option<String>,
         included_files: Option<&AHashSet<FileId>>,
+        included_funcs: Option<&AHashSet<FuncId>>,
     ) -> Self
     where
         F: Fn(FileId) -> Option<&'static str>,
@@ -139,6 +142,9 @@ impl WorkspaceMaps {
             }
             for decl in global.functions_in(file) {
                 let func = FuncId::new(decl.symbol.raw());
+                if included_funcs.is_some_and(|funcs| !funcs.contains(&func)) {
+                    continue;
+                }
                 func_to_seg.insert(func, seg);
                 func_to_name.insert(func, decl.name.clone());
                 func_to_module.insert(func, decl.module_path.clone());
@@ -1134,6 +1140,7 @@ fn decl_kind_is_type_receiver(kind: bonsai_lang_api::DeclKind) -> bool {
 fn class_constructors_by_parent_for_files(
     global: &GlobalIndex,
     included_files: Option<&AHashSet<FileId>>,
+    included_funcs: Option<&AHashSet<FuncId>>,
 ) -> AHashMap<bonsai_common::SymbolId, Vec<FuncId>> {
     let mut out: AHashMap<bonsai_common::SymbolId, Vec<FuncId>> = AHashMap::new();
     for file in global.all_files() {
@@ -1141,13 +1148,15 @@ fn class_constructors_by_parent_for_files(
             continue;
         }
         for decl in global.functions_in(file) {
+            let func = FuncId::new(decl.symbol.raw());
+            if included_funcs.is_some_and(|funcs| !funcs.contains(&func)) {
+                continue;
+            }
             let Some(parent) = decl.parent else {
                 continue;
             };
             if is_constructor_decl(global, decl) {
-                out.entry(parent)
-                    .or_default()
-                    .push(FuncId::new(decl.symbol.raw()));
+                out.entry(parent).or_default().push(func);
             }
         }
     }
@@ -1492,6 +1501,7 @@ where
         path_for_file,
         transfer_options,
         None,
+        None,
     )
 }
 
@@ -1548,6 +1558,38 @@ where
         path_for_file,
         transfer_options,
         Some(&included_files),
+        None,
+    )
+}
+
+/// Build with per-file aliases, language ids, paths, transfer options,
+/// and caller-provided file/function scopes.
+pub fn build_with_file_info_and_options_for_files_and_funcs_with_paths<F, G, P>(
+    global: &GlobalIndex,
+    call_graph: &ResolvedCallGraph,
+    aliases_for_file: F,
+    language_for_file: G,
+    path_for_file: P,
+    transfer_options: &TransferOptions,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+) -> IdgWorkspace
+where
+    F: FnMut(FileId) -> AHashMap<String, String>,
+    G: Fn(FileId) -> Option<&'static str>,
+    P: Fn(FileId) -> Option<String>,
+{
+    let included_files: AHashSet<FileId> = included_files.iter().copied().collect();
+    let included_funcs: AHashSet<FuncId> = included_funcs.iter().copied().collect();
+    build_with_file_info_and_options_scoped(
+        global,
+        call_graph,
+        aliases_for_file,
+        language_for_file,
+        path_for_file,
+        transfer_options,
+        Some(&included_files),
+        Some(&included_funcs),
     )
 }
 
@@ -1559,6 +1601,7 @@ fn build_with_file_info_and_options_scoped<F, G, P>(
     path_for_file: P,
     transfer_options: &TransferOptions,
     included_files: Option<&AHashSet<FileId>>,
+    included_funcs: Option<&AHashSet<FuncId>>,
 ) -> IdgWorkspace
 where
     F: FnMut(FileId) -> AHashMap<String, String>,
@@ -1572,6 +1615,7 @@ where
         language_for_file,
         &path_for_file,
         included_files,
+        included_funcs,
     );
     idg_build_log(format_args!(
         "maps: {:.3}s funcs={} files={}",
@@ -1580,7 +1624,8 @@ where
         maps.file_to_language.len()
     ));
     let phase_started = Instant::now();
-    let outputs = run_transfer_in_parallel_for_files(global, transfer_options, included_files);
+    let outputs =
+        run_transfer_in_parallel_for_files(global, transfer_options, included_files, included_funcs);
     if idg_build_enabled() {
         let places: usize = outputs.iter().map(|out| out.places.len()).sum();
         let nodes: usize = outputs.iter().map(|out| out.nodes.len()).sum();
@@ -1667,7 +1712,8 @@ where
     let class_symbols_by_name_scope =
         class_symbols_by_name_scope_for_files(global, &maps.symbol_to_scope, included_files);
     let class_symbol_count: usize = class_symbols_by_name.values().map(Vec::len).sum();
-    let class_constructors_by_parent = class_constructors_by_parent_for_files(global, included_files);
+    let class_constructors_by_parent =
+        class_constructors_by_parent_for_files(global, included_files, included_funcs);
     let class_constructor_count: usize = class_constructors_by_parent.values().map(Vec::len).sum();
     idg_build_log(format_args!(
         "class index: {:.3}s names={} classes={} constructor_parents={} constructors={}",
@@ -1713,7 +1759,12 @@ where
         func_to_seg: &maps.func_to_seg,
     };
     let phase_started = Instant::now();
-    let mut ws = stitch_idg(outputs, &resolver, &f2s);
+    let mut ws = stitch_idg_with_field_argument_forwarding(
+        outputs,
+        &resolver,
+        &f2s,
+        transfer_options.include_field_argument_forwarding,
+    );
     idg_build_log(format_args!(
         "stitch-idg: {:.3}s segments={} funcs={} intra_edges={} cross_edges={} field_links={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2132,6 +2183,11 @@ fn stitch_receiver_method_propagation(
                     read_nodes.push(*n);
                 }
             }
+            for n in receiver_accessor_return_nodes(ws, &offsets, global, callee, &field_names) {
+                if !read_nodes.contains(&n) {
+                    read_nodes.push(n);
+                }
+            }
             // Super-chain enrichment: if the callee's body is a thin
             // override that delegates via `super` / `super()` (Ruby's
             // bare-`super` keyword, Java/C# `super.method()`, etc.),
@@ -2379,6 +2435,138 @@ fn field_read_nodes_matching(
     out.sort();
     out.dedup();
     out
+}
+
+fn receiver_accessor_return_nodes(
+    ws: &IdgWorkspace,
+    offsets: &SegmentOffsets,
+    global: &GlobalIndex,
+    func: FuncId,
+    field_names: &ahash::AHashSet<String>,
+) -> Vec<crate::WsNodeId> {
+    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+        return Vec::new();
+    };
+    let accessor_name = canonical_field_name(&decl.name);
+    if accessor_name.is_empty() || !field_names.contains(&accessor_name) {
+        return Vec::new();
+    }
+    if !function_returns_accessor_named(&decl.flow_events, &accessor_name) {
+        return Vec::new();
+    }
+    collect_return_nodes(ws, offsets, func)
+}
+
+fn collect_return_nodes(ws: &IdgWorkspace, offsets: &SegmentOffsets, func: FuncId) -> Vec<crate::WsNodeId> {
+    use crate::place::Place;
+    let Some(seg_id) = ws.segment_for_func(func) else {
+        return Vec::new();
+    };
+    let Some(segment) = ws.segment(seg_id) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (pid_idx, place) in segment.places.places.iter().enumerate() {
+        if !matches!(place, Place::Return | Place::Yield) {
+            continue;
+        }
+        let pid = crate::node::PlaceId(pid_idx as u32);
+        let Some(local) = segment.nodes.lookup(func, pid) else {
+            continue;
+        };
+        let Some(ws_node) = ws_node_for(offsets, seg_id, local) else {
+            continue;
+        };
+        out.push(ws_node);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn function_returns_accessor_named(events: &[bonsai_lang_api::FlowEvent], field_name: &str) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_name,
+                value_text,
+                ..
+            } => {
+                if value_name
+                    .as_deref()
+                    .is_some_and(|value| return_value_references_accessor(value, field_name))
+                    || value_text
+                        .as_deref()
+                        .is_some_and(|value| return_value_references_accessor(value, field_name))
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if function_returns_accessor_named(then_events, field_name)
+                    || function_returns_accessor_named(else_events, field_name)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if function_returns_accessor_named(body, field_name) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if function_returns_accessor_named(body, field_name)
+                    || function_returns_accessor_named(catch_events, field_name)
+                    || function_returns_accessor_named(finally_events, field_name)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn return_value_references_accessor(value: &str, field_name: &str) -> bool {
+    simple_accessor_tail(value).is_some_and(|tail| tail == field_name)
+}
+
+fn simple_accessor_tail(value: &str) -> Option<String> {
+    let mut text = value.trim();
+    if text.is_empty() {
+        return None;
+    }
+    while text.ends_with('?') || text.ends_with('!') {
+        text = text[..text.len().saturating_sub(1)].trim_end();
+    }
+    if let Some(stripped) = text.strip_suffix("()") {
+        text = stripped.trim_end();
+    }
+    if text.contains(['(', ')', '{', '}']) {
+        return None;
+    }
+    let normalized = text.replace("->", ".");
+    let mut parts = normalized
+        .split(|ch: char| !(ch == '_' || ch == '$' || ch == '@' || ch.is_ascii_alphanumeric()))
+        .filter(|part| !part.is_empty());
+    let first = parts.next()?;
+    if matches!(first, "super" | "base" | "parent") {
+        return None;
+    }
+    let tail = parts.last().unwrap_or(first);
+    let tail = canonical_field_name(tail);
+    (!tail.is_empty()).then_some(tail)
 }
 
 /// True when `callee`'s body delegates via `super` / `super()` —
@@ -3157,6 +3345,7 @@ fn run_transfer_in_parallel_for_files(
     global: &GlobalIndex,
     transfer_options: &TransferOptions,
     included_files: Option<&AHashSet<FileId>>,
+    included_funcs: Option<&AHashSet<FuncId>>,
 ) -> Vec<TransferOutput> {
     // Collect every (FileId, decl-index) pair so rayon can split
     // them across threads. Each transfer call produces a
@@ -3169,6 +3358,10 @@ fn run_transfer_in_parallel_for_files(
             continue;
         }
         for decl in global.functions_in(file) {
+            let func = FuncId::new(decl.symbol.raw());
+            if included_funcs.is_some_and(|funcs| !funcs.contains(&func)) {
+                continue;
+            }
             funcs.push((file, decl));
         }
     }

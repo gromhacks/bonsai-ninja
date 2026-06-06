@@ -165,9 +165,10 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
     // 2026-05-29: FN-language gaps closed (cpp/csharp/dart/elixir/java/
     // scala 0→1, php 0→2); swift settled at 1 once the redundant
     // inferred-source over-claim was filtered; go 2→1 + objc 2→1
-    // (redundant-inferred / xxe over-claim removed); python 5→3 +
+    // (redundant-inferred / xxe over-claim removed); python 5→2 and
     // dart→1 (combiner group_id+sink-site dedup collapsed duplicate
-    // entry-chain rows); erlang 2→1 and solidity 3→2 once equivalent
+    // entry-chain rows, including local inferred callable-object
+    // evidence); erlang 2→1 and solidity 3→2 once equivalent
     // inferred/member paths are grouped into one real report row.
     match lang {
         "c" => 1,
@@ -184,7 +185,7 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "objc" => 1,
         "perl" => 1,
         "php" => 2,
-        "python" => 3,
+        "python" => 2,
         "ruby" => 2,
         "rust" => 1,
         "scala" => 1,

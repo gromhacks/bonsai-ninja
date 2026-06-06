@@ -26,13 +26,14 @@ pub mod transitive_callers;
 pub mod value_flow;
 pub mod value_flow_disk;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::TraceLimits;
-use bonsai_common::{FileId, FuncId, Precision, SymbolId};
+use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::{fnv1a_bytes64, Hasher as StableHasher};
-use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry};
+use bonsai_index::GlobalIndex;
+use bonsai_lang_api::{Decl, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
@@ -54,6 +55,14 @@ pub use cross_module::CrossModuleOptions;
 
 const DEFAULT_IDG_SIDECAR_FILE_LIMIT: usize = 5_000;
 
+#[derive(Clone)]
+pub struct SourceReachableCallGraph {
+    pub graph: Arc<bonsai_callgraph::ResolvedCallGraph>,
+    pub files: Vec<FileId>,
+    pub funcs: Vec<FuncId>,
+    pub reached_targets: usize,
+}
+
 /// Conventional workspace IDG sidecar path under `<workspace>/.bonsai/`.
 #[must_use]
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
@@ -69,6 +78,263 @@ fn idg_sidecar_file_limit() -> usize {
 
 fn workspace_idg_sidecar_enabled(file_count: usize) -> bool {
     file_count <= idg_sidecar_file_limit()
+}
+
+fn has_summary_output(global: &bonsai_index::GlobalIndex, func: FuncId) -> bool {
+    let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        return false;
+    };
+    matches!(decl.kind, DeclKind::Constructor)
+        || !decl.receiver_field_writes.is_empty()
+        || summary_output_shape(&decl.flow_events)
+}
+
+fn summary_output_shape(events: &[FlowEvent]) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_text,
+                value_name,
+                ..
+            } => {
+                if value_text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || value_name
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Yield { value_text, .. } => {
+                if value_text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if summary_output_shape(then_events) || summary_output_shape(else_events) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if summary_output_shape(body) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if summary_output_shape(body)
+                    || summary_output_shape(catch_events)
+                    || summary_output_shape(finally_events)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+pub fn extend_func_set_with_semantic_callback_dispatchers(
+    funcs: &mut AHashSet<FuncId>,
+    target_funcs: &AHashSet<FuncId>,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+) {
+    extend_func_set_with_semantic_callback_dispatchers_impl(
+        funcs,
+        target_funcs,
+        global,
+        max_precision,
+        |func| call_graph.callees_of(func).cloned().collect(),
+    );
+}
+
+fn extend_func_set_with_semantic_callback_dispatchers_in_call_graph(
+    funcs: &mut AHashSet<FuncId>,
+    target_funcs: &AHashSet<FuncId>,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::CallGraph,
+    max_precision: Option<Precision>,
+) {
+    extend_func_set_with_semantic_callback_dispatchers_impl(
+        funcs,
+        target_funcs,
+        global,
+        max_precision,
+        |func| call_graph.callees(func).cloned().collect(),
+    );
+}
+
+fn extend_func_set_with_semantic_callback_dispatchers_impl<C>(
+    funcs: &mut AHashSet<FuncId>,
+    target_funcs: &AHashSet<FuncId>,
+    global: &GlobalIndex,
+    max_precision: Option<Precision>,
+    mut callees_of: C,
+) where
+    C: FnMut(FuncId) -> Vec<bonsai_callgraph::CallEdge>,
+{
+    let target_keys = function_reference_keys(global, target_funcs);
+    if target_keys.is_empty() {
+        return;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let lineage: Vec<FuncId> = funcs.iter().copied().collect();
+        for func in lineage {
+            for edge in callees_of(func) {
+                if max_precision.is_some_and(|max| edge.precision > max) || funcs.contains(&edge.to) {
+                    continue;
+                }
+                if !call_edge_passes_target_callback(global, edge.from, edge.span, &target_keys) {
+                    continue;
+                }
+                funcs.insert(edge.to);
+                changed = true;
+            }
+        }
+    }
+}
+
+fn function_reference_keys(global: &GlobalIndex, funcs: &AHashSet<FuncId>) -> AHashSet<String> {
+    let mut out = AHashSet::new();
+    for func in funcs {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        push_reference_key(&mut out, &decl.name);
+    }
+    out
+}
+
+fn push_reference_key(out: &mut AHashSet<String>, raw: &str) {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return;
+    }
+    out.insert(raw.to_string());
+    let tail = short_qualified_tail(raw);
+    if !tail.is_empty() {
+        out.insert(tail.to_string());
+    }
+    for variant in callable_reference_variants(raw) {
+        let variant = variant.trim();
+        if !variant.is_empty() {
+            out.insert(variant.to_string());
+            let tail = short_qualified_tail(variant);
+            if !tail.is_empty() {
+                out.insert(tail.to_string());
+            }
+        }
+    }
+}
+
+fn call_edge_passes_target_callback(
+    global: &GlobalIndex,
+    caller: FuncId,
+    call_span: bonsai_common::Span,
+    target_keys: &AHashSet<String>,
+) -> bool {
+    let Some(decl) = global.decl_of(SymbolId::new(caller.raw())) else {
+        return false;
+    };
+    call_event_at_span_passes_target_callback(&decl.flow_events, call_span, target_keys)
+}
+
+fn call_event_at_span_passes_target_callback(
+    events: &[FlowEvent],
+    call_span: bonsai_common::Span,
+    target_keys: &AHashSet<String>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } => {
+                if spans_overlap(*span, call_span)
+                    && args
+                        .iter()
+                        .any(|arg| call_arg_references_target(arg, target_keys))
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if call_event_at_span_passes_target_callback(then_events, call_span, target_keys)
+                    || call_event_at_span_passes_target_callback(else_events, call_span, target_keys)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if call_event_at_span_passes_target_callback(body, call_span, target_keys) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if call_event_at_span_passes_target_callback(body, call_span, target_keys)
+                    || call_event_at_span_passes_target_callback(catch_events, call_span, target_keys)
+                    || call_event_at_span_passes_target_callback(finally_events, call_span, target_keys)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn spans_overlap(a: bonsai_common::Span, b: bonsai_common::Span) -> bool {
+    a.file == b.file && a.start <= b.end && b.start <= a.end
+}
+
+fn call_arg_references_target(arg: &bonsai_lang_api::CallArg, target_keys: &AHashSet<String>) -> bool {
+    if raw_value_references_target(&arg.value_text, target_keys) {
+        return true;
+    }
+    if arg
+        .place
+        .as_deref()
+        .is_some_and(|place| raw_value_references_target(place, target_keys))
+    {
+        return true;
+    }
+    arg.source_names
+        .iter()
+        .any(|name| raw_value_references_target(name, target_keys))
+}
+
+fn raw_value_references_target(raw: &str, target_keys: &AHashSet<String>) -> bool {
+    if target_keys.contains(raw.trim()) {
+        return true;
+    }
+    callable_reference_variants(raw)
+        .into_iter()
+        .any(|variant| target_keys.contains(variant.trim()))
 }
 
 pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
@@ -620,6 +886,214 @@ impl Workspace {
         build_resolved_call_graph_snapshot(&self.inner.db)
     }
 
+    pub fn source_reachable_resolved_call_graph(
+        &self,
+        source_funcs: &[FuncId],
+        target_funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> SourceReachableCallGraph {
+        let global = self.inner.db.global_index();
+        let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
+        let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
+        let mut queued_files: AHashSet<FileId> = AHashSet::new();
+        let mut built_files: AHashSet<FileId> = AHashSet::new();
+        for func in source_funcs {
+            if let Some(file) = global.declaring_file(SymbolId::new(func.raw())) {
+                queued_files.insert(file);
+            }
+        }
+
+        let mut known_edges_by_file: AHashMap<FileId, Vec<bonsai_callgraph::CallEdge>> = AHashMap::new();
+        let mut merged = bonsai_callgraph::CallGraph::new();
+        let callgraph_context = bonsai_callgraph::ResolvedCallGraph::build_context(
+            global.as_ref(),
+            |file| {
+                self.inner
+                    .db
+                    .vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
+            |file| {
+                self.inner
+                    .db
+                    .adapter_for(file)
+                    .map(|adapter| adapter.language_id().as_str())
+            },
+        );
+        while !queued_files.is_empty() {
+            let mut batch: Vec<FileId> = queued_files.drain().collect();
+            batch.retain(|file| !built_files.contains(file));
+            if batch.is_empty() {
+                break;
+            }
+            batch.sort_by_key(|file| file.raw());
+            batch.dedup();
+
+            let batch_graph =
+                bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files_with_context(
+                    global.as_ref(),
+                    |file| bonsai_resolve::alias_map_for_file(&self.inner.db.imports_for(file)),
+                    |file| {
+                        bonsai_lang_api::alias_map_from_import_specs(&self.inner.db.imports_for(file))
+                            .into_iter()
+                            .collect()
+                    },
+                    |file| {
+                        self.inner
+                            .db
+                            .adapter_for(file)
+                            .map(|adapter| adapter.capabilities().module_export_aliases)
+                            .unwrap_or(&[])
+                    },
+                    |file| {
+                        self.inner
+                            .db
+                            .adapter_for(file)
+                            .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                            .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+                    },
+                    &batch,
+                    &callgraph_context,
+                );
+            for edge in &batch_graph.inner().edges {
+                let Some(file) = global.declaring_file(SymbolId::new(edge.from.raw())) else {
+                    continue;
+                };
+                known_edges_by_file.entry(file).or_default().push(edge.clone());
+            }
+            for file in &batch {
+                built_files.insert(*file);
+            }
+
+            let mut newly_reached = Vec::new();
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for edges in known_edges_by_file.values() {
+                    for edge in edges {
+                        if max_precision.is_some_and(|max| edge.precision > max) {
+                            continue;
+                        }
+                        if !reached_funcs.contains(&edge.from) {
+                            continue;
+                        }
+                        merged.add_edge(edge.clone());
+                        if reached_funcs.insert(edge.to) {
+                            newly_reached.push(edge.to);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            for func in newly_reached.drain(..) {
+                let Some(file) = global.declaring_file(SymbolId::new(func.raw())) else {
+                    continue;
+                };
+                if !built_files.contains(&file) {
+                    queued_files.insert(file);
+                }
+            }
+        }
+
+        let mut return_corridor_funcs: AHashSet<FuncId> = AHashSet::new();
+        if !target_set.is_empty() {
+            for edges in known_edges_by_file.values() {
+                for edge in edges {
+                    if max_precision.is_some_and(|max| edge.precision > max) {
+                        continue;
+                    }
+                    if target_set.contains(&edge.from) && reached_funcs.contains(&edge.to) {
+                        merged.add_edge(edge.clone());
+                        reached_funcs.insert(edge.from);
+                        return_corridor_funcs.insert(edge.from);
+                        return_corridor_funcs.insert(edge.to);
+                    }
+                }
+            }
+        }
+
+        let reached_target_set: AHashSet<FuncId> = target_set
+            .iter()
+            .copied()
+            .filter(|target| reached_funcs.contains(target))
+            .collect();
+        let relevant_funcs: AHashSet<FuncId> = if target_set.is_empty() || reached_target_set.is_empty() {
+            reached_funcs.clone()
+        } else {
+            let mut can_reach_target = reached_target_set.clone();
+            let mut stack: Vec<FuncId> = reached_target_set.iter().copied().collect();
+            while let Some(func) = stack.pop() {
+                for edge in merged.callers(func) {
+                    if !reached_funcs.contains(&edge.from) {
+                        continue;
+                    }
+                    if can_reach_target.insert(edge.from) {
+                        stack.push(edge.from);
+                    }
+                }
+            }
+            reached_funcs.intersection(&can_reach_target).copied().collect()
+        };
+        let mut relevant_funcs = relevant_funcs;
+        relevant_funcs.extend(return_corridor_funcs);
+        let mut edges_by_from: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
+        for edge in &merged.edges {
+            if reached_funcs.contains(&edge.to) {
+                edges_by_from.entry(edge.from).or_default().push(edge.to);
+            }
+        }
+        let mut provider_stack: Vec<FuncId> = relevant_funcs.iter().copied().collect();
+        while let Some(func) = provider_stack.pop() {
+            let Some(callees) = edges_by_from.get(&func) else {
+                continue;
+            };
+            for callee in callees {
+                if relevant_funcs.contains(callee) || !has_summary_output(global.as_ref(), *callee) {
+                    continue;
+                }
+                relevant_funcs.insert(*callee);
+                provider_stack.push(*callee);
+            }
+        }
+        extend_func_set_with_semantic_callback_dispatchers_in_call_graph(
+            &mut relevant_funcs,
+            &reached_target_set,
+            global.as_ref(),
+            &merged,
+            max_precision,
+        );
+        let semantic_funcs = relevant_funcs;
+
+        let mut filtered = bonsai_callgraph::CallGraph::new();
+        for edge in &merged.edges {
+            if semantic_funcs.contains(&edge.from) && semantic_funcs.contains(&edge.to) {
+                filtered.add_edge(edge.clone());
+            }
+        }
+        let mut files: Vec<FileId> = semantic_funcs
+            .iter()
+            .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+            .collect();
+        files.sort_by_key(|file| file.raw());
+        files.dedup();
+        let mut funcs: Vec<FuncId> = semantic_funcs.into_iter().collect();
+        funcs.sort_by_key(|func| func.raw());
+        funcs.dedup();
+        let reached_targets = target_set
+            .iter()
+            .filter(|target| reached_funcs.contains(target))
+            .count();
+        SourceReachableCallGraph {
+            graph: Arc::new(bonsai_callgraph::ResolvedCallGraph::from_call_graph(filtered)),
+            files,
+            funcs,
+            reached_targets,
+        }
+    }
+
     /// Build the workspace-wide IDG once and seed it onto
     /// [`AnalyzerDb`] so consumers can fetch it via
     /// [`AnalyzerDb::idg_service`]. Idempotent — calling twice with
@@ -862,6 +1336,44 @@ impl Workspace {
                 "skipping workspace scoped transfer IDG sidecar save for large workspace"
             );
         }
+        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
+        self.inner.db.set_idg_service(service.clone());
+        service
+    }
+
+    /// Build and seed a file-scoped workspace IDG using an already
+    /// resolved semantic call graph.
+    ///
+    /// Source-to-sink security scans compute a source-reachable graph
+    /// first. Reusing that graph here avoids rebuilding workspace-wide
+    /// call metadata and keeps IDG transfer scoped to the semantic
+    /// region that can actually participate in findings.
+    pub fn build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
+        &self,
+        transfer_options: &bonsai_idg::TransferOptions,
+        included_files: &[FileId],
+        included_funcs: &[FuncId],
+        call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    ) -> Arc<bonsai_idg::IdgQueryService> {
+        let transfer_options = transfer_options.clone().canonicalized();
+        let global = self.inner.db.global_index();
+        let db = &self.inner.db;
+        let ws =
+            bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files_and_funcs_with_paths(
+                global.as_ref(),
+                call_graph,
+                |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+                |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+                |file| {
+                    db.vfs()
+                        .path(file)
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned())
+                },
+                &transfer_options,
+                included_files,
+                included_funcs,
+            );
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
@@ -1967,12 +2479,13 @@ fn idg_transfer_options_fingerprint(options: &bonsai_idg::TransferOptions) -> u6
 
     let options = options.clone().canonicalized();
     let mut hasher = StableHasher::new();
-    absorb_str(&mut hasher, "bonsai-idg-transfer-options-v2");
+    absorb_str(&mut hasher, "bonsai-idg-transfer-options-v3");
     absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
     absorb_u64(
         &mut hasher,
         u64::from(options.include_receiver_method_propagation),
     );
+    absorb_u64(&mut hasher, u64::from(options.include_field_argument_forwarding));
     absorb_u64(&mut hasher, options.clean_output_overwrites.len() as u64);
     for spec in &options.clean_output_overwrites {
         absorb_str(&mut hasher, "clean-output-overwrite");

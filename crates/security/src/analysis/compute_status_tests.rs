@@ -58,6 +58,112 @@ fn strict_source_text_matching_does_not_seed_receivers_or_siblings() {
     assert!(!security_text_matches_source_strict("headers", "req.query"));
 }
 
+#[test]
+fn clean_overwrite_target_keys_extract_compound_sink_operands() {
+    assert_eq!(clean_overwrite_target_keys("x"), vec!["x"]);
+    assert_eq!(clean_overwrite_target_keys("\"-c \" + x"), vec!["x"]);
+    assert_eq!(
+        clean_overwrite_target_keys("format!(\"{}\", cmd)"),
+        vec!["cmd", "format"]
+    );
+    assert_eq!(
+        clean_overwrite_target_keys("\"x inside string\""),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn clean_conditional_value_part_rejects_value_identifiers() {
+    assert!(
+        clean_conditional_value_part("cond ? \"clean-then\" : \"clean-else\"")
+            .is_some_and(value_part_contains_only_clean_literals)
+    );
+    assert!(clean_conditional_value_part(
+        "if cond { \"clean-then\".to_string() } else { \"clean-else\".to_string() }"
+    )
+    .is_some_and(value_part_contains_only_clean_literals));
+    assert!(
+        !clean_conditional_value_part("cond ? user_value : \"clean-else\"")
+            .is_some_and(value_part_contains_only_clean_literals)
+    );
+}
+
+#[test]
+fn clean_output_call_overwrites_only_with_clean_values() {
+    let args = vec![
+        bonsai_lang_api::CallArg {
+            span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 3),
+            name: None,
+            value_text: "buf".to_string(),
+            place: Some("buf".to_string()),
+            source_names: vec!["buf".to_string()],
+        },
+        bonsai_lang_api::CallArg {
+            span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 5, 16),
+            name: None,
+            value_text: "sizeof(buf)".to_string(),
+            place: None,
+            source_names: Vec::new(),
+        },
+        bonsai_lang_api::CallArg {
+            span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 18, 22),
+            name: None,
+            value_text: "\"%s\"".to_string(),
+            place: None,
+            source_names: Vec::new(),
+        },
+        bonsai_lang_api::CallArg {
+            span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 24, 31),
+            name: None,
+            value_text: "\"clean\"".to_string(),
+            place: None,
+            source_names: Vec::new(),
+        },
+    ];
+    assert!(clean_output_call_overwrites_target("snprintf", &args, "buf"));
+
+    let mut tainted_value = args;
+    tainted_value[3].value_text = "user_value".to_string();
+    assert!(!clean_output_call_overwrites_target(
+        "snprintf",
+        &tainted_value,
+        "buf"
+    ));
+}
+
+#[test]
+fn try_region_clean_overwrite_requires_all_continuing_paths() {
+    let target = "t";
+    let clean_t = clean_assign_event(target, 10, 20);
+    let clean_finally = clean_assign_event(target, 30, 40);
+
+    assert!(
+        !try_region_clean_overwrites_target(&[], &[clean_t.clone()], &[], target),
+        "a clean catch arm alone is only one exceptional path, not a definite overwrite"
+    );
+    assert!(
+        try_region_clean_overwrites_target(&[clean_t.clone()], &[clean_t.clone()], &[], target),
+        "normal and caught paths both overwrite the target"
+    );
+    assert!(
+        try_region_clean_overwrites_target(&[], &[], &[clean_finally], target),
+        "finally/ensure cleanup is path-unconditional for continuing paths"
+    );
+}
+
+fn clean_assign_event(target: &str, start: u64, end: u64) -> bonsai_lang_api::FlowEvent {
+    bonsai_lang_api::FlowEvent::Assign {
+        span: bonsai_common::Span::new(bonsai_common::FileId::new(1), start, end),
+        target: target.to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Literal),
+    }
+}
+
 fn single_rule_pack(rule: Rule) -> Rulepack {
     let mut pack = Rulepack::default();
     pack.packs.insert(

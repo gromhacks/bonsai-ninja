@@ -10,7 +10,7 @@ use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{
     AliasTarget, DeclKind, ImportSpec, ModulePath, Visibility, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 /// Caller-side context the resolver consults when narrowing a
 /// candidate set. Built by callgraph / taint / matcher at edge-
@@ -1182,7 +1182,24 @@ pub fn collect_method_candidates_for_class(
 #[derive(Debug, Default)]
 pub struct MethodCandidateCache {
     entries: AHashMap<MethodCandidateCacheKey, Vec<bonsai_common::FuncId>>,
-    peer_class_index: Option<AHashMap<(String, ModulePath), Vec<SymbolId>>>,
+    peer_class_index: Option<Arc<PeerClassIndex>>,
+}
+
+pub type PeerClassIndex = AHashMap<(String, ModulePath), Vec<SymbolId>>;
+
+impl MethodCandidateCache {
+    #[must_use]
+    pub fn with_peer_class_index(peer_class_index: Arc<PeerClassIndex>) -> Self {
+        Self {
+            entries: AHashMap::new(),
+            peer_class_index: Some(peer_class_index),
+        }
+    }
+}
+
+#[must_use]
+pub fn build_shared_peer_class_index(global: &GlobalIndex) -> Arc<PeerClassIndex> {
+    Arc::new(build_peer_class_index(global))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1545,14 +1562,14 @@ fn peer_partial_class_symbols(
     if let Some(cache) = cache {
         let index = cache
             .peer_class_index
-            .get_or_insert_with(|| build_peer_class_index(global));
+            .get_or_insert_with(|| build_shared_peer_class_index(global));
         return index.get(&key).cloned().unwrap_or_default();
     }
     build_peer_class_index(global).remove(&key).unwrap_or_default()
 }
 
-fn build_peer_class_index(global: &GlobalIndex) -> AHashMap<(String, ModulePath), Vec<SymbolId>> {
-    let mut index: AHashMap<(String, ModulePath), Vec<SymbolId>> = AHashMap::new();
+fn build_peer_class_index(global: &GlobalIndex) -> PeerClassIndex {
+    let mut index: PeerClassIndex = AHashMap::new();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             if decl.module_path.is_empty()

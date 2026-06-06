@@ -55,9 +55,11 @@ EXPECTED_FINDINGS = {
     # the redundant inferred-source over-claim was filtered; go 2→1
     # and objc 2→1 after redundant-inferred / xxe-over-claim removal;
     # python 5→3 and dart→1 after the combiner's group_id+sink-site
-    # dedup collapsed duplicate entry-chain rows; erlang 2→1 and solidity
-    # 3→2 after equivalent inferred/member paths are grouped into one real
-    # report row.
+    # dedup collapsed duplicate entry-chain rows; python 3→2 after
+    # local inferred callable-object paths grouped into one combined
+    # row while the concrete Flask source row stayed intact; erlang
+    # 2→1 and solidity 3→2 after equivalent inferred/member paths are
+    # grouped into one real report row.
     "c": 1,
     "cpp": 1,
     "csharp": 1,
@@ -75,7 +77,7 @@ EXPECTED_FINDINGS = {
     "objc": 1,
     "perl": 1,
     "php": 2,
-    "python": 3,
+    "python": 2,
     "ruby": 2,
     "rust": 1,
     "scala": 1,
