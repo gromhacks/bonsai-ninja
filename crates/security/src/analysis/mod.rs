@@ -24,7 +24,7 @@ use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{AssignValueKind, LanguageRegistry};
+use bonsai_lang_api::{AssignValueKind, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{
     apply_configured_transfer_fixpoint, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph,
     InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs,
@@ -791,23 +791,6 @@ where
     sort_matches(&mut sink_hits);
     sort_matches(&mut sanitizer_hits);
     sort_matches(&mut pattern_sink_hits);
-
-    // Exact security analysis relies on value-flow to choose source
-    // seeds before it builds source-seeded taint graphs. Query-only
-    // workspace opens do not eager-build the IDG, so force it here
-    // once for the requested analysis scope; otherwise value-flow
-    // falls back to the legacy per-source interprocedural engine and
-    // broad scans recompute the same workspace facts hundreds of times.
-    if !source_hits.is_empty() && !sink_hits.is_empty() {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "building semantic graph",
-            total: 2,
-        });
-        on_progress(AnalysisProgress::PhaseTicked);
-        seed_idg_service_for_rulepack(ws, pack);
-        on_progress(AnalysisProgress::PhaseTicked);
-        on_progress(AnalysisProgress::PhaseFinished);
-    }
 
     let mut findings_raw = build_findings_chain_aware(
         ws,
@@ -5160,10 +5143,6 @@ where
         .collect();
     let receiver_state_propagations =
         receiver_state_propagations_from_rulepack_for_languages(pack, &transfer_languages);
-    let idg = ws
-        .db()
-        .idg_service()
-        .unwrap_or_else(|| ws.build_and_seed_idg_service());
     // IDG closures already follow `callee.Return -> caller.CallRet`
     // edges and then continue through caller-side flow. The legacy
     // engine needed a separate "source reaches return" prepass to
@@ -5197,11 +5176,141 @@ where
         max_edge_precision: max_precision,
         ..Default::default()
     };
-    let chain_call_graph = ws.cached_resolved_call_graph();
+    let mut source_func_ids: Vec<FuncId> = source_groups.keys().copied().collect();
+    source_func_ids.sort_by_key(|func| func.raw());
+    let mut sink_func_ids: Vec<FuncId> = sink_by_func.keys().copied().collect();
+    sink_func_ids.sort_by_key(|func| func.raw());
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building source-reachable callgraph",
+        total: 0,
+    });
+    let reachable_call_graph =
+        ws.source_reachable_resolved_call_graph(&source_func_ids, &sink_func_ids, config.max_edge_precision);
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "semantic graph scope source_funcs={} sink_funcs={} reached_sinks={} funcs={} files={}",
+        source_func_ids.len(),
+        sink_func_ids.len(),
+        reachable_call_graph.reached_targets,
+        reachable_call_graph.funcs.len(),
+        reachable_call_graph.files.len()
+    );
+    if reachable_call_graph.funcs.len() <= 64 {
+        let global = ws.db().global_index();
+        let names: Vec<String> = reachable_call_graph
+            .funcs
+            .iter()
+            .filter_map(|func| {
+                global
+                    .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                    .map(|decl| format!("{}:{:?}", decl.name, decl.kind))
+            })
+            .collect();
+        bonsai_diagnostics::debug_log!("security-phase", "semantic graph funcs={}", names.join(", "));
+    }
+    on_progress(AnalysisProgress::PhaseFinished);
+
+    let chain_call_graph = reachable_call_graph.graph.clone();
     let sink_func_set: AHashSet<FuncId> = sink_by_func.keys().copied().collect();
     let source_sink_prefilter_enabled = !source_work.is_empty() && !sink_func_set.is_empty();
+    // AHashMap iteration order is hash-randomized per process. Sort
+    // by FuncId.raw() so the per-source-group analysis order and
+    // resulting finding fingerprints are stable across runs.
+    let mut source_groups_sorted: Vec<(FuncId, Vec<usize>)> =
+        source_groups.iter().map(|(k, v)| (*k, v.clone())).collect();
+    source_groups_sorted.sort_by_key(|(k, _)| k.raw());
+    let scheduling_total = source_groups_sorted
+        .iter()
+        .map(|(_, indices)| indices.len() as u64)
+        .sum();
+
+    let mut coarse_scope_funcs: AHashSet<FuncId> = AHashSet::new();
+    let mut coarse_corridors_by_func: AHashMap<FuncId, SourceSinkCorridor> = AHashMap::new();
+    if source_sink_prefilter_enabled {
+        for (src_func_id, indices) in &source_groups_sorted {
+            if indices.is_empty() {
+                continue;
+            }
+            if let Some(mut corridor) = callgraph_source_sink_corridor(
+                *src_func_id,
+                &sink_func_set,
+                chain_call_graph.as_ref(),
+                config.max_edge_precision,
+            ) {
+                corridor.lineage_funcs.insert(*src_func_id);
+                extend_corridor_with_summary_dependency_support(
+                    &mut corridor,
+                    global.as_ref(),
+                    chain_call_graph.as_ref(),
+                    config.max_edge_precision,
+                );
+                coarse_scope_funcs.extend(corridor.lineage_funcs.iter().copied());
+                coarse_corridors_by_func.insert(*src_func_id, corridor);
+            }
+        }
+    }
+    let (semantic_files, semantic_funcs): (Vec<FileId>, Vec<FuncId>) = if coarse_scope_funcs.is_empty() {
+        (
+            reachable_call_graph.files.clone(),
+            reachable_call_graph.funcs.clone(),
+        )
+    } else {
+        let mut funcs: Vec<FuncId> = coarse_scope_funcs.into_iter().collect();
+        funcs.sort_by_key(|func| func.raw());
+        funcs.dedup();
+        let mut files: Vec<FileId> = funcs
+            .iter()
+            .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+            .collect();
+        files.sort_by_key(|file| file.raw());
+        files.dedup();
+        (files, funcs)
+    };
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "semantic graph idg scope funcs={} files={} full_funcs={} full_files={} coarse_source_groups={}",
+        semantic_funcs.len(),
+        semantic_files.len(),
+        reachable_call_graph.funcs.len(),
+        reachable_call_graph.files.len(),
+        coarse_corridors_by_func.len()
+    );
+
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "building scoped semantic graph",
+        total: 0,
+    });
+    let idg = seed_idg_service_for_rulepack_for_files(
+        ws,
+        pack,
+        &transfer_languages,
+        &semantic_files,
+        &semantic_funcs,
+        chain_call_graph.as_ref(),
+    );
+    on_progress(AnalysisProgress::PhaseFinished);
     let sink_target_nodes = source_sink_prefilter_enabled
         .then(|| sink_target_nodes_for_funcs(idg.as_ref(), &sink_by_func, &sink_func_set));
+    let sink_target_nodes_for_schedule = sink_target_nodes.as_ref().and_then(|targets| {
+        if !targets.nodes.is_empty() {
+            Some(targets.nodes.as_slice())
+        } else {
+            None
+        }
+    });
+    let use_coarse_source_sink_schedule = transfer_languages.contains("java") && semantic_funcs.len() > 1_000;
+    let target_node_graph_cut_enabled = false;
+    if let Some(targets) = sink_target_nodes.as_ref() {
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "sink target nodes nodes={} complete={} schedule_node_cut={} graph_node_cut={}",
+            targets.nodes.len(),
+            targets.complete,
+            sink_target_nodes_for_schedule.is_some(),
+            target_node_graph_cut_enabled
+        );
+    }
+    let sink_target_nodes_for_graph: Option<&[bonsai_idg::WsNodeId]> = None;
     let taint_caches = ws.inter_taint_caches();
     taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
     // Workspace-wide source-seeded graph index. The resident cache is
@@ -5214,16 +5323,6 @@ where
     let taint_graph_fingerprint =
         taint_graph_config_fingerprint(pack, "taint-analysis", config.max_edge_precision);
     prepare_workspace_taint_graph_cache(ws, taint_graph_fingerprint);
-    // AHashMap iteration order is hash-randomized per process. Sort
-    // by FuncId.raw() so the per-source-group analysis order and
-    // resulting finding fingerprints are stable across runs.
-    let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> =
-        source_groups.iter().map(|(k, v)| (*k, v)).collect();
-    source_groups_sorted.sort_by_key(|(k, _)| k.raw());
-    let scheduling_total = source_groups_sorted
-        .iter()
-        .map(|(_, indices)| indices.len() as u64)
-        .sum();
     if source_sink_prefilter_enabled {
         on_progress(AnalysisProgress::PhaseStarted {
             label: "building source-sink reachability",
@@ -5243,7 +5342,9 @@ where
         let mut filtered_indices = Vec::with_capacity(indices.len());
         let mut group_corridor = SourceSinkCorridor::default();
         for idx in indices.iter().copied() {
-            let corridor = sink_target_nodes.as_deref().and_then(|target_nodes| {
+            let corridor = if use_coarse_source_sink_schedule {
+                coarse_corridors_by_func.get(&src_func_id).cloned()
+            } else if let Some(target_nodes) = sink_target_nodes_for_schedule {
                 source_index_sink_corridor(
                     idx,
                     &source_work,
@@ -5255,7 +5356,16 @@ where
                     &sink_func_set,
                     chain_call_graph.as_ref(),
                 )
-            });
+            } else {
+                source_work.get(idx).and_then(|(_, source_func, _)| {
+                    callgraph_source_sink_corridor(
+                        *source_func,
+                        &sink_func_set,
+                        chain_call_graph.as_ref(),
+                        config.max_edge_precision,
+                    )
+                })
+            };
             if let Some(corridor) = corridor {
                 filtered_indices.push(idx);
                 group_corridor.extend(corridor);
@@ -5280,7 +5390,18 @@ where
             }
             continue;
         }
+        if let Some(coarse_corridor) = coarse_corridors_by_func.get(&src_func_id).cloned() {
+            group_corridor.extend(coarse_corridor);
+        }
         group_corridor.lineage_funcs.insert(src_func_id);
+        if !use_coarse_source_sink_schedule {
+            extend_corridor_with_summary_dependency_support(
+                &mut group_corridor,
+                global.as_ref(),
+                chain_call_graph.as_ref(),
+                config.max_edge_precision,
+            );
+        }
         scheduled_source_groups.push(ScheduledSourceGroup {
             src_func_id,
             indices: filtered_indices,
@@ -5332,6 +5453,12 @@ where
         let mut sink_matches = 0usize;
         let mut lineage_misses = 0usize;
         let mut group_out: Vec<FindingWithChain> = Vec::new();
+        let group_target_nodes =
+            if sink_target_nodes_for_graph.is_some() && !group.corridor.target_nodes.is_empty() {
+                Some(group.corridor.target_nodes.as_slice())
+            } else {
+                None
+            };
         let group_sink_func_targets = Some(&group.corridor.lineage_funcs);
         let group_lineage_func_targets = Some(&group.corridor.lineage_funcs);
         if debug_taint_phase {
@@ -5383,6 +5510,7 @@ where
             );
             append_taint_target_key(&mut seed_key, "target_funcs", group_sink_func_targets);
             append_taint_target_key(&mut seed_key, "lineage_funcs", group_lineage_func_targets);
+            append_taint_target_node_key(&mut seed_key, "target_nodes", group_target_nodes);
             let graph_key = (src_func_id, seed_key);
             // Compute the per-`(source_func, seed_shape)` graph
             // exactly. The per-group cache removes duplicate work
@@ -5407,7 +5535,7 @@ where
                     ws,
                     anchor,
                     &output_arg_names,
-                    None,
+                    group_target_nodes,
                     group_sink_func_targets,
                     group_lineage_func_targets,
                 ));
@@ -5423,6 +5551,43 @@ where
                 continue;
             }
             tainted_calls_seen = tainted_calls_seen.saturating_add(graph.tainted_calls.len());
+            if debug_taint_phase
+                && sink_by_func
+                    .keys()
+                    .all(|func| !graph.tainted_calls.iter().any(|call| call.caller == *func))
+            {
+                let mut call_sites: Vec<String> = graph
+                    .tainted_calls
+                    .iter()
+                    .take(24)
+                    .map(|call| {
+                        let caller_name = global
+                            .decl_of(SymbolId::new(call.caller.raw()))
+                            .map(|decl| decl.name.clone())
+                            .unwrap_or_else(|| call.caller.raw().to_string());
+                        format!(
+                            "{}({})::{}@{}..{} kind={:?} args={:?} recv={:?}",
+                            caller_name,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span.start,
+                            call.call_span.end,
+                            call.kind,
+                            call.tainted_args,
+                            call.tainted_receiver
+                        )
+                    })
+                    .collect();
+                call_sites.sort();
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "graph_has_no_sink_callers source_rule={} src_func={} tainted_calls={} sample={:?}",
+                    src.rule_id,
+                    src_func_id.raw(),
+                    graph.tainted_calls.len(),
+                    call_sites
+                );
+            }
             let unresolved_call_index = GraphUnresolvedCallIndex::new(global.as_ref(), graph.as_ref());
             let attribution_started = debug_taint_phase.then(Instant::now);
             // Span set of every recorded tainted call on this
@@ -5497,12 +5662,43 @@ where
                         && call.tainted_args.is_empty()
                         && call.tainted_receiver.is_none()
                     {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_dropped_empty_evidence source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span,
+                            call.kind
+                        );
                         continue;
                     }
                     let Some(sink_rule) = pack.find_rule_by_id(&snk.rule_id) else {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_missing_rule source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span,
+                            call.kind,
+                            call.tainted_args,
+                            call.tainted_receiver
+                        );
                         continue;
                     };
                     if prototype_pollution_sink_is_guarded(ws, sink_rule, snk) {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_guarded source_rule={} sink_rule={} caller={} call={} span={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span
+                        );
                         continue;
                     }
                     if !sink_rule.constraints.is_empty() {
@@ -5514,10 +5710,32 @@ where
                             snk,
                             &current_call_taint_view,
                         ) {
+                            bonsai_diagnostics::debug_log!(
+                                "security-taint",
+                                "sink_match_constraint_failed source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?} constraints={:?}",
+                                src.rule_id,
+                                snk.rule_id,
+                                call.caller.raw(),
+                                call.name,
+                                call.call_span,
+                                call.kind,
+                                call.tainted_args,
+                                call.tainted_receiver,
+                                sink_rule.constraints
+                            );
                             continue;
                         }
                     }
                     if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call)) {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_duplicate source_rule={} sink_rule={} caller={} call={} span={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span
+                        );
                         continue;
                     }
                     let evidence = cached_evidence.get_or_insert_with(|| {
@@ -5561,6 +5779,19 @@ where
                             finding: f,
                             chain_funcs: evidence.chain_funcs.clone(),
                         });
+                    } else {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_no_finding source_rule={} sink_rule={} caller={} call={} span={:?} kind={:?} tainted_args={:?} receiver={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span,
+                            call.kind,
+                            call.tainted_args,
+                            call.tainted_receiver
+                        );
                     }
                 }
             }
@@ -5766,38 +5997,153 @@ fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {
     sorted
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SourceSinkCorridor {
     terminal_sinks: AHashSet<FuncId>,
     lineage_funcs: AHashSet<FuncId>,
+    target_nodes: Vec<bonsai_idg::WsNodeId>,
 }
 
 impl SourceSinkCorridor {
     fn extend(&mut self, other: SourceSinkCorridor) {
         self.terminal_sinks.extend(other.terminal_sinks);
         self.lineage_funcs.extend(other.lineage_funcs);
+        self.target_nodes.extend(other.target_nodes);
+        self.target_nodes.sort();
+        self.target_nodes.dedup();
     }
+}
+
+fn extend_corridor_with_summary_dependency_support(
+    corridor: &mut SourceSinkCorridor,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let lineage: Vec<FuncId> = corridor.lineage_funcs.iter().copied().collect();
+        for func in lineage {
+            for edge in call_graph.callees_of(func) {
+                if max_precision.is_some_and(|max| edge.precision > max) {
+                    continue;
+                }
+                if !summary_dependency_provider(global, edge.to) {
+                    continue;
+                }
+                if corridor.lineage_funcs.insert(edge.to) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    bonsai_workspace::extend_func_set_with_semantic_callback_dispatchers(
+        &mut corridor.lineage_funcs,
+        &corridor.terminal_sinks,
+        global,
+        call_graph,
+        max_precision,
+    );
+}
+
+fn summary_dependency_provider(global: &GlobalIndex, func: FuncId) -> bool {
+    let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        return false;
+    };
+    matches!(decl.kind, DeclKind::Constructor)
+        || !decl.receiver_field_writes.is_empty()
+        || summary_event_outputs(&decl.flow_events)
+}
+
+fn summary_event_outputs(events: &[FlowEvent]) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_text,
+                value_name,
+                ..
+            } => {
+                if value_text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    || value_name
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Yield { value_text, .. } => {
+                if value_text
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if summary_event_outputs(then_events) || summary_event_outputs(else_events) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if summary_event_outputs(body) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if summary_event_outputs(body)
+                    || summary_event_outputs(catch_events)
+                    || summary_event_outputs(finally_events)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+struct SinkTargetNodes {
+    nodes: Vec<bonsai_idg::WsNodeId>,
+    complete: bool,
 }
 
 fn sink_target_nodes_for_funcs(
     idg: &bonsai_idg::IdgQueryService,
     sink_by_func: &AHashMap<FuncId, Vec<&RuleMatch>>,
     sink_funcs: &AHashSet<FuncId>,
-) -> Vec<bonsai_idg::WsNodeId> {
+) -> SinkTargetNodes {
     let mut sorted_sink_funcs: Vec<FuncId> = sink_funcs.iter().copied().collect();
     sorted_sink_funcs.sort_by_key(|func| func.raw());
     let mut out = Vec::new();
+    let mut complete = true;
     for sink_func in sorted_sink_funcs {
         let Some(sinks) = sink_by_func.get(&sink_func) else {
             continue;
         };
         for sink in sinks {
-            out.extend(idg.nodes_at_span(sink_func, sink.span));
+            let mut nodes = idg.nodes_at_span(sink_func, sink.span);
+            if nodes.is_empty() {
+                complete = false;
+            }
+            out.append(&mut nodes);
         }
     }
     out.sort();
     out.dedup();
-    out
+    SinkTargetNodes { nodes: out, complete }
 }
 
 #[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
@@ -5863,6 +6209,9 @@ fn source_index_sink_corridor(
         let Some(point) = idg.resolve_point(*node) else {
             continue;
         };
+        if sink_target_nodes.binary_search(node).is_ok() {
+            corridor.target_nodes.push(*node);
+        }
         corridor.lineage_funcs.insert(point.func);
         if sink_func_set.contains(&point.func) {
             corridor.terminal_sinks.insert(point.func);
@@ -5875,6 +6224,8 @@ fn source_index_sink_corridor(
     corridor
         .lineage_funcs
         .extend(corridor.terminal_sinks.iter().copied());
+    corridor.target_nodes.sort();
+    corridor.target_nodes.dedup();
     Some(corridor)
 }
 
@@ -5908,14 +6259,33 @@ fn callgraph_source_sink_corridor(
             }
         }
     }
-    let terminal_sinks: AHashSet<FuncId> = seen
+    let mut terminal_sinks: AHashSet<FuncId> = seen
         .iter()
         .copied()
         .filter(|func| sink_func_set.contains(func))
         .collect();
-    if terminal_sinks.is_empty() {
-        return None;
+    let mut return_sinks = AHashSet::default();
+    for edge in call_graph.callers_of(source_func) {
+        if max_precision.is_some_and(|max| edge.precision > max) {
+            continue;
+        }
+        if sink_func_set.contains(&edge.from) {
+            return_sinks.insert(edge.from);
+        }
     }
+    if terminal_sinks.is_empty() {
+        if return_sinks.is_empty() {
+            return None;
+        }
+        let mut lineage_funcs = return_sinks.clone();
+        lineage_funcs.insert(source_func);
+        return Some(SourceSinkCorridor {
+            terminal_sinks: return_sinks,
+            lineage_funcs,
+            target_nodes: Vec::new(),
+        });
+    }
+    terminal_sinks.extend(return_sinks);
     let mut reverse: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
     for (caller, callees) in &forward {
         for callee in callees {
@@ -5946,6 +6316,7 @@ fn callgraph_source_sink_corridor(
     Some(SourceSinkCorridor {
         terminal_sinks,
         lineage_funcs,
+        target_nodes: Vec::new(),
     })
 }
 
@@ -5958,6 +6329,25 @@ fn append_taint_target_key(seed_key: &mut Vec<String>, label: &str, target_funcs
     let encoded = targets
         .into_iter()
         .map(|func| func.raw().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    seed_key.push(format!("__{label}@{encoded}"));
+}
+
+fn append_taint_target_node_key(
+    seed_key: &mut Vec<String>,
+    label: &str,
+    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
+) {
+    let Some(target_nodes) = target_nodes.filter(|nodes| !nodes.is_empty()) else {
+        return;
+    };
+    let mut nodes: Vec<bonsai_idg::WsNodeId> = target_nodes.to_vec();
+    nodes.sort();
+    nodes.dedup();
+    let encoded = nodes
+        .into_iter()
+        .map(|node| node.0.to_string())
         .collect::<Vec<_>>()
         .join(",");
     seed_key.push(format!("__{label}@{encoded}"));
@@ -6061,6 +6451,9 @@ fn effective_source_seed_nodes(
         });
         if anchor_has_call_return {
             seed_nodes = anchor_nodes;
+            if !seed_names.is_empty() {
+                seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
+            }
         } else {
             seed_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
             if seed_nodes.is_empty() {
@@ -6110,7 +6503,7 @@ fn exact_source_seed_graph(
     ws: &Workspace,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
-    _target_nodes: Option<&[bonsai_idg::WsNodeId]>,
+    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
     target_funcs: Option<&AHashSet<FuncId>>,
     lineage_funcs: Option<&AHashSet<FuncId>>,
 ) -> EntryTaintGraph {
@@ -6137,7 +6530,7 @@ fn exact_source_seed_graph(
         &config.receiver_state_propagations,
         &config.call_result_passthroughs,
         &config.output_arg_flows,
-        None,
+        target_nodes,
         target_funcs,
         lineage_funcs,
         config.max_edge_precision,
@@ -6211,10 +6604,10 @@ fn same_function_clean_overwrite_kills_sink_arg(
     }
     let mut targets: Vec<String> = tainted_args
         .iter()
-        .filter_map(|arg| clean_overwrite_target_key(&arg.value_text))
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
         .collect();
-    if let Some(receiver) = tainted_receiver.and_then(clean_overwrite_target_key) {
-        targets.push(receiver);
+    if let Some(receiver) = tainted_receiver {
+        targets.extend(clean_overwrite_target_keys(receiver));
     }
     targets.sort();
     targets.dedup();
@@ -6225,18 +6618,50 @@ fn same_function_clean_overwrite_kills_sink_arg(
     let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
         return false;
     };
-    clean_overwrite_branch_between(&decl.flow_events, source_span, sink_span, &targets)
+    clean_overwrite_between(ws, &decl.flow_events, source_span, sink_span, &targets, true)
 }
 
-fn clean_overwrite_branch_between(
+fn clean_overwrite_between(
+    ws: &Workspace,
     events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
     sink_span: Span,
     targets: &[String],
+    allow_direct_assign: bool,
 ) -> bool {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_names,
+                source_call_args,
+                value_kind,
+                ..
+            } => {
+                if allow_direct_assign
+                    && span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= sink_span.start
+                    && targets.iter().any(|target_key| {
+                        clean_overwrite_target_key(target).as_deref() == Some(target_key)
+                            && assignment_cleanly_overwrites_target(
+                                ws,
+                                *span,
+                                source_name.as_deref(),
+                                source_call.as_deref(),
+                                source_names,
+                                source_call_args,
+                                *value_kind,
+                            )
+                    })
+                {
+                    return true;
+                }
+            }
             FlowEvent::Branch {
                 span,
                 then_events,
@@ -6254,34 +6679,98 @@ fn clean_overwrite_branch_between(
                 {
                     return true;
                 }
-                if clean_overwrite_branch_between(then_events, source_span, sink_span, targets)
-                    || clean_overwrite_branch_between(else_events, source_span, sink_span, targets)
+                if clean_overwrite_between(ws, then_events, source_span, sink_span, targets, false)
+                    || clean_overwrite_between(ws, else_events, source_span, sink_span, targets, false)
                 {
                     return true;
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if clean_overwrite_branch_between(body, source_span, sink_span, targets) {
+                if clean_overwrite_between(ws, body, source_span, sink_span, targets, allow_direct_assign) {
                     return true;
                 }
             }
             FlowEvent::Try {
+                span,
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                if clean_overwrite_branch_between(body, source_span, sink_span, targets)
-                    || clean_overwrite_branch_between(catch_events, source_span, sink_span, targets)
-                    || clean_overwrite_branch_between(finally_events, source_span, sink_span, targets)
+                if clean_overwrite_between(
+                    ws,
+                    finally_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    allow_direct_assign,
+                ) {
+                    return true;
+                }
+                let try_before_sink = span.file == source_span.file && span.end <= sink_span.start;
+                let try_after_source =
+                    try_before_sink && span.start > source_span.start && span.end <= sink_span.start;
+                if try_after_source
+                    && targets.iter().any(|target| {
+                        try_region_clean_overwrites_target(body, catch_events, finally_events, target)
+                    })
                 {
                     return true;
+                }
+                let source_inside_try =
+                    try_before_sink && span.start <= source_span.start && source_span.start <= span.end;
+                if source_inside_try {
+                    for target in targets {
+                        let single_target = [target.clone()];
+                        let body_cleans_after_source = clean_overwrite_between(
+                            ws,
+                            body,
+                            source_span,
+                            sink_span,
+                            &single_target,
+                            allow_direct_assign,
+                        );
+                        let catch_cleans_after_source = clean_overwrite_between(
+                            ws,
+                            catch_events,
+                            source_span,
+                            sink_span,
+                            &single_target,
+                            allow_direct_assign,
+                        );
+                        let body_always_clean = branch_arm_clean_overwrites_target(body, target);
+                        let catch_always_clean = catch_events.is_empty()
+                            || branch_arm_clean_overwrites_target(catch_events, target);
+                        if (body_cleans_after_source && catch_always_clean)
+                            || (catch_cleans_after_source && body_always_clean)
+                        {
+                            return true;
+                        }
+                    }
                 }
             }
             _ => {}
         }
     }
     false
+}
+
+fn assignment_cleanly_overwrites_target(
+    ws: &Workspace,
+    span: Span,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_names: &[String],
+    source_call_args: &[String],
+    value_kind: Option<AssignValueKind>,
+) -> bool {
+    source_call.is_none()
+        && source_call_args.is_empty()
+        && (value_kind
+            .as_ref()
+            .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
+            || clean_constant_assignment(source_name, source_names)
+            || assignment_rhs_is_clean_conditional(ws, span))
 }
 
 fn branch_arm_clean_overwrites_target(events: &[bonsai_lang_api::FlowEvent], target: &str) -> bool {
@@ -6313,6 +6802,7 @@ fn branch_arm_clean_overwrites_target(events: &[bonsai_lang_api::FlowEvent], tar
                 && branch_arm_clean_overwrites_target(then_events, target)
                 && branch_arm_clean_overwrites_target(else_events, target)
         }
+        FlowEvent::Call { name, args, .. } => clean_output_call_overwrites_target(name, args, target),
         FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
             branch_arm_clean_overwrites_target(body, target)
         }
@@ -6321,13 +6811,77 @@ fn branch_arm_clean_overwrites_target(events: &[bonsai_lang_api::FlowEvent], tar
             catch_events,
             finally_events,
             ..
-        } => {
-            branch_arm_clean_overwrites_target(body, target)
-                || branch_arm_clean_overwrites_target(catch_events, target)
-                || branch_arm_clean_overwrites_target(finally_events, target)
-        }
+        } => try_region_clean_overwrites_target(body, catch_events, finally_events, target),
         _ => false,
     })
+}
+
+fn try_region_clean_overwrites_target(
+    body: &[bonsai_lang_api::FlowEvent],
+    catch_events: &[bonsai_lang_api::FlowEvent],
+    finally_events: &[bonsai_lang_api::FlowEvent],
+    target: &str,
+) -> bool {
+    branch_arm_clean_overwrites_target(finally_events, target)
+        || (branch_arm_clean_overwrites_target(body, target)
+            && (catch_events.is_empty() || branch_arm_clean_overwrites_target(catch_events, target)))
+}
+
+fn clean_output_call_overwrites_target(name: &str, args: &[bonsai_lang_api::CallArg], target: &str) -> bool {
+    if !matches!(
+        clean_overwrite_callee_tail(name).as_str(),
+        "snprintf" | "snprintf_s" | "sprintf_s" | "strcpy_s" | "strncpy_s"
+    ) {
+        return false;
+    }
+    let Some(first) = args.first() else {
+        return false;
+    };
+    if clean_overwrite_target_key(&first.value_text).as_deref() != Some(target) {
+        return false;
+    }
+    args.iter()
+        .skip(1)
+        .all(|arg| clean_output_overwrite_arg_is_clean(&arg.value_text, target))
+}
+
+fn clean_overwrite_callee_tail(name: &str) -> String {
+    name.rsplit(['.', ':'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn clean_output_overwrite_arg_is_clean(value: &str, target: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if quoted_literal(trimmed) || numeric_literal(trimmed) {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("sizeof(") && lower.ends_with(')') {
+        return true;
+    }
+    clean_overwrite_target_key(trimmed).as_deref() != Some(target) && looks_like_clean_constant(trimmed)
+}
+
+fn quoted_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+}
+
+fn numeric_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '_' | 'x' | 'X' | 'a'..='f' | 'A'..='F'))
+        && trimmed.chars().any(|ch| ch.is_ascii_digit())
 }
 
 fn clean_constant_assignment(source_name: Option<&str>, source_names: &[String]) -> bool {
@@ -6336,6 +6890,65 @@ fn clean_constant_assignment(source_name: Option<&str>, source_names: &[String])
         .chain(source_names.iter().map(String::as_str))
         .all(looks_like_clean_constant)
         && (source_name.is_some() || !source_names.is_empty())
+}
+
+fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
+    let Some(rhs) = assignment_rhs_text(ws, span) else {
+        return false;
+    };
+    clean_conditional_value_part(&rhs).is_some_and(value_part_contains_only_clean_literals)
+}
+
+fn assignment_rhs_text(ws: &Workspace, span: Span) -> Option<String> {
+    let snapshot = ws.vfs().snapshot(span.file).ok()?;
+    let raw = snapshot.text.get(span.start as usize..span.end as usize)?;
+    let rhs = raw.split_once('=').map_or(raw, |(_, rhs)| rhs);
+    Some(rhs.trim().trim_end_matches(';').trim().to_string())
+}
+
+fn clean_conditional_value_part(rhs: &str) -> Option<&str> {
+    let trimmed = rhs.trim();
+    if let Some(question) = trimmed.find('?') {
+        if trimmed[question + 1..].contains(':') {
+            return Some(&trimmed[question + 1..]);
+        }
+    }
+    if trimmed.starts_with("if ") || trimmed.starts_with("if(") || trimmed.starts_with("if (") {
+        if let Some(first_value_block) = trimmed.find('{') {
+            return Some(&trimmed[first_value_block..]);
+        }
+        if let Some(else_idx) = trimmed.find(" else ") {
+            return Some(&trimmed[else_idx..]);
+        }
+    }
+    None
+}
+
+fn value_part_contains_only_clean_literals(value_part: &str) -> bool {
+    if !value_part.contains('"') && !value_part.contains('\'') && !value_part.contains('`') {
+        return false;
+    }
+    identifier_tokens_outside_strings(value_part)
+        .into_iter()
+        .all(|token| clean_conditional_helper_identifier(&token))
+}
+
+fn clean_conditional_helper_identifier(token: &str) -> bool {
+    matches!(
+        token,
+        "if" | "else"
+            | "true"
+            | "false"
+            | "nil"
+            | "null"
+            | "None"
+            | "none"
+            | "to_string"
+            | "toString"
+            | "to_s"
+            | "String"
+            | "string"
+    )
 }
 
 fn looks_like_clean_constant(text: &str) -> bool {
@@ -6362,6 +6975,64 @@ fn clean_overwrite_target_key(text: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(key) = clean_overwrite_target_key(text) {
+        out.push(key);
+    }
+    for token in identifier_tokens_outside_strings(text) {
+        if let Some(key) = clean_overwrite_target_key(&token) {
+            out.push(key);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            push_identifier_token(&mut tokens, &mut current);
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else {
+            push_identifier_token(&mut tokens, &mut current);
+        }
+    }
+    push_identifier_token(&mut tokens, &mut current);
+    tokens
+}
+
+fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
+    if current
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+    {
+        tokens.push(std::mem::take(current));
+    } else {
+        current.clear();
+    }
 }
 
 fn same_statement_between(ws: &Workspace, earlier: Span, later: Span) -> bool {
@@ -7785,6 +8456,7 @@ fn idg_transfer_options_from_rulepack_shapes(
             .collect(),
         include_diagnostic_field_flows: false,
         include_receiver_method_propagation: false,
+        include_field_argument_forwarding: true,
     }
 }
 
@@ -7803,12 +8475,45 @@ pub fn taint_transfers_from_rulepack(pack: &Rulepack) -> RulepackTaintTransfers 
     }
 }
 
-pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) {
+pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bonsai_idg::IdgQueryService> {
     let languages = workspace_languages(ws);
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, &languages);
     let options = idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs);
-    let _ = ws.build_and_seed_idg_service_with_transfer_options(&options);
+    ws.build_and_seed_idg_service_with_transfer_options(&options)
+}
+
+fn seed_idg_service_for_rulepack_for_files(
+    ws: &Workspace,
+    pack: &Rulepack,
+    languages: &AHashSet<String>,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+) -> Arc<bonsai_idg::IdgQueryService> {
+    let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
+    let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
+    let mut options = idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs);
+    let large_java_scope = languages.contains("java") && included_funcs.len() > 1_000;
+    options.include_receiver_method_propagation = !large_java_scope;
+    if large_java_scope {
+        options.include_field_argument_forwarding = false;
+    }
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "semantic graph transfer options large_java_scope={} languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={}",
+        large_java_scope,
+        languages.len(),
+        included_funcs.len(),
+        options.include_receiver_method_propagation,
+        options.include_field_argument_forwarding
+    );
+    ws.build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
+        &options,
+        included_files,
+        included_funcs,
+        call_graph,
+    )
 }
 
 fn source_output_args_from_rulepack_for_languages(

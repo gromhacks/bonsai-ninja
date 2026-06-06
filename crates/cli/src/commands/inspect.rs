@@ -3328,35 +3328,6 @@ pub(crate) struct MatchOverride {
     pub(crate) label: String,
 }
 
-/// Render one flow with the active `InspectFilters`. When
-/// `--from` / `--to` are set the rendered annotation for the
-/// matching line gets a `FROM:` / `TO:` suffix so the user can
-/// see where in the flow each filter needle landed. Flow-label
-/// assignment (the `"14"` / `"15a"` / `"15b"` branch-split
-/// numbering) lives in `bonsai_sdk::compute_flow_labels_from`.
-pub(crate) fn render_flow_with_filters(
-    ws: &Workspace,
-    chain: &[bonsai_common::FuncId],
-    flow_number: u32,
-    flow_label: &str,
-    precision: bonsai_common::Precision,
-    match_at: Option<(usize, MatchOverride)>,
-    filters: InspectFilters<'_>,
-) -> Option<InspectFlowRendered> {
-    render_flow_with_cached_call_spans(
-        ws,
-        chain,
-        &[],
-        flow_number,
-        flow_label,
-        precision,
-        match_at,
-        filters,
-        true,
-        false,
-    )
-}
-
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 pub(crate) fn render_flow_with_cached_call_spans(
     ws: &Workspace,

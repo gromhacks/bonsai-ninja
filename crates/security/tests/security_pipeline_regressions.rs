@@ -153,11 +153,11 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // sink's tainted arg doesn't name the source's field. Then
         // (2026-05-29) the combiner's `group_id`-based dedup collapsed a
         // duplicate finding that reached `os_system@29` via a second
-        // entry chain but carried the same `finding_id`. Three distinct
+        // entry chain but carried the same `finding_id`. Two distinct
         // findings remain: the real flask `request.args.get` flow plus
-        // two distinct `decorator_handler.param_1` inferred entries
-        // (lines 21 and 25).
-        "python" => 3,
+        // one grouped local inferred callable-object flow whose member
+        // ids retain the collapsed `decorator_handler.param_1` evidence.
+        "python" => 2,
         "ruby" => 2,
         "rust" => 1,
         // HttpServletRequest.getParameter → Envelope (case class) →

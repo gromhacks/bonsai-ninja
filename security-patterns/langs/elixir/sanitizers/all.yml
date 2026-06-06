@@ -735,7 +735,7 @@
 # identity edge (T104) - taint propagates THROUGH instead of
 # being cleared. Bludit CVE-2019-16113 used urldecode to
 # turn %2F%2E%2E%2F into /../ AFTER the path safety check.
-- id: elixir.passthrough.uri_decode
+- id: elixir.sanitizer.passthrough.uri_decode
   enabled: true
   language: elixir
   tag: passthrough-decode
@@ -755,7 +755,7 @@
       end
     expect_match_text: [URI.decode]
   description: "URI.decode(s) - preserves taint."
-- id: elixir.passthrough.string_upcase
+- id: elixir.sanitizer.passthrough.string_upcase
   enabled: true
   language: elixir
   tag: passthrough-transform
@@ -775,7 +775,7 @@
       end
     expect_match_text: [String.upcase]
   description: "String.upcase(s) - case-normalizes but preserves taint from s."
-- id: elixir.passthrough.string_downcase
+- id: elixir.sanitizer.passthrough.string_downcase
   enabled: true
   language: elixir
   tag: passthrough-transform
@@ -795,7 +795,47 @@
       end
     expect_match_text: [String.downcase]
   description: "String.downcase(s) - case-normalizes but preserves taint from s."
-- id: elixir.passthrough.uri_decode_www_form
+- id: elixir.sanitizer.passthrough.string_trim
+  enabled: true
+  language: elixir
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, trim]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: String.trim preserves taint
+    code: |
+      defmodule App do
+        def test(input) do
+          String.trim(input)
+        end
+      end
+    expect_match_text: [String.trim]
+  description: "String.trim(s) - strips surrounding whitespace but preserves taint from s."
+- id: elixir.sanitizer.passthrough.string_to_charlist
+  enabled: true
+  language: elixir
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, to_charlist]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: String.to_charlist preserves taint
+    code: |
+      defmodule App do
+        def test(input) do
+          String.to_charlist(input)
+        end
+      end
+    expect_match_text: [String.to_charlist]
+  description: "String.to_charlist(s) - converts representation but preserves taint from s."
+- id: elixir.sanitizer.passthrough.uri_decode_www_form
   enabled: true
   language: elixir
   tag: passthrough-decode

@@ -106,12 +106,28 @@ env BONSAI_DEBUG=security-phase,idg-build \
   --no-progress > /tmp/bonsai-large-java-taint.json
 ```
 
-The 2026-06-03 Elasticsearch smoke covered 29,839 JVM-family source files and
-completed cold in 419.48s, then warm in 215.49s with byte-identical JSON. The
-warm run loaded the deterministic transfer sidecar key and avoided rebuilding
-the 3.1 GiB chunked IDG factstore. A valid large-codebase run should have
-`analysis_complete: true`, no incomplete reasons, no malformed page metadata,
-no `payload exceeds 4GiB` warning, and no `save_to_disk failed` warning.
+The 2026-06-06 Elasticsearch smoke used the reported CLI shape,
+`security ../elasticsearch taint-analysis --context 512k --no-color
+--no-progress`, against the local Elasticsearch checkout. The release run
+completed in 121.25s with 327 total findings and no `payload exceeds 4GiB` or
+`save_to_disk failed` warning. Phase timing with
+`BONSAI_DEBUG=security-phase` showed source matching in 6.776s, sink matching
+in 5.200s, sanitizer matching in 4.685s, source-reachable callgraph
+construction in 11.968s, scoped semantic graph construction in 6.939s,
+source-sink reachability in 0.004s, taint-chain building in 23.262s, flow
+evidence in 0.012s, and first-page rendering in 1.011s. The source-reachable
+graph was scoped to 15,557 functions / 3,074 files from 2,018 source functions
+and 7,954 sink functions, reaching 1,745 sink functions; the IDG scope was
+further narrowed to 13,876 functions / 2,958 files. Source groups were filtered
+from 2,018 to 497.
+
+A valid large-codebase run should have `analysis_complete: true` for JSON/SARIF
+runs, no incomplete reasons, no malformed page metadata, no `payload exceeds
+4GiB` warning, and no `save_to_disk failed` warning. Large Java scopes should
+log `large_java_scope=true`, `receiver_method_propagation=false`, and
+`field_argument_forwarding=false` in the scoped semantic graph phase; exact
+taint still runs over source-to-sink IDG/callgraph corridors rather than a
+workspace-wide graph.
 
 `BONSAI_DEBUG=security-phase` writes phase timing to stderr even when
 `--no-progress` keeps stdout clean. `--no-progress` and `NO_PROGRESS` are the
@@ -181,14 +197,14 @@ taint-path files stayed inside the same generated copy.
 The 2026-06-04 and 2026-06-06 source-to-sink scheduler regression passes verify
 that taint-analysis does not analyze every source in a large project when most
 sources cannot reach any sink. Source eligibility is source-scoped: the
-scheduler first uses concrete source-seed to sink-node IDG cuts, then only falls
-back to a source-origin resolved-callgraph corridor when the concrete node cut
-cannot prove a path. It must not materialize all semantic function edges before
-source filtering, and the taint budget must not cap source eligibility. Once a
-source group is eligible, the per-source IDG graph build is cut to the proven
-source-to-sink corridor; if no semantic corridor exists, the group is skipped
-instead of falling back to a workspace-wide graph. Same-file source batches also
-get a concrete seed-node to sink-node reachability prefilter so adapter module
+scheduler uses concrete source-seed to sink-node IDG cuts when possible, uses a
+source-origin resolved-callgraph corridor when a concrete node cut cannot prove
+completeness, and skips source groups with no semantic source-to-sink corridor.
+It must not materialize all semantic function edges before source filtering,
+the taint budget must not cap source eligibility, and there is no workspace-wide
+graph fallback. Once a source group is eligible, the per-source IDG graph build
+is cut to the proven source-to-sink corridor. Same-file source batches also get
+a concrete seed-node to sink-node reachability prefilter so adapter module
 wrappers or dense files do not schedule source-only calls. Cross-file node-cut
 uncertainty stays scheduled and is decided by the normal corridor-scoped
 semantic taint graph to avoid false negatives.

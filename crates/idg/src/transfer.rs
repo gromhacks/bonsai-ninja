@@ -105,6 +105,11 @@ pub struct TransferOptions {
     /// default graph keeps this compatibility heuristic; large security
     /// scans can skip it and rely on exact call/arg/return propagation.
     pub include_receiver_method_propagation: bool,
+    /// Whether Phase 3 eagerly materializes interprocedural object-field
+    /// forwarding edges. Generic IDG/code-intelligence queries keep this
+    /// enabled; large security scans can skip the eager closure and rely
+    /// on the taint engine's demand-driven field propagation.
+    pub include_field_argument_forwarding: bool,
 }
 
 impl Default for TransferOptions {
@@ -114,6 +119,7 @@ impl Default for TransferOptions {
             source_output_args: Vec::new(),
             include_diagnostic_field_flows: true,
             include_receiver_method_propagation: true,
+            include_field_argument_forwarding: true,
         }
     }
 }
@@ -126,6 +132,7 @@ impl TransferOptions {
             && self.source_output_args.is_empty()
             && self.include_diagnostic_field_flows
             && self.include_receiver_method_propagation
+            && self.include_field_argument_forwarding
     }
 
     /// Return a semantically equivalent option set in deterministic
