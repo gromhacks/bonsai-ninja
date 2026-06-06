@@ -1030,6 +1030,8 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     lambda_kinds: &[
         "lambda",
         "lambda_expression",
+        "anonymous_function",
+        "anonymous_fun",
         "arrow_function",
         "function_expression",
         "closure_expression",
@@ -1146,6 +1148,7 @@ pub const COMMON_CALL_KINDS: &[&str] = &[
     "object_creation_expression",
     "instance_expression",
     "constructor_invocation",
+    "explicit_constructor_invocation",
     "macro_invocation",
     "subroutine_call_expression",
     "generic_function",
@@ -1690,6 +1693,8 @@ fn walk_into(
             .child_by_field_name("right")
             .or_else(|| node.child_by_field_name("rhs"))
             .or_else(|| node.child_by_field_name("value"))
+            .or_else(|| node.child_by_field_name("result"))
+            .or_else(|| node.child_by_field_name("target"))
             .or_else(|| last_named_child_excluding(&node, target_node));
         let source_name = rhs.and_then(|rhs_node| {
             let rhs_text = node_text(&rhs_node, src).trim();
@@ -2063,7 +2068,8 @@ fn walk_into(
         let receiver_node = node
             .child_by_field_name("function")
             .or_else(|| node.child_by_field_name("callee"))
-            .or_else(|| node.child_by_field_name("receiver"));
+            .or_else(|| node.child_by_field_name("receiver"))
+            .or_else(|| node.child_by_field_name("object"));
         if let Some(recv) = receiver_node {
             walk_method_chain_receivers(recv, file, src, handler, class_names, out);
         }
@@ -2758,6 +2764,7 @@ fn build_call_event(
                 | "object_creation_expression"
                 | "instance_expression"
                 | "constructor_invocation"
+                | "explicit_constructor_invocation"
                 | "composite_literal"
         )
         || short == "new"
@@ -3125,6 +3132,7 @@ fn call_receiver_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
                 inner
                     .child_by_field_name("object")
                     .or_else(|| inner.child_by_field_name("receiver"))
+                    .or_else(|| inner.child_by_field_name("target"))
             } else {
                 None
             }
@@ -5115,7 +5123,9 @@ pub fn decl_index_with_handler(
             || handler.is_constructor_method(name)
         {
             crate::DeclKind::Constructor
-        } else if handler.method_kinds.contains(&node.kind()) {
+        } else if handler.method_kinds.contains(&node.kind())
+            || has_ancestor_kind(&node, handler.method_context_kinds)
+        {
             crate::DeclKind::Method
         } else {
             crate::DeclKind::Function
@@ -9307,6 +9317,95 @@ fn file_module_segments(file: FileId, ctx: &AdapterContext<'_>) -> Option<Vec<St
     *last = stripped.to_string();
     segments.retain(|segment| !segment.is_empty());
     (!segments.is_empty()).then_some(segments)
+}
+
+/// Prefix package/namespace module identity with the workspace-relative
+/// project path when one is present. Imports still resolve because the
+/// resolver suffix-matches package targets, while same-package visibility
+/// remains scoped to the concrete sibling project.
+#[must_use]
+pub fn package_module_segments_with_workspace_prefix<I, S>(
+    file: FileId,
+    ctx: &AdapterContext<'_>,
+    package_segments: I,
+) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let package_segments = package_segments
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<String>>();
+    if package_segments.is_empty() {
+        return Vec::new();
+    }
+    let Some(relative) = ctx.workspace_relative_path(file) else {
+        return package_segments;
+    };
+    let mut prefix = relative.parent().map(path_components).unwrap_or_default();
+    strip_suffix_segments(&mut prefix, &package_segments);
+    strip_known_source_root_suffix(&mut prefix);
+    let mut out = prefix
+        .into_iter()
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    out.extend(package_segments);
+    out
+}
+
+fn path_components(path: &std::path::Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => {
+                let text = part.to_string_lossy();
+                (!text.is_empty()).then(|| text.into_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn strip_suffix_segments(segments: &mut Vec<String>, suffix: &[String]) {
+    if suffix.is_empty() || suffix.len() > segments.len() {
+        return;
+    }
+    let start = segments.len() - suffix.len();
+    if segments[start..]
+        .iter()
+        .zip(suffix.iter())
+        .all(|(left, right)| left == right)
+    {
+        segments.truncate(start);
+    }
+}
+
+fn strip_known_source_root_suffix(segments: &mut Vec<String>) {
+    const SOURCE_ROOTS: &[&[&str]] = &[
+        &["src", "main", "java"],
+        &["src", "test", "java"],
+        &["src", "main", "kotlin"],
+        &["src", "test", "kotlin"],
+        &["src", "main", "scala"],
+        &["src", "test", "scala"],
+        &["src", "java"],
+        &["src", "kotlin"],
+        &["src", "scala"],
+    ];
+    for root in SOURCE_ROOTS {
+        if root.len() > segments.len() {
+            continue;
+        }
+        let start = segments.len() - root.len();
+        if segments[start..]
+            .iter()
+            .zip(root.iter())
+            .all(|(left, right)| left == right)
+        {
+            segments.truncate(start);
+            return;
+        }
+    }
 }
 
 fn strip_extension(part: &str) -> &str {

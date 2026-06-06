@@ -27,6 +27,18 @@ fn decl_kind(db: &AnalyzerDb, name: &str) -> DeclKind {
     panic!("missing declaration `{name}`")
 }
 
+fn decl_receiver_index(db: &AnalyzerDb, name: &str) -> Option<usize> {
+    let global = db.global_index();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == name {
+                return decl.receiver_param_index;
+            }
+        }
+    }
+    panic!("missing declaration `{name}`")
+}
+
 #[test]
 fn python_only_dunder_init_is_constructor() {
     let db = python_db(
@@ -46,4 +58,18 @@ class Repo:
         DeclKind::Constructor,
         "Python adapters must not inherit the cross-language `init` constructor name"
     );
+}
+
+#[test]
+fn python_class_functions_are_methods_with_receiver_params() {
+    let db = python_db(
+        r#"
+class Repo:
+    def persist(self):
+        return self.data
+"#,
+    );
+
+    assert_eq!(decl_kind(&db, "persist"), DeclKind::Method);
+    assert_eq!(decl_receiver_index(&db, "persist"), Some(0));
 }

@@ -508,6 +508,11 @@ fn go_range_value_assignment(
     } else {
         Vec::new()
     };
+    let value_kind = if source_call.is_some() {
+        bonsai_lang_api::AssignValueKind::CallResult
+    } else {
+        bonsai_lang_api::AssignValueKind::Compound
+    };
     FlowEvent::Assign {
         span,
         target: target.to_string(),
@@ -516,7 +521,7 @@ fn go_range_value_assignment(
         source_call_args,
         source_names,
         declares_new_binding: true,
-        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        value_kind: Some(value_kind),
     }
 }
 

@@ -199,7 +199,12 @@ impl LanguageAdapter for RustAdapter {
             bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let arm_spans = collect_rust_match_arm_spans(&tree, src, file);
             let spawn_body_spans = collect_rust_spawn_body_spans(&tree, src, file);
+            let struct_literal_field_assigns = collect_rust_struct_literal_field_assigns(&tree, file, src);
             for decl in &mut idx.defs {
+                enrich_rust_struct_literal_field_assigns(
+                    &mut decl.flow_events,
+                    &struct_literal_field_assigns,
+                );
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
                 isolate_rust_spawn_bodies(&mut decl.flow_events, &spawn_body_spans);
                 enrich_rust_format_macro_operands(&mut decl.flow_events);
@@ -268,6 +273,7 @@ impl LanguageAdapter for RustAdapter {
                 }
             }
             apply_rust_tuple_struct_field_aliases(&mut idx, &tuple_struct_field_aliases);
+            enrich_rust_self_tuple_constructor_returns(&mut idx);
         }
         // Append `FlowEvent::Lifecycle` for recognised Rust
         // resource transitions (`drop`, `Box::from_raw`,
@@ -417,6 +423,583 @@ fn enrich_rust_constructor_field_writes(decl: &mut bonsai_lang_api::Decl) {
     decl.receiver_field_writes.dedup_by(|a, b| {
         a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
     });
+}
+
+#[derive(Clone, Debug)]
+struct RustConstructorFieldSource {
+    target_suffix: String,
+    source_param_index: usize,
+}
+
+fn enrich_rust_self_tuple_constructor_returns(idx: &mut DeclIndex) {
+    let class_name_by_symbol = idx
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Class
+                    | bonsai_lang_api::DeclKind::Struct
+                    | bonsai_lang_api::DeclKind::Trait
+                    | bonsai_lang_api::DeclKind::Interface
+            )
+        })
+        .map(|decl| (decl.symbol, decl.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut constructor_fields: std::collections::HashMap<(String, String), Vec<RustConstructorFieldSource>> =
+        std::collections::HashMap::new();
+    for decl in &idx.defs {
+        let Some(parent) = decl.parent.and_then(|symbol| class_name_by_symbol.get(&symbol)) else {
+            continue;
+        };
+        for write in &decl.receiver_field_writes {
+            let Some(target_suffix) = write.target.trim().strip_prefix("self.") else {
+                continue;
+            };
+            if target_suffix.is_empty() {
+                continue;
+            }
+            for source_param_index in &write.source_param_indices {
+                constructor_fields
+                    .entry((parent.clone(), decl.name.clone()))
+                    .or_default()
+                    .push(RustConstructorFieldSource {
+                        target_suffix: target_suffix.to_string(),
+                        source_param_index: *source_param_index,
+                    });
+            }
+        }
+    }
+    if constructor_fields.is_empty() {
+        return;
+    }
+
+    for decl in &mut idx.defs {
+        if !matches!(
+            decl.kind,
+            bonsai_lang_api::DeclKind::Function
+                | bonsai_lang_api::DeclKind::Method
+                | bonsai_lang_api::DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let returns_self = decl.return_type.as_deref().is_some_and(|ty| ty.trim() == "Self");
+        let mut writes = Vec::new();
+        collect_rust_self_tuple_constructor_return_writes(
+            &decl.flow_events,
+            &decl.params,
+            returns_self,
+            &constructor_fields,
+            &mut writes,
+        );
+        if writes.is_empty() {
+            continue;
+        }
+        decl.receiver_field_writes.extend(writes);
+        decl.receiver_field_writes
+            .sort_by_key(|write| (write.span.start, write.target.clone()));
+        decl.receiver_field_writes.dedup_by(|a, b| {
+            a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+        });
+        decl.kind = bonsai_lang_api::DeclKind::Constructor;
+    }
+}
+
+fn collect_rust_self_tuple_constructor_return_writes(
+    events: &[FlowEvent],
+    params: &[String],
+    returns_self: bool,
+    constructor_fields: &std::collections::HashMap<(String, String), Vec<RustConstructorFieldSource>>,
+    out: &mut Vec<FieldWrite>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_text: Some(value_text),
+                ..
+            } => {
+                if !returns_self && !value_text.trim_start().starts_with("Self(") {
+                    continue;
+                }
+                let Some(args) = rust_self_tuple_constructor_args(value_text) else {
+                    continue;
+                };
+                for (tuple_idx, arg) in args.iter().enumerate() {
+                    if let Some((owner, ctor, ctor_args)) = rust_constructor_call_parts(arg) {
+                        if let Some(fields) = constructor_fields.get(&(owner, ctor)) {
+                            for field in fields {
+                                let Some(source_arg) = ctor_args.get(field.source_param_index) else {
+                                    continue;
+                                };
+                                let Some(source_param_index) =
+                                    rust_param_index_for_bare_arg(source_arg, params)
+                                else {
+                                    continue;
+                                };
+                                out.push(FieldWrite {
+                                    span: *span,
+                                    target: format!("self.{tuple_idx}.{}", field.target_suffix),
+                                    source_param_indices: vec![source_param_index],
+                                });
+                            }
+                        }
+                    } else if let Some(source_param_index) = rust_param_index_for_bare_arg(arg, params) {
+                        out.push(FieldWrite {
+                            span: *span,
+                            target: format!("self.{tuple_idx}"),
+                            source_param_indices: vec![source_param_index],
+                        });
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_rust_self_tuple_constructor_return_writes(
+                    then_events,
+                    params,
+                    returns_self,
+                    constructor_fields,
+                    out,
+                );
+                collect_rust_self_tuple_constructor_return_writes(
+                    else_events,
+                    params,
+                    returns_self,
+                    constructor_fields,
+                    out,
+                );
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_rust_self_tuple_constructor_return_writes(
+                    body,
+                    params,
+                    returns_self,
+                    constructor_fields,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_rust_self_tuple_constructor_return_writes(
+                    body,
+                    params,
+                    returns_self,
+                    constructor_fields,
+                    out,
+                );
+                collect_rust_self_tuple_constructor_return_writes(
+                    catch_events,
+                    params,
+                    returns_self,
+                    constructor_fields,
+                    out,
+                );
+                collect_rust_self_tuple_constructor_return_writes(
+                    finally_events,
+                    params,
+                    returns_self,
+                    constructor_fields,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rust_param_index_for_bare_arg(arg: &str, params: &[String]) -> Option<usize> {
+    let arg = strip_rust_reference_prefix(arg.trim());
+    if !rust_bare_identifier(arg) {
+        return None;
+    }
+    params.iter().position(|param| param == arg)
+}
+
+fn rust_self_tuple_constructor_args(text: &str) -> Option<Vec<String>> {
+    let expr = strip_rust_reference_prefix(text.trim());
+    let inner = rust_call_inner_for_prefix(expr, "Self")?;
+    Some(
+        split_top_level_commas(inner)
+            .into_iter()
+            .map(str::trim)
+            .filter(|arg| !arg.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn rust_constructor_call_parts(text: &str) -> Option<(String, String, Vec<String>)> {
+    let expr = strip_rust_reference_prefix(text.trim());
+    let open = expr.find('(')?;
+    let callee = expr[..open].trim();
+    let (owner, ctor) = callee.rsplit_once("::")?;
+    let owner = rust_type_tail(owner)?;
+    if !rust_bare_identifier(ctor) {
+        return None;
+    }
+    let inner = rust_call_inner_for_prefix(expr, callee)?;
+    let args = split_top_level_commas(inner)
+        .into_iter()
+        .map(str::trim)
+        .filter(|arg| !arg.is_empty())
+        .map(str::to_string)
+        .collect();
+    Some((owner, ctor.to_string(), args))
+}
+
+fn rust_call_inner_for_prefix<'a>(expr: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = expr.strip_prefix(prefix)?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let close = matching_call_close(rest)?;
+    if !rest[close + 1..].trim().is_empty() {
+        return None;
+    }
+    Some(&rest[..close])
+}
+
+fn matching_call_close(text_after_open: &str) -> Option<usize> {
+    let mut depth = 1i32;
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    for (idx, ch) in text_after_open.char_indices() {
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            ']' | '}' | '>' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn collect_rust_struct_literal_field_assigns(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<FlowEvent>> {
+    let mut out = std::collections::HashMap::new();
+    for node in collect_kinds(tree, &["let_declaration", "assignment_expression"]) {
+        let Some(target_node) = node
+            .child_by_field_name("pattern")
+            .or_else(|| node.child_by_field_name("left"))
+            .or_else(|| node.child_by_field_name("target"))
+        else {
+            continue;
+        };
+        let target = node_text(&target_node, src).trim();
+        if !rust_bare_identifier(target) {
+            continue;
+        }
+        let Some(value_node) = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("right"))
+        else {
+            continue;
+        };
+        let target_type = node
+            .child_by_field_name("type")
+            .and_then(|ty| rust_type_tail(node_text(&ty, src)));
+        let struct_nodes = rust_struct_literal_nodes_for_assignment(value_node, target_type.as_deref(), src);
+        if struct_nodes.is_empty() {
+            continue;
+        }
+        let mut events = Vec::new();
+        for struct_node in struct_nodes {
+            collect_rust_struct_literal_field_events(target, struct_node, file, src, &mut events);
+        }
+        if !events.is_empty() {
+            events.sort_by_key(|event| event_span_start(event));
+            events.dedup_by(|a, b| flow_event_assign_key(a) == flow_event_assign_key(b));
+            out.insert(span_of(file, &node), events);
+        }
+    }
+    out
+}
+
+fn enrich_rust_struct_literal_field_assigns(
+    events: &mut Vec<FlowEvent>,
+    field_assigns: &std::collections::HashMap<bonsai_common::Span, Vec<FlowEvent>>,
+) {
+    let mut enriched = Vec::with_capacity(events.len());
+    for mut event in std::mem::take(events) {
+        match &mut event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_rust_struct_literal_field_assigns(then_events, field_assigns);
+                enrich_rust_struct_literal_field_assigns(else_events, field_assigns);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_rust_struct_literal_field_assigns(body, field_assigns);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_rust_struct_literal_field_assigns(body, field_assigns);
+                enrich_rust_struct_literal_field_assigns(catch_events, field_assigns);
+                enrich_rust_struct_literal_field_assigns(finally_events, field_assigns);
+            }
+            _ => {}
+        }
+        let extra = match &event {
+            FlowEvent::Assign { span, .. } => field_assigns.get(span).cloned(),
+            _ => None,
+        };
+        enriched.push(event);
+        if let Some(extra) = extra {
+            enriched.extend(extra);
+        }
+    }
+    *events = enriched;
+}
+
+fn rust_struct_literal_nodes_for_assignment<'tree>(
+    value_node: Node<'tree>,
+    target_type: Option<&str>,
+    src: &[u8],
+) -> Vec<Node<'tree>> {
+    if value_node.kind() == "struct_expression" {
+        return vec![value_node];
+    }
+    let Some(target_type) = target_type else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![value_node];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "struct_expression"
+            && rust_struct_expression_name(node, src).as_deref() == Some(target_type)
+        {
+            out.push(node);
+            continue;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn collect_rust_struct_literal_field_events(
+    target: &str,
+    struct_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<FlowEvent>,
+) {
+    let Some(body) = first_named_child_of_kind_local(struct_node, "field_initializer_list") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for field_node in body.named_children(&mut cursor) {
+        match field_node.kind() {
+            "field_initializer" => {
+                let Some(field) = field_node.child_by_field_name("field") else {
+                    continue;
+                };
+                let Some(value) = field_node.child_by_field_name("value") else {
+                    continue;
+                };
+                let field_name = node_text(&field, src).trim();
+                if !rust_bare_identifier(field_name) {
+                    continue;
+                }
+                let value_text = node_text(&value, src).trim();
+                let source_names = rust_value_source_names(value_text);
+                if source_names.is_empty() {
+                    continue;
+                }
+                out.push(FlowEvent::Assign {
+                    span: span_of(file, &field_node),
+                    target: format!("{target}.{field_name}"),
+                    source_name: rust_bare_identifier(value_text).then(|| value_text.to_string()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names,
+                    declares_new_binding: false,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                });
+            }
+            "shorthand_field_initializer" => {
+                let value_text = node_text(&field_node, src).trim();
+                if !rust_bare_identifier(value_text) {
+                    continue;
+                }
+                out.push(FlowEvent::Assign {
+                    span: span_of(file, &field_node),
+                    target: format!("{target}.{value_text}"),
+                    source_name: Some(value_text.to_string()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec![value_text.to_string()],
+                    declares_new_binding: false,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rust_struct_expression_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let name = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("type"))
+        .or_else(|| first_named_child_of_kind_local(node, "type_identifier"))?;
+    rust_type_tail(node_text(&name, src))
+}
+
+fn rust_type_tail(text: &str) -> Option<String> {
+    let tail = text
+        .trim()
+        .trim_matches('&')
+        .trim()
+        .rsplit("::")
+        .next()
+        .unwrap_or(text)
+        .trim();
+    (rust_bare_identifier(tail)).then(|| tail.to_string())
+}
+
+fn rust_value_source_names(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in rust_identifier_chains_outside_strings(text) {
+        push_rust_source_token(&mut out, &token);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn rust_identifier_chains_outside_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    let mut in_string: Option<char> = None;
+    let mut escape = false;
+    while let Some(ch) = chars.next() {
+        if let Some(quote) = in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => {
+                push_rust_identifier_chain(&mut out, &mut current);
+                in_string = Some(ch);
+            }
+            ':' if chars.peek() == Some(&':') => {
+                current.push_str("::");
+                let _ = chars.next();
+            }
+            '.' => current.push('.'),
+            '_' | 'a'..='z' | 'A'..='Z' | '0'..='9' => current.push(ch),
+            _ => push_rust_identifier_chain(&mut out, &mut current),
+        }
+    }
+    push_rust_identifier_chain(&mut out, &mut current);
+    out
+}
+
+fn push_rust_identifier_chain(out: &mut Vec<String>, current: &mut String) {
+    let token = current.trim_matches('.').trim_matches(':').trim();
+    if !token.is_empty()
+        && token
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+    {
+        out.push(token.to_string());
+    }
+    current.clear();
+}
+
+fn push_rust_source_token(out: &mut Vec<String>, token: &str) {
+    let token = token.trim_end_matches('!');
+    if token.is_empty() {
+        return;
+    }
+    out.push(token.to_string());
+    for sep in [".", "::"] {
+        if token.contains(sep) {
+            let parts = token.split(sep).collect::<Vec<_>>();
+            for split in 1..parts.len() {
+                let prefix = parts[..split].join(sep);
+                if !prefix.is_empty() {
+                    out.push(prefix);
+                }
+            }
+        }
+    }
+}
+
+fn first_named_child_of_kind_local<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == kind);
+    found
+}
+
+fn event_span_start(event: &FlowEvent) -> u64 {
+    match event {
+        FlowEvent::Assign { span, .. }
+        | FlowEvent::Call { span, .. }
+        | FlowEvent::Return { span, .. }
+        | FlowEvent::Throw { span, .. }
+        | FlowEvent::Branch { span, .. }
+        | FlowEvent::Loop { span, .. }
+        | FlowEvent::Break { span, .. }
+        | FlowEvent::Continue { span, .. }
+        | FlowEvent::Yield { span, .. }
+        | FlowEvent::Await { span, .. }
+        | FlowEvent::Defer { span, .. }
+        | FlowEvent::Using { span, .. }
+        | FlowEvent::Try { span, .. }
+        | FlowEvent::Lifecycle { span, .. } => span.start,
+    }
+}
+
+fn flow_event_assign_key(event: &FlowEvent) -> Option<(bonsai_common::Span, String)> {
+    match event {
+        FlowEvent::Assign { span, target, .. } => Some((*span, target.clone())),
+        _ => None,
+    }
 }
 
 fn rust_struct_literal_field_values(expr: &str) -> Vec<(String, String)> {

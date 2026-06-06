@@ -3,8 +3,8 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
+        parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
@@ -165,6 +165,7 @@ impl LanguageAdapter for JavaAdapter {
                 decl.bases = bases.clone();
             }
         }
+        rewrite_java_explicit_constructor_invocations(&mut index);
         let constants_by_class = collect_java_class_string_constants(&tree, file, src);
         attach_java_class_string_constants(&mut index, &constants_by_class);
         // Java visibility from real syntax — `public`/`private`/
@@ -178,6 +179,7 @@ impl LanguageAdapter for JavaAdapter {
         // Module path from `package com.foo.bar;` declaration.
         // When absent (default package), fall back to file-stem.
         if let Some(segments) = extract_java_package(tree.root_node(), src) {
+            let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut index, segments);
         } else {
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut index, ctx);
@@ -485,6 +487,98 @@ fn is_class_like(kind: DeclKind) -> bool {
         kind,
         DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct | DeclKind::Enum
     )
+}
+
+fn rewrite_java_explicit_constructor_invocations(index: &mut DeclIndex) {
+    use std::collections::HashMap;
+
+    let class_info: HashMap<bonsai_common::SymbolId, (String, Vec<String>)> = index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.symbol, (decl.name.clone(), decl.bases.clone())))
+        .collect();
+
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Constructor) {
+            continue;
+        }
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let Some((class_name, bases)) = class_info.get(&parent) else {
+            continue;
+        };
+        let this_ctor = class_name.as_str();
+        let super_ctor = bases.first().map(String::as_str);
+        rewrite_java_explicit_constructor_invocations_in_events(&mut decl.flow_events, this_ctor, super_ctor);
+    }
+}
+
+fn rewrite_java_explicit_constructor_invocations_in_events(
+    events: &mut [FlowEvent],
+    this_ctor: &str,
+    super_ctor: Option<&str>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } => {
+                let replacement = match name.trim() {
+                    "this" => Some((this_ctor, "this")),
+                    "super" => super_ctor.map(|ctor| (ctor, "super")),
+                    _ => None,
+                };
+                if let Some((replacement, replacement_receiver)) =
+                    replacement.filter(|(replacement, _)| !replacement.is_empty())
+                {
+                    name.clear();
+                    name.push_str(replacement);
+                    *receiver = Some(replacement_receiver.to_string());
+                    receiver_types.clear();
+                    *call_kind = bonsai_lang_api::CallKind::Method;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_java_explicit_constructor_invocations_in_events(then_events, this_ctor, super_ctor);
+                rewrite_java_explicit_constructor_invocations_in_events(else_events, this_ctor, super_ctor);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_java_explicit_constructor_invocations_in_events(body, this_ctor, super_ctor);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_java_explicit_constructor_invocations_in_events(body, this_ctor, super_ctor);
+                rewrite_java_explicit_constructor_invocations_in_events(catch_events, this_ctor, super_ctor);
+                rewrite_java_explicit_constructor_invocations_in_events(
+                    finally_events,
+                    this_ctor,
+                    super_ctor,
+                );
+            }
+            FlowEvent::Assign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
 }
 
 /// Walk every Java class-like declaration and collect the

@@ -428,6 +428,10 @@ function entry($envelope) {
         "parent::run must resolve through the parent class and preserve receiver taint"
     );
     assert!(
+        has_propagation(&result, "run", "execute", &db),
+        "nested receiver-return call must taint the enclosing execute argument"
+    );
+    assert!(
         result
             .per_function
             .keys()
@@ -437,6 +441,108 @@ function entry($envelope) {
                 call_site_receives_taint(execute, sink_span, &sink_seed, &InterTaintConfig::default(), &db)
             }),
         "receiver state must reach shell_exec($cmd) through cmd() and Executor::execute"
+    );
+}
+
+#[test]
+fn php_multifile_interface_factory_parent_call_taints_nested_receiver_argument() {
+    let db = php_ws_files(&[
+        (
+            "executor.php",
+            r#"<?php
+class Executor {
+    public static function execute($cmd) {
+        shell_exec($cmd);
+    }
+}
+"#,
+        ),
+        (
+            "storage.php",
+            r#"<?php
+require_once __DIR__ . '/executor.php';
+
+interface Runnable {
+    public function run(): string;
+}
+
+abstract class BaseRepository implements Runnable {
+    public function __construct(protected array $data) {}
+    public function cmd(): string {
+        return $this->data['cmd'];
+    }
+    abstract public function run(): string;
+}
+
+class Repository extends BaseRepository {
+    public static function wrap(array $data): static {
+        return new static($data);
+    }
+    public function run(): string {
+        return Executor::execute($this->cmd());
+    }
+}
+
+class AuditedRepository extends Repository {
+    public function run(): string {
+        return parent::run();
+    }
+}
+
+class Storage {
+    public static function persist(array $envelope): string {
+        return AuditedRepository::wrap($envelope)->run();
+    }
+}
+"#,
+        ),
+        (
+            "pipeline.php",
+            r#"<?php
+require_once __DIR__ . '/storage.php';
+
+class Pipeline {
+    public static function orchestrate(array $envelope): string {
+        return Storage::persist($envelope);
+    }
+}
+"#,
+        ),
+        (
+            "app.php",
+            r#"<?php
+require_once __DIR__ . '/pipeline.php';
+
+function handle_request(array $envelope): string {
+    return Pipeline::orchestrate($envelope);
+}
+"#,
+        ),
+    ]);
+    let entry = func_id(&db, "handle_request");
+    let execute = func_id(&db, "execute");
+    let sink_span = call_span(&db, execute, "shell_exec", Some("$cmd"));
+    let result = interprocedural_taint(
+        entry,
+        &seed(&["$envelope", "envelope"]),
+        &InterTaintConfig::default(),
+        &db,
+    );
+
+    assert!(
+        has_propagation(&result, "run", "execute", &db),
+        "multi-file PHP receiver-return call must taint Executor::execute($this->cmd())"
+    );
+    assert!(
+        result
+            .per_function
+            .keys()
+            .filter(|key| key.func == execute)
+            .any(|key| {
+                let sink_seed = key.seed.iter().cloned().collect();
+                call_site_receives_taint(execute, sink_span, &sink_seed, &InterTaintConfig::default(), &db)
+            }),
+        "multi-file PHP receiver state must reach shell_exec($cmd)"
     );
 }
 

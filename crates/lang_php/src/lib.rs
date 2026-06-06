@@ -4,9 +4,9 @@ use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, TypeAliasVocabulary, Visibility,
 };
 
 const PHP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -148,6 +148,42 @@ impl LanguageAdapter for PhpAdapter {
                 }) {
                     decl.bases = bases.clone();
                 }
+            }
+            let promoted_writes_by_span = collect_php_property_promotion_writes(&tree, file, src);
+            for decl in &mut idx.defs {
+                if !matches!(decl.kind, DeclKind::Constructor) {
+                    continue;
+                }
+                let Some(promotions) = promoted_writes_by_span
+                    .iter()
+                    .find_map(|(span, promotions)| (*span == decl.span).then_some(promotions))
+                else {
+                    continue;
+                };
+                for promotion in promotions {
+                    let Some(param_idx) = decl.params.iter().position(|param| {
+                        php_param_matches_promoted_property(
+                            param,
+                            &promotion.param_name,
+                            &promotion.field_name,
+                        )
+                    }) else {
+                        continue;
+                    };
+                    decl.receiver_field_writes.push(FieldWrite {
+                        span: promotion.span,
+                        target: format!("this.{}", promotion.field_name),
+                        source_param_indices: vec![param_idx],
+                    });
+                }
+                decl.receiver_field_writes.sort_by_key(|write| {
+                    (
+                        write.span.start,
+                        write.target.clone(),
+                        write.source_param_indices.clone(),
+                    )
+                });
+                decl.receiver_field_writes.dedup();
             }
         }
         // Recognised PHP lifecycle transitions. Method-style `close`,
@@ -761,6 +797,91 @@ fn is_class_like(kind: DeclKind) -> bool {
         kind,
         DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct | DeclKind::Enum
     )
+}
+
+#[derive(Clone, Debug)]
+struct PhpPromotedPropertyWrite {
+    span: Span,
+    param_name: String,
+    field_name: String,
+}
+
+fn collect_php_property_promotion_writes(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<PhpPromotedPropertyWrite>)> {
+    let mut out = Vec::new();
+    for method_node in collect_kinds(tree, &["method_declaration"]) {
+        let Some(name_node) = method_node
+            .child_by_field_name("name")
+            .or_else(|| first_named_child_of_kind(&method_node, "name"))
+        else {
+            continue;
+        };
+        if node_text(&name_node, src).trim() != "__construct" {
+            continue;
+        }
+        let mut promotions = Vec::new();
+        collect_php_property_promotion_writes_inner(method_node, file, src, &mut promotions);
+        if !promotions.is_empty() {
+            out.push((span_of(file, &method_node), promotions));
+        }
+    }
+    out
+}
+
+fn collect_php_property_promotion_writes_inner(
+    node: tree_sitter::Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<PhpPromotedPropertyWrite>,
+) {
+    if node.kind() == "property_promotion_parameter" {
+        if let Some(name_node) = node.child_by_field_name("name") {
+            let param_name = node_text(&name_node, src).trim().to_string();
+            let field_name = php_promoted_property_field_name(&name_node, src)
+                .unwrap_or_else(|| param_name.trim_start_matches('$').to_string());
+            if !param_name.is_empty() && !field_name.is_empty() {
+                out.push(PhpPromotedPropertyWrite {
+                    span: span_of(file, &node),
+                    param_name,
+                    field_name,
+                });
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.named_children(&mut cursor).collect();
+    for child in children {
+        collect_php_property_promotion_writes_inner(child, file, src, out);
+    }
+}
+
+fn php_promoted_property_field_name(name_node: &tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    if name_node.kind() == "variable_name" {
+        let mut cursor = name_node.walk();
+        for child in name_node.named_children(&mut cursor) {
+            if child.kind() == "name" {
+                let name = node_text(&child, src).trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    let raw = node_text(name_node, src);
+    let bare = raw.trim().trim_start_matches('$');
+    (!bare.is_empty()).then(|| bare.to_string())
+}
+
+fn php_param_matches_promoted_property(param: &str, promoted_param: &str, field_name: &str) -> bool {
+    let param = param.trim();
+    let promoted_param = promoted_param.trim();
+    param == promoted_param
+        || param.trim_start_matches('$') == promoted_param.trim_start_matches('$')
+        || param.trim_start_matches('$') == field_name
 }
 
 /// Walk PHP class / interface / trait declarations and collect bare

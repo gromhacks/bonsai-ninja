@@ -9,7 +9,7 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
         c_family_preproc_imports, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
-        parse_with, span_of,
+        package_module_segments_with_workspace_prefix, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
     GrammarHandler, ImportIndex, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
@@ -117,7 +117,7 @@ impl LanguageAdapter for ObjCAdapter {
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
-        apply_objc_class_semantic_identity(&mut decl_index);
+        apply_objc_class_semantic_identity(&mut decl_index, ctx);
         // The leading `_` on an Objective-C method/selector is an Apple
         // naming convention, not a linkage boundary: selectors dispatch
         // dynamically across files. Marking `_`-prefixed decls
@@ -272,7 +272,7 @@ impl LanguageAdapter for ObjCAdapter {
     }
 }
 
-fn apply_objc_class_semantic_identity(decl_index: &mut DeclIndex) {
+fn apply_objc_class_semantic_identity(decl_index: &mut DeclIndex, ctx: &AdapterContext<'_>) {
     for decl in &mut decl_index.defs {
         if !matches!(
             decl.kind,
@@ -280,8 +280,11 @@ fn apply_objc_class_semantic_identity(decl_index: &mut DeclIndex) {
         ) {
             continue;
         }
-        decl.module_path = ModulePath::from_segments([decl.name.clone()]);
-        decl.qualified_name = Some(format!("{}::{}", decl.name, decl.name));
+        let segments =
+            package_module_segments_with_workspace_prefix(decl_index.file, ctx, [decl.name.clone()]);
+        let prefix = segments.join("::");
+        decl.module_path = ModulePath::from_segments(segments);
+        decl.qualified_name = Some(format!("{prefix}::{}", decl.name));
     }
 }
 

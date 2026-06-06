@@ -368,6 +368,125 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
 }
 
 #[test]
+fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input() {
+    let func = FuncId::new(0);
+    let call_span = Span {
+        file: FileId::new(0),
+        start: 10,
+        end: 35,
+    };
+    let write_span = Span {
+        file: FileId::new(0),
+        start: 1,
+        end: 5,
+    };
+    let mut segment = IdgSegment::new();
+    let payload = segment.strings.intern("payload");
+    let cmd = segment.strings.intern("cmd");
+    let payload_cmd = segment.intern_place(Place::write_field(payload, cmd, write_span));
+    let call_ret = segment.intern_place(Place::CallRet {
+        site: CallSiteId(call_span),
+    });
+    let _payload_cmd_node = segment.intern_node(func, payload_cmd);
+    let _ret_node = segment.intern_node(func, call_ret);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+
+    let mut global = bonsai_index::GlobalIndex::new();
+    let file = FileId::new(0);
+    let span = Span::new(file, 0, 40);
+    global.insert(bonsai_lang_api::DeclIndex {
+        file,
+        refs: Vec::new(),
+        strings: Vec::new(),
+        comments: Vec::new(),
+        defs: vec![bonsai_lang_api::Decl {
+            symbol: SymbolId::new(0),
+            kind: bonsai_lang_api::DeclKind::Function,
+            name: "normalize".to_string(),
+            qualified_name: Some("normalize".to_string()),
+            module_path: bonsai_lang_api::ModulePath::default(),
+            span,
+            name_span: span,
+            visibility: bonsai_lang_api::Visibility::Private,
+            parent: None,
+            body_span: Some(span),
+            flow_events: vec![bonsai_lang_api::FlowEvent::Call {
+                span: call_span,
+                name: "reduce".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args: vec![
+                    bonsai_lang_api::CallArg {
+                        span: call_span,
+                        name: None,
+                        value_text: "lambda a, b: f\"{a} {b}\"".to_string(),
+                        place: None,
+                        source_names: Vec::new(),
+                    },
+                    bonsai_lang_api::CallArg {
+                        span: call_span,
+                        name: None,
+                        value_text: "[payload]".to_string(),
+                        place: None,
+                        source_names: vec!["payload".to_string()],
+                    },
+                    bonsai_lang_api::CallArg {
+                        span: call_span,
+                        name: None,
+                        value_text: "\"\"".to_string(),
+                        place: None,
+                        source_names: Vec::new(),
+                    },
+                ],
+            }],
+            has_implicit_returns: false,
+            params: vec!["payload".to_string()],
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        }],
+    });
+
+    let mut seed_nodes = service.read_or_write_nodes_for_names(func, &["payload.*".to_string()]);
+    assert!(
+        !seed_nodes.is_empty(),
+        "test setup should expose the payload.cmd descendant seed"
+    );
+    let ret_node = service
+        .call_ret_node_at_site(func, call_span)
+        .expect("call return node");
+    assert!(
+        !seed_nodes.contains(&ret_node),
+        "return should not be seeded before rulepack passthrough semantics"
+    );
+    apply_call_result_passthrough_fixpoint(
+        &mut seed_nodes,
+        &[crate::inter::CallResultPassthrough {
+            callee: "reduce".to_string(),
+            input_arg_indices: vec![1],
+            input_receiver: false,
+        }],
+        &global,
+        &service,
+        Some(Precision::Narrowed),
+        None,
+    );
+
+    assert!(
+        seed_nodes.contains(&ret_node),
+        "configured passthroughs must treat tainted descendants of selected container args as tainted inputs"
+    );
+}
+
+#[test]
 fn call_result_passthrough_matches_erlang_remote_separator() {
     assert!(
         call_result_passthrough_matches("string:to_upper", "string.to_upper"),

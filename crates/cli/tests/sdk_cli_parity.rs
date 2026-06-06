@@ -260,11 +260,13 @@ fn sorted_rows(value: Value) -> Value {
 }
 
 fn assert_json_eq(label: &str, cli: Value, sdk: Value) {
-    assert_eq!(
-        normalized_json(cli),
-        normalized_json(sdk),
-        "CLI/SDK JSON mismatch for {label}"
-    );
+    let cli = normalized_json(cli);
+    let sdk = normalized_json(sdk);
+    if cli != sdk {
+        let diff = json_first_diff(&cli, &sdk, "$")
+            .unwrap_or_else(|| "values differ but no first diff was found".to_string());
+        panic!("CLI/SDK JSON mismatch for {label}: {diff}");
+    }
 }
 
 fn assert_json_rows_eq(label: &str, cli: Value, sdk: Value) {
@@ -273,6 +275,74 @@ fn assert_json_rows_eq(label: &str, cli: Value, sdk: Value) {
         sorted_rows(sdk),
         "CLI/SDK JSON row mismatch for {label}"
     );
+}
+
+fn json_first_diff(left: &Value, right: &Value, path: &str) -> Option<String> {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            let mut keys = BTreeSet::new();
+            keys.extend(left.keys().map(String::as_str));
+            keys.extend(right.keys().map(String::as_str));
+            for key in keys {
+                let child_path = format!("{path}.{key}");
+                match (left.get(key), right.get(key)) {
+                    (Some(left), Some(right)) => {
+                        if let Some(diff) = json_first_diff(left, right, &child_path) {
+                            return Some(diff);
+                        }
+                    }
+                    (Some(value), None) => {
+                        return Some(format!(
+                            "{child_path}: only in CLI, value={}",
+                            summarize_json(value)
+                        ));
+                    }
+                    (None, Some(value)) => {
+                        return Some(format!(
+                            "{child_path}: only in SDK, value={}",
+                            summarize_json(value)
+                        ));
+                    }
+                    (None, None) => {}
+                }
+            }
+            None
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            let common = left.len().min(right.len());
+            for idx in 0..common {
+                let child_path = format!("{path}[{idx}]");
+                if let Some(diff) = json_first_diff(&left[idx], &right[idx], &child_path) {
+                    return Some(diff);
+                }
+            }
+            if left.len() != right.len() {
+                return Some(format!(
+                    "{path}: array length differs, CLI={} SDK={}",
+                    left.len(),
+                    right.len()
+                ));
+            }
+            None
+        }
+        _ if left == right => None,
+        _ => Some(format!(
+            "{path}: CLI={} SDK={}",
+            summarize_json(left),
+            summarize_json(right)
+        )),
+    }
+}
+
+fn summarize_json(value: &Value) -> String {
+    let text = value.to_string();
+    let mut chars = text.chars();
+    let summary: String = chars.by_ref().take(400).collect();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
+    }
 }
 
 fn normalized_index_stats(mut value: Value) -> Value {

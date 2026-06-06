@@ -36,18 +36,13 @@ const SWIFT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     keyword_to_visibility: &[
         ("private", Visibility::Private),
         ("fileprivate", Visibility::Private),
-        ("internal", Visibility::Crate),
+        ("internal", Visibility::Module),
         ("public", Visibility::Public),
         ("open", Visibility::Public),
     ],
-    // Swift's true default is `internal` (visible across the same
-    // module), but until adapter coverage emits a real module_path
-    // from `import` / `Package.swift` data, we'd over-restrict
-    // cross-file calls inside the same module. Default to `Public`
-    // so the resolver behaves correctly under file-stem-fallback
-    // module_path. Tighten to `Crate` once real module_path lands
-    // for Swift.
-    default_visibility: Visibility::Public,
+    // Swift's true default is `internal`: visible across the same
+    // module, not across unrelated modules.
+    default_visibility: Visibility::Module,
 };
 use tree_sitter::{Language, Tree};
 
@@ -97,7 +92,7 @@ impl LanguageAdapter for SwiftAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+        apply_swift_semantic_identity(&mut idx, ctx);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
             // Phase-6 return-type extraction: `func f() -> T {}` populates
@@ -112,12 +107,18 @@ impl LanguageAdapter for SwiftAdapter {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_modifier_visibility(tree.root_node(), file, src, &SWIFT_VOCAB);
             let alias_map = collect_param_type_aliases(&tree, file, src, &SWIFT_TYPE_ALIASES);
+            for decl in &mut idx.defs {
+                if let Some(vis) = vis_map.get(&decl.span).copied() {
+                    decl.visibility = vis;
+                }
+            }
             // Class-level property type bindings — `let
             // authService = AuthService()` makes `authService :
             // AuthService` available inside every method of the
             // enclosing class so receiver dispatch reaches the real
             // method decl.
             let class_field_aliases = collect_swift_class_field_aliases(&tree, file, src);
+            let function_param_names = collect_swift_function_param_names(file, &tree, src);
             synthesize_swift_constructor_decls(&mut idx, file, &tree, src);
             // Swift structs (`struct Envelope { var kind, var cmd, ... }`)
             // get a compiler-synthesized **memberwise init** — no
@@ -146,6 +147,7 @@ impl LanguageAdapter for SwiftAdapter {
             // `repo.data.cmd` is field-precisely tainted. Mirrors
             // `synthesize_csharp_constructor_implicit_returns`.
             synthesize_swift_constructor_implicit_returns(&mut idx);
+            apply_swift_semantic_identity(&mut idx, ctx);
             let class_span_for_parent: std::collections::HashMap<bonsai_common::SymbolId, Span> = idx
                 .defs
                 .iter()
@@ -179,6 +181,14 @@ impl LanguageAdapter for SwiftAdapter {
                 }
                 if !aliases.is_empty() {
                     decl.type_aliases = aliases;
+                }
+                if matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+                    if let Some(params) = function_param_names
+                        .iter()
+                        .find_map(|(span, params)| (*span == decl.span).then_some(params))
+                    {
+                        decl.params = params.clone();
+                    }
                 }
                 normalize_swift_parameter_names(decl);
             }
@@ -232,8 +242,15 @@ impl LanguageAdapter for SwiftAdapter {
                 arg_index: 0,
             },
         ];
+        let constructor_field_params = swift_constructor_field_params(&idx);
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
+            if !constructor_field_params.is_empty() {
+                synthesize_swift_constructor_field_assignments(
+                    &mut decl.flow_events,
+                    &constructor_field_params,
+                );
+            }
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, SWIFT_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -246,6 +263,104 @@ impl LanguageAdapter for SwiftAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+fn apply_swift_semantic_identity(idx: &mut DeclIndex, ctx: &AdapterContext<'_>) {
+    let module_segments = swift_module_segments(idx.file, ctx);
+    let module_path = bonsai_lang_api::ModulePath::from_segments(module_segments.iter().cloned());
+    let qualified_prefix =
+        swift_qualified_prefix(idx.file, ctx).unwrap_or_else(|| module_segments.join("::"));
+    for decl in &mut idx.defs {
+        if decl.qualified_name.is_none() {
+            decl.qualified_name = Some(if qualified_prefix.is_empty() {
+                decl.name.clone()
+            } else {
+                format!("{qualified_prefix}::{}", decl.name)
+            });
+        }
+        decl.module_path = module_path.clone();
+    }
+}
+
+fn swift_module_segments(file: FileId, ctx: &AdapterContext<'_>) -> Vec<String> {
+    if let Some(relative) = ctx.workspace_relative_path(file) {
+        let components = swift_path_components(&relative);
+        for marker in ["Sources", "Tests"] {
+            if let Some(index) = components.iter().position(|part| part == marker) {
+                if let Some(target) = components.get(index + 1) {
+                    let mut segments = components[..index]
+                        .iter()
+                        .map(|part| sanitize_swift_module_segment(part))
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>();
+                    segments.push(sanitize_swift_module_segment(target));
+                    return segments;
+                }
+            }
+        }
+    }
+    if let Some(root_path) = ctx.workspace_root {
+        let mut segments = root_path
+            .file_name()
+            .map(|name| vec![sanitize_swift_module_segment(&name.to_string_lossy())])
+            .unwrap_or_default();
+        if let Some(relative) = ctx.workspace_relative_path(file) {
+            if let Some(parent) = relative.parent() {
+                segments.extend(
+                    swift_path_components(parent)
+                        .into_iter()
+                        .map(|part| sanitize_swift_module_segment(&part))
+                        .filter(|part| !part.is_empty()),
+                );
+            }
+        }
+        if !segments.is_empty() {
+            return segments;
+        }
+    }
+    vec!["swift".to_string()]
+}
+
+fn swift_qualified_prefix(file: FileId, ctx: &AdapterContext<'_>) -> Option<String> {
+    let path = ctx
+        .workspace_relative_path(file)
+        .or_else(|| ctx.vfs.path(file).ok().map(|p| (*p).clone()))?;
+    let mut segments = swift_path_components(&path);
+    let last = segments.last_mut()?;
+    if let Some((stem, _)) = last.rsplit_once('.') {
+        *last = stem.to_string();
+    }
+    segments.retain(|segment| !segment.is_empty());
+    (!segments.is_empty()).then(|| segments.join("::"))
+}
+
+fn swift_path_components(path: &std::path::Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => {
+                let text = part.to_string_lossy();
+                (!text.is_empty()).then(|| text.into_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn sanitize_swift_module_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "swift".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -269,6 +384,25 @@ fn normalize_swift_parameter_names(decl: &mut bonsai_lang_api::Decl) {
         .collect::<std::collections::HashSet<_>>();
     decl.params
         .retain(|param| !type_names.contains(param) || alias_names.contains(param));
+}
+
+fn collect_swift_function_param_names(file: FileId, tree: &Tree, src: &[u8]) -> Vec<(Span, Vec<String>)> {
+    collect_kinds(tree, &["function_declaration"])
+        .into_iter()
+        .map(|function| {
+            let mut params = Vec::new();
+            let mut cursor = function.walk();
+            for child in function.named_children(&mut cursor) {
+                if child.kind() != "parameter" {
+                    continue;
+                }
+                if let Some(name) = parameter_binding_name(child, src) {
+                    params.push(name);
+                }
+            }
+            (span_of(file, &function), params)
+        })
+        .collect()
 }
 
 fn synthesize_swift_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
@@ -357,7 +491,7 @@ fn swift_constructor_decl(
         module_path: bonsai_lang_api::ModulePath::default(),
         span: spans.decl,
         name_span: spans.name,
-        visibility: Visibility::Public,
+        visibility: Visibility::Module,
         parent: Some(parent),
         body_span: Some(spans.body),
         flow_events,
@@ -1296,4 +1430,196 @@ fn synthesize_swift_constructor_implicit_returns(index: &mut DeclIndex) {
             value_name: None,
         });
     }
+}
+
+fn swift_constructor_field_params(
+    index: &DeclIndex,
+) -> std::collections::HashMap<String, Vec<(usize, String)>> {
+    let mut out: std::collections::HashMap<String, Vec<(usize, String)>> = std::collections::HashMap::new();
+    for decl in &index.defs {
+        if !matches!(decl.kind, DeclKind::Constructor) || decl.receiver_field_writes.is_empty() {
+            continue;
+        }
+        let mut fields = Vec::new();
+        for write in &decl.receiver_field_writes {
+            let Some(field) = swift_receiver_field_tail(&write.target) else {
+                continue;
+            };
+            for idx in &write.source_param_indices {
+                fields.push((*idx, field.clone()));
+            }
+        }
+        if !fields.is_empty() {
+            fields.sort();
+            fields.dedup();
+            out.insert(decl.name.clone(), fields);
+        }
+    }
+    out
+}
+
+fn swift_receiver_field_tail(target: &str) -> Option<String> {
+    let mut parts = target.split('.').map(str::trim).filter(|part| !part.is_empty());
+    let root = parts.next()?;
+    if !matches!(root, "self" | "this" | "receiver") {
+        return None;
+    }
+    parts.next().map(str::to_string)
+}
+
+fn synthesize_swift_constructor_field_assignments(
+    events: &mut Vec<FlowEvent>,
+    constructor_field_params: &std::collections::HashMap<String, Vec<(usize, String)>>,
+) {
+    let original = std::mem::take(events);
+    let mut rewritten = Vec::with_capacity(original.len());
+    let constructor_calls = (0..original.len())
+        .map(|event_index| {
+            swift_constructor_call_for_assignment_event(&original, event_index, constructor_field_params)
+        })
+        .collect::<Vec<_>>();
+    for (event_index, mut event) in original.into_iter().enumerate() {
+        match &mut event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                synthesize_swift_constructor_field_assignments(then_events, constructor_field_params);
+                synthesize_swift_constructor_field_assignments(else_events, constructor_field_params);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                synthesize_swift_constructor_field_assignments(body, constructor_field_params);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                synthesize_swift_constructor_field_assignments(body, constructor_field_params);
+                synthesize_swift_constructor_field_assignments(catch_events, constructor_field_params);
+                synthesize_swift_constructor_field_assignments(finally_events, constructor_field_params);
+            }
+            _ => {}
+        }
+        let mut synthetic = Vec::new();
+        if let FlowEvent::Assign { span, target, .. } = &event {
+            let target = target.trim();
+            if !target.is_empty() && target != "_" {
+                if let Some((constructor, args)) = constructor_calls[event_index].as_ref() {
+                    let fields = constructor_field_params.get(constructor).into_iter().flatten();
+                    for (param_idx, field) in fields {
+                        let Some(arg) = args.get(*param_idx) else {
+                            continue;
+                        };
+                        let source_names = swift_value_source_names_from_text(arg);
+                        if source_names.is_empty() {
+                            continue;
+                        }
+                        synthetic.push(FlowEvent::Assign {
+                            span: *span,
+                            target: format!("{target}.{field}"),
+                            source_name: (source_names.len() == 1).then(|| source_names[0].clone()),
+                            source_call: None,
+                            source_call_args: Vec::new(),
+                            source_names,
+                            declares_new_binding: false,
+                            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                        });
+                    }
+                }
+            }
+        }
+        rewritten.push(event);
+        rewritten.extend(synthetic);
+    }
+    *events = rewritten;
+}
+
+fn swift_constructor_call_for_assignment_event(
+    events: &[FlowEvent],
+    event_index: usize,
+    constructor_field_params: &std::collections::HashMap<String, Vec<(usize, String)>>,
+) -> Option<(String, Vec<String>)> {
+    let FlowEvent::Assign {
+        span,
+        source_call,
+        source_call_args,
+        ..
+    } = events.get(event_index)?
+    else {
+        return None;
+    };
+    if let Some(source_call) = source_call {
+        let constructor = swift_constructor_call_tail(source_call).to_string();
+        if constructor_field_params.contains_key(&constructor) {
+            return Some((constructor, source_call_args.clone()));
+        }
+    }
+    events.iter().skip(event_index + 1).take(3).find_map(|event| {
+        let FlowEvent::Call {
+            name,
+            span: call_span,
+            args,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if call_span.file != span.file || call_span.start < span.start || call_span.end > span.end {
+            return None;
+        }
+        let constructor = swift_constructor_call_tail(name).to_string();
+        constructor_field_params.contains_key(&constructor).then(|| {
+            (
+                constructor,
+                args.iter().map(|arg| arg.value_text.clone()).collect(),
+            )
+        })
+    })
+}
+
+fn swift_constructor_call_tail(call: &str) -> &str {
+    call.split(|ch| matches!(ch, '.' | ':'))
+        .filter(|part| !part.trim().is_empty())
+        .next_back()
+        .map(str::trim)
+        .unwrap_or(call.trim())
+}
+
+fn swift_value_source_names_from_text(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let trimmed = text.trim();
+    if trimmed.contains('.') && !trimmed.starts_with('.') {
+        out.push(trimmed.to_string());
+    }
+    let mut token = String::new();
+    for ch in trimmed.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() || ch == '$' {
+            token.push(ch);
+        } else {
+            push_swift_value_token(&mut out, &token);
+            token.clear();
+        }
+    }
+    push_swift_value_token(&mut out, &token);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn push_swift_value_token(out: &mut Vec<String>, token: &str) {
+    let token = token.trim();
+    if token.is_empty()
+        || token == "_"
+        || token.chars().all(|ch| ch.is_ascii_digit())
+        || matches!(
+            token,
+            "true" | "false" | "nil" | "self" | "super" | "return" | "let" | "var"
+        )
+    {
+        return;
+    }
+    out.push(token.to_string());
 }

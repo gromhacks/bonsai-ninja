@@ -1177,27 +1177,16 @@ impl IdgQueryService {
         let mut out = Vec::new();
         for ws_node in closure {
             if let Some(rows) = cross_calls_by_from.get(ws_node) {
-                if let Some(max_precision) = max_precision {
-                    out.extend(
-                        rows.iter()
-                            .filter(|row| row.precision <= max_precision)
-                            .filter(|row| {
-                                lineage_funcs.is_none_or(|funcs| {
-                                    funcs.contains(&row.caller) && funcs.contains(&row.callee)
-                                })
-                            })
-                            .copied(),
-                    );
-                } else {
-                    out.extend(
-                        rows.iter()
-                            .filter(|row| {
-                                lineage_funcs.is_none_or(|funcs| {
-                                    funcs.contains(&row.caller) && funcs.contains(&row.callee)
-                                })
-                            })
-                            .copied(),
-                    );
+                for row in rows {
+                    if max_precision.is_some_and(|max| row.precision > max) {
+                        continue;
+                    }
+                    if lineage_funcs
+                        .is_some_and(|funcs| !(funcs.contains(&row.caller) && funcs.contains(&row.callee)))
+                    {
+                        continue;
+                    }
+                    out.push(*row);
                 }
             }
         }
@@ -1682,12 +1671,22 @@ fn lift_call_arg_edge(
     // hop without pretending the whole positional argument/parameter
     // is tainted.
     if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg && from_node.func != to_node.func {
+        let (arg_idx, param_idx) = field_cross_call_arg_and_param_indices(
+            from_seg,
+            to_seg,
+            from_node.func,
+            to_node.func,
+            edge.meta.via_span,
+            from_place,
+            to_place,
+        )
+        .unwrap_or((u8::MAX, u8::MAX));
         return Some(CrossCallEdge {
             caller: from_node.func,
             callee: to_node.func,
             call_span: edge.meta.via_span,
-            arg_idx: u8::MAX,
-            param_idx: u8::MAX,
+            arg_idx,
+            param_idx,
             precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
         });
@@ -1721,6 +1720,105 @@ fn lift_call_arg_edge(
         }
     }
     None
+}
+
+fn field_cross_call_arg_and_param_indices(
+    from_seg: &crate::segment::IdgSegment,
+    to_seg: &crate::segment::IdgSegment,
+    caller: FuncId,
+    callee: FuncId,
+    call_span: Span,
+    from_place: &Place,
+    to_place: &Place,
+) -> Option<(u8, u8)> {
+    let from_base = storage_base_from_place(from_seg, from_place)?;
+    let to_base = storage_base_from_place(to_seg, to_place)?;
+    let arg_idx = call_arg_index_for_storage_base(from_seg, caller, call_span, &from_base).unwrap_or(u8::MAX);
+    let param_idx = param_index_for_storage_base(to_seg, callee, &to_base).unwrap_or(u8::MAX);
+    Some((arg_idx, param_idx))
+}
+
+fn storage_base_from_place(segment: &crate::segment::IdgSegment, place: &Place) -> Option<String> {
+    let (name, _path) = match place {
+        Place::Read { name, path } | Place::Write { name, path, .. } => (*name, path),
+        _ => return None,
+    };
+    let base = segment.strings.get(name)?.trim();
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+fn call_arg_index_for_storage_base(
+    segment: &crate::segment::IdgSegment,
+    caller: FuncId,
+    call_span: Span,
+    base: &str,
+) -> Option<u8> {
+    let mut best = None;
+    for edge in &segment.edges {
+        if !edge.meta.kind.is_intra() {
+            continue;
+        }
+        let Some(to_node) = segment.nodes.get(edge.to) else {
+            continue;
+        };
+        if to_node.func != caller {
+            continue;
+        }
+        let Some(Place::CallArg { site, idx }) = segment.places.get(to_node.place) else {
+            continue;
+        };
+        if site.0 != call_span {
+            continue;
+        }
+        let Some(from_node) = segment.nodes.get(edge.from) else {
+            continue;
+        };
+        if from_node.func != caller {
+            continue;
+        }
+        let Some(from_place) = segment.places.get(from_node.place) else {
+            continue;
+        };
+        if storage_base_from_place(segment, from_place).as_deref() == Some(base) {
+            best = Some(best.map_or(*idx, |existing: u8| existing.min(*idx)));
+        }
+    }
+    best
+}
+
+fn param_index_for_storage_base(
+    segment: &crate::segment::IdgSegment,
+    callee: FuncId,
+    base: &str,
+) -> Option<u8> {
+    let mut best = None;
+    for edge in &segment.edges {
+        if !edge.meta.kind.is_intra() {
+            continue;
+        }
+        let Some(from_node) = segment.nodes.get(edge.from) else {
+            continue;
+        };
+        if from_node.func != callee {
+            continue;
+        }
+        let Some(Place::Param { idx }) = segment.places.get(from_node.place) else {
+            continue;
+        };
+        let Some(to_node) = segment.nodes.get(edge.to) else {
+            continue;
+        };
+        if to_node.func != callee {
+            continue;
+        }
+        let Some(to_place) = segment.places.get(to_node.place) else {
+            continue;
+        };
+        if storage_base_from_place(segment, to_place).as_deref() == Some(base) {
+            best = Some(best.map_or(*idx, |existing: u8| existing.min(*idx)));
+        }
+    }
+    best
 }
 
 #[cfg(test)]

@@ -35,8 +35,8 @@ pub(crate) static PAGING_FOOTER_FIRED: AtomicBool = AtomicBool::new(false);
 /// command so the footer fires on `Ok` OR error paths.
 ///
 /// Renders only when stderr is a TTY and chrome isn't muted
-/// (`--no-progress` / `NO_PROGRESS` / `NO_COLOR`), so JSON pipes
-/// and CI runs stay clean.
+/// (`--no-progress` / `NO_PROGRESS`), so JSON pipes and CI runs stay
+/// clean. `--no-color` / `NO_COLOR` only remove ANSI styling.
 pub(crate) struct WorkspaceFooter;
 
 impl WorkspaceFooter {

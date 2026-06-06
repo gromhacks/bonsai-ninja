@@ -162,3 +162,70 @@ fn list_cons_param_pattern_emits_entry_bindings() {
     assert!(bindings.contains(&("Token", "_Arg0")), "{bindings:?}");
     assert!(bindings.contains(&("Rest", "_Arg0")), "{bindings:?}");
 }
+
+#[test]
+fn collection_transform_assignments_expose_collection_sources() {
+    let span = bonsai_common::Span::new(FileId::new(0), 0, 1);
+    let mut events = vec![
+        FlowEvent::Assign {
+            span,
+            target: "Stripped".to_string(),
+            source_name: None,
+            source_call: Some("lists:map".to_string()),
+            source_call_args: vec!["fun string:strip/1".to_string(), "RawTokens".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Assign {
+            span,
+            target: "Joined".to_string(),
+            source_name: None,
+            source_call: Some("lists:foldl".to_string()),
+            source_call_args: vec![
+                "fun(Tok, Acc) -> Acc ++ Tok end".to_string(),
+                "\"\"".to_string(),
+                "Tokens".to_string(),
+            ],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+    ];
+
+    normalize_erlang_access_events(&mut events, "");
+    bonsai_lang_api::normalize_call_result_assignment_sources(&mut events);
+    augment_erlang_collection_transform_flow_events(&mut events);
+
+    assert!(matches!(
+        &events[0],
+        FlowEvent::Assign { source_names, .. } if source_names == &vec!["RawTokens".to_string()]
+    ));
+    assert!(matches!(
+        &events[1],
+        FlowEvent::Assign { source_names, .. } if source_names == &vec!["Tokens".to_string()]
+    ));
+}
+
+#[test]
+fn list_comprehension_assignment_exposes_generator_sources() {
+    let src = r#"RawTokens = [Part || Part <- string:tokens(Cmd, " ")]"#;
+    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let mut events = vec![FlowEvent::Assign {
+        span,
+        target: "RawTokens".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["Part".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }];
+
+    normalize_erlang_access_events(&mut events, src);
+
+    let FlowEvent::Assign { source_names, .. } = &events[0] else {
+        panic!("expected assign");
+    };
+    assert!(source_names.contains(&"Cmd".to_string()), "{source_names:?}");
+}

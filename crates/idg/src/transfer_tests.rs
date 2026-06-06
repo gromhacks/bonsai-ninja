@@ -123,6 +123,34 @@ fn assign_simple_emits_read_to_write_edge() {
 }
 
 #[test]
+fn compound_assign_source_names_reach_target_writer() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![FlowEvent::Assign {
+        span: span(20, 30),
+        target: "RawTokens".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["Part".to_string(), "Cmd".to_string()],
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }];
+
+    let out = transfer_function_for(&decl);
+    let raw_tokens_writes = out
+        .edges
+        .iter()
+        .filter(|edge| rendered_place_name(&out, edge.to) == "RawTokens")
+        .map(|edge| rendered_place_name(&out, edge.from))
+        .collect::<Vec<_>>();
+
+    assert!(
+        raw_tokens_writes.iter().any(|source| source == "Cmd"),
+        "Cmd should bridge to RawTokens writer: {raw_tokens_writes:?}"
+    );
+}
+
+#[test]
 fn assign_compound_emits_one_edge_per_source_name() {
     let mut decl = empty_decl(1, "f");
     decl.flow_events = vec![FlowEvent::Assign {
@@ -412,6 +440,43 @@ fn static_subscript_return_bridges_precise_field_read() {
 }
 
 #[test]
+fn php_this_scalar_return_projection_normalizes_receiver_sigil() {
+    let mut decl = empty_decl(1, "cmd");
+    decl.flow_events = vec![FlowEvent::Return {
+        span: span(20, 40),
+        value_name: None,
+        value_text: Some("$this->data['cmd']".to_string()),
+    }];
+    let out = transfer_function_for(&decl);
+
+    assert_eq!(
+        out.return_field_projections,
+        vec![ReturnFieldProjection {
+            base: "this.data".to_string(),
+            field: "cmd".to_string(),
+        }]
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "this.data.cmd"
+                && rendered_place_name(&out, edge.to) == "Return"
+                && edge.meta.kind == IdgEdgeKind::IntraReturn
+        }),
+        "PHP receiver field return must bridge the precise field read into Return: {:#?}",
+        out.edges
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "this.data"
+                && rendered_place_name(&out, edge.to) == "Return"
+                && edge.meta.kind == IdgEdgeKind::IntraReturn
+        }),
+        "PHP receiver field return must let a tainted immediate container flow into child reads: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn indexed_reads_keep_array_base_value_bearing() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["argv".to_string()];
@@ -432,6 +497,169 @@ fn indexed_reads_keep_array_base_value_bearing() {
             rendered_place_name(&out, edge.from) == "argv" && rendered_place_name(&out, edge.to) == "raw"
         }),
         "array index reads like argv[1] must keep the array base value-bearing: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn keyed_getter_sources_do_not_promote_sibling_container_fields() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["item".to_string()];
+    let assign_span = span(20, 80);
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: assign_span,
+            target: "payload".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["item".to_string(), "item.get".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: assign_span,
+            target: "payload".to_string(),
+            source_name: Some("item.flag".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["item.flag".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: assign_span,
+            target: "payload".to_string(),
+            source_name: Some("item.arg".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["item.arg".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(30, 42),
+            name: "item.get".to_string(),
+            receiver: Some("item".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: vec![CallArg {
+                span: span(39, 41),
+                name: None,
+                value_text: "\"flag\"".to_string(),
+                place: None,
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "item" && rendered_place_name(&out, edge.to) == "payload"
+        }),
+        "keyed getters select a field and must not promote sibling fields through the receiver base: {:#?}",
+        out.edges
+    );
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "item.arg"
+                && rendered_place_name(&out, edge.to) == "payload"
+        }),
+        "precise selected fields should still flow into the scalar result: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn assignment_method_projection_source_bridges_receiver_carrier() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["joined".to_string(), "env".to_string()];
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 40),
+            target: "routed".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["joined.trim".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(25, 38),
+            name: "joined.trim".to_string(),
+            receiver: Some("joined".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Assign {
+            span: span(50, 70),
+            target: "user".to_string(),
+            source_name: Some("env.User".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["env.User".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "joined" && rendered_place_name(&out, edge.to) == "routed"
+        }),
+        "value-preserving method projections should bridge receiver carrier into assignment targets: {:#?}",
+        out.edges
+    );
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "env" && rendered_place_name(&out, edge.to) == "user"
+        }),
+        "ordinary field projections must remain field-scoped and not promote their base: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn returned_container_spread_copies_known_fields_without_root_promotion() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["user".to_string()];
+    decl.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 35),
+            target: "rest.user".to_string(),
+            source_name: Some("user".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["user".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Return {
+            span: span(40, 70),
+            value_name: None,
+            value_text: Some("{\"cmd\": clean, **rest}".to_string()),
+        },
+    ];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "rest.user"
+                && rendered_place_name(&out, edge.to) == "__bonsai_return.user"
+        }),
+        "known spread fields must copy field-for-field into returned containers: {:#?}",
+        out.edges
+    );
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "rest"
+                && rendered_place_name(&out, edge.to) == "__bonsai_return"
+        }),
+        "spread copies must not promote the whole spread object into the whole return: {:#?}",
         out.edges
     );
 }
@@ -620,6 +848,34 @@ fn decode_call_result_is_not_hardcoded_passthrough_by_default() {
     assert!(
         !generic_decode_preserved,
         "unknown decode methods must not become generic CallArg->CallRet passthroughs: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn qualified_uppercase_library_call_result_is_not_constructor_passthrough() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["cmd".to_string()];
+    decl.flow_events = vec![FlowEvent::Assign {
+        span: span(50, 80),
+        target: "part".to_string(),
+        source_name: None,
+        source_call: Some("strings.Fields".to_string()),
+        source_call_args: vec!["cmd".to_string()],
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+    }];
+    let out = transfer_function_for(&decl);
+
+    let arg_inherits_return = out.edges.iter().any(|edge| {
+        rendered_place_name(&out, edge.from) == "cmd"
+            && rendered_place_name(&out, edge.to) == "part"
+            && edge.meta.kind == IdgEdgeKind::IntraAssign
+    });
+    assert!(
+        !arg_inherits_return,
+        "qualified exported library functions must not become constructor-style passthroughs: {:#?}",
         out.edges
     );
 }

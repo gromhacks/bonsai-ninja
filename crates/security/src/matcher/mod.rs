@@ -8,9 +8,10 @@
 
 use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{FileId, Span};
+use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, ImportSpec, RefKind, TypeAliasBinding,
+    AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
+    TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::Workspace;
@@ -18,6 +19,7 @@ use regex::Regex;
 use std::{
     cell::RefCell,
     sync::{mpsc, Arc},
+    time::Instant,
 };
 
 const LOCAL_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_local_import_pkg__";
@@ -5218,33 +5220,42 @@ fn resolve_span(ws: &Workspace, file: FileId, span: Span) -> (String, u32, u32) 
 ///   not from parameter-name conventions.
 #[must_use]
 pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
+    let files = ws.db().global_index().all_files().collect::<Vec<_>>();
+    infer_entry_point_sources_for_files_with_progress(ws, &files, || {})
+}
+
+pub(crate) fn infer_entry_point_sources_for_files_with_progress<F>(
+    ws: &Workspace,
+    scan_files: &[FileId],
+    mut on_file_done: F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(),
+{
     let db = ws.db();
     let global = db.global_index();
-    // Build a set of "has in-workspace callers" to detect leaf
-    // functions that look like entry points (unreferenced public
-    // decls).
-    let mut callees_seen: ahash::AHashSet<bonsai_common::SymbolId> = ahash::AHashSet::default();
-    for file in global.all_files() {
-        // Build the caller's per-file alias map once per file —
-        // shared across every decl in that file.
-        let alias_map = file_alias_map(ws, file);
-        let export_aliases = ws
-            .db()
-            .adapter_for(file)
-            .map(|adapter| adapter.capabilities().module_export_aliases)
-            .unwrap_or(&[]);
-        for decl in global.decls_in(file) {
-            collect_callee_symbols(
-                ws,
-                &decl.flow_events,
-                &global,
-                decl,
-                &alias_map,
-                export_aliases,
-                &mut callees_seen,
-            );
-        }
+    let mut files = scan_files.to_vec();
+    files.sort_by_key(|file| file.raw());
+    files.dedup();
+    if files.is_empty() {
+        return Vec::new();
     }
+    // Build a set of "has in-workspace callers" to detect leaf functions
+    // that look like entry points (unreferenced public decls). This uses
+    // the same scoped resolved-callgraph primitive as trace/taint instead
+    // of resolving every call name directly from the matcher. On large
+    // copied package trees, direct global lookup turns inferred-source
+    // generation into the dominant runtime; the callgraph builder keeps
+    // resolution local/module/receiver scoped and parallel.
+    let infer_debug = bonsai_diagnostics::debug::is_enabled("security-phase");
+    let started = infer_debug.then(Instant::now);
+    let callees_seen = collect_called_symbols_for_files(ws, &files);
+    log_inferred_subphase(
+        infer_debug,
+        "called-symbol collection",
+        started,
+        format_args!("symbols={}", callees_seen.len()),
+    );
 
     // G3 cross-method field-taint: build a per-class set of
     // qualified field writes sourced from that method's params
@@ -5255,11 +5266,21 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
     // to model object-state between method invocations on the same
     // receiver. Keyed on the class decl's symbol — derived purely
     // from tree-sitter-emitted DeclKind / parent / FlowEvent facts.
-    let class_field_writes = collect_class_field_taints(&global);
+    let started = infer_debug.then(Instant::now);
+    let class_field_writes = collect_class_field_taints_for_files(&global, &files);
+    log_inferred_subphase(
+        infer_debug,
+        "class-field taint collection",
+        started,
+        format_args!("classes={}", class_field_writes.len()),
+    );
 
     let mut out = Vec::new();
-    for file in global.all_files() {
+    let started = infer_debug.then(Instant::now);
+    let mut scanned_decls = 0usize;
+    for file in files {
         let Some(adapter) = db.adapter_for(file) else {
+            on_file_done();
             continue;
         };
         let language = adapter.language_id().as_str().to_string();
@@ -5270,6 +5291,7 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
             ) {
                 continue;
             }
+            scanned_decls = scanned_decls.saturating_add(1);
             let has_callers = callees_seen.contains(&decl.symbol);
             let decorator_kind = detect_framework_decorator(&decl.name, ws, file, decl.name_span);
             // Entry-point heuristic:
@@ -5340,8 +5362,93 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
                 }
             }
         }
+        on_file_done();
     }
+    log_inferred_subphase(
+        infer_debug,
+        "source emission",
+        started,
+        format_args!("decls={scanned_decls} matches={}", out.len()),
+    );
     out
+}
+
+fn collect_called_symbols_for_files(ws: &Workspace, files: &[FileId]) -> ahash::AHashSet<SymbolId> {
+    let db = ws.db();
+    let global = db.global_index();
+    let infer_debug = bonsai_diagnostics::debug::is_enabled("security-phase");
+    let started = infer_debug.then(Instant::now);
+    let call_graph = bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files(
+        global.as_ref(),
+        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| {
+            bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                .into_iter()
+                .collect()
+        },
+        |file| {
+            db.vfs()
+                .path(file)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        },
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().module_export_aliases)
+                .unwrap_or(&[])
+        },
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+        },
+        files,
+    );
+    log_inferred_subphase(
+        infer_debug,
+        "resolved callgraph",
+        started,
+        format_args!("edges={}", call_graph.inner().edges.len()),
+    );
+    let mut out: ahash::AHashSet<SymbolId> = call_graph
+        .inner()
+        .edges
+        .iter()
+        .map(|edge| SymbolId::new(edge.to.raw()))
+        .collect();
+    let before_assignment_refs = out.len();
+    let started = infer_debug.then(Instant::now);
+    collect_assignment_referenced_callable_symbols(ws, files, global.as_ref(), &mut out);
+    log_inferred_subphase(
+        infer_debug,
+        "assignment callable references",
+        started,
+        format_args!(
+            "symbols={} added={}",
+            out.len(),
+            out.len().saturating_sub(before_assignment_refs)
+        ),
+    );
+    out
+}
+
+fn log_inferred_subphase(
+    enabled: bool,
+    label: &str,
+    started: Option<Instant>,
+    args: std::fmt::Arguments<'_>,
+) {
+    if !enabled {
+        return;
+    }
+    let Some(started) = started else {
+        return;
+    };
+    eprintln!(
+        "[security-phase] inferred {label}: {:.3}s {args}",
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn flow_read_token_span(events: &[FlowEvent], token: &str) -> Option<Span> {
@@ -5437,12 +5544,13 @@ fn flow_read_token_span(events: &[FlowEvent], token: &str) -> Option<Span> {
 /// matcher does not infer membership from source-span containment,
 /// because nested/local functions can live inside the same spans but
 /// are not class methods.
-fn collect_class_field_taints(
+fn collect_class_field_taints_for_files(
     global: &bonsai_index::GlobalIndex,
+    files: &[FileId],
 ) -> ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> {
     let mut out: ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> =
         ahash::AHashMap::default();
-    for file in global.all_files() {
+    for &file in files {
         let decls = global.decls_in(file);
         for decl in decls.iter() {
             if !matches!(
@@ -5623,92 +5731,206 @@ fn decorator_is_attached_to_decl(
     })
 }
 
-/// Walk a function's flow events collecting every callee that
-/// resolves to a workspace-local symbol. Populates the "has callers"
-/// map used by [`infer_entry_point_sources`] to identify
-/// unreferenced public functions.
+/// Walk assignment-only callable references that do not necessarily
+/// produce a callgraph edge, collecting every referenced callable that
+/// resolves to a workspace-local symbol.
 ///
-/// Resolution goes through `bonsai_resolve::resolve_callable_with_context`,
-/// not bare `find_by_name`, so cross-TU name collisions
-/// (`static fn error()` in two files; helper methods on different
-/// classes that share a method name) don't cross-pollute the
-/// "has callers" set. The caller decl supplies file + module +
-/// alias-map context so `Decl.visibility` and `Decl.module_path`
-/// narrow candidates per
-/// `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
-fn collect_callee_symbols(
+/// The resolved callgraph above covers real calls, including
+/// assignment-source calls. This supplement preserves the old
+/// entrypoint-inference behavior for address-taken callables and
+/// export assignments such as `exports.handler = handler`: these
+/// functions are referenced by the workspace even if the assignment
+/// itself is not an invocation.
+fn collect_assignment_referenced_callable_symbols(
+    ws: &Workspace,
+    files: &[FileId],
+    global: &bonsai_index::GlobalIndex,
+    out: &mut ahash::AHashSet<SymbolId>,
+) {
+    let local_callable_index = AssignmentCallableReferenceIndex::build(global);
+    let mut resolve_cache: AHashMap<AssignmentResolveKey, Vec<SymbolId>> = AHashMap::default();
+    let mut stats = AssignmentReferenceStats::default();
+    for &file in files {
+        let alias_map: AHashMap<String, AliasTarget> = file_alias_map(ws, file).into_iter().collect();
+        let export_aliases = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().module_export_aliases)
+            .unwrap_or(&[]);
+        for decl in global.decls_in(file) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
+                continue;
+            }
+            collect_assignment_referenced_callable_symbols_from_events(
+                ws,
+                &decl.flow_events,
+                global,
+                decl,
+                &alias_map,
+                export_aliases,
+                &local_callable_index,
+                &mut resolve_cache,
+                &mut stats,
+                out,
+            );
+        }
+    }
+    if bonsai_diagnostics::debug::is_enabled("security-phase") {
+        eprintln!(
+            "[security-phase] inferred assignment refs detail: seen={} fast_hits={} skipped_simple={} skipped_qualified={} cache_hits={} fallback_resolves={} fallback_symbols={}",
+            stats.seen,
+            stats.fast_hits,
+            stats.skipped_simple,
+            stats.skipped_qualified,
+            stats.cache_hits,
+            stats.fallback_resolves,
+            stats.fallback_symbols,
+        );
+        if !stats.fallback_names.is_empty() {
+            let mut names = stats
+                .fallback_names
+                .iter()
+                .map(|(name, count)| (name.as_str(), *count))
+                .collect::<Vec<_>>();
+            names.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            let rendered = names
+                .into_iter()
+                .take(12)
+                .map(|(name, count)| format!("{name}:{count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("[security-phase] inferred assignment fallback names: {rendered}");
+        }
+    }
+}
+
+#[derive(Default)]
+struct AssignmentReferenceStats {
+    seen: usize,
+    fast_hits: usize,
+    skipped_simple: usize,
+    cache_hits: usize,
+    fallback_resolves: usize,
+    fallback_symbols: usize,
+    skipped_qualified: usize,
+    fallback_names: AHashMap<String, usize>,
+}
+
+#[derive(Default)]
+struct AssignmentCallableReferenceIndex {
+    by_file: AHashMap<(String, FileId), Option<SymbolId>>,
+    by_module: AHashSet<(String, ModulePath)>,
+}
+
+impl AssignmentCallableReferenceIndex {
+    fn build(global: &bonsai_index::GlobalIndex) -> Self {
+        let mut index = Self::default();
+        for file in global.all_files() {
+            for decl in global.decls_in(file) {
+                if !matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    continue;
+                }
+                for name in assignment_callable_reference_names(decl) {
+                    index.insert(file, &decl.module_path, name, decl.symbol);
+                }
+            }
+        }
+        index
+    }
+
+    fn insert(&mut self, file: FileId, module: &ModulePath, name: String, symbol: SymbolId) {
+        if !module.is_empty() {
+            self.by_module.insert((name.clone(), module.clone()));
+        }
+        let key = (name, file);
+        if let Some(slot) = self.by_file.get_mut(&key) {
+            if slot.is_some_and(|existing| existing != symbol) {
+                *slot = None;
+            }
+        } else {
+            self.by_file.insert(key, Some(symbol));
+        }
+    }
+
+    fn unique_in_file(&self, name: &str, file: FileId) -> Option<SymbolId> {
+        self.by_file
+            .get(&(name.to_string(), file))
+            .and_then(|symbol| *symbol)
+    }
+
+    fn contains_in_file(&self, name: &str, file: FileId) -> bool {
+        self.by_file.contains_key(&(name.to_string(), file))
+    }
+
+    fn contains_in_module(&self, name: &str, module: &ModulePath) -> bool {
+        !module.is_empty() && self.by_module.contains(&(name.to_string(), module.clone()))
+    }
+}
+
+fn assignment_callable_reference_names(decl: &Decl) -> Vec<String> {
+    let mut names = Vec::new();
+    push_unique_assignment_callable_name(&mut names, decl.name.clone());
+    if let Some(qualified) = decl.qualified_name.as_ref() {
+        push_unique_assignment_callable_name(&mut names, qualified.clone());
+        if let Some(tail) = assignment_reference_tail(qualified) {
+            push_unique_assignment_callable_name(&mut names, tail.to_string());
+        }
+    }
+    names
+}
+
+fn push_unique_assignment_callable_name(out: &mut Vec<String>, name: String) {
+    if !name.is_empty() && !out.iter().any(|existing| existing == &name) {
+        out.push(name);
+    }
+}
+
+fn assignment_reference_tail(name: &str) -> Option<&str> {
+    name.rsplit(['.', ':', '\\'])
+        .next()
+        .filter(|tail| !tail.is_empty())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AssignmentResolveKey {
+    name: String,
+    caller_file: FileId,
+    caller_module: ModulePath,
+}
+
+impl AssignmentResolveKey {
+    fn new(name: &str, caller: &Decl) -> Self {
+        Self {
+            name: name.to_string(),
+            caller_file: caller.span.file,
+            caller_module: caller.module_path.clone(),
+        }
+    }
+}
+
+fn collect_assignment_referenced_callable_symbols_from_events(
     ws: &Workspace,
     events: &[FlowEvent],
     global: &bonsai_index::GlobalIndex,
     caller: &bonsai_lang_api::Decl,
-    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    alias_map: &AHashMap<String, AliasTarget>,
     export_aliases: &[&'static str],
-    out: &mut ahash::AHashSet<bonsai_common::SymbolId>,
+    local_callable_index: &AssignmentCallableReferenceIndex,
+    resolve_cache: &mut AHashMap<AssignmentResolveKey, Vec<SymbolId>>,
+    stats: &mut AssignmentReferenceStats,
+    out: &mut ahash::AHashSet<SymbolId>,
 ) {
-    let resolve =
-        |name: &str, receiver_types: &[String], out: &mut ahash::AHashSet<bonsai_common::SymbolId>| {
-            if name.trim().is_empty() {
-                return;
-            }
-            // Build a resolve context for this caller. Pass alias_map
-            // through so the resolver can rewrite imported aliases
-            // (`require("child_process") as cp; cp.exec(...)`) before
-            // candidate lookup.
-            let ahash_alias: ahash::AHashMap<String, AliasTarget> =
-                alias_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            let path_lookup = |file| {
-                ws.vfs()
-                    .path(file)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-            };
-            let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
-                .with_alias_map(&ahash_alias)
-                .with_file_path_lookup(&path_lookup);
-            for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
-                out.insert(bonsai_common::SymbolId::new(func.raw()));
-            }
-            let tail = name.rsplit(&['.', ':', '\\'][..]).next().unwrap_or(name);
-            for receiver_type in receiver_types {
-                for receiver_class in bonsai_resolve::resolve_class(global, receiver_type, &ctx) {
-                    let mut seen = ahash::AHashSet::default();
-                    let mut candidates = Vec::new();
-                    bonsai_resolve::collect_method_candidates_for_class(
-                        global,
-                        receiver_class,
-                        tail,
-                        &ctx,
-                        &mut seen,
-                        &mut candidates,
-                    );
-                    for func in candidates {
-                        out.insert(bonsai_common::SymbolId::new(func.raw()));
-                    }
-                }
-            }
-            // Tail-name fallback for chains like `obj.method` where the
-            // resolver couldn't infer the receiver type. The same
-            // visibility/module narrowing applies because the caller
-            // context is unchanged.
-            if let Some(tail) = name.rsplit(&['.', ':'][..]).next() {
-                if !tail.is_empty() && tail != name {
-                    for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
-                        out.insert(bonsai_common::SymbolId::new(func.raw()));
-                    }
-                }
-            }
-        };
     for event in events {
         match event {
-            FlowEvent::Call {
-                name, receiver_types, ..
-            } => {
-                resolve(name.as_str(), receiver_types, out);
-            }
             FlowEvent::Assign {
                 target,
                 source_name,
-                source_call,
                 source_names,
                 ..
             } => {
@@ -5726,6 +5948,359 @@ fn collect_callee_symbols(
                 // caller invokes the resolver. Marking it as called
                 // suppresses the inferred entry-point source that the
                 // security wrapper needs.
+                if let Some(name) = source_name.as_deref() {
+                    resolve_assignment_callable_reference(
+                        ws,
+                        global,
+                        caller,
+                        alias_map,
+                        local_callable_index,
+                        resolve_cache,
+                        stats,
+                        name,
+                        out,
+                    );
+                }
+                if assignment_exports_callable_names(target, export_aliases) {
+                    for name in source_names {
+                        resolve_assignment_callable_reference(
+                            ws,
+                            global,
+                            caller,
+                            alias_map,
+                            local_callable_index,
+                            resolve_cache,
+                            stats,
+                            name,
+                            out,
+                        );
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    then_events,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    else_events,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+            }
+            FlowEvent::Loop { body, .. } => {
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    body,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    body,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    catch_events,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    finally_events,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assignment_referenced_callable_symbols_from_events(
+                    ws,
+                    body,
+                    global,
+                    caller,
+                    alias_map,
+                    export_aliases,
+                    local_callable_index,
+                    resolve_cache,
+                    stats,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors the recursive collector context.
+fn resolve_assignment_callable_reference(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    caller: &bonsai_lang_api::Decl,
+    alias_map: &AHashMap<String, AliasTarget>,
+    local_callable_index: &AssignmentCallableReferenceIndex,
+    resolve_cache: &mut AHashMap<AssignmentResolveKey, Vec<SymbolId>>,
+    stats: &mut AssignmentReferenceStats,
+    name: &str,
+    out: &mut ahash::AHashSet<SymbolId>,
+) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    stats.seen = stats.seen.saturating_add(1);
+    let local_name = trimmed.trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    if fast_assignment_local_reference_name(local_name) {
+        if let Some(symbol) = local_callable_index.unique_in_file(local_name, caller.span.file) {
+            out.insert(symbol);
+            stats.fast_hits = stats.fast_hits.saturating_add(1);
+            return;
+        }
+        if !assignment_reference_needs_resolver(ws, caller, alias_map, local_callable_index, local_name) {
+            stats.skipped_simple = stats.skipped_simple.saturating_add(1);
+            return;
+        }
+    }
+    if assignment_reference_is_unresolved_member_read(local_name, alias_map) {
+        stats.skipped_qualified = stats.skipped_qualified.saturating_add(1);
+        return;
+    }
+
+    let key = AssignmentResolveKey::new(trimmed, caller);
+    if let Some(cached) = resolve_cache.get(&key) {
+        out.extend(cached.iter().copied());
+        stats.cache_hits = stats.cache_hits.saturating_add(1);
+        return;
+    }
+    stats.fallback_resolves = stats.fallback_resolves.saturating_add(1);
+    *stats.fallback_names.entry(trimmed.to_string()).or_insert(0) += 1;
+
+    let path_lookup = |file| {
+        ws.vfs()
+            .path(file)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+    };
+    let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
+        .with_alias_map(alias_map)
+        .with_file_path_lookup(&path_lookup);
+    let mut resolved = Vec::new();
+    for func in bonsai_resolve::resolve_callable_with_context(global, trimmed, &ctx) {
+        push_unique_assignment_symbol(&mut resolved, SymbolId::new(func.raw()));
+    }
+    stats.fallback_symbols = stats.fallback_symbols.saturating_add(resolved.len());
+    out.extend(resolved.iter().copied());
+    resolve_cache.insert(key, resolved);
+}
+
+fn fast_assignment_local_reference_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('.')
+        && !trimmed.contains("::")
+        && !trimmed.contains(':')
+        && !trimmed.contains('\\')
+        && !trimmed.contains('(')
+        && !trimmed.contains(')')
+        && !trimmed.chars().any(char::is_whitespace)
+}
+
+fn assignment_reference_is_unresolved_member_read(
+    name: &str,
+    alias_map: &AHashMap<String, AliasTarget>,
+) -> bool {
+    let Some((head, _tail)) = assignment_reference_head_tail(name) else {
+        return false;
+    };
+    let head = head.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    if head.is_empty() {
+        return false;
+    }
+    if alias_map.contains_key(head) {
+        return false;
+    }
+    if head.starts_with("require(") || head.starts_with("import(") {
+        return true;
+    }
+    if matches!(head, "this" | "self" | "$this" | "super") {
+        return true;
+    }
+    head.chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+}
+
+fn assignment_reference_head_tail(name: &str) -> Option<(&str, &str)> {
+    name.rsplit_once("::")
+        .or_else(|| name.rsplit_once('.'))
+        .or_else(|| name.rsplit_once(':'))
+        .or_else(|| name.rsplit_once('\\'))
+}
+
+fn assignment_reference_needs_resolver(
+    ws: &Workspace,
+    caller: &bonsai_lang_api::Decl,
+    alias_map: &AHashMap<String, AliasTarget>,
+    local_callable_index: &AssignmentCallableReferenceIndex,
+    name: &str,
+) -> bool {
+    if local_callable_index.contains_in_file(name, caller.span.file)
+        || local_callable_index.contains_in_module(name, &caller.module_path)
+        || alias_map.contains_key(name)
+        || alias_map
+            .keys()
+            .any(|key| key.starts_with(bonsai_lang_api::WILDCARD_IMPORT_ALIAS_PREFIX))
+    {
+        return true;
+    }
+    caller_allows_same_directory_unqualified_lookup(ws, caller.span.file)
+}
+
+fn caller_allows_same_directory_unqualified_lookup(ws: &Workspace, file: FileId) -> bool {
+    let Ok(path) = ws.vfs().path(file) else {
+        return true;
+    };
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or_default(),
+        "c" | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "hxx"
+            | "m"
+            | "mm"
+            | "kt"
+            | "kts"
+            | "swift"
+            | "pl"
+            | "pm"
+    )
+}
+
+fn push_unique_assignment_symbol(out: &mut Vec<SymbolId>, symbol: SymbolId) {
+    if !out.iter().any(|existing| *existing == symbol) {
+        out.push(symbol);
+    }
+}
+
+fn collect_callee_symbols(
+    ws: &Workspace,
+    events: &[FlowEvent],
+    global: &bonsai_index::GlobalIndex,
+    caller: &bonsai_lang_api::Decl,
+    alias_map: &std::collections::HashMap<String, AliasTarget>,
+    export_aliases: &[&'static str],
+    out: &mut ahash::AHashSet<SymbolId>,
+) {
+    let resolve = |name: &str, receiver_types: &[String], out: &mut ahash::AHashSet<SymbolId>| {
+        if name.trim().is_empty() {
+            return;
+        }
+        let ahash_alias: ahash::AHashMap<String, AliasTarget> =
+            alias_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let path_lookup = |file| {
+            ws.vfs()
+                .path(file)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        };
+        let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
+            .with_alias_map(&ahash_alias)
+            .with_file_path_lookup(&path_lookup);
+        for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
+            out.insert(SymbolId::new(func.raw()));
+        }
+        let tail = name.rsplit(&['.', ':', '\\'][..]).next().unwrap_or(name);
+        for receiver_type in receiver_types {
+            for receiver_class in bonsai_resolve::resolve_class(global, receiver_type, &ctx) {
+                let mut seen = ahash::AHashSet::default();
+                let mut candidates = Vec::new();
+                bonsai_resolve::collect_method_candidates_for_class(
+                    global,
+                    receiver_class,
+                    tail,
+                    &ctx,
+                    &mut seen,
+                    &mut candidates,
+                );
+                for func in candidates {
+                    out.insert(SymbolId::new(func.raw()));
+                }
+            }
+        }
+        if let Some(tail) = name.rsplit(&['.', ':'][..]).next() {
+            if !tail.is_empty() && tail != name {
+                for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
+                    out.insert(SymbolId::new(func.raw()));
+                }
+            }
+        }
+    };
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name, receiver_types, ..
+            } => resolve(name.as_str(), receiver_types, out),
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_names,
+                ..
+            } => {
                 if let Some(name) = source_name.as_deref() {
                     resolve(name, &[], out);
                 }

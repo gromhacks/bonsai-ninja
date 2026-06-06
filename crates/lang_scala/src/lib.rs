@@ -4,12 +4,15 @@ use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
         collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
-        node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        node_text, package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
+        with_fn_kinds_and_implicit_receivers,
     },
-    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
-    FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex,
+    DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
+    Visibility,
 };
+use std::collections::HashMap;
 use tree_sitter::Node;
 
 const SCALA_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -89,11 +92,13 @@ impl LanguageAdapter for ScalaAdapter {
             let arm_spans = collect_scala_match_arm_spans(&tree, src, file);
             for decl in &mut idx.defs {
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
+                annotate_scala_named_call_args(&mut decl.flow_events);
             }
         }
         let pkg_segments = parse_with(PACK_NAME, file, ctx)
             .and_then(|(snapshot, tree)| extract_scala_package(tree.root_node(), snapshot.text.as_bytes()));
         if let Some(segments) = pkg_segments {
+            let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
         } else {
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
@@ -236,6 +241,27 @@ impl LanguageAdapter for ScalaAdapter {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ScalaBaseConstructorCall {
+    base_name: String,
+    args: Vec<String>,
+    event: FlowEvent,
+}
+
+#[derive(Clone, Debug)]
+struct ScalaConstructorDraft {
+    class_span: Span,
+    class_symbol: SymbolId,
+    class_name: String,
+    class_name_span: Span,
+    module_path: bonsai_lang_api::ModulePath,
+    body_span: Span,
+    params: Vec<String>,
+    flow_events: Vec<FlowEvent>,
+    direct_receiver_field_writes: Vec<FieldWrite>,
+    base_call: Option<ScalaBaseConstructorCall>,
+}
+
 fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     let class_names = idx
         .defs
@@ -265,6 +291,7 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
         .unwrap_or(0)
         .saturating_add(1);
 
+    let mut drafts = Vec::new();
     for class_node in collect_kinds(tree, &["class_definition"]) {
         let class_span = span_of(file, &class_node);
         let Some((_, class_symbol, class_name, class_name_span, module_path)) =
@@ -295,27 +322,208 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
         let mut body_writes =
             collect_receiver_field_writes(&flow_events, &params, None, &["this", "super"], &[]);
         receiver_field_writes.append(&mut body_writes);
-        receiver_field_writes.sort_by_key(|write| (write.span.start, write.target.clone()));
-        receiver_field_writes.dedup_by(|a, b| {
-            a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+        let base_call = scala_primary_base_constructor_call(class_node, file, src);
+        let mut constructor_flow_events = Vec::new();
+        if let Some(call) = &base_call {
+            constructor_flow_events.push(call.event.clone());
+        }
+        constructor_flow_events.extend(flow_events);
+        drafts.push(ScalaConstructorDraft {
+            class_span,
+            class_symbol: *class_symbol,
+            class_name: class_name.clone(),
+            class_name_span: *class_name_span,
+            module_path: module_path.clone(),
+            body_span,
+            params,
+            flow_events: constructor_flow_events,
+            direct_receiver_field_writes: receiver_field_writes,
+            base_call,
         });
-        if flow_events.is_empty() && receiver_field_writes.is_empty() {
+    }
+
+    let mut draft_by_name = HashMap::new();
+    for (idx, draft) in drafts.iter().enumerate() {
+        draft_by_name.insert(draft.class_name.clone(), idx);
+    }
+    let mut memo: HashMap<String, Vec<FieldWrite>> = HashMap::new();
+    for draft in &drafts {
+        let receiver_field_writes =
+            scala_constructor_receiver_field_writes(&draft.class_name, &drafts, &draft_by_name, &mut memo);
+        if draft.flow_events.is_empty() && receiver_field_writes.is_empty() {
             continue;
         }
         idx.defs.push(scala_constructor_decl(
             bonsai_common::SymbolId::new(next),
-            *class_symbol,
-            class_name,
-            *class_name_span,
-            class_span,
-            body_span,
-            params,
-            flow_events,
+            draft.class_symbol,
+            &draft.class_name,
+            draft.class_name_span,
+            draft.class_span,
+            draft.body_span,
+            draft.params.clone(),
+            draft.flow_events.clone(),
             receiver_field_writes,
-            module_path.clone(),
+            draft.module_path.clone(),
         ));
         next = next.saturating_add(1);
     }
+}
+
+fn scala_constructor_receiver_field_writes(
+    class_name: &str,
+    drafts: &[ScalaConstructorDraft],
+    draft_by_name: &HashMap<String, usize>,
+    memo: &mut HashMap<String, Vec<FieldWrite>>,
+) -> Vec<FieldWrite> {
+    if let Some(cached) = memo.get(class_name) {
+        return cached.clone();
+    }
+    let Some(&idx) = draft_by_name.get(class_name) else {
+        return Vec::new();
+    };
+    let draft = &drafts[idx];
+    let mut writes = draft.direct_receiver_field_writes.clone();
+    if let Some(base_call) = &draft.base_call {
+        let base_writes =
+            scala_constructor_receiver_field_writes(&base_call.base_name, drafts, draft_by_name, memo);
+        for write in base_writes {
+            let Some(source_param_indices) =
+                remap_constructor_field_write_sources(&write, &base_call.args, &draft.params)
+            else {
+                continue;
+            };
+            writes.push(FieldWrite {
+                span: write.span,
+                target: write.target,
+                source_param_indices,
+            });
+        }
+    }
+    writes.sort_by_key(|write| {
+        (
+            write.span.file.raw(),
+            write.span.start,
+            write.target.clone(),
+            write.source_param_indices.clone(),
+        )
+    });
+    writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+    memo.insert(class_name.to_string(), writes.clone());
+    writes
+}
+
+fn remap_constructor_field_write_sources(
+    write: &FieldWrite,
+    base_args: &[String],
+    subclass_params: &[String],
+) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    for source_idx in &write.source_param_indices {
+        let arg = base_args.get(*source_idx)?.trim();
+        if arg.is_empty() {
+            return None;
+        }
+        let subclass_idx = subclass_params.iter().position(|param| param == arg)?;
+        out.push(subclass_idx);
+    }
+    Some(out)
+}
+
+fn scala_primary_base_constructor_call(
+    class_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<ScalaBaseConstructorCall> {
+    let extend = class_node.child_by_field_name("extend")?;
+    let mut cursor = extend.walk();
+    let mut base_node = None;
+    let mut args_node = None;
+    for child in extend.named_children(&mut cursor) {
+        if base_node.is_none() {
+            let raw = node_text(&child, src);
+            if canonical_scala_base_name(raw).is_some() {
+                base_node = Some(child);
+            }
+            continue;
+        }
+        if child.kind() == "arguments" {
+            args_node = Some(child);
+        }
+        break;
+    }
+    let base_node = base_node?;
+    let base_name = canonical_scala_base_name(node_text(&base_node, src))?;
+    let args = args_node.map_or_else(Vec::new, |node| scala_constructor_argument_texts(node, src));
+    let event_args = args_node.map_or_else(Vec::new, |node| scala_constructor_call_args(node, file, src));
+    let event = FlowEvent::Call {
+        span: span_of(file, &extend),
+        name: base_name.clone(),
+        receiver: None,
+        receiver_types: vec![base_name.clone()],
+        call_kind: CallKind::Constructor,
+        args: event_args,
+    };
+    Some(ScalaBaseConstructorCall {
+        base_name,
+        args,
+        event,
+    })
+}
+
+fn scala_constructor_argument_texts(args_node: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = args_node.walk();
+    for child in args_node.named_children(&mut cursor) {
+        let text = node_text(&child, src).trim();
+        if !text.is_empty() {
+            out.push(text.to_string());
+        }
+    }
+    out
+}
+
+fn scala_constructor_call_args(args_node: Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
+    let mut out = Vec::new();
+    let mut cursor = args_node.walk();
+    for child in args_node.named_children(&mut cursor) {
+        let value_text = node_text(&child, src).trim().to_string();
+        if value_text.is_empty() {
+            continue;
+        }
+        out.push(CallArg {
+            span: span_of(file, &child),
+            name: None,
+            place: simple_scala_storage_place(&value_text),
+            source_names: scala_argument_source_names(&value_text),
+            value_text,
+        });
+    }
+    out
+}
+
+fn simple_scala_storage_place(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()
+        && trimmed
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())))
+    .then(|| trimmed.to_string())
+}
+
+fn scala_argument_source_names(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in value.split(|ch: char| !(ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())) {
+        let token = token.trim_matches('.');
+        if token.is_empty() {
+            continue;
+        }
+        out.push(token.to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,8 +566,9 @@ fn scala_constructor_decl(
 }
 
 fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
-    collect_descendant_kinds(node, &["class_parameter", "parameter"])
-        .into_iter()
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|param| matches!(param.kind(), "class_parameter" | "parameter"))
         .filter_map(|param| parameter_binding_name(param, src))
         .collect()
 }
@@ -379,7 +588,11 @@ fn scala_constructor_param_field_writes_with_mode(
     is_case_class: bool,
 ) -> Vec<FieldWrite> {
     let mut writes = Vec::new();
-    for param in collect_descendant_kinds(params_node, &["class_parameter"]) {
+    let mut cursor = params_node.walk();
+    for param in params_node
+        .named_children(&mut cursor)
+        .filter(|param| param.kind() == "class_parameter")
+    {
         if !is_case_class && !scala_class_parameter_declares_property(param, src) {
             continue;
         }
@@ -396,6 +609,63 @@ fn scala_constructor_param_field_writes_with_mode(
         });
     }
     writes
+}
+
+fn annotate_scala_named_call_args(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    if arg.name.is_none() {
+                        if let Some((label, value)) = scala_named_argument_parts(&arg.value_text) {
+                            arg.name = Some(label);
+                            if arg.place.is_none() {
+                                arg.place = simple_scala_storage_place(value);
+                            }
+                        }
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                annotate_scala_named_call_args(then_events);
+                annotate_scala_named_call_args(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                annotate_scala_named_call_args(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                annotate_scala_named_call_args(body);
+                annotate_scala_named_call_args(catch_events);
+                annotate_scala_named_call_args(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scala_named_argument_parts(text: &str) -> Option<(String, &str)> {
+    let text = text.trim();
+    let eq = text.find('=')?;
+    if text.get(eq..eq + 2) == Some("=>") {
+        return None;
+    }
+    let label = text[..eq].trim();
+    if label.is_empty()
+        || !label.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        || label.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((label.to_string(), text[eq + 1..].trim()))
 }
 
 fn scala_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool {
@@ -458,21 +728,6 @@ fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>
         }
         collect_binding_identifiers(child, src, out);
     }
-}
-
-fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
-    let mut out = Vec::new();
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        if kinds.contains(&current.kind()) {
-            out.push(current);
-        }
-        let mut cursor = current.walk();
-        for child in current.named_children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-    out
 }
 
 /// Walk every Scala class-like declaration and pull `(name, type)`

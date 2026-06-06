@@ -593,10 +593,12 @@ struct IdgWorkspaceMetadataOwned {
 /// directory can hold both formats without ambiguity.
 const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 
-/// Wire-format version for the workspace IDG sidecar. Bump on any
-/// incompatible change to the persisted shape (e.g. new field on
-/// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]).
-const IDG_WORKSPACE_VERSION: u32 = 7;
+/// Wire-format/semantic version for the workspace IDG sidecar. Bump on
+/// any incompatible persisted-shape change (e.g. new field on
+/// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]) or
+/// source-to-call edge semantic change that can leave old facts
+/// structurally decodable but security-significant.
+const IDG_WORKSPACE_VERSION: u32 = 8;
 
 #[cfg(not(test))]
 const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;

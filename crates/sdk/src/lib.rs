@@ -36,7 +36,7 @@ use std::{
 const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v8.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v8.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
-const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v6";
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v7";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub mod read_file;

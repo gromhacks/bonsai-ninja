@@ -69,6 +69,15 @@ fn func_id(idx: &GlobalIndex, name: &str) -> FuncId {
     unreachable!("function {name} not in index")
 }
 
+fn func_id_in_file(idx: &GlobalIndex, file: u32, name: &str) -> FuncId {
+    for decl in idx.functions_in(FileId::new(file)) {
+        if decl.name == name {
+            return FuncId::new(decl.symbol.raw());
+        }
+    }
+    unreachable!("function {name} not in file {file}")
+}
+
 fn resolved_graph(edges: impl IntoIterator<Item = (FuncId, FuncId, Span)>) -> ResolvedCallGraph {
     let mut cg = CallGraph::new();
     for (from, to, span) in edges {
@@ -247,6 +256,278 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
         arg_edges, 2,
         "an exact callgraph site may stitch through an explicit alias fact when the callee decl is `default` and the call text is an alias"
     );
+}
+
+#[test]
+fn exact_site_constructor_edge_stitches_class_call_arguments_across_modules() {
+    let call_span = span(0, 20, 35);
+    let mut caller = empty_decl(1, 0, "entry");
+    caller.module_path = ModulePath::from_segments(["pipeline"]);
+    caller.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "Repository".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(0, 31, 34),
+            name: None,
+            value_text: "raw".to_string(),
+            place: Some("raw".to_string()),
+            source_names: vec!["raw".to_string()],
+        }],
+    }];
+
+    let mut repository_class = empty_decl(2, 1, "Repository");
+    repository_class.kind = DeclKind::Class;
+    repository_class.module_path = ModulePath::from_segments(["storage"]);
+    repository_class.flow_events = Vec::new();
+
+    let mut init = empty_decl(3, 1, "__init__");
+    init.kind = DeclKind::Constructor;
+    init.module_path = ModulePath::from_segments(["storage"]);
+    init.parent = Some(repository_class.symbol);
+    init.params = vec!["self".to_string(), "data".to_string()];
+    init.receiver_param_index = Some(0);
+
+    let idx = build_index(vec![caller, repository_class, init]);
+    let caller_id = func_id(&idx, "entry");
+    let init_id = func_id(&idx, "__init__");
+    let cg = resolved_graph([(caller_id, init_id, call_span)]);
+
+    let ws = build(&idx, &cg);
+    let caller_seg = ws.segment_for_func(caller_id).expect("caller segment");
+    let init_seg = ws.segment_for_func(init_id).expect("constructor segment");
+    let arg_edges = ws
+        .cross_file()
+        .edges
+        .iter()
+        .filter(|cross| {
+            cross.from_segment == caller_seg
+                && cross.to_segment == init_seg
+                && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+                && cross.edge.meta.via_span == call_span
+        })
+        .count();
+
+    assert_eq!(
+        arg_edges, 1,
+        "site-specific semantic constructor edges must stitch class-call arguments even when fallback class lookup is module-scoped"
+    );
+}
+
+#[test]
+fn constructor_fallback_indexes_structs_by_scope_without_sibling_fanout() {
+    let call_span = span(0, 20, 35);
+    let mut caller = empty_decl(1, 0, "entry");
+    caller.module_path = ModulePath::from_segments(["copy_0"]);
+    caller.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "Envelope".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(0, 30, 33),
+            name: None,
+            value_text: "raw".to_string(),
+            place: Some("raw".to_string()),
+            source_names: vec!["raw".to_string()],
+        }],
+    }];
+
+    let mut local_struct = empty_decl(2, 1, "Envelope");
+    local_struct.kind = DeclKind::Struct;
+    local_struct.module_path = ModulePath::from_segments(["copy_0"]);
+    local_struct.visibility = Visibility::Module;
+    local_struct.flow_events = Vec::new();
+    let mut local_init = empty_decl(3, 1, "Envelope");
+    local_init.kind = DeclKind::Constructor;
+    local_init.module_path = ModulePath::from_segments(["copy_0"]);
+    local_init.visibility = Visibility::Module;
+    local_init.parent = Some(local_struct.symbol);
+    local_init.params = vec!["cmd".to_string()];
+
+    let mut sibling_struct = empty_decl(2, 2, "Envelope");
+    sibling_struct.kind = DeclKind::Struct;
+    sibling_struct.module_path = ModulePath::from_segments(["copy_1"]);
+    sibling_struct.visibility = Visibility::Module;
+    sibling_struct.flow_events = Vec::new();
+    let mut sibling_init = empty_decl(3, 2, "Envelope");
+    sibling_init.kind = DeclKind::Constructor;
+    sibling_init.module_path = ModulePath::from_segments(["copy_1"]);
+    sibling_init.visibility = Visibility::Module;
+    sibling_init.parent = Some(sibling_struct.symbol);
+    sibling_init.params = vec!["cmd".to_string()];
+
+    let idx = build_index(vec![
+        caller,
+        local_struct,
+        local_init,
+        sibling_struct,
+        sibling_init,
+    ]);
+    let caller_id = func_id(&idx, "entry");
+    let local_init_id = func_id_in_file(&idx, 1, "Envelope");
+    let sibling_init_id = func_id_in_file(&idx, 2, "Envelope");
+    let ws = build(&idx, &ResolvedCallGraph::default());
+    let caller_seg = ws.segment_for_func(caller_id).expect("caller segment");
+    let local_init_seg = ws
+        .segment_for_func(local_init_id)
+        .expect("local constructor segment");
+    let sibling_init_seg = ws
+        .segment_for_func(sibling_init_id)
+        .expect("sibling constructor segment");
+
+    let local_arg_edges = ws
+        .cross_file()
+        .edges
+        .iter()
+        .filter(|cross| {
+            cross.from_segment == caller_seg
+                && cross.to_segment == local_init_seg
+                && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+                && cross.edge.meta.via_span == call_span
+        })
+        .count();
+    let sibling_arg_edges = ws
+        .cross_file()
+        .edges
+        .iter()
+        .filter(|cross| {
+            cross.from_segment == caller_seg
+                && cross.to_segment == sibling_init_seg
+                && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+                && cross.edge.meta.via_span == call_span
+        })
+        .count();
+
+    assert_eq!(
+        local_arg_edges, 1,
+        "constructor fallback must route function-style struct calls to the local module constructor"
+    );
+    assert_eq!(
+        sibling_arg_edges, 0,
+        "constructor fallback must not fan out to same-named sibling module structs"
+    );
+}
+
+#[test]
+fn higher_order_callback_binding_stays_in_same_directory_scope() {
+    let mut entry_a = empty_decl(1, 0, "entry");
+    entry_a.flow_events = vec![FlowEvent::Call {
+        span: span(0, 20, 30),
+        name: "runCb".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![
+            bonsai_lang_api::CallArg {
+                span: span(0, 21, 29),
+                name: None,
+                value_text: "executor".to_string(),
+                place: Some("executor".to_string()),
+                source_names: vec!["executor".to_string()],
+            },
+            bonsai_lang_api::CallArg {
+                span: span(0, 31, 32),
+                name: None,
+                value_text: "t".to_string(),
+                place: Some("t".to_string()),
+                source_names: vec!["t".to_string()],
+            },
+        ],
+    }];
+    let mut run_cb_a = empty_decl(2, 1, "runCb");
+    run_cb_a.params = vec!["cb".to_string(), "value".to_string()];
+    run_cb_a.flow_events = vec![FlowEvent::Call {
+        span: span(1, 120, 130),
+        name: "cb".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(1, 123, 128),
+            name: None,
+            value_text: "value".to_string(),
+            place: Some("value".to_string()),
+            source_names: vec!["value".to_string()],
+        }],
+    }];
+    let mut executor_a = empty_decl(3, 2, "executor");
+    executor_a.params = vec!["cmd".to_string()];
+
+    let mut entry_b = empty_decl(4, 3, "entry");
+    entry_b.flow_events = entry_a.flow_events.clone();
+    for event in &mut entry_b.flow_events {
+        if let FlowEvent::Call { span, args, .. } = event {
+            *span = Span::new(FileId::new(3), span.start, span.end);
+            for arg in args {
+                arg.span = Span::new(FileId::new(3), arg.span.start, arg.span.end);
+            }
+        }
+    }
+    let mut run_cb_b = empty_decl(5, 4, "runCb");
+    run_cb_b.params = run_cb_a.params.clone();
+    run_cb_b.flow_events = run_cb_a.flow_events.clone();
+    for event in &mut run_cb_b.flow_events {
+        if let FlowEvent::Call { span, args, .. } = event {
+            *span = Span::new(FileId::new(4), span.start, span.end);
+            for arg in args {
+                arg.span = Span::new(FileId::new(4), arg.span.start, arg.span.end);
+            }
+        }
+    }
+    let mut executor_b = empty_decl(6, 5, "executor");
+    executor_b.params = vec!["cmd".to_string()];
+
+    let idx = build_index(vec![entry_a, run_cb_a, executor_a, entry_b, run_cb_b, executor_b]);
+    let entry_a_id = func_id_in_file(&idx, 0, "entry");
+    let run_cb_a_id = func_id_in_file(&idx, 1, "runCb");
+    let executor_a_id = func_id_in_file(&idx, 2, "executor");
+    let entry_b_id = func_id_in_file(&idx, 3, "entry");
+    let run_cb_b_id = func_id_in_file(&idx, 4, "runCb");
+    let executor_b_id = func_id_in_file(&idx, 5, "executor");
+    let cg = resolved_graph([
+        (entry_a_id, run_cb_a_id, span(0, 20, 30)),
+        (entry_b_id, run_cb_b_id, span(3, 20, 30)),
+    ]);
+
+    let ws = build_with_file_info_and_paths(
+        &idx,
+        &cg,
+        |_| AHashMap::new(),
+        |_| Some("dart"),
+        |file| match file.raw() {
+            0 => Some("/w/flow_a/entry.dart".to_string()),
+            1 => Some("/w/flow_a/run.dart".to_string()),
+            2 => Some("/w/flow_a/executor.dart".to_string()),
+            3 => Some("/w/flow_b/entry.dart".to_string()),
+            4 => Some("/w/flow_b/run.dart".to_string()),
+            5 => Some("/w/flow_b/executor.dart".to_string()),
+            _ => None,
+        },
+    );
+
+    let callback_edges = |from: FuncId, to: FuncId| {
+        let from_segment = ws.segment_for_func(from).expect("from segment");
+        let to_segment = ws.segment_for_func(to).expect("to segment");
+        ws.cross_file()
+            .edges
+            .iter()
+            .filter(|cross| {
+                cross.from_segment == from_segment
+                    && cross.to_segment == to_segment
+                    && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+                    && cross.edge.meta.call_kind == EdgeKind::Indirect
+            })
+            .count()
+    };
+
+    assert_eq!(callback_edges(run_cb_a_id, executor_a_id), 1);
+    assert_eq!(callback_edges(run_cb_a_id, executor_b_id), 0);
+    assert_eq!(callback_edges(run_cb_b_id, executor_b_id), 1);
+    assert_eq!(callback_edges(run_cb_b_id, executor_a_id), 0);
 }
 
 #[test]

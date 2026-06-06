@@ -52,10 +52,23 @@ use value_flow::ValueFlowCache;
 
 pub use cross_module::CrossModuleOptions;
 
+const DEFAULT_IDG_SIDECAR_FILE_LIMIT: usize = 5_000;
+
 /// Conventional workspace IDG sidecar path under `<workspace>/.bonsai/`.
 #[must_use]
 pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
     bonsai_idg::workspace::idg_sidecar_path(workspace_root)
+}
+
+fn idg_sidecar_file_limit() -> usize {
+    std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_IDG_SIDECAR_FILE_LIMIT)
+}
+
+fn workspace_idg_sidecar_enabled(file_count: usize) -> bool {
+    file_count <= idg_sidecar_file_limit()
 }
 
 pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
@@ -637,15 +650,24 @@ impl Workspace {
         // latency; the sidecar reduces it to a single mmap + decode
         // for subsequent invocations against the same content-hashed
         // workspace.
-        if let Some(root) = self.root_path() {
-            let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
-            if let Ok(Some(loaded)) =
-                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
-            {
-                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
-                self.inner.db.set_idg_service(service.clone());
-                return service;
+        let use_idg_sidecar = workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
+        if use_idg_sidecar {
+            if let Some(root) = self.root_path() {
+                let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
+                if let Ok(Some(loaded)) =
+                    bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+                {
+                    let service =
+                        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                    self.inner.db.set_idg_service(service.clone());
+                    return service;
+                }
             }
+        } else {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace IDG sidecar load for large workspace"
+            );
         }
         let cg = self.cached_resolved_call_graph();
         // Thread per-file alias maps into the IDG resolver so
@@ -655,25 +677,38 @@ impl Workspace {
         // reuses them to keep its name filter from rejecting
         // alias-rewritten call sites.
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info(
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_paths(
             global.as_ref(),
             cg.as_ref(),
             |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            |file| {
+                db.vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
         );
         // Persist before constructing the query service so a subsequent
         // open warm-starts. Failures (read-only filesystem, full disk)
         // are tracing-logged but not surfaced — the in-memory IDG is
         // still valid for this run.
-        if let Some(root) = self.root_path() {
-            let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
-            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
-                tracing::warn!(
-                    path = %sidecar.display(),
-                    error = %err,
-                    "workspace IDG save_to_disk failed"
-                );
+        if use_idg_sidecar {
+            if let Some(root) = self.root_path() {
+                let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
+                if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                    tracing::warn!(
+                        path = %sidecar.display(),
+                        error = %err,
+                        "workspace IDG save_to_disk failed"
+                    );
+                }
             }
+        } else {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace IDG sidecar save for large workspace"
+            );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
@@ -699,34 +734,56 @@ impl Workspace {
         let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), transfer_hash);
-        if let Some(root) = root_path.as_deref() {
-            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
-            if let Ok(Some(loaded)) =
-                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
-            {
-                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
-                self.inner.db.set_idg_service(service.clone());
-                return service;
+        let use_idg_sidecar = workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
+        if use_idg_sidecar {
+            if let Some(root) = root_path.as_deref() {
+                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
+                if let Ok(Some(loaded)) =
+                    bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+                {
+                    let service =
+                        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                    self.inner.db.set_idg_service(service.clone());
+                    return service;
+                }
             }
+        } else {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace transfer IDG sidecar load for large workspace"
+            );
         }
         let cg = self.cached_resolved_call_graph();
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options(
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
             global.as_ref(),
             cg.as_ref(),
             |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            |file| {
+                db.vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
             &transfer_options,
         );
-        if let Some(root) = root_path.as_deref() {
-            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
-            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
-                tracing::warn!(
-                    path = %sidecar.display(),
-                    error = %err,
-                    "workspace transfer IDG save_to_disk failed"
-                );
+        if use_idg_sidecar {
+            if let Some(root) = root_path.as_deref() {
+                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
+                if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                    tracing::warn!(
+                        path = %sidecar.display(),
+                        error = %err,
+                        "workspace transfer IDG save_to_disk failed"
+                    );
+                }
             }
+        } else {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace transfer IDG sidecar save for large workspace"
+            );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
@@ -753,35 +810,57 @@ impl Workspace {
         let scope_hash = idg_file_scope_fingerprint(included_files);
         let scoped_hash = transfer_hash ^ scope_hash ^ 0x5C0F_ED1D_65C0_9E5D_u64;
         let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), scoped_hash);
-        if let Some(root) = root_path.as_deref() {
-            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
-            if let Ok(Some(loaded)) =
-                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
-            {
-                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
-                self.inner.db.set_idg_service(service.clone());
-                return service;
+        let use_idg_sidecar = workspace_idg_sidecar_enabled(included_files.len());
+        if use_idg_sidecar {
+            if let Some(root) = root_path.as_deref() {
+                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+                if let Ok(Some(loaded)) =
+                    bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+                {
+                    let service =
+                        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                    self.inner.db.set_idg_service(service.clone());
+                    return service;
+                }
             }
+        } else {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace scoped transfer IDG sidecar load for large workspace"
+            );
         }
         let cg = build_resolved_call_graph_snapshot_for_files(&self.inner.db, included_files);
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files(
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files_with_paths(
             global.as_ref(),
             &cg,
             |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            |file| {
+                db.vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            },
             &transfer_options,
             included_files,
         );
-        if let Some(root) = root_path.as_deref() {
-            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
-            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
-                tracing::warn!(
-                    path = %sidecar.display(),
-                    error = %err,
-                    "workspace scoped transfer IDG save_to_disk failed"
-                );
+        if use_idg_sidecar {
+            if let Some(root) = root_path.as_deref() {
+                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+                if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                    tracing::warn!(
+                        path = %sidecar.display(),
+                        error = %err,
+                        "workspace scoped transfer IDG save_to_disk failed"
+                    );
+                }
             }
+        } else {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace scoped transfer IDG sidecar save for large workspace"
+            );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
@@ -1826,6 +1905,14 @@ fn idg_pipeline_hash() -> u64 {
     // on-disk layout change. This rejects old `idg.v*.factstore`
     // files whose shape can still decode but whose edges/lineage are
     // no longer semantically equivalent.
+    // v26 (2026-06-05): Constructor-like assignment RHS calls now
+    // propagate argument taint into the constructed receiver state
+    // for receiver-tainted sink checks.
+    // v25 (2026-06-04): Ruby terminal `super` returns now emit a
+    // semantic super-call FlowEvent, changing callgraph/IDG edges.
+    // v24 (2026-06-04): IDG callback and class/base fallback lookups
+    // are scoped by module/directory/file so copied projects with
+    // identical helper/class names do not cross-wire semantic edges.
     // v23 (2026-05-27): transfer.rs source-seeding changes
     // (method-receiver-base SemanticSourceFilter exemption +
     // container-input span-containment linkage), service.rs
@@ -1833,7 +1920,7 @@ fn idg_pipeline_hash() -> u64 {
     // synthesis (C# expression-bodied-property getters / record members,
     // Java records, Solidity struct-literal field writes) all change the
     // built IDG without an on-disk layout change.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 23;
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 27;
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;

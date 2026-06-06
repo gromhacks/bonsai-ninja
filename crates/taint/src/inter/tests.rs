@@ -61,6 +61,21 @@ fn rust_ws_multi(files: &[(&str, &str)]) -> AnalyzerDb {
     db
 }
 
+fn php_ws_multi(files: &[(&str, &str)]) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    for (path, source) in files {
+        vfs.write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_php::PhpAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+        let _ = db.import_index(file);
+    }
+    db
+}
+
 fn perl_ws_one_file(source: &str) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
     vfs.write("main.pl".to_string(), Arc::<str>::from(source));
@@ -84,6 +99,36 @@ fn func_id_of(db: &AnalyzerDb, name: &str) -> FuncId {
         matches.len()
     );
     matches[0]
+}
+
+fn func_id_at_line(db: &AnalyzerDb, name: &str, line: usize) -> FuncId {
+    let global = db.global_index();
+    let mut matches = resolve_callable(&global, name)
+        .into_iter()
+        .filter(|func| {
+            let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+                return false;
+            };
+            if decl.name != name {
+                return false;
+            }
+            let Ok(snapshot) = db.vfs().snapshot(decl.span.file) else {
+                return false;
+            };
+            let start = usize::try_from(decl.span.start)
+                .ok()
+                .unwrap_or(0)
+                .min(snapshot.text.len());
+            1 + snapshot.text[..start].bytes().filter(|b| *b == b'\n').count() == line
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one `{name}` at line {line}, got {}",
+        matches.len()
+    );
+    matches.remove(0)
 }
 
 fn seed(names: &[&str]) -> TokenSet {
@@ -227,6 +272,312 @@ fn call_arg_taint_uses_adapter_source_names_for_interpolation_operands() {
     let mut different = arg(1, "\"prefix $cap suffix\"", None);
     different.source_names = vec!["$cap".to_string()];
     assert!(!call_arg_is_tainted(&different, &state));
+}
+
+#[test]
+fn implicit_receiver_return_matches_sigil_qualified_descendant_state() {
+    let span = Span::new(FileId::new(0), 1, 2);
+    let mut decl = summary_decl(
+        vec![FlowEvent::Return {
+            span,
+            value_name: None,
+            value_text: Some("$this->data['cmd']".to_string()),
+        }],
+        false,
+    );
+    decl.kind = DeclKind::Method;
+    decl.name = "cmd".to_string();
+    decl.params.clear();
+    decl.implicit_receiver_names = vec!["$this".to_string(), "this".to_string()];
+
+    assert!(
+        implicit_receiver_return_is_tainted(&decl, "$this", &seed(&["this.data.cmd"])),
+        "PHP-style receiver return should match sigil-stripped descendant field taint"
+    );
+}
+
+#[test]
+fn implicit_receiver_return_matches_sigil_qualified_container_state() {
+    let span = Span::new(FileId::new(0), 1, 2);
+    let mut decl = summary_decl(
+        vec![FlowEvent::Return {
+            span,
+            value_name: None,
+            value_text: Some("$this->data['cmd']".to_string()),
+        }],
+        false,
+    );
+    decl.kind = DeclKind::Method;
+    decl.name = "cmd".to_string();
+    decl.params.clear();
+    decl.implicit_receiver_names = vec!["$this".to_string(), "this".to_string()];
+
+    assert!(
+        implicit_receiver_return_is_tainted(&decl, "$this", &seed(&["this.data"])),
+        "PHP-style receiver return should treat a tainted property container as tainting child reads"
+    );
+}
+
+#[test]
+fn php_sigil_qualified_read_matches_tainted_receiver_container() {
+    let state = seed(&["this.data"]);
+
+    assert!(
+        arg_text_is_tainted("$this->data['cmd']", &state),
+        "child reads from a tainted PHP receiver container must keep sigil-stripped receiver identity"
+    );
+    assert!(
+        !arg_text_is_tainted("$this->other['cmd']", &state),
+        "container matching must stay path-specific and not promote sibling properties"
+    );
+}
+
+#[test]
+fn nested_php_receiver_call_return_is_semantically_tainted_by_receiver_container() {
+    let db = php_ws_multi(&[(
+        "app.php",
+        r#"<?php
+class Executor {
+    public static function execute($cmd) {
+        shell_exec($cmd);
+    }
+}
+
+abstract class BaseRepository {
+    public function __construct(protected array $data) {}
+    public function cmd(): string {
+        return $this->data['cmd'];
+    }
+    abstract public function run(): string;
+}
+
+class Repository extends BaseRepository {
+    public function run(): string {
+        return Executor::execute($this->cmd());
+    }
+}
+"#,
+    )]);
+    let caller = func_id_at_line(&db, "run", 17);
+    let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
+    let local_bindings = AHashMap::new();
+    let config = InterTaintConfig::default();
+    let scope = CallResolveScope {
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        db: &db,
+        caller,
+        config: &config,
+        resolved_calls: None,
+    };
+    let summary_cache = parking_lot::RwLock::new(AHashMap::new());
+    let arg = EffectiveCallArg::positional("$this->cmd()".to_string());
+    let global = db.global_index();
+    let caller_decl = global.decl_of(SymbolId::new(caller.raw())).expect("caller decl");
+    let execute_arg = caller_decl
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "Executor::execute" => args.first().cloned(),
+            _ => None,
+        })
+        .expect("outer execute arg");
+    let arg_span = execute_arg.span;
+
+    assert_eq!(
+        direct_call_expression_return_taint(&arg, &seed(&["this.data"]), &scope, &summary_cache, None, 0),
+        Some(true),
+        "nested PHP receiver call should resolve and return taint from a tainted receiver container"
+    );
+    assert_eq!(
+        direct_call_expression_return_taint(
+            &arg,
+            &seed(&["this.data"]),
+            &scope,
+            &summary_cache,
+            Some(arg_span),
+            0,
+        ),
+        Some(true),
+        "nested PHP receiver call should retry resolution when the outer arg span is not the callee-token span"
+    );
+    let mut worklist = Vec::new();
+    let mut call_records = Vec::new();
+    let mut tainted_calls = Vec::new();
+    let mut precision = Precision::Exact;
+    let lineage_history = AHashSet::new();
+    let const_bindings = AHashMap::new();
+    let mut local_callable_body_calls = AHashMap::new();
+    let ctx = PropagationCtx {
+        caller,
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        db: &db,
+        config: &config,
+        call_records: &mut call_records,
+        tainted_calls: &mut tainted_calls,
+        worklist: &mut worklist,
+        precision: &mut precision,
+        current_trace_id: None,
+        lineage_history: &lineage_history,
+        const_bindings: &const_bindings,
+        resolved_calls: None,
+        local_callable_body_calls: &mut local_callable_body_calls,
+    };
+    assert!(
+        call_arg_has_semantic_direct_value_taint(&execute_arg, &seed(&["this.data"]), &ctx, &summary_cache),
+        "adapter-emitted PHP call arg should be semantically tainted by receiver container state"
+    );
+    let result = interprocedural_taint(caller, &seed(&["this.data"]), &config, &db);
+    assert!(
+        result.call_records.iter().any(|record| {
+            db.global_index()
+                .decl_of(SymbolId::new(record.callee.raw()))
+                .is_some_and(|decl| decl.name == "execute")
+        }),
+        "full interprocedural walk should propagate the nested receiver-return value into execute"
+    );
+}
+
+#[test]
+fn nested_php_receiver_call_return_is_semantically_tainted_in_interface_hierarchy() {
+    let db = php_ws_multi(&[
+        (
+            "executor.php",
+            r#"<?php
+class Executor {
+    public static function execute($cmd) {
+        shell_exec($cmd);
+    }
+}
+"#,
+        ),
+        (
+            "storage.php",
+            r#"<?php
+require_once __DIR__ . '/executor.php';
+
+interface Runnable {
+    public function run(): string;
+}
+
+abstract class BaseRepository implements Runnable {
+    public function __construct(protected array $data) {}
+    public function cmd(): string {
+        return $this->data['cmd'];
+    }
+    abstract public function run(): string;
+}
+
+class Repository extends BaseRepository {
+    public static function wrap(array $data): static {
+        return new static($data);
+    }
+    public function run(): string {
+        return Executor::execute($this->cmd());
+    }
+}
+
+class AuditedRepository extends Repository {
+    public function run(): string {
+        return parent::run();
+    }
+}
+"#,
+        ),
+    ]);
+    let caller = func_id_at_line(&db, "run", 20);
+    let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
+    let local_bindings = AHashMap::new();
+    let config = InterTaintConfig::default();
+    let scope = CallResolveScope {
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        db: &db,
+        caller,
+        config: &config,
+        resolved_calls: None,
+    };
+    let summary_cache = parking_lot::RwLock::new(AHashMap::new());
+    let arg = EffectiveCallArg::positional("$this->cmd()".to_string());
+    let global = db.global_index();
+    let caller_decl = global.decl_of(SymbolId::new(caller.raw())).expect("caller decl");
+    let execute_arg = caller_decl
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Call { name, args, .. } if name == "Executor::execute" => args.first().cloned(),
+            _ => None,
+        })
+        .expect("outer execute arg");
+    let arg_span = execute_arg.span;
+
+    assert_eq!(
+        direct_call_expression_return_taint(&arg, &seed(&["this.data"]), &scope, &summary_cache, None, 0),
+        Some(true),
+        "nested PHP receiver call should resolve and return taint from a tainted receiver container"
+    );
+    assert_eq!(
+        direct_call_expression_return_taint(
+            &arg,
+            &seed(&["this.data"]),
+            &scope,
+            &summary_cache,
+            Some(arg_span),
+            0,
+        ),
+        Some(true),
+        "nested PHP receiver call should retry resolution when the outer arg span is not the callee-token span"
+    );
+    let mut worklist = Vec::new();
+    let mut call_records = Vec::new();
+    let mut tainted_calls = Vec::new();
+    let mut precision = Precision::Exact;
+    let lineage_history = AHashSet::new();
+    let const_bindings = AHashMap::new();
+    let mut local_callable_body_calls = AHashMap::new();
+    let ctx = PropagationCtx {
+        caller,
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        db: &db,
+        config: &config,
+        call_records: &mut call_records,
+        tainted_calls: &mut tainted_calls,
+        worklist: &mut worklist,
+        precision: &mut precision,
+        current_trace_id: None,
+        lineage_history: &lineage_history,
+        const_bindings: &const_bindings,
+        resolved_calls: None,
+        local_callable_body_calls: &mut local_callable_body_calls,
+    };
+    assert!(
+        call_arg_has_semantic_direct_value_taint(&execute_arg, &seed(&["this.data"]), &ctx, &summary_cache),
+        "adapter-emitted PHP call arg should be semantically tainted by receiver container state"
+    );
+    let result = interprocedural_taint(caller, &seed(&["this.data"]), &config, &db);
+    assert!(
+        result.call_records.iter().any(|record| {
+            db.global_index()
+                .decl_of(SymbolId::new(record.callee.raw()))
+                .is_some_and(|decl| decl.name == "execute")
+        }),
+        "full interprocedural walk should propagate the nested receiver-return value into execute"
+    );
+}
+
+#[test]
+fn super_return_recognizes_php_parent_dispatch() {
+    assert!(return_expr_is_super(Some("parent::run()")));
+    assert!(return_expr_is_super(Some("super.run()")));
+    assert!(!return_expr_is_super(Some("parent_value")));
 }
 
 #[test]
@@ -436,6 +787,49 @@ fn typed_constructor_return_named_args_preserve_field_taint_summary() {
             .iter()
             .all(|field| field.field != "user"),
         "clean sibling named args must stay clean: {summary:?}"
+    );
+}
+
+#[test]
+fn python_style_reduce_return_dict_preserves_field_taint_summary() {
+    let flow_events = vec![
+        FlowEvent::Assign {
+            span: Span::new(FileId::new(0), 1, 2),
+            target: "payload".to_string(),
+            source_name: Some("input.arg".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["input.arg".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: Span::new(FileId::new(0), 3, 4),
+            target: "joined".to_string(),
+            source_name: None,
+            source_call: Some("reduce".to_string()),
+            source_call_args: vec![
+                "lambda a, b: f\"{a} {b}\"".to_string(),
+                "[payload]".to_string(),
+                "\"\"".to_string(),
+            ],
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Return {
+            span: Span::new(FileId::new(0), 5, 6),
+            value_text: Some("{\"value\": joined.strip(), \"tag\": \"arg\"}".to_string()),
+            value_name: None,
+        },
+    ];
+    let summary = compute_function_summary(&summary_decl(flow_events, false));
+    assert!(
+        summary
+            .returns_field_taint_of
+            .iter()
+            .any(|field| field.param == 0 && field.field == "value"),
+        "Python dict return should preserve reduce-derived field taint: {summary:?}"
     );
 }
 

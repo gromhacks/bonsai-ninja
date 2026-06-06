@@ -35,8 +35,8 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     default_visibility: Visibility::Public,
 };
 use bonsai_lang_javascript::{
-    apply_js_ts_commonjs_named_export_aliases, apply_js_ts_default_export_aliases, js_ts_imports,
-    js_ts_require_calls,
+    apply_javascript_getter_property_sources, apply_js_ts_commonjs_named_export_aliases,
+    apply_js_ts_default_export_aliases, js_ts_imports, js_ts_require_calls,
 };
 use tree_sitter::{Language, Tree};
 
@@ -161,6 +161,7 @@ impl LanguageAdapter for TypeScriptAdapter {
                     decl.bases = bases.clone();
                 }
             }
+            apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
         }
         // Recognised TypeScript lifecycle transitions — same call
         // names as JavaScript since TS shares the JS runtime surface.

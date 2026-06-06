@@ -58,12 +58,12 @@ use crate::{
 };
 
 use super::{
-    apply_event_transfer, apply_unresolved_call_side_effects, arg_text_is_tainted, bind_param_taint,
-    call_arg_is_directly_tainted, call_receiver_from_name, identifier_value_occurs,
-    insert_descendant_target_taint, insert_target_taint, insert_value_target_taint, named_field_initializers,
-    normalise_qualified_text, normalise_target_text, push_unique_string, qualified_wildcard_seed_matches,
-    type_constructor_arg_body, value_marker, FunctionSummary, InterTaintConfig, ParamSideEffect,
-    ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
+    actual_has_descendant_taint, apply_event_transfer, apply_unresolved_call_side_effects,
+    arg_text_is_tainted, bind_param_taint, call_arg_is_directly_tainted, call_receiver_from_name,
+    identifier_value_occurs, insert_descendant_target_taint, insert_target_taint, insert_value_target_taint,
+    named_field_initializers, normalise_qualified_text, normalise_target_text, push_unique_string,
+    qualified_wildcard_seed_matches, type_constructor_arg_body, value_marker, FunctionSummary,
+    InterTaintConfig, ParamSideEffect, ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
 };
 
 /// Compute the return-taint summary for one function by running the
@@ -212,13 +212,28 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
             &value_tainted_at_end,
             &mut returns_field_taint_of,
         );
+        collect_return_field_taints(
+            &decl.flow_events,
+            param_idx,
+            param,
+            &descendant_tainted_at_end,
+            &mut returns_field_taint_of,
+        );
         collect_return_element_taints(
             &decl.flow_events,
             param_idx,
             &value_tainted_at_end,
             &mut returns_element_taint_of,
         );
-        if contains_tainted_container_return(&decl.flow_events, &value_tainted_at_end) {
+        collect_return_element_taints(
+            &decl.flow_events,
+            param_idx,
+            &descendant_tainted_at_end,
+            &mut returns_element_taint_of,
+        );
+        if contains_tainted_container_return(&decl.flow_events, &value_tainted_at_end)
+            || contains_tainted_container_return(&decl.flow_events, &descendant_tainted_at_end)
+        {
             returns_container_taint_of.push(param_idx);
         }
     }
@@ -896,7 +911,9 @@ pub(super) fn implicit_receiver_return_is_tainted(
     }
     // Fallback: caller knows the receiver itself is tainted, and the callee
     // returns receiver-state — so the call's value is tainted by transitivity.
-    (caller_state.contains(&receiver) || caller_state.contains(&value_marker(&receiver)))
+    (caller_state.contains(&receiver)
+        || caller_state.contains(&value_marker(&receiver))
+        || actual_has_descendant_taint(&receiver, caller_state))
         && callee_returns_implicit_receiver_state(decl)
 }
 

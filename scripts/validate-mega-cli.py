@@ -55,13 +55,15 @@ EXPECTED_FINDINGS = {
     # the redundant inferred-source over-claim was filtered; go 2→1
     # and objc 2→1 after redundant-inferred / xxe-over-claim removal;
     # python 5→3 and dart→1 after the combiner's group_id+sink-site
-    # dedup collapsed duplicate entry-chain rows.
+    # dedup collapsed duplicate entry-chain rows; erlang 2→1 and solidity
+    # 3→2 after equivalent inferred/member paths are grouped into one real
+    # report row.
     "c": 1,
     "cpp": 1,
     "csharp": 1,
     "dart": 1,
     "elixir": 1,
-    "erlang": 2,
+    "erlang": 1,
     "go": 1,
     "java": 1,
     "javascript": 1,

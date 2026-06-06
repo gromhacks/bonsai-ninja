@@ -205,9 +205,8 @@ pub(crate) struct Cli {
     pub(crate) no_cache: bool,
 
     /// Disable progress bars for long-running commands. Also respects
-    /// `NO_PROGRESS` / `NO_COLOR` env vars and auto-disables when
-    /// stderr isn't a TTY (so pipes / CI / `--format json` scripts
-    /// stay clean by default).
+    /// `NO_PROGRESS` and auto-disables when stderr isn't a TTY (so
+    /// pipes / CI / `--format json` scripts stay clean by default).
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
 

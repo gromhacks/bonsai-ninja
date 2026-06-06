@@ -4,7 +4,8 @@ use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
         canonical_simple_type_name, collect_kinds, collect_receiver_field_writes, language_from_pack,
-        node_text, parse_with, span_of, with_fn_kinds_and_implicit_receivers,
+        node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
+        with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
@@ -126,6 +127,7 @@ impl LanguageAdapter for CSharpAdapter {
             extract_csharp_namespace(tree.root_node(), snapshot.text.as_bytes())
         });
         if let Some(segments) = pkg {
+            let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
             bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
         } else {
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);

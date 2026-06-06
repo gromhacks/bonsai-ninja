@@ -1,6 +1,6 @@
 use super::{
     apply_assign_call_result_types, canonical_simple_type_name, normalize_call_result_assignment_sources,
-    receiver_projected_alias_matches,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
@@ -153,6 +153,55 @@ fn receiver_projection_base_extracts_leftmost_token() {
     assert_eq!(receiver_projection_base("a->b->c"), "a");
     assert_eq!(receiver_projection_base("Foo::bar"), "Foo");
     assert_eq!(receiver_projection_base("conn"), "conn");
+}
+
+#[test]
+fn package_module_segments_keep_sibling_projects_distinct() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let vfs = Vfs::new();
+    let root = std::env::temp_dir().join("bonsai-package-module-prefix");
+    let first = vfs.write(root.join("flow_a/src/main/java/mega/App.java"), "");
+    let second = vfs.write(root.join("flow_b/src/main/java/mega/App.java"), "");
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = crate::AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: Some(&root),
+    };
+
+    assert_eq!(
+        package_module_segments_with_workspace_prefix(first, &ctx, ["mega"]),
+        vec!["flow_a".to_string(), "mega".to_string()]
+    );
+    assert_eq!(
+        package_module_segments_with_workspace_prefix(second, &ctx, ["mega"]),
+        vec!["flow_b".to_string(), "mega".to_string()]
+    );
+}
+
+#[test]
+fn package_module_segments_preserve_plain_fixture_packages() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let vfs = Vfs::new();
+    let root = std::env::temp_dir().join("bonsai-package-module-plain");
+    let file = vfs.write(root.join("App.java"), "");
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = crate::AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: Some(&root),
+    };
+
+    assert_eq!(
+        package_module_segments_with_workspace_prefix(file, &ctx, ["mega"]),
+        vec!["mega".to_string()]
+    );
 }
 
 // audit M9: `apply_assign_call_result_types` must fail closed when two
