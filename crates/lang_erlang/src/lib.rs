@@ -143,6 +143,7 @@ impl LanguageAdapter for ErlangAdapter {
         ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
+            augment_erlang_collection_transform_flow_events(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ERLANG_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -283,6 +284,16 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                 if source_call.as_deref().is_some_and(erlang_maps_get_callee_name) {
                     if let Some(access) = erlang_maps_get_access_from_args(source_call_args) {
                         push_unique_string(source_names, access);
+                    }
+                }
+                add_erlang_collection_transform_sources(
+                    source_call.as_deref(),
+                    source_call_args,
+                    source_names,
+                );
+                if let Some(rhs_text) = erlang_assignment_rhs_text(src, *span) {
+                    for source in erlang_comprehension_generator_sources(rhs_text) {
+                        push_unique_string(source_names, source);
                     }
                 }
                 // Any record access mentioned anywhere in the assignment
@@ -653,6 +664,172 @@ fn erlang_assignment_rhs_text(src: &str, span: bonsai_common::Span) -> Option<&s
     let span_text = erlang_span_text(src, span)?;
     let (_lhs, rhs_with_dot) = split_top_level_match_expr(span_text)?;
     Some(rhs_with_dot.trim().trim_end_matches('.').trim())
+}
+
+/// Add source operands for Erlang stdlib collection transforms whose
+/// result is semantically derived from one collection input.
+fn add_erlang_collection_transform_sources(
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    source_names: &mut Vec<String>,
+) {
+    let Some(callee) = source_call else {
+        return;
+    };
+    let source_arg_index = match normalise_erlang_callee_separator(callee).as_str() {
+        // string:tokens(String, Separators) returns parts of String.
+        "string.tokens" => Some(0),
+        // lists:map(Fun, List) and lists:filter(Pred, List) preserve
+        // element taint from List into the result collection.
+        "lists.map" | "lists.filter" => Some(1),
+        // lists:foldl(Fun, Acc0, List) / foldr derive the result from
+        // the list elements under the callback.
+        "lists.foldl" | "lists.foldr" => Some(2),
+        _ => None,
+    };
+    let Some(source_arg) = source_arg_index.and_then(|idx| source_call_args.get(idx)) else {
+        return;
+    };
+    for source in erlang_value_source_names(source_arg) {
+        push_unique_string(source_names, source);
+    }
+}
+
+fn augment_erlang_collection_transform_flow_events(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                let source_call = source_call.clone();
+                let source_call_args = source_call_args.clone();
+                add_erlang_collection_transform_sources(
+                    source_call.as_deref(),
+                    &source_call_args,
+                    source_names,
+                );
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_erlang_collection_transform_flow_events(then_events);
+                augment_erlang_collection_transform_flow_events(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_erlang_collection_transform_flow_events(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_erlang_collection_transform_flow_events(body);
+                augment_erlang_collection_transform_flow_events(catch_events);
+                augment_erlang_collection_transform_flow_events(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn normalise_erlang_callee_separator(callee: &str) -> String {
+    callee.trim().replace(':', ".")
+}
+
+/// Extract source operands from Erlang list/binary comprehension
+/// generators, e.g. `[Part || Part <- string:tokens(Cmd, " ")]`.
+fn erlang_comprehension_generator_sources(rhs_text: &str) -> Vec<String> {
+    let Some((_, qualifiers)) = split_top_level_erlang_comprehension(rhs_text) else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    for qualifier in split_top_level_args(qualifiers) {
+        let Some((_, generator_source)) = split_top_level_erlang_generator(&qualifier) else {
+            continue;
+        };
+        for source in erlang_value_source_names(generator_source) {
+            push_unique_string(&mut sources, source);
+        }
+    }
+    sources
+}
+
+fn split_top_level_erlang_comprehension(text: &str) -> Option<(&str, &str)> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut iter = text.char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '|' if matches!(iter.peek(), Some((_, '|'))) && depth == 1 => {
+                let _ = iter.next();
+                let qualifiers = text[idx + 2..].trim();
+                let qualifiers = qualifiers
+                    .strip_suffix(']')
+                    .or_else(|| qualifiers.strip_suffix(">>"))
+                    .unwrap_or(qualifiers)
+                    .trim();
+                return Some((text[..idx].trim(), qualifiers));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_erlang_generator(text: &str) -> Option<(&str, &str)> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut iter = text.char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '<' if matches!(iter.peek(), Some((_, '-'))) && depth == 0 => {
+                let _ = iter.next();
+                return Some((text[..idx].trim(), text[idx + 2..].trim()));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Identify the implicit return expression of an Erlang function clause.

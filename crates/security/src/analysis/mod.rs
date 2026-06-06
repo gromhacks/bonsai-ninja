@@ -12,7 +12,8 @@ use crate::finding::{
 };
 use crate::loader::Rulepack;
 use crate::matcher::{
-    infer_entry_point_sources, match_rules_against_facts_for_sink_inventory_with_progress_on_files,
+    infer_entry_point_sources_for_files_with_progress,
+    match_rules_against_facts_for_sink_inventory_with_progress_on_files,
     match_rules_against_facts_for_taint_with_progress_on_files,
     match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
     InterTaintView, RuleMatch,
@@ -41,6 +42,7 @@ type RankedCallPath = std::cmp::Reverse<(i64, u32, u32, Vec<FuncId>)>;
 type InventoryMatchIdentity = (String, String, u32, u32, String, String, Option<String>);
 type SourceMatchDedupeKey = (String, String, u64, u64, String);
 type SourceMatchDedupeValue<'a> = (usize, &'a RuleMatch, FuncId, u64);
+const SOURCE_SINK_NODE_PREFILTER_MAX_CANDIDATES: u64 = 512;
 
 /// Phase-aware progress event emitted by `run_taint_analysis_with_phase_progress`
 /// and `run_source_analysis_with_phase_progress`. Long-running phases
@@ -679,8 +681,16 @@ where
         // duplicates the concrete `r.URL.Query().Get(...)` source). Drop
         // the inferred param so the precise source is the sole evidence.
         let concrete_param_bases = concrete_source_param_bases(&source_hits);
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "inferring entry-point sources",
+            total: total_files,
+        });
+        let inferred_sources = infer_entry_point_sources_for_files_with_progress(ws, &scan_files, || {
+            on_progress(AnalysisProgress::PhaseTicked);
+        });
+        on_progress(AnalysisProgress::PhaseFinished);
         source_hits.extend(
-            infer_entry_point_sources(ws)
+            inferred_sources
                 .into_iter()
                 .filter(|inferred| !inferred_param_subsumed_by_concrete(inferred, &concrete_param_bases)),
         );
@@ -885,18 +895,24 @@ where
             .cmp(&a.finding.severity)
             .then_with(|| a.finding.finding_id.cmp(&b.finding.finding_id))
     });
+    on_progress(AnalysisProgress::PhaseFinished);
 
     // Embed per-hop source bodies so JSON/SARIF carry the same code the text
     // view renders. Done last, on surviving findings only, so filtered-out
     // findings never pay the VFS read.
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "attaching flow evidence",
+        total: findings.len() as u64,
+    });
+    let mut flow_body_cache = crate::flow_evidence::FlowBodyCache::new(ws);
     for combined in &mut findings {
-        combined.finding.hops = crate::flow_evidence::build_flow_bodies(
-            ws,
+        combined.finding.hops = flow_body_cache.build_flow_bodies(
             &combined.chain_funcs,
             &combined.finding.source,
             &combined.finding.taint_path,
             crate::flow_evidence::FlowRole::Sink,
         );
+        on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
@@ -986,8 +1002,16 @@ where
         // request param. Drop the inferred param in that case so the
         // precise source is the sole evidence for the flow.
         let concrete_param_bases = concrete_source_param_bases(&source_hits);
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "inferring entry-point sources",
+            total: total_files,
+        });
+        let inferred_sources = infer_entry_point_sources_for_files_with_progress(ws, &scan_files, || {
+            on_progress(AnalysisProgress::PhaseTicked);
+        });
+        on_progress(AnalysisProgress::PhaseFinished);
         source_hits.extend(
-            infer_entry_point_sources(ws)
+            inferred_sources
                 .into_iter()
                 .filter(|inferred| !inferred_param_subsumed_by_concrete(inferred, &concrete_param_bases)),
         );
@@ -4351,10 +4375,11 @@ fn drop_field_mismatched_inferred_findings(
             if !source_is_inferred(&f.source) {
                 return true;
             }
-            // `class_field.inherited` is the synthesized-per-record-
-            // component shape — always over-approximation, safe to
-            // drop even without concrete coverage when the field
-            // name mismatches the sink.
+            // `class_field.inherited` is synthesized per record /
+            // instance-field component. It is still the only
+            // available source evidence for constructor-to-field
+            // flows in some languages, so only collapse it when
+            // another source already covers the same chain or sink.
             let is_class_field = f.source.rule_id.contains(".class_field.inherited");
             let is_unreferenced_entry = f.source.rule_id.contains(".unreferenced_entry.");
             let same_sink_site_covered = concrete_sink_sites.contains_key(&(
@@ -4364,6 +4389,9 @@ fn drop_field_mismatched_inferred_findings(
                 f.sink.column,
                 f.sink.rule_id.clone(),
             ));
+            if is_class_field && same_sink_site_covered {
+                return false;
+            }
             if is_unreferenced_entry && same_sink_site_covered {
                 return false;
             }
@@ -4380,7 +4408,7 @@ fn drop_field_mismatched_inferred_findings(
                 );
                 concrete_chains.contains_key(&key)
             };
-            if !is_class_field && !same_chain_covered && !same_sink_site_covered {
+            if !same_chain_covered && !same_sink_site_covered {
                 return true;
             }
             // Source text without a field-name segment (rare) gets
@@ -5170,16 +5198,30 @@ where
         max_edge_precision: max_precision,
         ..Default::default()
     };
+    let chain_call_graph = ws.cached_resolved_call_graph();
     let sink_func_set: AHashSet<FuncId> = sink_by_func.keys().copied().collect();
     let source_sink_prefilter_enabled = !source_work.is_empty() && !sink_func_set.is_empty();
+    if source_sink_prefilter_enabled {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "building source-sink reachability",
+            total: 2,
+        });
+    }
     let semantic_function_graph = source_sink_prefilter_enabled.then(|| {
-        SemanticFunctionGraph::new(idg.semantic_function_edges_with_max_precision(config.max_edge_precision))
+        SemanticFunctionGraph::new(prefilter_function_edges(idg.as_ref(), config.max_edge_precision))
     });
-    let chain_call_graph = ws.cached_resolved_call_graph();
+    if source_sink_prefilter_enabled {
+        on_progress(AnalysisProgress::PhaseTicked);
+    }
     let source_funcs_that_can_reach_sinks = semantic_function_graph
         .as_ref()
         .map(|graph| graph.funcs_that_can_reach(&sink_func_set));
+    if source_sink_prefilter_enabled {
+        on_progress(AnalysisProgress::PhaseTicked);
+        on_progress(AnalysisProgress::PhaseFinished);
+    }
     let taint_caches = ws.inter_taint_caches();
+    taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
     // Workspace-wide source-seeded graph index. The resident cache is
     // bounded and guarded by a rule/config fingerprint, so reuse
     // cannot keep stale graphs alive across rulepack or precision
@@ -5199,6 +5241,15 @@ where
         source_groups_sorted.retain(|(func, _)| reachable.contains(func));
     }
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
+    let scheduling_total = source_groups_sorted
+        .iter()
+        .map(|(_, indices)| indices.len() as u64)
+        .sum();
+    let use_source_sink_node_prefilter = scheduling_total <= SOURCE_SINK_NODE_PREFILTER_MAX_CANDIDATES;
+    on_progress(AnalysisProgress::PhaseStarted {
+        label: "scheduling taint sources",
+        total: scheduling_total,
+    });
 
     struct ScheduledSourceGroup {
         src_func_id: FuncId,
@@ -5208,11 +5259,21 @@ where
 
     let debug_taint_phase = bonsai_diagnostics::debug::is_enabled("security-taint");
     let mut scheduled_source_groups = Vec::new();
+    let mut sink_target_node_cache: AHashMap<Vec<u32>, Vec<bonsai_idg::WsNodeId>> = AHashMap::new();
     for (src_func_id, indices) in source_groups_sorted {
         let Some(group_corridor) = semantic_function_graph.as_ref().and_then(|graph| {
             let reachable_to_sink = source_funcs_that_can_reach_sinks.as_ref()?;
             let corridor = graph.source_sink_corridor(src_func_id, &sink_func_set, reachable_to_sink);
-            (!corridor.terminal_sinks.is_empty()).then_some(corridor)
+            if !corridor.terminal_sinks.is_empty() {
+                return Some(corridor);
+            }
+            if !reachable_to_sink.contains(&src_func_id) {
+                return None;
+            }
+            Some(SourceSinkCorridor {
+                terminal_sinks: sink_func_set.clone(),
+                lineage_funcs: reachable_to_sink.clone(),
+            })
         }) else {
             if debug_taint_phase {
                 let name = global
@@ -5227,28 +5288,44 @@ where
                     indices.len()
                 );
             }
+            for _ in indices {
+                on_progress(AnalysisProgress::PhaseTicked);
+            }
             continue;
         };
-        let target_nodes = sink_target_nodes_for_corridor(idg.as_ref(), &sink_by_func, &group_corridor);
-        let filtered_indices = if target_nodes.is_empty() {
-            indices.clone()
-        } else {
-            indices
+        let filtered_indices = if use_source_sink_node_prefilter {
+            let mut sink_target_key: Vec<u32> = group_corridor
+                .terminal_sinks
                 .iter()
-                .copied()
-                .filter(|idx| {
-                    source_index_reaches_target_nodes(
-                        *idx,
-                        &source_work,
-                        pack,
-                        &config,
-                        global.as_ref(),
-                        idg.as_ref(),
-                        &target_nodes,
-                        Some(&group_corridor.lineage_funcs),
-                    )
-                })
-                .collect()
+                .map(|func| func.raw())
+                .collect();
+            sink_target_key.sort();
+            sink_target_key.dedup();
+            let sink_target_nodes = sink_target_node_cache.entry(sink_target_key).or_insert_with(|| {
+                sink_target_nodes_for_corridor(idg.as_ref(), &sink_by_func, &group_corridor)
+            });
+            let mut filtered_indices = Vec::with_capacity(indices.len());
+            for idx in indices.iter().copied() {
+                if source_index_reaches_sink_target_nodes(
+                    idx,
+                    &source_work,
+                    pack,
+                    &config,
+                    global.as_ref(),
+                    idg.as_ref(),
+                    sink_target_nodes,
+                    &group_corridor.lineage_funcs,
+                ) {
+                    filtered_indices.push(idx);
+                }
+                on_progress(AnalysisProgress::PhaseTicked);
+            }
+            filtered_indices
+        } else {
+            for _ in indices {
+                on_progress(AnalysisProgress::PhaseTicked);
+            }
+            indices.clone()
         };
         if filtered_indices.is_empty() {
             if debug_taint_phase {
@@ -5258,7 +5335,7 @@ where
                     .unwrap_or_default();
                 bonsai_diagnostics::debug_log!(
                     "security-taint",
-                    "group func={}({}) sources={} skipped=no_seed_to_sink_node_cut",
+                    "group func={}({}) sources={} skipped=no_source_to_sink_node_cut",
                     name,
                     src_func_id.raw(),
                     indices.len()
@@ -5272,6 +5349,7 @@ where
             corridor: group_corridor,
         });
     }
+    on_progress(AnalysisProgress::PhaseFinished);
 
     bonsai_diagnostics::debug_log!(
         "security-phase",
@@ -5305,6 +5383,25 @@ where
         let mut group_out: Vec<FindingWithChain> = Vec::new();
         let group_sink_func_targets = Some(&group.corridor.lineage_funcs);
         let group_lineage_func_targets = Some(&group.corridor.lineage_funcs);
+        if debug_taint_phase {
+            let mut names: Vec<String> = group
+                .corridor
+                .lineage_funcs
+                .iter()
+                .filter_map(|func| {
+                    global
+                        .decl_of(SymbolId::new(func.raw()))
+                        .map(|decl| format!("{}({})", decl.name, func.raw()))
+                })
+                .collect();
+            names.sort();
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "group func={} lineage_funcs={:?}",
+                src_func_id.raw(),
+                names
+            );
+        }
         let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
             AHashSet::new();
         // Bounded L1 for this one source function. Several
@@ -5325,8 +5422,14 @@ where
                 } else {
                     Some(src.span)
                 };
-            let mut seed_key =
-                effective_source_seed_key(src_func_id, seeds, anchor, &output_arg_names, idg.as_ref());
+            let mut seed_key = effective_source_seed_key(
+                src_func_id,
+                seeds,
+                anchor,
+                &output_arg_names,
+                global.as_ref(),
+                idg.as_ref(),
+            );
             append_taint_target_key(&mut seed_key, "target_funcs", group_sink_func_targets);
             append_taint_target_key(&mut seed_key, "lineage_funcs", group_lineage_func_targets);
             let graph_key = (src_func_id, seed_key);
@@ -5717,6 +5820,94 @@ struct SourceSinkCorridor {
     lineage_funcs: AHashSet<FuncId>,
 }
 
+fn prefilter_function_edges(
+    idg: &bonsai_idg::IdgQueryService,
+    max_precision: Option<Precision>,
+) -> Vec<(FuncId, FuncId)> {
+    let mut edges = idg.semantic_function_edges_with_max_precision(max_precision);
+    edges.sort_by_key(|(caller, callee)| (caller.raw(), callee.raw()));
+    edges.dedup();
+    edges
+}
+
+fn sink_target_nodes_for_corridor(
+    idg: &bonsai_idg::IdgQueryService,
+    sink_by_func: &AHashMap<FuncId, Vec<&RuleMatch>>,
+    corridor: &SourceSinkCorridor,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let mut sink_funcs: Vec<FuncId> = corridor.terminal_sinks.iter().copied().collect();
+    sink_funcs.sort_by_key(|func| func.raw());
+    let mut out = Vec::new();
+    for sink_func in sink_funcs {
+        let Some(sinks) = sink_by_func.get(&sink_func) else {
+            continue;
+        };
+        for sink in sinks {
+            out.extend(idg.nodes_at_span(sink_func, sink.span));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
+fn source_index_reaches_sink_target_nodes(
+    index: usize,
+    source_work: &[(&RuleMatch, FuncId, TokenSet)],
+    pack: &Rulepack,
+    config: &InterTaintConfig,
+    global: &GlobalIndex,
+    idg: &bonsai_idg::IdgQueryService,
+    sink_target_nodes: &[bonsai_idg::WsNodeId],
+    lineage_func_filter: &AHashSet<FuncId>,
+) -> bool {
+    if sink_target_nodes.is_empty() {
+        return true;
+    }
+    let Some((src, source_func, seeds)) = source_work.get(index) else {
+        return true;
+    };
+    // Parameter and inferred-entry sources are intentionally unanchored:
+    // the source span points at a declaration, not a value-producing
+    // expression. Keep them on the function-level corridor and let the
+    // exact graph builder seed the declaration parameters.
+    if src.rule_id.starts_with("entry-point.") || rule_match_kind_is_param(pack, &src.rule_id) {
+        return true;
+    }
+    let output_arg_names = global
+        .decl_of(SymbolId::new(source_func.raw()))
+        .map(|decl| output_arg_names_for_match(pack, src, decl))
+        .unwrap_or_default();
+    let mut seed_nodes = effective_source_seed_nodes(
+        *source_func,
+        seeds,
+        Some(src.span),
+        &output_arg_names,
+        global,
+        idg,
+    );
+    if seed_nodes.is_empty() {
+        return true;
+    }
+    apply_configured_transfer_fixpoint(
+        &mut seed_nodes,
+        &config.receiver_state_propagations,
+        &config.call_result_passthroughs,
+        &config.output_arg_flows,
+        global,
+        idg,
+        config.max_edge_precision,
+        Some(lineage_func_filter),
+    );
+    !idg.forward_target_nodes_cut_with_max_precision(
+        &seed_nodes,
+        sink_target_nodes,
+        config.max_edge_precision,
+    )
+    .is_empty()
+}
+
 struct SemanticFunctionGraph {
     callees: AHashMap<FuncId, Vec<FuncId>>,
     callers: AHashMap<FuncId, Vec<FuncId>>,
@@ -5831,82 +6022,6 @@ fn append_taint_target_key(seed_key: &mut Vec<String>, label: &str, target_funcs
     seed_key.push(format!("__{label}@{encoded}"));
 }
 
-fn sink_target_nodes_for_corridor(
-    idg: &bonsai_idg::IdgQueryService,
-    sink_by_func: &AHashMap<FuncId, Vec<&RuleMatch>>,
-    corridor: &SourceSinkCorridor,
-) -> Vec<bonsai_idg::WsNodeId> {
-    let mut out = Vec::new();
-    for func in &corridor.terminal_sinks {
-        let Some(sinks) = sink_by_func.get(func) else {
-            continue;
-        };
-        for sink in sinks {
-            out.extend(idg.nodes_at_span(*func, sink.span));
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-#[allow(clippy::too_many_arguments)] // Mirrors exact graph seed resolution plus configured transfer overlays.
-fn source_index_reaches_target_nodes(
-    idx: usize,
-    source_work: &[(&RuleMatch, FuncId, TokenSet)],
-    pack: &Rulepack,
-    config: &InterTaintConfig,
-    global: &GlobalIndex,
-    idg: &bonsai_idg::IdgQueryService,
-    target_nodes: &[bonsai_idg::WsNodeId],
-    lineage_funcs: Option<&AHashSet<FuncId>>,
-) -> bool {
-    if target_nodes.is_empty() {
-        return true;
-    }
-    let Some((src, src_func_id, seeds)) = source_work.get(idx) else {
-        return false;
-    };
-    let output_arg_names = global
-        .decl_of(SymbolId::new(src_func_id.raw()))
-        .map(|d| output_arg_names_for_match(pack, src, d))
-        .unwrap_or_default();
-    let anchor = if rule_match_kind_is_param(pack, &src.rule_id) || src.rule_id.starts_with("entry-point.") {
-        None
-    } else {
-        Some(src.span)
-    };
-    let mut seed_nodes = effective_source_seed_nodes(*src_func_id, seeds, anchor, &output_arg_names, idg);
-    if seed_nodes.is_empty() {
-        return true;
-    }
-    apply_configured_transfer_fixpoint(
-        &mut seed_nodes,
-        &config.receiver_state_propagations,
-        &config.call_result_passthroughs,
-        &config.output_arg_flows,
-        global,
-        idg,
-        config.max_edge_precision,
-        lineage_funcs,
-    );
-    if !idg
-        .forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, config.max_edge_precision)
-        .is_empty()
-    {
-        return true;
-    }
-    let Some(source_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
-        return true;
-    };
-    let source_file = source_decl.span.file;
-    let same_file_target = target_nodes.iter().any(|node| {
-        idg.resolve_point(*node)
-            .is_some_and(|point| point.span.file == source_file)
-    });
-    !same_file_target
-}
-
 fn source_analysis_worker_count() -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
@@ -5950,9 +6065,10 @@ fn effective_source_seed_key(
     seeds: &TokenSet,
     anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<String> {
-    let seed_nodes = effective_source_seed_nodes(source_func, seeds, anchor, output_arg_names, idg);
+    let seed_nodes = effective_source_seed_nodes(source_func, seeds, anchor, output_arg_names, global, idg);
     if !seed_nodes.is_empty() {
         let node_ids = seed_nodes
             .iter()
@@ -5969,12 +6085,21 @@ fn effective_source_seed_nodes(
     seeds: &TokenSet,
     anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
-    let Some(span) = anchor else {
-        return Vec::new();
-    };
     let mut seed_nodes = Vec::new();
+    let seed_names: Vec<String> = seeds.iter().cloned().collect();
+    if anchor.is_none() {
+        seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
+        if seed_nodes.is_empty() {
+            seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
+        }
+        seed_nodes.sort();
+        seed_nodes.dedup();
+        return seed_nodes;
+    }
+    let span = anchor.expect("checked above");
     if !output_arg_names.is_empty() {
         for arg_name in output_arg_names {
             if arg_name.is_empty() {
@@ -5992,7 +6117,6 @@ fn effective_source_seed_nodes(
         if anchor_has_call_return {
             seed_nodes = anchor_nodes;
         } else {
-            let seed_names: Vec<String> = seeds.iter().cloned().collect();
             seed_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
             if seed_nodes.is_empty() {
                 seed_nodes = anchor_nodes;
@@ -6036,7 +6160,7 @@ fn exact_source_seed_graph(
     ws: &Workspace,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
-    target_nodes: Option<&[bonsai_idg::WsNodeId]>,
+    _target_nodes: Option<&[bonsai_idg::WsNodeId]>,
     target_funcs: Option<&AHashSet<FuncId>>,
     lineage_funcs: Option<&AHashSet<FuncId>>,
 ) -> EntryTaintGraph {
@@ -6063,7 +6187,7 @@ fn exact_source_seed_graph(
         &config.receiver_state_propagations,
         &config.call_result_passthroughs,
         &config.output_arg_flows,
-        target_nodes,
+        None,
         target_funcs,
         lineage_funcs,
         config.max_edge_precision,
@@ -6385,6 +6509,20 @@ fn sanitizer_call_overlaps_tainted_call(san: &RuleMatch, tainted_call_spans: &AH
     tainted_call_spans
         .iter()
         .any(|span| spans_overlap(*span, san.span))
+}
+
+fn sanitizer_char_allowlist_guards_tainted_call(
+    san: &RuleMatch,
+    tainted_call_spans: &AHashSet<Span>,
+) -> bool {
+    if !san.rule_id.contains("char_allowlist") && !san.rule_id.contains("char-allowlist") {
+        return false;
+    }
+    tainted_call_spans.iter().any(|span| {
+        span.file == san.span.file
+            && san.span.end <= span.start
+            && span.start.saturating_sub(san.span.end) <= 128
+    })
 }
 
 /// M4: a sanitizer is only "nested in a tainted sink arg" when the
@@ -6868,6 +7006,9 @@ fn collect_source_seed_targets(
                     );
                     if !skip_target_seed && !source_is_call_input && !target.is_empty() {
                         insert_taint_aliases(out, target);
+                        if source_names_contain_descendant_of_source(source_names, &src.match_text) {
+                            insert_descendant_taint_aliases(out, target);
+                        }
                     }
                     let _ = source_call;
                     if let Some(source_name) = source_name.as_deref() {
@@ -7034,6 +7175,18 @@ fn seed_descendant_aliases_for_qualified_source_reads(
     }
 }
 
+fn source_names_contain_descendant_of_source(source_names: &[String], source_text: &str) -> bool {
+    let source = security_normalise_qualified_text(source_text);
+    if source.is_empty() {
+        return false;
+    }
+    source_names.iter().any(|name| {
+        let name = security_normalise_qualified_text(name);
+        name.strip_prefix(source.as_str())
+            .is_some_and(|rest| rest.starts_with('.') && rest.len() > 1)
+    })
+}
+
 fn source_base_matches(base: &str, source_text: &str) -> bool {
     security_text_matches_source_strict(base, source_text)
         || security_text_matches_source_strict(
@@ -7098,11 +7251,24 @@ fn security_text_matches_source_strict(text: &str, source_text: &str) -> bool {
         return true;
     }
     // Tail match: `getenv` matches `os.getenv` (one is a suffix of
-    // the other when split on `.` / `:`). Equivalent to: the bare
-    // tails are equal.
+    // the other when split on `.` / `:`). Do not tail-match
+    // multi-segment receiver chains such as `request.headers.get`:
+    // the tail `get` is generic and would conflate sibling framework
+    // sources like `request.args.get` and `request.headers.get`.
+    if source_qualified_segment_count(source_text) > 2 {
+        return false;
+    }
     let text_tail = text.rsplit(&['.', ':'][..]).next().unwrap_or(text);
     let src_tail = source_text.rsplit(&['.', ':'][..]).next().unwrap_or(source_text);
     text_tail == src_tail && !text_tail.is_empty()
+}
+
+fn source_qualified_segment_count(text: &str) -> usize {
+    let normalized = security_normalise_qualified_text(text);
+    normalized
+        .split(&['.', ':'][..])
+        .filter(|part| !part.trim().is_empty())
+        .count()
 }
 
 fn security_normalise_qualified_text(text: &str) -> String {
@@ -7313,6 +7479,10 @@ fn make_finding(
         for sanitizer_match in sanitizer_hits {
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
+                    || sanitizer_char_allowlist_guards_tainted_call(
+                        sanitizer_match,
+                        context.tainted_call_spans,
+                    )
                     || sanitizer_is_nested_in_tainted_sink_arg(
                         src,
                         sanitizer_match,
@@ -7663,8 +7833,8 @@ fn idg_transfer_options_from_rulepack_shapes(
                 output_arg_indices: shape.output_arg_indices.clone(),
             })
             .collect(),
-        include_diagnostic_field_flows: true,
-        include_receiver_method_propagation: true,
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
     }
 }
 

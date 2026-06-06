@@ -1654,8 +1654,7 @@ fn adapters_do_not_emit_qualified_name_none_without_post_process() {
         // The adapter must call one of the apply_*_semantic_identity
         // helpers somewhere in the body; otherwise the None will
         // persist into the global index.
-        let post_processes = body.contains("apply_file_stem_semantic_identity")
-            || body.contains("apply_module_path_semantic_identity");
+        let post_processes = adapter_applies_semantic_identity(body);
         if !post_processes {
             violations.push(format!(
                 "{}: emits qualified_name: None without semantic-identity post-process",
@@ -1739,8 +1738,7 @@ fn every_adapter_populates_qualified_name() {
         } else {
             text.as_str()
         };
-        let calls_post_process = body.contains("apply_file_stem_semantic_identity")
-            || body.contains("apply_module_path_semantic_identity");
+        let calls_post_process = adapter_applies_semantic_identity(body);
         let emits_inline_qualified = body.contains("qualified_name: Some(");
         if !calls_post_process && !emits_inline_qualified {
             violations.push(format!(
@@ -1845,8 +1843,7 @@ fn every_adapter_populates_module_path() {
         } else {
             text.as_str()
         };
-        let has_module_path = body.contains("apply_file_stem_semantic_identity")
-            || body.contains("apply_module_path_semantic_identity");
+        let has_module_path = adapter_applies_semantic_identity(body);
         if !has_module_path {
             violations.push(format!(
                 "{}: adapter does not populate `module_path` (no apply_*_semantic_identity call)",
@@ -1859,6 +1856,12 @@ fn every_adapter_populates_module_path() {
         "every adapter must populate Decl.module_path:\n  {}",
         violations.join("\n  ")
     );
+}
+
+fn adapter_applies_semantic_identity(body: &str) -> bool {
+    body.contains("apply_file_stem_semantic_identity")
+        || body.contains("apply_module_path_semantic_identity")
+        || body.contains("apply_swift_semantic_identity")
 }
 
 /// Call-arg indexing must be post-receiver-normalised across every

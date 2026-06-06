@@ -2,7 +2,7 @@ use super::*;
 use crate::workspace_adapter;
 use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, ResolvedCallGraph};
 use bonsai_common::{Precision, SymbolId};
-use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility};
+use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, ModulePath, Visibility};
 
 fn span(file: u32, start: u64, end: u64) -> Span {
     Span::new(bonsai_common::FileId::new(file), start, end)
@@ -62,6 +62,17 @@ fn func_id(idx: &GlobalIndex, name: &str) -> FuncId {
         }
     }
     unreachable!("function {name} not in index")
+}
+
+fn func_id_at_start(idx: &GlobalIndex, name: &str, start: u64) -> FuncId {
+    for file in idx.all_files() {
+        for decl in idx.functions_in(file) {
+            if decl.name == name && decl.span.start == start {
+                return FuncId::new(decl.symbol.raw());
+            }
+        }
+    }
+    unreachable!("function {name}@{start} not in index")
 }
 
 fn resolved_graph(edges: impl IntoIterator<Item = (FuncId, FuncId, Span)>) -> ResolvedCallGraph {
@@ -970,6 +981,1568 @@ fn sibling_field_taint_does_not_promote_container_argument_to_sink() {
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(0, 90, 100) && *idx == 0),
         "user field must not promote the whole env argument: {user_calls:?}"
+    );
+}
+
+#[test]
+fn module_path_method_call_forwards_field_precise_argument() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string(), "user".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "valid.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 21, 30),
+            target: "valid.user".to_string(),
+            source_name: Some("user".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["user".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(0, 40, 55),
+            name: "store::persist".to_string(),
+            receiver: Some("store".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 50, 54),
+                name: None,
+                value_text: "valid".to_string(),
+                place: Some("valid".to_string()),
+                source_names: vec!["valid".to_string()],
+            }],
+        },
+    ];
+
+    let mut persist = empty_decl(2, 1, "persist");
+    persist.params = vec!["envelope".to_string()];
+    persist.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(1, 70, 85),
+            target: "cmd".to_string(),
+            source_name: Some("envelope.cmd".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["envelope.cmd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(1, 90, 105),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 98, 101),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+    ];
+
+    let mut execute = empty_decl(3, 2, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(2, 120, 135),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(2, 125, 128),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(vec![entry, persist, execute], |idx| {
+        vec![
+            (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 40, 55)),
+            (func_id(idx, "persist"), func_id(idx, "execute"), span(1, 90, 105)),
+        ]
+    });
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(2, 120, 135) && *idx == 0),
+        "module-path method call should forward valid.cmd into envelope.cmd: {raw_calls:?}"
+    );
+
+    let user_seed = svc.param_nodes_for_names(entry_id, &["user".to_string()], &idx);
+    let user_calls = svc.tainted_call_args_in_closure(&user_seed);
+    assert!(
+        !user_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(2, 120, 135) && *idx == 0),
+        "sibling field must not promote through module-path method arg forwarding: {user_calls:?}"
+    );
+}
+
+#[test]
+fn returned_container_field_forwards_to_assigned_object_argument() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string(), "user".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 21, 30),
+            target: "env.user".to_string(),
+            source_name: Some("user".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["user".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 40, 55),
+            target: "valid".to_string(),
+            source_name: None,
+            source_call: Some("validate".to_string()),
+            source_call_args: vec!["env".to_string()],
+            source_names: vec!["validate".to_string(), "env".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(0, 70, 85),
+            name: "persist".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 78, 83),
+                name: None,
+                value_text: "valid".to_string(),
+                place: Some("valid".to_string()),
+                source_names: vec!["valid".to_string()],
+            }],
+        },
+    ];
+
+    let mut validate = empty_decl(2, 1, "validate");
+    validate.params = vec!["payload".to_string()];
+    validate.flow_events = vec![FlowEvent::Return {
+        span: span(1, 100, 140),
+        value_name: None,
+        value_text: Some("{\"cmd\": payload.cmd, \"user\": payload.user}".to_string()),
+    }];
+
+    let mut persist = empty_decl(3, 2, "persist");
+    persist.params = vec!["data".to_string()];
+    persist.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(2, 150, 165),
+            target: "cmd".to_string(),
+            source_name: Some("data.cmd".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["data.cmd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(2, 170, 185),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(2, 178, 181),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+    ];
+
+    let mut execute = empty_decl(4, 3, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(3, 200, 215),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(3, 205, 208),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(vec![entry, validate, persist, execute], |idx| {
+        vec![
+            (func_id(idx, "entry"), func_id(idx, "validate"), span(0, 40, 55)),
+            (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 70, 85)),
+            (
+                func_id(idx, "persist"),
+                func_id(idx, "execute"),
+                span(2, 170, 185),
+            ),
+        ]
+    });
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(3, 200, 215) && *idx == 0),
+        "returned cmd field should reach the command sink: {raw_calls:?}"
+    );
+
+    let user_seed = svc.param_nodes_for_names(entry_id, &["user".to_string()], &idx);
+    let user_calls = svc.tainted_call_args_in_closure(&user_seed);
+    assert!(
+        !user_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(3, 200, 215) && *idx == 0),
+        "returned user sibling field must not reach the command sink: {user_calls:?}"
+    );
+}
+
+#[test]
+fn returned_container_field_forwards_through_constructor_receiver_state() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string(), "user".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 21, 30),
+            target: "env.user".to_string(),
+            source_name: Some("user".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["user".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 40, 55),
+            target: "valid".to_string(),
+            source_name: None,
+            source_call: Some("validate".to_string()),
+            source_call_args: vec!["env".to_string()],
+            source_names: vec!["validate".to_string(), "env".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Assign {
+            span: span(0, 70, 95),
+            target: "repo".to_string(),
+            source_name: None,
+            source_call: Some("Repository".to_string()),
+            source_call_args: vec!["valid".to_string()],
+            source_names: vec!["Repository".to_string(), "valid".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(0, 110, 130),
+            name: "repo.persist".to_string(),
+            receiver: Some("repo".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut validate = empty_decl(2, 1, "validate");
+    validate.params = vec!["payload".to_string()];
+    validate.flow_events = vec![FlowEvent::Return {
+        span: span(1, 100, 140),
+        value_name: None,
+        value_text: Some("{\"cmd\": payload.cmd, \"user\": payload.user}".to_string()),
+    }];
+
+    let mut repository_class = empty_decl(3, 2, "Repository");
+    repository_class.kind = DeclKind::Class;
+    repository_class.flow_events = Vec::new();
+
+    let mut init = empty_decl(4, 2, "__init__");
+    init.kind = DeclKind::Constructor;
+    init.parent = Some(repository_class.symbol);
+    init.params = vec!["self".to_string(), "data".to_string()];
+    init.receiver_param_index = Some(0);
+    init.receiver_field_writes = vec![FieldWrite {
+        span: span(2, 150, 170),
+        target: "self._data".to_string(),
+        source_param_indices: vec![1],
+    }];
+
+    let mut persist = empty_decl(5, 2, "persist");
+    persist.kind = DeclKind::Method;
+    persist.parent = Some(repository_class.symbol);
+    persist.params = vec!["self".to_string()];
+    persist.receiver_param_index = Some(0);
+    persist.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(2, 180, 200),
+            target: "cmd".to_string(),
+            source_name: Some("self._data.cmd".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["self._data.cmd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(2, 210, 225),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(2, 218, 221),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+    ];
+
+    let mut execute = empty_decl(6, 3, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(3, 240, 255),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(3, 245, 248),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(
+        vec![entry, validate, repository_class, init, persist, execute],
+        |idx| {
+            vec![
+                (func_id(idx, "entry"), func_id(idx, "validate"), span(0, 40, 55)),
+                (func_id(idx, "entry"), func_id(idx, "__init__"), span(0, 70, 95)),
+                (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 110, 130)),
+                (
+                    func_id(idx, "persist"),
+                    func_id(idx, "execute"),
+                    span(2, 210, 225),
+                ),
+            ]
+        },
+    );
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(3, 240, 255) && *idx == 0),
+        "returned cmd field should reach through constructor receiver state to sink: {raw_calls:?}"
+    );
+    let mut target_funcs = ahash::AHashSet::default();
+    target_funcs.insert(func_id(&idx, "entry"));
+    target_funcs.insert(func_id(&idx, "persist"));
+    target_funcs.insert(func_id(&idx, "execute"));
+    let cut =
+        svc.forward_target_func_cut_with_max_precision(&raw_seed, &target_funcs, Some(Precision::Narrowed));
+    let cut_calls = svc.tainted_call_args_in_reachable_nodes(&cut);
+    assert!(
+        cut_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(3, 240, 255) && *idx == 0),
+        "target-function cut must keep constructor receiver-state dependency nodes: {cut_calls:?}"
+    );
+
+    let user_seed = svc.param_nodes_for_names(entry_id, &["user".to_string()], &idx);
+    let user_calls = svc.tainted_call_args_in_closure(&user_seed);
+    assert!(
+        !user_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(3, 240, 255) && *idx == 0),
+        "returned user sibling field must not reach constructor-backed command sink: {user_calls:?}"
+    );
+}
+
+#[test]
+fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(0, 42, 46),
+            name: "Repository::wrap".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 47, 50),
+                name: None,
+                value_text: "env".to_string(),
+                place: Some("env".to_string()),
+                source_names: vec!["env".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: span(0, 58, 61),
+            name: "Repository::wrap(env)->run".to_string(),
+            receiver: Some("Repository::wrap(env)".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut base_class = empty_decl(2, 1, "BaseRepository");
+    base_class.kind = DeclKind::Class;
+
+    let mut repository_class = empty_decl(8, 1, "Repository");
+    repository_class.kind = DeclKind::Class;
+    repository_class.bases = vec!["BaseRepository".to_string()];
+
+    let mut ctor = empty_decl(3, 1, "__construct");
+    ctor.kind = DeclKind::Constructor;
+    ctor.parent = Some(base_class.symbol);
+    ctor.params = vec!["data".to_string()];
+    ctor.receiver_field_writes = vec![FieldWrite {
+        span: span(1, 90, 95),
+        target: "this.data".to_string(),
+        source_param_indices: vec![0],
+    }];
+
+    let mut wrap = empty_decl(4, 1, "wrap");
+    wrap.kind = DeclKind::Method;
+    wrap.parent = Some(repository_class.symbol);
+    wrap.params = vec!["data".to_string()];
+    wrap.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 110, 116),
+            name: "static".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 117, 121),
+                name: None,
+                value_text: "data".to_string(),
+                place: Some("data".to_string()),
+                source_names: vec!["data".to_string()],
+            }],
+        },
+        FlowEvent::Return {
+            span: span(1, 100, 125),
+            value_name: None,
+            value_text: Some("new static(data)".to_string()),
+        },
+    ];
+
+    let mut run = empty_decl(5, 1, "run");
+    run.kind = DeclKind::Method;
+    run.parent = Some(repository_class.symbol);
+    run.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 200, 207),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 201, 210),
+                name: None,
+                value_text: "$this->cmd()".to_string(),
+                place: Some("$this.cmd".to_string()),
+                source_names: vec![
+                    "$this.cmd".to_string(),
+                    "$this".to_string(),
+                    "this".to_string(),
+                    "this.cmd".to_string(),
+                ],
+            }],
+        },
+        FlowEvent::Call {
+            span: span(1, 205, 208),
+            name: "$this->cmd".to_string(),
+            receiver: Some("$this".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut cmd = empty_decl(6, 1, "cmd");
+    cmd.kind = DeclKind::Method;
+    cmd.parent = Some(base_class.symbol);
+    cmd.flow_events = vec![FlowEvent::Return {
+        span: span(1, 300, 315),
+        value_name: None,
+        value_text: Some("$this->data['cmd']".to_string()),
+    }];
+
+    let mut execute = empty_decl(7, 2, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(2, 400, 405),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(2, 401, 404),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(
+        vec![entry, base_class, repository_class, ctor, wrap, run, cmd, execute],
+        |idx| {
+            vec![
+                (func_id(idx, "entry"), func_id(idx, "wrap"), span(0, 42, 46)),
+                (func_id(idx, "entry"), func_id(idx, "run"), span(0, 58, 61)),
+                (
+                    func_id(idx, "wrap"),
+                    func_id(idx, "__construct"),
+                    span(1, 110, 116),
+                ),
+                (func_id(idx, "run"), func_id(idx, "cmd"), span(1, 205, 208)),
+                (func_id(idx, "run"), func_id(idx, "execute"), span(1, 200, 207)),
+            ]
+        },
+    );
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    assert!(!raw_seed.is_empty(), "raw param seed should exist");
+    let raw_closure = svc.forward_closure(&raw_seed);
+    let raw_points: Vec<String> = raw_closure
+        .iter()
+        .filter_map(|node| {
+            svc.resolve_point(*node).map(|point| {
+                format!(
+                    "{:?}:{}@{}..{}",
+                    point.kind, point.name, point.span.start, point.span.end
+                )
+            })
+        })
+        .collect();
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(1, 200, 207) && *idx == 0),
+        "constructor state returned from inline factory receiver must reach execute: calls={raw_calls:?} closure={raw_points:?}"
+    );
+}
+
+#[test]
+fn returned_factory_assignment_receiver_field_flows_to_method_call() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(0, 40, 52),
+            name: "persist".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 48, 51),
+                name: None,
+                value_text: "env".to_string(),
+                place: Some("env".to_string()),
+                source_names: vec!["env".to_string()],
+            }],
+        },
+    ];
+
+    let mut repository_class = empty_decl(2, 1, "Repository");
+    repository_class.kind = DeclKind::Class;
+
+    let mut init = empty_decl(3, 1, "initialize");
+    init.kind = DeclKind::Constructor;
+    init.parent = Some(repository_class.symbol);
+    init.params = vec!["data".to_string()];
+    init.flow_events = vec![FlowEvent::Assign {
+        span: span(1, 70, 80),
+        target: "self.data".to_string(),
+        source_name: Some("data".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["data".to_string()],
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }];
+
+    let mut wrap = empty_decl(4, 1, "wrap");
+    wrap.kind = DeclKind::Method;
+    wrap.parent = Some(repository_class.symbol);
+    wrap.params = vec!["data".to_string()];
+    wrap.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 110, 116),
+            name: "new".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 117, 121),
+                name: None,
+                value_text: "data".to_string(),
+                place: Some("data".to_string()),
+                source_names: vec!["data".to_string()],
+            }],
+        },
+        FlowEvent::Return {
+            span: span(1, 110, 125),
+            value_name: None,
+            value_text: Some("new(data)".to_string()),
+        },
+    ];
+
+    let mut persist = empty_decl(5, 1, "persist");
+    persist.params = vec!["envelope".to_string()];
+    persist.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(1, 150, 175),
+            target: "repo".to_string(),
+            source_name: None,
+            source_call: Some("Repository.wrap".to_string()),
+            source_call_args: vec!["envelope".to_string()],
+            source_names: vec!["Repository".to_string(), "wrap".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(1, 162, 177),
+            name: "Repository.wrap".to_string(),
+            receiver: Some("Repository".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 178, 186),
+                name: None,
+                value_text: "envelope".to_string(),
+                place: Some("envelope".to_string()),
+                source_names: vec!["envelope".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: span(1, 190, 198),
+            name: "repo.run".to_string(),
+            receiver: Some("repo".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut run = empty_decl(6, 1, "run");
+    run.kind = DeclKind::Method;
+    run.parent = Some(repository_class.symbol);
+    run.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 210, 214),
+            name: "cmd".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: span(1, 220, 230),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 228, 231),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+    ];
+
+    let mut cmd = empty_decl(7, 1, "cmd");
+    cmd.kind = DeclKind::Method;
+    cmd.parent = Some(repository_class.symbol);
+    cmd.flow_events = vec![FlowEvent::Return {
+        span: span(1, 240, 253),
+        value_name: None,
+        value_text: Some("self.data[:cmd]".to_string()),
+    }];
+
+    let mut execute = empty_decl(8, 2, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(2, 300, 305),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(2, 301, 304),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(
+        vec![entry, repository_class, init, wrap, persist, run, cmd, execute],
+        |idx| {
+            vec![
+                (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 40, 52)),
+                (func_id(idx, "persist"), func_id(idx, "wrap"), span(1, 162, 177)),
+                (
+                    func_id(idx, "wrap"),
+                    func_id(idx, "initialize"),
+                    span(1, 110, 116),
+                ),
+                (func_id(idx, "persist"), func_id(idx, "run"), span(1, 190, 198)),
+                (func_id(idx, "run"), func_id(idx, "cmd"), span(1, 210, 214)),
+                (func_id(idx, "run"), func_id(idx, "execute"), span(1, 220, 230)),
+            ]
+        },
+    );
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(2, 300, 305) && *idx == 0),
+        "constructor state returned through a factory assignment must taint repo.run() receiver fields: {raw_calls:?}"
+    );
+}
+
+#[test]
+fn returned_factory_assignment_receiver_field_flows_through_super_method() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(0, 40, 52),
+            name: "persist".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 48, 51),
+                name: None,
+                value_text: "env".to_string(),
+                place: Some("env".to_string()),
+                source_names: vec!["env".to_string()],
+            }],
+        },
+    ];
+
+    let mut repository_class = empty_decl(2, 1, "Repository");
+    repository_class.kind = DeclKind::Class;
+
+    let mut audited_class = empty_decl(3, 1, "AuditedRepository");
+    audited_class.kind = DeclKind::Class;
+    audited_class.bases = vec!["Repository".to_string()];
+
+    let mut init = empty_decl(4, 1, "initialize");
+    init.kind = DeclKind::Constructor;
+    init.parent = Some(repository_class.symbol);
+    init.params = vec!["data".to_string()];
+    init.flow_events = vec![FlowEvent::Assign {
+        span: span(1, 70, 80),
+        target: "self.data".to_string(),
+        source_name: Some("data".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["data".to_string()],
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }];
+
+    let mut wrap = empty_decl(5, 1, "wrap");
+    wrap.kind = DeclKind::Method;
+    wrap.parent = Some(repository_class.symbol);
+    wrap.params = vec!["data".to_string()];
+    wrap.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 110, 116),
+            name: "new".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 117, 121),
+                name: None,
+                value_text: "data".to_string(),
+                place: Some("data".to_string()),
+                source_names: vec!["data".to_string()],
+            }],
+        },
+        FlowEvent::Return {
+            span: span(1, 110, 125),
+            value_name: None,
+            value_text: Some("new(data)".to_string()),
+        },
+    ];
+
+    let mut persist = empty_decl(6, 1, "persist");
+    persist.params = vec!["envelope".to_string()];
+    persist.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(1, 150, 175),
+            target: "repo".to_string(),
+            source_name: None,
+            source_call: Some("AuditedRepository.wrap".to_string()),
+            source_call_args: vec!["envelope".to_string()],
+            source_names: vec!["AuditedRepository".to_string(), "wrap".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(1, 162, 177),
+            name: "AuditedRepository.wrap".to_string(),
+            receiver: Some("AuditedRepository".to_string()),
+            receiver_types: vec!["AuditedRepository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 178, 186),
+                name: None,
+                value_text: "envelope".to_string(),
+                place: Some("envelope".to_string()),
+                source_names: vec!["envelope".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: span(1, 190, 198),
+            name: "repo.run".to_string(),
+            receiver: Some("repo".to_string()),
+            receiver_types: vec!["AuditedRepository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut audited_run = empty_decl(7, 1, "run");
+    audited_run.kind = DeclKind::Method;
+    audited_run.parent = Some(audited_class.symbol);
+    audited_run.span = span(1, 300, 340);
+    audited_run.name_span = span(1, 300, 303);
+    audited_run.flow_events = vec![FlowEvent::Call {
+        span: span(1, 315, 320),
+        name: "super.run".to_string(),
+        receiver: Some("super".to_string()),
+        receiver_types: vec!["Repository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    }];
+
+    let mut base_run = empty_decl(8, 1, "run");
+    base_run.kind = DeclKind::Method;
+    base_run.parent = Some(repository_class.symbol);
+    base_run.span = span(1, 360, 430);
+    base_run.name_span = span(1, 360, 363);
+    base_run.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 370, 373),
+            name: "cmd".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Call {
+            span: span(1, 390, 405),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 398, 401),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+    ];
+
+    let mut cmd = empty_decl(9, 1, "cmd");
+    cmd.kind = DeclKind::Method;
+    cmd.parent = Some(repository_class.symbol);
+    cmd.flow_events = vec![FlowEvent::Return {
+        span: span(1, 440, 455),
+        value_name: None,
+        value_text: Some("self.data[:cmd]".to_string()),
+    }];
+
+    let mut execute = empty_decl(10, 2, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(2, 500, 510),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(2, 504, 507),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(
+        vec![
+            entry,
+            repository_class,
+            audited_class,
+            init,
+            wrap,
+            persist,
+            audited_run,
+            base_run,
+            cmd,
+            execute,
+        ],
+        |idx| {
+            vec![
+                (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 40, 52)),
+                (func_id(idx, "persist"), func_id(idx, "wrap"), span(1, 162, 177)),
+                (
+                    func_id(idx, "wrap"),
+                    func_id(idx, "initialize"),
+                    span(1, 110, 116),
+                ),
+                (
+                    func_id(idx, "persist"),
+                    func_id_at_start(idx, "run", 300),
+                    span(1, 190, 198),
+                ),
+                (
+                    func_id_at_start(idx, "run", 300),
+                    func_id_at_start(idx, "run", 360),
+                    span(1, 315, 320),
+                ),
+                (
+                    func_id_at_start(idx, "run", 360),
+                    func_id(idx, "cmd"),
+                    span(1, 370, 373),
+                ),
+                (
+                    func_id_at_start(idx, "run", 360),
+                    func_id(idx, "execute"),
+                    span(1, 390, 405),
+                ),
+            ]
+        },
+    );
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(2, 500, 510) && *idx == 0),
+        "factory receiver field must flow through subclass super method to sink: {raw_calls:?}"
+    );
+}
+
+#[test]
+fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(0, 40, 52),
+            name: "persist".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(0, 48, 51),
+                name: None,
+                value_text: "env".to_string(),
+                place: Some("env".to_string()),
+                source_names: vec!["env".to_string()],
+            }],
+        },
+    ];
+
+    let mut repository_class = empty_decl(2, 1, "Repository");
+    repository_class.kind = DeclKind::Class;
+
+    let mut audited_class = empty_decl(3, 1, "AuditedRepository");
+    audited_class.kind = DeclKind::Class;
+    audited_class.bases = vec!["Repository".to_string()];
+
+    let mut base_ctor = empty_decl(4, 1, "BaseRepository");
+    base_ctor.kind = DeclKind::Constructor;
+    base_ctor.params = vec!["data".to_string()];
+    base_ctor.receiver_field_writes = vec![FieldWrite {
+        span: span(1, 70, 90),
+        target: "this.data".to_string(),
+        source_param_indices: vec![0],
+    }];
+
+    let mut repository_ctor = empty_decl(5, 1, "Repository");
+    repository_ctor.kind = DeclKind::Constructor;
+    repository_ctor.params = vec!["data".to_string()];
+    repository_ctor.receiver_field_writes = vec![FieldWrite {
+        span: span(1, 70, 90),
+        target: "this.data".to_string(),
+        source_param_indices: vec![0],
+    }];
+    repository_ctor.flow_events = vec![FlowEvent::Call {
+        span: span(1, 100, 120),
+        name: "BaseRepository".to_string(),
+        receiver: None,
+        receiver_types: vec!["BaseRepository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Constructor,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(1, 115, 119),
+            name: None,
+            value_text: "data".to_string(),
+            place: Some("data".to_string()),
+            source_names: vec!["data".to_string()],
+        }],
+    }];
+
+    let mut audited_ctor = empty_decl(6, 1, "AuditedRepository");
+    audited_ctor.kind = DeclKind::Constructor;
+    audited_ctor.params = vec!["data".to_string()];
+    audited_ctor.receiver_field_writes = vec![FieldWrite {
+        span: span(1, 70, 90),
+        target: "this.data".to_string(),
+        source_param_indices: vec![0],
+    }];
+    audited_ctor.flow_events = vec![FlowEvent::Call {
+        span: span(1, 130, 150),
+        name: "Repository".to_string(),
+        receiver: None,
+        receiver_types: vec!["Repository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Constructor,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(1, 145, 149),
+            name: None,
+            value_text: "data".to_string(),
+            place: Some("data".to_string()),
+            source_names: vec!["data".to_string()],
+        }],
+    }];
+
+    let mut wrap = empty_decl(7, 1, "wrap");
+    wrap.kind = DeclKind::Method;
+    wrap.params = vec!["data".to_string()];
+    wrap.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 160, 178),
+            name: "AuditedRepository".to_string(),
+            receiver: None,
+            receiver_types: vec!["AuditedRepository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Constructor,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 179, 183),
+                name: None,
+                value_text: "data".to_string(),
+                place: Some("data".to_string()),
+                source_names: vec!["data".to_string()],
+            }],
+        },
+        FlowEvent::Return {
+            span: span(1, 156, 184),
+            value_name: None,
+            value_text: Some("new AuditedRepository(data)".to_string()),
+        },
+    ];
+
+    let mut persist = empty_decl(8, 1, "persist");
+    persist.params = vec!["envelope".to_string()];
+    persist.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 200, 215),
+            name: "Repository.wrap".to_string(),
+            receiver: Some("Repository".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 216, 224),
+                name: None,
+                value_text: "envelope".to_string(),
+                place: Some("envelope".to_string()),
+                source_names: vec!["envelope".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: span(1, 200, 235),
+            name: "Repository.wrap(envelope).run".to_string(),
+            receiver: Some("Repository.wrap(envelope)".to_string()),
+            receiver_types: vec!["AuditedRepository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut audited_run = empty_decl(9, 1, "run");
+    audited_run.kind = DeclKind::Method;
+    audited_run.parent = Some(audited_class.symbol);
+    audited_run.span = span(1, 300, 340);
+    audited_run.name_span = span(1, 300, 303);
+    audited_run.flow_events = vec![FlowEvent::Call {
+        span: span(1, 320, 330),
+        name: "super.run".to_string(),
+        receiver: Some("super".to_string()),
+        receiver_types: vec!["Repository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: Vec::new(),
+    }];
+
+    let mut base_run = empty_decl(10, 1, "run");
+    base_run.kind = DeclKind::Method;
+    base_run.parent = Some(repository_class.symbol);
+    base_run.span = span(1, 360, 430);
+    base_run.name_span = span(1, 360, 363);
+    base_run.flow_events = vec![
+        FlowEvent::Call {
+            span: span(1, 370, 373),
+            name: "cmd".to_string(),
+            receiver: None,
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+        FlowEvent::Assign {
+            span: span(1, 370, 373),
+            target: "c".to_string(),
+            source_name: None,
+            source_call: Some("cmd".to_string()),
+            source_call_args: Vec::new(),
+            source_names: vec!["cmd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(1, 390, 405),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(1, 398, 401),
+                name: None,
+                value_text: "c".to_string(),
+                place: Some("c".to_string()),
+                source_names: vec!["c".to_string()],
+            }],
+        },
+    ];
+
+    let mut cmd = empty_decl(11, 1, "cmd");
+    cmd.kind = DeclKind::Method;
+    cmd.parent = Some(repository_class.symbol);
+    cmd.flow_events = vec![FlowEvent::Return {
+        span: span(1, 440, 455),
+        value_name: None,
+        value_text: Some("data.cmd()".to_string()),
+    }];
+
+    let mut execute = empty_decl(12, 2, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(2, 500, 510),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(2, 504, 507),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(
+        vec![
+            entry,
+            repository_class,
+            audited_class,
+            base_ctor,
+            repository_ctor,
+            audited_ctor,
+            wrap,
+            persist,
+            audited_run,
+            base_run,
+            cmd,
+            execute,
+        ],
+        |idx| {
+            vec![
+                (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 40, 52)),
+                (func_id(idx, "persist"), func_id(idx, "wrap"), span(1, 200, 215)),
+                (
+                    func_id(idx, "wrap"),
+                    func_id(idx, "AuditedRepository"),
+                    span(1, 160, 178),
+                ),
+                (
+                    func_id(idx, "AuditedRepository"),
+                    func_id(idx, "Repository"),
+                    span(1, 130, 150),
+                ),
+                (
+                    func_id(idx, "Repository"),
+                    func_id(idx, "BaseRepository"),
+                    span(1, 100, 120),
+                ),
+                (
+                    func_id(idx, "persist"),
+                    func_id_at_start(idx, "run", 300),
+                    span(1, 200, 235),
+                ),
+                (
+                    func_id_at_start(idx, "run", 300),
+                    func_id_at_start(idx, "run", 360),
+                    span(1, 320, 330),
+                ),
+                (
+                    func_id_at_start(idx, "run", 360),
+                    func_id(idx, "cmd"),
+                    span(1, 370, 373),
+                ),
+                (
+                    func_id_at_start(idx, "run", 360),
+                    func_id(idx, "execute"),
+                    span(1, 390, 405),
+                ),
+            ]
+        },
+    );
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(2, 500, 510) && *idx == 0),
+        "inline factory receiver field must flow through super.run and bare cmd accessor: {raw_calls:?}"
+    );
+}
+
+#[test]
+fn returned_container_field_forwards_through_super_constructor_receiver_state() {
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["raw".to_string(), "user".to_string()];
+    entry.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(0, 10, 20),
+            target: "env.cmd".to_string(),
+            source_name: Some("raw".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 21, 30),
+            target: "env.user".to_string(),
+            source_name: Some("user".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["user".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Assign {
+            span: span(0, 40, 55),
+            target: "valid".to_string(),
+            source_name: None,
+            source_call: Some("validate".to_string()),
+            source_call_args: vec!["env".to_string()],
+            source_names: vec!["validate".to_string(), "env".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Assign {
+            span: span(0, 70, 100),
+            target: "repo".to_string(),
+            source_name: None,
+            source_call: Some("AuditedRepository".to_string()),
+            source_call_args: vec!["valid".to_string(), "user".to_string()],
+            source_names: vec![
+                "AuditedRepository".to_string(),
+                "valid".to_string(),
+                "user".to_string(),
+            ],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(0, 110, 130),
+            name: "repo.persist".to_string(),
+            receiver: Some("repo".to_string()),
+            receiver_types: vec!["AuditedRepository".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let mut validate = empty_decl(2, 1, "validate");
+    validate.params = vec!["payload".to_string()];
+    validate.flow_events = vec![FlowEvent::Return {
+        span: span(1, 100, 140),
+        value_name: None,
+        value_text: Some("{\"cmd\": payload.cmd, \"user\": payload.user}".to_string()),
+    }];
+
+    let mut repository_class = empty_decl(3, 2, "Repository");
+    repository_class.kind = DeclKind::Class;
+    repository_class.flow_events = Vec::new();
+
+    let mut audited_class = empty_decl(4, 2, "AuditedRepository");
+    audited_class.kind = DeclKind::Class;
+    audited_class.bases = vec!["Repository".to_string()];
+    audited_class.flow_events = Vec::new();
+
+    let mut base_init = empty_decl(5, 2, "__init__");
+    base_init.kind = DeclKind::Constructor;
+    base_init.parent = Some(repository_class.symbol);
+    base_init.span = span(2, 145, 172);
+    base_init.name_span = span(2, 146, 154);
+    base_init.body_span = Some(span(2, 154, 172));
+    base_init.params = vec!["self".to_string(), "data".to_string()];
+    base_init.receiver_param_index = Some(0);
+    base_init.receiver_field_writes = vec![FieldWrite {
+        span: span(2, 150, 170),
+        target: "self._data".to_string(),
+        source_param_indices: vec![1],
+    }];
+
+    let mut audited_init = empty_decl(6, 2, "__init__");
+    audited_init.kind = DeclKind::Constructor;
+    audited_init.parent = Some(audited_class.symbol);
+    audited_init.span = span(2, 172, 206);
+    audited_init.name_span = span(2, 173, 181);
+    audited_init.body_span = Some(span(2, 181, 206));
+    audited_init.params = vec!["self".to_string(), "data".to_string(), "who".to_string()];
+    audited_init.receiver_param_index = Some(0);
+    audited_init.receiver_field_writes = vec![FieldWrite {
+        span: span(2, 190, 205),
+        target: "self.who".to_string(),
+        source_param_indices: vec![2],
+    }];
+    audited_init.flow_events = vec![FlowEvent::Call {
+        span: span(2, 175, 185),
+        name: "super().__init__".to_string(),
+        receiver: Some("super()".to_string()),
+        receiver_types: vec!["Repository".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(2, 181, 185),
+            name: None,
+            value_text: "data".to_string(),
+            place: Some("data".to_string()),
+            source_names: vec!["data".to_string()],
+        }],
+    }];
+
+    let mut persist = empty_decl(7, 2, "persist");
+    persist.kind = DeclKind::Method;
+    persist.parent = Some(repository_class.symbol);
+    persist.params = vec!["self".to_string()];
+    persist.receiver_param_index = Some(0);
+    persist.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(2, 210, 230),
+            target: "cmd".to_string(),
+            source_name: Some("self._data.cmd".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["self._data.cmd".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(2, 240, 255),
+            name: "execute".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![bonsai_lang_api::CallArg {
+                span: span(2, 248, 251),
+                name: None,
+                value_text: "cmd".to_string(),
+                place: Some("cmd".to_string()),
+                source_names: vec!["cmd".to_string()],
+            }],
+        },
+    ];
+
+    let mut execute = empty_decl(8, 3, "execute");
+    execute.params = vec!["cmd".to_string()];
+    execute.flow_events = vec![FlowEvent::Call {
+        span: span(3, 270, 285),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(3, 275, 278),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+
+    let (idx, ws) = build_with_edges(
+        vec![
+            entry,
+            validate,
+            repository_class,
+            audited_class,
+            base_init,
+            audited_init,
+            persist,
+            execute,
+        ],
+        |idx| {
+            let init_with_param_count = |param_count: usize| {
+                for file in idx.all_files() {
+                    for decl in idx.decls_in(file) {
+                        if decl.name == "__init__" && decl.params.len() == param_count {
+                            return FuncId::new(decl.symbol.raw());
+                        }
+                    }
+                }
+                unreachable!("constructor with {param_count} params not in index")
+            };
+            vec![
+                (func_id(idx, "entry"), func_id(idx, "validate"), span(0, 40, 55)),
+                (func_id(idx, "entry"), init_with_param_count(3), span(0, 70, 100)),
+                (
+                    init_with_param_count(3),
+                    init_with_param_count(2),
+                    span(2, 175, 185),
+                ),
+                (func_id(idx, "entry"), func_id(idx, "persist"), span(0, 110, 130)),
+                (
+                    func_id(idx, "persist"),
+                    func_id(idx, "execute"),
+                    span(2, 240, 255),
+                ),
+            ]
+        },
+    );
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let entry_id = func_id(&idx, "entry");
+    let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
+    assert!(
+        raw_calls
+            .iter()
+            .any(|(_, call_span, idx)| *call_span == span(3, 270, 285) && *idx == 0),
+        "returned cmd field should reach through super constructor receiver state: {raw_calls:?}"
     );
 }
 

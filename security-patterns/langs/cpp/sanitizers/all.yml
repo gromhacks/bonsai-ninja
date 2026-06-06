@@ -1,4 +1,22 @@
 # C++ sanitizers / validators - reduce severity or suppress when in-path.
+- id: cpp.sanitizer.isalnum_char_allowlist
+  enabled: true
+  language: cpp
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      regex: "(^|::)isalnum$"
+  match_examples:
+  - name: alnum allowlist predicate
+    code: |
+      #include <cctype>
+      void example(unsigned char input) {
+        std::isalnum(input);
+      }
+    expect_match_text: [std::isalnum]
+  description: "std::isalnum / isalnum - character allowlist predicate used to copy only alphanumeric bytes into a sanitized buffer."
+
 - id: cpp.sanitizer.strncpy_bounded
   enabled: false
   disabled_reason:

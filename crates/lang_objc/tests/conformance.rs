@@ -54,3 +54,52 @@ fn objc_adapter_emits_function_pointer_callable_alias() {
         entry.flow_events
     );
 }
+
+#[test]
+fn objc_sibling_project_classes_do_not_share_module_identity() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, LanguageAdapter, ModulePath};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let root = std::env::temp_dir().join("bonsai-objc-sibling-projects");
+    let first = vfs.write(
+        root.join("flow_a/Storage.m"),
+        "@interface Repository : NSObject\n@end\n@implementation Repository\n@end\n",
+    );
+    let second = vfs.write(
+        root.join("flow_b/Storage.m"),
+        "@interface Repository : NSObject\n@end\n@implementation Repository\n@end\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: Some(&root),
+    };
+
+    let first_idx = adapter.extract_declarations(first, &ctx);
+    let second_idx = adapter.extract_declarations(second, &ctx);
+    let first_repo = first_idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Repository")
+        .expect("first Repository declaration");
+    let second_repo = second_idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Repository")
+        .expect("second Repository declaration");
+
+    assert_eq!(
+        first_repo.module_path,
+        ModulePath::from_segments(["flow_a", "Repository"])
+    );
+    assert_eq!(
+        second_repo.module_path,
+        ModulePath::from_segments(["flow_b", "Repository"])
+    );
+    assert_ne!(first_repo.module_path, second_repo.module_path);
+}

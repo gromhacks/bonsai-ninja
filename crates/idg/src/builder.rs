@@ -46,7 +46,10 @@ use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use crate::place::{CallSiteId, Place};
 use crate::segment::IdgSegment;
-use crate::transfer::{CallSiteRef, TransferOutput};
+use crate::transfer::{
+    inline_call_result_receiver_base, inline_constructor_receiver_base, CallSiteRef, ReturnFieldProjection,
+    TransferOutput,
+};
 use crate::workspace::{CrossFileEdge, IdgWorkspace, SegmentId};
 
 #[derive(Debug, Clone)]
@@ -57,6 +60,7 @@ struct CalleeEndpoints {
     receiver_param_index: Option<usize>,
     receiver_field_bases: Vec<String>,
     implicit_receiver_bases: Vec<String>,
+    return_field_projections: Vec<ReturnFieldProjection>,
     return_node: Option<NodeId>,
 }
 
@@ -65,9 +69,11 @@ struct FunctionStitchData {
     params: Vec<String>,
     call_sites: Vec<CallSiteRef>,
     param_count: usize,
+    is_constructor: bool,
     receiver_param_index: Option<usize>,
     receiver_field_bases: Vec<String>,
     implicit_receiver_bases: Vec<String>,
+    return_field_projections: Vec<ReturnFieldProjection>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,17 +88,10 @@ struct FieldArgStitch {
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
+    allow_out_of_order_source: bool,
 }
 
-const MAX_FIELD_ARG_STITCHES_PER_SOURCE_KEY: usize = 4;
-const MAX_RETURN_FIELD_STITCHES_PER_SOURCE_KEY: usize = 4;
-const MAX_CONSTRUCTOR_RETURN_STITCHES_PER_SOURCE_KEY: usize = 8;
 const MAX_FIELD_COPY_STITCHES_PER_SOURCE_KEY: usize = 4;
-const MIN_FIELD_FORWARD_WORKLIST_WRITES: usize = 200_000;
-const MIN_FIELD_FORWARD_TRANSFORM_APPS: usize = 400_000;
-const FIELD_FORWARD_WORKLIST_FACTOR: usize = 4;
-const FIELD_FORWARD_TRANSFORM_FACTOR: usize = 8;
-
 #[derive(Default, Debug)]
 struct FieldArgSiteQueue {
     sites: Vec<FieldArgStitch>,
@@ -110,11 +109,7 @@ impl FieldArgSiteQueue {
         if key.base.is_empty() {
             return;
         }
-        let count = self.by_source_key.entry(key).or_default();
-        if *count >= MAX_FIELD_ARG_STITCHES_PER_SOURCE_KEY {
-            return;
-        }
-        *count += 1;
+        *self.by_source_key.entry(key).or_default() += 1;
         self.sites.push(site);
     }
 
@@ -133,6 +128,36 @@ struct ReturnFieldSiteQueue {
     by_source_key: AHashMap<FieldPlaceKey, usize>,
 }
 
+#[derive(Default, Debug)]
+struct ScalarReturnSiteQueue {
+    sites: Vec<ScalarReturnStitch>,
+    by_source_key: AHashMap<FieldPlaceKey, usize>,
+}
+
+impl ScalarReturnSiteQueue {
+    fn push(&mut self, site: ScalarReturnStitch) {
+        if !field_forwarding_base_allowed(&site.source_base)
+            || !field_forwarding_base_allowed(&site.target_base)
+        {
+            return;
+        }
+        let key = field_write_key(site.callee_seg, site.callee, &site.source_base);
+        if key.base.is_empty() {
+            return;
+        }
+        *self.by_source_key.entry(key).or_default() += 1;
+        self.sites.push(site);
+    }
+
+    fn as_slice(&self) -> &[ScalarReturnStitch] {
+        &self.sites
+    }
+
+    fn len(&self) -> usize {
+        self.sites.len()
+    }
+}
+
 impl ReturnFieldSiteQueue {
     fn push(&mut self, site: ReturnFieldStitch) {
         if !field_forwarding_base_allowed(&site.target_base) {
@@ -142,11 +167,7 @@ impl ReturnFieldSiteQueue {
         if key.base.is_empty() {
             return;
         }
-        let count = self.by_source_key.entry(key).or_default();
-        if *count >= MAX_RETURN_FIELD_STITCHES_PER_SOURCE_KEY {
-            return;
-        }
-        *count += 1;
+        *self.by_source_key.entry(key).or_default() += 1;
         self.sites.push(site);
     }
 
@@ -176,11 +197,7 @@ impl ConstructorReturnSiteQueue {
         if key.base.is_empty() {
             return;
         }
-        let count = self.by_source_key.entry(key).or_default();
-        if *count >= MAX_CONSTRUCTOR_RETURN_STITCHES_PER_SOURCE_KEY {
-            return;
-        }
-        *count += 1;
+        *self.by_source_key.entry(key).or_default() += 1;
         self.sites.push(site);
     }
 
@@ -214,6 +231,21 @@ struct ReturnFieldStitch {
     callee: FuncId,
     callee_seg: SegmentId,
     source_base: String,
+    target_base: String,
+    call_span: Span,
+    write_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+}
+
+#[derive(Clone, Debug)]
+struct ScalarReturnStitch {
+    caller: FuncId,
+    caller_seg: SegmentId,
+    callee: FuncId,
+    callee_seg: SegmentId,
+    source_base: String,
+    source_field: String,
     target_base: String,
     call_span: Span,
     write_span: Span,
@@ -283,6 +315,7 @@ struct PendingFieldWrite {
 enum FieldWriteTransform {
     Argument(FieldArgStitch),
     Return(ReturnFieldStitch),
+    ScalarReturn(ScalarReturnStitch),
     ConstructorReturn(ConstructorReturnStitch),
     ReceiverMutation(ReceiverMutationStitch),
     Copy(FieldCopySite),
@@ -460,7 +493,9 @@ pub fn stitch_idg(
                 receiver_param_index,
                 receiver_field_bases,
                 implicit_receiver_bases,
+                return_field_projections,
                 call_sites,
+                is_constructor,
                 ..
             } = out;
             let param_count = params.len().min(u8::MAX as usize);
@@ -470,9 +505,11 @@ pub fn stitch_idg(
                     params,
                     call_sites,
                     param_count,
+                    is_constructor,
                     receiver_param_index,
                     receiver_field_bases,
                     implicit_receiver_bases,
+                    return_field_projections,
                 },
             );
             local_remaps.push((func, remap));
@@ -510,6 +547,7 @@ pub fn stitch_idg(
     let mut stats = StitchStats::default();
     let mut field_arg_sites = FieldArgSiteQueue::default();
     let mut return_field_sites = ReturnFieldSiteQueue::default();
+    let mut scalar_return_sites = ScalarReturnSiteQueue::default();
     let mut constructor_return_sites = ConstructorReturnSiteQueue::default();
     let mut receiver_mutation_sites: Vec<ReceiverMutationStitch> = Vec::new();
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
@@ -534,6 +572,7 @@ pub fn stitch_idg(
                 caller_remap,
                 site,
                 &data.params,
+                data.is_constructor,
                 data.receiver_param_index,
                 &data.implicit_receiver_bases,
                 resolver,
@@ -541,6 +580,7 @@ pub fn stitch_idg(
                 &mut ws,
                 &mut field_arg_sites,
                 &mut return_field_sites,
+                &mut scalar_return_sites,
                 &mut constructor_return_sites,
                 &mut receiver_mutation_sites,
                 if collect_stats { Some(&mut stats) } else { None },
@@ -548,22 +588,24 @@ pub fn stitch_idg(
         }
     }
     stitch_debug_log(format_args!(
-        "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} constructor_return_sites={} receiver_mutation_sites={}",
+        "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
         call_started.elapsed().as_secs_f64(),
         field_arg_sites.len(),
         return_field_sites.len(),
+        scalar_return_sites.len(),
         constructor_return_sites.len(),
         receiver_mutation_sites.len()
     ));
     stitch_field_argument_forwarding(
         field_arg_sites.as_slice(),
         return_field_sites.as_slice(),
+        scalar_return_sites.as_slice(),
         constructor_return_sites.as_slice(),
         &receiver_mutation_sites,
         &mut ws,
     );
     stitch_debug_log(format_args!(
-        "stitch calls: {:.3}s sites={} candidates={} callback_lookups={} callback_candidates={} wired_candidates={} inter_edges={} passthrough_edges={} field_arg_sites={} return_field_sites={} constructor_return_sites={} receiver_mutation_sites={} resolve={:.3}s callback={:.3}s",
+        "stitch calls: {:.3}s sites={} candidates={} callback_lookups={} callback_candidates={} wired_candidates={} inter_edges={} passthrough_edges={} field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={} resolve={:.3}s callback={:.3}s",
         call_started.elapsed().as_secs_f64(),
         stats.sites,
         stats.resolved_candidates,
@@ -574,6 +616,7 @@ pub fn stitch_idg(
         stats.passthrough_edges,
         field_arg_sites.len(),
         return_field_sites.len(),
+        scalar_return_sites.len(),
         constructor_return_sites.len(),
         receiver_mutation_sites.len(),
         stats.resolve_nanos as f64 / 1_000_000_000.0,
@@ -642,6 +685,10 @@ fn build_callee_endpoints(
                 implicit_receiver_bases: stitch_data
                     .get(&func)
                     .map(|data| data.implicit_receiver_bases.clone())
+                    .unwrap_or_default(),
+                return_field_projections: stitch_data
+                    .get(&func)
+                    .map(|data| data.return_field_projections.clone())
                     .unwrap_or_default(),
                 return_node,
             },
@@ -821,6 +868,7 @@ fn stitch_call_site(
     caller_remap: &NodeRemap,
     site: &CallSiteRef,
     caller_params: &[String],
+    caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
     caller_implicit_receiver_bases: &[String],
     resolver: &dyn CalleeResolver,
@@ -828,6 +876,7 @@ fn stitch_call_site(
     ws: &mut IdgWorkspace,
     field_arg_sites: &mut FieldArgSiteQueue,
     return_field_sites: &mut ReturnFieldSiteQueue,
+    scalar_return_sites: &mut ScalarReturnSiteQueue,
     constructor_return_sites: &mut ConstructorReturnSiteQueue,
     receiver_mutation_sites: &mut Vec<ReceiverMutationStitch>,
     mut stats: Option<&mut StitchStats>,
@@ -946,18 +995,39 @@ fn stitch_call_site(
                         .filter(|receiver| !receiver.is_empty()),
                     endpoints.param_names.get(receiver_idx).map(String::as_str),
                 ) {
+                    let actual_receiver = receiver_field_forwarding_base(
+                        site,
+                        receiver,
+                        caller_params,
+                        caller_receiver_param_index,
+                        caller_implicit_receiver_bases,
+                        false,
+                    );
                     push_receiver_field_arg_site(
                         field_arg_sites,
                         caller,
                         caller_seg,
                         cand.func,
                         endpoints.segment,
-                        receiver,
+                        &actual_receiver,
                         param_name,
                         site.site.0,
                         cand.precision,
                         cand.edge_kind,
                         None,
+                    );
+                    push_nested_receiver_field_arg_sites(
+                        field_arg_sites,
+                        caller,
+                        caller_seg,
+                        cand.func,
+                        endpoints.segment,
+                        &actual_receiver,
+                        param_name,
+                        endpoints,
+                        site.site.0,
+                        cand.precision,
+                        cand.edge_kind,
                     );
                     if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
                         push_receiver_field_arg_site(
@@ -966,7 +1036,7 @@ fn stitch_call_site(
                             caller_seg,
                             cand.func,
                             endpoints.segment,
-                            receiver,
+                            &actual_receiver,
                             param_name,
                             site.site.0,
                             cand.precision,
@@ -976,20 +1046,30 @@ fn stitch_call_site(
                     }
                 }
             }
-            if endpoints.receiver_param_index.is_none() && !endpoints.implicit_receiver_bases.is_empty() {
+            if endpoints.receiver_param_index.is_none()
+                && (!endpoints.implicit_receiver_bases.is_empty()
+                    || !endpoints.return_field_projections.is_empty())
+            {
                 if let Some(receiver) = site
                     .receiver
                     .as_deref()
                     .map(str::trim)
                     .filter(|receiver| !receiver.is_empty())
                 {
-                    let actual_receiver = implicit_receiver_actual_base(
+                    let actual_receiver = receiver_field_forwarding_base(
+                        site,
                         receiver,
                         caller_params,
                         caller_receiver_param_index,
                         caller_implicit_receiver_bases,
+                        true,
                     );
-                    for param_name in &endpoints.implicit_receiver_bases {
+                    let projection_bases = return_projection_bases(endpoints);
+                    for param_name in endpoints
+                        .implicit_receiver_bases
+                        .iter()
+                        .chain(projection_bases.iter())
+                    {
                         push_receiver_field_arg_site(
                             field_arg_sites,
                             caller,
@@ -1005,6 +1085,61 @@ fn stitch_call_site(
                         );
                     }
                 }
+            }
+            if endpoints.receiver_param_index.is_none() {
+                if let Some(receiver) = site
+                    .receiver
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|receiver| !receiver.is_empty())
+                {
+                    let actual_receiver = receiver_field_forwarding_base(
+                        site,
+                        receiver,
+                        caller_params,
+                        caller_receiver_param_index,
+                        caller_implicit_receiver_bases,
+                        true,
+                    );
+                    push_receiver_field_arg_site(
+                        field_arg_sites,
+                        caller,
+                        caller_seg,
+                        cand.func,
+                        endpoints.segment,
+                        &actual_receiver,
+                        "receiver",
+                        site.site.0,
+                        cand.precision,
+                        cand.edge_kind,
+                        None,
+                    );
+                }
+            }
+        }
+        if site.receiver.is_none()
+            && endpoints.receiver_param_index.is_none()
+            && (!endpoints.implicit_receiver_bases.is_empty()
+                || !endpoints.return_field_projections.is_empty())
+        {
+            push_bare_implicit_member_field_arg_sites(
+                field_arg_sites,
+                caller,
+                caller_seg,
+                cand.func,
+                endpoints.segment,
+                endpoints,
+                caller_implicit_receiver_bases,
+                site.site.0,
+                cand.precision,
+                cand.edge_kind,
+            );
+        }
+        let higher_order_edges =
+            stitch_higher_order_callback_inputs(caller_seg, caller_remap, site, endpoints, cand, ws);
+        if higher_order_edges > 0 {
+            if let Some(stats) = &mut stats {
+                stats.inter_edges = stats.inter_edges.saturating_add(higher_order_edges);
             }
         }
         // For each explicit arg index, emit
@@ -1058,6 +1193,7 @@ fn stitch_call_site(
                         call_span: site.site.0,
                         precision: cand.precision,
                         call_kind: cand.edge_kind,
+                        allow_out_of_order_source: false,
                     });
                 }
             }
@@ -1104,32 +1240,48 @@ fn stitch_call_site(
                         });
                     }
                 }
+                for (target_base, write_span) in &assignment_targets {
+                    for projection in &endpoints.return_field_projections {
+                        scalar_return_sites.push(ScalarReturnStitch {
+                            caller,
+                            caller_seg,
+                            callee: cand.func,
+                            callee_seg: endpoints.segment,
+                            source_base: projection.base.clone(),
+                            source_field: projection.field.clone(),
+                            target_base: target_base.clone(),
+                            call_span: site.site.0,
+                            write_span: *write_span,
+                            precision: cand.precision,
+                            call_kind: cand.edge_kind,
+                        });
+                    }
+                }
             }
         }
         if matches!(site.call_kind, CallKind::Method) && resolver.is_constructor_func(cand.func) {
-            if let (Some(receiver_idx), Some(receiver)) = (
-                endpoints.receiver_param_index,
-                site.receiver
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|receiver| !receiver.is_empty()),
-            ) {
-                if let Some(callee_receiver_param_name) =
-                    endpoints.param_names.get(receiver_idx).map(String::as_str)
-                {
-                    let target_base = constructor_receiver_target_base(
-                        receiver,
-                        caller_params,
-                        caller_receiver_param_index,
-                    );
-                    if !target_base.is_empty() {
+            if let Some(receiver) = site
+                .receiver
+                .as_deref()
+                .map(str::trim)
+                .filter(|receiver| !receiver.is_empty())
+            {
+                let target_base = constructor_receiver_target_base(
+                    receiver,
+                    caller_params,
+                    caller_is_constructor,
+                    caller_receiver_param_index,
+                    caller_implicit_receiver_bases,
+                );
+                if !target_base.is_empty() {
+                    for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
                         receiver_mutation_sites.push(ReceiverMutationStitch {
                             caller,
                             caller_seg,
                             callee: cand.func,
                             callee_seg: endpoints.segment,
-                            target_base,
-                            callee_receiver_param_name: callee_receiver_param_name.to_string(),
+                            target_base: target_base.clone(),
+                            callee_receiver_param_name,
                             call_span: site.site.0,
                             precision: cand.precision,
                             call_kind: cand.edge_kind,
@@ -1141,27 +1293,20 @@ fn stitch_call_site(
         if resolver.is_constructor_func(cand.func) {
             let caller_call_ret = caller_remap.get(site.call_ret_node);
             if !caller_call_ret.is_sentinel() {
-                let mut receiver_bases: Vec<String> = endpoints
-                    .receiver_param_index
-                    .and_then(|idx| endpoints.param_names.get(idx).cloned())
-                    .into_iter()
-                    .collect();
-                for base in &endpoints.receiver_field_bases {
-                    if !receiver_bases.iter().any(|existing| existing == base) {
-                        receiver_bases.push(base.clone());
-                    }
-                }
+                let receiver_bases = constructor_receiver_bases(endpoints);
                 if !receiver_bases.is_empty() {
                     for (target_base, write_span) in
                         call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret)
                     {
                         for receiver_param_name in &receiver_bases {
+                            let target_base =
+                                projected_receiver_target_base(&target_base, receiver_param_name);
                             constructor_return_sites.push(ConstructorReturnStitch {
                                 caller,
                                 caller_seg,
                                 callee: cand.func,
                                 callee_seg: endpoints.segment,
-                                target_base: target_base.clone(),
+                                target_base,
                                 receiver_param_name: receiver_param_name.clone(),
                                 call_span: site.site.0,
                                 write_span,
@@ -1181,20 +1326,171 @@ fn stitch_call_site(
     drop(candidates);
 }
 
+fn stitch_higher_order_callback_inputs(
+    caller_seg: SegmentId,
+    caller_remap: &NodeRemap,
+    site: &CallSiteRef,
+    endpoints: &CalleeEndpoints,
+    cand: &ResolvedCallee,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    if cand.edge_kind != bonsai_callgraph::EdgeKind::Indirect {
+        return 0;
+    }
+    let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index);
+    let Some(&callee_param_node) = endpoints.params.get(callback_param_idx) else {
+        return 0;
+    };
+    if callee_param_node.is_sentinel() {
+        return 0;
+    }
+
+    let mut input_nodes = Vec::new();
+    if matches!(site.call_kind, CallKind::Method)
+        && higher_order_receiver_method_flows_to_callback(site.callee_name.as_str())
+    {
+        if let Some(receiver_arg_node) = site.receiver_arg_node {
+            input_nodes.push(receiver_arg_node);
+        }
+    } else if higher_order_free_function_flows_to_callback(site.callee_name.as_str()) {
+        // Free HOFs such as C++ `std::for_each(begin, end, step)`
+        // carry collection/iterator values in the arguments before
+        // the callback. Route those value-carrying args to the
+        // callback's first parameter; do not route the callback
+        // function object itself.
+        let data_args = site.call_arg_nodes.len().saturating_sub(1);
+        for arg_node in site.call_arg_nodes.iter().take(data_args) {
+            input_nodes.push(*arg_node);
+        }
+    }
+    if input_nodes.is_empty() {
+        return 0;
+    }
+
+    let mut emitted = 0usize;
+    for input_node in input_nodes {
+        let caller_call_arg = caller_remap.get(input_node);
+        if caller_call_arg.is_sentinel() {
+            continue;
+        }
+        let edge = IdgEdge::inter_call_arg(
+            caller_call_arg,
+            callee_param_node,
+            site.site.0,
+            cand.precision,
+            cand.edge_kind,
+        );
+        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+        emitted = emitted.saturating_add(1);
+    }
+    emitted
+}
+
+fn higher_order_receiver_method_flows_to_callback(callee_name: &str) -> bool {
+    matches!(
+        normalized_call_tail(callee_name).as_str(),
+        "foreach" | "each" | "map" | "filter" | "flatmap" | "collect" | "select"
+    )
+}
+
+fn higher_order_free_function_flows_to_callback(callee_name: &str) -> bool {
+    matches!(
+        normalized_call_tail(callee_name).as_str(),
+        "for_each" | "foreach" | "array_walk"
+    )
+}
+
+fn normalized_call_tail(callee_name: &str) -> String {
+    callee_name
+        .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .find(|part| !part.is_empty())
+        .unwrap_or(callee_name)
+        .to_ascii_lowercase()
+}
+
 fn constructor_receiver_target_base(
     receiver: &str,
     caller_params: &[String],
+    caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
+    caller_implicit_receiver_bases: &[String],
 ) -> String {
     let trimmed = receiver.trim();
     if is_super_receiver(trimmed) {
-        return caller_receiver_param_index
+        if let Some(param) = caller_receiver_param_index
             .and_then(|idx| caller_params.get(idx))
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| trimmed.to_string());
+        {
+            return param;
+        }
+        if caller_is_constructor {
+            if let Some(base) = constructor_implicit_receiver_base(caller_implicit_receiver_bases) {
+                return base;
+            }
+        }
     }
     trimmed.to_string()
+}
+
+fn constructor_receiver_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
+    let mut out: Vec<String> = endpoints
+        .receiver_param_index
+        .and_then(|idx| endpoints.param_names.get(idx).cloned())
+        .into_iter()
+        .collect();
+    for base in endpoints
+        .receiver_field_bases
+        .iter()
+        .chain(endpoints.implicit_receiver_bases.iter())
+    {
+        let base = base.trim();
+        if !base.is_empty() && !out.iter().any(|existing| existing == base) {
+            out.push(base.to_string());
+        }
+    }
+    out
+}
+
+fn constructor_implicit_receiver_base(caller_implicit_receiver_bases: &[String]) -> Option<String> {
+    caller_implicit_receiver_bases
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .find(|base| !base.is_empty() && is_implicit_receiver_name(base) && !is_super_receiver(base))
+        .or_else(|| {
+            caller_implicit_receiver_bases
+                .iter()
+                .map(String::as_str)
+                .map(str::trim)
+                .find(|base| !base.is_empty() && !is_super_receiver(base))
+        })
+        .map(str::to_string)
+}
+
+fn receiver_field_forwarding_base(
+    site: &CallSiteRef,
+    receiver: &str,
+    caller_params: &[String],
+    caller_receiver_param_index: Option<usize>,
+    caller_implicit_receiver_bases: &[String],
+    allow_implicit_receiver_rewrite: bool,
+) -> String {
+    if let Some(base) = inline_constructor_receiver_base(receiver, site.site.0) {
+        return base;
+    }
+    if let Some(base) = inline_call_result_receiver_base(receiver, site.site.0) {
+        return base;
+    }
+    if allow_implicit_receiver_rewrite {
+        return implicit_receiver_actual_base(
+            receiver,
+            caller_params,
+            caller_receiver_param_index,
+            caller_implicit_receiver_bases,
+        );
+    }
+    receiver.trim().to_string()
 }
 
 fn implicit_receiver_actual_base(
@@ -1213,6 +1509,16 @@ fn implicit_receiver_actual_base(
         {
             return param.to_string();
         }
+        if is_super_receiver(trimmed) {
+            if let Some(base) = caller_implicit_receiver_bases
+                .iter()
+                .map(String::as_str)
+                .map(str::trim)
+                .find(|base| *base == "receiver")
+            {
+                return base.to_string();
+            }
+        }
         if let Some(base) = caller_implicit_receiver_bases
             .iter()
             .find(|base| is_implicit_receiver_name(base.trim()) && !is_super_receiver(base.trim()))
@@ -1228,7 +1534,7 @@ fn implicit_receiver_actual_base(
 }
 
 fn is_super_receiver(receiver: &str) -> bool {
-    matches!(receiver.trim(), "super" | "super()" | "base")
+    matches!(receiver.trim(), "super" | "super()" | "base" | "parent")
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the explicit FieldArgStitch metadata.
@@ -1266,7 +1572,189 @@ fn push_receiver_field_arg_site(
         call_span,
         precision,
         call_kind,
+        allow_out_of_order_source: false,
     });
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors receiver forwarding metadata.
+fn push_nested_receiver_field_arg_sites(
+    sites: &mut FieldArgSiteQueue,
+    caller: FuncId,
+    caller_seg: SegmentId,
+    callee: FuncId,
+    callee_seg: SegmentId,
+    actual_receiver: &str,
+    receiver_param_name: &str,
+    endpoints: &CalleeEndpoints,
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+) {
+    let projection_bases = return_projection_bases(endpoints);
+    let nested_bases = endpoints
+        .receiver_field_bases
+        .iter()
+        .chain(endpoints.implicit_receiver_bases.iter())
+        .chain(projection_bases.iter());
+    let mut seen = AHashSet::new();
+    for nested_param_base in nested_bases {
+        let nested_param_base = nested_param_base.trim();
+        let Some(actual_nested_base) =
+            project_receiver_base(actual_receiver, receiver_param_name, nested_param_base)
+        else {
+            continue;
+        };
+        if actual_nested_base == actual_receiver
+            || !seen.insert((actual_nested_base.clone(), nested_param_base.to_string()))
+        {
+            continue;
+        }
+        sites.push(FieldArgStitch {
+            caller,
+            caller_seg,
+            callee,
+            callee_seg,
+            actual_arg_node: None,
+            actual_arg: actual_nested_base,
+            param_name: nested_param_base.to_string(),
+            call_span,
+            precision,
+            call_kind,
+            allow_out_of_order_source: false,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors receiver forwarding metadata for implicit member calls.
+fn push_bare_implicit_member_field_arg_sites(
+    sites: &mut FieldArgSiteQueue,
+    caller: FuncId,
+    caller_seg: SegmentId,
+    callee: FuncId,
+    callee_seg: SegmentId,
+    endpoints: &CalleeEndpoints,
+    caller_implicit_receiver_bases: &[String],
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+) {
+    let roots = implicit_member_actual_roots(caller_implicit_receiver_bases);
+    if roots.is_empty() {
+        return;
+    }
+    let projection_bases = return_projection_bases(endpoints);
+    let nested_bases = endpoints
+        .receiver_field_bases
+        .iter()
+        .chain(endpoints.implicit_receiver_bases.iter())
+        .chain(projection_bases.iter());
+    let mut seen = AHashSet::new();
+    for nested_param_base in nested_bases {
+        let nested_param_base = nested_param_base.trim();
+        if nested_param_base.is_empty() {
+            continue;
+        }
+        for root in &roots {
+            let actual_arg = implicit_member_actual_base(root, nested_param_base);
+            if !seen.insert((actual_arg.clone(), nested_param_base.to_string())) {
+                continue;
+            }
+            if actual_arg == nested_param_base && caller == callee {
+                continue;
+            }
+            sites.push(FieldArgStitch {
+                caller,
+                caller_seg,
+                callee,
+                callee_seg,
+                actual_arg,
+                actual_arg_node: None,
+                param_name: nested_param_base.to_string(),
+                call_span,
+                precision,
+                call_kind,
+                allow_out_of_order_source: true,
+            });
+        }
+    }
+}
+
+fn return_projection_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
+    let mut out = Vec::new();
+    for projection in &endpoints.return_field_projections {
+        let base = projection.base.trim();
+        if !base.is_empty() && !out.iter().any(|existing| existing == base) {
+            out.push(base.to_string());
+        }
+    }
+    out
+}
+
+fn implicit_member_actual_roots(caller_implicit_receiver_bases: &[String]) -> Vec<String> {
+    let mut roots = Vec::new();
+    for base in caller_implicit_receiver_bases {
+        let Some(root) = implicit_receiver_root(base) else {
+            continue;
+        };
+        if !roots.iter().any(|existing| existing == root) {
+            roots.push(root.to_string());
+        }
+    }
+    for root in ["this", "self", "super", "base", "receiver"] {
+        if !roots.iter().any(|existing| existing == root) {
+            roots.push(root.to_string());
+        }
+    }
+    roots
+}
+
+fn implicit_member_actual_base(root: &str, nested_param_base: &str) -> String {
+    if implicit_receiver_root(nested_param_base).is_some() {
+        nested_param_base.trim().to_string()
+    } else {
+        format!("{}.{}", root.trim(), nested_param_base.trim())
+    }
+}
+
+fn projected_receiver_target_base(target_base: &str, receiver_base: &str) -> String {
+    project_receiver_base(
+        target_base,
+        implicit_receiver_root(receiver_base).unwrap_or(""),
+        receiver_base,
+    )
+    .unwrap_or_else(|| target_base.trim().to_string())
+}
+
+fn project_receiver_base(actual_base: &str, receiver_root: &str, receiver_base: &str) -> Option<String> {
+    let actual_base = actual_base.trim();
+    let receiver_root = receiver_root.trim();
+    let receiver_base = receiver_base.trim();
+    if actual_base.is_empty() || receiver_root.is_empty() || receiver_base.is_empty() {
+        return None;
+    }
+    if receiver_base == receiver_root {
+        return Some(actual_base.to_string());
+    }
+    let suffix = receiver_base
+        .strip_prefix(receiver_root)
+        .and_then(|rest| rest.strip_prefix('.'))?;
+    if suffix.is_empty() {
+        return Some(actual_base.to_string());
+    }
+    Some(format!("{actual_base}.{suffix}"))
+}
+
+fn implicit_receiver_root(receiver_base: &str) -> Option<&str> {
+    let root = receiver_base
+        .trim()
+        .split('.')
+        .find(|part| !part.trim().is_empty())?
+        .trim();
+    matches!(
+        root,
+        "self" | "this" | "$this" | "Self" | "super" | "base" | "receiver"
+    )
+    .then_some(root)
 }
 
 fn receiver_projection_needed(receiver: &str, receiver_type: &str) -> bool {
@@ -1301,12 +1789,14 @@ fn named_arg_param_index(
 fn stitch_field_argument_forwarding(
     sites: &[FieldArgStitch],
     return_field_sites: &[ReturnFieldStitch],
+    scalar_return_sites: &[ScalarReturnStitch],
     constructor_return_sites: &[ConstructorReturnStitch],
     receiver_mutation_sites: &[ReceiverMutationStitch],
     ws: &mut IdgWorkspace,
 ) {
     if sites.is_empty()
         && return_field_sites.is_empty()
+        && scalar_return_sites.is_empty()
         && constructor_return_sites.is_empty()
         && receiver_mutation_sites.is_empty()
     {
@@ -1320,20 +1810,12 @@ fn stitch_field_argument_forwarding(
     let transforms = build_field_write_transforms(
         sites,
         return_field_sites,
+        scalar_return_sites,
         constructor_return_sites,
         receiver_mutation_sites,
         &copy_sites,
     );
     let transform_count = transforms.values().map(Vec::len).sum::<usize>();
-    let max_worklist_writes = field_index
-        .seen
-        .len()
-        .saturating_add(transform_count)
-        .saturating_mul(FIELD_FORWARD_WORKLIST_FACTOR)
-        .max(MIN_FIELD_FORWARD_WORKLIST_WRITES);
-    let max_transform_apps = transform_count
-        .saturating_mul(FIELD_FORWARD_TRANSFORM_FACTOR)
-        .max(MIN_FIELD_FORWARD_TRANSFORM_APPS);
     let mut pending = VecDeque::new();
     let mut enqueued = AHashSet::default();
     seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
@@ -1344,21 +1826,12 @@ fn stitch_field_argument_forwarding(
         stitch_field_argument_fallbacks(sites, ws, &mut known_edges, &field_index, &inter_call_arg_entries);
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
-    let mut budget_hit = false;
     while let Some(write) = pending.pop_front() {
-        if processed >= max_worklist_writes {
-            budget_hit = true;
-            break;
-        }
         processed += 1;
         let Some(sites) = transforms.get(&write.key) else {
             continue;
         };
         for site in sites {
-            if processed_transforms >= max_transform_apps {
-                budget_hit = true;
-                break;
-            }
             processed_transforms += 1;
             apply_field_write_transform(
                 site,
@@ -1373,23 +1846,17 @@ fn stitch_field_argument_forwarding(
                 &mut enqueued,
             );
         }
-        if budget_hit {
-            break;
-        }
     }
     let added_edges = ws.total_edge_count().saturating_sub(before_edges);
     stitch_debug_log(format_args!(
-        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} max_processed={} max_transform_apps={} fallback_edges={} added_edges={} total_edges={} budget_hit={} pending_remaining={}",
+        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} fallback_edges={} added_edges={} total_edges={} pending_remaining={}",
         phase_started.elapsed().as_secs_f64(),
         processed,
         processed_transforms,
         transform_count,
-        max_worklist_writes,
-        max_transform_apps,
         fallback_edges,
         added_edges,
         ws.total_edge_count(),
-        budget_hit,
         pending.len(),
     ));
 }
@@ -1409,6 +1876,7 @@ struct FieldCopySite {
 fn build_field_write_transforms(
     sites: &[FieldArgStitch],
     return_field_sites: &[ReturnFieldStitch],
+    scalar_return_sites: &[ScalarReturnStitch],
     constructor_return_sites: &[ConstructorReturnStitch],
     receiver_mutation_sites: &[ReceiverMutationStitch],
     copy_sites: &[FieldCopySite],
@@ -1426,6 +1894,13 @@ fn build_field_write_transforms(
             &mut out,
             field_write_key(site.callee_seg, site.callee, &site.source_base),
             FieldWriteTransform::Return(site.clone()),
+        );
+    }
+    for site in scalar_return_sites {
+        push_field_write_transform(
+            &mut out,
+            field_write_key(site.callee_seg, site.callee, &site.source_base),
+            FieldWriteTransform::ScalarReturn(site.clone()),
         );
     }
     for site in constructor_return_sites {
@@ -1560,6 +2035,7 @@ fn apply_field_write_transform(
             apply_return_field_write(
                 site,
                 &write.hit,
+                inter_call_arg_entries,
                 ws,
                 known_edges,
                 field_index,
@@ -1568,10 +2044,14 @@ fn apply_field_write_transform(
                 enqueued,
             );
         }
+        FieldWriteTransform::ScalarReturn(site) => {
+            apply_scalar_return_field_write(site, &write.hit, ws, known_edges);
+        }
         FieldWriteTransform::ConstructorReturn(site) => {
             apply_constructor_return_field_write(
                 site,
                 &write.hit,
+                inter_call_arg_entries,
                 ws,
                 known_edges,
                 field_index,
@@ -1584,6 +2064,7 @@ fn apply_field_write_transform(
             apply_receiver_mutation_field_write(
                 site,
                 &write.hit,
+                inter_call_arg_entries,
                 ws,
                 known_edges,
                 field_index,
@@ -1596,6 +2077,7 @@ fn apply_field_write_transform(
             apply_intra_field_copy_write(
                 site,
                 &write.hit,
+                inter_call_arg_entries,
                 ws,
                 known_edges,
                 field_index,
@@ -1620,13 +2102,15 @@ fn apply_field_argument_write(
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
-    if !source_write_can_reach_call(
-        source,
-        site.call_span,
-        inter_call_arg_entries,
-        site.caller_seg,
-        site.caller,
-    ) || !is_forwardable_field(&source.field)
+    if (!site.allow_out_of_order_source
+        && !source_write_can_reach_call(
+            source,
+            site.call_span,
+            inter_call_arg_entries,
+            site.caller_seg,
+            site.caller,
+        ))
+        || !is_forwardable_field(&source.field)
     {
         return;
     }
@@ -1687,6 +2171,7 @@ fn apply_field_argument_write(
 fn apply_return_field_write(
     site: &ReturnFieldStitch,
     source: &FieldPlaceHit,
+    inter_call_arg_entries: &mut InterCallArgEntryIndex,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
@@ -1704,6 +2189,7 @@ fn apply_return_field_write(
         site.precision,
         site.call_kind,
         source,
+        inter_call_arg_entries,
         ws,
         known_edges,
         field_index,
@@ -1715,10 +2201,47 @@ fn apply_return_field_write(
     );
 }
 
+fn apply_scalar_return_field_write(
+    site: &ScalarReturnStitch,
+    source: &FieldPlaceHit,
+    ws: &mut IdgWorkspace,
+    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
+) {
+    if source.field != site.source_field {
+        return;
+    }
+    let Some(target_write) = ensure_scalar_write_node(
+        ws,
+        site.caller_seg,
+        site.caller,
+        &site.target_base,
+        site.write_span,
+    ) else {
+        return;
+    };
+    place_inter_edge_if_absent(
+        site.callee_seg,
+        site.caller_seg,
+        IdgEdge {
+            from: source.node,
+            to: target_write,
+            meta: crate::edge::EdgeMeta {
+                precision: site.precision,
+                kind: crate::edge::IdgEdgeKind::InterReturn,
+                call_kind: site.call_kind,
+                via_span: site.call_span,
+            },
+        },
+        ws,
+        known_edges,
+    );
+}
+
 #[allow(clippy::too_many_arguments)] // Constructor return forwarding carries source, destination, and worklist state.
 fn apply_constructor_return_field_write(
     site: &ConstructorReturnStitch,
     source: &FieldPlaceHit,
+    inter_call_arg_entries: &mut InterCallArgEntryIndex,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
@@ -1736,6 +2259,7 @@ fn apply_constructor_return_field_write(
         site.precision,
         site.call_kind,
         source,
+        inter_call_arg_entries,
         ws,
         known_edges,
         field_index,
@@ -1751,6 +2275,7 @@ fn apply_constructor_return_field_write(
 fn apply_receiver_mutation_field_write(
     site: &ReceiverMutationStitch,
     source: &FieldPlaceHit,
+    inter_call_arg_entries: &mut InterCallArgEntryIndex,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
@@ -1768,6 +2293,7 @@ fn apply_receiver_mutation_field_write(
         site.precision,
         site.call_kind,
         source,
+        inter_call_arg_entries,
         ws,
         known_edges,
         field_index,
@@ -1783,6 +2309,7 @@ fn apply_receiver_mutation_field_write(
 fn apply_intra_field_copy_write(
     site: &FieldCopySite,
     source: &FieldPlaceHit,
+    inter_call_arg_entries: &mut InterCallArgEntryIndex,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
@@ -1800,6 +2327,7 @@ fn apply_intra_field_copy_write(
         site.precision,
         site.call_kind,
         source,
+        inter_call_arg_entries,
         ws,
         known_edges,
         field_index,
@@ -1822,6 +2350,7 @@ fn apply_outbound_field_write(
     precision: Precision,
     call_kind: CallEdgeKind,
     source: &FieldPlaceHit,
+    inter_call_arg_entries: &mut InterCallArgEntryIndex,
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &mut FieldPlaceIndex,
@@ -1859,7 +2388,7 @@ fn apply_outbound_field_write(
         transforms,
     );
     if !(skip_self_edge && from_seg == to_seg && source.node == target_field_write) {
-        place_inter_edge_if_absent(
+        let changed = place_inter_edge_if_absent(
             from_seg,
             to_seg,
             IdgEdge {
@@ -1875,6 +2404,14 @@ fn apply_outbound_field_write(
             ws,
             known_edges,
         );
+        if changed
+            && matches!(
+                edge_kind,
+                crate::edge::IdgEdgeKind::InterCallArg | crate::edge::IdgEdgeKind::InterReturn
+            )
+        {
+            inter_call_arg_entries.insert(to_seg, to_func, target_field_write);
+        }
     }
     connect_field_write_to_reads(
         to_seg,
@@ -2105,7 +2642,7 @@ fn storage_segments(text: &str) -> Vec<String> {
 }
 
 fn is_implicit_receiver_name(name: &str) -> bool {
-    matches!(name.trim(), "self" | "this" | "$this" | "Self")
+    matches!(name.trim(), "self" | "this" | "$this" | "Self" | "receiver")
 }
 
 fn is_unprojected_storage_place(segment: &crate::segment::IdgSegment, place: &Place) -> bool {
@@ -2140,7 +2677,7 @@ fn connect_field_write_to_reads(
     let readers = field_index.field_reads_for_base(seg_id, func, base);
     let mut changed = false;
     for (reader_field, reader) in readers {
-        if reader_field != field || reader == writer {
+        if !field_matches_or_descends(&reader_field, field) || reader == writer {
             continue;
         }
         changed |= place_inter_edge_if_absent(
@@ -2172,7 +2709,14 @@ fn field_write_has_consumer(
     field: &str,
 ) -> bool {
     transforms.contains_key(&field_write_key(seg_id, func, base))
-        || field_index.has_field_read_for_base_field(seg_id, func, base, field)
+        || field_index.has_field_read_for_base_field_or_descendant(seg_id, func, base, field)
+}
+
+fn field_matches_or_descends(candidate: &str, field: &str) -> bool {
+    candidate == field
+        || candidate
+            .strip_prefix(field)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn field_write_has_storage_path_consumer(
@@ -2225,6 +2769,27 @@ fn ensure_field_write_node(
     Some(segment.intern_node(func, pid))
 }
 
+fn ensure_scalar_write_node(
+    ws: &mut IdgWorkspace,
+    seg_id: SegmentId,
+    func: FuncId,
+    target_base: &str,
+    span: Span,
+) -> Option<NodeId> {
+    let name = normalize_storage_base(target_base);
+    if name.is_empty() || name.contains('.') {
+        return None;
+    }
+    let segment = ws.segment_mut(seg_id)?;
+    let name_id = segment.strings.intern(&name);
+    let pid = segment.intern_place(Place::Write {
+        name: name_id,
+        path: SmallVec::new(),
+        span,
+    });
+    Some(segment.intern_node(func, pid))
+}
+
 fn storage_path_parts(base: &str, field: &str) -> Option<(String, Vec<String>)> {
     let mut parts = Vec::new();
     push_storage_segments(base, &mut parts);
@@ -2239,7 +2804,7 @@ fn storage_path_parts(base: &str, field: &str) -> Option<(String, Vec<String>)> 
 fn push_storage_segments(text: &str, out: &mut Vec<String>) {
     let normalized = normalize_static_subscripts(text);
     for part in normalized.split('.') {
-        let part = part.trim();
+        let part = part.trim().trim_start_matches(':');
         if !part.is_empty() {
             out.push(part.to_string());
         }
@@ -2365,6 +2930,25 @@ impl FieldPlaceIndex {
         self.by_base
             .get(&key)
             .is_some_and(|hits| hits.iter().any(|hit| hit.field == field))
+    }
+
+    fn has_field_read_for_base_field_or_descendant(
+        &self,
+        seg_id: SegmentId,
+        func: FuncId,
+        base: &str,
+        field: &str,
+    ) -> bool {
+        let key = FieldPlaceKey {
+            seg_id,
+            func,
+            base: normalize_storage_base(base),
+            writes: false,
+        };
+        self.by_base.get(&key).is_some_and(|hits| {
+            hits.iter()
+                .any(|hit| field_matches_or_descends(&hit.field, field))
+        })
     }
 
     fn field_hits_for_base(

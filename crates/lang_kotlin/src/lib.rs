@@ -3,12 +3,13 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
-        node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        collect_assign_targets, collect_kinds, collect_receiver_field_writes, first_named_child_of_kind,
+        language_from_pack, node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
+        walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasBinding, Visibility,
+    rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, Decl, DeclIndex, DeclKind,
+    FieldWrite, FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -108,9 +109,11 @@ impl LanguageAdapter for KotlinAdapter {
             // `Foo.bar(...)` dispatches correctly.
             synthesize_kotlin_object_decls(&mut idx, file, &tree, src);
             synthesize_kotlin_constructor_decls(&mut idx, file, &tree, src);
+            synthesize_kotlin_property_getter_decls(&mut idx, file, &tree, src);
             // Module path from `package com.foo.bar` declaration; falls
             // back to file-stem when absent.
             if let Some(segments) = extract_kotlin_package(tree.root_node(), src) {
+                let segments = package_module_segments_with_workspace_prefix(file, ctx, segments);
                 bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
             } else {
                 bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
@@ -219,6 +222,7 @@ impl LanguageAdapter for KotlinAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, KOTLIN_LIFECYCLE_TRANSITIONS);
         }
+        qualify_kotlin_implicit_member_reads(&mut idx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -229,6 +233,38 @@ impl LanguageAdapter for KotlinAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+fn qualify_kotlin_implicit_member_reads(index: &mut DeclIndex) {
+    use std::collections::HashSet;
+    let getter_names: HashSet<String> = index
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(decl.kind, DeclKind::Method | DeclKind::Function)
+                && decl.params.is_empty()
+                && !decl.name.is_empty()
+        })
+        .map(|decl| decl.name.clone())
+        .collect();
+    if getter_names.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        if decl.flow_events.is_empty() {
+            continue;
+        }
+        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
+        collect_assign_targets(&decl.flow_events, &mut locals);
+        rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
+            ImplicitMemberReadCall {
+                source_call: name.to_string(),
+                call_name: name.to_string(),
+                receiver: None,
+                call_kind: CallKind::Function,
+            }
+        });
     }
 }
 
@@ -772,6 +808,141 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
             next = next.saturating_add(1);
         }
     }
+}
+
+fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
+    let class_names = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| decl.name.clone())
+        .collect::<Vec<_>>();
+    let classes = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| {
+            (
+                decl.body_span.unwrap_or(decl.span),
+                decl.symbol,
+                decl.module_path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if classes.is_empty() {
+        return;
+    }
+
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut synthesized = Vec::new();
+    for property in collect_kinds(tree, &["property_declaration"]) {
+        let Some(getter) = first_named_child_of_kind(&property, "getter") else {
+            continue;
+        };
+        let Some(name_node) = kotlin_property_name_node(property) else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let property_span = span_of(file, &property);
+        let Some((_, parent, module_path)) = classes
+            .iter()
+            .filter(|(body_span, _, _)| span_contains(*body_span, property_span))
+            .min_by_key(|(body_span, _, _)| body_span.end.saturating_sub(body_span.start))
+        else {
+            continue;
+        };
+        if idx
+            .defs
+            .iter()
+            .chain(synthesized.iter())
+            .any(|decl| decl.parent == Some(*parent) && decl.name == name && decl.params.is_empty())
+        {
+            continue;
+        }
+        let body = first_named_child_of_kind(&getter, "function_body").unwrap_or(getter);
+        let body_span = span_of(file, &body);
+        let mut flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+        if !flow_events
+            .iter()
+            .any(|event| matches!(event, FlowEvent::Return { .. }))
+        {
+            if let Some(expr) = kotlin_getter_expression_text(body, src) {
+                flow_events.push(FlowEvent::Return {
+                    span: body_span,
+                    value_text: Some(expr.clone()),
+                    value_name: kotlin_bare_identifier(&expr),
+                });
+            }
+        }
+        if flow_events.is_empty() {
+            continue;
+        }
+        synthesized.push(Decl {
+            symbol: bonsai_common::SymbolId::new(next),
+            kind: DeclKind::Method,
+            name,
+            qualified_name: None,
+            module_path: module_path.clone(),
+            span: span_of(file, &getter),
+            name_span: span_of(file, &name_node),
+            visibility: Visibility::Public,
+            parent: Some(*parent),
+            body_span: Some(body_span),
+            flow_events,
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+            is_variadic: false,
+        });
+        next = next.saturating_add(1);
+    }
+    idx.defs.extend(synthesized);
+}
+
+fn kotlin_property_name_node(property: Node<'_>) -> Option<Node<'_>> {
+    let variable = first_named_child_of_kind(&property, "variable_declaration")?;
+    first_named_child_of_kind(&variable, "simple_identifier")
+        .or_else(|| first_named_child_of_kind(&variable, "identifier"))
+}
+
+fn kotlin_getter_expression_text(body: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut text = node_text(&body, src).trim().trim_end_matches(';').trim();
+    if let Some(rest) = text.strip_prefix('=') {
+        text = rest.trim();
+    }
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn kotlin_bare_identifier(text: &str) -> Option<String> {
+    let text = text.trim();
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    chars
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        .then(|| text.to_string())
+}
+
+fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }
 
 struct KotlinConstructorSpans {

@@ -439,11 +439,12 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "os.system",
         sqli_sink: "cursor.execute",
         min_findings_micro: 2,
-        // Tightening Python source attribution and inferred-entry
-        // filtering removed duplicate/overclaim rows from this fixture
-        // while preserving the real command-injection, SQLi, template,
-        // path, SSRF, eval, and pickle findings.
-        min_findings_complex: 63,
+        // Tightening Python source attribution, inferred-entry
+        // filtering, and source-to-sink scheduling removed duplicate /
+        // overclaim rows from this fixture while preserving the real
+        // command-injection, SQLi, template, path, SSRF, eval, and
+        // pickle findings.
+        min_findings_complex: 62,
         min_complex_decls: 200,
         refs_populated: true,
         has_classes: false,
@@ -1014,9 +1015,9 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         "csharp" => 1,
         "dart" => 1,
         "elixir" => 1,
-        // Concrete-source empty: the real flow seeds from an inferred
-        // entry-point parameter, surfaced only under `--inferred-sources`.
-        "erlang" => 0,
+        // io:get_line is a concrete CLI source and reaches os:cmd through
+        // the full mega-flow chain.
+        "erlang" => 1,
         "go" => 1,
         "java" => 1,
         "javascript" => 1,
@@ -1034,8 +1035,9 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         "php" => 2,
         "python" => 1,
         "ruby" => 2,
-        // Concrete-source empty: real flow needs an inferred entry source.
-        "rust" => 0,
+        // stdin.lock().read_line is a concrete CLI source and reaches the
+        // command argument sink through the full mega-flow chain.
+        "rust" => 1,
         "scala" => 1,
         // One concrete information-exposure finding from `msg.sender`
         // in the audit modifier. The reentrancy chain through

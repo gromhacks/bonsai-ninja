@@ -288,12 +288,16 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
             }
         });
     if let Some(parameters_container) = parameters_container {
-        let mut cursor = parameters_container.walk();
-        for param in parameters_container.named_children(&mut cursor) {
-            if is_parameter_modifier_container(param.kind()) {
-                continue;
+        if looks_like_identifier(parameters_container.kind()) {
+            push_param_name(parameters_container, src, &mut param_names);
+        } else {
+            let mut cursor = parameters_container.walk();
+            for param in parameters_container.named_children(&mut cursor) {
+                if is_parameter_modifier_container(param.kind()) {
+                    continue;
+                }
+                push_param_name(param, src, &mut param_names);
             }
-            push_param_name(param, src, &mut param_names);
         }
     }
     // Flat-shape grammars (Solidity, ObjC) emit param nodes as direct
@@ -342,7 +346,10 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         param_names.push(bound_name.unwrap_or_default());
     }
     let fn_text = node_text(fn_node, src);
-    let fallback_params = callable_param_names_from_text(fn_text);
+    let fallback_param_text = parameters_container
+        .map(|container| node_text(&container, src))
+        .unwrap_or(fn_text);
+    let fallback_params = callable_param_names_from_text(fallback_param_text);
     if param_names.is_empty() {
         param_names.extend(fallback_params);
     } else if fallback_params

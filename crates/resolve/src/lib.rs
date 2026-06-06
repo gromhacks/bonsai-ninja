@@ -1182,6 +1182,7 @@ pub fn collect_method_candidates_for_class(
 #[derive(Debug, Default)]
 pub struct MethodCandidateCache {
     entries: AHashMap<MethodCandidateCacheKey, Vec<bonsai_common::FuncId>>,
+    peer_class_index: Option<AHashMap<(String, ModulePath), Vec<SymbolId>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1436,7 +1437,7 @@ fn collect_peer_partial_class_method_candidates(
     // only runs after a same-symbol class has no owned callable; the
     // candidates are narrowed to the same class-like name, visibility,
     // and semantic method ownership before any method leaves this helper.
-    for peer_sym in global.find_by_name(&class_decl.name).iter().copied() {
+    for peer_sym in peer_partial_class_symbols(global, class_sym, class_decl, None) {
         if peer_sym == class_sym || seen_classes.contains(&peer_sym) {
             continue;
         }
@@ -1483,7 +1484,7 @@ fn collect_peer_partial_class_method_candidates_cached(
     // only runs after a same-symbol class has no owned callable; the
     // candidates are narrowed to the same class-like name, visibility,
     // and semantic method ownership before any method leaves this helper.
-    for peer_sym in global.find_by_name(&class_decl.name).iter().copied() {
+    for peer_sym in peer_partial_class_symbols(global, class_sym, class_decl, Some(cache)) {
         if peer_sym == class_sym || seen_classes.contains(&peer_sym) {
             continue;
         }
@@ -1513,6 +1514,62 @@ fn collect_peer_partial_class_method_candidates_cached(
             push_unique_func(out, func);
         }
     }
+}
+
+fn peer_partial_class_symbols(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    class_decl: &bonsai_lang_api::Decl,
+    cache: Option<&mut MethodCandidateCache>,
+) -> Vec<SymbolId> {
+    if class_decl.module_path.is_empty() {
+        let Some(class_file) = global.declaring_file(class_sym) else {
+            return Vec::new();
+        };
+        return global
+            .decls_in(class_file)
+            .iter()
+            .filter(|decl| {
+                decl.symbol != class_sym
+                    && decl.name == class_decl.name
+                    && matches!(
+                        decl.kind,
+                        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                    )
+            })
+            .map(|decl| decl.symbol)
+            .collect();
+    }
+
+    let key = (class_decl.name.clone(), class_decl.module_path.clone());
+    if let Some(cache) = cache {
+        let index = cache
+            .peer_class_index
+            .get_or_insert_with(|| build_peer_class_index(global));
+        return index.get(&key).cloned().unwrap_or_default();
+    }
+    build_peer_class_index(global).remove(&key).unwrap_or_default()
+}
+
+fn build_peer_class_index(global: &GlobalIndex) -> AHashMap<(String, ModulePath), Vec<SymbolId>> {
+    let mut index: AHashMap<(String, ModulePath), Vec<SymbolId>> = AHashMap::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.module_path.is_empty()
+                || !matches!(
+                    decl.kind,
+                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                )
+            {
+                continue;
+            }
+            index
+                .entry((decl.name.clone(), decl.module_path.clone()))
+                .or_default()
+                .push(decl.symbol);
+        }
+    }
+    index
 }
 
 fn peer_partial_class_matches(
@@ -1802,7 +1859,11 @@ pub fn resolve_class(
             .filter(|(decl, _)| {
                 matches!(
                     decl.kind,
-                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                    DeclKind::Class
+                        | DeclKind::Struct
+                        | DeclKind::Trait
+                        | DeclKind::Interface
+                        | DeclKind::Enum
                 )
             })
             .filter(|(decl, decl_file)| visibility_allows(decl, *decl_file, &decl.module_path, ctx))
@@ -1828,7 +1889,11 @@ pub fn resolve_class(
             .filter(|decl| {
                 matches!(
                     decl.kind,
-                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                    DeclKind::Class
+                        | DeclKind::Struct
+                        | DeclKind::Trait
+                        | DeclKind::Interface
+                        | DeclKind::Enum
                 )
             })
             .filter(|decl| visibility_allows(decl, ctx.caller_file, &decl.module_path, ctx))
@@ -1856,6 +1921,15 @@ pub fn resolve_class(
                 return out;
             }
             if let Some(target_module) = rewrite.target_module.as_deref() {
+                for exact_lookup in
+                    alias_target_qualified_class_lookup_names(name, &lookup, target_module, ctx)
+                {
+                    out.extend(collect(&exact_lookup));
+                }
+                if !out.is_empty() {
+                    dedup_symbols(&mut out);
+                    return out;
+                }
                 for alias_lookup in alias_bound_class_lookup_names(name, &lookup) {
                     let mut candidates = collect(&alias_lookup);
                     candidates.retain(|sym| symbol_in_alias_target(global, *sym, target_module, ctx));
@@ -1916,6 +1990,36 @@ pub fn resolve_class(
                 return out;
             }
         }
+    }
+    out
+}
+
+fn alias_target_qualified_class_lookup_names(
+    local_name: &str,
+    rewritten: &str,
+    target_module: &str,
+    ctx: &ResolveContext<'_>,
+) -> Vec<String> {
+    let Some(target_segments) = relative_module_target_segments(target_module, ctx.caller_module) else {
+        return Vec::new();
+    };
+    if target_segments.is_empty() {
+        return Vec::new();
+    }
+    let module_prefix = target_segments.join("::");
+    let mut out = Vec::new();
+    for alias_lookup in alias_bound_class_lookup_names(local_name, rewritten) {
+        if let Some(tail) = alias_lookup
+            .rsplit(['.', ':', '\\', '/'])
+            .next()
+            .map(str::trim)
+            .filter(|tail| !tail.is_empty())
+        {
+            push_unique(&mut out, format!("{module_prefix}::{tail}"));
+        }
+    }
+    if let Some(module_leaf) = target_segments.last() {
+        push_unique(&mut out, format!("{module_prefix}::{module_leaf}"));
     }
     out
 }

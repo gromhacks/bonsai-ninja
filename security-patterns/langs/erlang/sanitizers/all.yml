@@ -385,3 +385,98 @@
         string:to_lower(Input).
     expect_match_text: ["string:to_lower"]
   description: "string:to_lower(s) - case-normalizes but preserves taint from s."
+- id: erlang.passthrough.string_tokens
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, tokens]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string tokens preserves source string taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        string:tokens(Input, " ").
+    expect_match_text: ["string:tokens"]
+  description: "string:tokens(String, Separators) - returns substrings derived from String; preserves taint from String."
+- id: erlang.passthrough.lists_map
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [lists, map]
+  taint_semantics:
+    call_result_passthrough_args: [1]
+  match_examples:
+  - name: lists map preserves input list element taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:map(fun string:strip/1, Input).
+    expect_match_text: ["lists:map"]
+  description: "lists:map(Fun, List) - result elements are derived from List elements; preserves element taint from List."
+- id: erlang.passthrough.lists_filter
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [lists, filter]
+  taint_semantics:
+    call_result_passthrough_args: [1]
+  match_examples:
+  - name: lists filter preserves input list element taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:filter(fun(Value) -> Value =/= "" end, Input).
+    expect_match_text: ["lists:filter"]
+  description: "lists:filter(Pred, List) - selected output elements are original List elements; preserves element taint from List."
+- id: erlang.passthrough.lists_foldl
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [lists, foldl]
+  taint_semantics:
+    call_result_passthrough_args: [2]
+  match_examples:
+  - name: lists foldl preserves input list element taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:foldl(fun(Value, Acc) -> Acc ++ Value end, "", Input).
+    expect_match_text: ["lists:foldl"]
+  description: "lists:foldl(Fun, Acc0, List) - reducer output can be derived from List elements; preserves element taint from List."
+- id: erlang.passthrough.lists_foldr
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [lists, foldr]
+  taint_semantics:
+    call_result_passthrough_args: [2]
+  match_examples:
+  - name: lists foldr preserves input list element taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:foldr(fun(Value, Acc) -> Value ++ Acc end, "", Input).
+    expect_match_text: ["lists:foldr"]
+  description: "lists:foldr(Fun, Acc0, List) - reducer output can be derived from List elements; preserves element taint from List."

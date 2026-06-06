@@ -160,6 +160,7 @@ impl LanguageAdapter for SolidityAdapter {
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            normalize_solidity_decl_kinds(&mut idx, &tree, file);
             // Phase-6 return-type extraction. The shared walker reads a
             // `return_type`/`type`/`result` field, but the Solidity grammar
             // surfaces the return as a bare `return_type_definition` child,
@@ -894,6 +895,21 @@ fn is_callable_decl(kind: DeclKind) -> bool {
         kind,
         DeclKind::Function | DeclKind::Method | DeclKind::Constructor
     )
+}
+
+fn normalize_solidity_decl_kinds(idx: &mut DeclIndex, tree: &Tree, file: FileId) {
+    let modifier_spans = collect_kinds(tree, &["modifier_definition"])
+        .into_iter()
+        .map(|node| span_of(file, &node))
+        .collect::<std::collections::HashSet<_>>();
+    if modifier_spans.is_empty() {
+        return;
+    }
+    for decl in &mut idx.defs {
+        if modifier_spans.contains(&decl.span) {
+            decl.kind = DeclKind::Function;
+        }
+    }
 }
 
 fn span_contains(outer: Span, inner: Span) -> bool {

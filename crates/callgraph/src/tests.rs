@@ -1219,6 +1219,68 @@ fn typed_child_receiver_resolves_inherited_base_method() {
 }
 
 #[test]
+fn super_receiver_resolves_base_method_from_override_context() {
+    let file = FileId::new(1);
+    let repo = 1;
+    let audited = 2;
+    let base_run = 3;
+    let override_run = 4;
+    let mut global = GlobalIndex::new();
+
+    let mut repo_class = decl_with(file, repo, "Repository", DeclKind::Class, None, Vec::new());
+    repo_class.body_span = Some(Span::new(file, 0, 100));
+    let mut audited_class = decl_with(
+        file,
+        audited,
+        "AuditedRepository",
+        DeclKind::Class,
+        None,
+        Vec::new(),
+    );
+    audited_class.body_span = Some(Span::new(file, 100, 220));
+    audited_class.bases = vec!["Repository".to_string()];
+    let base = decl_with(file, base_run, "run", DeclKind::Method, Some(repo), Vec::new());
+    let override_method = decl_with(
+        file,
+        override_run,
+        "run",
+        DeclKind::Method,
+        Some(audited),
+        vec![FlowEvent::Call {
+            span: Span::new(file, 150, 159),
+            name: "super.run".to_string(),
+            receiver: Some("super".to_string()),
+            receiver_types: vec!["Repository".to_string()],
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        }],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![repo_class, audited_class, base.clone(), override_method],
+    );
+    global.finalize_semantic_facts();
+
+    let cg = ResolvedCallGraph::build_with_file_info_and_super_tokens(
+        &global,
+        |_| ahash::AHashMap::new(),
+        |_| ahash::AHashMap::new(),
+        |_| None,
+        |_| &[],
+        |_| Some("swift"),
+        |_| &["super"],
+    );
+    let from = func_id_by_name_and_parent(&global, "run", "AuditedRepository");
+    let to = func_id_by_name_and_parent(&global, "run", "Repository");
+    let edges = cg.callees_of(from).collect::<Vec<_>>();
+    assert!(
+        edges.iter().any(|edge| edge.to == to),
+        "super.run should resolve to Repository.run from AuditedRepository.run; got {edges:?}"
+    );
+}
+
+#[test]
 fn bare_method_call_without_adapter_implicit_receiver_does_not_fan_out() {
     let caller_file = FileId::new(1);
     let other_file = FileId::new(2);
@@ -1661,6 +1723,136 @@ fn java_package_local_static_calls_do_not_fan_out_to_sibling_packages() {
         edges.iter().all(|edge| edge.to == same_package_orchestrate),
         "sibling packages must not be retained as Java same-language candidates: {edges:?}"
     );
+}
+
+#[test]
+fn local_scope_retention_uses_same_directory_when_modules_are_absent() {
+    let mut global = GlobalIndex::new();
+    let caller_file = FileId::new(1);
+    let local_file = FileId::new(2);
+    let sibling_file = FileId::new(3);
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![decl(caller_file, 1, "run", Vec::new())],
+    );
+    insert_file(
+        &mut global,
+        local_file,
+        vec![decl(local_file, 2, "execute", Vec::new())],
+    );
+    insert_file(
+        &mut global,
+        sibling_file,
+        vec![decl(sibling_file, 3, "execute", Vec::new())],
+    );
+    let caller_decl = global
+        .find_by_name("run")
+        .first()
+        .and_then(|symbol| global.decl_of(*symbol))
+        .expect("caller declaration");
+    let local_execute = global
+        .find_by_name("execute")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(local_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("local execute");
+    let sibling_execute = global
+        .find_by_name("execute")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(sibling_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("sibling execute");
+    let mut candidates = vec![local_execute, sibling_execute];
+
+    retain_local_scope_candidates_when_present(
+        &global,
+        caller_decl,
+        &|file| match file {
+            f if f == caller_file => Some("/workspace/flow1/app.cpp".to_string()),
+            f if f == local_file => Some("/workspace/flow1/executor.cpp".to_string()),
+            f if f == sibling_file => Some("/workspace/flow2/executor.cpp".to_string()),
+            _ => None,
+        },
+        &mut candidates,
+    );
+
+    assert_eq!(candidates, vec![local_execute]);
+}
+
+#[test]
+fn cpp_receiver_methods_do_not_fan_out_to_sibling_directories() {
+    let mut global = GlobalIndex::new();
+    let caller_file = FileId::new(1);
+    let sibling_file = FileId::new(2);
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![
+            decl_with(
+                caller_file,
+                10,
+                "BaseRepository",
+                DeclKind::Class,
+                None,
+                Vec::new(),
+            ),
+            decl_with(caller_file, 11, "cmd", DeclKind::Method, Some(10), Vec::new()),
+            decl(
+                caller_file,
+                12,
+                "run",
+                vec![method_call(caller_file, "repo.cmd", "repo", &["BaseRepository"])],
+            ),
+        ],
+    );
+    insert_file(
+        &mut global,
+        sibling_file,
+        vec![
+            decl_with(
+                sibling_file,
+                20,
+                "BaseRepository",
+                DeclKind::Class,
+                None,
+                Vec::new(),
+            ),
+            decl_with(sibling_file, 21, "cmd", DeclKind::Method, Some(20), Vec::new()),
+        ],
+    );
+
+    let cg = build_graph_with_paths(
+        &global,
+        |file| match file {
+            f if f == caller_file => Some("/workspace/flow1/storage.cpp".to_string()),
+            f if f == sibling_file => Some("/workspace/flow2/storage.cpp".to_string()),
+            _ => None,
+        },
+        |_| Some("cpp"),
+    );
+    let run = FuncId::new(global.find_by_name("run")[0].raw());
+    let local_cmd = global
+        .find_by_name("cmd")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(caller_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("local cmd");
+    let sibling_cmd = global
+        .find_by_name("cmd")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(sibling_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("sibling cmd");
+
+    let edges = cg.callees_of(run).collect::<Vec<_>>();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].to, local_cmd);
+    assert_eq!(cg.callers_of(sibling_cmd).count(), 0);
 }
 
 #[test]

@@ -1,22 +1,30 @@
 //! Progress-bar helpers for long-running CLI commands.
 //!
 //! Bars render to stderr (keeps `--format json` stdout clean) and
-//! become a no-op when any of: stderr isn't a TTY, `--no-progress`
-//! is set, or `NO_PROGRESS` / `NO_COLOR` env vars are present.
+//! become a no-op when stderr isn't a TTY, `--no-progress` is set,
+//! or `NO_PROGRESS` is present. `--no-color` / `NO_COLOR` keep bars
+//! visible but render them without ANSI colors.
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
 /// Global toggle backing `--no-progress`. Set once at CLI startup
-/// from the flag or the `NO_PROGRESS` / `NO_COLOR` env vars; every
+/// from the flag or the `NO_PROGRESS` env var; every
 /// [`progress_bar`] call reads it.
 static NO_PROGRESS: OnceLock<bool> = OnceLock::new();
+static NO_COLOR_PROGRESS: OnceLock<bool> = OnceLock::new();
 
 /// Install the `--no-progress` toggle. Called once from the
 /// top-level CLI dispatch before any command runs.
 pub(crate) fn set_no_progress(disabled: bool) {
     let _ = NO_PROGRESS.set(disabled);
+}
+
+/// Install the `--no-color` toggle for progress styling. Progress
+/// visibility is controlled separately by [`set_no_progress`].
+pub(crate) fn set_no_color(disabled: bool) {
+    let _ = NO_COLOR_PROGRESS.set(disabled);
 }
 
 /// `true` when the CLI has been told (via flag, env, or TTY
@@ -29,13 +37,11 @@ pub(crate) fn is_disabled() -> bool {
     if std::env::var("NO_PROGRESS").is_ok() {
         return true;
     }
-    // Matches the `--no-color` / `NO_COLOR` convention: if the
-    // user opted out of one chrome knob, they probably want the
-    // other muted too.
-    if std::env::var("NO_COLOR").is_ok() {
-        return true;
-    }
     !std::io::stderr().is_terminal()
+}
+
+fn color_disabled() -> bool {
+    *NO_COLOR_PROGRESS.get().unwrap_or(&false) || std::env::var("NO_COLOR").is_ok()
 }
 
 /// Whether the per-command workspace footer (cloc/LLM-style
@@ -59,7 +65,12 @@ pub(crate) fn progress_bar(label: &str, total: u64) -> ProgressBar {
         return ProgressBar::hidden();
     }
     let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
-    if let Ok(style) = ProgressStyle::with_template("  {msg:<24} [{bar:30.cyan/blue}] {pos}/{len} ({eta})") {
+    let template = if color_disabled() {
+        "  {msg:<24} [{bar:30}] {pos}/{len} ({eta})"
+    } else {
+        "  {msg:<24} [{bar:30.cyan/blue}] {pos}/{len} ({eta})"
+    };
+    if let Ok(style) = ProgressStyle::with_template(template) {
         bar.set_style(style.progress_chars("━━╸ "));
     }
     bar.set_message(label.to_string());
@@ -75,7 +86,12 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
         return ProgressBar::hidden();
     }
     let spin = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
-    if let Ok(style) = ProgressStyle::with_template("  {spinner:.cyan} {msg}") {
+    let template = if color_disabled() {
+        "  {spinner} {msg}"
+    } else {
+        "  {spinner:.cyan} {msg}"
+    };
+    if let Ok(style) = ProgressStyle::with_template(template) {
         spin.set_style(style.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "));
     }
     spin.set_message(label.to_string());

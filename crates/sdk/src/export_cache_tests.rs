@@ -96,6 +96,30 @@ fn export_cache_rejects_source_content_mismatch() {
 }
 
 #[test]
+fn export_cache_rejects_pipeline_version_mismatch() {
+    let root = tempdir("export-pipeline-version");
+    std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");
+    write_cache(&root, None);
+    assert!(cache_is_fresh(&root, None));
+
+    let metadata_path = default_export_cache_metadata_path(&root);
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&metadata_path).expect("read metadata"))
+            .expect("parse metadata");
+    metadata["pipeline_version"] = serde_json::Value::String("native-export-cache-old".to_string());
+    let mut bytes = serde_json::to_vec_pretty(&metadata).expect("serialize metadata");
+    bytes.push(b'\n');
+    std::fs::write(&metadata_path, bytes).expect("rewrite metadata");
+
+    assert!(
+        !cache_is_fresh(&root, None),
+        "native export cache pipeline changes must invalidate stale semantic export JSON"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn export_cache_rejects_dependency_metadata_mismatch() {
     let root = tempdir("export-dependency-content");
     std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");

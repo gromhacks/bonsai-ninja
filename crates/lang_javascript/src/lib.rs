@@ -9,6 +9,8 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
 };
+use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("javascript");
@@ -101,6 +103,8 @@ impl LanguageAdapter for JavaScriptAdapter {
                     decl.bases = bases.clone();
                 }
             }
+            rewrite_javascript_super_constructor_invocations(&mut decl_index);
+            apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
         }
         // Recognised JavaScript lifecycle transitions. Mirrors the
         // common Node.js / browser surface: streams (`close`,
@@ -142,6 +146,20 @@ impl LanguageAdapter for JavaScriptAdapter {
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, JAVASCRIPT_LIFECYCLE_TRANSITIONS);
+        }
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            rewrite_javascript_object_destructuring_sources(
+                &mut decl_index,
+                &tree,
+                snapshot.text.as_bytes(),
+                file,
+            );
+            inject_javascript_object_literal_field_assigns(
+                &mut decl_index,
+                &tree,
+                snapshot.text.as_bytes(),
+                file,
+            );
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -593,6 +611,493 @@ enum DefaultExportTarget {
     Name(String),
 }
 
+#[derive(Clone, Debug)]
+struct JsDestructureSource {
+    assign_span: bonsai_common::Span,
+    target: String,
+    source: String,
+}
+
+fn rewrite_javascript_object_destructuring_sources(
+    decl_index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let rewrites = collect_javascript_object_destructuring_sources(tree, src, file);
+    if rewrites.is_empty() {
+        return;
+    }
+    for decl in &mut decl_index.defs {
+        let owner_span = decl.body_span.unwrap_or(decl.span);
+        let relevant = rewrites
+            .iter()
+            .filter(|item| span_contains_or_equal(owner_span, item.assign_span))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !relevant.is_empty() {
+            rewrite_destructuring_sources_in_events(&mut decl.flow_events, &relevant);
+        }
+    }
+}
+
+fn collect_javascript_object_destructuring_sources(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<JsDestructureSource> {
+    let mut out = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(pattern) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        if pattern.kind() != "object_pattern" {
+            continue;
+        }
+        let base = normalize_js_member_text(node_text(&value, src));
+        if base.is_empty() {
+            continue;
+        }
+        collect_js_object_pattern_sources(pattern, &base, span_of(file, &declarator), src, &mut out);
+    }
+    out
+}
+
+fn collect_js_object_pattern_sources(
+    pattern: Node<'_>,
+    base: &str,
+    assign_span: bonsai_common::Span,
+    src: &[u8],
+    out: &mut Vec<JsDestructureSource>,
+) {
+    let mut cursor = pattern.walk();
+    for child in pattern.named_children(&mut cursor) {
+        match child.kind() {
+            "shorthand_property_identifier_pattern" => {
+                let target = node_text(&child, src).trim().to_string();
+                if !target.is_empty() {
+                    out.push(JsDestructureSource {
+                        assign_span,
+                        source: format!("{base}.{target}"),
+                        target,
+                    });
+                }
+            }
+            "pair_pattern" => {
+                let Some(key_node) = child.child_by_field_name("key") else {
+                    continue;
+                };
+                let Some(value_node) = child.child_by_field_name("value") else {
+                    continue;
+                };
+                let Some(key) = js_object_field_key(key_node, src) else {
+                    continue;
+                };
+                if let Some(target) = js_destructure_target_name(value_node, src) {
+                    out.push(JsDestructureSource {
+                        assign_span,
+                        source: format!("{base}.{key}"),
+                        target,
+                    });
+                }
+            }
+            "object_assignment_pattern" => {
+                let Some(left) = child.child_by_field_name("left") else {
+                    continue;
+                };
+                let target = node_text(&left, src).trim().to_string();
+                if !target.is_empty() {
+                    out.push(JsDestructureSource {
+                        assign_span,
+                        source: format!("{base}.{target}"),
+                        target,
+                    });
+                }
+            }
+            "rest_pattern" => {}
+            _ => {}
+        }
+    }
+}
+
+fn js_destructure_target_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            let target = node_text(&node, src).trim().to_string();
+            (!target.is_empty()).then_some(target)
+        }
+        "assignment_pattern" => node
+            .child_by_field_name("left")
+            .and_then(|left| js_destructure_target_name(left, src)),
+        _ => None,
+    }
+}
+
+fn rewrite_destructuring_sources_in_events(events: &mut [FlowEvent], rewrites: &[JsDestructureSource]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } => {
+                let Some(rewrite) = rewrites
+                    .iter()
+                    .find(|item| item.target == *target && spans_overlap_or_contain(*span, item.assign_span))
+                else {
+                    continue;
+                };
+                *source_name = Some(rewrite.source.clone());
+                *source_call = None;
+                source_call_args.clear();
+                source_names.clear();
+                source_names.push(rewrite.source.clone());
+                *value_kind = Some(bonsai_lang_api::AssignValueKind::Compound);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_destructuring_sources_in_events(then_events, rewrites);
+                rewrite_destructuring_sources_in_events(else_events, rewrites);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_destructuring_sources_in_events(body, rewrites)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_destructuring_sources_in_events(body, rewrites);
+                rewrite_destructuring_sources_in_events(catch_events, rewrites);
+                rewrite_destructuring_sources_in_events(finally_events, rewrites);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct JsObjectFieldAssigns {
+    assign_span: bonsai_common::Span,
+    target: String,
+    fields: Vec<FlowEvent>,
+}
+
+fn inject_javascript_object_literal_field_assigns(
+    decl_index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let field_assigns = collect_javascript_object_literal_field_assigns(tree, src, file);
+    if field_assigns.is_empty() {
+        return;
+    }
+    for decl in &mut decl_index.defs {
+        let owner_span = decl.body_span.unwrap_or(decl.span);
+        let relevant = field_assigns
+            .iter()
+            .filter(|item| span_contains_or_equal(owner_span, item.assign_span))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !relevant.is_empty() {
+            insert_object_field_assigns_in_events(&mut decl.flow_events, &relevant);
+        }
+    }
+}
+
+fn collect_javascript_object_literal_field_assigns(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<JsObjectFieldAssigns> {
+    let mut out = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(name) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        if value.kind() != "object" || name.kind() != "identifier" {
+            continue;
+        }
+        let target = node_text(&name, src).trim().to_string();
+        push_javascript_object_literal_field_assigns(
+            &mut out,
+            span_of(file, &declarator),
+            &target,
+            value,
+            src,
+            file,
+        );
+    }
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let Some(left) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        let Some(right) = assignment.child_by_field_name("right") else {
+            continue;
+        };
+        if right.kind() != "object" {
+            continue;
+        }
+        let target = normalize_js_member_text(node_text(&left, src));
+        push_javascript_object_literal_field_assigns(
+            &mut out,
+            span_of(file, &assignment),
+            &target,
+            right,
+            src,
+            file,
+        );
+    }
+    out
+}
+
+fn push_javascript_object_literal_field_assigns(
+    out: &mut Vec<JsObjectFieldAssigns>,
+    assign_span: bonsai_common::Span,
+    target: &str,
+    object: Node<'_>,
+    src: &[u8],
+    file: FileId,
+) {
+    if target.trim().is_empty() {
+        return;
+    }
+    let mut fields = Vec::new();
+    let mut cursor = object.walk();
+    for child in object.named_children(&mut cursor) {
+        match child.kind() {
+            "pair" => {
+                let Some(key_node) = child.child_by_field_name("key") else {
+                    continue;
+                };
+                let Some(value_node) = child.child_by_field_name("value") else {
+                    continue;
+                };
+                let Some(key) = js_object_field_key(key_node, src) else {
+                    continue;
+                };
+                let sources = js_value_source_names(value_node, src);
+                fields.push(FlowEvent::Assign {
+                    span: span_of(file, &value_node),
+                    target: format!("{target}.{key}"),
+                    source_name: (sources.len() == 1).then(|| sources[0].clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: sources,
+                    declares_new_binding: false,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                });
+            }
+            "shorthand_property_identifier" => {
+                let key = node_text(&child, src).trim().to_string();
+                if key.is_empty() {
+                    continue;
+                }
+                fields.push(FlowEvent::Assign {
+                    span: span_of(file, &child),
+                    target: format!("{target}.{key}"),
+                    source_name: Some(key.clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec![key],
+                    declares_new_binding: false,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                });
+            }
+            "spread_element" => {}
+            _ => {}
+        }
+    }
+    if !fields.is_empty() {
+        out.push(JsObjectFieldAssigns {
+            assign_span,
+            target: target.to_string(),
+            fields,
+        });
+    }
+}
+
+fn insert_object_field_assigns_in_events(
+    events: &mut Vec<FlowEvent>,
+    field_assigns: &[JsObjectFieldAssigns],
+) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_object_field_assigns_in_events(then_events, field_assigns);
+                insert_object_field_assigns_in_events(else_events, field_assigns);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_object_field_assigns_in_events(body, field_assigns);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_object_field_assigns_in_events(body, field_assigns);
+                insert_object_field_assigns_in_events(catch_events, field_assigns);
+                insert_object_field_assigns_in_events(finally_events, field_assigns);
+            }
+            _ => {}
+        }
+
+        let inserts = match &events[index] {
+            FlowEvent::Assign { span, target, .. } => field_assigns
+                .iter()
+                .filter(|item| item.target == *target && spans_overlap_or_contain(*span, item.assign_span))
+                .flat_map(|item| item.fields.clone())
+                .filter(|field_event| !event_list_contains_assign(events, field_event))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        if inserts.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = inserts.len();
+        events.splice(index + 1..index + 1, inserts);
+        index += inserted + 1;
+    }
+}
+
+fn event_list_contains_assign(events: &[FlowEvent], candidate: &FlowEvent) -> bool {
+    let FlowEvent::Assign {
+        span: wanted_span,
+        target: wanted_target,
+        ..
+    } = candidate
+    else {
+        return false;
+    };
+    events.iter().any(|event| match event {
+        FlowEvent::Assign { span, target, .. } => span == wanted_span && target == wanted_target,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            event_list_contains_assign(then_events, candidate)
+                || event_list_contains_assign(else_events, candidate)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            event_list_contains_assign(body, candidate)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            event_list_contains_assign(body, candidate)
+                || event_list_contains_assign(catch_events, candidate)
+                || event_list_contains_assign(finally_events, candidate)
+        }
+        _ => false,
+    })
+}
+
+fn js_object_field_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let key = raw
+        .strip_prefix('"')
+        .and_then(|part| part.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|part| part.strip_suffix('\'')))
+        .or_else(|| raw.strip_prefix('`').and_then(|part| part.strip_suffix('`')))
+        .unwrap_or(raw)
+        .trim();
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+fn js_value_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_js_value_source_names(node, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_js_value_source_names(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier" => {
+            push_js_source_name(out, node_text(&node, src).trim());
+        }
+        "member_expression" => {
+            push_js_source_name(out, &normalize_js_member_text(node_text(&node, src)));
+            if let Some(object) = node.child_by_field_name("object") {
+                collect_js_value_source_names(object, src, out);
+            }
+            return;
+        }
+        "string" | "number" | "true" | "false" | "null" | "undefined" | "property_identifier" => return,
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_js_value_source_names(child, src, out);
+    }
+}
+
+fn push_js_source_name(out: &mut Vec<String>, source: &str) {
+    let source = source.trim();
+    if source.is_empty()
+        || source.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        || source.contains(['"', '\'', '`', '{', '}'])
+    {
+        return;
+    }
+    out.push(source.to_string());
+}
+
+fn normalize_js_member_text(text: &str) -> String {
+    text.trim()
+        .replace("?.", ".")
+        .replace("?.[", ".[")
+        .replace([' ', '\t', '\n', '\r'], "")
+        .trim_end_matches(';')
+        .to_string()
+}
+
+fn span_contains_or_equal(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && outer.end >= inner.end
+}
+
+fn spans_overlap_or_contain(left: bonsai_common::Span, right: bonsai_common::Span) -> bool {
+    left.file == right.file
+        && (span_contains_or_equal(left, right)
+            || span_contains_or_equal(right, left)
+            || (left.start <= right.end && right.start <= left.end))
+}
+
 /// CommonJS `const x = require("y")` / `const { a } = require("y")` /
 /// `const { a: b } = require("y")`. Walks `call_expression` nodes whose
 /// function name is `require`.
@@ -768,6 +1273,432 @@ fn collect_js_extends_names(node: Node<'_>, src: &[u8], collected_bases: &mut Ve
             }
         }
     }
+}
+
+fn rewrite_javascript_super_constructor_invocations(index: &mut DeclIndex) {
+    let class_info: HashMap<SymbolId, (String, Vec<String>)> = index
+        .defs
+        .iter()
+        .filter(|decl| matches!(decl.kind, DeclKind::Class))
+        .map(|decl| (decl.symbol, (decl.name.clone(), decl.bases.clone())))
+        .collect();
+
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Constructor) {
+            continue;
+        }
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let Some((_, bases)) = class_info.get(&parent) else {
+            continue;
+        };
+        rewrite_javascript_super_constructor_invocations_in_events(
+            &mut decl.flow_events,
+            bases.first().map(String::as_str),
+        );
+    }
+}
+
+fn rewrite_javascript_super_constructor_invocations_in_events(
+    events: &mut [FlowEvent],
+    super_ctor: Option<&str>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                ..
+            } => {
+                if let Some(super_ctor) = super_ctor.filter(|ctor| !ctor.is_empty()) {
+                    if name.trim() == "super" {
+                        name.clear();
+                        name.push_str(super_ctor);
+                        *receiver = Some("super".to_string());
+                        receiver_types.clear();
+                        *call_kind = bonsai_lang_api::CallKind::Method;
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_javascript_super_constructor_invocations_in_events(then_events, super_ctor);
+                rewrite_javascript_super_constructor_invocations_in_events(else_events, super_ctor);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_javascript_super_constructor_invocations_in_events(body, super_ctor);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_javascript_super_constructor_invocations_in_events(body, super_ctor);
+                rewrite_javascript_super_constructor_invocations_in_events(catch_events, super_ctor);
+                rewrite_javascript_super_constructor_invocations_in_events(finally_events, super_ctor);
+            }
+            FlowEvent::Assign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct JsGetterProjection {
+    property: String,
+    projected_source: String,
+}
+
+pub fn apply_javascript_getter_property_sources(
+    decl_index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let own_getters = collect_javascript_getter_projections(decl_index, tree, src, file);
+    if own_getters.is_empty() {
+        return;
+    }
+
+    let mut class_symbols = Vec::new();
+    let mut class_symbol_by_name: HashMap<String, SymbolId> = HashMap::new();
+    let mut base_symbols_by_class: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
+    for decl in &decl_index.defs {
+        if !matches!(decl.kind, DeclKind::Class) {
+            continue;
+        }
+        class_symbols.push(decl.symbol);
+        class_symbol_by_name.insert(canonical_js_class_name(&decl.name), decl.symbol);
+        if let Some(qualified) = &decl.qualified_name {
+            class_symbol_by_name.insert(canonical_js_class_name(qualified), decl.symbol);
+        }
+    }
+    for decl in &decl_index.defs {
+        if !matches!(decl.kind, DeclKind::Class) {
+            continue;
+        }
+        let bases = decl
+            .bases
+            .iter()
+            .filter_map(|base| class_symbol_by_name.get(&canonical_js_class_name(base)).copied())
+            .collect::<Vec<_>>();
+        if !bases.is_empty() {
+            base_symbols_by_class.insert(decl.symbol, bases);
+        }
+    }
+
+    let mut getters_by_class: HashMap<SymbolId, Vec<JsGetterProjection>> = HashMap::new();
+    for class_symbol in class_symbols {
+        let mut projections = Vec::new();
+        let mut seen_properties = HashSet::new();
+        let mut visiting = HashSet::new();
+        collect_getters_for_class(
+            class_symbol,
+            &own_getters,
+            &base_symbols_by_class,
+            &mut seen_properties,
+            &mut visiting,
+            &mut projections,
+        );
+        if !projections.is_empty() {
+            getters_by_class.insert(class_symbol, projections);
+        }
+    }
+
+    for decl in &mut decl_index.defs {
+        if !matches!(decl.kind, DeclKind::Method | DeclKind::Constructor) {
+            continue;
+        }
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let Some(projections) = getters_by_class.get(&parent) else {
+            continue;
+        };
+        enrich_getter_property_sources_in_events(&mut decl.flow_events, projections);
+    }
+}
+
+fn collect_javascript_getter_projections(
+    decl_index: &DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> HashMap<SymbolId, Vec<JsGetterProjection>> {
+    let mut by_class: HashMap<SymbolId, Vec<JsGetterProjection>> = HashMap::new();
+    for method in collect_kinds(tree, &["method_definition"]) {
+        if !is_javascript_getter_method(method, src) {
+            continue;
+        }
+        let method_span = span_of(file, &method);
+        let Some(decl) = decl_index.defs.iter().find(|decl| {
+            decl.span == method_span && matches!(decl.kind, DeclKind::Method) && decl.parent.is_some()
+        }) else {
+            continue;
+        };
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let Some(projected_source) = first_simple_js_getter_return_projection(&decl.flow_events) else {
+            continue;
+        };
+        let projection = JsGetterProjection {
+            property: decl.name.clone(),
+            projected_source,
+        };
+        let entries = by_class.entry(parent).or_default();
+        if !entries.iter().any(|existing| existing == &projection) {
+            entries.push(projection);
+        }
+    }
+    by_class
+}
+
+fn is_javascript_getter_method(method: Node<'_>, src: &[u8]) -> bool {
+    if method.kind() != "method_definition" {
+        return false;
+    }
+    let Some(name) = method.child_by_field_name("name") else {
+        return false;
+    };
+    let Some(prefix) = src.get(method.start_byte()..name.start_byte()) else {
+        return false;
+    };
+    let Ok(prefix) = std::str::from_utf8(prefix) else {
+        return false;
+    };
+    prefix
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .any(|token| token == "get")
+}
+
+fn first_simple_js_getter_return_projection(events: &[FlowEvent]) -> Option<String> {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_name,
+                value_text,
+                ..
+            } => {
+                if let Some(projected) = value_name
+                    .as_deref()
+                    .and_then(simple_js_getter_projection)
+                    .or_else(|| value_text.as_deref().and_then(simple_js_getter_projection))
+                {
+                    return Some(projected);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(projected) = first_simple_js_getter_return_projection(then_events)
+                    .or_else(|| first_simple_js_getter_return_projection(else_events))
+                {
+                    return Some(projected);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(projected) = first_simple_js_getter_return_projection(body) {
+                    return Some(projected);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(projected) = first_simple_js_getter_return_projection(body)
+                    .or_else(|| first_simple_js_getter_return_projection(catch_events))
+                    .or_else(|| first_simple_js_getter_return_projection(finally_events))
+                {
+                    return Some(projected);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn simple_js_getter_projection(text: &str) -> Option<String> {
+    let normalized = text
+        .trim()
+        .trim_end_matches(';')
+        .replace("?.", ".")
+        .replace("?.[", ".[");
+    if normalized.contains(['(', ')', '{', '}', ',', ' ', '\t', '\n', '\r']) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in normalized.split(['.', '[', ']']) {
+        let part = part.trim().trim_matches('"').trim_matches('\'').trim_matches('`');
+        if part.is_empty() {
+            continue;
+        }
+        if !part
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch == '#' || ch.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        parts.push(part.to_string());
+    }
+    if parts.len() < 2 || !matches!(parts.first().map(String::as_str), Some("this") | Some("super")) {
+        return None;
+    }
+    Some(parts.join("."))
+}
+
+fn collect_getters_for_class(
+    class_symbol: SymbolId,
+    own_getters: &HashMap<SymbolId, Vec<JsGetterProjection>>,
+    base_symbols_by_class: &HashMap<SymbolId, Vec<SymbolId>>,
+    seen_properties: &mut HashSet<String>,
+    visiting: &mut HashSet<SymbolId>,
+    out: &mut Vec<JsGetterProjection>,
+) {
+    if !visiting.insert(class_symbol) {
+        return;
+    }
+    if let Some(getters) = own_getters.get(&class_symbol) {
+        for getter in getters {
+            if seen_properties.insert(getter.property.clone()) {
+                out.push(getter.clone());
+            }
+        }
+    }
+    if let Some(bases) = base_symbols_by_class.get(&class_symbol) {
+        for base in bases {
+            collect_getters_for_class(
+                *base,
+                own_getters,
+                base_symbols_by_class,
+                seen_properties,
+                visiting,
+                out,
+            );
+        }
+    }
+    visiting.remove(&class_symbol);
+}
+
+fn enrich_getter_property_sources_in_events(events: &mut [FlowEvent], projections: &[JsGetterProjection]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                source_name,
+                source_names,
+                ..
+            } => {
+                if let Some(projected) = source_name
+                    .as_deref()
+                    .and_then(|source| projected_js_getter_source(source, projections))
+                {
+                    push_unique_source(source_names, projected);
+                }
+                enrich_getter_source_names(source_names, projections);
+            }
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    enrich_getter_sources_in_call_arg(arg, projections);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_getter_property_sources_in_events(then_events, projections);
+                enrich_getter_property_sources_in_events(else_events, projections);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_getter_property_sources_in_events(body, projections)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_getter_property_sources_in_events(body, projections);
+                enrich_getter_property_sources_in_events(catch_events, projections);
+                enrich_getter_property_sources_in_events(finally_events, projections);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn enrich_getter_sources_in_call_arg(arg: &mut CallArg, projections: &[JsGetterProjection]) {
+    let mut candidates = Vec::new();
+    candidates.push(arg.value_text.clone());
+    if let Some(place) = arg.place.as_deref() {
+        candidates.push(place.to_string());
+    }
+    for source in &arg.source_names {
+        candidates.push(source.clone());
+    }
+    for candidate in candidates {
+        if let Some(projected) = projected_js_getter_source(&candidate, projections) {
+            push_unique_source(&mut arg.source_names, projected);
+        }
+    }
+    enrich_getter_source_names(&mut arg.source_names, projections);
+}
+
+fn enrich_getter_source_names(source_names: &mut Vec<String>, projections: &[JsGetterProjection]) {
+    let existing = source_names.clone();
+    for source in existing {
+        if let Some(projected) = projected_js_getter_source(&source, projections) {
+            push_unique_source(source_names, projected);
+        }
+    }
+}
+
+fn projected_js_getter_source(source: &str, projections: &[JsGetterProjection]) -> Option<String> {
+    let source = source.trim();
+    for projection in projections {
+        for receiver in ["this", "super"] {
+            let property_read = format!("{receiver}.{}", projection.property);
+            if source != property_read {
+                continue;
+            }
+            if receiver == "this" {
+                return Some(projection.projected_source.clone());
+            }
+            if let Some(rest) = projection.projected_source.strip_prefix("this.") {
+                return Some(format!("super.{rest}"));
+            }
+            return Some(projection.projected_source.clone());
+        }
+    }
+    None
+}
+
+fn push_unique_source(source_names: &mut Vec<String>, source: String) {
+    if !source.trim().is_empty() && !source_names.iter().any(|existing| existing == &source) {
+        source_names.push(source);
+    }
+}
+
+fn canonical_js_class_name(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).trim().to_string()
 }
 
 /// Split a workspace-relative JS/TS path into module-identity segments.

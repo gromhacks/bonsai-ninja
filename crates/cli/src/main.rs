@@ -315,9 +315,10 @@ fn main() -> Result<()> {
     if let Some(categories) = cli.debug.as_deref().filter(|c| !c.is_empty()) {
         std::env::set_var("BONSAI_DEBUG", categories);
     }
-    // --no-progress piggybacks on the same gating machinery. The
-    // progress module additionally checks `NO_PROGRESS` / `NO_COLOR`
-    // env and stderr-TTY-ness itself.
+    // Progress visibility is independent from color. `--no-color`
+    // keeps progress visible in interactive terminals, but renders it
+    // without ANSI color; `--no-progress` / `NO_PROGRESS` hide it.
+    progress::set_no_color(cli.no_color);
     progress::set_no_progress(cli.no_progress);
     if let Some(workspace) = command_workspace_for_page_cache(&cli.command) {
         if page_cache::replay_if_hit(workspace)? {

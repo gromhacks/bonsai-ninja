@@ -64,6 +64,58 @@ fn contains_loop(events: &[FlowEvent]) -> bool {
 }
 
 #[test]
+fn ruby_super_return_emits_semantic_super_call_and_base() {
+    let db = db_with(
+        r#"
+class Repository
+  def run
+    sink(cmd)
+  end
+end
+
+class AuditedRepository < Repository
+  def run
+    super
+  end
+end
+"#,
+    );
+    let index = db.global_index();
+    let audited = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "AuditedRepository")
+        .expect("AuditedRepository class should index");
+    assert_eq!(audited.bases, vec!["Repository"]);
+
+    let events = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .filter(|decl| decl.name == "run")
+        .find(|decl| {
+            decl.qualified_name
+                .as_deref()
+                .is_some_and(|name| name.contains("AuditedRepository"))
+        })
+        .expect("AuditedRepository.run should index")
+        .flow_events
+        .clone();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver: Some(receiver),
+                call_kind: bonsai_lang_api::CallKind::Method,
+                ..
+            } if name == "super.run" && receiver == "super"
+        )),
+        "terminal super should surface a semantic super.run call: {events:?}"
+    );
+}
+
+#[test]
 fn ruby_if_modifier_emits_branch_event() {
     let events = ruby_decl_events(
         r#"

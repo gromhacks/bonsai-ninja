@@ -167,14 +167,15 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
     // inferred-source over-claim was filtered; go 2→1 + objc 2→1
     // (redundant-inferred / xxe over-claim removed); python 5→3 +
     // dart→1 (combiner group_id+sink-site dedup collapsed duplicate
-    // entry-chain rows).
+    // entry-chain rows); erlang 2→1 and solidity 3→2 once equivalent
+    // inferred/member paths are grouped into one real report row.
     match lang {
         "c" => 1,
         "cpp" => 1,
         "csharp" => 1,
         "dart" => 1,
         "elixir" => 1,
-        "erlang" => 2,
+        "erlang" => 1,
         "go" => 1,
         "java" => 1,
         "javascript" => 1,

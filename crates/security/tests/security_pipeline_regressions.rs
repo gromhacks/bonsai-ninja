@@ -104,7 +104,11 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // System.argv → envelope.cmd → … → :os.cmd: a real CWE-78
         // command-injection threaded through the Elixir pipeline.
         "elixir" => 1,
-        "erlang" => 2,
+        // io:get_line → envelope.cmd → ... → os:cmd. The source is
+        // reachable through two equivalent inferred/member paths, but
+        // they share one group_id and the report combiner emits a single
+        // combined finding with both member ids.
+        "erlang" => 1,
         "go" => 1,
         // NOTE: java is the validated record-synthesis case. C# uses the
         // same shared helper but stays FN — its remaining blocker is the
@@ -171,6 +175,11 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // explicit `Call` event; case-class component accessors
         // synthesized for cross-class field-projection).
         "scala" => 1,
+        // In inferred-source mode Solidity reports one combined
+        // audit-event information-exposure finding plus the external
+        // `handle(raw) -> target.call(cmd)` reentrancy flow. The latter
+        // starts at an inferred entry-point param because the concrete
+        // bytes-calldata source rule is intentionally name-narrow.
         "solidity" => 2,
         // readLine() → Envelope (struct memberwise init) → Pipeline.orchestrate
         // (Optional/guard/case match) → Storage.persist → AuditedRepository

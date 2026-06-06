@@ -1,5 +1,5 @@
 use bonsai_diagnostics::DiagnosticSink;
-use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+use bonsai_lang_api::{AdapterContext, DeclKind, FlowEvent, LanguageAdapter};
 use bonsai_vfs::Vfs;
 use parking_lot::RwLock;
 
@@ -136,4 +136,37 @@ fn solidity_adapter_method_call_result_preserves_receiver_source_name() {
     assert_eq!(assign.1.as_deref(), Some("target.call"));
     assert_eq!(assign.2.as_slice(), ["payload"]);
     assert_eq!(assign.3.as_slice(), ["target"]);
+}
+
+#[test]
+fn solidity_modifier_definition_is_not_a_method_entry() {
+    let adapter = bonsai_lang_solidity::SolidityAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("App.sol"),
+        "contract App { \
+           modifier audit(bytes calldata data) { _; } \
+           function handle(bytes calldata data) external audit(data) {} \
+         }",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let audit = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "audit")
+        .expect("audit modifier decl");
+    let handle = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handle")
+        .expect("handle method decl");
+
+    assert_eq!(audit.kind, DeclKind::Function);
+    assert_eq!(handle.kind, DeclKind::Method);
 }

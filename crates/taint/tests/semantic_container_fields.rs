@@ -7,18 +7,21 @@
 
 mod common;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::Precision;
 use bonsai_db::AnalyzerDb;
-use bonsai_idg::{workspace_adapter, IdgQueryService};
+use bonsai_idg::{workspace_adapter, IdgQueryService, TransferOptions};
 use bonsai_lang_api::AdapterArc;
 use bonsai_lang_go::GoAdapter;
+use bonsai_lang_javascript::JavaScriptAdapter;
 use bonsai_lang_objc::ObjCAdapter;
 use bonsai_lang_python::PythonAdapter;
+use bonsai_lang_rust::RustAdapter;
 use bonsai_lang_solidity::SolidityAdapter;
 use bonsai_taint::{
-    entry_taint_graph_from_idg, entry_taint_graph_from_idg_with_max_precision, interprocedural_taint,
+    entry_taint_graph_from_idg, entry_taint_graph_from_idg_with_max_precision,
+    entry_taint_graph_from_idg_with_target_funcs_and_max_precision, interprocedural_taint,
     CallResultPassthrough, TokenSet,
 };
 use common::{build_db, cfg, func_id_or_none, seed, sink_reached};
@@ -47,11 +50,17 @@ fn seed_idg_on(db: &AnalyzerDb) -> Arc<IdgQueryService> {
         },
         |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
     );
-    let ws = workspace_adapter::build_with_file_info(
+    let transfer_options = TransferOptions {
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
+        ..TransferOptions::default()
+    };
+    let ws = workspace_adapter::build_with_file_info_and_options(
         global.as_ref(),
         &cg,
         |_| AHashMap::new(),
         |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        &transfer_options,
     );
     let svc = Arc::new(IdgQueryService::new(Arc::new(ws), global));
     db.set_idg_service(Arc::clone(&svc));
@@ -61,6 +70,11 @@ fn seed_idg_on(db: &AnalyzerDb) -> Arc<IdgQueryService> {
 fn go_db(src: &str) -> AnalyzerDb {
     let adapter: AdapterArc = Arc::new(GoAdapter::new());
     build_db(adapter, &[("main.go", src)])
+}
+
+fn javascript_db(src: &str) -> AnalyzerDb {
+    let adapter: AdapterArc = Arc::new(JavaScriptAdapter::new());
+    build_db(adapter, &[("app.js", src)])
 }
 
 fn objc_db(src: &str) -> AnalyzerDb {
@@ -502,6 +516,115 @@ func entry(cmd string, user string) {
 }
 
 #[test]
+fn rust_idg_newtype_constructor_receiver_state_stays_field_scoped() {
+    let src = r#"
+struct Envelope {
+    cmd: String,
+    user: String,
+}
+
+struct Repository {
+    data: Envelope,
+}
+
+impl Repository {
+    fn new(data: Envelope) -> Self {
+        Self { data }
+    }
+
+    fn cmd(&self) -> String {
+        self.data.cmd.clone()
+    }
+
+    fn run(&self) {
+        let cmd = self.cmd();
+        execute(cmd);
+    }
+}
+
+struct AuditedRepository(Repository);
+
+impl AuditedRepository {
+    fn wrap(data: Envelope) -> Self {
+        Self(Repository::new(data))
+    }
+
+    fn run(&self) {
+        self.0.run();
+    }
+}
+
+fn entry(raw: String, user: String) {
+    let valid = Envelope { cmd: raw, user };
+    let repo = AuditedRepository::wrap(valid);
+    repo.run();
+}
+
+fn execute(cmd: String) {
+    sink_cmd(cmd);
+}
+
+fn sink_cmd(_cmd: String) {}
+"#;
+    let db = build_db(Arc::new(RustAdapter::new()), &[("main.rs", src)]);
+    let idg = seed_idg_on(&db);
+    let entry = func_id_or_none(&db, "entry").expect("entry should index");
+    let target_funcs = AHashSet::from_iter(
+        ["entry", "wrap", "new", "run", "cmd", "execute", "sink_cmd"]
+            .into_iter()
+            .filter_map(|name| func_id_or_none(&db, name)),
+    );
+
+    let mut raw_tokens = TokenSet::default();
+    raw_tokens.insert("raw".to_string());
+    let raw_graph = entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
+        entry,
+        &raw_tokens,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        Some(&target_funcs),
+        Some(Precision::Narrowed),
+        &db,
+        idg.as_ref(),
+    );
+    assert!(
+        raw_graph
+            .tainted_calls
+            .iter()
+            .any(|call| call.name.ends_with("sink_cmd")),
+        "Rust newtype constructor state should carry valid.cmd to sink_cmd: {:?}",
+        raw_graph.tainted_calls
+    );
+
+    let mut user_tokens = TokenSet::default();
+    user_tokens.insert("user".to_string());
+    let user_graph = entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
+        entry,
+        &user_tokens,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        Some(&target_funcs),
+        Some(Precision::Narrowed),
+        &db,
+        idg.as_ref(),
+    );
+    assert!(
+        !user_graph
+            .tainted_calls
+            .iter()
+            .any(|call| call.name.ends_with("sink_cmd")),
+        "Rust newtype constructor state must not promote valid.user into sink_cmd: {:?}",
+        user_graph.tainted_calls
+    );
+}
+
+#[test]
 fn go_idg_call_result_source_reaches_matching_struct_field_only() {
     let src = r#"
 package main
@@ -570,6 +693,98 @@ func execute(cmd string) {
             .iter()
             .any(|call| call.name.ends_with("sinkCmd")),
         "user must not reach sibling env.Cmd command sink: {:?}",
+        user_graph.tainted_calls
+    );
+}
+
+#[test]
+fn javascript_idg_object_getter_super_chain_reaches_matching_field_only() {
+    let src = r#"
+function source() { return ""; }
+
+function entry(user) {
+  const raw = source();
+  const envelope = { cmd: raw, user };
+  return orchestrate(envelope);
+}
+
+function orchestrate(envelope) {
+  const { cmd, user, ...rest } = envelope;
+  sinkUser(user);
+  const valid = { ...rest, user, cmd };
+  return persist(valid);
+}
+
+class Repository {
+  constructor(data) {
+    this._data = data;
+  }
+
+  get cmd() {
+    return this._data.cmd;
+  }
+
+  run() {
+    const c = this.cmd;
+    return execute(c);
+  }
+}
+
+class AuditedRepository extends Repository {
+  constructor(data) {
+    super(data);
+  }
+
+  run() {
+    return super.run();
+  }
+}
+
+function persist(data) {
+  const repo = new AuditedRepository(data);
+  return repo.run();
+}
+
+function execute(cmd) {
+  sinkCmd(cmd);
+}
+
+function sinkUser(user) {}
+function sinkCmd(cmd) {}
+"#;
+    let db = javascript_db(src);
+    let idg = seed_idg_on(&db);
+    let entry = func_id_or_none(&db, "entry").expect("entry should index");
+
+    let mut raw_tokens = TokenSet::default();
+    raw_tokens.insert("raw".to_string());
+    let raw_graph = entry_taint_graph_from_idg(entry, &raw_tokens, None, &[], &[], &db, idg.as_ref());
+    assert!(
+        raw_graph
+            .tainted_calls
+            .iter()
+            .any(|call| call.name.ends_with("sinkCmd")),
+        "raw must reach the command sink through object fields, constructor state, getter, and super: {:?}",
+        raw_graph.tainted_calls
+    );
+
+    let mut user_tokens = TokenSet::default();
+    user_tokens.insert("user".to_string());
+    let user_graph = entry_taint_graph_from_idg(entry, &user_tokens, None, &[], &[], &db, idg.as_ref());
+    assert!(
+        user_graph
+            .tainted_calls
+            .iter()
+            .any(|call| call.name.ends_with("sinkUser")),
+        "positive control must keep user field propagation available: {:?}",
+        user_graph.tainted_calls
+    );
+    assert!(
+        !user_graph
+            .tainted_calls
+            .iter()
+            .any(|call| call.name.ends_with("sinkCmd")),
+        "user must not reach sibling cmd sink through the getter chain: {:?}",
         user_graph.tainted_calls
     );
 }

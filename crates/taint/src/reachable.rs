@@ -1129,10 +1129,14 @@ pub fn entry_taint_call_records_from_idg_with_max_precision(
             (
                 dist_map.get(&ce.caller).copied().unwrap_or(u32::MAX),
                 ce.caller.raw(),
+                ce.callee.raw(),
                 ce.call_span.start,
                 ce.arg_idx,
+                ce.param_idx,
+                ce.precision,
             )
         });
+        edges.dedup();
         edges
     };
     let mut next_trace_id: u64 = 1;
@@ -1385,7 +1389,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         global.as_ref(),
         idg,
         max_precision,
-        lineage_funcs.or(target_funcs),
+        None,
     );
     let closure_nodes = if let Some(target_nodes) = target_nodes.filter(|nodes| !nodes.is_empty()) {
         idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, max_precision)
@@ -1758,9 +1762,10 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
 /// Expand an IDG seed set with semantic transfer shapes before
 /// computing the final closure. This is shared by security findings
 /// and user-facing dump commands so both surfaces explain taint
-/// through the same adapter-backed constructor-result transfer plus
-/// configured receiver-state, call-result, and output-argument
-/// transfers.
+/// through the same configured receiver-state, call-result, and
+/// output-argument transfers. Constructor field propagation is handled
+/// by the IDG itself; this layer must not promote one tainted
+/// constructor argument to the entire constructed object root.
 #[allow(clippy::too_many_arguments)] // Shared transfer surface carries seed, transfer tables, IDG, precision, and scope.
 pub fn apply_configured_transfer_fixpoint(
     seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
@@ -1784,7 +1789,6 @@ pub fn apply_configured_transfer_fixpoint(
     }
     loop {
         let mut grew = false;
-        grew |= apply_typed_constructor_result_fixpoint(seed_nodes, global, idg, max_precision, func_filter);
         if !call_result_passthroughs.is_empty() {
             grew |= apply_call_result_passthrough_fixpoint(
                 seed_nodes,
@@ -1809,78 +1813,6 @@ pub fn apply_configured_transfer_fixpoint(
             break;
         }
     }
-}
-
-/// Apply adapter-backed constructor result transfer. If a tainted
-/// positional argument reaches `Type(...)`, and the call's synthetic
-/// return is assigned to a local whose adapter type alias says
-/// `local: Type`, seed the call return. The regular IDG closure then
-/// carries that constructed value into the local's later receiver
-/// uses. This is deliberately narrower than generic call-result
-/// passthrough: it requires both a concrete `CallRet -> Write(local)`
-/// edge and a syntax-derived type binding for that same local.
-fn apply_typed_constructor_result_fixpoint(
-    seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
-    global: &bonsai_index::GlobalIndex,
-    idg: &bonsai_idg::IdgQueryService,
-    max_precision: Option<Precision>,
-    func_filter: Option<&AHashSet<FuncId>>,
-) -> bool {
-    let mut seeded: ahash::AHashSet<bonsai_idg::WsNodeId> = seed_nodes.iter().copied().collect();
-    let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, u8, String)> = ahash::AHashSet::default();
-    let mut any_grew = false;
-    loop {
-        let closure = idg.forward_closure_with_max_precision(seed_nodes, max_precision);
-        let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
-        let mut call_summary_cache: ahash::AHashMap<
-            FuncId,
-            ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
-        > = ahash::AHashMap::default();
-        let mut grew = false;
-        for (caller, call_span, arg_idx) in tainted_args {
-            if arg_idx == u8::MAX {
-                continue;
-            }
-            let Some(summary) = cached_call_event_summary(caller, call_span, global, &mut call_summary_cache)
-            else {
-                continue;
-            };
-            let Some(callee_type) = constructor_call_type_name(&summary.name, summary.call_kind) else {
-                continue;
-            };
-            let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
-                continue;
-            };
-            for target in idg.call_ret_assignment_targets_at_site(caller, call_span) {
-                if target.name.contains('.') || target.name.contains('[') {
-                    continue;
-                }
-                if !decl.type_aliases.iter().any(|alias| {
-                    alias.name == target.name && type_names_match(&alias.type_name, &callee_type)
-                }) {
-                    continue;
-                }
-                let key = (caller, call_span, arg_idx, target.name.clone());
-                if !applied.insert(key) {
-                    continue;
-                }
-                let Some(ret_node) = idg.call_ret_node_at_site(caller, call_span) else {
-                    continue;
-                };
-                if seeded.insert(ret_node) {
-                    seed_nodes.push(ret_node);
-                    grew = true;
-                    any_grew = true;
-                }
-            }
-        }
-        if !grew {
-            break;
-        }
-        seed_nodes.sort();
-        seed_nodes.dedup();
-    }
-    any_grew
 }
 
 /// Walk a function's flow events and collect every `Return`
@@ -1948,8 +1880,15 @@ fn collect_tainted_writes(
                 for n in source_names {
                     push_if_tainted(n, &mut tainted_args);
                 }
-                for n in source_call_args {
-                    push_if_tainted(n, &mut tainted_args);
+                // For `target = callee(args...)`, the arguments are inputs to the
+                // callee, not direct inputs to the target write. Configured
+                // passthroughs and resolved return summaries add the legitimate
+                // `CallRet -> target` flow; treating args as direct write evidence
+                // makes arbitrary split/map helpers look like value passthroughs.
+                if source_call.is_none() {
+                    for n in source_call_args {
+                        push_if_tainted(n, &mut tainted_args);
+                    }
                 }
                 if let Some(call_name) = source_call {
                     push_if_tainted(call_name, &mut tainted_args);
@@ -2136,12 +2075,11 @@ fn apply_call_result_passthrough_fixpoint(
     let mut seeded: ahash::AHashSet<bonsai_idg::WsNodeId> = seed_nodes.iter().copied().collect();
     let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, u8, String)> = ahash::AHashSet::default();
     let mut callee_name_cache = CalleeNameCache::default();
-    let mut iter = 0usize;
     let mut any_grew = false;
     loop {
-        iter += 1;
         let closure = idg.forward_closure_with_max_precision(seed_nodes, max_precision);
         let tainted_args = idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure, func_filter);
+        let descendant_inputs = DescendantClosureIndex::from_closure(&closure, idg, func_filter);
         let mut call_summary_cache: ahash::AHashMap<
             FuncId,
             ahash::AHashMap<bonsai_common::Span, CallEventSummary>,
@@ -2177,20 +2115,279 @@ fn apply_call_result_passthrough_fixpoint(
                 }
             }
         }
+        for (caller, descendant_bases) in descendant_inputs.bases_by_func() {
+            let Some(summaries) =
+                cached_call_event_summaries_for_func(*caller, global, &mut call_summary_cache)
+            else {
+                continue;
+            };
+            for (call_span, summary) in summaries {
+                for configured in &passthroughs {
+                    let passthrough = configured.passthrough;
+                    if !configured.callee.matches(&summary.name, &mut callee_name_cache) {
+                        continue;
+                    }
+                    if passthrough.input_receiver
+                        && call_receiver_has_descendant_input(summary, descendant_bases)
+                    {
+                        let key = (*caller, *call_span, u8::MAX, passthrough.callee.clone());
+                        if applied.insert(key) {
+                            if let Some(ret_node) = idg.call_ret_node_at_site(*caller, *call_span) {
+                                if seeded.insert(ret_node) {
+                                    seed_nodes.push(ret_node);
+                                    grew = true;
+                                    any_grew = true;
+                                }
+                            }
+                        }
+                    }
+                    for &arg_idx in &passthrough.input_arg_indices {
+                        let Ok(arg_idx_u8) = u8::try_from(arg_idx) else {
+                            continue;
+                        };
+                        if !call_arg_has_descendant_input(summary, arg_idx, descendant_bases) {
+                            continue;
+                        }
+                        let key = (*caller, *call_span, arg_idx_u8, passthrough.callee.clone());
+                        if !applied.insert(key) {
+                            continue;
+                        }
+                        let Some(ret_node) = idg.call_ret_node_at_site(*caller, *call_span) else {
+                            continue;
+                        };
+                        if seeded.insert(ret_node) {
+                            seed_nodes.push(ret_node);
+                            grew = true;
+                            any_grew = true;
+                        }
+                    }
+                }
+            }
+        }
         if !grew {
             break;
         }
         seed_nodes.sort();
         seed_nodes.dedup();
-        bonsai_diagnostics::debug_log!(
-            "call-result-passthrough",
-            "iter={} seeds={} applied={}",
-            iter,
-            seed_nodes.len(),
-            applied.len()
-        );
     }
     any_grew
+}
+
+#[derive(Default)]
+struct DescendantClosureIndex {
+    bases_by_func: ahash::AHashMap<FuncId, ahash::AHashSet<String>>,
+}
+
+impl DescendantClosureIndex {
+    fn from_closure(
+        closure: &[bonsai_idg::WsNodeId],
+        idg: &bonsai_idg::IdgQueryService,
+        func_filter: Option<&AHashSet<FuncId>>,
+    ) -> Self {
+        let mut out = Self::default();
+        for node in closure {
+            let Some(point) = idg.resolve_point(*node) else {
+                continue;
+            };
+            if func_filter.is_some_and(|funcs| !funcs.contains(&point.func)) {
+                continue;
+            }
+            if !matches!(
+                point.kind,
+                bonsai_idg::PointKind::Read | bonsai_idg::PointKind::Write
+            ) {
+                continue;
+            }
+            for base in descendant_storage_bases(&point.name) {
+                out.bases_by_func.entry(point.func).or_default().insert(base);
+            }
+        }
+        out
+    }
+
+    fn bases_by_func(&self) -> impl Iterator<Item = (&FuncId, &ahash::AHashSet<String>)> {
+        self.bases_by_func.iter()
+    }
+}
+
+fn call_receiver_has_descendant_input(
+    summary: &CallEventSummary,
+    descendant_bases: &ahash::AHashSet<String>,
+) -> bool {
+    summary
+        .receiver
+        .as_deref()
+        .is_some_and(|receiver| input_text_has_descendant_base(receiver, descendant_bases))
+}
+
+fn call_arg_has_descendant_input(
+    summary: &CallEventSummary,
+    arg_idx: usize,
+    descendant_bases: &ahash::AHashSet<String>,
+) -> bool {
+    summary
+        .args_place
+        .get(arg_idx)
+        .and_then(|place| place.as_deref())
+        .is_some_and(|place| input_text_has_descendant_base(place, descendant_bases))
+        || summary
+            .args_value_text
+            .get(arg_idx)
+            .is_some_and(|text| input_text_has_descendant_base(text, descendant_bases))
+}
+
+fn input_text_has_descendant_base(text: &str, descendant_bases: &ahash::AHashSet<String>) -> bool {
+    input_storage_bases(text)
+        .into_iter()
+        .any(|base| descendant_bases.contains(&base))
+}
+
+fn input_storage_bases(text: &str) -> Vec<String> {
+    let mut out = ahash::AHashSet::default();
+    let trimmed = text.trim();
+    if let Some(base) = storage_base_candidate(trimmed) {
+        out.insert(base);
+    }
+    for token in identifier_tokens_outside_strings(trimmed) {
+        if let Some(base) = storage_base_candidate(&token) {
+            out.insert(base);
+        }
+    }
+    let mut out: Vec<String> = out.into_iter().collect();
+    out.sort();
+    out
+}
+
+fn storage_base_candidate(text: &str) -> Option<String> {
+    let normalized = normalize_storage_text(text);
+    if normalized.is_empty() {
+        return None;
+    }
+    let base = normalized.split('.').next().unwrap_or("").trim();
+    if is_bare_identifier(base) && !is_non_value_identifier(base) {
+        Some(base.to_string())
+    } else {
+        None
+    }
+}
+
+fn descendant_storage_bases(name: &str) -> Vec<String> {
+    let normalized = normalize_storage_text(name);
+    let parts: Vec<&str> = normalized.split('.').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 2 || !is_bare_identifier(parts[0]) {
+        return Vec::new();
+    }
+    (1..parts.len()).map(|idx| parts[..idx].join(".")).collect()
+}
+
+fn normalize_storage_text(text: &str) -> String {
+    let trimmed = text
+        .trim()
+        .trim_start_matches(['&', '*'])
+        .trim_start_matches("mut ")
+        .trim();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in trimmed.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            } else if ch.is_ascii_alphanumeric() || ch == '_' {
+                out.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '[' | '(' => out.push('.'),
+            ']' | ')' => {}
+            ':' if out.ends_with(':') => {}
+            '-' | '>' => out.push('.'),
+            ch if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '$' || ch == '@' => {
+                out.push(ch);
+            }
+            _ => out.push('.'),
+        }
+    }
+    out.split('.')
+        .map(|part| part.trim().trim_start_matches(['$', '@', '%']))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            push_identifier_token(&mut current, &mut out);
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            current.push(ch);
+        } else {
+            push_identifier_token(&mut current, &mut out);
+        }
+    }
+    push_identifier_token(&mut current, &mut out);
+    out
+}
+
+fn push_identifier_token(current: &mut String, out: &mut Vec<String>) {
+    if current.is_empty() {
+        return;
+    }
+    let token = std::mem::take(current);
+    let base = token.split('.').next().unwrap_or("").trim();
+    if is_bare_identifier(base) && !is_non_value_identifier(base) {
+        out.push(token);
+    }
+}
+
+fn is_non_value_identifier(token: &str) -> bool {
+    matches!(
+        token,
+        "as" | "await"
+            | "case"
+            | "else"
+            | "false"
+            | "False"
+            | "for"
+            | "from"
+            | "if"
+            | "in"
+            | "lambda"
+            | "map"
+            | "None"
+            | "null"
+            | "or"
+            | "return"
+            | "true"
+            | "True"
+            | "yield"
+    )
 }
 
 /// Apply rulepack-declared output-argument transfers. If a configured
@@ -2485,50 +2682,6 @@ fn normalise_passthrough_callee(value: &str) -> String {
         .replace("::", ".")
         .replace("->", ".")
         .replace(':', ".")
-}
-
-fn constructor_call_type_name(value: &str, call_kind: bonsai_lang_api::CallKind) -> Option<String> {
-    let value = value
-        .trim()
-        .trim_start_matches("new ")
-        .trim_start_matches('&')
-        .trim_start_matches("mut ")
-        .trim();
-    let tail = canonical_type_tail(value)?;
-    if matches!(call_kind, bonsai_lang_api::CallKind::Constructor)
-        || tail.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
-    {
-        return Some(tail);
-    }
-    None
-}
-
-fn type_names_match(alias_type: &str, call_type: &str) -> bool {
-    let Some(alias_type) = canonical_type_tail(alias_type) else {
-        return false;
-    };
-    alias_type == call_type
-}
-
-fn canonical_type_tail(value: &str) -> Option<String> {
-    let no_generics = value.split('<').next().unwrap_or(value);
-    let no_arrays = no_generics.split('[').next().unwrap_or(no_generics);
-    let stripped = no_arrays.trim().trim_end_matches('?').trim();
-    let short = stripped
-        .rsplit(['.', ':'])
-        .find(|part| !part.trim().is_empty())
-        .unwrap_or(stripped)
-        .trim()
-        .trim_end_matches("()");
-    if short.is_empty()
-        || !short
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-    {
-        return None;
-    }
-    Some(short.to_string())
 }
 
 fn passthrough_compiled_regex_matches(
@@ -2924,7 +3077,6 @@ struct CallEventSummary {
     args_span: Vec<bonsai_common::Span>,
     args_place: Vec<Option<String>>,
     receiver: Option<String>,
-    call_kind: bonsai_lang_api::CallKind,
 }
 
 impl CallEventSummary {
@@ -3115,6 +3267,15 @@ fn cached_call_event_summary<'a>(
     global: &GlobalIndex,
     cache: &'a mut ahash::AHashMap<FuncId, ahash::AHashMap<bonsai_common::Span, CallEventSummary>>,
 ) -> Option<&'a CallEventSummary> {
+    cached_call_event_summaries_for_func(func, global, cache)
+        .and_then(|summaries| summaries.get(&target_span))
+}
+
+fn cached_call_event_summaries_for_func<'a>(
+    func: FuncId,
+    global: &GlobalIndex,
+    cache: &'a mut ahash::AHashMap<FuncId, ahash::AHashMap<bonsai_common::Span, CallEventSummary>>,
+) -> Option<&'a ahash::AHashMap<bonsai_common::Span, CallEventSummary>> {
     if !cache.contains_key(&func) {
         let mut summaries: ahash::AHashMap<bonsai_common::Span, CallEventSummary> =
             ahash::AHashMap::default();
@@ -3123,7 +3284,7 @@ fn cached_call_event_summary<'a>(
         }
         cache.insert(func, summaries);
     }
-    cache.get(&func).and_then(|summaries| summaries.get(&target_span))
+    cache.get(&func)
 }
 
 fn collect_call_event_summaries(
@@ -3138,7 +3299,6 @@ fn collect_call_event_summaries(
                 name,
                 args,
                 receiver,
-                call_kind,
                 ..
             } => {
                 out.insert(
@@ -3149,7 +3309,6 @@ fn collect_call_event_summaries(
                         args_span: args.iter().map(|arg| arg.span).collect(),
                         args_place: args.iter().map(|arg| arg.place.clone()).collect(),
                         receiver: receiver.clone(),
-                        call_kind: *call_kind,
                     },
                 );
             }
@@ -3168,7 +3327,6 @@ fn collect_call_event_summaries(
                         .map(|arg| is_bare_identifier(arg.trim()).then(|| arg.trim().to_string()))
                         .collect(),
                     receiver: None,
-                    call_kind: bonsai_lang_api::CallKind::Function,
                 });
             }
             FlowEvent::Branch {

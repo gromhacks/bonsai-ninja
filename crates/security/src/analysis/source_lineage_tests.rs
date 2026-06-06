@@ -160,3 +160,20 @@ fn source_lineage_omissions_attach_to_first_emitted_status() {
     assert_eq!(first_rendered.omitted_paths, 3);
     assert_eq!(later_rendered.omitted_paths, 0);
 }
+
+#[test]
+fn strict_source_text_matching_keeps_framework_get_receivers_distinct() {
+    assert!(security_text_matches_source_strict("getenv", "os.getenv"));
+    assert!(security_text_matches_source_strict(
+        "request.headers.get",
+        "request.headers.get"
+    ));
+    assert!(!security_text_matches_source_strict(
+        "request.args.get",
+        "request.headers.get"
+    ));
+    assert!(!security_text_matches_source_strict(
+        "request.values.get",
+        "request.args.get"
+    ));
+}

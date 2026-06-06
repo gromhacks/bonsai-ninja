@@ -71,7 +71,7 @@
 
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
-use bonsai_lang_api::{CallArg, CallKind, Decl, FlowEvent};
+use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -82,6 +82,8 @@ use crate::place::{CallSiteId, Place, TypeId};
 
 pub(crate) const RETURN_FIELD_BASE: &str = "__bonsai_return";
 pub(crate) const YIELD_FIELD_BASE: &str = "__bonsai_yield";
+pub(crate) const INLINE_RECEIVER_BASE_PREFIX: &str = "__bonsai_inline_recv";
+pub(crate) const INLINE_CALL_RESULT_RECEIVER_BASE_PREFIX: &str = "__bonsai_inline_call_recv";
 
 /// Transfer-time options supplied by higher layers.
 ///
@@ -246,11 +248,23 @@ pub struct ThrowSite {
     pub span: Span,
 }
 
+/// Field projection returned as a scalar value, e.g.
+/// `return self.data.cmd` / `&self.data.cmd`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ReturnFieldProjection {
+    /// Storage base that owns the returned field, e.g. `self.data`.
+    pub base: String,
+    /// Field segment returned from `base`, e.g. `cmd`.
+    pub field: String,
+}
+
 /// Output of the transfer-function pass for one function.
 #[derive(Clone, Debug)]
 pub struct TransferOutput {
     /// FuncId this transfer-function pass ran for.
     pub func: FuncId,
+    /// True when this output belongs to a constructor body.
+    pub is_constructor: bool,
     /// Parameter names declared by this function, in declaration
     /// order. Used by Phase 3 callback-binding stitching to detect
     /// `callback(value)` calls whose callee name matches a function
@@ -284,6 +298,11 @@ pub struct TransferOutput {
     pub call_sites: Vec<CallSiteRef>,
     /// Throw sites encountered, for Phase 3 stitching.
     pub throw_sites: Vec<ThrowSite>,
+    /// Scalar return projections. Phase 3 uses these to map
+    /// `callee` field writes into the caller's assigned scalar
+    /// target (`let c = self.cmd()`), without treating sibling fields
+    /// as taint on that scalar.
+    pub return_field_projections: Vec<ReturnFieldProjection>,
     /// Name pool used by this function's `Place::Read` /
     /// `Place::Write` / field-path / type-name interns. Embedded so
     /// the segment merge can resolve StrIds back to source-name
@@ -300,6 +319,7 @@ impl TransferOutput {
     pub fn new(func: FuncId) -> Self {
         Self {
             func,
+            is_constructor: false,
             params: Vec::new(),
             receiver_param_index: None,
             receiver_field_bases: Vec::new(),
@@ -309,6 +329,7 @@ impl TransferOutput {
             edges: Vec::new(),
             call_sites: Vec::new(),
             throw_sites: Vec::new(),
+            return_field_projections: Vec::new(),
             names: bonsai_factstore::StringPoolBuilder::new(),
         }
     }
@@ -375,10 +396,12 @@ pub fn transfer_function_for(decl: &Decl) -> TransferOutput {
 pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
+    out.is_constructor = matches!(decl.kind, DeclKind::Constructor);
     out.params.clone_from(&decl.params);
     out.receiver_param_index = decl.receiver_param_index;
     out.receiver_field_bases = receiver_field_bases(decl);
     out.implicit_receiver_bases = implicit_receiver_bases(decl);
+    out.return_field_projections = return_field_projections(&decl.flow_events);
     let mut ctx = TransferCtx {
         out: &mut out,
         options,
@@ -386,7 +409,9 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
         field_precise_container_assigns: collect_field_precise_container_assigns(&decl.flow_events),
-        method_receiver_bases: collect_method_receiver_bases(&decl.flow_events),
+        method_receiver_projections: collect_method_receiver_projections(&decl.flow_events),
+        yield_callback_names: collect_yield_callback_names(&decl.flow_events),
+        pattern_bindings: collect_pattern_bindings(&decl.flow_events),
     };
 
     // Seed the function's `Return` place defensively. Every
@@ -427,20 +452,153 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
 
     emit_receiver_field_writes(decl, &mut ctx);
     walk_events(&decl.flow_events, &mut ctx);
+    bridge_return_expression_calls(&mut ctx, &decl.flow_events);
     bridge_compound_expression_calls(&mut ctx);
+    bridge_inline_call_result_receivers(&mut ctx);
+    bridge_inline_constructor_receivers(&mut ctx);
     out
+}
+
+fn return_field_projections(events: &[FlowEvent]) -> Vec<ReturnFieldProjection> {
+    let mut out = Vec::new();
+    collect_return_field_projections(events, &mut out);
+    out
+}
+
+fn collect_return_field_projections(events: &[FlowEvent], out: &mut Vec<ReturnFieldProjection>) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_name,
+                value_text,
+                ..
+            } => {
+                let projection = value_name
+                    .as_deref()
+                    .and_then(scalar_return_projection)
+                    .or_else(|| value_text.as_deref().and_then(scalar_return_projection));
+                if let Some(projection) = projection {
+                    if !out.iter().any(|existing| existing == &projection) {
+                        out.push(projection);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_field_projections(then_events, out);
+                collect_return_field_projections(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_field_projections(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_field_projections(body, out);
+                collect_return_field_projections(catch_events, out);
+                collect_return_field_projections(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scalar_return_projection(text: &str) -> Option<ReturnFieldProjection> {
+    let mut normalized = text
+        .trim()
+        .trim_end_matches(';')
+        .trim_start_matches('&')
+        .trim_start_matches('*')
+        .replace("->", ".");
+    if normalized.ends_with(')') {
+        let (receiver, method_call) = normalized.rsplit_once('.')?;
+        let method = method_call.trim_end_matches("()").trim();
+        if !method_call.ends_with("()") {
+            return None;
+        }
+        if return_projection_value_preserving_method(method) {
+            normalized = receiver.to_string();
+        } else if return_projection_property_getter_candidate(receiver, method) {
+            normalized = format!("{receiver}.{method}");
+        } else {
+            return None;
+        }
+    }
+    if normalized.contains(['(', ')', '{', '}', ',', ' ']) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in normalized.split(['.', '[', ']']) {
+        let part = part.trim().trim_matches('"').trim_matches('\'');
+        if part.is_empty() {
+            continue;
+        }
+        if !part
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch == '@' || ch.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        parts.push(normalize_return_projection_part(part));
+    }
+    if parts.len() < 2 || parts.len() > 4 {
+        return None;
+    }
+    let field = parts.pop()?;
+    Some(ReturnFieldProjection {
+        base: parts.join("."),
+        field,
+    })
+}
+
+fn normalize_return_projection_part(part: &str) -> String {
+    let stripped = part.trim_start_matches('$');
+    if matches!(stripped, "this" | "self" | "super" | "base") {
+        stripped.to_string()
+    } else {
+        part.to_string()
+    }
+}
+
+fn return_projection_value_preserving_method(method: &str) -> bool {
+    matches!(
+        method,
+        "clone" | "to_string" | "to_owned" | "as_str" | "trim" | "trim_start" | "trim_end"
+    )
+}
+
+fn return_projection_property_getter_candidate(receiver: &str, method: &str) -> bool {
+    if method.is_empty()
+        || matches!(
+            method,
+            "run" | "execute" | "audit" | "close" | "cancel" | "dispose" | "status" | "wait"
+        )
+    {
+        return false;
+    }
+    let root = receiver
+        .trim()
+        .split('.')
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    !matches!(root, "self" | "this" | "super" | "base" | "Self")
 }
 
 fn receiver_field_bases(decl: &Decl) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = ahash::AHashSet::default();
     for write in &decl.receiver_field_writes {
-        let Some(base) = field_base_name(&write.target) else {
-            continue;
-        };
-        let base = base.trim();
-        if !base.is_empty() && seen.insert(base.to_string()) {
-            out.push(base.to_string());
+        for base in implicit_receiver_storage_prefixes(&write.target) {
+            if seen.insert(base.clone()) {
+                out.push(base);
+            }
         }
     }
     out
@@ -528,20 +686,41 @@ fn collect_implicit_receiver_bases(events: &[FlowEvent], out: &mut Vec<String>) 
 }
 
 fn push_implicit_receiver_base(out: &mut Vec<String>, text: &str) {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let candidate = field_base_name(trimmed).unwrap_or(trimmed).trim();
-    let bare = candidate.trim_start_matches(['$', '@', '%']);
-    if !matches!(bare, "self" | "this" | "super" | "base" | "Self") {
-        return;
-    }
-    for value in [candidate, bare] {
-        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
-            out.push(value.to_string());
+    for value in implicit_receiver_storage_prefixes(text) {
+        if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+            out.push(value);
         }
     }
+}
+
+fn implicit_receiver_storage_prefixes(text: &str) -> Vec<String> {
+    let normalized = text
+        .trim()
+        .trim_start_matches('&')
+        .trim_start_matches('*')
+        .replace("->", ".");
+    let mut parts = Vec::new();
+    for part in normalized.split(['.', '[', ']']) {
+        let part = part.trim().trim_start_matches(['$', '@', '%']);
+        if part.is_empty() {
+            continue;
+        }
+        if !part.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+            break;
+        }
+        parts.push(part.to_string());
+    }
+    let Some(root) = parts.first().map(String::as_str) else {
+        return Vec::new();
+    };
+    if !matches!(root, "self" | "this" | "super" | "base" | "Self") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for len in 1..=parts.len().min(3) {
+        out.push(parts[..len].join("."));
+    }
+    out
 }
 
 fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
@@ -620,6 +799,400 @@ fn bridge_compound_expression_calls(ctx: &mut TransferCtx<'_>) {
     }
 }
 
+fn bridge_return_expression_calls(ctx: &mut TransferCtx<'_>, events: &[FlowEvent]) {
+    let mut return_spans = Vec::new();
+    collect_return_expression_spans(events, &mut return_spans);
+    if return_spans.is_empty() {
+        return;
+    }
+    return_spans.sort_by_key(|span| (span.file.raw(), span.start, span.end));
+    return_spans.dedup();
+    let sites = ctx.out.call_sites.clone();
+    let return_node = ctx.intern_node(Place::Return);
+    for return_span in return_spans {
+        let return_base_node = ctx.write_node(RETURN_FIELD_BASE, return_span);
+        for inner in &sites {
+            let inner_span = inner.site.0;
+            if !span_contains_or_equal(return_span, inner_span) {
+                continue;
+            }
+            ctx.emit(IdgEdge {
+                from: inner.call_ret_node,
+                to: return_node,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraReturn,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: return_span,
+                },
+            });
+            ctx.emit(IdgEdge {
+                from: inner.call_ret_node,
+                to: return_base_node,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraReturn,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: return_span,
+                },
+            });
+        }
+    }
+}
+
+fn collect_return_expression_spans(events: &[FlowEvent], out: &mut Vec<Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_text: Some(value_text),
+                ..
+            } if !value_text.trim().is_empty() => out.push(*span),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_expression_spans(then_events, out);
+                collect_return_expression_spans(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_expression_spans(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_expression_spans(body, out);
+                collect_return_expression_spans(catch_events, out);
+                collect_return_expression_spans(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn bridge_inline_constructor_receivers(ctx: &mut TransferCtx<'_>) {
+    let sites = ctx.out.call_sites.clone();
+    for outer in &sites {
+        if !matches!(outer.call_kind, CallKind::Method) {
+            continue;
+        }
+        let Some(receiver) = outer.receiver.as_deref() else {
+            continue;
+        };
+        let Some((ctor_name, ctor_args)) = inline_constructor_receiver_parts(receiver) else {
+            continue;
+        };
+        let Some(target_base) = inline_constructor_receiver_base(receiver, outer.site.0) else {
+            continue;
+        };
+        let Some(inner) = sites
+            .iter()
+            .filter(|site| inline_constructor_site_matches(site, outer.site.0, &ctor_name, &ctor_args))
+            .max_by_key(|site| site.site.0.start)
+        else {
+            continue;
+        };
+        let write_node = ctx.write_node(&target_base, outer.site.0);
+        ctx.emit(IdgEdge {
+            from: inner.call_ret_node,
+            to: write_node,
+            meta: crate::edge::EdgeMeta {
+                precision: Precision::Exact,
+                kind: IdgEdgeKind::IntraAssign,
+                call_kind: bonsai_callgraph::EdgeKind::Direct,
+                via_span: outer.site.0,
+            },
+        });
+    }
+}
+
+fn bridge_inline_call_result_receivers(ctx: &mut TransferCtx<'_>) {
+    let sites = ctx.out.call_sites.clone();
+    for outer in &sites {
+        if !matches!(outer.call_kind, CallKind::Method) {
+            continue;
+        }
+        let Some(receiver) = outer.receiver.as_deref() else {
+            continue;
+        };
+        if receiver.trim().is_empty() {
+            continue;
+        }
+        let Some(target_base) = inline_call_result_receiver_base(receiver, outer.site.0) else {
+            continue;
+        };
+        let Some(receiver_arg_node) = outer.receiver_arg_node else {
+            continue;
+        };
+        let Some(inner) = sites
+            .iter()
+            .filter(|site| inline_receiver_call_site_matches(site, outer.site.0, receiver))
+            .max_by_key(|site| site.site.0.start)
+        else {
+            continue;
+        };
+        let write_node = ctx.write_node(&target_base, outer.site.0);
+        ctx.emit(IdgEdge {
+            from: inner.call_ret_node,
+            to: write_node,
+            meta: crate::edge::EdgeMeta {
+                precision: Precision::Exact,
+                kind: IdgEdgeKind::IntraAssign,
+                call_kind: bonsai_callgraph::EdgeKind::Direct,
+                via_span: outer.site.0,
+            },
+        });
+        for arg_node in &inner.call_arg_nodes {
+            ctx.emit(IdgEdge {
+                from: *arg_node,
+                to: write_node,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Narrowed,
+                    kind: IdgEdgeKind::IntraAssign,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: outer.site.0,
+                },
+            });
+        }
+        ctx.emit(IdgEdge {
+            from: inner.call_ret_node,
+            to: receiver_arg_node,
+            meta: crate::edge::EdgeMeta {
+                precision: Precision::Exact,
+                kind: IdgEdgeKind::IntraRead,
+                call_kind: bonsai_callgraph::EdgeKind::Direct,
+                via_span: inner.site.0,
+            },
+        });
+        for arg_node in &inner.call_arg_nodes {
+            ctx.emit(IdgEdge {
+                from: *arg_node,
+                to: receiver_arg_node,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Narrowed,
+                    kind: IdgEdgeKind::IntraRead,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: inner.site.0,
+                },
+            });
+        }
+    }
+}
+
+pub(crate) fn inline_call_result_receiver_base(receiver: &str, site: Span) -> Option<String> {
+    if inline_constructor_receiver_parts(receiver).is_some() {
+        return None;
+    }
+    inline_call_result_receiver_head(receiver)?;
+    Some(format!(
+        "{}_{}_{}_{}",
+        INLINE_CALL_RESULT_RECEIVER_BASE_PREFIX,
+        site.file.raw(),
+        site.start,
+        site.end
+    ))
+}
+
+fn inline_receiver_call_site_matches(site: &CallSiteRef, outer_span: Span, receiver: &str) -> bool {
+    let site_span = site.site.0;
+    if site_span.file != outer_span.file || site_span.start > outer_span.start {
+        return false;
+    }
+    let receiver = receiver.trim();
+    if receiver.is_empty() {
+        return false;
+    }
+    site_span_text_matches_receiver(site, receiver)
+}
+
+fn site_span_text_matches_receiver(site: &CallSiteRef, receiver: &str) -> bool {
+    let callee = site.callee_name.trim();
+    if callee.is_empty() {
+        return false;
+    }
+    if let Some(head) = inline_call_result_receiver_head(receiver) {
+        return same_call_head(callee, &head);
+    }
+    same_call_head(callee, receiver.trim_end_matches("()"))
+}
+
+fn inline_call_result_receiver_head(receiver: &str) -> Option<String> {
+    let receiver = receiver.trim();
+    if receiver.starts_with("new ") {
+        return None;
+    }
+    let open = receiver.find('(')?;
+    let head = receiver[..open].trim();
+    if head.is_empty() {
+        return None;
+    }
+    Some(head.to_string())
+}
+
+fn same_call_head(left: &str, right: &str) -> bool {
+    let left = normalize_call_head(left);
+    let right = normalize_call_head(right);
+    !left.is_empty() && left == right
+}
+
+fn normalize_call_head(text: &str) -> String {
+    text.trim()
+        .trim_start_matches("new ")
+        .trim_end_matches("()")
+        .replace("->", ".")
+        .replace("::", ".")
+        .replace([' ', '\t', '\n', '\r'], "")
+}
+
+fn inline_constructor_site_matches(
+    site: &CallSiteRef,
+    outer_span: Span,
+    ctor_name: &str,
+    ctor_args: &[String],
+) -> bool {
+    if !matches!(site.call_kind, CallKind::Constructor) {
+        return false;
+    }
+    let site_span = site.site.0;
+    if site_span.file != outer_span.file || site_span.start > outer_span.start {
+        return false;
+    }
+    if !same_bare_type_name(&site.callee_name, ctor_name) {
+        return false;
+    }
+    if site.call_arg_places.len() != ctor_args.len() {
+        return false;
+    }
+    site.call_arg_places
+        .iter()
+        .zip(ctor_args)
+        .all(|(place, expected)| place.trim().is_empty() || place.trim() == expected.trim())
+}
+
+pub(crate) fn inline_constructor_receiver_base(receiver: &str, site: Span) -> Option<String> {
+    inline_constructor_receiver_parts(receiver)?;
+    Some(format!(
+        "{}_{}_{}_{}",
+        INLINE_RECEIVER_BASE_PREFIX,
+        site.file.raw(),
+        site.start,
+        site.end
+    ))
+}
+
+fn inline_constructor_receiver_parts(receiver: &str) -> Option<(String, Vec<String>)> {
+    let receiver = receiver.trim();
+    let rest = receiver.strip_prefix("new ")?;
+    let open = rest.find('(')?;
+    let close = matching_close_paren(rest, open)?;
+    if rest[close + 1..].trim().is_empty() {
+        // `new Type(args)` as a bare receiver.
+    } else {
+        return None;
+    }
+    let raw_type = rest[..open].trim();
+    let type_name = bare_constructor_type_name(raw_type)?;
+    let args = split_top_level_args(&rest[open + 1..close]);
+    Some((type_name, args))
+}
+
+fn matching_close_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escape = false;
+    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open) {
+        if let Some(quote) = in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => in_string = Some(ch),
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn bare_constructor_type_name(raw_type: &str) -> Option<String> {
+    let without_generics = raw_type.split('<').next().unwrap_or(raw_type).trim();
+    let bare = without_generics
+        .rsplit(['.', ':'])
+        .next()
+        .unwrap_or(without_generics)
+        .trim();
+    (!bare.is_empty()
+        && bare
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+    .then(|| bare.to_string())
+}
+
+fn split_top_level_args(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escape = false;
+    for (idx, ch) in args.char_indices() {
+        if let Some(quote) = in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == quote {
+                in_string = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => in_string = Some(ch),
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                push_trimmed_arg(&mut out, &args[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    push_trimmed_arg(&mut out, &args[start..]);
+    out
+}
+
+fn push_trimmed_arg(out: &mut Vec<String>, arg: &str) {
+    let arg = arg.trim();
+    if !arg.is_empty() {
+        out.push(arg.to_string());
+    }
+}
+
+fn same_bare_type_name(left: &str, right: &str) -> bool {
+    let Some(left) = bare_constructor_type_name(left.trim_start_matches("new ").trim()) else {
+        return false;
+    };
+    let Some(right) = bare_constructor_type_name(right.trim_start_matches("new ").trim()) else {
+        return false;
+    };
+    left == right
+}
+
 /// True when `outer` strictly contains `inner` — i.e. inner is
 /// fully inside outer with at least one different endpoint. Used
 /// to detect compound-expression nesting.
@@ -662,13 +1235,29 @@ struct TransferCtx<'a> {
     /// that shape; feeding every literal identifier into it collapses
     /// sibling fields.
     field_precise_container_assigns: ahash::AHashSet<(Span, String)>,
-    /// Bare names that appear as the receiver of a method call in this
-    /// function (`raw` in `raw.dup`, `routed` in `routed.to_s`). A
-    /// method invocation derives its result from the *whole* receiver
-    /// value, so a sibling method projection (`raw.dup`) must NOT
-    /// demote bare `raw` to a structural field-only base the way a
-    /// genuine field/index access (`obj.field`, `data[:cmd]`) does.
-    method_receiver_bases: ahash::AHashSet<String>,
+    /// Exact method projections seen in this function (`raw.dup`,
+    /// `routed.to_s`). A method invocation derives its result from the
+    /// *whole* receiver value, so the projection itself must NOT demote
+    /// bare `raw`/`routed` to a structural field-only base. Other
+    /// sibling projections (`item.flag` beside `item.get`) remain
+    /// field-sensitive.
+    method_receiver_projections: ahash::AHashSet<String>,
+    /// Local callback variables assigned from a yielding closure such
+    /// as Ruby's `callback = Proc.new { |part| yield part }`. Calls
+    /// through these names forward their arguments into `Place::Yield`.
+    yield_callback_names: ahash::AHashSet<String>,
+    /// Pattern bindings from conditions such as
+    /// `let Some(value) = Some(routed)`. Some adapters emit the
+    /// enclosing assignment before the branch condition, so the
+    /// binding must be materialized before lowering that assignment.
+    pattern_bindings: Vec<PatternBinding>,
+}
+
+#[derive(Clone, Debug)]
+struct PatternBinding {
+    span: Span,
+    binding: String,
+    source: String,
 }
 
 impl<'a> TransferCtx<'a> {
@@ -840,33 +1429,38 @@ fn field_base_name(target: &str) -> Option<&str> {
     (!base.is_empty()).then_some(base)
 }
 
-/// Collect the bare base names that are used as a method-call receiver
-/// somewhere in the function. `raw.dup` / `routed.to_s` contribute
-/// `raw` / `routed`; chained calls like `routed.to_s.empty?` also
-/// contribute the intermediate `routed` (via the receiver's base).
-/// Used by [`SemanticSourceFilter`] to keep a whole-value receiver
-/// from being demoted to a field-only structural base.
-fn collect_method_receiver_bases(events: &[FlowEvent]) -> ahash::AHashSet<String> {
+/// Collect exact method projections that derive from a whole receiver.
+/// `raw.dup` contributes `raw.dup`; chained calls also contribute the
+/// receiver projection (`routed.to_s` in `routed.to_s.empty?`). Used by
+/// [`SemanticSourceFilter`] to keep method transforms whole while still
+/// allowing unrelated static field projections on the same base to stay
+/// field-sensitive.
+fn collect_method_receiver_projections(events: &[FlowEvent]) -> ahash::AHashSet<String> {
     let mut out = ahash::AHashSet::default();
-    collect_method_receiver_bases_into(events, &mut out);
+    collect_method_receiver_projections_into(events, &mut out);
     out
 }
 
-fn collect_method_receiver_bases_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
+fn collect_yield_callback_names(events: &[FlowEvent]) -> ahash::AHashSet<String> {
+    if !events_contain_yield(events) {
+        return ahash::AHashSet::default();
+    }
+    let mut out = ahash::AHashSet::default();
+    collect_yield_callback_names_into(events, &mut out);
+    out
+}
+
+fn collect_yield_callback_names_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
     for event in events {
         match event {
-            FlowEvent::Call {
-                receiver, call_kind, ..
-            } => {
-                if matches!(call_kind, CallKind::Method) {
-                    push_method_receiver_base(receiver.as_deref(), out);
-                }
-            }
-            FlowEvent::Assign { source_call, .. } => {
-                // `a = raw.dup` carries the method projection through
-                // `source_call` rather than a `source_names` entry.
-                if let Some(call) = source_call.as_deref() {
-                    push_method_receiver_base(method_chain_receiver_carrier(call).as_deref(), out);
+            FlowEvent::Assign {
+                target,
+                source_call: Some(source_call),
+                ..
+            } if source_call_creates_yield_callback(source_call) => {
+                let target = target.trim();
+                if is_bare_identifier(target) {
+                    out.insert(target.to_string());
                 }
             }
             FlowEvent::Branch {
@@ -874,11 +1468,11 @@ fn collect_method_receiver_bases_into(events: &[FlowEvent], out: &mut ahash::AHa
                 else_events,
                 ..
             } => {
-                collect_method_receiver_bases_into(then_events, out);
-                collect_method_receiver_bases_into(else_events, out);
+                collect_yield_callback_names_into(then_events, out);
+                collect_yield_callback_names_into(else_events, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_method_receiver_bases_into(body, out);
+                collect_yield_callback_names_into(body, out);
             }
             FlowEvent::Try {
                 body,
@@ -886,25 +1480,199 @@ fn collect_method_receiver_bases_into(events: &[FlowEvent], out: &mut ahash::AHa
                 finally_events,
                 ..
             } => {
-                collect_method_receiver_bases_into(body, out);
-                collect_method_receiver_bases_into(catch_events, out);
-                collect_method_receiver_bases_into(finally_events, out);
+                collect_yield_callback_names_into(body, out);
+                collect_yield_callback_names_into(catch_events, out);
+                collect_yield_callback_names_into(finally_events, out);
             }
             _ => {}
         }
     }
 }
 
-fn push_method_receiver_base(receiver: Option<&str>, out: &mut ahash::AHashSet<String>) {
-    let Some(receiver) = receiver.map(str::trim).filter(|r| !r.is_empty()) else {
-        return;
-    };
-    // The receiver itself is a whole value (`routed.to_s` as the
-    // receiver of `.empty?`), and so is its base (`routed`).
-    out.insert(receiver.to_string());
-    if let Some(base) = field_base_name(receiver) {
-        out.insert(base.to_string());
+fn events_contain_yield(events: &[FlowEvent]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Yield { .. } => true,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => events_contain_yield(then_events) || events_contain_yield(else_events),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            events_contain_yield(body)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            events_contain_yield(body)
+                || events_contain_yield(catch_events)
+                || events_contain_yield(finally_events)
+        }
+        _ => false,
+    })
+}
+
+fn source_call_creates_yield_callback(source_call: &str) -> bool {
+    matches!(
+        normalise_callee_text(source_call).as_str(),
+        "Proc.new" | "lambda" | "proc"
+    )
+}
+
+fn collect_pattern_bindings(events: &[FlowEvent]) -> Vec<PatternBinding> {
+    let mut out = Vec::new();
+    collect_pattern_bindings_into(events, &mut out);
+    out.sort_by(|a, b| {
+        (
+            a.span.file.raw(),
+            a.span.start,
+            a.binding.as_str(),
+            a.source.as_str(),
+        )
+            .cmp(&(
+                b.span.file.raw(),
+                b.span.start,
+                b.binding.as_str(),
+                b.source.as_str(),
+            ))
+    });
+    out.dedup_by(|a, b| a.span == b.span && a.binding == b.binding && a.source == b.source);
+    out
+}
+
+fn collect_pattern_bindings_into(events: &[FlowEvent], out: &mut Vec<PatternBinding>) {
+    for event in events {
+        match event {
+            FlowEvent::Branch {
+                span,
+                condition: Some(condition),
+                then_events,
+                else_events,
+            } => {
+                if let Some((binding, source)) = pattern_binding_from_condition(condition) {
+                    out.push(PatternBinding {
+                        span: *span,
+                        binding,
+                        source,
+                    });
+                }
+                collect_pattern_bindings_into(then_events, out);
+                collect_pattern_bindings_into(else_events, out);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_pattern_bindings_into(then_events, out);
+                collect_pattern_bindings_into(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_pattern_bindings_into(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_pattern_bindings_into(body, out);
+                collect_pattern_bindings_into(catch_events, out);
+                collect_pattern_bindings_into(finally_events, out);
+            }
+            _ => {}
+        }
     }
+}
+
+fn pattern_binding_from_condition(condition: &str) -> Option<(String, String)> {
+    let condition = condition.trim();
+    let rest = condition.strip_prefix("let ")?;
+    let (pattern, source) = rest.split_once('=')?;
+    let binding = single_wrapper_arg(pattern.trim()).unwrap_or_else(|| pattern.trim().to_string());
+    let source = single_wrapper_arg(source.trim()).unwrap_or_else(|| source.trim().to_string());
+    if !is_bare_identifier(&binding) || source.is_empty() {
+        return None;
+    }
+    Some((binding, source))
+}
+
+fn single_wrapper_arg(text: &str) -> Option<String> {
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let wrapper = text[..open].trim();
+    if !matches!(wrapper, "Some" | "Ok" | "Err") {
+        return None;
+    }
+    let inner = text[open + 1..close].trim();
+    if inner.is_empty() || inner.contains(',') {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+fn collect_method_receiver_projections_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                call_kind,
+                ..
+            } => {
+                if matches!(call_kind, CallKind::Method) {
+                    push_method_projection(name, out);
+                    push_method_projection(receiver.as_deref().unwrap_or_default(), out);
+                }
+            }
+            FlowEvent::Assign { source_call, .. } => {
+                // `a = raw.dup` carries the method projection through
+                // `source_call` rather than a `source_names` entry.
+                if let Some(call) = source_call.as_deref() {
+                    push_method_projection(call, out);
+                    push_method_projection(
+                        method_chain_receiver_carrier(call).as_deref().unwrap_or_default(),
+                        out,
+                    );
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_method_receiver_projections_into(then_events, out);
+                collect_method_receiver_projections_into(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_method_receiver_projections_into(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_method_receiver_projections_into(body, out);
+                collect_method_receiver_projections_into(catch_events, out);
+                collect_method_receiver_projections_into(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_method_projection(projection: &str, out: &mut ahash::AHashSet<String>) {
+    let projection = projection.trim();
+    if projection.is_empty() || !projection.contains('.') {
+        return;
+    }
+    out.insert(projection.to_string());
 }
 
 #[derive(Default)]
@@ -916,10 +1684,11 @@ impl SemanticSourceFilter {
     fn from_sources(
         primary: Option<&str>,
         sources: &[String],
-        method_receiver_bases: &ahash::AHashSet<String>,
+        method_receiver_projections: &ahash::AHashSet<String>,
     ) -> Self {
         let mut filter = Self::default();
         for source in primary.into_iter().chain(sources.iter().map(String::as_str)) {
+            let source = source.trim();
             let Some(base) = field_base_name(source) else {
                 continue;
             };
@@ -933,7 +1702,9 @@ impl SemanticSourceFilter {
             // directly (`cmd: "#{raw}"`, `cmd: routed`). Genuine field
             // / index projections (`obj.field`, `data[:cmd]`,
             // Solidity `routed.length`) keep their base structural.
-            if method_receiver_bases.contains(base) {
+            if method_receiver_projections.contains(source)
+                && method_projection_derives_whole_receiver(source)
+            {
                 continue;
             }
             filter.structural_bases.insert(base.to_string());
@@ -945,6 +1716,20 @@ impl SemanticSourceFilter {
         let trimmed = source.trim();
         !trimmed.is_empty() && !trimmed.contains(['.', '[']) && self.structural_bases.contains(trimmed)
     }
+}
+
+fn method_projection_derives_whole_receiver(source: &str) -> bool {
+    let terminal = source
+        .trim()
+        .rsplit('.')
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches("()");
+    !matches!(
+        terminal,
+        "at" | "At" | "fetch" | "Fetch" | "get" | "Get" | "getOrDefault" | "objectForKey" | "valueForKey"
+    )
 }
 
 fn source_uses_index_projection(source: &str, base: &str) -> bool {
@@ -1226,13 +2011,63 @@ fn emit_container_field_writes(
         let write_node = ctx.write_node(&target, span);
         bridge_value_expr_to_node(&value, write_node, span, IdgEdgeKind::IntraFieldWrite, ctx);
     }
-    if !spreads.is_empty() {
-        let write_node = ctx.write_node(special_base, span);
-        for spread in spreads {
-            bridge_value_expr_to_node(&spread, write_node, span, IdgEdgeKind::IntraAssign, ctx);
+    for spread in spreads {
+        emit_spread_field_copies_to_special_base(special_base, &spread, span, ctx);
+    }
+    // A spread in a returned/yielded container copies fields, not the
+    // spread object as a scalar return value. Emitting
+    // `spread -> __bonsai_return` promotes any tainted sibling field
+    // to the whole return and lets `rest.user` satisfy a later
+    // `return.cmd` read. Known live spread fields are copied
+    // field-for-field above; unknown spread fields stay unknown rather
+    // than becoming whole-return taint.
+    true
+}
+
+fn emit_spread_field_copies_to_special_base(
+    special_base: &str,
+    spread: &str,
+    span: Span,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let spread = spread.trim();
+    if spread.is_empty() || spread.contains(['.', '[', '(']) {
+        return;
+    }
+    let prefix = format!("{spread}.");
+    let mut copies: Vec<(String, smallvec::SmallVec<[NodeId; 4]>)> = Vec::new();
+    for (name_id, writers) in &ctx.last_writer {
+        let Some(name) = ctx.out.names.get(*name_id) else {
+            continue;
+        };
+        let Some(field) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if field.is_empty() {
+            continue;
+        }
+        copies.push((field.to_string(), writers.clone()));
+    }
+    copies.sort_by(|a, b| a.0.cmp(&b.0));
+    copies.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Exact,
+        kind: IdgEdgeKind::IntraFieldWrite,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: span,
+    };
+    for (field, writers) in copies {
+        let target = format!("{special_base}.{field}");
+        let write_node = ctx.write_node(&target, span);
+        for writer in writers {
+            ctx.emit(IdgEdge {
+                from: writer,
+                to: write_node,
+                meta,
+            });
         }
     }
-    true
 }
 
 fn bridge_value_expr_to_node(
@@ -1254,6 +2089,12 @@ fn bridge_value_expr_to_node(
         let sid = ctx.intern_name(access);
         if bridged.insert(sid) {
             ctx.bridge_read(access, target, meta);
+        }
+        if let Some(parent) = immediate_qualified_parent(access) {
+            let sid = ctx.intern_name(parent);
+            if bridged.insert(sid) {
+                ctx.bridge_read(parent, target, meta);
+            }
         }
         let source_slice = value.get(*start..*end).unwrap_or(access);
         if !source_slice.contains('[') {
@@ -1282,6 +2123,14 @@ fn bridge_value_expr_to_node(
             ctx.bridge_read(&token, target, meta);
         }
     }
+}
+
+fn immediate_qualified_parent(access: &str) -> Option<&str> {
+    let (parent, _) = access.rsplit_once('.')?;
+    parent
+        .contains('.')
+        .then(|| parent.trim())
+        .filter(|parent| !parent.is_empty())
 }
 
 fn is_non_value_token(token: &str) -> bool {
@@ -1717,6 +2566,7 @@ fn walk_assign(
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
     };
+    emit_pattern_bindings_for_assign_span(span, ctx);
 
     // Bridge each source's most-recent writer to the new target's
     // Write node. CFG narrowing: bridge_read consults
@@ -1728,7 +2578,7 @@ fn walk_assign(
             && !source_call_args.is_empty()
             && matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::CallResult)));
     let source_filter =
-        SemanticSourceFilter::from_sources(source_name, source_names, &ctx.method_receiver_bases);
+        SemanticSourceFilter::from_sources(source_name, source_names, &ctx.method_receiver_projections);
     if !suppress_direct_rhs_inputs {
         if let Some(src) = source_name {
             if !src.is_empty()
@@ -1736,6 +2586,7 @@ fn walk_assign(
                 && !direct_rhs_source_is_call_internals(src, source_call, source_call_args)
             {
                 ctx.bridge_read(src, write_node, edge_meta);
+                bridge_method_projection_receiver_source(src, write_node, edge_meta, ctx);
             }
         }
         for src in source_names {
@@ -1746,6 +2597,7 @@ fn walk_assign(
                 continue;
             }
             ctx.bridge_read(src, write_node, edge_meta);
+            bridge_method_projection_receiver_source(src, write_node, edge_meta, ctx);
         }
     }
     if !suppress_broad_container_inputs {
@@ -1788,6 +2640,20 @@ fn walk_assign(
                 to: write_node,
                 meta: edge_meta,
             });
+            if call_result_inherits_constructor_args(callee) {
+                for arg_node in &arg_nodes {
+                    ctx.emit(IdgEdge {
+                        from: *arg_node,
+                        to: ret_node,
+                        meta: crate::edge::EdgeMeta {
+                            precision: Precision::Narrowed,
+                            kind: IdgEdgeKind::IntraAssign,
+                            call_kind: bonsai_callgraph::EdgeKind::Indirect,
+                            via_span: span,
+                        },
+                    });
+                }
+            }
             // Assign-RHS `source_call_args` are Strings without
             // explicit per-arg spans; use the assign's span as
             // the conservative fallback.
@@ -1838,6 +2704,26 @@ fn walk_assign(
     // therefore see the prior `x` on the RHS and still update to
     // a fresh writer node post-assign.
     ctx.commit_writer(target, write_node);
+}
+
+fn emit_pattern_bindings_for_assign_span(span: Span, ctx: &mut TransferCtx<'_>) {
+    let bindings = ctx
+        .pattern_bindings
+        .iter()
+        .filter(|binding| span_contains_or_equal(span, binding.span))
+        .cloned()
+        .collect::<Vec<_>>();
+    for binding in bindings {
+        let write_node = ctx.write_node(&binding.binding, binding.span);
+        bridge_value_expr_to_node(
+            &binding.source,
+            write_node,
+            binding.span,
+            IdgEdgeKind::IntraAssign,
+            ctx,
+        );
+        ctx.commit_writer(&binding.binding, write_node);
+    }
 }
 
 fn is_structural_index_metadata_target(target: &str) -> bool {
@@ -1904,6 +2790,53 @@ fn direct_rhs_source_is_call_internals(
     source_call_args.iter().any(|arg| arg.trim() == src)
 }
 
+fn call_result_inherits_constructor_args(callee: &str) -> bool {
+    let trimmed = callee.trim();
+    let explicit_new = trimmed.starts_with("new ");
+    let callee = trimmed.trim_start_matches("new ").trim();
+    if !explicit_new && (callee.contains('.') || callee.contains(':') || callee.contains("->")) {
+        return false;
+    }
+    let tail = callee
+        .rsplit(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .find(|part| !part.is_empty())
+        .unwrap_or(callee);
+    tail.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn bridge_method_projection_receiver_source(
+    source: &str,
+    node: NodeId,
+    meta: crate::edge::EdgeMeta,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let source = source.trim();
+    if source.is_empty()
+        || !ctx.method_receiver_projections.contains(source)
+        || !method_projection_derives_whole_receiver(source)
+    {
+        return;
+    }
+    let Some(receiver) = dotted_projection_receiver(source) else {
+        return;
+    };
+    if receiver.is_empty() {
+        return;
+    }
+    ctx.bridge_read(&receiver, node, meta);
+}
+
+fn dotted_projection_receiver(source: &str) -> Option<String> {
+    let source = source.trim();
+    let (receiver, member) = source.rsplit_once('.')?;
+    let receiver = receiver.trim();
+    let member = member.trim();
+    if receiver.is_empty() || member.is_empty() {
+        return None;
+    }
+    Some(receiver.to_string())
+}
+
 /// Walk a `Call` event. Records the call site for Phase 3 and emits
 /// caller-side `Read(arg.place) → CallArg(site, idx)` edges where
 /// the adapter exposed a place identifier for the argument.
@@ -1948,7 +2881,7 @@ fn walk_call(
         let source_filter = SemanticSourceFilter::from_sources(
             arg.place.as_deref(),
             &arg.source_names,
-            &ctx.method_receiver_bases,
+            &ctx.method_receiver_projections,
         );
         if let Some(place) = arg.place.as_deref() {
             if !place.is_empty() && !source_filter.is_structural_base_token(place) {
@@ -2003,6 +2936,8 @@ fn walk_call(
             }
         }
     }
+    apply_collection_append_call(span, name, receiver, call_kind, args, ctx);
+    apply_yield_callback_call(span, name, receiver, args, ctx);
     if name == "send" && args.len() >= 2 {
         if let Some(channel) = args
             .first()
@@ -2156,6 +3091,109 @@ fn walk_call(
     apply_clean_output_overwrite_call(span, name, args, ctx);
 }
 
+fn apply_yield_callback_call(
+    span: Span,
+    name: &str,
+    receiver: Option<&str>,
+    args: &[CallArg],
+    ctx: &mut TransferCtx<'_>,
+) {
+    if ctx.yield_callback_names.is_empty() || args.is_empty() {
+        return;
+    }
+    let callback = receiver
+        .map(str::trim)
+        .filter(|recv| !recv.is_empty())
+        .or_else(|| {
+            let name = name.trim();
+            is_bare_identifier(name).then_some(name)
+        });
+    let Some(callback) = callback else {
+        return;
+    };
+    if !ctx.yield_callback_names.contains(callback) {
+        return;
+    }
+    let yield_node = ctx.intern_node(Place::Yield);
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Exact,
+        kind: IdgEdgeKind::IntraYield,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: span,
+    };
+    for arg in args {
+        bridge_value_expr_to_node(&arg.value_text, yield_node, span, IdgEdgeKind::IntraYield, ctx);
+        let mut emitted = ahash::AHashSet::new();
+        if let Some(place) = arg.place.as_deref().filter(|place| !place.is_empty()) {
+            let sid = ctx.intern_name(place);
+            if emitted.insert(sid) {
+                ctx.bridge_read(place, yield_node, meta);
+            }
+        }
+        for source in &arg.source_names {
+            if source.is_empty() {
+                continue;
+            }
+            let sid = ctx.intern_name(source);
+            if emitted.insert(sid) {
+                ctx.bridge_read(source, yield_node, meta);
+            }
+        }
+    }
+}
+
+fn apply_collection_append_call(
+    span: Span,
+    name: &str,
+    receiver: Option<&str>,
+    call_kind: CallKind,
+    args: &[CallArg],
+    ctx: &mut TransferCtx<'_>,
+) {
+    if !matches!(call_kind, CallKind::Method) || args.is_empty() {
+        return;
+    }
+    let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
+        return;
+    };
+    if !collection_append_method_name(name, receiver) {
+        return;
+    }
+
+    let (write_node, _) = build_target_node(receiver, span, ctx);
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Exact,
+        kind: IdgEdgeKind::IntraAssign,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: span,
+    };
+    for arg in args {
+        bridge_call_arg_value_to_node(arg, write_node, meta, span, ctx);
+    }
+    ctx.append_writer(receiver, write_node);
+}
+
+fn collection_append_method_name(name: &str, receiver: &str) -> bool {
+    let name = name.trim();
+    let receiver = receiver.trim();
+    if name.is_empty() || receiver.is_empty() {
+        return false;
+    }
+    let member = name
+        .strip_prefix(receiver)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .unwrap_or(name)
+        .rsplit(['.', ':'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .trim_end_matches("()");
+    matches!(
+        member,
+        "push" | "append" | "add" | "addLast" | "push_back" | "emplace_back"
+    )
+}
+
 fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
     let output_indices: Vec<usize> = ctx
         .options
@@ -2217,7 +3255,7 @@ fn bridge_call_arg_value_to_node(
     let source_filter = SemanticSourceFilter::from_sources(
         arg.place.as_deref(),
         &arg.source_names,
-        &ctx.method_receiver_bases,
+        &ctx.method_receiver_projections,
     );
     let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {
@@ -2655,7 +3693,7 @@ fn bridge_call_arg_value_to_throw(arg: &CallArg, throw_node: NodeId, span: Span,
     let source_filter = SemanticSourceFilter::from_sources(
         arg.place.as_deref(),
         &arg.source_names,
-        &ctx.method_receiver_bases,
+        &ctx.method_receiver_projections,
     );
     let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {

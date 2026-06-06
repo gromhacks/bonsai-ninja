@@ -95,7 +95,9 @@ impl LanguageAdapter for RubyAdapter {
                         snapshot.text.as_ref(),
                     );
                     inject_ruby_raise_throw_events(&mut decl.flow_events);
+                    inject_ruby_super_call_events(&mut decl.flow_events, &decl.name);
                     normalize_ruby_subshell_events(&mut decl.flow_events, snapshot.text.as_bytes());
+                    normalize_ruby_instance_variable_events(decl);
                 }
             }
             // Per-class `bases`: `class Echo < Base` → ["Base"].
@@ -115,6 +117,8 @@ impl LanguageAdapter for RubyAdapter {
                         decl.bases = bases.clone();
                     }
                 }
+                inject_ruby_hash_field_assigns(&mut idx, &tree, file, src);
+                inject_ruby_bare_method_arg_calls(&mut idx, &tree, file, src);
             }
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
             apply_ruby_class_semantic_identity(&mut idx);
@@ -328,6 +332,70 @@ fn inject_ruby_raise_throw_events(events: &mut Vec<FlowEvent>) {
     *events = rewritten;
 }
 
+fn inject_ruby_super_call_events(events: &mut Vec<FlowEvent>, method_name: &str) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_ruby_super_call_events(then_events, method_name);
+                inject_ruby_super_call_events(else_events, method_name);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_ruby_super_call_events(body, method_name);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_ruby_super_call_events(body, method_name);
+                inject_ruby_super_call_events(catch_events, method_name);
+                inject_ruby_super_call_events(finally_events, method_name);
+            }
+            _ => {}
+        }
+    }
+
+    if method_name.trim().is_empty() {
+        return;
+    }
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        if ruby_return_is_bare_super(&event) {
+            let span = match &event {
+                FlowEvent::Return { span, .. } => *span,
+                _ => unreachable!("guarded by ruby_return_is_bare_super"),
+            };
+            rewritten.push(FlowEvent::Call {
+                span,
+                name: format!("super.{method_name}"),
+                receiver: Some("super".to_string()),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            });
+        }
+        rewritten.push(event);
+    }
+    *events = rewritten;
+}
+
+fn ruby_return_is_bare_super(event: &FlowEvent) -> bool {
+    let FlowEvent::Return {
+        value_text,
+        value_name,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    value_name.as_deref() == Some("super") || value_text.as_deref().is_some_and(|text| text.trim() == "super")
+}
+
 fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
     let FlowEvent::Call { name, args, span, .. } = event else {
         return None;
@@ -430,6 +498,486 @@ fn ruby_subshell_arg_source_names(args: &[CallArg]) -> Vec<String> {
         }
     }
     source_names
+}
+
+fn normalize_ruby_instance_variable_events(decl: &mut bonsai_lang_api::Decl) {
+    for write in &mut decl.receiver_field_writes {
+        write.target = normalize_ruby_instance_variable_text(&write.target);
+    }
+    for source in &mut decl.receiver_state_sources {
+        *source = normalize_ruby_instance_variable_text(source);
+    }
+    normalize_ruby_instance_variable_flow_events(&mut decl.flow_events);
+}
+
+fn normalize_ruby_instance_variable_flow_events(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                *target = normalize_ruby_instance_variable_text(target);
+                normalize_optional_ruby_instance_variable_text(source_name);
+                normalize_optional_ruby_instance_variable_text(source_call);
+                normalize_ruby_instance_variable_texts(source_call_args);
+                normalize_ruby_instance_variable_texts(source_names);
+            }
+            FlowEvent::Call {
+                name, receiver, args, ..
+            } => {
+                *name = normalize_ruby_instance_variable_text(name);
+                normalize_optional_ruby_instance_variable_text(receiver);
+                for arg in args {
+                    arg.value_text = normalize_ruby_instance_variable_text(&arg.value_text);
+                    normalize_optional_ruby_instance_variable_text(&mut arg.place);
+                    normalize_ruby_instance_variable_texts(&mut arg.source_names);
+                }
+            }
+            FlowEvent::Return {
+                value_name,
+                value_text,
+                ..
+            } => {
+                normalize_optional_ruby_instance_variable_text(value_name);
+                normalize_optional_ruby_instance_variable_text(value_text);
+            }
+            FlowEvent::Throw { value_name, .. } => {
+                normalize_optional_ruby_instance_variable_text(value_name);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                normalize_optional_ruby_instance_variable_text(catch_param);
+                normalize_ruby_instance_variable_flow_events(body);
+                normalize_ruby_instance_variable_flow_events(catch_events);
+                normalize_ruby_instance_variable_flow_events(finally_events);
+            }
+            FlowEvent::Branch {
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_optional_ruby_instance_variable_text(condition);
+                normalize_ruby_instance_variable_flow_events(then_events);
+                normalize_ruby_instance_variable_flow_events(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_ruby_instance_variable_flow_events(body);
+            }
+            FlowEvent::Yield { value_text, .. } => {
+                normalize_optional_ruby_instance_variable_text(value_text);
+            }
+            FlowEvent::Await { value_name, .. } => {
+                normalize_optional_ruby_instance_variable_text(value_name);
+            }
+            FlowEvent::Lifecycle { name, .. } => {
+                *name = normalize_ruby_instance_variable_text(name);
+            }
+            FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {}
+        }
+    }
+}
+
+fn normalize_optional_ruby_instance_variable_text(value: &mut Option<String>) {
+    if let Some(text) = value {
+        *text = normalize_ruby_instance_variable_text(text);
+    }
+}
+
+fn normalize_ruby_instance_variable_texts(values: &mut [String]) {
+    for value in values {
+        *value = normalize_ruby_instance_variable_text(value);
+    }
+}
+
+fn normalize_ruby_instance_variable_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    while let Some(ch) = chars.next() {
+        if let Some(active_quote) = quote {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            out.push(ch);
+            continue;
+        }
+
+        if ch != '@' {
+            out.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('@') => out.push(ch),
+            Some(next) if next == '_' || next.is_ascii_alphabetic() => {
+                out.push_str("self.");
+                while let Some(part) = chars.peek().copied() {
+                    if part == '_' || part.is_ascii_alphanumeric() {
+                        out.push(part);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
+fn inject_ruby_hash_field_assigns(idx: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut synthesized = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment"]) {
+        let (Some(left), Some(right)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        let target = normalize_ruby_instance_variable_text(node_text(&left, src).trim());
+        if target.is_empty() || !ruby_field_target_base_is_supported(&target) {
+            continue;
+        }
+        collect_ruby_hash_field_assigns_for_target(&target, right, file, src, &mut synthesized);
+    }
+    if synthesized.is_empty() {
+        return;
+    }
+
+    for event in synthesized {
+        let span = event.span();
+        let Some(decl) = idx
+            .defs
+            .iter_mut()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && decl_span_contains(decl, span)
+            })
+            .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
+        else {
+            continue;
+        };
+        if !decl.flow_events.iter().any(|existing| existing == &event) {
+            decl.flow_events.push(event);
+            decl.flow_events
+                .sort_by_key(|event| (event.span().start, event.span().end));
+        }
+    }
+}
+
+fn ruby_field_target_base_is_supported(target: &str) -> bool {
+    target
+        .split('.')
+        .all(|part| !part.is_empty() && part.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
+}
+
+fn decl_span_contains(decl: &bonsai_lang_api::Decl, span: Span) -> bool {
+    let container = decl.body_span.unwrap_or(decl.span);
+    container.file == span.file && container.start <= span.start && span.end <= container.end
+}
+
+fn collect_ruby_hash_field_assigns_for_target(
+    target: &str,
+    node: tree_sitter::Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<FlowEvent>,
+) {
+    if node.kind() == "hash" {
+        collect_ruby_hash_pair_assigns(target, node, file, src, out);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ruby_hash_field_assigns_for_target(target, child, file, src, out);
+    }
+}
+
+fn collect_ruby_hash_pair_assigns(
+    target: &str,
+    hash: tree_sitter::Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<FlowEvent>,
+) {
+    let mut cursor = hash.walk();
+    for child in hash.named_children(&mut cursor) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = child
+            .child_by_field_name("key")
+            .and_then(|key| ruby_hash_key_name(key, src))
+        else {
+            continue;
+        };
+        let Some(value) = child.child_by_field_name("value") else {
+            continue;
+        };
+        let mut source_names = ruby_value_source_names(value, src);
+        if source_names.is_empty() {
+            continue;
+        }
+        source_names.sort();
+        source_names.dedup();
+        out.push(FlowEvent::Assign {
+            span: span_of(file, &child),
+            target: format!("{target}.{key}"),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names,
+            declares_new_binding: false,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        });
+    }
+}
+
+fn ruby_hash_key_name(key: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&key, src)
+        .trim()
+        .trim_start_matches(':')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    if raw.is_empty() || !raw.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+fn ruby_value_source_names(node: tree_sitter::Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_ruby_value_source_names(node, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_ruby_value_source_names(node: tree_sitter::Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" | "constant" | "self" => {
+            push_ruby_source_name(out, node_text(&node, src));
+        }
+        "instance_variable" => {
+            push_ruby_source_name(out, &normalize_ruby_instance_variable_text(node_text(&node, src)));
+        }
+        "call" => {
+            push_ruby_source_name(
+                out,
+                &normalize_ruby_instance_variable_text(node_text(&node, src).trim()),
+            );
+            if let Some(receiver) = node.child_by_field_name("receiver") {
+                collect_ruby_value_source_names(receiver, src, out);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() == "arguments" {
+                    collect_ruby_value_source_names(child, src, out);
+                }
+            }
+            return;
+        }
+        "element_reference" => {
+            if let Some(access) = ruby_element_reference_name(node, src) {
+                push_ruby_source_name(out, &access);
+            }
+        }
+        "hash_key_symbol" | "simple_symbol" | "integer" | "float" | "string_content" => {}
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ruby_value_source_names(child, src, out);
+    }
+}
+
+fn ruby_element_reference_name(node: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let object = node
+        .child_by_field_name("object")
+        .map(|object| normalize_ruby_instance_variable_text(node_text(&object, src).trim()))?;
+    let mut cursor = node.walk();
+    let key = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "simple_symbol" || child.kind() == "string")
+        .and_then(|key| ruby_hash_key_name(key, src))?;
+    (!object.is_empty()).then(|| format!("{object}.{key}"))
+}
+
+fn push_ruby_source_name(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with(':')
+        || value.starts_with('"')
+        || value.starts_with('\'')
+        || value.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return;
+    }
+    if !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
+    }
+}
+
+fn inject_ruby_bare_method_arg_calls(idx: &mut DeclIndex, tree: &Tree, file: FileId, src: &[u8]) {
+    let mut candidates = Vec::new();
+    for call in collect_kinds(tree, &["call"]) {
+        let Some(arguments) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let mut cursor = arguments.walk();
+        for arg in arguments.named_children(&mut cursor) {
+            if arg.kind() != "identifier" {
+                continue;
+            }
+            let name = node_text(&arg, src).trim();
+            if !ruby_bare_method_candidate(name) {
+                continue;
+            }
+            candidates.push((span_of(file, &arg), name.to_string()));
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+
+    for (span, name) in candidates {
+        let Some(decl) = idx
+            .defs
+            .iter_mut()
+            .filter(|decl| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && decl_span_contains(decl, span)
+            })
+            .min_by_key(|decl| decl.span.end.saturating_sub(decl.span.start))
+        else {
+            continue;
+        };
+        let locals = ruby_local_bindings_for_decl(decl);
+        if locals.contains(name.as_str()) {
+            continue;
+        }
+        let event = FlowEvent::Call {
+            span,
+            name,
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        };
+        if !decl.flow_events.iter().any(|existing| existing == &event) {
+            decl.flow_events.push(event);
+            decl.flow_events
+                .sort_by_key(|event| (event.span().start, event.span().end));
+        }
+    }
+}
+
+fn ruby_bare_method_candidate(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(
+            name,
+            "nil" | "true" | "false" | "self" | "super" | "yield" | "return" | "break" | "next"
+        )
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch == '!' || ch == '?' || ch.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+}
+
+fn ruby_local_bindings_for_decl(decl: &bonsai_lang_api::Decl) -> std::collections::BTreeSet<String> {
+    let mut locals: std::collections::BTreeSet<String> = decl
+        .params
+        .iter()
+        .filter_map(|param| ruby_bare_binding_name(param))
+        .collect();
+    collect_ruby_local_bindings(&decl.flow_events, &mut locals);
+    locals
+}
+
+fn collect_ruby_local_bindings(events: &[FlowEvent], locals: &mut std::collections::BTreeSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => {
+                if let Some(name) = ruby_bare_binding_name(target) {
+                    locals.insert(name);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                if let Some(param) = catch_param.as_deref().and_then(ruby_bare_binding_name) {
+                    locals.insert(param);
+                }
+                collect_ruby_local_bindings(body, locals);
+                collect_ruby_local_bindings(catch_events, locals);
+                collect_ruby_local_bindings(finally_events, locals);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_ruby_local_bindings(then_events, locals);
+                collect_ruby_local_bindings(else_events, locals);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_ruby_local_bindings(body, locals);
+            }
+            FlowEvent::Call { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. } => {}
+        }
+    }
+}
+
+fn ruby_bare_binding_name(value: &str) -> Option<String> {
+    let name = value.trim();
+    if name.is_empty() || name.contains('.') || name.contains('[') || name.starts_with('@') {
+        return None;
+    }
+    ruby_bare_method_candidate(name).then(|| name.to_string())
 }
 
 fn ruby_span_text(src: &[u8], span: Span) -> Option<&str> {

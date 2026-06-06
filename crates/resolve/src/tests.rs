@@ -293,6 +293,55 @@ fn unqualified_class_resolution_accepts_same_module_package() {
 }
 
 #[test]
+fn static_member_resolution_accepts_enum_receivers_in_same_module() {
+    let mut global = GlobalIndex::new();
+    let local_file = FileId::new(1);
+    let sibling_file = FileId::new(2);
+
+    let mut local_enum = decl(local_file, DeclKind::Enum, "Executor", &["copy_0"], 10);
+    local_enum.symbol = SymbolId::new(1);
+    local_enum.visibility = Visibility::Module;
+    let mut local_execute = decl(local_file, DeclKind::Method, "execute", &["copy_0"], 20);
+    local_execute.symbol = SymbolId::new(2);
+    local_execute.parent = Some(local_enum.symbol);
+    local_execute.visibility = Visibility::Module;
+    global.insert(DeclIndex {
+        file: local_file,
+        defs: vec![local_enum, local_execute],
+        refs: Vec::new(),
+        strings: Vec::new(),
+        comments: Vec::new(),
+    });
+
+    let mut sibling_enum = decl(sibling_file, DeclKind::Enum, "Executor", &["copy_1"], 10);
+    sibling_enum.symbol = SymbolId::new(1);
+    sibling_enum.visibility = Visibility::Module;
+    let mut sibling_execute = decl(sibling_file, DeclKind::Method, "execute", &["copy_1"], 20);
+    sibling_execute.symbol = SymbolId::new(2);
+    sibling_execute.parent = Some(sibling_enum.symbol);
+    sibling_execute.visibility = Visibility::Module;
+    global.insert(DeclIndex {
+        file: sibling_file,
+        defs: vec![sibling_enum, sibling_execute],
+        refs: Vec::new(),
+        strings: Vec::new(),
+        comments: Vec::new(),
+    });
+
+    let caller_module = ModulePath::from_segments(["copy_0"]);
+    let ctx = ResolveContext::new(FileId::new(99), &caller_module);
+    let hits = resolve_callable_with_context(&global, "Executor.execute", &ctx);
+
+    assert_eq!(hits.len(), 1);
+    let hit = global
+        .decl_of(SymbolId::new(hits[0].raw()))
+        .expect("resolved enum static method");
+    assert_eq!(hit.name, "execute");
+    assert_eq!(hit.module_path, caller_module);
+    assert_eq!(global.declaring_file(hit.symbol), Some(local_file));
+}
+
+#[test]
 fn unqualified_class_resolution_accepts_wildcard_import_target_only() {
     let mut global = GlobalIndex::new();
     let imported_file = FileId::new(1);

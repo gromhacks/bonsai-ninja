@@ -114,10 +114,14 @@ the 3.1 GiB chunked IDG factstore. A valid large-codebase run should have
 no `payload exceeds 4GiB` warning, and no `save_to_disk failed` warning.
 
 `BONSAI_DEBUG=security-phase` writes phase timing to stderr even when
-`--no-progress` keeps stdout clean. For taint-analysis, expect separate timings
-for rule matching, semantic graph construction, taint-chain building,
-finding finalization, and JSON/text rendering. Text output also reports page
-cost estimation, pagination, page-window rendering, and page-cache save time.
+`--no-progress` keeps stdout clean. `--no-progress` and `NO_PROGRESS` are the
+only progress mute switches; `--no-color` and `NO_COLOR` keep progress visible
+in an interactive terminal but render monochrome bars. For taint-analysis,
+expect separate progress phases and timings for rule loading, parsing,
+source/sink/sanitizer matching, semantic graph construction, source-sink
+reachability, taint scheduling, taint-chain building, finding finalization,
+flow evidence, and JSON/text rendering. Text output also reports page cost
+estimation, pagination, page-window rendering, and page-cache save time.
 The rendered page cache reuses the indexed source fingerprint from the opened
 workspace, so a first-page render should not perform a second full source-tree
 content scan after analysis completes.
@@ -142,6 +146,37 @@ run, the IDG call-edge site index had 40,000 edges and call-name aliasing took
 0.025s. The pre-fix shape retained sibling-package candidates and was still
 CPU-bound after several minutes; a 400-file diagnostic clone showed 51,100
 call-edge site edges before the fix versus 1,600 after it.
+
+The 2026-06-06 all-language 10,000-file mega-flow benchmark copied only valid
+`examples/<lang>/mega_flow` source files into isolated package/module
+directories, deleted each generated `/tmp` workspace after its audit, and
+validated content rather than just JSON shape. Every language matched the
+expected finding count, and every finding's source file, sink file, and
+taint-path files stayed inside the same generated copy.
+
+| Language | Files | Findings | Index | Taint |
+| --- | ---: | ---: | ---: | ---: |
+| C | 10,000 | 2,000 | 2.26s | 4.56s |
+| C++ | 10,000 | 2,000 | 2.66s | 7.83s |
+| C# | 10,000 | 2,500 | 4.33s | 23.60s |
+| Dart | 10,000 | 2,500 | 3.65s | 36.17s |
+| Elixir | 10,000 | 2,500 | 2.22s | 13.40s |
+| Erlang | 10,000 | 2,000 | 1.77s | 5.64s |
+| Go | 10,000 | 2,500 | 2.94s | 22.47s |
+| Java | 10,000 | 2,500 | 2.60s | 40.19s |
+| JavaScript | 10,000 | 2,500 | 2.91s | 31.94s |
+| Kotlin | 10,000 | 2,500 | 2.80s | 15.92s |
+| Lua | 10,000 | 2,500 | 2.19s | 6.93s |
+| Objective-C | 10,000 | 2,500 | 3.08s | 13.43s |
+| Perl | 10,000 | 2,500 | 2.84s | 7.09s |
+| PHP | 10,000 | 5,000 | 3.49s | 10.62s |
+| Python | 10,000 | 1,250 | 2.65s | 11.41s |
+| Ruby | 10,000 | 5,000 | 2.29s | 18.66s |
+| Rust | 10,000 | 2,500 | 3.25s | 17.29s |
+| Scala | 10,000 | 2,500 | 2.93s | 18.44s |
+| Solidity | 10,002 | 3,334 | 2.88s | 16.02s |
+| Swift | 10,000 | 2,500 | 3.50s | 38.26s |
+| TypeScript | 10,000 | 2,000 | 2.74s | 25.19s |
 
 The 2026-06-04 source-to-sink scheduler regression pass verifies that
 taint-analysis does not analyze every source in a large project when most

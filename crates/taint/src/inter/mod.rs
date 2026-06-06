@@ -280,6 +280,50 @@ pub struct InterTaintCaches {
 }
 
 impl InterTaintCaches {
+    /// Seed the per-call-site resolver memo from the workspace's
+    /// resolved callgraph. Exact taint propagation still decides
+    /// whether a source reaches the call; this only keeps the
+    /// interprocedural walker from re-resolving an already-proven
+    /// call-site edge, and preserves callgraph-only receiver/type
+    /// narrowing such as `repo.run()` after `repo = Factory.wrap(...)`.
+    pub fn seed_resolved_call_graph(&self, call_graph: &bonsai_callgraph::ResolvedCallGraph) {
+        let mut grouped: AHashMap<(FuncId, Span, Vec<String>), Vec<ResolvedCallee>> = AHashMap::new();
+        for edge in &call_graph.inner().edges {
+            if !edge.precision.is_semantic() {
+                continue;
+            }
+            let key = (edge.from, edge.span, Vec::new());
+            push_unique_resolved_callee(
+                grouped.entry(key).or_default(),
+                ResolvedCallee {
+                    func: edge.to,
+                    kind: edge.kind,
+                    precision: edge.precision,
+                },
+            );
+        }
+        if grouped.is_empty() {
+            return;
+        }
+        let mut cache = self.resolved_calls_by_site.write();
+        for (key, mut seeded) in grouped {
+            if let Some(existing) = cache.get(&key) {
+                for candidate in existing.iter() {
+                    push_unique_resolved_callee(&mut seeded, candidate.clone());
+                }
+            }
+            seeded.sort_by_key(|candidate| {
+                (
+                    candidate.func.raw(),
+                    edge_kind_rank(candidate.kind),
+                    candidate.precision.rank(),
+                )
+            });
+            let arc: std::sync::Arc<[ResolvedCallee]> = seeded.into_iter().collect();
+            cache.insert(key, arc);
+        }
+    }
+
     /// Drop every cached entry. Workspace-level callers invoke this
     /// when an edit invalidates the underlying static AST state — for
     /// example after `Workspace::ingest_dir` re-writes a file's text.
@@ -300,6 +344,26 @@ impl InterTaintCaches {
             && self.local_bindings_by_func.read().is_empty()
             && self.summaries_by_func.read().is_empty()
             && self.resolved_calls_by_site.read().is_empty()
+    }
+}
+
+fn push_unique_resolved_callee(candidates: &mut Vec<ResolvedCallee>, candidate: ResolvedCallee) {
+    if candidates.iter().any(|existing| {
+        existing.func == candidate.func
+            && existing.kind == candidate.kind
+            && existing.precision == candidate.precision
+    }) {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+fn edge_kind_rank(kind: EdgeKind) -> u8 {
+    match kind {
+        EdgeKind::Direct => 0,
+        EdgeKind::Virtual => 1,
+        EdgeKind::Indirect => 2,
+        EdgeKind::Unknown => 3,
     }
 }
 
@@ -2183,7 +2247,10 @@ fn propagate_call_event(
     }
     apply_configured_source_output_args(call.name, call.args, ctx.config, state);
     apply_configured_output_arg_flows(call.name, call.args, ctx.config, state);
-    let semantic_taint_added = apply_variadic_runtime_call_semantics(call.name, call.args, state);
+    let collection_taint_added =
+        apply_builtin_collection_receiver_mutation(call.name, call.receiver, call.args, state);
+    let semantic_taint_added =
+        apply_variadic_runtime_call_semantics(call.name, call.args, state) || collection_taint_added;
     let implicit_receiver = implicit_receiver_from_call_name(
         call.name,
         call.call_kind,
@@ -2539,6 +2606,46 @@ fn apply_variadic_runtime_call_semantics(name: &str, args: &[CallArg], state: &m
     true
 }
 
+fn apply_builtin_collection_receiver_mutation(
+    name: &str,
+    receiver: Option<&str>,
+    args: &[CallArg],
+    state: &mut TokenSet,
+) -> bool {
+    let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
+        return false;
+    };
+    if !builtin_collection_mutator_tail(short_tail(name)) {
+        return false;
+    }
+    if !args.iter().any(|arg| {
+        call_arg_is_tainted(arg, state) || arg_text_has_mapped_descendant_taint(&arg.value_text, state)
+    }) {
+        return false;
+    }
+    let before = state.len();
+    insert_value_target_taint(state, receiver);
+    insert_descendant_target_taint(state, receiver);
+    state.len() != before
+}
+
+fn builtin_collection_mutator_tail(tail: &str) -> bool {
+    matches!(
+        tail,
+        "push"
+            | "append"
+            | "add"
+            | "addAll"
+            | "insert"
+            | "unshift"
+            | "put"
+            | "set"
+            | "emplace"
+            | "push_back"
+            | "pushBack"
+    )
+}
+
 fn resolve_call_event_candidates_via_callgraph(
     call: &CallEventView<'_>,
     ctx: &PropagationCtx<'_>,
@@ -2719,17 +2826,14 @@ fn propagate_super_return_event(
     // a `return super.method(...)` fires: the explicit super-family
     // tokens and the implicit-receiver bare tokens. Taint state keyed
     // on any of these gets carried into the resolved super-method.
-    let candidate_receivers = bonsai_common::SUPER_RECEIVER_TOKENS
-        .iter()
-        .chain(bonsai_common::IMPLICIT_RECEIVER_TOKENS.iter())
-        .copied();
-    let Some(receiver_value) = candidate_receivers.into_iter().find(|candidate| {
-        receiver_expr_is_tainted(candidate, state) || actual_has_descendant_taint(candidate, state)
-    }) else {
-        return;
-    };
     let global = ctx.db.global_index();
     let Some(caller_decl) = global.decl_of(SymbolId::new(ctx.caller.raw())) else {
+        return;
+    };
+    let candidate_receivers = caller_receiver_state_candidate_names(ctx.db, caller_decl);
+    let Some(receiver_value) = candidate_receivers.iter().map(String::as_str).find(|candidate| {
+        receiver_expr_is_tainted(candidate, state) || actual_has_descendant_taint(candidate, state)
+    }) else {
         return;
     };
     let candidates =
@@ -2786,10 +2890,13 @@ fn return_expr_is_super(value: Option<&str>) -> bool {
         return false;
     };
     let value = trim_outer_parens(value.trim());
-    value == "super"
-        || value
-            .strip_prefix("super")
-            .is_some_and(|rest| rest.trim_start().starts_with('('))
+    let normalised = normalise_qualified_text(&value.replace("->", ".").replace("::", "."));
+    let receiver = normalised
+        .split(['.', '('])
+        .next()
+        .unwrap_or(normalised.as_str())
+        .trim();
+    is_super_receiver_with_tokens(receiver, bonsai_common::SUPER_RECEIVER_TOKENS)
 }
 
 fn apply_resolved_param_side_effects(
@@ -3243,9 +3350,13 @@ fn walk_events_for_sink(
             }) {
                 continue;
             }
-            if let FlowEvent::Call { name, args, .. } = event {
+            if let FlowEvent::Call {
+                name, receiver, args, ..
+            } = event
+            {
                 apply_configured_source_output_args(name, args, ctx.config, &mut state);
                 apply_configured_output_arg_flows(name, args, ctx.config, &mut state);
+                apply_builtin_collection_receiver_mutation(name, receiver.as_deref(), args, &mut state);
                 let candidates = resolve_call_candidates_with_caller(
                     name,
                     ctx.aliases,
@@ -5629,10 +5740,33 @@ fn implicit_receiver_from_call_name(
 fn caller_implicit_receiver_taint_binding(ctx: &PropagationCtx<'_>, state: &TokenSet) -> Option<String> {
     let global = ctx.db.global_index();
     let caller_decl = global.decl_of(SymbolId::new(ctx.caller.raw()))?;
-    receiver_state_names_for_decl(caller_decl)
+    caller_receiver_state_candidate_names(ctx.db, caller_decl)
         .into_iter()
         .filter(|name| receiver_state_name_is_implicit_marker(name))
         .find(|name| receiver_expr_is_tainted(name, state) || actual_has_descendant_taint(name, state))
+}
+
+fn caller_receiver_state_candidate_names(db: &AnalyzerDb, caller_decl: &Decl) -> Vec<String> {
+    let mut names = receiver_state_names_for_decl(caller_decl);
+    if let Some(file) = db.global_index().declaring_file(caller_decl.symbol) {
+        if let Some(adapter) = db.adapter_for(file) {
+            for token in adapter
+                .capabilities()
+                .effective_super_receiver_tokens()
+                .iter()
+                .chain(adapter.capabilities().effective_implicit_receiver_tokens().iter())
+            {
+                push_unique_string(&mut names, (*token).to_string());
+            }
+        }
+    }
+    for token in bonsai_common::SUPER_RECEIVER_TOKENS
+        .iter()
+        .chain(bonsai_common::IMPLICIT_RECEIVER_TOKENS.iter())
+    {
+        push_unique_string(&mut names, (*token).to_string());
+    }
+    names
 }
 
 fn receiver_state_name_is_implicit_marker(name: &str) -> bool {
@@ -5831,7 +5965,18 @@ fn rhs_operand_is_tainted(text: &str, state: &TokenSet) -> bool {
     if normalised != trimmed && !collapsed_to_base && state.contains(&normalised) {
         return true;
     }
+    let target_normalised = normalise_target_text(trimmed);
+    if target_normalised != trimmed
+        && target_normalised != normalised
+        && !target_normalised.is_empty()
+        && state.contains(&target_normalised)
+    {
+        return true;
+    }
     if qualified_wildcard_seed_matches(&normalised, state) {
+        return true;
+    }
+    if target_normalised != normalised && qualified_wildcard_seed_matches(&target_normalised, state) {
         return true;
     }
     if receiver_method_projection_is_tainted(trimmed, state) {
@@ -5960,6 +6105,15 @@ fn direct_call_expression_return_taint(
         .collect::<Vec<_>>();
     let global = scope.db.global_index();
     let mut candidates = resolve_call_candidates_with_caller_at(&callee_name, scope, &[], call_span);
+    if candidates.is_empty() && call_span.is_some() {
+        // `call_span` comes from the outer argument expression
+        // (`sink(obj.value())` -> span of `obj.value()`), while the
+        // adapter's call event normally uses the callee-token span
+        // (`value`). Exact-site lookup can therefore miss a real
+        // nested call. Retrying without the site keeps resolution
+        // scoped to the same caller instead of inventing graph walks.
+        candidates = resolve_call_candidates_with_caller_at(&callee_name, scope, &[], None);
+    }
     let constructor_candidates =
         constructor_candidates_for_class_call(scope.db, scope.caller, scope.alias_targets, &callee_name);
     if !constructor_candidates.is_empty() {
@@ -6309,7 +6463,18 @@ pub(super) fn arg_text_is_tainted(text: &str, state: &TokenSet) -> bool {
     if normalised != value_trimmed && !collapsed_to_base && state.contains(&normalised) {
         return true;
     }
+    let target_normalised = normalise_target_text(value_trimmed);
+    if target_normalised != value_trimmed
+        && target_normalised != normalised
+        && !target_normalised.is_empty()
+        && state.contains(&target_normalised)
+    {
+        return true;
+    }
     if qualified_wildcard_seed_matches(&normalised, state) {
+        return true;
+    }
+    if target_normalised != normalised && qualified_wildcard_seed_matches(&target_normalised, state) {
         return true;
     }
     if !stripped_value_free_operand && receiver_method_projection_is_tainted(value_trimmed, state) {
@@ -8812,7 +8977,11 @@ fn tainted_receiver_access(text: &str, state: &TokenSet) -> bool {
         return false;
     }
     let normalised = normalise_qualified_text(text);
+    let target_normalised = normalise_target_text(text);
     if qualified_wildcard_seed_matches(&normalised, state) {
+        return true;
+    }
+    if target_normalised != normalised && qualified_wildcard_seed_matches(&target_normalised, state) {
         return true;
     }
     state.iter().any(|seed| {
@@ -8820,12 +8989,22 @@ fn tainted_receiver_access(text: &str, state: &TokenSet) -> bool {
             return false;
         }
         let seed = normalise_qualified_text(seed);
-        !seed.is_empty()
-            && (normalised == seed
-                || normalised
-                    .strip_prefix(seed.as_str())
-                    .is_some_and(|rest| rest.starts_with('.')))
+        let target_seed = normalise_target_text(&seed);
+        qualified_access_matches_seed(&normalised, &seed)
+            || (target_normalised != normalised && qualified_access_matches_seed(&target_normalised, &seed))
+            || (target_seed != seed
+                && (qualified_access_matches_seed(&normalised, &target_seed)
+                    || qualified_access_matches_seed(&target_normalised, &target_seed)))
     })
+}
+
+fn qualified_access_matches_seed(access: &str, seed: &str) -> bool {
+    !access.is_empty()
+        && !seed.is_empty()
+        && (access == seed
+            || access
+                .strip_prefix(seed)
+                .is_some_and(|rest| rest.starts_with('.')))
 }
 
 fn receiver_method_projection_is_tainted(text: &str, state: &TokenSet) -> bool {
