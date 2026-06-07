@@ -41,7 +41,7 @@ use commands::{
 };
 use help_theme::try_themed_help;
 
-const DEFAULT_RAYON_STACK_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_RAYON_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 // CLI-wide stdout counter + counted print macros — defined up top so
 // `cli_println!` / `cli_print!` are visible everywhere below (macro_rules

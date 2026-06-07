@@ -1392,7 +1392,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         global.as_ref(),
         idg,
         max_precision,
-        None,
+        lineage_funcs,
     );
     let closure_nodes = if let Some(target_nodes) = target_nodes.filter(|nodes| !nodes.is_empty()) {
         idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, max_precision)
@@ -2186,21 +2186,9 @@ impl DescendantClosureIndex {
         func_filter: Option<&AHashSet<FuncId>>,
     ) -> Self {
         let mut out = Self::default();
-        for node in closure {
-            let Some(point) = idg.resolve_point(*node) else {
-                continue;
-            };
-            if func_filter.is_some_and(|funcs| !funcs.contains(&point.func)) {
-                continue;
-            }
-            if !matches!(
-                point.kind,
-                bonsai_idg::PointKind::Read | bonsai_idg::PointKind::Write
-            ) {
-                continue;
-            }
-            for base in descendant_storage_bases(&point.name) {
-                out.bases_by_func.entry(point.func).or_default().insert(base);
+        for (func, name) in idg.read_write_storage_names_in_reachable_nodes_for_funcs(closure, func_filter) {
+            for base in descendant_storage_bases(&name) {
+                out.bases_by_func.entry(func).or_default().insert(base);
             }
         }
         out

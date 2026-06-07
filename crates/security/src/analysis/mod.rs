@@ -859,6 +859,7 @@ where
         findings.retain(|combined| !combined.finding.from_test);
     }
     drop_dominated_wrapper_findings(&mut findings);
+    drop_dominated_receiver_projection_findings(&mut findings);
     // §C cleanup pass: when `--inferred-sources` synthesizes
     // `entry-point.class_field.inherited` sources for every record/
     // case-class component, each component reaches the sink through
@@ -3434,6 +3435,9 @@ impl GraphUnresolvedCallIndex {
         };
         let mut reasons = Vec::new();
         for site in sites {
+            if site.span == terminal_call.call_span && site.name == terminal_call.name {
+                continue;
+            }
             if unresolved_call_site_is_in_terminal_expression(terminal_call.call_span, site.span) {
                 reasons.push(format!("unresolved-call:{}", site.name));
             }
@@ -4862,6 +4866,53 @@ fn drop_dominated_wrapper_findings(findings: &mut Vec<CombinedFindingWithChain>)
     });
 }
 
+fn drop_dominated_receiver_projection_findings(findings: &mut Vec<CombinedFindingWithChain>) {
+    if findings.len() < 2 {
+        return;
+    }
+    let mut dominated = AHashSet::new();
+    for (idx, candidate) in findings.iter().enumerate() {
+        if findings.iter().enumerate().any(|(other_idx, other)| {
+            other_idx != idx && receiver_projection_finding_is_dominated(candidate, other)
+        }) {
+            dominated.insert(idx);
+        }
+    }
+    if dominated.is_empty() {
+        return;
+    }
+    let mut next_idx = 0usize;
+    findings.retain(|_| {
+        let keep = !dominated.contains(&next_idx);
+        next_idx = next_idx.saturating_add(1);
+        keep
+    });
+}
+
+fn receiver_projection_finding_is_dominated(
+    receiver_projection: &CombinedFindingWithChain,
+    direct_arg: &CombinedFindingWithChain,
+) -> bool {
+    let projected = &receiver_projection.finding;
+    let direct = &direct_arg.finding;
+    projected.language == direct.language
+        && projected.tag == direct.tag
+        && projected.status == direct.status
+        && same_source_site(&projected.source, &direct.source)
+        && same_sink_site(&projected.sink, &direct.sink)
+        && cwe_sets_overlap_or_unknown(&projected.cwe, &direct.cwe)
+        && sink_args_are_receiver_projection_only(&projected.sink.tainted_args)
+        && sink_args_include_direct_argument(&direct.sink.tainted_args)
+}
+
+fn sink_args_are_receiver_projection_only(args: &[TaintedArgInfo]) -> bool {
+    !args.is_empty() && args.iter().all(|arg| arg.index == usize::MAX)
+}
+
+fn sink_args_include_direct_argument(args: &[TaintedArgInfo]) -> bool {
+    args.iter().any(|arg| arg.index != usize::MAX)
+}
+
 fn wrapper_finding_is_dominated(
     wrapper: &CombinedFindingWithChain,
     deeper: &CombinedFindingWithChain,
@@ -5234,6 +5285,7 @@ where
             if let Some(mut corridor) = callgraph_source_sink_corridor(
                 *src_func_id,
                 &sink_func_set,
+                global.as_ref(),
                 chain_call_graph.as_ref(),
                 config.max_edge_precision,
             ) {
@@ -5291,8 +5343,9 @@ where
     on_progress(AnalysisProgress::PhaseFinished);
     let sink_target_nodes = source_sink_prefilter_enabled
         .then(|| sink_target_nodes_for_funcs(idg.as_ref(), &sink_by_func, &sink_func_set));
+    let sink_match_count: usize = sink_by_func.values().map(Vec::len).sum();
     let sink_target_nodes_for_schedule = sink_target_nodes.as_ref().and_then(|targets| {
-        if !targets.nodes.is_empty() {
+        if sink_target_nodes_are_selective_for_schedule(targets, sink_match_count) {
             Some(targets.nodes.as_slice())
         } else {
             None
@@ -5303,8 +5356,9 @@ where
     if let Some(targets) = sink_target_nodes.as_ref() {
         bonsai_diagnostics::debug_log!(
             "security-phase",
-            "sink target nodes nodes={} complete={} schedule_node_cut={} graph_node_cut={}",
+            "sink target nodes nodes={} sink_matches={} complete={} schedule_node_cut={} graph_node_cut={}",
             targets.nodes.len(),
+            sink_match_count,
             targets.complete,
             sink_target_nodes_for_schedule.is_some(),
             target_node_graph_cut_enabled
@@ -5345,6 +5399,7 @@ where
             let corridor = if use_coarse_source_sink_schedule {
                 coarse_corridors_by_func.get(&src_func_id).cloned()
             } else if let Some(target_nodes) = sink_target_nodes_for_schedule {
+                let coarse_corridor = coarse_corridors_by_func.get(&src_func_id);
                 source_index_sink_corridor(
                     idx,
                     &source_work,
@@ -5353,18 +5408,13 @@ where
                     global.as_ref(),
                     idg.as_ref(),
                     target_nodes,
-                    &sink_func_set,
-                    chain_call_graph.as_ref(),
+                    sink_target_nodes
+                        .as_ref()
+                        .map_or(true, |targets| targets.complete),
+                    coarse_corridor,
                 )
             } else {
-                source_work.get(idx).and_then(|(_, source_func, _)| {
-                    callgraph_source_sink_corridor(
-                        *source_func,
-                        &sink_func_set,
-                        chain_call_graph.as_ref(),
-                        config.max_edge_precision,
-                    )
-                })
+                coarse_corridors_by_func.get(&src_func_id).cloned()
             };
             if let Some(corridor) = corridor {
                 filtered_indices.push(idx);
@@ -5615,11 +5665,25 @@ where
                 // case is the canonical motivator: previously the same
                 // source attached to BOTH because text-matching is
                 // loose enough to bridge unrelated calls.
+                let any_exact_span_match = candidate_sinks
+                    .iter()
+                    .any(|snk| snk.language == src.language && snk.span == call.call_span);
                 let any_span_match = candidate_sinks
                     .iter()
                     .any(|snk| snk.language == src.language && spans_overlap(call.call_span, snk.span));
                 for snk in candidate_sinks {
                     if snk.language != src.language {
+                        continue;
+                    }
+                    if any_exact_span_match {
+                        if snk.span != call.call_span {
+                            continue;
+                        }
+                    } else if any_span_match {
+                        if !spans_overlap(call.call_span, snk.span) {
+                            continue;
+                        }
+                    } else if !tainted_call_matches_sink(call, snk) {
                         continue;
                     }
                     if !source_can_precede_sink(ws, pack, src, src_func_id, snk, call.caller) {
@@ -5634,13 +5698,6 @@ where
                         &call.tainted_args,
                         call.tainted_receiver.as_deref(),
                     ) {
-                        continue;
-                    }
-                    if any_span_match {
-                        if !spans_overlap(call.call_span, snk.span) {
-                            continue;
-                        }
-                    } else if !tainted_call_matches_sink(call, snk) {
                         continue;
                     }
                     sink_matches = sink_matches.saturating_add(1);
@@ -6146,6 +6203,18 @@ fn sink_target_nodes_for_funcs(
     SinkTargetNodes { nodes: out, complete }
 }
 
+fn sink_target_nodes_are_selective_for_schedule(targets: &SinkTargetNodes, sink_match_count: usize) -> bool {
+    const MAX_SELECTIVE_SCHEDULE_TARGET_NODES: usize = 50_000;
+    if targets.nodes.is_empty() || sink_match_count == 0 {
+        return false;
+    }
+    if targets.nodes.len() > MAX_SELECTIVE_SCHEDULE_TARGET_NODES {
+        return false;
+    }
+    let expected_span_nodes = sink_match_count.saturating_mul(16).max(8_192);
+    targets.nodes.len() <= expected_span_nodes
+}
+
 #[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
 fn source_index_sink_corridor(
     index: usize,
@@ -6155,17 +6224,13 @@ fn source_index_sink_corridor(
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
     sink_target_nodes: &[bonsai_idg::WsNodeId],
-    sink_func_set: &AHashSet<FuncId>,
-    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    sink_target_nodes_complete: bool,
+    coarse_corridor: Option<&SourceSinkCorridor>,
 ) -> Option<SourceSinkCorridor> {
     let (src, source_func, seeds) = source_work.get(index)?;
+    let coarse_corridor = coarse_corridor?;
     if sink_target_nodes.is_empty() {
-        return callgraph_source_sink_corridor(
-            *source_func,
-            sink_func_set,
-            call_graph,
-            config.max_edge_precision,
-        );
+        return Some(coarse_corridor.clone());
     }
     let output_arg_names = global
         .decl_of(SymbolId::new(source_func.raw()))
@@ -6189,7 +6254,7 @@ fn source_index_sink_corridor(
         global,
         idg,
         config.max_edge_precision,
-        None,
+        Some(&coarse_corridor.lineage_funcs),
     );
     let cut = idg.forward_target_nodes_cut_with_max_precision(
         &seed_nodes,
@@ -6197,12 +6262,7 @@ fn source_index_sink_corridor(
         config.max_edge_precision,
     );
     if cut.is_empty() {
-        return callgraph_source_sink_corridor(
-            *source_func,
-            sink_func_set,
-            call_graph,
-            config.max_edge_precision,
-        );
+        return (!sink_target_nodes_complete).then(|| coarse_corridor.clone());
     }
     let mut corridor = SourceSinkCorridor::default();
     for node in &cut {
@@ -6213,7 +6273,7 @@ fn source_index_sink_corridor(
             corridor.target_nodes.push(*node);
         }
         corridor.lineage_funcs.insert(point.func);
-        if sink_func_set.contains(&point.func) {
+        if coarse_corridor.terminal_sinks.contains(&point.func) {
             corridor.terminal_sinks.insert(point.func);
         }
     }
@@ -6232,6 +6292,7 @@ fn source_index_sink_corridor(
 fn callgraph_source_sink_corridor(
     source_func: FuncId,
     sink_func_set: &AHashSet<FuncId>,
+    global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
     max_precision: Option<Precision>,
 ) -> Option<SourceSinkCorridor> {
@@ -6240,6 +6301,11 @@ fn callgraph_source_sink_corridor(
     }
     let mut seen = AHashSet::default();
     let mut forward: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
+    let mut reverse_output_funcs = AHashSet::default();
+    if summary_dependency_provider(global, source_func) {
+        reverse_output_funcs.insert(source_func);
+    }
+    let mut processed_reverse_funcs = AHashSet::default();
     let mut stack = vec![source_func];
     seen.insert(source_func);
     while let Some(func) = stack.pop() {
@@ -6248,14 +6314,27 @@ fn callgraph_source_sink_corridor(
             .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
             .map(|edge| edge.to)
             .collect();
+        if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
+            let callers: Vec<FuncId> = call_graph
+                .callers_of(func)
+                .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+                .map(|edge| edge.from)
+                .collect();
+            for caller in callers {
+                if summary_dependency_provider(global, caller) && reverse_output_funcs.insert(caller) {
+                    stack.push(caller);
+                }
+                next.push(caller);
+            }
+        }
         next.sort_by_key(|callee| callee.raw());
         next.dedup();
-        for callee in &next {
-            forward.entry(func).or_default().push(*callee);
+        for next_func in &next {
+            forward.entry(func).or_default().push(*next_func);
         }
-        for callee in next.into_iter().rev() {
-            if seen.insert(callee) {
-                stack.push(callee);
+        for next_func in next.into_iter().rev() {
+            if seen.insert(next_func) {
+                stack.push(next_func);
             }
         }
     }

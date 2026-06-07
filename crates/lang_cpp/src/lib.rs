@@ -379,25 +379,28 @@ fn cpp_access_visibility(raw: &str, default_visibility: Visibility) -> Visibilit
 /// anonymous namespace; when we are, every nested function definition
 /// counts as TU-private even without a `static` specifier.
 fn walk_for_tu_private(
-    node: Node<'_>,
+    root: Node<'_>,
     src: &[u8],
     inside_anonymous_ns: bool,
     private_names: &mut std::collections::HashSet<String>,
 ) {
-    if node.kind() == "function_definition"
-        && (inside_anonymous_ns || function_has_static_specifier(&node, src))
-    {
-        if let Some(name) = function_name(&node, src) {
-            private_names.insert(name);
+    let mut stack = vec![(root, inside_anonymous_ns)];
+    while let Some((node, inside_anonymous_ns)) = stack.pop() {
+        if node.kind() == "function_definition"
+            && (inside_anonymous_ns || function_has_static_specifier(&node, src))
+        {
+            if let Some(name) = function_name(&node, src) {
+                private_names.insert(name);
+            }
         }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        // An anonymous namespace child flips the flag for the
-        // subtree; inner namespaces inherit privacy.
-        let entering_anonymous =
-            inside_anonymous_ns || (child.kind() == "namespace_definition" && !namespace_is_named(&child));
-        walk_for_tu_private(child, src, entering_anonymous, private_names);
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            // An anonymous namespace child flips the flag for the
+            // subtree; inner namespaces inherit privacy.
+            let entering_anonymous = inside_anonymous_ns
+                || (child.kind() == "namespace_definition" && !namespace_is_named(&child));
+            stack.push((child, entering_anonymous));
+        }
     }
 }
 

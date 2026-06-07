@@ -895,6 +895,11 @@ impl Workspace {
         let global = self.inner.db.global_index();
         let target_set: AHashSet<FuncId> = target_funcs.iter().copied().collect();
         let mut reached_funcs: AHashSet<FuncId> = source_funcs.iter().copied().collect();
+        let mut reverse_output_funcs: AHashSet<FuncId> = source_funcs
+            .iter()
+            .copied()
+            .filter(|func| has_summary_output(global.as_ref(), *func))
+            .collect();
         let mut queued_files: AHashSet<FileId> = AHashSet::new();
         let mut built_files: AHashSet<FileId> = AHashSet::new();
         for func in source_funcs {
@@ -977,6 +982,16 @@ impl Workspace {
                             continue;
                         }
                         if !reached_funcs.contains(&edge.from) {
+                            if reverse_output_funcs.contains(&edge.to) {
+                                merged.add_edge(edge.clone());
+                                if has_summary_output(global.as_ref(), edge.from) {
+                                    reverse_output_funcs.insert(edge.from);
+                                }
+                                if reached_funcs.insert(edge.from) {
+                                    newly_reached.push(edge.from);
+                                    changed = true;
+                                }
+                            }
                             continue;
                         }
                         merged.add_edge(edge.clone());
@@ -2626,6 +2641,11 @@ fn read_supported_source_files(
                 skipped_counter.fetch_add(1, Ordering::Relaxed);
                 return ReadOutcome::Skip;
             }
+            if content_has_extreme_structure_nesting(&text) {
+                tracing::debug!(path = %path.display(), "skipping file with extreme structure nesting");
+                skipped_counter.fetch_add(1, Ordering::Relaxed);
+                return ReadOutcome::Skip;
+            }
             let hash = fnv1a_bytes64(text.as_bytes());
             ReadOutcome::Keep(SourceFileContent {
                 path: path.to_path_buf(),
@@ -2778,6 +2798,31 @@ pub fn path_looks_minified(path: &Path) -> bool {
 pub fn content_looks_minified(text: &str) -> bool {
     const MAX_LINE_LEN: usize = 5_000;
     text.lines().any(|line| line.len() > MAX_LINE_LEN)
+}
+
+/// Does the file contain delimiter nesting deep enough to be a parser stress
+/// fixture rather than normal source? Tree-sitter grammars can recurse deeply
+/// on thousands of nested `(` / `[` / `{` tokens before any adapter-level
+/// recovery can run, so guard this at repository ingest.
+#[must_use]
+pub fn content_has_extreme_structure_nesting(text: &str) -> bool {
+    const MAX_STRUCTURE_NESTING: usize = 2_048;
+    let mut depth = 0usize;
+    for byte in text.bytes() {
+        match byte {
+            b'(' | b'[' | b'{' => {
+                depth = depth.saturating_add(1);
+                if depth > MAX_STRUCTURE_NESTING {
+                    return true;
+                }
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
