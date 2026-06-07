@@ -12,7 +12,7 @@ use bonsai_lang_api::{
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
     Visibility,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 const SCALA_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -347,9 +347,15 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
         draft_by_name.insert(draft.class_name.clone(), idx);
     }
     let mut memo: HashMap<String, Vec<FieldWrite>> = HashMap::new();
+    let mut visiting: HashSet<String> = HashSet::new();
     for draft in &drafts {
-        let receiver_field_writes =
-            scala_constructor_receiver_field_writes(&draft.class_name, &drafts, &draft_by_name, &mut memo);
+        let receiver_field_writes = scala_constructor_receiver_field_writes(
+            &draft.class_name,
+            &drafts,
+            &draft_by_name,
+            &mut memo,
+            &mut visiting,
+        );
         if draft.flow_events.is_empty() && receiver_field_writes.is_empty() {
             continue;
         }
@@ -374,6 +380,7 @@ fn scala_constructor_receiver_field_writes(
     drafts: &[ScalaConstructorDraft],
     draft_by_name: &HashMap<String, usize>,
     memo: &mut HashMap<String, Vec<FieldWrite>>,
+    visiting: &mut HashSet<String>,
 ) -> Vec<FieldWrite> {
     if let Some(cached) = memo.get(class_name) {
         return cached.clone();
@@ -381,22 +388,32 @@ fn scala_constructor_receiver_field_writes(
     let Some(&idx) = draft_by_name.get(class_name) else {
         return Vec::new();
     };
+    if !visiting.insert(class_name.to_string()) {
+        return Vec::new();
+    }
     let draft = &drafts[idx];
     let mut writes = draft.direct_receiver_field_writes.clone();
     if let Some(base_call) = &draft.base_call {
-        let base_writes =
-            scala_constructor_receiver_field_writes(&base_call.base_name, drafts, draft_by_name, memo);
-        for write in base_writes {
-            let Some(source_param_indices) =
-                remap_constructor_field_write_sources(&write, &base_call.args, &draft.params)
-            else {
-                continue;
-            };
-            writes.push(FieldWrite {
-                span: write.span,
-                target: write.target,
-                source_param_indices,
-            });
+        if base_call.base_name != draft.class_name {
+            let base_writes = scala_constructor_receiver_field_writes(
+                &base_call.base_name,
+                drafts,
+                draft_by_name,
+                memo,
+                visiting,
+            );
+            for write in base_writes {
+                let Some(source_param_indices) =
+                    remap_constructor_field_write_sources(&write, &base_call.args, &draft.params)
+                else {
+                    continue;
+                };
+                writes.push(FieldWrite {
+                    span: write.span,
+                    target: write.target,
+                    source_param_indices,
+                });
+            }
         }
     }
     writes.sort_by_key(|write| {
@@ -411,6 +428,7 @@ fn scala_constructor_receiver_field_writes(
         a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
     });
     memo.insert(class_name.to_string(), writes.clone());
+    visiting.remove(class_name);
     writes
 }
 

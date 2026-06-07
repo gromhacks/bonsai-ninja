@@ -833,6 +833,61 @@ impl IdgQueryService {
         out
     }
 
+    /// Return read/write storage names in a precomputed closure,
+    /// optionally restricted to a function set.
+    ///
+    /// This is the cheap counterpart to resolving every closure node
+    /// into a renderable [`PointRef`]: it checks the underlying
+    /// [`Place`] first and only materializes strings for Read/Write
+    /// places. Transfer passes use this to detect descendant storage
+    /// bases without formatting CallArg/CallRet/Param points they will
+    /// immediately discard.
+    pub fn read_write_storage_names_in_reachable_nodes_for_funcs(
+        &self,
+        closure: &[WsNodeId],
+        target_funcs: Option<&AHashSet<FuncId>>,
+    ) -> Vec<(FuncId, String)> {
+        let unified = self.ensure_unified();
+        let mut out = Vec::new();
+        for ws_node in closure {
+            let Some(&(seg_id, local)) = unified.reverse.get(ws_node.0 as usize) else {
+                continue;
+            };
+            let Some(segment) = self.workspace.segment(seg_id) else {
+                continue;
+            };
+            let Some(node) = segment.nodes.get(local) else {
+                continue;
+            };
+            if target_funcs.is_some_and(|targets| !targets.contains(&node.func)) {
+                continue;
+            }
+            let Some(place) = segment.places.get(node.place) else {
+                continue;
+            };
+            let (name, path) = match place {
+                Place::Read { name, path } | Place::Write { name, path, .. } => (*name, path),
+                _ => continue,
+            };
+            let Some(base) = segment.strings.get(name) else {
+                continue;
+            };
+            let mut storage = base.to_string();
+            for part in path {
+                let Some(part) = segment.strings.get(*part) else {
+                    continue;
+                };
+                storage.push('.');
+                storage.push_str(part);
+            }
+            if storage.trim().is_empty() {
+                continue;
+            }
+            out.push((node.func, storage));
+        }
+        out
+    }
+
     /// Return the `CallRet` node for a call site in `func`, if the
     /// transfer pass recorded one. Used by rulepack-declared
     /// call-result passthrough semantics: a tainted `CallArg` at the

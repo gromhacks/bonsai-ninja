@@ -89,6 +89,13 @@ cargo test -p bonsai_cli --test per_lang_cli_matrix \
 python3 scripts/validate-mega-cli.py \
   --bin ./target/release/bonsai-ninja \
   --skip-realworld
+
+python3 scripts/realworld-lang-benchmark.py \
+  --bin ./target/release/bonsai-ninja \
+  --langs all \
+  --command-timeout 1500 \
+  --clone-timeout 1200 \
+  --continue-on-error
 ```
 
 ## Large-Codebase Performance Checks
@@ -193,6 +200,58 @@ taint-path files stayed inside the same generated copy.
 | Solidity | 10,002 | 3,334 | 2.88s | 16.02s |
 | Swift | 10,000 | 2,500 | 3.50s | 38.26s |
 | TypeScript | 10,000 | 2,000 | 2.74s | 25.19s |
+
+The 2026-06-07 real-world non-Java benchmark used fresh shallow clones under
+`/tmp` and deleted every checkout after the run. The harness command was:
+
+```bash
+python3 scripts/realworld-lang-benchmark.py \
+  --bin ./target/release/bonsai-ninja \
+  --langs all \
+  --command-timeout 1500 \
+  --clone-timeout 1200 \
+  --continue-on-error
+```
+
+The harness runs `index`, then production `security taint-analysis --format
+json --all --no-color --no-progress` with `BONSAI_DEBUG=security-phase`.
+Validation checks content, not just shape: stable finding ids, source/sink
+objects, `analysis_complete`, source/sink/taint-path files under the disposable
+workspace, existing referenced files, language counts, severity counts,
+precision counts, and forbidden persistence warnings. Empty-finding production
+runs are accepted only after the command exits successfully and the JSON parses
+cleanly. All 20 non-Java targets passed with no validation problems, no
+timeouts, no `payload exceeds 4GiB` warning, and no `save_to_disk failed`
+warning.
+
+| Language | Real repository | Language files | Index | Taint | Findings |
+| --- | --- | ---: | ---: | ---: | ---: |
+| C | FFmpeg | 4,659 | 10.393s | 13.285s | 5 |
+| C++ | OpenCV | 2,945 | 17.928s | 23.168s | 80 |
+| C# | ASP.NET Core | 10,427 | 15.648s | 23.337s | 20 |
+| Dart | Flutter | 6,428 | 25.708s | 31.372s | 19 |
+| Elixir | Elixir | 567 | 1.437s | 1.691s | 0 |
+| Erlang | OTP | 4,128 | 23.790s | 41.204s | 13 |
+| Go | Kubernetes | 12,797 | 20.503s | 30.291s | 10 |
+| JavaScript | Node.js | 20,750 | 6.426s | 9.622s | 27 |
+| Kotlin | JetBrains Kotlin | 65,805 | 40.471s | 100.599s | 32 |
+| Lua | Kong | 1,308 | 2.549s | 2.930s | 0 |
+| Objective-C | Firebase iOS SDK | 868 | 6.520s | 8.613s | 3 |
+| Perl | Perl 5 | 3,824 | 8.564s | 32.790s | 7 |
+| PHP | WordPress | 3,119 | 6.123s | 10.908s | 10 |
+| Python | Ansible | 1,801 | 1.551s | 2.150s | 0 |
+| Ruby | Rails | 3,413 | 3.175s | 4.607s | 5 |
+| Rust | rust-lang/rust | 36,109 | 55.041s | 65.139s | 2 |
+| Scala | Spark | 6,056 | 22.667s | 38.173s | 4 |
+| Solidity | OpenZeppelin Contracts | 402 | 0.822s | 1.308s | 2 |
+| Swift | Swift | 22,418 | 22.731s | 32.860s | 14 |
+| TypeScript | VS Code | 10,923 | 22.332s | 37.767s | 3 |
+
+The summary-output corridor is intentionally source-origin scoped. It can climb
+return-to-caller edges from a source-bearing helper when the helper has a
+semantic output summary, then continue through the caller-to-callee graph. That
+keeps returned-object flows schedulable without letting every reached
+summary-returning utility fan out to unrelated callers.
 
 The 2026-06-04 and 2026-06-06 source-to-sink scheduler regression passes verify
 that taint-analysis does not analyze every source in a large project when most

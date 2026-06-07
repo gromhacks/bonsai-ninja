@@ -318,6 +318,45 @@ pub fn span_of(file: FileId, node: &Node<'_>) -> Span {
     )
 }
 
+const LARGE_LITERAL_INITIALIZER_BYTES: usize = 64 * 1024;
+
+fn is_large_literal_initializer_node(kind: &str, node: &Node<'_>) -> bool {
+    is_initializer_list_kind(kind)
+        && node.end_byte().saturating_sub(node.start_byte()) > LARGE_LITERAL_INITIALIZER_BYTES
+}
+
+fn is_initializer_list_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "initializer_list" | "initializer_list_expression" | "braced_initializer_list"
+    )
+}
+
+fn is_large_data_declaration_node(kind: &str, node: &Node<'_>) -> bool {
+    matches!(kind, "declaration" | "init_declarator" | "field_declaration")
+        && node.end_byte().saturating_sub(node.start_byte()) > LARGE_LITERAL_INITIALIZER_BYTES
+        && (has_direct_large_literal_initializer_child(node)
+            || has_direct_large_initializer_declarator_child(node))
+}
+
+fn has_direct_large_literal_initializer_child(node: &Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| is_large_literal_initializer_node(child.kind(), &child));
+    found
+}
+
+fn has_direct_large_initializer_declarator_child(node: &Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let found = node.named_children(&mut cursor).any(|child| {
+        child.kind() == "init_declarator"
+            && child.end_byte().saturating_sub(child.start_byte()) > LARGE_LITERAL_INITIALIZER_BYTES
+            && has_direct_large_literal_initializer_child(&child)
+    });
+    found
+}
+
 /// Synthesize the implicit members that `record` / positional value
 /// declarations auto-generate but the grammar emits no nodes for: a
 /// canonical constructor (`this.<comp> = <comp>` for each component) and
@@ -1289,6 +1328,41 @@ pub fn walk_flow_events(
     out
 }
 
+fn walk_deep_sequence_executable_nodes(
+    root: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) {
+    let mut stack = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        stack.push(child);
+    }
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        if is_large_literal_initializer_node(kind, &node) {
+            continue;
+        }
+        if is_initializer_list_kind(kind)
+            || kind == "comma_expression"
+            || !(handler.is_assignment(kind)
+                || handler.is_call(kind)
+                || COMMON_CALL_KINDS.contains(&kind)
+                || kind == "selector")
+        {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                stack.push(child);
+            }
+            continue;
+        }
+        walk_into(node, file, src, handler, class_names, out, false);
+    }
+}
+
 /// Recursive flow-event emitter. The biggest single function in the
 /// kit — drives all per-event emission across 21 languages.
 ///
@@ -1338,6 +1412,16 @@ fn walk_into(
     is_root: bool,
 ) {
     let kind = node.kind();
+    if is_large_literal_initializer_node(kind, &node) {
+        return;
+    }
+    if is_initializer_list_kind(kind) || kind == "comma_expression" {
+        walk_deep_sequence_executable_nodes(node, file, src, handler, class_names, out);
+        return;
+    }
+    if is_large_data_declaration_node(kind, &node) {
+        return;
+    }
 
     // Skip over nested function/class definitions — their flow belongs to
     // their own decls. But do walk into their *declarators* to catch inline
@@ -1737,7 +1821,11 @@ fn walk_into(
         // correctly across all grammars without requiring the adapter
         // to evaluate the expression AST itself.
         let mut source_names: Vec<String> = Vec::new();
-        if let Some(n) = rhs {
+        let rhs_is_large_literal = rhs
+            .as_ref()
+            .is_some_and(|n| is_large_literal_initializer_node(n.kind(), n))
+            || has_direct_large_literal_initializer_child(&node);
+        if let Some(n) = rhs.filter(|n| !is_large_literal_initializer_node(n.kind(), n)) {
             source_names.extend(extract_rhs_expr_operands(&n, src));
         }
         // Some grammars expose a declaration initializer as a wrapper
@@ -1750,7 +1838,7 @@ fn walk_into(
         if rhs.is_none() {
             source_names.extend(extract_rhs_expr_operands(&node, src));
         }
-        if source_names.is_empty() {
+        if source_names.is_empty() && !rhs_is_large_literal {
             if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
                 source_names.extend(identifier_tokens_from_text(rhs_text));
             }
@@ -1763,7 +1851,7 @@ fn walk_into(
         if !is_compound {
             source_names.retain(|name| !same_identifier_name(name, &target));
         }
-        if source_names.is_empty() {
+        if source_names.is_empty() && !rhs_is_large_literal {
             if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
                 source_names.extend(identifier_tokens_from_text(rhs_text));
                 if !is_compound {
@@ -1789,6 +1877,7 @@ fn walk_into(
         // source assignment immediately after it.
         let has_value_semantics =
             (rhs.is_some() || source_name.is_some() || source_call.is_some() || !source_names.is_empty())
+                && !rhs_is_large_literal
                 && !type_only_declaration_without_initializer(&node);
         if has_value_semantics {
             // G3 + G4: when the LHS is a member / subscript expression
@@ -3013,10 +3102,16 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         "interpolated_identifier",
         "identifier_dollar_escaped",
     ];
+    if is_large_literal_initializer_node(node.kind(), node) {
+        return Vec::new();
+    }
     let mut out: Vec<String> = Vec::new();
     out.extend(qualified_accesses_from_text(node_text(node, src)));
     let mut stack: Vec<Node<'_>> = vec![*node];
     while let Some(n) = stack.pop() {
+        if is_large_literal_initializer_node(n.kind(), &n) {
+            continue;
+        }
         out.extend(call_receiver_source_names(&n, src));
         // Avoid descending into nested CALL sites — those are handled
         // separately by `extract_direct_call_info` on the outer call.

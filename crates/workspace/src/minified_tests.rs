@@ -112,3 +112,15 @@ fn content_leaves_multi_line_big_files_alone() {
     }
     assert!(!content_looks_minified(&big));
 }
+
+#[test]
+fn content_detects_extreme_structure_nesting() {
+    let source = format!("let x = {}0{}", "(".repeat(2_100), ")".repeat(2_100));
+    assert!(content_has_extreme_structure_nesting(&source));
+}
+
+#[test]
+fn content_leaves_normal_structure_nesting_alone() {
+    let source = "func f() { let x = [foo(bar(baz()))] }\n";
+    assert!(!content_has_extreme_structure_nesting(source));
+}

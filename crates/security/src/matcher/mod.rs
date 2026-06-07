@@ -450,7 +450,11 @@ fn call_rule_match_passes_constraints_at_expected_hit(
         let Some(facts) = bundle.by_decl_span.get(&decl.span) else {
             continue;
         };
-        for call in facts.calls.iter().filter(|call| call.span == expected.span) {
+        for call in facts
+            .calls
+            .iter()
+            .filter(|call| call.span == expected.span || spans_overlap(call.span, expected.span))
+        {
             let Some(matched_callee) = callee_or_alias_matches(
                 &call.callee,
                 &call.receiver_types,
@@ -2352,13 +2356,9 @@ fn resolve_relative_import_file(ws: &Workspace, importer: FileId, module: &str) 
     let importer_path = ws.vfs().path(importer).ok()?;
     let base_dir = importer_path.parent()?;
     let raw = normalize_path(&base_dir.join(module));
-    let candidates = relative_import_candidates(&raw);
-    ws.vfs().all_files().into_iter().find(|file| {
-        let Ok(path) = ws.vfs().path(*file) else {
-            return false;
-        };
-        candidates.iter().any(|candidate| path.as_ref() == candidate)
-    })
+    relative_import_candidates(&raw)
+        .into_iter()
+        .find_map(|candidate| ws.vfs().lookup(&candidate))
 }
 
 fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
