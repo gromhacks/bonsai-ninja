@@ -2192,8 +2192,47 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         "security source-analysis must build source-seeded graphs with a semantic precision ceiling"
     );
     assert!(
+        source_body.contains("source_analysis_lineage_func_scope")
+            && source_body.contains("building source lineage scope")
+            && source_body.contains("append_taint_target_key(")
+            && source_body.contains("\"source_lineage\"")
+            && source_body.contains("group.lineage_funcs.as_ref()"),
+        "security source-analysis must scope default source path graphs through a semantic source-lineage corridor, not an unbounded source-only closure"
+    );
+    assert!(
         source_body.contains("if !precision.is_semantic()"),
         "security source-analysis must drop diagnostic precision classes before emitting candidates"
+    );
+    let source_path_graph_body = function_body(&security_analysis, "exact_source_path_graph");
+    assert!(
+        source_path_graph_body.contains("entry_taint_call_records_from_idg_with_target_filters_and_max_precision")
+            && source_path_graph_body.contains("&config.call_result_passthroughs")
+            && source_path_graph_body.contains("&config.output_arg_flows")
+            && source_path_graph_body.contains("target_funcs")
+            && source_path_graph_body.contains("lineage_funcs"),
+        "security source-analysis must use the filtered IDG call-record API with the same rulepack transfer semantics as taint-analysis"
+    );
+    let source_lineage_scope_body = function_body(&security_analysis, "source_analysis_lineage_func_scope");
+    assert!(
+        source_lineage_scope_body.contains(".callees_of(func)")
+            && source_lineage_scope_body.contains(".callers_of(func)")
+            && source_lineage_scope_body.contains("summary_dependency_provider")
+            && source_lineage_scope_body.contains("depth >= max_hops")
+            && !source_lineage_scope_body.contains(".all_files()"),
+        "source-analysis lineage scope must use semantic callgraph edges and source-origin summary-output support, not a workspace file walk"
+    );
+
+    let taint_reachable = read(&root.join("crates/taint/src/reachable.rs"));
+    let call_records_body = function_body(
+        &taint_reachable,
+        "entry_taint_call_records_from_idg_with_target_filters_and_max_precision",
+    );
+    assert!(
+        call_records_body.contains("apply_configured_transfer_fixpoint")
+            && call_records_body.contains("forward_target_func_cut_with_max_precision")
+            && call_records_body.contains("cross_call_edges_in_reachable_nodes_filtered_with_max_precision")
+            && call_records_body.contains("lineage_funcs"),
+        "IDG call-record export used by source-analysis must support target/lineage cuts and configured transfer summaries"
     );
 
     let trace_call_body = function_body(&workspace_trace, "emit_call");
@@ -2355,6 +2394,54 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
             && export_body.contains("chains_mode")
             && export_body.contains("flow_id_labels_mode"),
         "native export must use an explicit compressed semantic callgraph mode for dense complete exports"
+    );
+}
+
+#[test]
+fn production_taint_command_paths_use_filtered_semantic_idg_apis() {
+    let root = repo_root();
+    let checked_files = [
+        "crates/security/src/analysis/mod.rs",
+        "crates/cli/src/commands/security.rs",
+        "crates/cli/src/commands/inspect.rs",
+        "crates/cli/src/commands/export.rs",
+        "crates/browse/src/native_export.rs",
+    ];
+    let forbidden_calls = [
+        "entry_taint_call_records_from_idg(",
+        "entry_taint_call_records_from_idg_with_max_precision(",
+        "entry_taint_graph_from_idg(",
+        "entry_taint_graph_from_idg_with_max_precision(",
+        "forward_closure_with_max_precision(&seed_nodes, None",
+        "forward_closure_with_max_precision(\n        &seed_nodes,\n        None",
+    ];
+    let allowlist = [
+        "crates/security/src/analysis/mod.rs: exact_source_seed_graph",
+        "crates/security/src/analysis/mod.rs: exact_source_path_graph",
+    ];
+
+    let mut violations = Vec::new();
+    for rel in checked_files {
+        let text = read(&root.join(rel));
+        for forbidden in forbidden_calls {
+            if text.contains(forbidden) {
+                let allowed = allowlist.iter().any(|entry| {
+                    rel == entry.split(':').next().unwrap_or("")
+                        && entry
+                            .split(": ")
+                            .nth(1)
+                            .is_some_and(|func| function_body(&text, func).contains(forbidden))
+                });
+                if !allowed {
+                    violations.push(format!("{rel}: production command path references `{forbidden}`"));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "taint-related production commands must use filtered semantic IDG/corridor APIs; diagnostic wrappers are not allowed here:\n{}",
+        violations.join("\n")
     );
 }
 

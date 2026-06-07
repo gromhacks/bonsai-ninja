@@ -1053,6 +1053,38 @@ pub fn entry_taint_call_records_from_idg_with_max_precision(
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
 ) -> EntryTaintGraph {
+    entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
+        source_func,
+        seeds,
+        source_anchor,
+        output_arg_names,
+        receiver_state_propagations,
+        &[],
+        &[],
+        None,
+        None,
+        max_precision,
+        db,
+        idg,
+    )
+}
+
+#[must_use]
+#[allow(clippy::too_many_arguments)] // Public IDG query surface carries seed, target, precision, db, and service context.
+pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
+    source_func: FuncId,
+    seeds: &TokenSet,
+    source_anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
+    output_arg_flows: &[crate::inter::OutputArgFlow],
+    target_funcs: Option<&AHashSet<FuncId>>,
+    lineage_funcs: Option<&AHashSet<FuncId>>,
+    max_precision: Option<Precision>,
+    db: &AnalyzerDb,
+    idg: &bonsai_idg::IdgQueryService,
+) -> EntryTaintGraph {
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
@@ -1113,20 +1145,27 @@ pub fn entry_taint_call_records_from_idg_with_max_precision(
         }
     }
 
-    if !receiver_state_propagations.is_empty() {
-        apply_receiver_state_fixpoint(
-            &mut seed_nodes,
-            receiver_state_propagations,
-            global.as_ref(),
-            idg,
-            max_precision,
-            None,
-        );
-    }
-    let closure_nodes = idg.forward_closure_with_max_precision(&seed_nodes, max_precision);
+    apply_configured_transfer_fixpoint(
+        &mut seed_nodes,
+        receiver_state_propagations,
+        call_result_passthroughs,
+        output_arg_flows,
+        global.as_ref(),
+        idg,
+        max_precision,
+        lineage_funcs,
+    );
+    let closure_nodes = if let Some(targets) = target_funcs {
+        idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision)
+    } else {
+        idg.forward_closure_with_max_precision(&seed_nodes, max_precision)
+    };
     let cross_calls = {
-        let mut edges =
-            idg.cross_call_edges_in_reachable_nodes_with_max_precision(&closure_nodes, max_precision);
+        let mut edges = idg.cross_call_edges_in_reachable_nodes_filtered_with_max_precision(
+            &closure_nodes,
+            max_precision,
+            lineage_funcs,
+        );
         let dist_map = distances_from_source(source_func, &edges);
         edges.sort_by_key(|ce| {
             (

@@ -1025,25 +1025,6 @@ where
     }
     sort_matches(&mut source_hits);
 
-    // Source-analysis is exact and source-seeded, but its source
-    // selection pass asks value-flow for per-function seed shape.
-    // Seed/load the IDG once before that fan-out so value-flow uses
-    // the workspace graph instead of repeatedly invoking the legacy
-    // interprocedural engine for every source match.
-    if !source_hits.is_empty() {
-        on_progress(AnalysisProgress::PhaseStarted {
-            label: "building semantic graph",
-            total: 3,
-        });
-        on_progress(AnalysisProgress::PhaseTicked);
-        let graph_files = ws.vfs().all_files();
-        ensure_workspace_files_indexed(ws, &graph_files);
-        on_progress(AnalysisProgress::PhaseTicked);
-        seed_idg_service_for_rulepack(ws, pack);
-        on_progress(AnalysisProgress::PhaseTicked);
-        on_progress(AnalysisProgress::PhaseFinished);
-    }
-
     let global = ws.db().global_index();
     let transfer_languages = workspace_languages(ws);
     let source_graph_config = InterTaintConfig {
@@ -1091,6 +1072,7 @@ where
         first_index: usize,
         start: FuncId,
         graph_key: Vec<String>,
+        lineage_funcs: Option<AHashSet<FuncId>>,
         jobs: Vec<SourceGraphJob>,
     }
     struct SourceHitForFunction<'a> {
@@ -1157,11 +1139,59 @@ where
                 first_index: idx,
                 start: job.start,
                 graph_key: job.graph_key.clone(),
+                lineage_funcs: None,
                 jobs: vec![job],
             });
         }
     }
     source_groups.sort_by_key(|group| group.first_index);
+    if !source_groups.is_empty() {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "building source lineage scope",
+            total: source_groups.len() as u64 + 2,
+        });
+        let source_call_graph = ws.cached_resolved_call_graph();
+        source_graph_caches.seed_resolved_call_graph(source_call_graph.as_ref());
+        on_progress(AnalysisProgress::PhaseTicked);
+        let mut scoped_func_set: AHashSet<FuncId> = AHashSet::default();
+        for group in &mut source_groups {
+            let source_lineage_funcs = source_analysis_lineage_func_scope(
+                group.start,
+                global.as_ref(),
+                source_call_graph.as_ref(),
+                source_graph_config.max_edge_precision,
+                options.lineage_limits.max_hops,
+            );
+            append_taint_target_key(
+                &mut group.graph_key,
+                "source_lineage",
+                Some(&source_lineage_funcs),
+            );
+            scoped_func_set.extend(source_lineage_funcs.iter().copied());
+            group.lineage_funcs = Some(source_lineage_funcs);
+            on_progress(AnalysisProgress::PhaseTicked);
+        }
+        let mut scoped_funcs: Vec<FuncId> = scoped_func_set.into_iter().collect();
+        scoped_funcs.sort_by_key(|func| func.raw());
+        scoped_funcs.dedup();
+        let mut scoped_files: Vec<FileId> = scoped_funcs
+            .iter()
+            .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+            .collect();
+        scoped_files.sort_by_key(|file| file.raw());
+        scoped_files.dedup();
+        ensure_workspace_files_indexed(ws, &scoped_files);
+        seed_idg_service_for_rulepack_for_files(
+            ws,
+            pack,
+            &transfer_languages,
+            &scoped_files,
+            &scoped_funcs,
+            source_call_graph.as_ref(),
+        );
+        on_progress(AnalysisProgress::PhaseTicked);
+        on_progress(AnalysisProgress::PhaseFinished);
+    }
     let total_source_path_ticks = source_hits.len();
     on_progress(AnalysisProgress::PhaseStarted {
         label: "enumerating source paths",
@@ -1181,6 +1211,8 @@ where
                     ws,
                     first.anchor,
                     &first.output_arg_names,
+                    group.lineage_funcs.as_ref(),
+                    group.lineage_funcs.as_ref(),
                 ));
                 workspace_taint_index.insert_if_absent(group.start, group.graph_key.clone(), graph)
             });
@@ -6104,6 +6136,66 @@ fn extend_corridor_with_summary_dependency_support(
     );
 }
 
+fn source_analysis_lineage_func_scope(
+    source_func: FuncId,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+    max_hops: usize,
+) -> AHashSet<FuncId> {
+    let mut scope = AHashSet::default();
+    scope.insert(source_func);
+
+    let mut reverse_output_funcs = AHashSet::default();
+    if summary_dependency_provider(global, source_func) {
+        reverse_output_funcs.insert(source_func);
+    }
+    let mut processed_reverse_funcs = AHashSet::default();
+    let mut stack = vec![(source_func, 0usize)];
+
+    while let Some((func, depth)) = stack.pop() {
+        if depth >= max_hops {
+            continue;
+        }
+
+        let mut next: Vec<FuncId> = call_graph
+            .callees_of(func)
+            .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+            .map(|edge| edge.to)
+            .collect();
+        if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
+            next.extend(
+                call_graph
+                    .callers_of(func)
+                    .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+                    .map(|edge| edge.from),
+            );
+        }
+
+        next.sort_by_key(|next_func| next_func.raw());
+        next.dedup();
+        for next_func in next.into_iter().rev() {
+            if !scope.insert(next_func) {
+                continue;
+            }
+            if summary_dependency_provider(global, next_func) {
+                reverse_output_funcs.insert(next_func);
+            }
+            stack.push((next_func, depth.saturating_add(1)));
+        }
+    }
+
+    let callback_targets = scope.clone();
+    bonsai_workspace::extend_func_set_with_semantic_callback_dispatchers(
+        &mut scope,
+        &callback_targets,
+        global,
+        call_graph,
+        max_precision,
+    );
+    scope
+}
+
 fn summary_dependency_provider(global: &GlobalIndex, func: FuncId) -> bool {
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return false;
@@ -6628,16 +6720,22 @@ fn exact_source_path_graph(
     ws: &Workspace,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
+    target_funcs: Option<&AHashSet<FuncId>>,
+    lineage_funcs: Option<&AHashSet<FuncId>>,
 ) -> EntryTaintGraph {
     let idg = db
         .idg_service()
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
-    bonsai_taint::entry_taint_call_records_from_idg_with_max_precision(
+    bonsai_taint::entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
         source_func,
         seeds,
         source_anchor,
         output_arg_names,
         &config.receiver_state_propagations,
+        &config.call_result_passthroughs,
+        &config.output_arg_flows,
+        target_funcs,
+        lineage_funcs,
         config.max_edge_precision,
         db,
         idg.as_ref(),

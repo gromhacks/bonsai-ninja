@@ -109,6 +109,7 @@ fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
             "micro_security_flows_min_findings",
             "micro_security_sarif_shape",
             "mega_flow_security_flows_produces_finding",
+            "mega_flow_source_analysis_uses_semantic_paths",
             "mega_flow_export_has_interproc_edges",
         ],
     );

@@ -1427,6 +1427,70 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
     );
 }
 
+/// Assert `security source-analysis` stays semantic on the construct-heavy
+/// mega_flow fixture, not just the tiny micro fixture.
+fn check_mega_flow_source_analysis(ws: &str, lang: &str) {
+    let Some((out, _, code)) = run(&["security", ws, "source-analysis", "--format", "json"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] mega_flow source-analysis ec={code}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = rows_of(&parsed);
+    assert!(
+        !rows.is_empty(),
+        "[{lang}] mega_flow source-analysis returned no source flows"
+    );
+    let mut has_multi_hop_semantic_flow = false;
+    for row in &rows {
+        let source = row
+            .get("source")
+            .unwrap_or_else(|| panic!("[{lang}] mega_flow source-analysis row missing source: {row}"));
+        assert!(
+            source
+                .get("rule_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|rule| !rule.is_empty()),
+            "[{lang}] mega_flow source-analysis source missing rule_id: {row}"
+        );
+        let flow = row
+            .get("flow")
+            .unwrap_or_else(|| panic!("[{lang}] mega_flow source-analysis row missing flow: {row}"));
+        let precision = flow.get("precision").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            matches!(precision, "exact" | "narrowed"),
+            "[{lang}] mega_flow source-analysis surfaced non-semantic precision `{precision}`: {row}"
+        );
+        let chain_len = flow.get("chain").and_then(|v| v.as_array()).map_or(0, Vec::len);
+        if chain_len > 1 {
+            has_multi_hop_semantic_flow = true;
+        }
+        assert!(
+            row.get("analysis_complete").is_some(),
+            "[{lang}] mega_flow source-analysis row missing analysis_complete: {row}"
+        );
+        assert!(
+            row.get("analysis_incomplete_reasons").is_some(),
+            "[{lang}] mega_flow source-analysis row missing incomplete reasons: {row}"
+        );
+    }
+    if lang == "solidity" {
+        assert!(
+            rows.iter().any(|row| {
+                row.get("source")
+                    .and_then(|source| source.get("rule_id"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|rule| rule == "solidity.msg.sender")
+            }),
+            "[{lang}] mega_flow source-analysis must keep exact caller-identity source rows: {rows:?}"
+        );
+    } else {
+        assert!(
+            has_multi_hop_semantic_flow,
+            "[{lang}] mega_flow source-analysis did not render any multi-hop semantic flow: {rows:?}"
+        );
+    }
+}
+
 /// Assert `security deps` ties rulepack package keys back to real
 /// evidence files, with exact-zero protection for languages whose
 /// micro fixture has no package/dependency signals.
@@ -1930,6 +1994,11 @@ macro_rules! lang_matrix_tests {
                         "[{}] mega_flow finding count drifted",
                         EXP.lang
                     );
+                }
+
+                #[test]
+                fn mega_flow_source_analysis_uses_semantic_paths() {
+                    check_mega_flow_source_analysis(&ws(EXP.lang, "mega_flow"), EXP.lang);
                 }
 
                 #[test]
