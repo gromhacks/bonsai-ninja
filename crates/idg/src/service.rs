@@ -1834,6 +1834,7 @@ impl FieldCrossCallIndex {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Hot-path lookup keeps segment/call context explicit to avoid temporary structs.
 fn field_cross_call_arg_and_param_indices(
     field_index: &mut FieldCrossCallIndex,
     from_seg_id: SegmentId,

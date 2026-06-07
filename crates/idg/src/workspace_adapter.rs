@@ -446,7 +446,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                     continue;
                 }
                 if edge.edge_kind == bonsai_callgraph::EdgeKind::Indirect {
-                    self.push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
+                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
                 } else {
                     self.push_resolved_edge_if_name_matches(
                         &mut out,
@@ -470,7 +470,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                     continue;
                 }
                 if edge.kind == bonsai_callgraph::EdgeKind::Indirect {
-                    self.push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
+                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
                 } else {
                     self.push_resolved_edge_if_name_matches(
                         &mut out,
@@ -521,7 +521,6 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
 
 impl WorkspaceCalleeResolver<'_> {
     fn push_resolved_edge(
-        &self,
         out: &mut Vec<ResolvedCallee>,
         seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)>,
         to: FuncId,
@@ -565,7 +564,7 @@ impl WorkspaceCalleeResolver<'_> {
             matched = true;
         }
         if matched {
-            self.push_resolved_edge(out, seen, to, edge_kind, precision);
+            Self::push_resolved_edge(out, seen, to, edge_kind, precision);
         }
     }
 
@@ -1564,6 +1563,7 @@ where
 
 /// Build with per-file aliases, language ids, paths, transfer options,
 /// and caller-provided file/function scopes.
+#[allow(clippy::too_many_arguments)] // Public scoped IDG builder mirrors the release/security call site parameters.
 pub fn build_with_file_info_and_options_for_files_and_funcs_with_paths<F, G, P>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
@@ -1593,6 +1593,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Shared builder carries optional file/function scopes plus transfer hooks.
 fn build_with_file_info_and_options_scoped<F, G, P>(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
@@ -2564,7 +2565,7 @@ fn simple_accessor_tail(value: &str) -> Option<String> {
     if matches!(first, "super" | "base" | "parent") {
         return None;
     }
-    let tail = parts.last().unwrap_or(first);
+    let tail = parts.next_back().unwrap_or(first);
     let tail = canonical_field_name(tail);
     (!tail.is_empty()).then_some(tail)
 }

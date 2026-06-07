@@ -135,19 +135,23 @@ instead of becoming name-only fan-out.
 **`crates/abstract_interp`** is a tiny abstract-interpretation runtime
 the engine uses for constant propagation and a few narrowing tricks.
 
-**`crates/taint`** is the engine. The single entry point is
-`interprocedural_taint_to_completion_with_caches`. It walks call graph
-strongly-connected components, builds per-function summaries
-(`source-arg-index → return-or-side-effect`), and propagates taint until
-fixpoint. Sub-modules:
+**`crates/taint`** owns taint reachability and source-specific graph
+construction. Production security surfaces are IDG-backed: source seeds are
+resolved to concrete IDG nodes, configured transfer summaries are applied to
+fixpoint, and the resulting closure is cut to a semantic target/lineage
+corridor before call records or findings are rendered. The older
+`interprocedural_taint_to_completion_with_caches` path remains as the
+function-summary engine used by diagnostics and compatibility surfaces; it is
+not the production source-to-sink scheduler. Sub-modules:
 
 - `intra.rs` — single-function taint propagation over `flow_events`.
 - `inter/mod.rs` — interprocedural orchestration, typed-exception rules,
   pattern-arm forking, async isolation.
 - `inter/summary.rs` / `summary_impl.rs` — function-summary construction.
 - `assignment.rs` — assignment effect calculation.
-- `reachable.rs` — reachability analysis used by the engine and by
-  source-analysis.
+- `reachable.rs` — IDG-backed source-seeded graph builders, filtered
+  call-record export, and semantic reachability helpers used by security,
+  source-analysis, and debug commands.
 - `text.rs` — text-level normalisation shared with adapters (the engine
   side of the qualified-text canonicalisation).
 - `value_flow.rs` — value-flow graph used by `dump-edges` and the
@@ -207,15 +211,19 @@ file edit lands so subsequent queries observe current state.
 
 ## Security
 
-**`crates/security`** is the rulepack matcher and findings pipeline. It
-loads YAML rules from `security-patterns/`, compiles them into matcher
-state machines, selects source value nodes from the value-flow graph,
-augments those with strict source-site facts, and walks exact
-source-seeded taint graphs to emit findings. `taint-analysis` and
-`source-analysis` use those source-specific graphs for reported paths;
-the broader workspace dataflow sidecar remains the fast cache for
-navigation and export surfaces. The output formats (text / JSON / SARIF)
-live in `report.rs`. Sanitizer-credit calculation has its own module.
+**`crates/security`** is the rulepack matcher and findings pipeline. It loads
+YAML rules from `security-patterns/`, compiles them into matcher state
+machines, selects source value nodes from the value-flow graph, augments those
+with strict source-site facts, and builds source-specific IDG taint graphs to
+emit findings. `taint-analysis` first narrows each source group to a
+source-to-sink callgraph/IDG corridor, then propagates only through that
+semantic corridor. `source-analysis` uses a source-lineage corridor from the
+resolved callgraph, including summary-output caller support, and seeds a scoped
+IDG over only the files/functions needed for the rendered lineage. Neither
+surface uses whole-workspace per-source/per-sink traversal for production
+evidence. The broader workspace dataflow sidecar remains the fast cache for
+navigation and export surfaces. The output formats (text / JSON / SARIF) live
+in `report.rs`. Sanitizer-credit calculation has its own module.
 
 ## Query / browse / trace
 
@@ -273,19 +281,20 @@ When the CLI runs `index`:
    `cached_resolved_call_graph`; one canonical instance is shared
    with the dataflow + flow-id caches via `seed_call_graph`).
 7. `cfg` builds basic-block CFGs from flow_events.
-8. `taint` runs interprocedural fixpoint over the SCCs through the
-   workspace-wide `InterTaintCaches` singleton — resolver memo,
-   alias maps, function summaries, and local bindings persist across
-   per-source runs.
+8. `taint` prewarms compatibility dataflow/value-flow caches. Production
+   security scans build source-specific IDG graphs on demand and reuse the
+   workspace-wide `InterTaintCaches` singleton for resolver memo, alias maps,
+   function summaries, and local bindings across source groups.
 9. `DataFlowCache::prewarm_all` and `ValueFlowCache::prewarm_all`
    fan out across rayon, persist to
    `.bonsai/dataflow.v3.factstore` / `.bonsai/value_flow.v3.factstore`.
 10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
     using the same shared call graph.
 
-Query commands (`inspect`, `security taint-analysis`, `dump`, `trace`,
-`browse *`) hit the prewarmed caches; cache misses fall through to
-the engine via the workspace singleton.
+Query commands (`inspect`, `dump`, `trace`, `browse *`) hit the prewarmed
+caches; `security taint-analysis` and `security source-analysis` combine those
+caches with scoped source-specific IDG graphs and the workspace singleton
+caches.
 
 Subsequent runs read the sidecars instead of repeating the work,
 with source-content and dependency-hash checks that invalidate stale

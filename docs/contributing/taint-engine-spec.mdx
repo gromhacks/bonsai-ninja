@@ -5,12 +5,13 @@ description: "The standalone taint engine contract, propagation semantics, and c
 
 # Taint engine specification
 
-The bonsai taint engine is a fully procedural, standalone analyzer that
-tracks untrusted data flow through:
+The bonsai taint engine is a semantic data-flow analyzer that tracks
+untrusted data through:
 
 - intra-procedural CFG dataflow within a single function,
 - inter-procedural call propagation across functions, and
-- cross-file resolution via imports / exports / aliases.
+- cross-file resolution via imports / exports / aliases,
+- IDG value-flow edges for production security scans.
 
 This doc covers the engine's contract, the ten concepts it implements, and
 the read/write rules that consumers should understand. It's the engineering
@@ -18,7 +19,7 @@ reference. For the hands-on rule-authoring view, see [Pattern Guide](../pattern-
 
 ## Contract
 
-The engine is a pure function:
+The reusable summary engine is exposed as a pure function:
 
 ```rust
 interprocedural_taint(
@@ -30,21 +31,27 @@ interprocedural_taint(
 ```
 
 Given a non-empty `entry_sources`, it traces every reachable propagation.
-Given an empty `entry_sources`, it produces zero records — the engine
-never invents taint. CLI, SDK, security, and the inspect/trace/export
-consumers all drive it through
+Given an empty `entry_sources`, it produces zero records; the engine never
+invents taint. Diagnostic and compatibility consumers can drive it through
 `interprocedural_taint_to_completion_with_caches` (in
 `crates/taint/src/inter/mod.rs`), which shares an `InterTaintCaches` across
 calls and runs to fixpoint within `config.budget`.
 
+Production `security taint-analysis`, `security source-analysis`, and
+`dump-taint` use the IDG-backed graph builders in
+`crates/taint/src/reachable.rs`. Those builders resolve source seeds to IDG
+nodes, apply configured transfer summaries, compute a precision-bounded
+closure, and then cut/report only the relevant semantic target or lineage
+corridor. This is the deployed source-to-sink path; direct raw-AST taint and
+whole-workspace per-source/per-sink traversal are not production evidence
+paths.
+
 The workspace exposes the canonical `InterTaintCaches` singleton via
-`Workspace::inter_taint_caches()`. Every production driver
-(`security/analysis`, `value_flow`, `cross_module`, `browse::taint`,
-`browse::native_export`) borrows that one instance so the engine's
-internal caches — resolver answers per `(caller_func, call_span)`,
-file alias maps, function summaries, local bindings — accumulate
-across runs in a single CLI process. `Workspace::ingest_dir` calls
-`InterTaintCaches::clear()` when a file edit lands.
+`Workspace::inter_taint_caches()`. Production and diagnostic drivers borrow
+that one instance so resolver answers per `(caller_func, call_span)`, file
+alias maps, function summaries, and local bindings accumulate across runs in a
+single CLI process. `Workspace::ingest_dir` calls `InterTaintCaches::clear()`
+when a file edit lands.
 
 Only the security layer populates `config.source_bearing_functions` —
 the set of helpers whose matched source has been proven to reach a return.

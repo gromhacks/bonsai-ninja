@@ -5440,9 +5440,7 @@ where
                     global.as_ref(),
                     idg.as_ref(),
                     target_nodes,
-                    sink_target_nodes
-                        .as_ref()
-                        .map_or(true, |targets| targets.complete),
+                    sink_target_nodes.as_ref().is_none_or(|targets| targets.complete),
                     coarse_corridor,
                 )
             } else {
@@ -6143,6 +6141,9 @@ fn source_analysis_lineage_func_scope(
     max_precision: Option<Precision>,
     max_hops: usize,
 ) -> AHashSet<FuncId> {
+    // Source-analysis has no sink set to cut against, so bound the graph by
+    // the lineage the command is allowed to render. Summary-output providers
+    // can climb back to callers, then continue forward through resolved edges.
     let mut scope = AHashSet::default();
     scope.insert(source_func);
 
@@ -6160,14 +6161,14 @@ fn source_analysis_lineage_func_scope(
 
         let mut next: Vec<FuncId> = call_graph
             .callees_of(func)
-            .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+            .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
             .map(|edge| edge.to)
             .collect();
         if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
             next.extend(
                 call_graph
                     .callers_of(func)
-                    .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+                    .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
                     .map(|edge| edge.from),
             );
         }
@@ -6403,13 +6404,13 @@ fn callgraph_source_sink_corridor(
     while let Some(func) = stack.pop() {
         let mut next: Vec<FuncId> = call_graph
             .callees_of(func)
-            .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+            .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
             .map(|edge| edge.to)
             .collect();
         if reverse_output_funcs.contains(&func) && processed_reverse_funcs.insert(func) {
             let callers: Vec<FuncId> = call_graph
                 .callers_of(func)
-                .filter(|edge| !max_precision.is_some_and(|max| edge.precision > max))
+                .filter(|edge| max_precision.is_none_or(|max| edge.precision <= max))
                 .map(|edge| edge.from)
                 .collect();
             for caller in callers {

@@ -318,11 +318,14 @@ source without requiring a sink rule. Useful for "where does this data
 go" investigations. The report shape is similar to taint-analysis but
 without the sink-attribution stage.
 
-Source-analysis uses the same source-seed extraction as taint-analysis.
-That means a source such as `request.args.get("cmd")` follows the value it
-introduced, not every parameter, local, or unrelated branch in the entry
-function. Text output is labelled `SOURCE FLOW` to distinguish these paths
-from generic `inspect` call flows.
+Source-analysis uses the same source-seed extraction and rulepack transfer
+semantics as taint-analysis. A source such as `request.args.get("cmd")`
+follows the value it introduced, not every parameter, local, or unrelated
+branch in the entry function. Before rendering, the command builds a
+source-lineage scope from resolved callgraph edges, adds summary-output caller
+support for source-returning helpers, and seeds a scoped IDG for only the files
+and functions in that lineage. Text output is labelled `SOURCE FLOW` to
+distinguish these paths from generic `inspect` call flows.
 
 Each JSON row carries `analysis_complete`, `analysis_incomplete_reasons`,
 and `lineage`. If representative lineage rendering hits its hop or path

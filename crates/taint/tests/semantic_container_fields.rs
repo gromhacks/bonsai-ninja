@@ -569,11 +569,10 @@ fn sink_cmd(_cmd: String) {}
     let db = build_db(Arc::new(RustAdapter::new()), &[("main.rs", src)]);
     let idg = seed_idg_on(&db);
     let entry = func_id_or_none(&db, "entry").expect("entry should index");
-    let target_funcs = AHashSet::from_iter(
-        ["entry", "wrap", "new", "run", "cmd", "execute", "sink_cmd"]
-            .into_iter()
-            .filter_map(|name| func_id_or_none(&db, name)),
-    );
+    let target_funcs = ["entry", "wrap", "new", "run", "cmd", "execute", "sink_cmd"]
+        .into_iter()
+        .filter_map(|name| func_id_or_none(&db, name))
+        .collect::<AHashSet<_>>();
 
     let mut raw_tokens = TokenSet::default();
     raw_tokens.insert("raw".to_string());
