@@ -201,9 +201,11 @@ bonsai-ninja security ./src source-analysis --trust remote
 bonsai-ninja security ./src source-analysis --format json --all
 ```
 
-Text output is labelled `SOURCE FLOW`. The command runs taint forward
-from each matched source seed, so it maps where that source value travels
-without requiring a sink rule.
+Text output is labelled `SOURCE FLOW`. The command runs taint forward from
+each matched source seed, so it maps where that source value travels without
+requiring a sink rule. Internally it uses resolved callgraph lineage scopes and
+scoped IDG graphs; it does not walk the entire workspace separately for every
+source.
 
 JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 `lineage` so capped representative lineage is machine-readable even when

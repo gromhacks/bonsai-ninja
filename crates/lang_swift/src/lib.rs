@@ -1581,7 +1581,7 @@ fn swift_constructor_call_for_assignment_event(
 }
 
 fn swift_constructor_call_tail(call: &str) -> &str {
-    call.split(|ch| matches!(ch, '.' | ':'))
+    call.split(['.', ':'])
         .filter(|part| !part.trim().is_empty())
         .next_back()
         .map(str::trim)

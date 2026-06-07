@@ -2744,6 +2744,7 @@ fn insert_local_callable_binding_use(out: &mut AHashSet<String>, raw: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Recursive collector threads resolver context without allocating a wrapper per event group.
 fn collect_local_callable_bindings_into(
     events: &[FlowEvent],
     global: &GlobalIndex,

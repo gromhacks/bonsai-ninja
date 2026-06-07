@@ -771,7 +771,7 @@ fn rewrite_destructuring_sources_in_events(events: &mut [FlowEvent], rewrites: &
                 rewrite_destructuring_sources_in_events(else_events, rewrites);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                rewrite_destructuring_sources_in_events(body, rewrites)
+                rewrite_destructuring_sources_in_events(body, rewrites);
             }
             FlowEvent::Try {
                 body,
@@ -978,7 +978,7 @@ fn insert_object_field_assigns_in_events(
             continue;
         }
         let inserted = inserts.len();
-        events.splice(index + 1..index + 1, inserts);
+        events.splice((index + 1)..=index, inserts);
         index += inserted + 1;
     }
 }
@@ -1559,7 +1559,7 @@ fn simple_js_getter_projection(text: &str) -> Option<String> {
         }
         parts.push(part.to_string());
     }
-    if parts.len() < 2 || !matches!(parts.first().map(String::as_str), Some("this") | Some("super")) {
+    if parts.len() < 2 || !matches!(parts.first().map(String::as_str), Some("this" | "super")) {
         return None;
     }
     Some(parts.join("."))
@@ -1628,7 +1628,7 @@ fn enrich_getter_property_sources_in_events(events: &mut [FlowEvent], projection
                 enrich_getter_property_sources_in_events(else_events, projections);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                enrich_getter_property_sources_in_events(body, projections)
+                enrich_getter_property_sources_in_events(body, projections);
             }
             FlowEvent::Try {
                 body,

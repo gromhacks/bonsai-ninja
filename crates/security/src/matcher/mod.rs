@@ -1189,6 +1189,7 @@ fn match_base_name(text: &str) -> Option<&str> {
     (!base.is_empty()).then_some(base)
 }
 
+#[allow(clippy::struct_field_names)] // Rule buckets intentionally carry the matched rule kind in each field name.
 struct PreparedRuleBatch<'p, 'rule> {
     call_rules: Vec<&'p PreparedRule<'rule>>,
     call_wildcard_rules: Vec<&'p PreparedRule<'rule>>,
@@ -5949,6 +5950,7 @@ impl AssignmentResolveKey {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Recursive matcher collector carries workspace, resolver, cache, stats, and output context.
 fn collect_assignment_referenced_callable_symbols_from_events(
     ws: &Workspace,
     events: &[FlowEvent],
@@ -6266,7 +6268,7 @@ fn caller_allows_same_directory_unqualified_lookup(ws: &Workspace, file: FileId)
 }
 
 fn push_unique_assignment_symbol(out: &mut Vec<SymbolId>, symbol: SymbolId) {
-    if !out.iter().any(|existing| *existing == symbol) {
+    if !out.contains(&symbol) {
         out.push(symbol);
     }
 }

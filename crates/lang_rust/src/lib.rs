@@ -732,7 +732,7 @@ fn collect_rust_struct_literal_field_assigns(
             collect_rust_struct_literal_field_events(target, struct_node, file, src, &mut events);
         }
         if !events.is_empty() {
-            events.sort_by_key(|event| event_span_start(event));
+            events.sort_by_key(event_span_start);
             events.dedup_by(|a, b| flow_event_assign_key(a) == flow_event_assign_key(b));
             out.insert(span_of(file, &node), events);
         }

@@ -1244,7 +1244,7 @@ fn stitch_call_site(
             );
         }
         let higher_order_edges =
-            stitch_higher_order_callback_inputs(caller_seg, caller_remap, site, endpoints, cand, ws);
+            stitch_higher_order_callback_inputs(caller_seg, caller_remap, site, endpoints, *cand, ws);
         if higher_order_edges > 0 {
             if let Some(stats) = &mut stats {
                 stats.inter_edges = stats.inter_edges.saturating_add(higher_order_edges);
@@ -1439,7 +1439,7 @@ fn stitch_higher_order_callback_inputs(
     caller_remap: &NodeRemap,
     site: &CallSiteRef,
     endpoints: &CalleeEndpoints,
-    cand: &ResolvedCallee,
+    cand: ResolvedCallee,
     ws: &mut IdgWorkspace,
 ) -> usize {
     if cand.edge_kind != bonsai_callgraph::EdgeKind::Indirect {
