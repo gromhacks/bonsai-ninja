@@ -672,15 +672,20 @@ impl DataFlowCache {
     /// Number of cached entries across in-memory and disk-backed
     /// stores. Handy for tests + the `open_with` stats printout.
     pub fn len(&self) -> usize {
-        let in_memory = self.inner.read().facts.len();
-        let on_disk = self.disk.read().as_ref().map_or(0, |r| r.len());
+        // Hold both guards across all three reads. Acquiring `inner` and
+        // `disk` separately let a concurrent `try_hydrate_from_disk` insert
+        // land between the `in_memory` snapshot and the `overlap` recount,
+        // making `overlap > in_memory` and underflowing the subtraction
+        // below (debug panic / release wraparound).
+        let inner = self.inner.read();
+        let disk = self.disk.read();
+        let in_memory = inner.facts.len();
+        let on_disk = disk.as_ref().map_or(0, |r| r.len());
         // Disk-resident entries that have been hydrated into the
         // in-memory map appear in both counts; subtract the overlap
         // for a true "distinct entries reachable" metric.
-        let overlap = match self.disk.read().as_ref() {
-            Some(reader) => self
-                .inner
-                .read()
+        let overlap = match disk.as_ref() {
+            Some(reader) => inner
                 .facts
                 .keys()
                 .filter(|f| reader.get(u64::from(f.raw())).ok().flatten().is_some())

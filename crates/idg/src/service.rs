@@ -596,7 +596,10 @@ impl IdgQueryService {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for idx in 0..u8::MAX {
+        // Inclusive of 255: `Place::Param { idx: 255 }` is a legitimate
+        // (256th) param slot. The break-on-miss below still terminates early
+        // for the normal case of a handful of params.
+        for idx in 0..=u8::MAX {
             let place = Place::Param { idx };
             let Some(pid) = segment.places.lookup(&place) else {
                 if idx == 0 {
@@ -1726,9 +1729,12 @@ fn spans_overlap(a: Span, b: Span) -> bool {
     a.file == b.file && a.start < b.end && b.start < a.end
 }
 
-/// True iff `a` strictly follows `b` in source order (same file,
-/// `a.start >= b.end`). Used to filter post-source writes when a
-/// source rule has `output_args` semantics.
+/// True iff `a` starts at or after `b` in source order (same file,
+/// `a.start >= b.start`). Used to filter post-source writes when a
+/// source rule has `output_args` semantics — the cutoff is the source
+/// call span, and the source's own output-arg write is anchored *at*
+/// that span (same start), so the bound is inclusive of `b.start`
+/// rather than requiring `a.start >= b.end`.
 fn span_after(a: Span, b: Span) -> bool {
     a.file == b.file && a.start >= b.start
 }

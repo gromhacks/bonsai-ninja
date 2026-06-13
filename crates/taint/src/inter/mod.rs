@@ -851,10 +851,10 @@ fn run_interprocedural_worklist(
 
         let mut state = seed.clone();
         let mut local_callable_body_calls = AHashMap::new();
-        // Resolver cache lives on `caches` but is borrowed
-        // immutably here (interior-mutable via `RefCell`) so it can
-        // share the borrow with the rest of `caches`'s mutable
-        // fields used elsewhere in the loop body.
+        // Resolver cache lives on `caches` but is taken by shared
+        // reference here (interior-mutable via its `RwLock`) so it can
+        // coexist with the other `caches` fields used elsewhere in the
+        // loop body.
         let resolved_calls_cache = &caches.resolved_calls_by_site;
         let mut ctx = PropagationCtx {
             caller: func,
@@ -6099,7 +6099,7 @@ fn direct_call_expression_return_taint(
     depth: usize,
 ) -> Option<bool> {
     let (callee_name, nested_arg_values) = direct_call_expression_parts(&arg.value_text)?;
-    let mut nested_args = nested_arg_values
+    let nested_args = nested_arg_values
         .into_iter()
         .map(EffectiveCallArg::positional)
         .collect::<Vec<_>>();
@@ -6221,7 +6221,6 @@ fn direct_call_expression_return_taint(
             return Some(true);
         }
     }
-    nested_args.clear();
     Some(false)
 }
 

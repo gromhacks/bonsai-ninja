@@ -1054,7 +1054,6 @@ fn cmd_flows(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn emit_taint_render_report(
     workspace: &Path,
     pack: &Rulepack,

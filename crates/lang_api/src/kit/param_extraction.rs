@@ -303,13 +303,18 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
     // Flat-shape grammars (Solidity, ObjC) emit param nodes as direct
     // siblings of the function. Run the flat scan even after the
     // container scan succeeded — grammars rarely mix shapes, so usually
-    // exactly one path fires.
+    // exactly one path fires. Skip params already counted inside the
+    // container (mirrors `extract_param_annotations`'s guard) so a
+    // grammar that exposes a param at both levels can't double-count and
+    // desync the parallel `params` / `param_annotations` indexing.
     let mut cursor = fn_node.walk();
     for child in fn_node.named_children(&mut cursor) {
+        let already_visited = parameters_container.is_some_and(|p| child_in(child, p));
         if matches!(
             child.kind(),
             "parameter" | "method_parameter" | "formal_parameter"
-        ) {
+        ) && !already_visited
+        {
             push_param_name(child, src, &mut param_names);
         }
     }

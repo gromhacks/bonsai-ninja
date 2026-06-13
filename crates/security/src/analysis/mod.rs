@@ -7363,9 +7363,13 @@ fn same_statement_between(ws: &Workspace, earlier: Span, later: Span) -> bool {
     if start >= end || end > source.len() {
         return false;
     }
-    !source[start..end]
-        .chars()
-        .any(|ch| matches!(ch, ';' | '\n' | '\r'))
+    // `start`/`end` are raw byte offsets; a multi-byte UTF-8 char straddling
+    // either bound makes direct slicing panic. Fall back to "not the same
+    // statement" if the range isn't on char boundaries.
+    let Some(between) = source.get(start..end) else {
+        return false;
+    };
+    !between.chars().any(|ch| matches!(ch, ';' | '\n' | '\r'))
 }
 
 fn source_is_sink_call_argument(
