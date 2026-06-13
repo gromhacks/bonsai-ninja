@@ -1093,7 +1093,23 @@ impl<'a> PreparedRule<'a> {
                         .and_then(|target| target.regex.as_deref())
                         .is_some_and(regex_prefix_is_receiver_agnostic)
                     && target.is_none_or(|target| target.base_name_in.is_empty());
-                !receiver_agnostic_call_regex
+                // A receiver-agnostic call regex (`^\w+\.process$`) is too
+                // blunt to anchor "package in use" on file-level import
+                // evidence alone — any `x.process(...)` in a file that
+                // happens to import the package would qualify. BUT when the
+                // rule also carries a `receiver_type_in` constraint, that
+                // constraint (enforced separately in the matcher) supplies
+                // the missing precision: the call only matches if the
+                // receiver resolves to one of the named types. So file/
+                // workspace package presence is sound evidence here, and the
+                // rule's own example (typed receiver + in-file import) can
+                // fire instead of being silently gated out.
+                let has_receiver_type_constraint = self
+                    .rule
+                    .constraints
+                    .iter()
+                    .any(|constraint| matches!(constraint, ConstraintKind::ReceiverTypeIn { .. }));
+                !receiver_agnostic_call_regex || has_receiver_type_constraint
             }
         }
     }
