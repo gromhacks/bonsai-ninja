@@ -379,8 +379,29 @@ fn retain_flow_events_outside_errors(events: &mut Vec<FlowEvent>, error_spans: &
             retain_flow_events_outside_errors(body, error_spans);
             true
         }
+        // C/C++ `x = va_arg(ap, TYPE)`: tree-sitter-c/cpp cannot parse the
+        // TYPE operand of the `va_arg` builtin (`const char *` → an ERROR
+        // node), so the assignment's span always overlaps a benign error.
+        // The taint-relevant operand — the `ap` va_list — parses cleanly,
+        // and `va_start` taint propagation depends on this Assign surviving.
+        // Keep it: the error is in a non-runtime type position, not the
+        // value flow.
+        leaf @ FlowEvent::Assign { .. } if assign_is_variadic_builtin_read(leaf) => true,
         leaf => !span_overlaps_error(leaf.span(), error_spans),
     });
+}
+
+/// True when `event` is an `Assign` whose RHS is a C/C++ `va_arg` /
+/// `__builtin_va_arg` builtin read. These are exempt from
+/// error-span pruning because the macro's TYPE argument is unparseable
+/// by tree-sitter and produces a spurious ERROR node that would
+/// otherwise discard the whole assignment.
+fn assign_is_variadic_builtin_read(event: &FlowEvent) -> bool {
+    matches!(
+        event,
+        FlowEvent::Assign { source_call: Some(call), .. }
+            if call == "va_arg" || call == "__builtin_va_arg"
+    )
 }
 
 /// Byte spans of every ERROR / MISSING node in the tree. Mirrors the
