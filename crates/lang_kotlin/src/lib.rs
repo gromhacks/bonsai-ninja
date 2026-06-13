@@ -655,20 +655,34 @@ fn collect_kotlin_type_aliases(
 fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     let mut next_symbol_raw = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(0, |m| m + 1);
     for infix in collect_kinds(tree, &["infix_expression"]) {
+        // `object Foo { ... }` puts the `object` keyword in the
+        // `operator` FIELD (matching the kit's detection in
+        // `pseudo_call.rs`), not a child of kind `object_literal` — that
+        // kind is the unrelated anonymous `object : Foo {}` expression.
+        // Gating on `object_literal` left this synthesis permanently dead.
+        let operator = infix.child_by_field_name("operator");
+        let is_object_decl = operator
+            .as_ref()
+            .is_some_and(|op| node_text(op, src).trim() == "object");
+        if !is_object_decl {
+            continue;
+        }
+        let operator_id = operator.map(|op| op.id());
         let mut cursor = infix.walk();
-        let mut object_keyword = false;
         let mut name_node: Option<Node<'_>> = None;
         let mut lambda_node: Option<Node<'_>> = None;
         for child in infix.named_children(&mut cursor) {
+            // The `object` operator can itself surface as a
+            // `simple_identifier` named child; skip it so the object's
+            // name (the next identifier) is picked instead.
+            if Some(child.id()) == operator_id {
+                continue;
+            }
             match child.kind() {
-                "object_literal" => object_keyword = true,
                 "simple_identifier" if name_node.is_none() => name_node = Some(child),
                 "lambda_literal" => lambda_node = Some(child),
                 _ => {}
             }
-        }
-        if !object_keyword {
-            continue;
         }
         let (Some(name_node), Some(lambda_node)) = (name_node, lambda_node) else {
             continue;

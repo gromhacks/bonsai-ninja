@@ -669,8 +669,15 @@ fn read_decl_body(loc: &Locator, ws: &Workspace) -> Option<String> {
         if loc.decl.as_deref() == Some(decl.name.as_str()) {
             let start = decl.span.start as usize;
             let end = (decl.span.end as usize).min(snap.text.len());
+            // `start`/`end` are raw byte offsets and `end` is clamped to the
+            // (possibly newer) snapshot length, so neither is guaranteed to
+            // land on a UTF-8 char boundary. Use `get` rather than slicing to
+            // avoid panicking on files with multibyte chars; a boundary miss
+            // just falls through to the next decl / `None`.
             if start <= end {
-                return Some(snap.text[start..end].to_string());
+                if let Some(body) = snap.text.get(start..end) {
+                    return Some(body.to_string());
+                }
             }
         }
     }
