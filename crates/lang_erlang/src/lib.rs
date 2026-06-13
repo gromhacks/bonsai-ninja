@@ -1050,9 +1050,13 @@ fn find_matching_erlang_delim(text: &str, open_idx: usize, open: u8, close: u8) 
             quote = Some(ch);
             continue;
         }
-        if ch as u8 == open {
+        // Guard `is_ascii()` before narrowing: `ch as u8` truncates to the
+        // low byte, so a non-ASCII char whose codepoint & 0xFF equals an
+        // ASCII delimiter (e.g. 'Ż' U+017B & 0xFF == b'{') would otherwise
+        // be miscounted as a brace/paren and drift the depth.
+        if ch.is_ascii() && ch as u8 == open {
             depth = depth.saturating_add(1);
-        } else if ch as u8 == close {
+        } else if ch.is_ascii() && ch as u8 == close {
             depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Some(idx);
