@@ -4,7 +4,7 @@
 - id: elixir.log_injection.logger_info
   enabled: true
   language: elixir
-  tag: header-injection
+  tag: log-injection
   severity: medium
   cwe: [CWE-117]
   match:
@@ -31,3 +31,65 @@
         end
       expect_no_match: true
   description: 'Logger.info("...#{user}...\n") - log forging.'
+
+- id: elixir.log_injection.logger_warning
+  enabled: true
+  language: elixir
+  tag: log-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [Logger, warning]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def test(input) do
+            Logger.warning(input)
+          end
+        end
+    - name: literal logger warning negative
+      code: |
+        defmodule App do
+          def test(input) do
+            Logger.warning("disk space low")
+          end
+        end
+      expect_no_match: true
+  description: 'Logger.warning("...#{user}...\n") - tainted value written into the log line; unescaped newlines/control chars forge log entries (CWE-117).'
+
+- id: elixir.log_injection.logger_debug
+  enabled: true
+  language: elixir
+  tag: log-injection
+  severity: low
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [Logger, debug]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def test(input) do
+            Logger.debug(input)
+          end
+        end
+    - name: literal logger debug negative
+      code: |
+        defmodule App do
+          def test(input) do
+            Logger.debug("cache hit")
+          end
+        end
+      expect_no_match: true
+  description: 'Logger.debug("...#{user}...\n") - same log-forging risk as Logger.info on a debug-level line.'

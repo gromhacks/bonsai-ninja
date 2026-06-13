@@ -76,6 +76,22 @@
   description: "NSString -stringByAddingPercentEncodingWithAllowedCharacters: - percent-encodes for URL path/query components;
     neutralizes URL-injection."
 
+- id: objc.sanitizer.cfstring_percent_escapes
+  enabled: true
+  language: objc
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      name: CFURLCreateStringByAddingPercentEscapes
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; CFURLCreateStringByAddingPercentEscapes(input); }
+    expect_match_text: [CFURLCreateStringByAddingPercentEscapes]
+  description: "CFURLCreateStringByAddingPercentEscapes - legacy CoreFoundation URL percent-escaping (pre-iOS 9 equivalent of
+    -stringByAddingPercentEncodingWithAllowedCharacters:); neutralizes URL-injection in path/query components."
+
 - id: objc.sanitizer.nsurlcomponents_build
   enabled: true
   language: objc
@@ -125,6 +141,29 @@
   description: "FMDB parameterized forms (-executeUpdate:withArgumentsInArray:, -executeQueryWithFormat:) - binds values as
     SQLite parameters."
 
+- id: objc.sanitizer.fmdb_parameter_dictionary
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  tag: sql-parameter
+  packages: [fmdb]
+  match:
+    kind: call
+    callee:
+      regex: "^(executeUpdate:withParameterDictionary:|executeQuery:withParameterDictionary:)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(FMDatabase *db, id input) { [db executeUpdate:@"insert" withParameterDictionary:input]; }
+    expect_match_text: ["executeUpdate:withParameterDictionary:"]
+  description: "Disabled - the ObjC adapter emits only the first selector keyword (`executeUpdate`) for a message send, so the
+    full multi-part selector `executeUpdate:withParameterDictionary:` is not adapter-visible and cannot be matched without
+    over-matching the array-argument form. FMDB named-parameter forms (-executeUpdate:withParameterDictionary:,
+    -executeQuery:withParameterDictionary:) bind dictionary values as named SQLite parameters (`:name`); values cannot be
+    interpreted as SQL."
+
 - id: objc.sanitizer.gtm_string_escape_html
   enabled: true
   language: objc
@@ -162,14 +201,14 @@
   match:
     kind: call
     callee:
-      regex: "^(CCHmacVerify|timingsafe_bcmp|timingsafe_memcmp)$"
+      regex: "^(CCHmacVerify|timingsafe_bcmp|timingsafe_memcmp|CRYPTO_memcmp)$"
   match_examples:
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; CCHmacVerify(input); }
     expect_match_text: [CCHmacVerify]
-  description: "Constant-time comparison helper (CCHmacVerify / timingsafe_bcmp / timingsafe_memcmp) - avoids MAC/HMAC timing
-    oracles. Replaces memcmp on CC_SHA256/CC_SHA512 digest pairs."
+  description: "Constant-time comparison helper (CCHmacVerify / timingsafe_bcmp / timingsafe_memcmp / OpenSSL CRYPTO_memcmp)
+    - avoids MAC/HMAC timing oracles. Replaces memcmp on CC_SHA256/CC_SHA512 digest pairs."
 
 - id: objc.sanitizer.cccryptor_create_with_mode
   enabled: true

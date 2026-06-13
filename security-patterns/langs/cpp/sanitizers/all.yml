@@ -95,11 +95,9 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        snprintf(arg);
+      void example(const char *input) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%s", input);
       }
     expect_match_text: [snprintf]
   description: "snprintf - bounded format; length-limited output."
@@ -207,6 +205,57 @@
     expect_match_text: [sqlite3_bind_int]
   description: "sqlite3_bind_int - binds integer placeholder."
 
+- id: cpp.sanitizer.sqlite3_bind_blob
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_blob
+  match_examples:
+  - name: sqlite3 bind blob
+    code: |
+      void example(sqlite3_stmt *stmt, const void *data, int n) {
+        sqlite3_bind_blob(stmt, 1, data, n, 0);
+      }
+    expect_match_text: [sqlite3_bind_blob]
+  description: "sqlite3_bind_blob - binds a binary blob to a prepared-statement placeholder; no SQL string concatenation."
+
+- id: cpp.sanitizer.sqlite3_bind_double
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_double
+  match_examples:
+  - name: sqlite3 bind double
+    code: |
+      void example(sqlite3_stmt *stmt, double v) {
+        sqlite3_bind_double(stmt, 1, v);
+      }
+    expect_match_text: [sqlite3_bind_double]
+  description: "sqlite3_bind_double - binds a floating-point value to a prepared-statement placeholder."
+
+- id: cpp.sanitizer.mysql_stmt_bind_param
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: mysql_stmt_bind_param
+  match_examples:
+  - name: mysql stmt bind param
+    code: |
+      void example(MYSQL_STMT *stmt, MYSQL_BIND *bind) {
+        mysql_stmt_bind_param(stmt, bind);
+      }
+    expect_match_text: [mysql_stmt_bind_param]
+  description: "MySQL C API mysql_stmt_bind_param - binds parameter buffers to a prepared statement; values travel out-of-band, not in the SQL text."
+
 - id: cpp.sanitizer.libpqxx_exec_params
   enabled: true
   language: cpp
@@ -246,6 +295,24 @@
       }
     expect_match_text: ["QSqlQuery::bindValue"]
   description: "Qt QSqlQuery::bindValue - parameter binding after prepare()."
+
+- id: cpp.sanitizer.qt_addbindvalue
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [QSqlQuery, addBindValue]
+  match_examples:
+  - name: qt addBindValue
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        QSqlQuery::addBindValue(arg);
+      }
+    expect_match_text: ["QSqlQuery::addBindValue"]
+  description: "Qt QSqlQuery::addBindValue - positional parameter binding after prepare(); value supplied out-of-band."
 
 - id: cpp.sanitizer.qt_tohtmlescaped
   enabled: true
@@ -534,6 +601,97 @@
       }
     expect_match_text: [sodium_memcmp]
   description: "libsodium sodium_memcmp - constant-time memory comparison."
+
+- id: cpp.sanitizer.timingsafe_memcmp
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: timingsafe_memcmp
+  match_examples:
+  - name: timingsafe memcmp
+    code: |
+      void example(const unsigned char *a, const unsigned char *b, size_t n) {
+        timingsafe_memcmp(a, b, n);
+      }
+    expect_match_text: [timingsafe_memcmp]
+  description: "timingsafe_memcmp - BSD libc (OpenBSD/macOS) constant-time memory comparison; no early-exit timing leak."
+
+- id: cpp.sanitizer.timingsafe_bcmp
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: timingsafe_bcmp
+  match_examples:
+  - name: timingsafe bcmp
+    code: |
+      void example(const unsigned char *a, const unsigned char *b, size_t n) {
+        timingsafe_bcmp(a, b, n);
+      }
+    expect_match_text: [timingsafe_bcmp]
+  description: "timingsafe_bcmp - BSD libc constant-time buffer comparison returning equal/not-equal without leaking position."
+
+- id: cpp.sanitizer.consttime_memequal
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: consttime_memequal
+  match_examples:
+  - name: consttime memequal
+    code: |
+      void example(const void *a, const void *b, size_t n) {
+        consttime_memequal(a, b, n);
+      }
+    expect_match_text: [consttime_memequal]
+  description: "consttime_memequal - NetBSD libc constant-time equality check for secret comparisons."
+
+- id: cpp.sanitizer.mbedtls_ct_memcmp
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      regex: "(^|::)mbedtls_(ct_memcmp|safer_memcmp)$"
+  match_examples:
+  - name: mbedtls ct memcmp
+    code: |
+      void example(const void *a, const void *b, size_t n) {
+        mbedtls_ct_memcmp(a, b, n);
+      }
+    expect_match_text: [mbedtls_ct_memcmp]
+  - name: mbedtls safer memcmp
+    code: |
+      void example(const void *a, const void *b, size_t n) {
+        mbedtls_safer_memcmp(a, b, n);
+      }
+    expect_match_text: [mbedtls_safer_memcmp]
+  description: "mbedTLS mbedtls_ct_memcmp / mbedtls_safer_memcmp - constant-time comparison used for MAC/tag verification."
+
+- id: cpp.sanitizer.boringssl_constant_time_memcmp
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: OPENSSL_memcmp
+  match_examples:
+  - name: openssl memcmp
+    code: |
+      void example(const void *a, const void *b, size_t n) {
+        OPENSSL_memcmp(a, b, n);
+      }
+    expect_match_text: [OPENSSL_memcmp]
+  description: "BoringSSL/OpenSSL OPENSSL_memcmp - constant-time comparison wrapper (alias of CRYPTO_memcmp on BoringSSL)."
 
 - id: cpp.sanitizer.string_starts_with_same_origin
   enabled: true

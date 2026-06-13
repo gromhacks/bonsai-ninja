@@ -64,3 +64,69 @@
       }
     expect_no_match: true
   description: "xmlquery.QueryAll(node, tainted XPath) - attacker-controlled XPath expression."
+- id: go.xpath.htmlquery_query
+  enabled: true
+  language: go
+  tag: xpath-injection
+  severity: high
+  packages:
+  - github.com/antchfx/htmlquery
+  cwe:
+  - CWE-643
+  match:
+    kind: call
+    callee:
+      attribute:
+      - htmlquery
+      - Query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted htmlquery xpath
+    code: "package main\nimport \"github.com/antchfx/htmlquery\"\nfunc find(expr string) {\n  _ = htmlquery.Query(nil, expr)\n}\n"
+    expect_match_text:
+    - htmlquery.Query
+  - name: literal htmlquery xpath negative
+    code: |
+      package main
+      import "github.com/antchfx/htmlquery"
+
+      func find() {
+        _ = htmlquery.Query(nil, "//a[@id='home']")
+      }
+    expect_no_match: true
+  description: "htmlquery.Query(node, tainted XPath) - antchfx/htmlquery shares the xmlquery XPath engine; concatenated predicates allow XPath injection."
+- id: go.xpath.htmlquery_queryall
+  enabled: true
+  language: go
+  tag: xpath-injection
+  severity: high
+  packages:
+  - github.com/antchfx/htmlquery
+  cwe:
+  - CWE-643
+  match:
+    kind: call
+    callee:
+      attribute:
+      - htmlquery
+      - QueryAll
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted htmlquery queryall xpath
+    code: "package main\nimport \"github.com/antchfx/htmlquery\"\nfunc find(expr string) {\n  _, _ = htmlquery.QueryAll(nil, expr)\n}\n"
+    expect_match_text:
+    - htmlquery.QueryAll
+  - name: literal htmlquery queryall xpath negative
+    code: |
+      package main
+      import "github.com/antchfx/htmlquery"
+
+      func find() {
+        _, _ = htmlquery.QueryAll(nil, "//a")
+      }
+    expect_no_match: true
+  description: "htmlquery.QueryAll(node, tainted XPath) - attacker-controlled XPath expression against the antchfx/htmlquery engine."

@@ -74,7 +74,44 @@
       -export([test/1]).
       test(Input) ->
         cowboy_req:read_urlencoded_body(Input).
+  - name: cowboy reply negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:reply(Input).
+    expect_no_match: true
   description: "cowboy_req:read_urlencoded_body - form POST body parsed into kv list."
+
+- id: erlang.source.cowboy_read_and_match_urlencoded
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:read_and_match_urlencoded_body"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:read_and_match_urlencoded_body(Input).
+  - name: cowboy reply negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:reply(Input).
+    expect_no_match: true
+  description: "cowboy_req:read_and_match_urlencoded_body - matches the form POST body against a spec; the extracted values remain client-controlled."
 
 - id: erlang.source.cowboy_read_part
   enabled: true
@@ -412,6 +449,7 @@
   language: erlang
   trust: remote
   tag: socket-input
+  payload_types: [binary]
   match:
     kind: call
     callee:
@@ -423,6 +461,13 @@
       -export([test/1]).
       test(Input) ->
         gen_tcp:recv(Input).
+  - name: gen_tcp send negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        gen_tcp:send(Input).
+    expect_no_match: true
   description: "gen_tcp:recv - raw TCP bytes from peer; protocol-level attacker input."
 
 - id: erlang.source.gen_udp_recv
@@ -430,6 +475,7 @@
   language: erlang
   trust: remote
   tag: socket-input
+  payload_types: [binary]
   match:
     kind: call
     callee:
@@ -441,6 +487,13 @@
       -export([test/1]).
       test(Input) ->
         gen_udp:recv(Input).
+  - name: gen_udp send negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        gen_udp:send(Input).
+    expect_no_match: true
   description: "gen_udp:recv - raw UDP datagram bytes from peer; spoofable origin."
 
 - id: erlang.source.ssl_recv
@@ -448,6 +501,7 @@
   language: erlang
   trust: remote
   tag: socket-input
+  payload_types: [binary]
   match:
     kind: call
     callee:
@@ -459,4 +513,11 @@
       -export([test/1]).
       test(Input) ->
         ssl:recv(Input).
+  - name: ssl send negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        ssl:send(Input).
+    expect_no_match: true
   description: "ssl:recv - TLS-decrypted bytes from peer; cleartext is still attacker-controlled."

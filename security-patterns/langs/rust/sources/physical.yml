@@ -21,6 +21,13 @@
           let query = "user";
           obj.is_high(target);
       }
+  - name: output pin set_high negative
+    code: |
+      use embedded_hal::dummy;
+      fn example() {
+          obj.set_high();
+      }
+    expect_no_match: true
   description: "InputPin::is_high - digital GPIO state from attached hardware."
 
   imports:
@@ -47,6 +54,13 @@
           let query = "user";
           obj.is_low(target);
       }
+  - name: output pin set_low negative
+    code: |
+      use embedded_hal::dummy;
+      fn example() {
+          obj.set_low();
+      }
+    expect_no_match: true
   description: "InputPin::is_low - digital GPIO state from attached hardware."
 
   imports:

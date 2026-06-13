@@ -213,7 +213,7 @@
       }
     expect_match_text:
     - XMLParser
-  description: "fast-xml-parser with entity processing enabled - audit tainted XML for entity expansion and unsafe downstream interpretation."
+  description: "fast-xml-parser with entity processing enabled - audit parser use for entity expansion and unsafe downstream XML interpretation."
 - id: javascript.xxe.libxmljs_loadxml
   enabled: true
   language: javascript

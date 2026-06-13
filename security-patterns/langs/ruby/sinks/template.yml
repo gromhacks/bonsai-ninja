@@ -192,7 +192,7 @@
 - id: ruby.template.html_safe
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: requires-constraint
   language: ruby
   tag: xss
   severity: high
@@ -213,7 +213,7 @@
       def example(input, url, id, payload, request, params)
         String.html_safe("{{ user }}")
       end
-  description: "Disabled duplicate - covered by ruby.xss.html_safe. Receiver typing is not available in YAML, so keeping both rules makes the same ActionView html_safe call produce duplicate sink facts."
+  description: "Disabled duplicate - same html_safe surface as ruby.xss.html_safe, but receiver typing / receiver-taint support is not available in YAML yet."
 - id: ruby.template.raw_helper
   enabled: false
   disabled_reason:

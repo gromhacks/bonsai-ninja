@@ -679,7 +679,7 @@
 - id: go.path.zip_reader_open
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: go
   tag: zip-slip
   severity: high
@@ -701,4 +701,4 @@
         value := "value"
         zip.OpenReader(target)
       }
-  description: "Disabled - zip.OpenReader returns an archive reader, not a vulnerable path operation. Re-enable as a source model when adapter facts can taint per-entry File.Name values precisely; the Zip Slip sink is the later path open/write."
+  description: "Disabled (over-broad) - zip.OpenReader merely opens an archive and is not itself the Zip Slip sink; flagging every call (including safe reads) would be noise. The real Go Zip Slip sink is the per-entry file write `os.Create/OpenFile(filepath.Join(dest, f.Name))` over `r.File`, where `f.Name` is the attacker-controlled member path. Belongs to a per-entry-name source model, not an OpenReader sink."

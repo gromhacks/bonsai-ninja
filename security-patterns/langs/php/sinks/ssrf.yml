@@ -244,6 +244,162 @@
   imports:
   - guzzlehttp\guzzle
   - guzzlehttp
+- id: php.ssrf.guzzle_put
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.guzzle_put example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::put($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::put("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::put(tainted_url).
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.ssrf.guzzle_delete
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.guzzle_delete example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::delete($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::delete("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::delete(tainted_url).
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.ssrf.guzzle_patch
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.guzzle_patch example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::patch($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::patch("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::patch(tainted_url).
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.ssrf.guzzle_head
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: medium
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - head
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.guzzle_head example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::head($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::head("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::head(tainted_url) - HEAD request to attacker-controlled host.
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
 - id: php.ssrf.symfony_httpclient_request
   enabled: true
   language: php
@@ -360,6 +516,123 @@
       }
     expect_no_match: true
   description: Laravel Http::post.
+  imports:
+  - illuminate\http
+  - illuminate
+- id: php.ssrf.laravel_http_put
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - illuminate/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Http
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.laravel_http_put example
+    code: |
+      <?php
+      use illuminate\http;
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::put($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::put("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Laravel Http::put(tainted_url).
+  imports:
+  - illuminate\http
+  - illuminate
+- id: php.ssrf.laravel_http_delete
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - illuminate/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Http
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.laravel_http_delete example
+    code: |
+      <?php
+      use illuminate\http;
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::delete($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::delete("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Laravel Http::delete(tainted_url).
+  imports:
+  - illuminate\http
+  - illuminate
+- id: php.ssrf.laravel_http_patch
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - illuminate/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Http
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.laravel_http_patch example
+    code: |
+      <?php
+      use illuminate\http;
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::patch($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::patch("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Laravel Http::patch(tainted_url).
   imports:
   - illuminate\http
   - illuminate

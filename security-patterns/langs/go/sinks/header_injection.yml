@@ -249,19 +249,37 @@
     expect_no_match: true
   description: "http.Header.Set(name, value) - tainted header names can inject delimiters or target security-sensitive headers."
 - id: go.header.responsewriter_header_add
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: go
   tag: header-injection
   severity: high
+  packages: ["net/http"]
   cwe:
   - CWE-113
   match:
     kind: call
     callee:
-      regex: \.Add$
-  description: "Disabled - bare `.Add$` regex double-fires with go.ldap.conn_add. The ldap rule already covers the call shape; enable only when semantic receiver facts distinguish http.Header.Add from LDAP Add."
+      regex: \.Header\(\)\.Add$
+  constraints:
+  - any_arg_tainted: true
+  match_examples:
+  - name: responsewriter header add tainted value
+    code: |
+      package main
+      import "net/http"
+      func handler(w http.ResponseWriter, r *http.Request) {
+        w.Header().Add("X-Forwarded-Host", r.URL.Query().Get("v"))
+      }
+    expect_match_text: ["w.Header().Add"]
+  - name: responsewriter header add literal negative
+    code: |
+      package main
+      import "net/http"
+      func handler(w http.ResponseWriter) {
+        w.Header().Add("X-Content-Type-Options", "nosniff")
+      }
+    expect_no_match: true
+  description: "http.ResponseWriter `w.Header().Add(name, value)` - a tainted header name or value is CRLF/response-header injection. The `.Header().Add` chain in the callee text distinguishes it from ldap Conn.Add (which collides on a bare `.Add$`)."
 - id: go.header.gin_header
   enabled: true
   language: go

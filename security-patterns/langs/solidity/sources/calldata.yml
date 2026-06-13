@@ -22,6 +22,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { latestRoundData(input); } }
+    - name: unrelated call negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function decimals() external view returns (uint8) {} function test() public { decimals(); } }
+      expect_no_match: true
   description: "Chainlink AggregatorV3Interface.latestRoundData() - returns (roundId, answer, startedAt, updatedAt, answeredInRound). Caller MUST verify answer > 0, updatedAt is fresh, and answeredInRound >= roundId; otherwise stale/negative price taints downstream pricing."
 
 - id: solidity.oracle.chainlink_latest_answer
@@ -38,7 +43,33 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { latestAnswer(input); } }
+    - name: unrelated call negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function decimals() external view returns (uint8) {} function test() public { decimals(); } }
+      expect_no_match: true
   description: "Chainlink AggregatorV2.latestAnswer() - deprecated single-value oracle read; no freshness/round metadata. Treat returned price as untrusted-staleness."
+
+- id: solidity.oracle.chainlink_get_round_data
+  enabled: true
+  language: solidity
+  trust: service
+  tag: oracle-input
+  match:
+    kind: call
+    callee:
+      name: getRoundData
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { getRoundData(input); } }
+    - name: unrelated call negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function decimals() external view returns (uint8) {} function test() public { decimals(); } }
+      expect_no_match: true
+  description: "Chainlink AggregatorV3Interface.getRoundData(roundId) - historical round read with the same (roundId, answer, startedAt, updatedAt, answeredInRound) shape as latestRoundData. Caller MUST verify answer > 0 and freshness; otherwise stale/negative price taints downstream pricing."
 
 - id: solidity.erc20.allowance_read
   enabled: false
@@ -87,6 +118,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { function test(address target) public { } }
+    - name: unrelated param negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(address recipient) public { } }
+      expect_no_match: true
   description: "External-function `address target` parameter - caller-controlled call target. Pairs with delegatecall (CWE-94 unrestricted-delegatecall) and call sinks (CWE-841 reentrancy)."
 
 # Untrusted bytes-calldata parameter. Distinct from the removed
@@ -109,4 +145,9 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { function test(bytes calldata data) public { } }
+    - name: unrelated param negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(bytes calldata payload) public { } }
+      expect_no_match: true
   description: "External-function `bytes calldata data` parameter - peer-controlled raw bytes payload. Pairs with solidity.reentrancy.call (untrusted call data = arbitrary external contract dispatch)."

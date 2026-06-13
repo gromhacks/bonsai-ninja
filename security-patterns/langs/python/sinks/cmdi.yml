@@ -203,6 +203,56 @@
     code: "import os\ndef example(user_input):\n    return os.execlpe('echo')\n"
     expect_no_match: true
   description: "os.execlpe - $PATH-searching execl variant with tainted env."
+- id: python.cmdi.os_execle
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execle
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execle
+    code: "import os\ndef example(user_input):\n    return os.execle(user_input)\n"
+  - name: os execle literal negative
+    code: "import os\ndef example(user_input):\n    return os.execle('/bin/echo')\n"
+    expect_no_match: true
+  description: "os.execle - exec with tainted program path and explicit env; first tainted arg is the binary."
+- id: python.cmdi.os_execvpe
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execvpe
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execvpe
+    code: "import os\ndef example(user_input):\n    return os.execvpe(user_input)\n"
+  - name: os execvpe literal negative
+    code: "import os\ndef example(user_input):\n    return os.execvpe('echo')\n"
+    expect_no_match: true
+  description: "os.execvpe - $PATH-searching execv variant with tainted program name and env."
 - id: python.cmdi.os_spawn
   enabled: true
   language: python
@@ -279,6 +329,131 @@
     code: "import os\ndef example(user_input):\n    return os.spawnvp(os.P_NOWAIT, 'echo', ['echo'])\n"
     expect_no_match: true
   description: "os.spawnvp - $PATH-searching spawn with tainted program name."
+- id: python.cmdi.os_spawnlp
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnlp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnlp
+    code: "import os\ndef example(user_input):\n    return os.spawnlp(os.P_NOWAIT, user_input)\n"
+  - name: os spawnlp literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnlp(os.P_NOWAIT, '/bin/echo')\n"
+    expect_no_match: true
+  description: "os.spawnlp - $PATH-searching spawnl variant; first tainted arg is the program name."
+- id: python.cmdi.os_spawnle
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnle
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnle
+    code: "import os\ndef example(user_input):\n    return os.spawnle(os.P_NOWAIT, user_input)\n"
+  - name: os spawnle literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnle(os.P_NOWAIT, '/bin/echo')\n"
+    expect_no_match: true
+  description: "os.spawnle - spawnl variant with explicit env; first tainted arg is the program path."
+- id: python.cmdi.os_spawnlpe
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnlpe
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnlpe
+    code: "import os\ndef example(user_input):\n    return os.spawnlpe(os.P_NOWAIT, user_input)\n"
+  - name: os spawnlpe literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnlpe(os.P_NOWAIT, 'echo')\n"
+    expect_no_match: true
+  description: "os.spawnlpe - $PATH-searching spawnl variant with tainted program name and env."
+- id: python.cmdi.os_spawnve
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnve
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnve
+    code: "import os\ndef example(user_input):\n    return os.spawnve(os.P_NOWAIT, user_input, ['echo'], {})\n"
+  - name: os spawnve literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnve(os.P_NOWAIT, '/bin/echo', ['echo'], {})\n"
+    expect_no_match: true
+  description: "os.spawnve - spawns a tainted program path / argv with explicit env."
+- id: python.cmdi.os_spawnvpe
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnvpe
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnvpe
+    code: "import os\ndef example(user_input):\n    return os.spawnvpe(os.P_NOWAIT, user_input, ['echo'], {})\n"
+  - name: os spawnvpe literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnvpe(os.P_NOWAIT, 'echo', ['echo'], {})\n"
+    expect_no_match: true
+  description: "os.spawnvpe - $PATH-searching spawnv variant with tainted program name and env."
 - id: python.cmdi.posix_spawn
   enabled: true
   language: python

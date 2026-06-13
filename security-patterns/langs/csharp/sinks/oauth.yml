@@ -13,9 +13,19 @@
     kind: call
     callee:
       attribute: [OpenIdConnectOptions, RequireHttpsMetadata]
+  constraints:
+  - arg_equals:
+      index: 0
+      value: "false"
   match_examples:
   - name: declared shape
     code: |
       using Microsoft.AspNetCore.Authentication.OpenIdConnect;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; OpenIdConnectOptions.RequireHttpsMetadata(false); } }
-  description: "OpenIdConnectOptions.RequireHttpsMetadata = false - allows the metadata endpoint over plain HTTP, MitM-attackable."
+      class App { void Test() { OpenIdConnectOptions.RequireHttpsMetadata(false); } }
+    expect_match_text: [OpenIdConnectOptions.RequireHttpsMetadata]
+  - name: require https metadata enabled negative
+    code: |
+      using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+      class App { void Test() { OpenIdConnectOptions.RequireHttpsMetadata(true); } }
+    expect_no_match: true
+  description: "OpenIdConnectOptions.RequireHttpsMetadata = false - allows the metadata endpoint over plain HTTP, MitM-attackable. The arg_equals constraint flags only the explicit `false` setting; the secure default (`true`) stays quiet."

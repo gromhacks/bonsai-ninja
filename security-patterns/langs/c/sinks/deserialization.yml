@@ -2,7 +2,8 @@
 - id: c.deser.libxml2_xmlreadmemory
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: c.xxe.libxml2_xml_read_memory
   language: c
   tag: insecure-deserialization
   severity: high
@@ -17,7 +18,8 @@
 - id: c.deser.libxml2_xmlreadfile
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: c.xxe.libxml2_xml_read_file
   language: c
   tag: insecure-deserialization
   severity: high
@@ -32,7 +34,8 @@
 - id: c.deser.libxml2_xmlparsefile
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: c.xxe.libxml2_xml_parse_file
   language: c
   tag: insecure-deserialization
   severity: high
@@ -57,7 +60,7 @@
     kind: call
     callee:
       name: protobuf_c_message_unpack
-  description: "Disabled - protobuf is type-bounded."
+  description: "Disabled - protobuf-c unpack parses a schema-bounded wire format; it does not materialize arbitrary application objects."
 
 - id: c.deser.cjson_parse
   enabled: false
@@ -72,4 +75,4 @@
     kind: call
     callee:
       name: cJSON_Parse
-  description: "Disabled - cJSON_Parse is type-bounded."
+  description: "Disabled - cJSON_Parse builds a JSON tree from data; it is not arbitrary object deserialization."

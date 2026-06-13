@@ -135,6 +135,8 @@
     kind: call
     callee:
       regex: "\\.Sanitize$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated direct match
     code: |
@@ -148,7 +150,10 @@
         obj.Sanitize(target)
       }
     expect_match_text: [obj.Sanitize]
-  description: "bluemonday policy.Sanitize - HTML-sanitises against an allow-list."
+  - name: bluemonday sanitize no-arg negative
+    code: "import \"github.com/microcosm-cc/bluemonday\"\npackage main\n\nfunc example() {\n  obj.Sanitize()\n}\n"
+    expect_no_match: true
+  description: "bluemonday policy.Sanitize(html) - HTML-sanitises against an allow-list. `min_args: 1` rejects 0-arg same-name decoys."
 - id: go.sanitizer.url_escape
   enabled: true
   language: go
@@ -361,6 +366,25 @@
       }
     expect_match_text: [strconv.ParseFloat]
   description: "strconv.ParseFloat - numeric coercion; rejects non-numeric input."
+- id: go.sanitizer.strconv_parseuint
+  enabled: true
+  language: go
+  tag: numeric-coerce
+  packages: [strconv]
+  match:
+    kind: call
+    callee:
+      attribute: [strconv, ParseUint]
+  match_examples:
+  - name: strconv parseuint coerce
+    code: |
+      package main
+      import "strconv"
+      func example(target string) {
+        strconv.ParseUint(target, 10, 64)
+      }
+    expect_match_text: [strconv.ParseUint]
+  description: "strconv.ParseUint - unsigned numeric coercion; rejects non-numeric and negative input."
 - id: go.sanitizer.strconv_parsebool
   enabled: true
   language: go
@@ -551,6 +575,8 @@
     kind: call
     callee:
       regex: "\\.Prepare$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated direct match
     code: |
@@ -564,7 +590,10 @@
         obj.Prepare(target)
       }
     expect_match_text: [obj.Prepare]
-  description: "db.Prepare(sql) - parameterised statement; subsequent Exec/Query with placeholder args is SQL-safe."
+  - name: db prepare no-arg negative
+    code: "import \"database/sql\"\npackage main\n\nfunc example() {\n  obj.Prepare()\n}\n"
+    expect_no_match: true
+  description: "db.Prepare(sql) - parameterised statement; subsequent Exec/Query with placeholder args is SQL-safe. `min_args: 1` rejects 0-arg same-name decoys."
 - id: go.sanitizer.ldap_escape_filter
   enabled: true
   language: go
@@ -700,6 +729,8 @@
     kind: call
     callee:
       regex: "\\.Var$"
+  constraints:
+  - min_args: 2
   match_examples:
   - name: generated direct match
     code: |
@@ -710,10 +741,13 @@
         target := "tainted"
         name := "user"
         value := "value"
-        obj.Var(target)
+        obj.Var(target, "required,email")
       }
     expect_match_text: [obj.Var]
-  description: "go-playground/validator v.Var(value, tag) - single-value validation against a declared rule set."
+  - name: validator var no-arg negative
+    code: "import \"github.com/go-playground/validator\"\npackage main\n\nfunc example() {\n  obj.Var()\n}\n"
+    expect_no_match: true
+  description: "go-playground/validator v.Var(value, tag) - single-value validation against a declared rule set. `min_args: 2` requires the value plus the validation tag, rejecting same-name decoys."
 
 # -- Open-redirect mitigations -------------------------------------------------
 - id: go.sanitizer.url_parse_then_host_check

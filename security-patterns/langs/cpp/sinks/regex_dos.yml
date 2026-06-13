@@ -15,11 +15,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        std::regex_search(arg);
+      void example(const char *input) {
+        std::regex_search("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -45,11 +42,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        std::regex_match(arg);
+      void example(const char *input) {
+        std::regex_match("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -75,11 +69,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        std::regex_replace(arg);
+      void example(const char *input) {
+        std::regex_replace("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -135,13 +126,8 @@
   - name: generated direct match
     code: |
       #include <boost/regex.hpp>
-      #include <boost/regex.hpp>
-      #include <boost/regex.hpp>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        boost::regex_search(arg);
+      void example(const char *input) {
+        boost::regex_search("safe", input);
       }
   - name: literal arg 1 negative
     code: |

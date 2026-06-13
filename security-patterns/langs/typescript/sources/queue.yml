@@ -18,6 +18,53 @@
       }
   description: "kafkajs consumer message.value - producer-controlled bytes."
 
+- id: typescript.source.kafkajs_message_key
+  enabled: true
+  language: typescript
+  trust: service
+  tag: queue-input
+  packages: [kafkajs]
+  match:
+    kind: read
+    target:
+      attribute: [message, key]
+  match_examples:
+  - name: kafkajs message key
+    code: |
+      const _u = require("kafkajs");
+      function demo() {
+        return message.key;
+      }
+    expect_match_text: [message.key]
+  - name: unrelated message property negative
+    code: |
+      const _u = require("kafkajs");
+      function demo() {
+        return message.offset;
+      }
+    expect_no_match: true
+  description: "kafkajs consumer message.key - producer-controlled partition key, frequently used downstream as a lookup/identifier value."
+
+- id: typescript.source.nats_msg_data
+  enabled: true
+  language: typescript
+  trust: service
+  tag: queue-input
+  packages: [nats]
+  match:
+    kind: read
+    target:
+      attribute: [msg, data]
+  match_examples:
+  - name: nats msg data
+    code: |
+      const _u = require("nats");
+      function demo(input, req, obj) {
+        return msg.data;
+      }
+    expect_match_text: [msg.data]
+  description: "NATS Msg.data - publisher-controlled payload."
+
 - id: typescript.source.amqplib_msg_content
   enabled: true
   language: typescript
@@ -57,9 +104,7 @@
   description: "bullmq/bull Job.data - enqueuer-controlled payload."
 
 - id: typescript.source.sqs_message_body
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: typescript
   trust: service
   tag: queue-input
@@ -67,8 +112,17 @@
   match:
     kind: read
     target:
-      attribute: [Message, Body]
-  description: "Disabled - adapters index local receivers like `message.Body`, not receiver types like `Message.Body`."
+      name: Body
+      receiver_type_in: [Message]
+  match_examples:
+  - name: sqs message body read
+    code: |
+      import { Message } from "@aws-sdk/client-sqs";
+      function handle(message: Message): string | undefined {
+        const b = message.Body;
+        return b;
+      }
+  description: "SQS Message.Body - queue message body read on a typed Message receiver."
 
 - id: typescript.source.pubsub_message_data
   enabled: true

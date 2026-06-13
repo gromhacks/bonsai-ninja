@@ -1,8 +1,6 @@
 # Kotlin message-queue consumers.
 - id: kotlin.source.kafka_consumer_record
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: kotlin
   trust: service
   tag: queue-input
@@ -10,8 +8,24 @@
   match:
     kind: call
     callee:
-      attribute: [ConsumerRecord, value]
-  description: "Disabled - adapters index local receivers like `record.value`, not receiver types like `ConsumerRecord.value`."
+      name: value
+  constraints:
+  - receiver_type_in: [ConsumerRecord]
+  match_examples:
+  - name: kafka consumer record value
+    code: |
+      import org.apache.kafka.clients.consumer.ConsumerRecord
+      fun onMessage(record: ConsumerRecord<String, String>) {
+        val body = record.value()
+      }
+    expect_match_text: ["record.value"]
+  - name: unrelated value negative
+    code: |
+      fun f(record: Widget) {
+        val body = record.value()
+      }
+    expect_no_match: true
+  description: "Kafka ConsumerRecord.value() returns the broker-supplied message payload - attacker-controllable. Gated on the ConsumerRecord receiver type (resolved from the local/param declaration) so unrelated value() methods stay quiet."
 
 - id: kotlin.source.kafka_listener
   enabled: false
@@ -70,9 +84,7 @@
   description: "Disabled - matcher only sees parameter identifiers, not Spring Cloud AWS @SqsListener annotations."
 
 - id: kotlin.source.amqp_delivery_getbody
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: kotlin
   trust: service
   tag: queue-input
@@ -80,13 +92,27 @@
   match:
     kind: call
     callee:
-      attribute: [Delivery, getBody]
-  description: "Disabled - adapters index local receivers like `delivery.getBody`, not receiver types like `Delivery.getBody`."
+      name: getBody
+  constraints:
+  - receiver_type_in: [Delivery]
+  match_examples:
+  - name: amqp delivery getbody
+    code: |
+      import com.rabbitmq.client.Delivery
+      fun onMessage(delivery: Delivery) {
+        val body = delivery.getBody()
+      }
+    expect_match_text: ["delivery.getBody"]
+  - name: unrelated getbody negative
+    code: |
+      fun f(delivery: Widget) {
+        val body = delivery.getBody()
+      }
+    expect_no_match: true
+  description: "RabbitMQ AMQP Delivery.getBody() returns the broker-supplied message bytes - attacker-controllable. Gated on the Delivery receiver type (resolved from the local/param declaration) so unrelated getBody() methods stay quiet."
 
 - id: kotlin.source.jms_textmessage_gettext
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: kotlin
   trust: service
   tag: queue-input
@@ -94,13 +120,27 @@
   match:
     kind: call
     callee:
-      attribute: [TextMessage, getText]
-  description: "Disabled - adapters index local receivers like `msg.getText`, not receiver types like `TextMessage.getText`."
+      name: getText
+  constraints:
+  - receiver_type_in: [TextMessage, Message]
+  match_examples:
+  - name: jms textmessage gettext
+    code: |
+      import javax.jms.TextMessage
+      fun onMessage(msg: TextMessage) {
+        val body = msg.getText()
+      }
+    expect_match_text: ["msg.getText"]
+  - name: unrelated gettext negative
+    code: |
+      fun f(msg: Widget) {
+        val body = msg.getText()
+      }
+    expect_no_match: true
+  description: "JMS TextMessage.getText() returns the queue message body - attacker-controllable payload. Gated on the receiver's JMS message type (resolved from the local/param declaration) so unrelated getText() methods stay quiet."
 
 - id: kotlin.source.jms_bytesmessage_readbytes
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: kotlin
   trust: service
   tag: queue-input
@@ -108,13 +148,28 @@
   match:
     kind: call
     callee:
-      attribute: [BytesMessage, readBytes]
-  description: "Disabled - adapters index local receivers like `msg.readBytes`, not receiver types like `BytesMessage.readBytes`."
+      name: readBytes
+  constraints:
+  - receiver_type_in: [BytesMessage]
+  match_examples:
+  - name: jms bytesmessage readbytes
+    code: |
+      import javax.jms.BytesMessage
+      fun onMessage(msg: BytesMessage) {
+        val buf = ByteArray(256)
+        msg.readBytes(buf)
+      }
+    expect_match_text: ["msg.readBytes"]
+  - name: unrelated readbytes negative
+    code: |
+      fun f(msg: Widget) {
+        msg.readBytes()
+      }
+    expect_no_match: true
+  description: "JMS BytesMessage.readBytes() reads the raw queue payload - attacker-controllable bytes. Gated on the BytesMessage receiver type (resolved from the local/param declaration) so unrelated readBytes() methods stay quiet."
 
 - id: kotlin.source.jms_message_getbody
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: kotlin
   trust: service
   tag: queue-input
@@ -122,13 +177,27 @@
   match:
     kind: call
     callee:
-      attribute: [Message, getBody]
-  description: "Disabled - adapters index local receivers like `msg.getBody`, not receiver types like `Message.getBody`."
+      name: getBody
+  constraints:
+  - receiver_type_in: [Message, TextMessage, BytesMessage]
+  match_examples:
+  - name: jms message getbody
+    code: |
+      import javax.jms.Message
+      fun onMessage(msg: Message) {
+        val body = msg.getBody(Any::class.java)
+      }
+    expect_match_text: ["msg.getBody"]
+  - name: unrelated getbody negative
+    code: |
+      fun f(msg: Widget) {
+        val body = msg.getBody()
+      }
+    expect_no_match: true
+  description: "JMS Message.getBody() returns the typed queue payload - attacker-controllable. Gated on the JMS Message receiver type (resolved from the local/param declaration) so unrelated getBody() methods stay quiet."
 
 - id: kotlin.source.pubsub_message_getdata
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: kotlin
   trust: service
   tag: queue-input
@@ -136,5 +205,21 @@
   match:
     kind: call
     callee:
-      attribute: [PubsubMessage, getData]
-  description: "Disabled - adapters index local receivers like `message.getData`, not receiver types like `PubsubMessage.getData`."
+      name: getData
+  constraints:
+  - receiver_type_in: [PubsubMessage]
+  match_examples:
+  - name: pubsub message getdata
+    code: |
+      import com.google.cloud.pubsub.v1.PubsubMessage
+      fun receive(message: PubsubMessage) {
+        val data = message.getData()
+      }
+    expect_match_text: ["message.getData"]
+  - name: unrelated getdata negative
+    code: |
+      fun f(message: Widget) {
+        val data = message.getData()
+      }
+    expect_no_match: true
+  description: "Google Pub/Sub PubsubMessage.getData() returns the message payload - attacker-controllable. Gated on the PubsubMessage receiver type (resolved from the local/param declaration) so unrelated getData() methods stay quiet."

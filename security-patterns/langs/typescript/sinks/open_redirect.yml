@@ -225,7 +225,7 @@
 - id: typescript.open_redirect.window_location_href_assign
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: typescript
   tag: open-redirect
   severity: high

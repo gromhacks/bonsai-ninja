@@ -1872,3 +1872,21 @@ fn transfer_for_many_processes_all_decls() {
         assert_eq!(o.func, FuncId::new(i as u32));
     }
 }
+
+#[test]
+fn matches_shared_projection_canonicalization_spec() {
+    // The IDG-transfer copy of projection canonicalization. Unlike the
+    // other two normalisers it extracts accesses from arbitrary text,
+    // so we assert each projection form yields exactly its canonical
+    // dotted access. Pinned to the shared vectors so it cannot drift
+    // from the adapter-side and engine-side copies. See
+    // `bonsai_common::PROJECTION_CANONICALIZATION_VECTORS`.
+    for (input, expected) in bonsai_common::PROJECTION_CANONICALIZATION_VECTORS {
+        let accesses = extract_qualified_accesses_outside_strings(input);
+        assert_eq!(
+            accesses.iter().map(|(a, _, _)| a.as_str()).collect::<Vec<_>>(),
+            vec![*expected],
+            "IDG-transfer extractor drifted on `{input}`"
+        );
+    }
+}

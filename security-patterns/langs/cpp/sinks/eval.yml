@@ -29,6 +29,33 @@
     expect_no_match: true
   description: "dlopen(tainted) - loads arbitrary shared library as code."
 
+- id: cpp.eval.dlmopen
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: dlmopen
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted dlmopen library path
+    code: |
+      void example(const char *input) {
+        dlmopen(-1, input, 2);
+      }
+  - name: literal dlmopen library path negative
+    code: |
+      void example() {
+        dlmopen(-1, "libplugin.so", 2);
+      }
+    expect_no_match: true
+  description: "dlmopen(lmid, tainted_file, flags) - glibc namespace-aware dlopen; loads an attacker-chosen shared library as code."
+
 - id: cpp.eval.dlsym
   enabled: true
   language: cpp
@@ -164,11 +191,8 @@
   - name: generated direct match
     code: |
       #include <lua.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        luaL_dostring(arg);
+      void example(const char *input) {
+        luaL_dostring("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -196,11 +220,8 @@
   - name: generated direct match
     code: |
       #include <lua.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        luaL_dofile(arg);
+      void example(const char *input) {
+        luaL_dofile("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -408,11 +429,8 @@
   - name: generated direct match
     code: |
       #include <duktape.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        duk_eval_string(arg);
+      void example(const char *input) {
+        duk_eval_string("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -440,11 +458,8 @@
   - name: generated direct match
     code: |
       #include <duktape.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        duk_peval_string(arg);
+      void example(const char *input) {
+        duk_peval_string("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -472,11 +487,8 @@
   - name: generated direct match
     code: |
       #include <quickjs.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        JS_Eval(arg);
+      void example(const char *input) {
+        JS_Eval("safe", input);
       }
   - name: literal arg 1 negative
     code: |

@@ -8,14 +8,21 @@
     kind: call
     callee:
       name: strcpy
+  constraints:
+    - arg_tainted:
+        index: 1
   match_examples:
-    - name: generated direct match
+    - name: strcpy tainted source
       code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          strcpy(arg);
+        void example(char *dst, char *user_input) {
+          strcpy(dst, user_input);
         }
+    - name: strcpy literal source negative
+      code: |
+        void example(char *dst) {
+          strcpy(dst, "fixed");
+        }
+      expect_no_match: true
   description: "strcpy(dst, tainted_src) - copies until NUL with no length check; classic stack/heap buffer overflow."
 - id: c.memory.strncpy
   enabled: false
@@ -48,14 +55,21 @@
     kind: call
     callee:
       name: strcat
+  constraints:
+    - arg_tainted:
+        index: 1
   match_examples:
-    - name: generated direct match
+    - name: strcat tainted source
       code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          strcat(arg);
+        void example(char *dst, char *user_input) {
+          strcat(dst, user_input);
         }
+    - name: strcat literal source negative
+      code: |
+        void example(char *dst) {
+          strcat(dst, "fixed");
+        }
+      expect_no_match: true
   description: "strcat(dst, tainted_src) - appends until NUL with no bound; overflows dst if remaining space < strlen(src)."
 - id: c.memory.strncat
   enabled: false
@@ -210,14 +224,21 @@
     kind: call
     callee:
       name: stpcpy
+  constraints:
+    - arg_tainted:
+        index: 1
   match_examples:
-    - name: generated direct match
+    - name: stpcpy tainted source
       code: |
-        void example(void) {
-          char *arg = "tainted";
-          char *fmt = arg;
-          stpcpy(arg);
+        void example(char *dst, char *user_input) {
+          stpcpy(dst, user_input);
         }
+    - name: stpcpy literal source negative
+      code: |
+        void example(char *dst) {
+          stpcpy(dst, "fixed");
+        }
+      expect_no_match: true
   description: "stpcpy - unbounded copy (strcpy variant returning end pointer)."
 - id: c.memory.getwd
   enabled: true
@@ -288,7 +309,7 @@
       name: free
   constraints:
   - requires_state:
-      name: p
+      index: 0
       expected: freed
   match_examples:
   - name: double free
@@ -298,13 +319,20 @@
           free(p);
       }
     expect_match_text: [free]
+  - name: double free other name
+    code: |
+      void example(int *queue) {
+          free(queue);
+          free(queue);
+      }
+    expect_match_text: [free]
   - name: single free
     code: |
       void example(int *p) {
           free(p);
       }
     expect_no_match: true
-  description: "Double-free - `free(p)` called when the binding is already `freed` from a preceding `free(p)`. Re-freeing is a heap-corruption primitive (CWE-415); glibc tcache / dlmalloc poisoning attacks pivot off this. The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so the single-free case stays silent."
+  description: "Double-free - `free(x)` called when the binding `x` is already `freed` from a preceding `free(x)`. Re-freeing is a heap-corruption primitive (CWE-415); glibc tcache / dlmalloc poisoning attacks pivot off this. The `requires_state: {index: 0}` constraint gates on the actual freed argument's lifecycle state, so it catches a double-free of ANY pointer (not just one named `p`) and stays silent on the single-free case."
 - id: c.memory.realloc_zero
   enabled: true
   language: c

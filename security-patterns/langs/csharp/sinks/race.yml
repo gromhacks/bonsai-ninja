@@ -22,6 +22,15 @@
           }
         }
       expect_match_text: [File.Exists]
+    - name: unrelated file op negative
+      code: |
+        using System.IO;
+        class App {
+          void Handle(string input) {
+            File.Delete(input);
+          }
+        }
+      expect_no_match: true
   description: "File.Exists(path) - check site for TOCTOU; the symlink/file swap window between this and File.Open is the race."
 - id: csharp.race.sql_transaction_commit
   enabled: true
@@ -45,6 +54,15 @@
           }
         }
       expect_match_text: [tx.Commit]
+    - name: unrelated transaction method negative
+      code: |
+        using System.Data.SqlClient;
+        class App {
+          void Handle(SqlTransaction tx) {
+            tx.Save("savepoint");
+          }
+        }
+      expect_no_match: true
   description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Commit() - transaction-after-error race-pair; later command.ExecuteNonQuery on the same connection runs outside the intended transaction window."
 - id: csharp.race.sql_transaction_rollback
   enabled: true
@@ -68,4 +86,13 @@
           }
         }
       expect_match_text: [tx.Rollback]
+    - name: unrelated transaction method negative
+      code: |
+        using System.Data.SqlClient;
+        class App {
+          void Handle(SqlTransaction tx) {
+            tx.Save("savepoint");
+          }
+        }
+      expect_no_match: true
   description: "Audit-pair site - engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Rollback() - transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."

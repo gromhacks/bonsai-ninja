@@ -1,13 +1,54 @@
 - id: python.cache.flask_add_cache_header
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: python
   tag: cache-poisoning
   severity: medium
+  packages:
+  - flask
+  - werkzeug
+  - starlette
+  - fastapi
+  - aiohttp
   cwe: [CWE-444]
   match:
     kind: call
     callee:
-      attribute: [response, headers, add]
-  description: "Disabled - flag only on tainted Vary / Cache-Control values."
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.headers\.(add|set)$
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: (?i)^(cache-control|vary|surrogate-control|cdn-cache-control)$
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted cache-control header
+    code: |
+      import flask
+
+      def set_cache(response, user_input):
+          return response.headers.add("Cache-Control", user_input)
+    expect_match_text:
+    - response.headers.add
+  - name: tainted vary header
+    code: |
+      import flask
+
+      def set_cache(resp, user_input):
+          return resp.headers.set("Vary", user_input)
+    expect_match_text:
+    - resp.headers.set
+  - name: unrelated header negative
+    code: |
+      import flask
+
+      def set_cache(response, user_input):
+          return response.headers.add("X-Name", user_input)
+    expect_no_match: true
+  - name: literal cache-control value negative
+    code: |
+      import flask
+
+      def set_cache(response):
+          return response.headers.add("Cache-Control", "private, no-store")
+    expect_no_match: true
+  description: "response.headers.add/set(Cache-Control|Vary, tainted) - attacker-controlled cache metadata can poison downstream cache keys or directives."

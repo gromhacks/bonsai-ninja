@@ -16,10 +16,8 @@
   - name: generated direct match
     code: |
       #include <sqlite3.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        sqlite3_exec(arg);
+      void example(char *input) {
+        sqlite3_exec("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -46,10 +44,8 @@
   - name: generated direct match
     code: |
       #include <sqlite3.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        sqlite3_prepare_v2(arg);
+      void example(char *input) {
+        sqlite3_prepare_v2("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -58,6 +54,62 @@
       }
     expect_no_match: true
   description: "sqlite3_prepare_v2 with concatenated SQL."
+- id: c.sqli.sqlite3_prepare_v3
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: high
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_prepare_v3
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <sqlite3.h>
+      void example(char *input) {
+        sqlite3_prepare_v3("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        sqlite3_prepare_v3("safe", "safe");
+      }
+    expect_no_match: true
+  description: "sqlite3_prepare_v3(db, tainted_sql, nByte, prepFlags, ...) - flags-aware variant of prepare_v2; string-built SQL is still injectable. Use bound parameters (?)."
+- id: c.sqli.sqlite3_prepare
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: high
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_prepare
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <sqlite3.h>
+      void example(char *input) {
+        sqlite3_prepare("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        sqlite3_prepare("safe", "safe");
+      }
+    expect_no_match: true
+  description: "sqlite3_prepare(db, tainted_sql, ...) - legacy (pre-v2) prepare; same SQLi surface as prepare_v2 when SQL is concatenated from user input."
 - id: c.sqli.mysql_query
   enabled: true
   language: c
@@ -76,10 +128,8 @@
   - name: generated direct match
     code: |
       #include <mysqlclient/mysql.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mysql_query(arg);
+      void example(char *input) {
+        mysql_query("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -106,10 +156,8 @@
   - name: generated direct match
     code: |
       #include <mysqlclient/mysql.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mysql_real_query(arg);
+      void example(char *input) {
+        mysql_real_query("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -136,13 +184,8 @@
   - name: generated direct match
     code: |
       #include <libpq-fe.h>
-      #include <libpq-fe.h>
-      #include <libpq-fe.h>
-      #include <libpq-fe.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        PQexec(arg);
+      void example(char *input) {
+        PQexec("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -172,13 +215,8 @@
   - name: generated direct match
     code: |
       #include <libpq-fe.h>
-      #include <libpq-fe.h>
-      #include <libpq-fe.h>
-      #include <libpq-fe.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        PQsendQuery(arg);
+      void example(char *input) {
+        PQsendQuery("safe", input);
       }
   - name: literal arg 1 negative
     code: |

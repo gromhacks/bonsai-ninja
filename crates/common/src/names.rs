@@ -42,6 +42,30 @@ pub const ALL_NAME_PUNCTUATION: &[char] = &['$', '@', '%', '&', '*'];
 /// candidates in priority order — pick the longer alternative first.
 pub const QUALIFIED_NAME_SEPARATORS: &[&str] = &["::", "->", ".", ":"];
 
+/// Canonical projection forms that EVERY `normalise_qualified_text`-style
+/// canonicalizer must agree on. Subscript / arrow / symbol-key field
+/// access all collapse to one dotted key, so the taint engine and the
+/// security matcher hash `obj['x']`, `obj.x`, `obj->x`, and `obj[:x]`
+/// to the same `obj.x`. There are THREE independent copies of this
+/// canonicalization — the adapter kit (`bonsai_lang_api::kit::qualified`),
+/// the taint engine (`bonsai_taint::text`), and the IDG transfer pass
+/// (`bonsai_idg::transfer`). Each carries a conformance test asserting it
+/// matches these vectors, so the copies cannot silently drift. This guards
+/// the exact class of bug that shipped a real recall regression: the Ruby
+/// `[:sym]` colon-strip diverging between two of the copies.
+///
+/// Only includes forms where all copies AGREE — i.e. no leading `&`/`*`
+/// sigils or interior whitespace, which the engine copy strips but the
+/// adapter copy (grammar-clean tree-sitter input) does not.
+pub const PROJECTION_CANONICALIZATION_VECTORS: &[(&str, &str)] = &[
+    ("obj.cmd", "obj.cmd"),
+    ("obj['cmd']", "obj.cmd"),
+    ("obj[\"cmd\"]", "obj.cmd"),
+    ("conn->host", "conn.host"),
+    ("params[:token]", "params.token"),
+    ("args[:cmd]", "args.cmd"),
+];
+
 /// Implicit-receiver prefixes recognized across object-oriented
 /// languages: `self.` (Python / Ruby / Rust), `this.` (Java / Kotlin
 /// / JS / TS / C# / Dart / Swift / PHP). Engine code that needs to

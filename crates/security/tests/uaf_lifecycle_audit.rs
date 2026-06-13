@@ -200,7 +200,7 @@ void handle(char *src) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "c");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(&fired, "c.memory.strcpy", "free→strcpy UAF pair");
 }
 
@@ -232,6 +232,32 @@ void handle(void) {
     // `p` binding. With distinct names the requires_state lookup
     // misses, so the rule stays silent — locks in current behaviour.
     assert_rule_silent(&fired, "c.memory.free_double", "aliased double-free");
+}
+
+#[test]
+fn c_double_free_generalizes_to_any_binding_name() {
+    // Direct double-free of a variable NOT named `p`. The rule's
+    // `requires_state: { index: 0, expected: freed }` resolves the
+    // freed binding from the call's actual argument, so it fires on a
+    // double-free of any pointer. (The legacy `name: p` form would have
+    // missed `buf` entirely.)
+    let ws = ws_for(
+        "app.c",
+        r#"
+#include <stdlib.h>
+void handle(void) {
+  char *buf = malloc(64);
+  free(buf);
+  free(buf);
+}
+"#,
+    );
+    let fired = fired_sink_rule_ids(&ws, "c");
+    assert_rule_fires(
+        &fired,
+        "c.memory.free_double",
+        "double-free of `buf` (index-bound)",
+    );
 }
 
 #[test]
@@ -351,7 +377,7 @@ void handle(const char *src) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "c");
+    let fired = fired_finding_sink_rule_ids(&ws);
     // ENGINE GAP: cross-function ownership — strcpy fires only because
     // the surface-level rule is callee-name based; the genuine UAF
     // correlation needs P5 + interprocedural alias analysis.
@@ -379,7 +405,7 @@ void handle(const char *src) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "c");
+    let fired = fired_finding_sink_rule_ids(&ws);
     // ENGINE GAP: reassignment-clears-dangling needs P5/P6.
     assert_rule_fires(&fired, "c.memory.strcpy", "reassignment audit site");
 }
@@ -435,7 +461,7 @@ void handle(Buf *b, const char *src) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "cpp");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(&fired, "cpp.memory.strcpy", "delete→strcpy audit");
     // ENGINE GAP: bare delete UAF rule disabled until alias analysis.
     assert_rule_silent(&fired, "cpp.memory.delete_use_after", "delete UAF gap");
@@ -480,7 +506,7 @@ void handle(const char *src) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "cpp");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(&fired, "cpp.memory.strcpy", "unique_ptr release audit");
 }
 
@@ -617,7 +643,7 @@ fn handle(p: *const u8) -> u8 {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "rust");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(&fired, "rust.memory.ptr_read", "ptr::read audit");
 }
 
@@ -631,7 +657,7 @@ fn handle(p: *mut u8) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "rust");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(&fired, "rust.memory.ptr_write", "ptr::write audit");
 }
 
@@ -645,7 +671,7 @@ fn handle(src: *const u8, dst: *mut u8, n: usize) {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "rust");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(
         &fired,
         "rust.memory.ptr_copy_nonoverlapping",
@@ -663,7 +689,7 @@ fn handle(p: *const u8, n: usize) -> &'static [u8] {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "rust");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(
         &fired,
         "rust.memory.slice_from_raw_parts",
@@ -681,7 +707,7 @@ fn handle(x: u32) -> f32 {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "rust");
+    let fired = fired_finding_sink_rule_ids(&ws);
     assert_rule_fires(&fired, "rust.memory.transmute", "transmute audit");
 }
 
@@ -727,7 +753,7 @@ fn handle(b: Box<u8>) -> u8 {
 }
 "#,
     );
-    let fired = fired_sink_rule_ids(&ws, "rust");
+    let fired = fired_finding_sink_rule_ids(&ws);
     // ENGINE GAP: alias-aware UAF detection needs P5.
     assert_rule_fires(&fired, "rust.memory.ptr_read", "aliased ptr::read audit");
 }

@@ -1,4 +1,29 @@
-use super::{is_quoted_literal, value_bearing_identifier_text};
+use super::{is_quoted_literal, normalise_qualified_text, value_bearing_identifier_text};
+
+#[test]
+fn symbol_key_subscript_normalises_without_colon() {
+    // Ruby / Elixir symbol keys canonicalise to the same dotted
+    // projection as string keys, so a field seed (`params.token`)
+    // addresses the projected read node regardless of key syntax.
+    assert_eq!(normalise_qualified_text("params[:token]"), "params.token");
+    assert_eq!(normalise_qualified_text("args[:cmd]"), "args.cmd");
+    assert_eq!(normalise_qualified_text("args['cmd']"), "args.cmd");
+}
+
+#[test]
+fn matches_shared_projection_canonicalization_spec() {
+    // Engine-side copy of the projection canonicalization; pinned to
+    // the shared vectors so it cannot drift from the adapter-side and
+    // IDG-transfer copies. See
+    // `bonsai_common::PROJECTION_CANONICALIZATION_VECTORS`.
+    for (input, expected) in bonsai_common::PROJECTION_CANONICALIZATION_VECTORS {
+        assert_eq!(
+            &normalise_qualified_text(input),
+            expected,
+            "engine-side normaliser drifted on `{input}`"
+        );
+    }
+}
 
 #[test]
 fn quoted_literal_detection_rejects_concat_expressions() {

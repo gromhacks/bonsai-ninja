@@ -309,3 +309,59 @@
           file:del_dir("tmp/cache").
       expect_no_match: true
   description: "file:del_dir/del_dir_r - tainted directory path enables arbitrary directory deletion."
+- id: erlang.path.file_consult
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:(consult|path_consult)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted consult path
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:consult(Input).
+    - name: literal consult negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:consult("priv/app.config").
+      expect_no_match: true
+  description: "file:consult/1 (and path_consult/2) - reads and parses Erlang terms from a tainted path; traversal via ../ reads arbitrary config/term files."
+- id: erlang.path.file_read_link
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:read_link(_info|_all)?$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted read link path
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:read_link(Input).
+    - name: literal read link negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:read_link("priv/symlink").
+      expect_no_match: true
+  description: "file:read_link/read_link_info/read_link_all - tainted path discloses symlink targets / file metadata outside the intended root."

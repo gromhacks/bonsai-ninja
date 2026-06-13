@@ -530,11 +530,55 @@ pub struct MustAliasSpec {
 }
 
 /// `{ name, expected }` for the lifecycle-state constraint.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// `requires_state: { name | index, expected }` — the binding the call
+/// acts on must be in `expected` lifecycle state at this call site.
+/// Use `index` (the call's argument position) to bind to whatever
+/// variable is actually passed — e.g. `requires_state: { index: 0,
+/// expected: freed }` on `free`/`strcpy` flags a double-free or
+/// use-after-free of ANY pointer, not just one literally named `p`.
+/// `name` keeps the legacy literal-binding form.
+#[derive(Clone, Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequiresStateSpec {
-    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
     pub expected: String,
+}
+
+impl<'de> Deserialize<'de> for RequiresStateSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            index: Option<u32>,
+            expected: String,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        match (raw.name, raw.index) {
+            (Some(name), None) if !name.trim().is_empty() => Ok(Self {
+                name: Some(name),
+                index: None,
+                expected: raw.expected,
+            }),
+            (None, Some(index)) => Ok(Self {
+                name: None,
+                index: Some(index),
+                expected: raw.expected,
+            }),
+            _ => Err(de::Error::custom(
+                "requires_state must set exactly one of non-empty `name` or `index`",
+            )),
+        }
+    }
 }
 
 /// `{ index, value }` for the integer-comparison constraints

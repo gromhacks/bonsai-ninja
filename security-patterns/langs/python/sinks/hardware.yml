@@ -11,13 +11,21 @@
     kind: call
     callee:
       attribute: [GPIO, output]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: hardware rpigpio output
+  - name: rpigpio output tainted pin
     code: |
       import RPi.GPIO
       def example(user_input):
-          return GPIO.output(user_input)
-  description: "RPi.GPIO GPIO.output(pin, value) - tainted pin/value drives a physical output."
+          return GPIO.output(user_input, True)
+  - name: rpigpio output literal negative
+    code: |
+      import RPi.GPIO
+      def example():
+          return GPIO.output(17, True)
+    expect_no_match: true
+  description: "RPi.GPIO GPIO.output(pin, value) - attacker-controlled pin or value drives a physical output."
 
 - id: python.hardware.smbus_write_byte
   enabled: true
@@ -31,13 +39,22 @@
     kind: call
     callee:
       name: write_byte
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: hardware smbus write byte
+  - name: smbus write byte tainted value
     code: |
       import smbus
       def example(user_input):
           return write_byte(user_input)
-  description: "SMBus write_byte - tainted bytes are sent to an I2C/SMBus device."
+  - name: smbus write byte literal negative
+    code: |
+      import smbus
+      def example():
+          return write_byte(0xff)
+    expect_no_match: true
+  description: "SMBus write_byte(value) - attacker-controlled byte is sent to an I2C/SMBus device."
 
 - id: python.hardware.smbus_write_byte_data
   enabled: true
@@ -51,13 +68,21 @@
     kind: call
     callee:
       name: write_byte_data
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: hardware smbus write byte data
+  - name: smbus write byte data tainted register
     code: |
       import smbus
       def example(user_input):
-          return write_byte_data(user_input)
-  description: "SMBus write_byte_data - tainted register/value mutates an attached peripheral."
+          return write_byte_data(user_input, 0xff)
+  - name: smbus write byte data literal negative
+    code: |
+      import smbus
+      def example():
+          return write_byte_data(0x10, 0xff)
+    expect_no_match: true
+  description: "SMBus write_byte_data(register, value) - attacker-controlled I2C register/value mutates an attached peripheral."
 
 - id: python.hardware.smbus_write_word_data
   enabled: true
@@ -71,13 +96,21 @@
     kind: call
     callee:
       name: write_word_data
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: hardware smbus write word data
+  - name: smbus write word data tainted value
     code: |
       import smbus
       def example(user_input):
-          return write_word_data(user_input)
-  description: "SMBus write_word_data - tainted 16-bit register write controls hardware state."
+          return write_word_data(0x10, user_input)
+  - name: smbus write word data literal negative
+    code: |
+      import smbus
+      def example():
+          return write_word_data(0x10, 0x0203)
+    expect_no_match: true
+  description: "SMBus write_word_data(register, value) - attacker-controlled 16-bit I2C write controls hardware state."
 
 - id: python.hardware.smbus_write_i2c_block_data
   enabled: true
@@ -91,13 +124,21 @@
     kind: call
     callee:
       name: write_i2c_block_data
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: hardware smbus write i2c block data
+  - name: smbus write i2c block data tainted block
     code: |
       import smbus
       def example(user_input):
-          return write_i2c_block_data(user_input)
-  description: "SMBus write_i2c_block_data - tainted block payload is sent to a peripheral over I2C."
+          return write_i2c_block_data(0x10, 0x01, user_input)
+  - name: smbus write i2c block data literal negative
+    code: |
+      import smbus
+      def example():
+          return write_i2c_block_data(0x10, 0x01, [0xff])
+    expect_no_match: true
+  description: "SMBus write_i2c_block_data(addr, register, block) - attacker-controlled block payload is sent to a peripheral over I2C."
 
 - id: python.hardware.spidev_writebytes
   enabled: true
@@ -201,13 +242,21 @@
     kind: call
     callee:
       name: set_PWM_dutycycle
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: hardware pigpio set pwm dutycycle
+  - name: pigpio set pwm dutycycle tainted duty
     code: |
       import pigpio
       def example(user_input):
-          return set_PWM_dutycycle(user_input)
-  description: "pigpio set_PWM_dutycycle - tainted duty cycle or pin selection drives PWM hardware."
+          return set_PWM_dutycycle(17, user_input)
+  - name: pigpio set pwm dutycycle literal negative
+    code: |
+      import pigpio
+      def example():
+          return set_PWM_dutycycle(17, 128)
+    expect_no_match: true
+  description: "pigpio set_PWM_dutycycle(gpio, dutycycle) - attacker-controlled GPIO or duty cycle drives PWM hardware."
 
 - id: python.hardware.pigpio_set_servo_pulsewidth
   enabled: true
@@ -221,10 +270,18 @@
     kind: call
     callee:
       name: set_servo_pulsewidth
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: hardware pigpio set servo pulsewidth
+  - name: pigpio set servo pulsewidth tainted width
     code: |
       import pigpio
       def example(user_input):
-          return set_servo_pulsewidth(user_input)
-  description: "pigpio set_servo_pulsewidth - tainted pulse width commands a physical servo/actuator."
+          return set_servo_pulsewidth(17, user_input)
+  - name: pigpio set servo pulsewidth literal negative
+    code: |
+      import pigpio
+      def example():
+          return set_servo_pulsewidth(17, 1500)
+    expect_no_match: true
+  description: "pigpio set_servo_pulsewidth(gpio, pulsewidth) - attacker-controlled GPIO or pulse width commands a physical servo/actuator."

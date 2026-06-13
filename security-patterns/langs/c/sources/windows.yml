@@ -226,6 +226,64 @@
   - winreg
   - advapi32
   - advapi32.h
+- id: c.input.win_reg_enum_value_a
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32-advapi32]
+  match:
+    kind: call
+    callee:
+      name: RegEnumValueA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <winreg.h>
+      #include <winreg.h>
+      #include <advapi32.h> /* win32-advapi32 */
+      #include <advapi32.h> /* win32-advapi32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        RegEnumValueA(arg);
+      }
+  description: "Win32 RegEnumValueA - enumerates registry value names/data; writable-hive contents are attacker-influenced like RegQueryValueExA."
+  imports:
+  - winreg.h
+  - winreg
+  - advapi32
+  - advapi32.h
+- id: c.input.win_reg_enum_value_w
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32-advapi32]
+  match:
+    kind: call
+    callee:
+      name: RegEnumValueW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <winreg.h>
+      #include <winreg.h>
+      #include <advapi32.h> /* win32-advapi32 */
+      #include <advapi32.h> /* win32-advapi32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        RegEnumValueW(arg);
+      }
+  description: "Win32 RegEnumValueW - UTF-16 registry value enumeration; writable-hive contents are attacker-influenced."
+  imports:
+  - winreg.h
+  - winreg
+  - advapi32
+  - advapi32.h
 - id: c.input.win_wsa_recv
   enabled: true
   language: c
@@ -249,10 +307,34 @@
       }
     expect_match_text: [WSARecv]
   description: "WSARecv(socket, buffers, ...) - network bytes taint the caller-supplied WSABUF array."
+- id: c.input.win_wsa_recv_from
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [winsock]
+  match:
+    kind: call
+    callee:
+      name: WSARecvFrom
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: WSARecvFrom output buffers
+    code: |
+      #include <winsock.h>
+      #include <winsock2.h>
+      void handle(SOCKET s, LPWSABUF buffers, LPDWORD read, LPDWORD flags) {
+        WSARecvFrom(s, buffers, 1, read, flags, 0, 0, 0, 0);
+      }
+    expect_match_text: [WSARecvFrom]
+  description: "WSARecvFrom(socket, buffers, ...) - datagram bytes from a remote peer taint the caller-supplied WSABUF array; same shape as WSARecv."
 - id: c.input.win_recv
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: c.input.recv
   language: c
   trust: remote
   tag: network-input

@@ -8,7 +8,7 @@ description: "Install bonsai-ninja, run a first security scan, and read the outp
 <Steps>
 
 1. Install or build the CLI.
-2. Index the workspace so `.bonsai/dataflow.v3.factstore` is warm.
+2. Index the workspace so structural facts are ready.
 3. Keep `index --watch` running while you edit if you want save-time hot reloads.
 4. Run `security taint-analysis` against a source tree.
 5. Re-run with JSON or SARIF when you need machine-readable output.
@@ -64,9 +64,13 @@ release target matrix and parser bundle constraints.
 ./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis --rules-dir ./security-patterns
 ```
 
-`index` is incremental across runs: it loads the existing sidecar,
-validates entries by source-content hashes and dependency hashes, computes
-only missing or stale dataflow facts, and writes the sidecar back.
+`index` is structural by default: it parses supported files and builds
+the declaration/import indexes that later commands share. Browse,
+inspect, trace, security, export, and debug commands load reusable
+sidecars when present and compute the exact analysis scope they need
+before rendering. Pass `--prewarm-dataflow` only when a benchmark or
+workflow explicitly needs the full-workspace dataflow sidecar built up
+front.
 
 For development workflows, keep the workspace hot while your editor saves:
 

@@ -269,7 +269,7 @@
   match:
     kind: call
     callee:
-      regex: "^code:(ensure_loaded|load_file)$"
+      regex: "^code:(ensure_loaded|load_file|load_abs)$"
   constraints:
   - arg_tainted:
       index: 0
@@ -280,6 +280,13 @@
         -export([test/1]).
         test(Input) ->
           code:ensure_loaded(Input).
+    - name: tainted abs path load
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          code:load_abs(Input).
+      expect_match_text: ["code:load_abs"]
     - name: literal module load negative
       code: |
         -module(example).
@@ -287,4 +294,4 @@
         test() ->
           code:ensure_loaded(safe_module).
       expect_no_match: true
-  description: "code:ensure_loaded/load_file with a tainted module atom - attacker controls runtime code loading."
+  description: "code:ensure_loaded/load_file/load_abs with a tainted module atom or path - attacker controls runtime code loading (load_abs hot-loads a BEAM from a tainted filesystem path)."

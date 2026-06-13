@@ -43,6 +43,50 @@
     expect_match_text: [rs.getBytes]
   description: "ResultSet.getBytes(...) on a result-set receiver - binary value read from the database boundary."
 
+- id: java.jdbc.resultset_getobject
+  enabled: true
+  language: java
+  trust: database
+  tag: db-input
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [ResultSet, getObject]
+  match_examples:
+  - name: ResultSet getObject
+    code: |
+      import java.sql.*;
+      class App {
+        Object handle(ResultSet rs) throws Exception {
+          return rs.getObject("data");
+        }
+      }
+    expect_match_text: [rs.getObject]
+  description: "ResultSet.getObject(...) on a result-set receiver - value read from the database boundary, including raw deserialized objects."
+
+- id: java.jdbc.resultset_getnstring
+  enabled: true
+  language: java
+  trust: database
+  tag: db-input
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [ResultSet, getNString]
+  match_examples:
+  - name: ResultSet getNString
+    code: |
+      import java.sql.*;
+      class App {
+        Object handle(ResultSet rs) throws Exception {
+          return rs.getNString("name");
+        }
+      }
+    expect_match_text: [rs.getNString]
+  description: "ResultSet.getNString(...) on a result-set receiver - national-charset string value read from the database boundary."
+
 - id: java.hibernate.session_get
   enabled: true
   language: java

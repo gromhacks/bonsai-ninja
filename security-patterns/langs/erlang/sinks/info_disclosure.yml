@@ -48,4 +48,11 @@
         test(Stack) ->
           error_logger:error_msg("stack trace ~p", [Stack]).
       expect_match_text: [error_logger:error_msg]
+    - name: unrelated logger call negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(User) ->
+          logger:info("user=~p", [User]).
+      expect_no_match: true
   description: "error_logger:error_msg with stack / crash diagnostics - exposes internals through logs."

@@ -160,6 +160,29 @@
     expect_no_match: true
   description: "NSString +stringWithFormat: / -initWithFormat: / +localizedStringWithFormat: - when the FORMAT argument is tainted (not the value args), `%@` / `%n` / `%s` parses attacker-controlled conversions; commonly observed downstream of SQL/HTML/JS string assembly."
 
+- id: objc.eval.dlopen
+  enabled: true
+  language: objc
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: dlopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; dlopen(input, 2); }
+  - name: literal dlopen path negative
+    code: |
+      void test(void) { dlopen("/usr/lib/libz.dylib", 2); }
+    expect_no_match: true
+  description: "dlopen(tainted) - loads an arbitrary shared library from a tainted path; the library's constructors run attacker-controlled native code (CWE-470). ObjC code routinely bridges to dlopen/dlsym."
+
 - id: objc.eval.nslog_format
   aliases:
   - objc.info_disclosure.nslog_secret

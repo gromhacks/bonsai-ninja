@@ -246,7 +246,7 @@
   imports:
   - asynchttpclient
 - id: swift.ssrf.async_http_client_execute
-  enabled: false
+  enabled: true
   language: swift
   tag: ssrf
   severity: high
@@ -260,15 +260,24 @@
       attribute:
       - HTTPClient
       - execute
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: 'import asynchttpclient
 
-      func test() { let input = "x"; let amount = 1; HTTPClient.execute(input) }
+      func test(input: String) { HTTPClient.execute(input) }
 
       '
-  description: AsyncHTTPClient.execute.
+    expect_match_text: [HTTPClient.execute]
+  - name: literal async http client execute negative
+    code: 'import asynchttpclient
+
+      func test() { HTTPClient.execute("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: "AsyncHTTPClient HTTPClient.execute - modern request entrypoint; tainted request/URL is the SSRF vector. Package-gated and attribute-specific like swift.ssrf.async_http_client_get, with arg_tainted to suppress literal-URL calls."
   imports:
   - asynchttpclient
-  disabled_reason:
-    code: over-broad

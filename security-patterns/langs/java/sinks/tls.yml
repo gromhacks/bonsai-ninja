@@ -201,10 +201,22 @@
       attribute:
       - SSLContext
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^"(SSL|SSLv2|SSLv3|TLSv1|TLSv1\.1)"$'
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    SSLContext.getInstance(\"SSL\");\n  }\n}\n"
-  description: "SSLContext.getInstance(\"SSL\") - use TLSv1.2 or newer. Merged aliases: java.tls.sslcontext_getinstance_sslv3, java.tls.sslcontext_getinstance_tlsv10, java.tls.sslcontext_getinstance_tlsv11."
+  - name: modern tls protocol negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          SSLContext.getInstance("TLSv1.2");
+        }
+      }
+    expect_no_match: true
+  description: "SSLContext.getInstance(\"SSL\"/\"SSLv3\"/\"TLSv1\"/\"TLSv1.1\") - obsolete protocol versions; use TLSv1.2 or newer. Merged aliases: java.tls.sslcontext_getinstance_sslv3, java.tls.sslcontext_getinstance_tlsv10, java.tls.sslcontext_getinstance_tlsv11."
   aliases:
   - java.tls.sslcontext_getinstance_sslv3
   - java.tls.sslcontext_getinstance_tlsv10

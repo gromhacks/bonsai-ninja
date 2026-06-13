@@ -6,7 +6,7 @@
   language: perl
   tag: ssrf
   severity: high
-  packages: ["LWP::UserAgent", "HTTP::Tiny", "Mojo::UserAgent"]
+  packages: ["LWP::UserAgent", "HTTP::Tiny", "Mojo::UserAgent", "LWP::Simple"]
   cwe: [CWE-918]
   match:
     kind: call
@@ -23,6 +23,14 @@
         my ($input, $url, $id, $payload, $request) = @_;
         $ua->get($input)
       }
+  - name: perl.ssrf.lwp_simple_get example
+    code: |
+      use LWP::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        get($input)
+      }
+    expect_match_text: [get]
   - name: literal useragent get negative
     code: |
       use LWP::UserAgent;
@@ -31,7 +39,7 @@
         $ua->get("https://example.com/health")
       }
     expect_no_match: true
-  description: "$ua->get(tainted_url) - LWP::UserAgent / HTTP::Tiny / Mojo::UserAgent share the verb name; tainted URL = SSRF to internal services / cloud metadata. Receiver allowlist filters generic `get` collisions on hash/object accessors that don't actually issue HTTP requests."
+  description: "$ua->get(tainted_url) / LWP::Simple get(tainted_url) - LWP::UserAgent / HTTP::Tiny / Mojo::UserAgent / LWP::Simple share the verb name; tainted URL = SSRF to internal services / cloud metadata. Receiver allowlist filters generic `get` collisions on hash/object accessors that don't actually issue HTTP requests."
 
 - id: perl.ssrf.useragent_post
   enabled: true
@@ -192,3 +200,67 @@
       }
     expect_no_match: true
   description: "Net::HTTP->new(Host => tainted) - raw HTTP client; tainted Host = SSRF to arbitrary internal host."
+
+- id: perl.ssrf.lwp_simple_getstore
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["LWP::Simple"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: getstore
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.lwp_simple_getstore example
+    code: |
+      use LWP::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        getstore($input, "tmp/out.dat")
+      }
+  - name: literal lwp simple getstore negative
+    code: |
+      use LWP::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        getstore("https://example.com/file", "tmp/out.dat")
+      }
+    expect_no_match: true
+  description: "LWP::Simple getstore(tainted_url, file) - fetches an attacker-controlled URL and writes the body to disk; combines SSRF with a file-write primitive. Exported bare-name function unique to LWP::Simple."
+
+- id: perl.ssrf.lwp_simple_getprint
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["LWP::Simple"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: getprint
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.lwp_simple_getprint example
+    code: |
+      use LWP::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        getprint($input)
+      }
+  - name: literal lwp simple getprint negative
+    code: |
+      use LWP::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        getprint("https://example.com/file")
+      }
+    expect_no_match: true
+  description: "LWP::Simple getprint(tainted_url) - fetches an attacker-controlled URL and prints the body to stdout; SSRF to internal services / cloud metadata. Exported bare-name function unique to LWP::Simple."

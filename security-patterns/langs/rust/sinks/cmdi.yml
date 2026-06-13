@@ -409,10 +409,8 @@
   - name: generated direct match
     code: |
       use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          Command::env(target);
+      fn example(input: &str) {
+          Command::env("PATH", input);
       }
   - name: literal arg 1 negative
     code: |

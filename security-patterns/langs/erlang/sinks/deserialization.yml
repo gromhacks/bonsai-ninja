@@ -81,6 +81,13 @@
         test() ->
           list_to_atom("safe_atom").
       expect_no_match: true
+    - name: existing atom safe form negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          list_to_existing_atom(Input).
+      expect_no_match: true
   description: "list_to_atom/binary_to_atom on tainted input - atom table is global, never GC'd; unbounded keys exhaust the VM. Use list_to_existing_atom."
 
 - id: erlang.deser.ets_match_spec

@@ -5,6 +5,7 @@
   trust: service
   tag: cloud-event
   packages: [erlang_aws_lambda]
+  payload_types: [json]
   match:
     kind: param
     target:
@@ -17,4 +18,12 @@
       -export([handle/1]).
       handle(Event) ->
         Event.
+  - name: non event param negative
+    code: |
+      -module(example).
+      -include_lib("erlang_aws_lambda/include/erlang_aws_lambda.hrl").
+      -export([handle/1]).
+      handle(Context) ->
+        Context.
+    expect_no_match: true
   description: "AWS Lambda Erlang custom-runtime handler(Event, Context) - Event is caller-controlled."

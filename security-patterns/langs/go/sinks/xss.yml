@@ -161,6 +161,83 @@
       }
     expect_no_match: true
   description: "template.HTMLAttr(tainted) - marks string as a safe HTML attribute; enables attribute-break XSS."
+- id: go.xss.template_css
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - CSS
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted template css cast
+    code: |
+      import "html/template"
+      package main
+
+      func example(target string) {
+        template.CSS(target)
+      }
+    expect_match_text: [template.CSS]
+  - name: literal css trust type negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.CSS("color: red")
+      }
+    expect_no_match: true
+  description: "template.CSS(tainted) - cast marks the string as safe CSS, bypassing html/template style-context escaping; attacker CSS can break out of the style context (expression(), url(javascript:...))."
+- id: go.xss.template_srcset
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - Srcset
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted template srcset cast
+    code: |
+      import "html/template"
+      package main
+
+      func example(target string) {
+        template.Srcset(target)
+      }
+    expect_match_text: [template.Srcset]
+  - name: literal srcset trust type negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.Srcset("/img/a.png 1x")
+      }
+    expect_no_match: true
+  description: "template.Srcset(tainted) - cast marks the string as a safe img srcset attribute value, bypassing URL-context escaping; tainted values enable srcset/URL-based injection."
 - id: go.xss.fmt_fprintf_w
   enabled: false
   disabled_reason:

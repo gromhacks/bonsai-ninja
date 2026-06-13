@@ -77,7 +77,9 @@
   imports:
   - org
 - id: java.template.thymeleaf_string_resolver
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   tag: ssti
   category: source-independent
@@ -91,12 +93,7 @@
     kind: new
     callee:
       name: StringTemplateResolver
-  match_examples:
-  - name: generated shape example
-    code: "import org.thymeleaf.StringTemplateResolver;\nclass App {\n  void handle(String input) throws\
-      \ Exception {\n    new StringTemplateResolver(input);\n  }\n}\n"
-  description: "new StringTemplateResolver - evaluates template text directly\
-    \ from input."
+  description: "Disabled - Thymeleaf StringTemplateResolver is a resolver configuration object, not the tainted template source. Model the later TemplateEngine.process(template, context) call instead."
 - id: java.template.freemarker_template_ctor
   enabled: true
   language: java
@@ -439,11 +436,24 @@
       attribute:
       - Configuration
       - setAutoEscapingPolicy
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: 'DISABLE_AUTO_ESCAPING_POLICY'
   match_examples:
   - name: generated shape example
     code: "import freemarker.template.*;\nclass App {\n  void handle(String input)\
       \ throws Exception {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY);\n\
       \  }\n}\n"
+  - name: enable auto escaping negative
+    code: |
+      import freemarker.template.*;
+      class App {
+        void handle() throws Exception {
+          Configuration.setAutoEscapingPolicy(ENABLE_AUTO_ESCAPING_POLICY);
+        }
+      }
+    expect_no_match: true
   description: "FreeMarker Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\
     \ - turns off autoescape."
 - id: java.template.velocity_unescape

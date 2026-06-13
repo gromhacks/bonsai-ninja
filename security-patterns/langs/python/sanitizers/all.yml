@@ -95,6 +95,43 @@
     expect_match_text: [bleach.clean]
   description: bleach.clean - strips or allow-lists tags / attributes; safe HTML fragment.
 
+- id: python.sanitizer.nh3_clean
+  enabled: true
+  language: python
+  tag: html-sanitize
+  packages: [nh3]
+  imports: [nh3]
+  match:
+    kind: call
+    callee:
+      regex: "^nh3\\.clean$"
+  match_examples:
+  - name: sanitizer nh3 clean
+    code: |
+      import nh3
+      def example(user_input):
+          return nh3.clean(user_input)
+    expect_match_text: [nh3.clean]
+  description: nh3.clean - Rust ammonia-backed HTML sanitizer (recommended bleach replacement); strips or allow-lists tags/attributes into an XSS-safe fragment.
+
+- id: python.sanitizer.markupsafe_escape_silent
+  enabled: true
+  language: python
+  tag: html-encode
+  packages: [markupsafe]
+  match:
+    kind: call
+    callee:
+      regex: "^markupsafe\\.escape_silent$"
+  match_examples:
+  - name: sanitizer markupsafe escape silent
+    code: |
+      import markupsafe
+      def example(user_input):
+          return markupsafe.escape_silent(user_input)
+    expect_match_text: [markupsafe.escape_silent]
+  description: markupsafe.escape_silent - HTML-encodes like escape but returns an empty Markup for None; same XSS-neutralising semantics.
+
 - id: python.sanitizer.html_unescape_not_applicable
   enabled: false
   disabled_reason:
@@ -484,13 +521,18 @@
     kind: call
     callee:
       name: int
+  constraints:
+  - min_args: 1
   match_examples:
   - name: sanitizer int coerce
     code: |
       def example(user_input):
           return int(user_input)
     expect_match_text: [int]
-  description: int() - raises on non-numeric input, neutralising SQL / XSS / cmdi taint in numeric contexts.
+  - name: sanitizer int coerce no arg negative
+    code: "def example():\n    return int()\n"
+    expect_no_match: true
+  description: "int() - raises on non-numeric input, neutralising SQL / XSS / cmdi taint in numeric contexts. min_args 1 rejects the bare int() default-zero form that cleanses nothing."
 
 - id: python.sanitizer.float_coerce
   enabled: true
@@ -500,13 +542,18 @@
     kind: call
     callee:
       name: float
+  constraints:
+  - min_args: 1
   match_examples:
   - name: sanitizer float coerce
     code: |
       def example(user_input):
           return float(user_input)
     expect_match_text: [float]
-  description: float() - coerces to float; raises on non-numeric input.
+  - name: sanitizer float coerce no arg negative
+    code: "def example():\n    return float()\n"
+    expect_no_match: true
+  description: "float() - coerces to float; raises on non-numeric input. min_args 1 rejects the bare float() default-zero form that cleanses nothing."
 
 - id: python.sanitizer.uuid_parse
   enabled: true
@@ -672,6 +719,29 @@
           return bcrypt.checkpw(user_input)
     expect_match_text: [bcrypt.checkpw]
   description: "bcrypt.checkpw - verifies a password against a bcrypt hash using bcrypt's password-check primitive."
+
+- id: python.sanitizer.passlib_cryptcontext_verify
+  enabled: true
+  language: python
+  tag: auth-sanitizer
+  packages: [passlib]
+  match:
+    kind: call
+    callee:
+      attribute: [CryptContext, verify]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: sanitizer passlib cryptcontext verify
+    code: |
+      from passlib.context import CryptContext
+      def example(password, hashed):
+          return CryptContext.verify(password, hashed)
+    expect_match_text: [CryptContext.verify]
+  - name: sanitizer passlib cryptcontext verify no args negative
+    code: "from passlib.context import CryptContext\ndef example():\n    return CryptContext.verify()\n"
+    expect_no_match: true
+  description: "passlib CryptContext.verify(secret, hash) - constant-time password verification against a configured hash scheme. min_args 2 requires both the candidate secret and the stored hash, rejecting same-name decoys."
 
 # -- Pydantic / msgspec validation gates -----------------------------
 - id: python.sanitizer.pydantic_model_validate

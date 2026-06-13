@@ -307,10 +307,22 @@
       attribute:
       - Mac
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^"Hmac(MD5|SHA1)"$'
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    Mac.getInstance(\"HmacMD5\");\n  }\n}\n"
-  description: "Mac.getInstance(\"HmacMD5\") - MD5-based MAC."
+  - name: strong hmac negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          Mac.getInstance("HmacSHA256");
+        }
+      }
+    expect_no_match: true
+  description: "Mac.getInstance(\"HmacMD5\"/\"HmacSHA1\") - MD5/SHA1-based MAC; prefer HmacSHA256 or stronger."
 - id: java.crypto.pbkdf2_sha1
   enabled: true
   language: java
@@ -326,9 +338,21 @@
       attribute:
       - SecretKeyFactory
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^"PBKDF2WithHmacSHA1"$'
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\");\n  }\n}\n"
+  - name: strong pbkdf2 negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+        }
+      }
+    expect_no_match: true
   description: "SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\") - prefer SHA-256/512."
 - id: java.crypto.keygenerator_low_bits
   enabled: true

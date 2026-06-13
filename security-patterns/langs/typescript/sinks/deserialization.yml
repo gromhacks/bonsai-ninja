@@ -180,7 +180,8 @@
 - id: typescript.deser.node_serialize
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: typescript.deser.node_serialize_unserialize
   language: typescript
   tag: insecure-deserialization
   severity: critical

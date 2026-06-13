@@ -91,11 +91,10 @@
     expect_no_match: true
   description: "os.rename(source, tainted destination) - clobbers attacker-selected paths."
 - id: python.path.zipfile_extract
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   tag: zip-slip
+  category: source-independent
   severity: high
   packages:
   - zipfile
@@ -110,15 +109,19 @@
       - ZipFile
       - extractall
   match_examples:
-  - name: path zipfile extract
-    code: "import zipfile\ndef example(user_input):\n    return ZipFile.extractall(user_input)\n"
-  description: "Disabled until archive-entry state tracking exists - Zip Slip depends on tainted archive member names, not the extractall destination argument alone."
+  - name: zipfile extractall
+    code: |
+      import zipfile
+      def example(path, dest):
+          zf = zipfile.ZipFile(path)
+          zf.extractall(dest)
+    expect_match_text: ["zf.extractall"]
+  description: "ZipFile.extractall() - Zip Slip (CWE-22): a crafted archive entry with `../` traversal escapes the destination directory. extractall() performs no member-path validation. Source-independent (archive contents are not statically known) - flag on every call; remediate with a guarded per-member extract that rejects absolute/`..` paths."
 - id: python.path.tarfile_extractall
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   tag: zip-slip
+  category: source-independent
   severity: high
   packages:
   - tarfile
@@ -133,9 +136,14 @@
       - TarFile
       - extractall
   match_examples:
-  - name: path tarfile extractall
-    code: "import tarfile\ndef example(user_input):\n    return TarFile.extractall(user_input)\n"
-  description: "Disabled until archive-entry state tracking exists - Tar Slip depends on tainted archive member names, not the extractall destination argument alone."
+  - name: tarfile extractall
+    code: |
+      import tarfile
+      def example(path, dest):
+          tf = tarfile.TarFile(path)
+          tf.extractall(dest)
+    expect_match_text: ["tf.extractall"]
+  description: "TarFile.extractall() - Tar Slip (CWE-22): a crafted archive member with `../` traversal (or an absolute path / symlink) escapes the destination. Pre-3.12 extractall() does no member validation. Source-independent - flag on every call; use a `filter=` (3.12+) or validate members before extracting."
 - id: python.path.open
   enabled: true
   language: python

@@ -34,4 +34,11 @@
       void example(const char *invocationRequest) {
         (void)invocationRequest;
       }
+  - name: unrelated param name is not the invocation request
+    code: |
+      #include <aws-lambda-cpp.h>
+      void example(const char *invocationResponse) {
+        (void)invocationResponse;
+      }
+    expect_no_match: true
   description: "AWS Lambda C++ runtime invocation_request parameter."

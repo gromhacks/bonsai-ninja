@@ -32,7 +32,8 @@
 - id: erlang.cmdi.os_cmd_2
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: erlang.cmdi.os_cmd
   language: erlang
   tag: command-injection
   severity: critical

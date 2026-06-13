@@ -56,7 +56,9 @@
   description: "Disabled duplicate - folded into kotlin.template.thymeleaf_processstring\
     \ with fragment-expression examples."
 - id: kotlin.template.thymeleaf_string_resolver
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: kotlin
   tag: ssti
   category: source-independent
@@ -70,11 +72,7 @@
     kind: new
     callee:
       name: StringTemplateResolver
-  match_examples:
-  - name: generated shape example
-    code: "import org.thymeleaf.StringTemplateResolver\nclass App {\n  fun handle(input: String) {\n  \
-      \  StringTemplateResolver(input)\n  }\n}\nclass StringTemplateResolver(vararg args: Any?)\n"
-  description: "new StringTemplateResolver - flag template source as tainted."
+  description: "Disabled - Thymeleaf StringTemplateResolver is a resolver configuration object, not the tainted template source. Model the later TemplateEngine.process(template, context) call instead."
 - id: kotlin.template.freemarker_template_ctor
   enabled: true
   language: kotlin
@@ -387,8 +385,21 @@
       attribute:
       - Configuration
       - setAutoEscapingPolicy
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: 'DISABLE_AUTO_ESCAPING_POLICY'
   match_examples:
   - name: generated shape example
     code: "import freemarker.*\nclass App {\n  fun handle(input: String) {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\n\
       \  }\n}\n"
-  description: "FreeMarker (via Java interop) - autoescape disabled at config."
+  - name: enable auto escaping negative
+    code: |
+      import freemarker.*
+      class App {
+        fun handle() {
+          Configuration.setAutoEscapingPolicy(ENABLE_AUTO_ESCAPING_POLICY)
+        }
+      }
+    expect_no_match: true
+  description: "FreeMarker (via Java interop) Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY) - autoescape disabled at config."

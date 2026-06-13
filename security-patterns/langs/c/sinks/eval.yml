@@ -44,10 +44,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        dlmopen(arg);
+      void example(char *input) {
+        dlmopen("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -160,10 +158,8 @@
   - name: generated direct match
     code: |
       #include <lua.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        luaL_dostring(arg);
+      void example(char *input) {
+        luaL_dostring("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -191,10 +187,8 @@
   - name: generated direct match
     code: |
       #include <lua.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        luaL_dofile(arg);
+      void example(char *input) {
+        luaL_dofile("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -222,10 +216,8 @@
   - name: generated direct match
     code: |
       #include <lua.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        luaL_loadstring(arg);
+      void example(char *input) {
+        luaL_loadstring("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -331,10 +323,8 @@
   - name: generated direct match
     code: |
       #include <tcl.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        Tcl_Eval(arg);
+      void example(char *input) {
+        Tcl_Eval("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -362,10 +352,8 @@
   - name: generated direct match
     code: |
       #include <duktape.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        duk_eval_string(arg);
+      void example(char *input) {
+        duk_eval_string("safe", input);
       }
   - name: literal arg 1 negative
     code: |

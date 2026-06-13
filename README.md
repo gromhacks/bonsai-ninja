@@ -57,11 +57,14 @@ There is no CI database build step and no code upload. The release binary
 operates on your source tree and writes local cache state only when that
 helps performance.
 
-`bonsai-ninja index` is incremental: it reuses `.bonsai/dataflow.v3.factstore`
-across runs, validates cached facts by source-content hashes and
-dependency hashes, and recomputes only stale entries. For editor and
-agent workflows, `bonsai-ninja index --watch` stays running and
-hot-reloads saved file changes into the live workspace.
+`bonsai-ninja index` is structural by default: it parses supported files,
+builds declaration/import indexes, and leaves exact dataflow work to the
+commands that need it. Query commands load valid persisted sidecars when
+present and compute missing facts on demand. For editor and agent
+workflows, `bonsai-ninja index --watch` stays running and hot-reloads
+saved file changes into the live workspace. Pass `--prewarm-dataflow`
+only when you intentionally want the legacy full-workspace dataflow
+sidecar rebuilt up front.
 
 ## Human-First And LLM-First
 
@@ -203,7 +206,7 @@ source build path for that platform. See
 ./target/release/bonsai-ninja security ./my-app taint-analysis
 
 # SARIF for code scanning
-./target/release/bonsai-ninja security ./my-app taint-analysis --format sarif > findings.sarif.json
+./target/release/bonsai-ninja security ./my-app taint-analysis --format sarif --output-path findings.sarif.json
 ```
 
 ## Commands
@@ -227,6 +230,10 @@ stable machine-consumable schema, and `--format sarif` is available for
 text/json-only source-flow mapping; requesting SARIF for it fails clearly
 instead of emitting a misleading vulnerability report.
 
+Commands with `--format` also accept `--output-path <PATH>` to write the
+selected text, JSON, SARIF, DOT, or graph export payload directly to a
+file instead of stdout.
+
 Text output names the evidence type directly: `inspect` renders generic
 `FLOW` call paths, `security source-analysis` renders `SOURCE FLOW`, and
 `security taint-analysis` renders `TAINT FLOW` with source, argument
@@ -247,9 +254,12 @@ pages, and `--format json --no-color --no-progress` for scripts.
 
 - `BONSAI_RULES_DIR` - alternative rulepack location
 - `BONSAI_PARSE_TIMEOUT_MS` - per-file parse timeout, default 30 seconds
-- `BONSAI_NO_DATAFLOW=1` - skip dataflow prewarm during indexing
+- `BONSAI_NO_DATAFLOW=1` - skip explicit dataflow prewarm and trace eager hydration
 - `BONSAI_THEME` - terminal theme
 - `BONSAI_WORKSPACE_DIR` - per-workspace state directory
+- `BONSAI_CONTEXT` - default text paging budget
+- `BONSAI_NO_CACHE=1` - disable in-process caches for a command
+- `NO_COLOR` / `NO_PROGRESS` - disable ANSI styling or progress output
 
 ## SDK
 

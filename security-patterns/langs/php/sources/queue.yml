@@ -14,9 +14,7 @@
   description: "Disabled - too broad (handle is ubiquitous); enable with ShouldQueue class constraint."
 
 - id: php.source.pheanstalk_reserve
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: queue-message
   trust: service
@@ -24,8 +22,22 @@
   match:
     kind: call
     callee:
-      attribute: [Pheanstalk, reserve]
-  description: "Disabled - adapters index local receivers like `$pheanstalk->reserve()`, not Pheanstalk type facts; a bare `reserve` fallback would match unrelated APIs."
+      name: reserve
+  constraints:
+  - receiver_type_in: [Pheanstalk]
+  match_examples:
+  - name: pheanstalk reserve
+    code: |
+      <?php
+      use Pheanstalk\Pheanstalk;
+      function run(Pheanstalk $pheanstalk) {
+        $job = $pheanstalk->reserve();
+        return $job;
+      }
+  description: "Pheanstalk.reserve() - beanstalkd job payload reserved on a typed Pheanstalk receiver."
+
+  imports:
+  - Pheanstalk
 
 - id: php.source.pheanstalk_watch
   enabled: false
@@ -42,9 +54,7 @@
   description: "Disabled - watch selects a tube; reserve is the source."
 
 - id: php.source.amqp_envelope_get_body
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: queue-message
   trust: service
@@ -52,13 +62,25 @@
   match:
     kind: call
     callee:
-      attribute: [AMQPEnvelope, getBody]
-  description: "Disabled - adapters index local receivers like `$message->getBody()`, not AMQPEnvelope type facts; a bare `getBody` fallback would match unrelated APIs."
+      name: getBody
+  constraints:
+  - receiver_type_in: [AMQPEnvelope]
+  match_examples:
+  - name: amqp envelope get body
+    code: |
+      <?php
+      use PhpAmqpLib\Message\AMQPEnvelope;
+      function handle(AMQPEnvelope $message) {
+        $b = $message->getBody();
+        return $b;
+      }
+  description: "AMQPEnvelope.getBody() - broker-supplied message body read on a typed AMQPEnvelope receiver."
+
+  imports:
+  - PhpAmqpLib
 
 - id: php.source.sqs_message_body
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: queue-message
   trust: service
@@ -66,5 +88,19 @@
   match:
     kind: call
     callee:
-      attribute: [Message, getBody]
-  description: "Disabled - adapters index local receivers like `$message->getBody()`, not SQS Message type facts; a bare `getBody` fallback would match unrelated APIs."
+      name: getBody
+  constraints:
+  - receiver_type_in: [Message]
+  match_examples:
+  - name: sqs message get body
+    code: |
+      <?php
+      use Aws\Sqs\Message;
+      function run(Message $message) {
+        $b = $message->getBody();
+        return $b;
+      }
+  description: "AWS SQS Message.getBody() - broker-supplied body read on a typed Message receiver."
+
+  imports:
+  - Aws

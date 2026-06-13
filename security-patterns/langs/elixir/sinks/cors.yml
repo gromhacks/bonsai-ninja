@@ -11,6 +11,10 @@
     kind: call
     callee:
       attribute: [CORSPlug, init]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '"\*"'
   match_examples:
   - name: declared shape
     code: |
@@ -20,7 +24,18 @@
           CORSPlug.init("*")
         end
       end
+  - name: specific origin negative
+    code: |
+      alias Cors_plug
+      defmodule App do
+        def test(input) do
+          CORSPlug.init("https://app.example.com")
+        end
+      end
+    expect_no_match: true
   description: |-
-    Plug CORSPlug origin: '*' - wildcard CORS.
+    Plug CORSPlug origin '*' - wildcard CORS reflects every origin and defeats the
+    same-origin policy; an explicit allow-list origin is safe, so the rule requires
+    the literal "*".
   imports:
   - Cors_plug

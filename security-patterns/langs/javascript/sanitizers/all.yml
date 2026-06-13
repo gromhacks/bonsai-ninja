@@ -167,6 +167,31 @@
     expect_match_text: [validator.escape]
   description: validator.escape - HTML-escapes &, <, >, ", ', /.
 
+- id: javascript.sanitizer.validator_whitelist
+  enabled: true
+  language: javascript
+  tag: char-allowlist
+  packages: [validator]
+  imports: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.whitelist$"
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: validator whitelist
+    code: |
+      const validator = require("validator");
+      function clean(input) {
+        return validator.whitelist(input, "a-zA-Z0-9_-");
+      }
+    expect_match_text: [validator.whitelist]
+  - name: validator whitelist negative constraint boundary
+    code: "const validator = require(\"validator\");\nfunction clean(input) {\n  return validator.whitelist(input);\n}\n"
+    expect_no_match: true
+  description: "validator.whitelist(str, chars) - removes every character not present in the explicit allowlist string."
+
 # -- URL ---------------------------------------------------------------------
 - id: javascript.sanitizer.encodeuricomponent
   enabled: true
@@ -201,6 +226,26 @@
       }
     expect_match_text: [encodeURI]
   description: encodeURI - percent-encodes a URL (preserves reserved chars).
+
+- id: javascript.sanitizer.querystring_escape
+  enabled: true
+  language: javascript
+  tag: url-encode
+  packages: [querystring]
+  imports: [querystring]
+  match:
+    kind: call
+    callee:
+      regex: "^querystring\\.escape$"
+  match_examples:
+  - name: querystring escape
+    code: |
+      const querystring = require("querystring");
+      function clean(input) {
+        return querystring.escape(input);
+      }
+    expect_match_text: [querystring.escape]
+  description: "querystring.escape - Node built-in percent-encoder for query-string component values."
 
 - id: javascript.sanitizer.url_constructor
   enabled: true
@@ -448,6 +493,25 @@
       }
     expect_match_text: [path.basename]
   description: path.basename - strips directory components, leaving just the filename.
+
+- id: javascript.sanitizer.sanitize_filename
+  enabled: true
+  language: javascript
+  tag: path-sanitize
+  packages: [sanitize-filename]
+  match:
+    kind: call
+    callee:
+      name: sanitizeFilename
+  match_examples:
+  - name: sanitize-filename call
+    code: |
+      const sanitizeFilename = require("sanitize-filename");
+      function clean(input) {
+        return sanitizeFilename(input);
+      }
+    expect_match_text: [sanitizeFilename]
+  description: "sanitize-filename - strips path separators, control chars, and reserved names from a client-supplied filename (JS analogue of werkzeug.secure_filename)."
 
 # -- LDAP --------------------------------------------------------------------
 - id: javascript.sanitizer.ldap_escape

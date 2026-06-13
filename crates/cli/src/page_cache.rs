@@ -7,9 +7,9 @@
 //! keyed by the normalized command line (with `--page` removed) and
 //! source/rulepack/dependency freshness fingerprints.
 
-use crate::{out_count, paging, progress};
+use crate::{out_count, output, paging, progress};
 use bonsai_common::dependency_metadata::collect_dependency_metadata_fingerprints;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -35,6 +35,13 @@ pub(crate) struct CachedPage {
     pub cursor: String,
     pub text: String,
 }
+
+/// Hard ceiling on a cached command payload. The payload exists so a
+/// re-invocation can re-render without re-running analysis; past this
+/// size the save/reload memory cost outweighs the re-run it avoids,
+/// so larger payloads are simply not cached. This bound is what keeps
+/// huge-corpus reports from exhausting memory at render time.
+const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PageCacheFile {
@@ -77,6 +84,9 @@ where
 }
 
 pub(crate) fn emit_cached_text(text: &str) -> anyhow::Result<()> {
+    if output::write_raw_counted(text) {
+        return Ok(());
+    }
     let mut h = std::io::stdout().lock();
     h.write_all(text.as_bytes())?;
     out_count::add_counting(text, false);
@@ -106,8 +116,17 @@ fn remembered_workspace_fingerprint(workspace: &Path) -> Option<bonsai_sdk::Work
         })
 }
 
+/// `--no-cache` / `BONSAI_NO_CACHE` disables the rendered-page cache
+/// entirely: no replay, no payload reuse, no saves. The flag is the
+/// documented escape hatch for stale state, so an argv-keyed replay
+/// (the flag is part of the key!) must not serve a previous
+/// `--no-cache` run's output back.
+fn cache_disabled() -> bool {
+    *crate::NO_CACHE.get().unwrap_or(&false)
+}
+
 pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
-    if requested_page_arg().is_none() {
+    if cache_disabled() || requested_page_arg().is_none() {
         return Ok(false);
     }
     let bar = progress::spinner("validating rendered page cache");
@@ -129,7 +148,143 @@ pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
 }
 
 pub(crate) fn save_pages(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<()> {
-    if pages.is_empty() {
+    save_pages_value(workspace, pages)
+}
+
+/// A payload cached under an explicit SEMANTIC key rather than the
+/// command line. The key is computed by the caller from only the
+/// inputs that change the result (for taint-analysis: the source/sink/
+/// severity/etc. filters + content + rulepack), so output-shaping
+/// flags — format, paging, `--contains` — reuse this entry instead of
+/// re-running the analysis. Freshness is verified the same way as the
+/// page cache (binary / matcher-policy / workspace-content / rulepack).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct KeyedPayloadFile {
+    version: u32,
+    binary_version: String,
+    matcher_policy_fingerprint: u128,
+    workspace_fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
+    dependency_metadata_fingerprint: u64,
+    rulepack_fingerprint: Option<u64>,
+    semantic_key: u64,
+    kind: String,
+    /// Pre-serialized payload JSON (a string, never a `Value` tree).
+    value: String,
+}
+
+fn keyed_payload_path(workspace: &Path, semantic_key: u64) -> PathBuf {
+    cache_dir(workspace).join(format!("payload.{semantic_key:016x}.json"))
+}
+
+/// Persist `payload` under `semantic_key`. No-op when caching is
+/// disabled or the payload exceeds [`MAX_PAYLOAD_BYTES`] (a cache miss
+/// next time, never a correctness problem).
+pub(crate) fn save_keyed_payload<T: Serialize>(
+    workspace: &Path,
+    semantic_key: u64,
+    kind: &str,
+    payload: &T,
+) -> anyhow::Result<()> {
+    if cache_disabled() {
+        return Ok(());
+    }
+    let value = serde_json::to_string(payload)?;
+    if value.len() > MAX_PAYLOAD_BYTES {
+        tracing::debug!(
+            "skipping {kind} keyed payload: {} bytes exceeds {MAX_PAYLOAD_BYTES} cap",
+            value.len()
+        );
+        return Ok(());
+    }
+    let dir = cache_dir(workspace);
+    std::fs::create_dir_all(&dir)?;
+    let file = KeyedPayloadFile {
+        version: RENDER_CACHE_VERSION,
+        binary_version: binary_cache_fingerprint().to_string(),
+        matcher_policy_fingerprint: bonsai_common::MATCHER_POLICY_FINGERPRINT,
+        workspace_fingerprint: match remembered_workspace_fingerprint(workspace) {
+            Some(fingerprint) => fingerprint,
+            None => workspace_fingerprint(workspace)?,
+        },
+        dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
+        rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
+        semantic_key,
+        kind: kind.to_string(),
+        value,
+    };
+    atomic_write_json(&keyed_payload_path(workspace, semantic_key), &file)
+}
+
+/// Read the payload stored under `semantic_key`/`kind` when it is fresh
+/// against the current binary, rulepack, and workspace content.
+pub(crate) fn read_keyed_payload<T: DeserializeOwned>(
+    workspace: &Path,
+    semantic_key: u64,
+    kind: &str,
+) -> anyhow::Result<Option<T>> {
+    if cache_disabled() {
+        return Ok(None);
+    }
+    let path = keyed_payload_path(workspace, semantic_key);
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Ok(None);
+    };
+    if current_exe_is_newer_than_cache(&metadata) {
+        return Ok(None);
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Ok(None);
+    };
+    let Ok(file) = serde_json::from_slice::<KeyedPayloadFile>(&bytes) else {
+        return Ok(None);
+    };
+    if file.version != RENDER_CACHE_VERSION
+        || file.binary_version != binary_cache_fingerprint()
+        || file.matcher_policy_fingerprint != bonsai_common::MATCHER_POLICY_FINGERPRINT
+        || file.semantic_key != semantic_key
+        || file.kind != kind
+    {
+        return Ok(None);
+    }
+    let fresh = file.workspace_fingerprint == workspace_fingerprint(workspace)?
+        && file.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
+        && file.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?;
+    if !fresh {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&file.value)?))
+}
+
+/// Atomically write `value` as JSON to `path` via a temp file + rename,
+/// fsync'd so a crash can't leave a torn cache file. Shared by the page
+/// cache and the keyed-payload store.
+fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let counter = PAGE_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{counter:x}.tmp", std::process::id()));
+    {
+        let mut tmp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        tmp_file.write_all(&serde_json::to_vec(value)?)?;
+        tmp_file.sync_all()?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn save_pages_value(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<()> {
+    if cache_disabled() || pages.is_empty() {
         return Ok(());
     }
     let dir = cache_dir(workspace);
@@ -147,35 +302,11 @@ pub(crate) fn save_pages(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Re
         normalized_argv_hash: normalized_argv_hash(),
         pages,
     };
-    let path = cache_path(workspace);
-    // Per-thread / per-call unique tmp suffix so concurrent renders
-    // in the same PID don't collide on the rename. Atomic counter +
-    // pid is sufficient for any plausible thread count.
-    let counter = PAGE_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("{}.{counter:x}.tmp", std::process::id()));
-    {
-        let mut tmp_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        tmp_file.write_all(&serde_json::to_vec(&cache)?)?;
-        // Per docs/contributing/design-patterns.mdx::Lossless Caches: a partially
-        // written cache file must not survive a crash and replay
-        // truncated text on the next page request.
-        tmp_file.sync_all()?;
-    }
-    if let Err(err) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err.into());
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-    }
-    Ok(())
+    // Per docs/contributing/design-patterns.mdx::Lossless Caches: a
+    // partially written cache file must not survive a crash and replay
+    // truncated text on the next page request — `atomic_write_json`
+    // fsyncs a temp file then renames.
+    atomic_write_json(&cache_path(workspace), &cache)
 }
 
 pub(crate) fn eager_window(current_page: u64, total_pages: u64) -> BTreeSet<u64> {
@@ -208,10 +339,22 @@ pub(crate) fn emit_paged_text<T, C, R>(
     mut render_page: R,
 ) -> anyhow::Result<()>
 where
-    T: Clone,
+    T: Clone + serde::Serialize,
     C: Fn(&T) -> u64,
     R: FnMut(&[T], &paging::PageInfo, &paging::PagingConfig) -> anyhow::Result<()>,
 {
+    // Secondary `--contains` / `--not-contains` filters run here, the
+    // shared funnel for every row-based command's text AND json paths.
+    // Drop the non-matching rows before pagination so page counts,
+    // budgets, and cursors all reflect the filtered set. The filter is
+    // part of the normalized argv, so the saved pages key correctly.
+    let secondary = crate::filter::active();
+    let filtered_storage: Option<Vec<T>> = secondary.is_active().then(|| {
+        let mut kept = rows.to_vec();
+        secondary.retain(&mut kept);
+        kept
+    });
+    let rows: &[T] = filtered_storage.as_deref().unwrap_or(rows);
     let (_, current_info) = paging::paginate(rows, cfg, command, filters_hash, &row_cost_bytes);
     let current_page = current_info.page_number;
     let mut cached_pages = Vec::new();
@@ -350,6 +493,13 @@ fn normalized_argv_without_page() -> Vec<String> {
             continue;
         }
         if arg.starts_with("--page=") {
+            continue;
+        }
+        if arg == "--output-path" {
+            let _ = args.next();
+            continue;
+        }
+        if arg.starts_with("--output-path=") {
             continue;
         }
         out.push(arg);

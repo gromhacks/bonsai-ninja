@@ -11,23 +11,27 @@
     kind: call
     callee:
       name: gpio_set_value
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: gpio set value tainted pin
     code: |
       #include <linux/gpio.h>
-      #include <linux/gpio.h>
-      #include <linux/gpio.h> /* linux-gpio */
-      #include <linux/gpio.h> /* linux-gpio */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        gpio_set_value(arg);
+      void example(int user_input) {
+        gpio_set_value(user_input, 1);
       }
-  description: "gpio_set_value - tainted pin/value drives physical hardware state."
-
+  - name: gpio set value literal negative
+    code: |
+      #include <linux/gpio.h>
+      void example(void) {
+        gpio_set_value(17, 1);
+      }
+    expect_no_match: true
+  description: "gpio_set_value(pin, value) - attacker-controlled pin or value drives physical hardware state."
   imports:
   - linux
   - linux/gpio.h
+
 - id: c.hardware.gpiod_line_set_value
   enabled: true
   language: c
@@ -40,16 +44,23 @@
     kind: call
     callee:
       name: gpiod_line_set_value
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: gpiod line set value tainted value
     code: |
       #include <libgpiod.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        gpiod_line_set_value(arg);
+      void example(struct gpiod_line *line, int user_input) {
+        gpiod_line_set_value(line, user_input);
       }
-  description: "gpiod_line_set_value - tainted line/value actuates GPIO-backed hardware."
+  - name: gpiod line set value literal negative
+    code: |
+      #include <libgpiod.h>
+      void example(struct gpiod_line *line) {
+        gpiod_line_set_value(line, 1);
+      }
+    expect_no_match: true
+  description: "gpiod_line_set_value(line, value) - attacker-controlled GPIO value actuates hardware."
 
 - id: c.hardware.digitalwrite
   enabled: true
@@ -63,23 +74,27 @@
     kind: call
     callee:
       name: digitalWrite
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: digitalwrite tainted pin
     code: |
       #include <Arduino.h>
-      #include <Arduino.h>
-      #include <Arduino.h> /* arduino */
-      #include <Arduino.h> /* arduino */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        digitalWrite(arg);
+      void example(int user_input) {
+        digitalWrite(user_input, HIGH);
       }
-  description: "digitalWrite - tainted pin/value toggles a physical output."
-
+  - name: digitalwrite literal negative
+    code: |
+      #include <Arduino.h>
+      void example(void) {
+        digitalWrite(13, HIGH);
+      }
+    expect_no_match: true
+  description: "digitalWrite(pin, value) - attacker-controlled pin or value toggles a physical output."
   imports:
   - Arduino.h
   - Arduino
+
 - id: c.hardware.analogwrite
   enabled: true
   language: c
@@ -92,23 +107,27 @@
     kind: call
     callee:
       name: analogWrite
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: analogwrite tainted duty
     code: |
       #include <Arduino.h>
-      #include <Arduino.h>
-      #include <Arduino.h> /* arduino */
-      #include <Arduino.h> /* arduino */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        analogWrite(arg);
+      void example(int user_input) {
+        analogWrite(9, user_input);
       }
-  description: "analogWrite - tainted PWM duty or pin selection drives a physical actuator."
-
+  - name: analogwrite literal negative
+    code: |
+      #include <Arduino.h>
+      void example(void) {
+        analogWrite(9, 127);
+      }
+    expect_no_match: true
+  description: "analogWrite(pin, value) - attacker-controlled PWM duty or pin selection drives a physical actuator."
   imports:
   - Arduino.h
   - Arduino
+
 - id: c.hardware.i2c_smbus_write_byte_data
   enabled: true
   language: c
@@ -121,23 +140,27 @@
     kind: call
     callee:
       name: i2c_smbus_write_byte_data
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: i2c smbus write byte data tainted register
     code: |
       #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h> /* linux-i2c */
-      #include <linux/i2c-dev.h> /* linux-i2c */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        i2c_smbus_write_byte_data(arg);
+      void example(int fd, int user_input) {
+        i2c_smbus_write_byte_data(fd, user_input, 0xff);
       }
-  description: "i2c_smbus_write_byte_data - tainted register/value mutates an attached device over I2C."
-
+  - name: i2c smbus write byte data literal negative
+    code: |
+      #include <linux/i2c-dev.h>
+      void example(int fd) {
+        i2c_smbus_write_byte_data(fd, 0x10, 0xff);
+      }
+    expect_no_match: true
+  description: "i2c_smbus_write_byte_data(fd, register, value) - attacker-controlled register/value mutates an attached device over I2C."
   imports:
   - linux
   - linux/i2c-dev.h
+
 - id: c.hardware.i2c_smbus_write_word_data
   enabled: true
   language: c
@@ -150,23 +173,27 @@
     kind: call
     callee:
       name: i2c_smbus_write_word_data
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: i2c smbus write word data tainted value
     code: |
       #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h>
-      #include <linux/i2c-dev.h> /* linux-i2c */
-      #include <linux/i2c-dev.h> /* linux-i2c */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        i2c_smbus_write_word_data(arg);
+      void example(int fd, int user_input) {
+        i2c_smbus_write_word_data(fd, 0x10, user_input);
       }
-  description: "i2c_smbus_write_word_data - tainted 16-bit register write controls peripheral state."
-
+  - name: i2c smbus write word data literal negative
+    code: |
+      #include <linux/i2c-dev.h>
+      void example(int fd) {
+        i2c_smbus_write_word_data(fd, 0x10, 0x0203);
+      }
+    expect_no_match: true
+  description: "i2c_smbus_write_word_data(fd, register, value) - attacker-controlled 16-bit register write controls peripheral state."
   imports:
   - linux
   - linux/i2c-dev.h
+
 - id: c.hardware.wiringpi_i2c_write_reg8
   enabled: true
   language: c
@@ -179,16 +206,24 @@
     kind: call
     callee:
       name: wiringPiI2CWriteReg8
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: wiringpi i2c write reg8 tainted value
     code: |
-      #include <wiringpi.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        wiringPiI2CWriteReg8(arg);
+      #include <wiringPiI2C.h>
+      #include <wiringpi.h> /* wiringpi */
+      void example(int fd, int user_input) {
+        wiringPiI2CWriteReg8(fd, 0x10, user_input);
       }
-  description: "wiringPiI2CWriteReg8 - tainted register/value drives a chip-to-chip I2C peripheral."
+  - name: wiringpi i2c write reg8 literal negative
+    code: |
+      #include <wiringPiI2C.h>
+      void example(int fd) {
+        wiringPiI2CWriteReg8(fd, 0x10, 0xff);
+      }
+    expect_no_match: true
+  description: "wiringPiI2CWriteReg8(fd, register, value) - attacker-controlled register/value drives an I2C peripheral."
 
 - id: c.hardware.wiringpi_i2c_write_reg16
   enabled: true
@@ -202,16 +237,24 @@
     kind: call
     callee:
       name: wiringPiI2CWriteReg16
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: wiringpi i2c write reg16 tainted register
     code: |
-      #include <wiringpi.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        wiringPiI2CWriteReg16(arg);
+      #include <wiringPiI2C.h>
+      #include <wiringpi.h> /* wiringpi */
+      void example(int fd, int user_input) {
+        wiringPiI2CWriteReg16(fd, user_input, 0x0203);
       }
-  description: "wiringPiI2CWriteReg16 - tainted 16-bit write mutates peripheral hardware state."
+  - name: wiringpi i2c write reg16 literal negative
+    code: |
+      #include <wiringPiI2C.h>
+      void example(int fd) {
+        wiringPiI2CWriteReg16(fd, 0x10, 0x0203);
+      }
+    expect_no_match: true
+  description: "wiringPiI2CWriteReg16(fd, register, value) - attacker-controlled 16-bit write mutates peripheral hardware state."
 
 - id: c.hardware.serial_putchar
   enabled: true
@@ -225,16 +268,24 @@
     kind: call
     callee:
       name: serialPutchar
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: serial putchar tainted byte
     code: |
-      #include <wiringpi.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        serialPutchar(arg);
+      #include <wiringSerial.h>
+      #include <wiringpi.h> /* wiringpi */
+      void example(int fd, int user_input) {
+        serialPutchar(fd, user_input);
       }
-  description: "serialPutchar - tainted byte is emitted onto a UART/serial link."
+  - name: serial putchar literal negative
+    code: |
+      #include <wiringSerial.h>
+      void example(int fd) {
+        serialPutchar(fd, 'A');
+      }
+    expect_no_match: true
+  description: "serialPutchar(fd, byte) - attacker-controlled byte is emitted onto a UART/serial link."
 
 - id: c.hardware.serialport_blocking_write
   enabled: true
@@ -248,16 +299,24 @@
     kind: call
     callee:
       name: sp_blocking_write
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: serialport blocking write tainted buffer
     code: |
       #include <libserialport.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        sp_blocking_write(arg);
+      void example(struct sp_port *port, char *user_input) {
+        sp_blocking_write(port, user_input, 4, 1000);
       }
-  description: "sp_blocking_write - tainted bytes are transmitted to a serial-attached device."
+  - name: serialport blocking write literal negative
+    code: |
+      #include <libserialport.h>
+      void example(struct sp_port *port) {
+        char safe[] = "ok";
+        sp_blocking_write(port, safe, 2, 1000);
+      }
+    expect_no_match: true
+  description: "sp_blocking_write(port, buffer, count, timeout) - attacker-controlled bytes are transmitted to a serial-attached device."
 
 - id: c.hardware.wiringpi_spi_data_rw
   enabled: true
@@ -271,16 +330,25 @@
     kind: call
     callee:
       name: wiringPiSPIDataRW
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: wiringpi spi data rw tainted buffer
     code: |
-      #include <wiringpi.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        wiringPiSPIDataRW(arg);
+      #include <wiringPiSPI.h>
+      #include <wiringpi.h> /* wiringpi */
+      void example(unsigned char *user_input) {
+        wiringPiSPIDataRW(0, user_input, 4);
       }
-  description: "wiringPiSPIDataRW - tainted SPI frame bytes are sent to an attached peripheral."
+  - name: wiringpi spi data rw literal negative
+    code: |
+      #include <wiringPiSPI.h>
+      void example(void) {
+        unsigned char safe[] = {0x01, 0x02};
+        wiringPiSPIDataRW(0, safe, 2);
+      }
+    expect_no_match: true
+  description: "wiringPiSPIDataRW(channel, data, len) - attacker-controlled SPI frame bytes are sent to an attached peripheral."
 
 - id: c.hardware.mraa_gpio_write
   enabled: true
@@ -294,16 +362,23 @@
     kind: call
     callee:
       name: mraa_gpio_write
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: mraa gpio write tainted value
     code: |
       #include <mraa.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mraa_gpio_write(arg);
+      void example(mraa_gpio_context gpio, int user_input) {
+        mraa_gpio_write(gpio, user_input);
       }
-  description: "mraa_gpio_write - tainted pin/value drives a digital output."
+  - name: mraa gpio write literal negative
+    code: |
+      #include <mraa.h>
+      void example(mraa_gpio_context gpio) {
+        mraa_gpio_write(gpio, 1);
+      }
+    expect_no_match: true
+  description: "mraa_gpio_write(gpio, value) - attacker-controlled value drives a digital output."
 
 - id: c.hardware.mraa_pwm_write
   enabled: true
@@ -317,16 +392,23 @@
     kind: call
     callee:
       name: mraa_pwm_write
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: mraa pwm write tainted duty
     code: |
       #include <mraa.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mraa_pwm_write(arg);
+      void example(mraa_pwm_context pwm, float user_input) {
+        mraa_pwm_write(pwm, user_input);
       }
-  description: "mraa_pwm_write - tainted duty-cycle or channel value actuates PWM hardware."
+  - name: mraa pwm write literal negative
+    code: |
+      #include <mraa.h>
+      void example(mraa_pwm_context pwm) {
+        mraa_pwm_write(pwm, 0.5);
+      }
+    expect_no_match: true
+  description: "mraa_pwm_write(pwm, duty_cycle) - attacker-controlled duty cycle actuates PWM hardware."
 
 - id: c.hardware.mraa_i2c_write
   enabled: true
@@ -340,13 +422,21 @@
     kind: call
     callee:
       name: mraa_i2c_write
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: mraa i2c write tainted buffer
     code: |
       #include <mraa.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mraa_i2c_write(arg);
+      void example(mraa_i2c_context i2c, unsigned char *user_input) {
+        mraa_i2c_write(i2c, user_input, 4);
       }
-  description: "mraa_i2c_write - tainted bytes are written onto an I2C bus."
+  - name: mraa i2c write literal negative
+    code: |
+      #include <mraa.h>
+      void example(mraa_i2c_context i2c) {
+        unsigned char safe[] = {0x01, 0x02};
+        mraa_i2c_write(i2c, safe, 2);
+      }
+    expect_no_match: true
+  description: "mraa_i2c_write(i2c, data, length) - attacker-controlled bytes are written onto an I2C bus."

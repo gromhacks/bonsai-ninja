@@ -300,9 +300,7 @@
     expect_no_match: true
   description: "redigo Conn.Do(\"EVAL\", taintedScript, ...) - attacker-controlled Lua executes inside Redis."
 - id: go.nosql.cassandra_query
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: go
   tag: cql-injection
   severity: high
@@ -313,12 +311,31 @@
   match:
     kind: call
     callee:
-      regex: \.Query$
-  description: "Disabled - bare `.Query$` regex double-fires with go.sqli.db_query. The sqli rule already covers the call shape; enable only when semantic receiver facts distinguish Cassandra Query from SQL Query."
+      name: Query
+  constraints:
+  - receiver_type_in: [Session]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gocql session query tainted
+    code: |
+      package main
+      import "github.com/gocql/gocql"
+      func handler(session *gocql.Session, q string) {
+        session.Query(q)
+      }
+    expect_match_text: [session.Query]
+  - name: gocql session query literal negative
+    code: |
+      package main
+      import "github.com/gocql/gocql"
+      func handler(session *gocql.Session) {
+        session.Query("SELECT * FROM users")
+      }
+    expect_no_match: true
+  description: "gocql Session.Query(cql) - CQL injection; receiver-typed to distinguish from database/sql Query."
 - id: go.nosql.elasticsearch_search
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: go
   tag: nosql-injection
   severity: high
@@ -330,12 +347,31 @@
   match:
     kind: call
     callee:
-      regex: \.Search$
-  description: "Disabled - bare `.Search$` regex double-fires with go.ldap.conn_search. The ldap rule already covers the call shape; enable only when semantic receiver facts distinguish Elasticsearch Search from LDAP Search."
+      name: Search
+  constraints:
+  - receiver_type_in: [Client]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elastic client search tainted
+    code: |
+      package main
+      import "github.com/olivere/elastic"
+      func handler(client *elastic.Client, q string) {
+        client.Search(q)
+      }
+    expect_match_text: [client.Search]
+  - name: elastic client search literal negative
+    code: |
+      package main
+      import "github.com/olivere/elastic"
+      func handler(client *elastic.Client) {
+        client.Search("match_all")
+      }
+    expect_no_match: true
+  description: "Elasticsearch Client.Search(query) - NoSQL/query injection; receiver-typed to distinguish from LDAP Conn.Search."
 - id: go.nosql.neo4j_run
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: go
   tag: cypher-injection
   severity: high
@@ -346,8 +382,29 @@
   match:
     kind: call
     callee:
-      regex: \.Run$
-  description: "Disabled - bare `.Run$` regex double-fires with go.eval.otto_run. The eval rule already covers the call shape; enable only when semantic receiver facts distinguish Neo4j Run from Otto Run."
+      name: Run
+  constraints:
+  - receiver_type_in: [Session]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: neo4j session run tainted
+    code: |
+      package main
+      import "github.com/neo4j/neo4j-go-driver/neo4j"
+      func handler(session neo4j.Session, cypher string) {
+        session.Run(cypher, nil)
+      }
+    expect_match_text: [session.Run]
+  - name: neo4j session run literal negative
+    code: |
+      package main
+      import "github.com/neo4j/neo4j-go-driver/neo4j"
+      func handler(session neo4j.Session) {
+        session.Run("MATCH (n) RETURN n", nil)
+      }
+    expect_no_match: true
+  description: "Neo4j Session.Run(cypher) - Cypher injection; receiver-typed to distinguish from Otto VM Run."
 - id: go.nosql.dynamodb_scan
   enabled: false
   disabled_reason:

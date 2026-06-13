@@ -11,6 +11,10 @@
     kind: call
     callee:
       attribute: [CrossOrigin, allowedOrigins]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"\*"$'
   match_examples:
   - name: generated shape example
     code: |
@@ -20,5 +24,50 @@
           CrossOrigin.allowedOrigins("*")
         }
       }
+  - name: explicit origin negative
+    code: |
+      import org.springframework.web.bind.annotation.*
+      class App {
+        fun handle() {
+          CrossOrigin.allowedOrigins("https://app.example.com")
+        }
+      }
+    expect_no_match: true
   description: |-
     @CrossOrigin(origins = ['*']) - Spring (Kotlin) allow-all CORS.
+- id: kotlin.cors.cors_config_addallowedorigin_wildcard
+  enabled: true
+  language: kotlin
+  tag: cors
+  category: source-independent
+  severity: medium
+  packages: [org.springframework.web.cors]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CorsConfiguration, addAllowedOrigin]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"\*"$'
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.cors.*
+      class App {
+        fun handle(input: String) {
+          CorsConfiguration.addAllowedOrigin("*")
+        }
+      }
+  - name: explicit origin negative
+    code: |
+      import org.springframework.web.cors.*
+      class App {
+        fun handle() {
+          CorsConfiguration.addAllowedOrigin("https://app.example.com")
+        }
+      }
+    expect_no_match: true
+  description: |-
+    CorsConfiguration.addAllowedOrigin("*") - Spring (Kotlin) filter-chain allow-all CORS.

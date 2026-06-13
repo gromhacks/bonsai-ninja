@@ -87,19 +87,64 @@
       func test() { let input = "x"; let amount = 1; Bcrypt.verify(input) }
     expect_match_text: [Bcrypt.verify]
   description: "Vapor Bcrypt.verify - constant-time password check."
+- id: swift.sanitizer.vapor_jwt_verify
+  enabled: true
+  language: swift
+  tag: jwt-verify
+  packages: [JWTKit, Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, verify]
+  match_examples:
+  - name: Vapor JWT verify
+    code: |
+      import JWTKit
+      func test(req: Request) { req.jwt.verify(as: Payload.self) }
+    expect_match_text: [req.jwt.verify]
+  description: "Vapor/JWTKit `req.jwt.verify(as:)` - verifies the JWT signature (and registered claims) before the payload
+    is trusted; rejects forged/tampered tokens. Mirror sink: the unverified `JWTSigner` decode path."
 - id: swift.sanitizer.sqlite_swift_bind
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: swift
   tag: sql-parameter
   packages: [SQLite.swift]
   match:
     kind: call
     callee:
-      name: bind
-  description: "Disabled - bare `.bind` matches SwiftUI `@State.bind`, Combine, etc.; would over-sanitize. Enable with receiver
-    narrowing to Statement/Connection."
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.bind$"
+      base_name_in: [statement, stmt, prepared, preparedStatement]
+  constraints:
+  - min_args: 1
+  imports:
+  - SQLite
+  match_examples:
+  - name: SQLite.swift statement bind
+    code: |
+      import SQLite
+      import struct SQLite.Statement
+      func test(input: String) {
+          let statement = Statement()
+          statement.bind(input)
+      }
+    expect_match_text: [statement.bind]
+  - name: SQLite.swift statement bind no-arg negative constraint boundary
+    code: |
+      import SQLite
+      import struct SQLite.Statement
+      func test() {
+          let statement = Statement()
+          statement.bind()
+      }
+    expect_no_match: true
+  - name: unrelated swiftui state bind negative
+    code: |
+      import SwiftUI
+      func test(value: String) { state.bind(value) }
+    expect_no_match: true
+  description: "SQLite.swift Statement.bind(values...) - binds Swift values to `?` placeholders on a prepared statement; value
+    is not interpreted as SQL. Receiver narrowed to statement-named bases so SwiftUI `@State.bind` / Combine `.bind` no longer
+    over-sanitize. `min_args: 1` rejects 0-arg decoys."
 - id: swift.sanitizer.grdb_arguments
   enabled: true
   language: swift
@@ -288,6 +333,23 @@
     callee:
       attribute: [HashedAuthenticationCode, ==]
   description: "CryptoKit HashedAuthenticationCode `==` - Apple's overload performs a constant-time compare; safe MAC verification."
+- id: swift.sanitizer.hmac_is_valid_authentication_code
+  enabled: true
+  language: swift
+  tag: constant-time-compare
+  packages: [CryptoKit]
+  match:
+    kind: call
+    callee:
+      name: isValidAuthenticationCode
+  match_examples:
+  - name: CryptoKit HMAC verify
+    code: |
+      import CryptoKit
+      func test(mac: Data, key: SymmetricKey, msg: Data) { isValidAuthenticationCode(mac, authenticating: msg, using: key) }
+    expect_match_text: [isValidAuthenticationCode]
+  description: "CryptoKit HMAC.isValidAuthenticationCode(_:authenticating:using:) - the recommended constant-time MAC
+    verification API; mitigates CWE-208 timing leaks on tag comparison and confirms message authenticity."
 - id: swift.sanitizer.timingsafe_bcmp
   enabled: true
   language: swift

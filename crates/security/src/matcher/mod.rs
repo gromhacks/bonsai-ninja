@@ -76,7 +76,7 @@ fn record_runtime_disabled_rule(rule_id: &str, reason: impl Into<String>) {
 }
 
 /// One rule match — the specific fact + location that triggered.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct RuleMatch {
     pub rule_id: String,
     pub language: String,
@@ -4972,11 +4972,26 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 }
             }
             // P6: binding must be in `expected` state at this call.
+            // `index` resolves the binding from the call's actual
+            // argument (general — `free(q)` then `strcpy(q, ..)` flags a
+            // UAF of `q`); `name` keeps the legacy literal binding.
             ConstraintKind::RequiresState { requires_state } => {
                 let Some(transitions) = ctx.lifecycle_transitions else {
                     return false;
                 };
-                let observed = lifecycle_state_at(transitions, &requires_state.name, ctx.span.start);
+                let binding: Option<&str> = match (&requires_state.name, requires_state.index) {
+                    (Some(name), _) => Some(name.as_str()),
+                    (None, Some(index)) => ctx
+                        .args
+                        .get(index as usize)
+                        .map(|arg| arg.value_text.trim())
+                        .filter(|value| is_simple_ident(value)),
+                    (None, None) => None,
+                };
+                let Some(binding) = binding else {
+                    return false;
+                };
+                let observed = lifecycle_state_at(transitions, binding, ctx.span.start);
                 if observed.as_deref() != Some(requires_state.expected.as_str()) {
                     return false;
                 }

@@ -168,6 +168,28 @@
       }
   description: "Express req.url; also covers Bun.serve request URLs when handlers name the Request `req`."
 
+- id: typescript.source.express_req_path
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [express]
+  match:
+    kind: read
+    target:
+      attribute: [req, path]
+  match_examples:
+  - name: express req path
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.path;
+      }
+    expect_match_text: [req.path]
+  description: "Express req.path - request pathname, attacker-controlled."
+
 - id: typescript.source.express_req_originalurl
   enabled: true
   language: typescript
@@ -293,7 +315,8 @@
 - id: typescript.source.koa_ctx_headers_referer
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: typescript.source.koa_ctx_headers
   language: typescript
   trust: remote
   tag: http-input
@@ -305,7 +328,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
-  description: "Disabled duplicate - typescript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
+  description: "Subsumed by typescript.source.koa_ctx_headers, which taints the whole Koa request-header object (the adapter normalizes the `.headers[...]`/`.headers.referer` subscript read to the parent header object)."
 
 - id: typescript.source.fastify_request_body
   enabled: true
@@ -838,6 +861,12 @@
         return document.referrer;
       }
     expect_match_text: [document.referrer]
+  - name: unrelated document property negative
+    code: |
+      function demo(input, req, obj) {
+        return document.title;
+      }
+    expect_no_match: true
   description: "document.referrer - attacker can set via Referer header."
 
 - id: typescript.source.postmessage_event
@@ -894,7 +923,8 @@
 - id: typescript.source.hono_ctx_req_query
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: typescript.source.express_req_query
   language: typescript
   trust: remote
   tag: http-input
@@ -948,6 +978,52 @@
         return c.req.param(input);
       }
   description: "Hono c.req.param('name') - URL path parameter."
+
+- id: typescript.source.hono_ctx_req_header
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [hono]
+  packages: [hono]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.header$"
+  match_examples:
+  - name: hono ctx req header
+    code: |
+      const _u = require("hono");
+      function demo(input, req, obj) {
+        return c.req.header(input);
+      }
+    expect_match_text: [c.req.header]
+  description: "Hono c.req.header('X-...') - HTTP request header value."
+
+- id: typescript.source.hono_ctx_req_form
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [hono]
+  packages: [hono]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.parseBody$"
+  match_examples:
+  - name: hono ctx req form
+    code: |
+      const _u = require("hono");
+      function demo(input, req, obj) {
+        return c.req.parseBody(input);
+      }
+    expect_match_text: [c.req.parseBody]
+  description: "Hono c.req.parseBody() - multipart/urlencoded form body."
 
 - id: typescript.source.trpc_input
   enabled: true
@@ -1387,6 +1463,31 @@
       }
     expect_match_text: [window.location.host]
   description: "Browser location origin/path/host fields - attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
+
+- id: typescript.source.window_name
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      attribute: [window, name]
+  match_examples:
+  - name: window name
+    code: |
+      function demo() {
+        return window.name;
+      }
+    expect_match_text: [window.name]
+  - name: unrelated window property negative
+    code: |
+      function demo() {
+        return window.length;
+      }
+    expect_no_match: true
+  description: "window.name - persists across navigations and is writable by any prior/cross-origin page, a classic DOM-XSS / data-smuggling source."
 
 - id: typescript.source.localstorage_getitem
   enabled: true

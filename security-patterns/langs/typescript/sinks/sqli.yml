@@ -215,6 +215,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: typescript.sqli.sqlite3_exec
   language: typescript
   tag: sql-injection
   severity: high

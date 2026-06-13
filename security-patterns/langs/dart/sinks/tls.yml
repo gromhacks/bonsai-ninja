@@ -3,6 +3,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: dart.tls.disable_verify_bad_cert_callback
   language: dart
   tag: weak-tls
   severity: critical

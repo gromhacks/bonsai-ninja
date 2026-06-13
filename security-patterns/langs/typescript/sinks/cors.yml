@@ -12,14 +12,24 @@
     kind: call
     callee:
       name: cors
+  constraints:
+  - any_arg_matches_regex: "(?i)credentials\\s*[:=]\\s*true"
   match_examples:
   - name: cors wildcard with credentials
     code: |
       const _u = require("cors");
       function demo(input, req, obj) {
-        return cors(input, { origin: "*", credentials: true });
+        return cors({ origin: "*", credentials: true });
       }
-  description: "cors with wildcard origin + credentials true - TS via @types/cors."
+    expect_match_text: [cors]
+  - name: cors no credentials negative
+    code: |
+      const _u = require("cors");
+      function demo(input, req, obj) {
+        return cors({ origin: "https://app.example.com" });
+      }
+    expect_no_match: true
+  description: "cors({origin: '*', credentials: true}) - reflecting any origin while allowing credentials defeats the same-origin policy. The options regex requires `credentials: true` so default/locked-down cors() configs stay quiet. TS via @types/cors."
 - id: typescript.cors.nest_enablecors_default
   enabled: true
   language: typescript
@@ -62,6 +72,8 @@
       attribute:
       - NestFactory
       - create
+  constraints:
+  - any_arg_matches_regex: "(?i)cors\\s*[:=]\\s*(?:true|\\{[^}]*origin\\s*[:=]\\s*['\"]\\*['\"])"
   match_examples:
   - name: nestfactory create cors true
     code: |
@@ -79,4 +91,11 @@
       }
     expect_match_text:
     - NestFactory.create
-  description: 'NestFactory.create(..., {cors: true/origin:''*''}) enables permissive CORS.'
+  - name: nestfactory create no cors negative
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(AppModule: any) {
+        return NestFactory.create(AppModule);
+      }
+    expect_no_match: true
+  description: 'NestFactory.create(..., {cors: true/origin:''*''}) enables permissive CORS. The options regex requires the permissive cors config so plain app bootstraps stay quiet.'

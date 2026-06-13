@@ -62,7 +62,7 @@ Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST
 The current audit pass completed the focused release/readiness surface:
 
 - Release binary builds with `cargo build -q --release -p bonsai_cli`.
-- Rulepack validation is clean: 6,694 rules, 5,487 enabled rules, 9,461 examples, 9,069 enabled examples, 0 errors, 0 warnings.
+- Rulepack validation is clean: 6,918 rules, 5,764 enabled rules, 10,135 examples, 9,748 enabled examples, 0 errors, 0 warnings (refreshed 2026-06-12 after the adapter-fact / receiver-type rule expansion; see [adapter-fact read-source unlock](../) effort).
 - Rulepack audit renders without errors and has no unexplained canonical sink-family gaps across the 20 canonical-audit languages. Solidity is explicitly ecosystem-specific; C deserialization is explicitly not applicable. Alias-covered merged rules now count toward audit coverage, so path/header rules that intentionally preserve upload/open-redirect aliases are not reported as false gaps.
 - Manual security-pattern audit is clean: `scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch` reports 0 duplicate ids, 0 duplicate enabled match shapes, 0 cross-family API collisions, and 0 family-file mismatches; the JSON audit reports 0 unresolved canonical family gaps and 0 unreviewed fragile bare-name rules.
 - `cargo fmt --all --check` is clean.

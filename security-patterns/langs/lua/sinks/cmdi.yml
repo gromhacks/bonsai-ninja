@@ -204,3 +204,69 @@
       end
     expect_no_match: true
   description: "luvit process.spawn - wrapper around uv.spawn; tainted argv is RCE."
+
+- id: lua.cmdi.penlight_utils_execute
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [penlight]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [utils, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.penlight_utils_execute example
+    code: |
+      local penlight = require("penlight")
+      local utils = require("pl.utils")
+      function example(input, url, id, payload, request, params, user)
+        utils.execute(input)
+      end
+  - name: literal command negative
+    code: |
+      local penlight = require("penlight")
+      local utils = require("pl.utils")
+      function example(input, url, id, payload, request, params, user)
+        utils.execute("ls -la")
+      end
+    expect_no_match: true
+  description: "Penlight pl.utils.execute(cmd) - runs cmd through os.execute (shell); tainted string is shell injection."
+
+- id: lua.cmdi.penlight_utils_executeex
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [penlight]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [utils, executeex]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.penlight_utils_executeex example
+    code: |
+      local penlight = require("penlight")
+      local utils = require("pl.utils")
+      function example(input, url, id, payload, request, params, user)
+        utils.executeex(input)
+      end
+  - name: literal command negative
+    code: |
+      local penlight = require("penlight")
+      local utils = require("pl.utils")
+      function example(input, url, id, payload, request, params, user)
+        utils.executeex("uptime")
+      end
+    expect_no_match: true
+  description: "Penlight pl.utils.executeex(cmd) - runs cmd via popen and captures stdout/stderr; tainted string is shell injection."

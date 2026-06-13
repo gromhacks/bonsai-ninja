@@ -160,7 +160,11 @@
     - name: declared shape
       code: |
         void test(NSUserDefaults *defaults, id input) { id target = input; int amount = 1; [defaults stringForKey:input]; }
-  description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: - typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:."
+    - name: primitive accessor negative
+      code: |
+        void test(NSUserDefaults *defaults, id input) { id target = input; int amount = 1; [defaults boolForKey:input]; }
+      expect_no_match: true
+  description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: - typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:. The method-name allowlist excludes primitive accessors like boolForKey:/integerForKey: that cannot carry a string/data payload."
 
 - id: objc.source.uipasteboard_string
   enabled: true
@@ -178,7 +182,11 @@
     - name: declared shape
       code: |
         void test(UIPasteboard *pasteboard, id input) { id target = input; int amount = 1; [pasteboard stringForType:input]; }
-  description: "UIPasteboard/NSPasteboard typed accessors - clipboard contents originate from any other app or user paste action; treat as untrusted IPC input."
+    - name: non-accessor method negative
+      code: |
+        void test(UIPasteboard *pasteboard, id input) { id target = input; int amount = 1; [pasteboard setPersistent:input]; }
+      expect_no_match: true
+  description: "UIPasteboard/NSPasteboard typed accessors - clipboard contents originate from any other app or user paste action; treat as untrusted IPC input. The method-name allowlist excludes mutators/metadata methods (setPersistent:, numberOfItems) that do not return clipboard payload."
 
 - id: objc.source.nspasteboard_string
   enabled: true

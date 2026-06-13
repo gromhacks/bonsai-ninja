@@ -69,7 +69,10 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  openat(arg);\n}\n"
+    code: |
+      void example(const char *input) {
+        openat("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {

@@ -10,7 +10,7 @@
   category: http-input
   tag: http-input
   payload_types: [query, form]
-  packages: [CGI, "Plack::Request", "Dancer2", "Catalyst"]
+  packages: [CGI, "Plack::Request", "Dancer2", "Catalyst", "Mojolicious"]
   match:
     kind: call
     callee:
@@ -224,7 +224,15 @@
         my ($upload) = @_;
         $upload->filename()
       }
-  description: "Plack/Mojolicious/CGI upload filename accessor - client-controlled multipart filename metadata."
+  - name: perl.source.plack_upload_filename setter negative
+    code: |
+      use Plack::Request;
+      sub example {
+        my ($upload, $input) = @_;
+        $upload->filename($input)
+      }
+    expect_no_match: true
+  description: "Plack/Mojolicious/CGI upload filename accessor - client-controlled multipart filename metadata. `max_args: 0` keeps it to the zero-arg read accessor and off any one-arg setter form."
 
 # -- Dancer / Dancer2 ----------------------------------------------
 - id: perl.source.dancer_params
@@ -362,6 +370,30 @@
         body_params($input)
       }
   description: "Mojolicious $c->req->body_params - POST body params."
+
+- id: perl.source.mojolicious_req_json
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [json]
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      name: json
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: perl.source.mojolicious_req_json example
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        json($input)
+      }
+  description: "Mojolicious $c->req->json - parsed JSON request body. Fully attacker-controlled. `max_args: 1` keeps it to the request-side accessor/JSON-Pointer form and off encode-side `render(json => {...})` calls that take a hashref payload."
 
 # -- DBI second-order taint ----------------------------------------
 # Database row reads are not first-order remote, but represent

@@ -719,13 +719,18 @@ pub(crate) fn idg_seed_nodes_for_names(
     seed_names: &[String],
     global: &bonsai_index::GlobalIndex,
 ) -> Vec<bonsai_idg::WsNodeId> {
+    // Bare container seeds also address their projections (`args` →
+    // `args.q`) — same expansion the security and taint-graph seed
+    // builders apply, so dump-taint reports exactly the flows
+    // taint-analysis acts on.
+    let seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(seed_names.iter());
     let mut seed_nodes: Vec<bonsai_idg::WsNodeId> =
-        idg.param_nodes_for_names(source_func, seed_names, global);
+        idg.param_nodes_for_names(source_func, &seed_names, global);
     // Augment with explicit seeds the user supplied (or the
     // assign-target augment built for dump-taint). The
     // `read_or_write_nodes_for_names` helper looks each seed name
     // up in the source func's segment string pool.
-    seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, seed_names));
+    seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
     seed_nodes.sort();
     seed_nodes.dedup();
     seed_nodes

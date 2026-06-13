@@ -48,7 +48,8 @@
 - id: perl.eval.do_file
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: perl.eval.builtin_eval
   language: perl
   tag: code-injection
   severity: critical
@@ -74,7 +75,8 @@
 - id: perl.eval.scalar
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: perl.eval.builtin_eval
   language: perl
   tag: code-injection
   severity: critical

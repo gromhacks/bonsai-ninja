@@ -29,6 +29,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { extcodesize(input); } }
+    - name: unrelated callee negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(address input) public view returns (uint256) { return input.balance; } }
+      expect_no_match: true
   description: "extcodesize(addr) - used as an 'is-this-an-EOA' guard, but returns 0 for a contract that calls during its own constructor. Trivially bypassed by performing the protected action from a constructor. Use tx.origin == msg.sender (with care) or accept the attack surface."
 - id: solidity.auth.is_contract_check
   enabled: false

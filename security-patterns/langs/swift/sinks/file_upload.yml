@@ -18,8 +18,7 @@
     code: |
       import vapor
       import Vapor // vapor
-      import Vapor // vapor
-      func test() { let input = "x"; let amount = 1; writeFile(input) }
+      func test(input: String) { writeFile("safe", input) }
   - name: literal arg 1 negative
     code: |
       func test() { writeFile("safe", "safe") }

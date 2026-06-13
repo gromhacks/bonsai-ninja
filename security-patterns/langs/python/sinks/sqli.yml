@@ -414,7 +414,7 @@
 - id: python.sqli.asyncpg_conn_execute
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: python
   tag: sql-injection
   severity: critical
@@ -476,7 +476,7 @@
 - id: python.sqli.aiopg_cursor_execute_variable
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: python
   tag: sql-injection
   severity: critical
@@ -567,7 +567,7 @@
 - id: python.sqli.sqlalchemy_engine_execute_variable
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: python
   tag: sql-injection
   severity: high
@@ -658,6 +658,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: python.sqli.cursor_execute
   language: python
   tag: sql-injection
   severity: critical
@@ -710,7 +711,8 @@
 - id: python.sqli.django_queryset_extra_order_by
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: python.sqli.django_extra
   language: python
   tag: sql-injection
   severity: high

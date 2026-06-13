@@ -11,17 +11,14 @@
     callee:
       regex: "\\.DigitalRead$"
   match_examples:
-  - name: generated direct match
+  - name: gobot digital read
     code: |
-      import "gobot.io/x/gobot"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.DigitalRead(target)
+      import "gobot.io/x/gobot"
+      func example(adaptor gobot.DigitalReader) {
+        _, _ = adaptor.DigitalRead("11")
       }
+    expect_match_text: [adaptor.DigitalRead]
   description: "DigitalRead - physical GPIO pin state from attached hardware."
 
 - id: go.physical.analog_read
@@ -36,17 +33,14 @@
     callee:
       regex: "\\.AnalogRead$"
   match_examples:
-  - name: generated direct match
+  - name: gobot analog read
     code: |
-      import "gobot.io/x/gobot"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.AnalogRead(target)
+      import "gobot.io/x/gobot"
+      func example(adaptor gobot.AnalogReader) {
+        _, _ = adaptor.AnalogRead("0")
       }
+    expect_match_text: [adaptor.AnalogRead]
   description: "AnalogRead - ADC sample from a sensor or other physical input."
 
 - id: go.physical.read_byte_data
@@ -61,17 +55,14 @@
     callee:
       regex: "\\.ReadByteData$"
   match_examples:
-  - name: generated direct match
+  - name: i2c read byte data
     code: |
-      import "gobot.io/x/gobot"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.ReadByteData(target)
+      import "periph.io/x/conn/v3/i2c"
+      func example(d *i2c.Dev) {
+        _, _ = d.ReadByteData(0x00)
       }
+    expect_match_text: [d.ReadByteData]
   description: "ReadByteData - device register read over I2C/SMBus."
 
 - id: go.physical.read_word_data
@@ -86,17 +77,14 @@
     callee:
       regex: "\\.ReadWordData$"
   match_examples:
-  - name: generated direct match
+  - name: i2c read word data
     code: |
-      import "gobot.io/x/gobot"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.ReadWordData(target)
+      import "periph.io/x/conn/v3/i2c"
+      func example(d *i2c.Dev) {
+        _, _ = d.ReadWordData(0x00)
       }
+    expect_match_text: [d.ReadWordData]
   description: "ReadWordData - 16-bit register read from a chip-to-chip bus."
 
 - id: go.physical.read_reg_u8
@@ -111,17 +99,14 @@
     callee:
       regex: "\\.ReadRegU8$"
   match_examples:
-  - name: generated direct match
+  - name: i2c read reg u8
     code: |
-      import "periph.io/x/conn/v3/i2c"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.ReadRegU8(target)
+      import "periph.io/x/conn/v3/i2c"
+      func example(d *i2c.Dev) {
+        _, _ = d.ReadRegU8(0x00)
       }
+    expect_match_text: [d.ReadRegU8]
   description: "ReadRegU8 - reads an 8-bit device register from attached hardware."
 
 - id: go.physical.read_reg_u16be
@@ -136,15 +121,12 @@
     callee:
       regex: "\\.ReadRegU16BE$"
   match_examples:
-  - name: generated direct match
+  - name: i2c read reg u16be
     code: |
-      import "periph.io/x/conn/v3/i2c"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.ReadRegU16BE(target)
+      import "periph.io/x/conn/v3/i2c"
+      func example(d *i2c.Dev) {
+        _, _ = d.ReadRegU16BE(0x00)
       }
+    expect_match_text: [d.ReadRegU16BE]
   description: "ReadRegU16BE - big-endian 16-bit register read from an attached peripheral."

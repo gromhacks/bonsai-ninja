@@ -536,6 +536,7 @@ fn normalize_ruby_instance_variable_flow_events(events: &mut [FlowEvent]) {
                     arg.value_text = normalize_ruby_instance_variable_text(&arg.value_text);
                     normalize_optional_ruby_instance_variable_text(&mut arg.place);
                     normalize_ruby_instance_variable_texts(&mut arg.source_names);
+                    enrich_ruby_instance_variable_call_arg(arg);
                 }
             }
             FlowEvent::Return {
@@ -598,6 +599,41 @@ fn normalize_ruby_instance_variable_texts(values: &mut [String]) {
     for value in values {
         *value = normalize_ruby_instance_variable_text(value);
     }
+}
+
+fn enrich_ruby_instance_variable_call_arg(arg: &mut CallArg) {
+    let Some(place) = ruby_normalized_instance_variable_place(&arg.value_text) else {
+        return;
+    };
+    if arg.place.as_deref().is_none_or(str::is_empty) {
+        arg.place = Some(place.clone());
+    }
+    if !arg.source_names.iter().any(|source| source == &place) {
+        arg.source_names.push(place);
+        arg.source_names.sort();
+        arg.source_names.dedup();
+    }
+}
+
+fn ruby_normalized_instance_variable_place(text: &str) -> Option<String> {
+    let text = text.trim();
+    let rest = text.strip_prefix("self.")?;
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.split('.').all(ruby_identifier_part) {
+        Some(text.to_string())
+    } else {
+        None
+    }
+}
+
+fn ruby_identifier_part(part: &str) -> bool {
+    let mut chars = part.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn normalize_ruby_instance_variable_text(text: &str) -> String {

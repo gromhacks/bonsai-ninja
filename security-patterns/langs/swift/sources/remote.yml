@@ -36,6 +36,11 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; content.decode(input) }
+  - name: unrelated decode receiver negative
+    code: |
+      import Vapor
+      func test() { let input = "x"; cache.decode(input) }
+    expect_no_match: true
   description: "Vapor req.content.decode(T.self) - decodes the request body into a model; payload is attacker-controlled."
 
 - id: swift.vapor.request_query_decode
@@ -55,7 +60,37 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; query.decode(input) }
+  - name: unrelated decode receiver negative
+    code: |
+      import Vapor
+      func test() { let input = "x"; cache.decode(input) }
+    expect_no_match: true
   description: "Vapor req.query.decode(T.self) - decodes the query-string into a model; attacker-controlled."
+
+- id: swift.vapor.request_query_get
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [query, get]
+  match_examples:
+  - name: vapor query get
+    code: |
+      import Vapor
+      func test() { let input = "x"; query.get(input) }
+    expect_match_text: [query.get]
+  - name: unrelated get receiver negative
+    code: |
+      import Vapor
+      func test() { let input = "x"; cache.get(input) }
+    expect_no_match: true
+  description: "Vapor req.query.get(_:at:) - typed query-parameter accessor; the returned value is attacker-controlled."
 
 - id: swift.vapor.request_headers_first
   enabled: true
@@ -74,6 +109,11 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; headers.first(input) }
+  - name: unrelated first receiver negative
+    code: |
+      import Vapor
+      func test() { let input = "x"; items.first(input) }
+    expect_no_match: true
   description: "Vapor req.headers.first(name:) - header value lookup; attacker-controlled."
 
 - id: swift.vapor.request_parameters_get
@@ -93,6 +133,11 @@
     code: |
       import Vapor
       func test() { let input = "x"; let amount = 1; parameters.get(input) }
+  - name: unrelated get receiver negative
+    code: |
+      import Vapor
+      func test() { let input = "x"; cache.get(input) }
+    expect_no_match: true
   description: "Vapor req.parameters.get(_:) - URL path parameter; attacker-controlled."
 
 - id: swift.uipasteboard_general
@@ -110,6 +155,11 @@
     code: |
       import UIKit
       func test() { let input = "x"; let amount = 1; UIPasteboard.general(input) }
+  - name: unrelated general receiver negative
+    code: |
+      import UIKit
+      func test() { let input = "x"; NotificationCenter.general(input) }
+    expect_no_match: true
   description: "UIPasteboard.general.string - clipboard contents are user-mutable; treat as untrusted when used in security-sensitive flows."
 
 - id: swift.vapor.request_query
@@ -265,41 +315,53 @@
   description: "Vapor File.filename - multipart Content-Disposition filename supplied by the client."
 
 - id: swift.hummingbird.request_query
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: http-input
   payload_types: [query]
   frameworks: [hummingbird]
-  packages: [hummingbird]
+  packages: [Hummingbird]
   match:
     kind: read
     target:
-      attribute: [Request, uri, query]
-  description: "Disabled - the current Swift adapter does not index property reads like `req.uri.query`."
+      name: query
+      receiver_type_in: [Request]
+  match_examples:
+  - name: hummingbird request uri query read
+    code: |
+      import Hummingbird
+      func handle(req: Request) -> String? {
+        let q = req.uri.query
+        return q
+      }
+  description: "Hummingbird Request.uri.query - raw query string read on a typed Request receiver."
 
 - id: swift.hummingbird.request_body
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: http-input
   payload_types: [json, text]
   frameworks: [hummingbird]
-  packages: [hummingbird]
+  packages: [Hummingbird]
   match:
     kind: read
     target:
-      attribute: [Request, body]
-  description: "Disabled - the current Swift adapter does not index property reads like `req.body`."
+      name: body
+      receiver_type_in: [Request]
+  match_examples:
+  - name: hummingbird request body read
+    code: |
+      import Hummingbird
+      func handle(req: Request) -> ByteBuffer {
+        let b = req.body
+        return b
+      }
+  description: "Hummingbird Request.body - request body read on a typed Request receiver."
 
 - id: swift.kitura.request_query
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: http-input
@@ -309,13 +371,20 @@
   match:
     kind: read
     target:
-      attribute: [RouterRequest, queryParameters]
-  description: "Disabled - the current Swift adapter does not index property reads like `request.queryParameters`."
+      name: queryParameters
+      receiver_type_in: [RouterRequest]
+  match_examples:
+  - name: kitura request query parameters read
+    code: |
+      import Kitura
+      func handle(request: RouterRequest) -> [String: String] {
+        let q = request.queryParameters
+        return q
+      }
+  description: "Kitura RouterRequest.queryParameters - parsed query parameters read on a typed RouterRequest receiver."
 
 - id: swift.kitura.request_body
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: http-input
@@ -325,8 +394,17 @@
   match:
     kind: read
     target:
-      attribute: [RouterRequest, body]
-  description: "Disabled - the current Swift adapter does not index property reads like `request.body`."
+      name: body
+      receiver_type_in: [RouterRequest]
+  match_examples:
+  - name: kitura request body read
+    code: |
+      import Kitura
+      func handle(request: RouterRequest) -> ParsedBody? {
+        let b = request.body
+        return b
+      }
+  description: "Kitura RouterRequest.body - parsed request body read on a typed RouterRequest receiver."
 
 - id: swift.perfect.request_param
   enabled: true
@@ -346,6 +424,11 @@
       import PerfectHTTP
       func test() { let input = "x"; HTTPRequest.param(input) }
     expect_match_text: [HTTPRequest.param]
+  - name: unrelated param receiver negative
+    code: |
+      import PerfectHTTP
+      func test() { let input = "x"; config.param(input) }
+    expect_no_match: true
   description: "Perfect HTTPRequest.param(_:) - request parameter value; local receiver calls require semantic HTTPRequest receiver-type facts."
 
 - id: swift.urlsession_response_data
@@ -362,6 +445,10 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; URLSession.shared.data(input) }
+  - name: unrelated session method negative
+    code: |
+      func test() { URLSession.shared.invalidateAndCancel() }
+    expect_no_match: true
   description: "URLSession.shared.data(for:) - returns (Data, URLResponse) from a remote server; payload may be attacker-controlled (supply-chain / redirection)."
 
 - id: swift.alamofire_response
@@ -494,6 +581,11 @@
       import NIO
       func test(input: Any) { ChannelHandlerContext.fireChannelRead(input) }
     expect_match_text: [ChannelHandlerContext.fireChannelRead]
+  - name: unrelated fireChannelRead receiver negative
+    code: |
+      import NIO
+      func test(input: Any) { other.fireChannelRead(input) }
+    expect_no_match: true
   description: "SwiftNIO ChannelHandlerContext.fireChannelRead(_:) - inbound network bytes/messages; local receiver calls require semantic ChannelHandlerContext receiver-type facts."
 
 - id: swift.grpc.request_param
@@ -530,4 +622,34 @@
       import Vapor
       func test() { WebSocket.onText { ws, text in _ = text } }
     expect_match_text: [WebSocket.onText]
+  - name: unrelated onText receiver negative
+    code: |
+      import Vapor
+      func test() { logger.onText { ws, text in _ = text } }
+    expect_no_match: true
   description: "Vapor WebSocket.onText(_:) - inbound WebSocket text frame; local receiver calls require semantic WebSocket receiver-type facts."
+
+- id: swift.websocket_on_binary
+  enabled: true
+  language: swift
+  trust: remote
+  tag: ws-input
+  payload_types: [binary]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [WebSocket, onBinary]
+  match_examples:
+  - name: vapor websocket on binary
+    code: |
+      import Vapor
+      func test() { WebSocket.onBinary { ws, data in _ = data } }
+    expect_match_text: [WebSocket.onBinary]
+  - name: unrelated onBinary receiver negative
+    code: |
+      import Vapor
+      func test() { logger.onBinary { ws, data in _ = data } }
+    expect_no_match: true
+  description: "Vapor WebSocket.onBinary(_:) - inbound WebSocket binary frame; attacker-controlled payload."

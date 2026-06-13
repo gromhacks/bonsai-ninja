@@ -98,7 +98,7 @@
 - id: perl.template.mason_exec
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: perl
   tag: ssti
   severity: critical

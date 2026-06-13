@@ -214,6 +214,59 @@
       }
     expect_no_match: true
   description: "execvp(file, argv) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+- id: c.cmdi.execvpe
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execvpe
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted program name
+    code: |
+      void example(char *input) {
+        execvpe(input);
+      }
+  - name: literal program negative
+    code: |
+      void example(void) {
+        execvpe("safe");
+      }
+    expect_no_match: true
+  description: "execvpe(file, argv, envp) - GNU PATH-resolving exec; tainted file hijacks the binary via $PATH (same surface as execvp, plus a caller-supplied environment)."
+- id: c.cmdi.execvpe_argv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execvpe
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted argv vector
+    code: |
+      void example(char **args) {
+        execvpe("git", args);
+      }
+  - name: literal argv vector negative
+    code: |
+      void example(void) {
+        char *args[] = {"git", "status", 0};
+        execvpe("git", args);
+      }
+    expect_no_match: true
+  description: "execvpe(file, argv, envp) - tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
 - id: c.cmdi.execve
   enabled: true
   language: c
@@ -310,10 +363,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        posix_spawn(arg);
+      void example(char *input) {
+        posix_spawn("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -390,10 +441,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        posix_spawnp(arg);
+      void example(char *input) {
+        posix_spawnp("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -588,13 +637,9 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
       #include <windows.h> /* win32 */
-      #include <windows.h> /* win32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        CreateProcessA(arg);
+      void example(char *input) {
+        CreateProcessA("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -655,13 +700,9 @@
   - name: generated direct match
     code: |
       #include <windows.h>
-      #include <windows.h>
       #include <windows.h> /* win32 */
-      #include <windows.h> /* win32 */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        CreateProcessW(arg);
+      void example(char *input) {
+        CreateProcessW("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -722,13 +763,9 @@
   - name: generated direct match
     code: |
       #include <shellapi.h>
-      #include <shellapi.h>
       #include <shellapi.h> /* win32-shell */
-      #include <shellapi.h> /* win32-shell */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        ShellExecuteA(arg);
+      void example(char *input) {
+        ShellExecuteA("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -789,13 +826,9 @@
   - name: generated direct match
     code: |
       #include <shellapi.h>
-      #include <shellapi.h>
       #include <shellapi.h> /* win32-shell */
-      #include <shellapi.h> /* win32-shell */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        ShellExecuteW(arg);
+      void example(char *input) {
+        ShellExecuteW("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -919,10 +952,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        fexecve(arg);
+      void example(char *input) {
+        fexecve("safe", input);
       }
   - name: literal arg 1 negative
     code: |

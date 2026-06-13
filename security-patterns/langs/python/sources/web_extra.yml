@@ -84,7 +84,8 @@
 - id: python.web.request_cookies_get
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: python.pyramid.request_cookies
   language: python
   trust: remote
   tag: http-input
@@ -537,7 +538,8 @@
 - id: python.falcon.bounded_stream_read
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: python.aiohttp.bounded_stream_read
   language: python
   trust: remote
   tag: http-input
@@ -694,7 +696,8 @@
 - id: python.bottle.request_query
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: python.aiohttp.request_query
   language: python
   trust: remote
   tag: http-input
@@ -705,7 +708,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query$"
-  description: "Disabled duplicate - same `request.query` adapter fact as python.aiohttp.request_query; package metadata is merged there."
+  description: "Subsumed by python.aiohttp.request_query, whose packages: [aiohttp, bottle] already cover `request.query` in bottle apps."
 
 # ---------------------------------------------------------------------------
 # FastAPI / Starlette

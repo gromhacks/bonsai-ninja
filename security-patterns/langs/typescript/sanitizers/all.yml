@@ -140,6 +140,87 @@
     expect_match_text: [validator.isNumeric]
   description: "validator.isNumeric - digits-only check; neutralises tainted numeric paths."
 
+- id: typescript.sanitizer.validator_is_int
+  enabled: true
+  language: typescript
+  tag: numeric-coerce
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.isInt$"
+  match_examples:
+  - name: validator isInt
+    code: |
+      import validator from "validator";
+      function ok(input: string) {
+        return validator.isInt(input);
+      }
+    expect_match_text: [validator.isInt]
+  description: "validator.isInt - integer-format check; pass implies the value is digits-only and safe in numeric contexts."
+
+- id: typescript.sanitizer.validator_is_uuid
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.isUUID$"
+  match_examples:
+  - name: validator isUUID
+    code: |
+      import validator from "validator";
+      function ok(input: string) {
+        return validator.isUUID(input);
+      }
+    expect_match_text: [validator.isUUID]
+  description: "validator.isUUID - RFC-4122 UUID format check; a pass constrains the value to a fixed hex/dash shape with no injection metacharacters."
+
+- id: typescript.sanitizer.validator_is_alphanumeric
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.isAlphanumeric$"
+  match_examples:
+  - name: validator isAlphanumeric
+    code: |
+      import validator from "validator";
+      function ok(input: string) {
+        return validator.isAlphanumeric(input);
+      }
+    expect_match_text: [validator.isAlphanumeric]
+  description: "validator.isAlphanumeric - [A-Za-z0-9] character allowlist check; pass implies no SQL/XSS/shell metacharacters."
+
+- id: typescript.sanitizer.validator_whitelist
+  enabled: true
+  language: typescript
+  tag: char-allowlist
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.whitelist$"
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: validator whitelist
+    code: |
+      import validator from "validator";
+      function clean(input: string) {
+        return validator.whitelist(input, "a-zA-Z0-9_");
+      }
+    expect_match_text: [validator.whitelist]
+  - name: validator whitelist no chars negative constraint boundary
+    code: "import validator from \"validator\";\nfunction clean(input: string) {\n  return validator.whitelist(input);\n}\n"
+    expect_no_match: true
+  description: "validator.whitelist(input, chars) - removes every character outside the explicit allowlist; min_args 2 requires the allowlist argument."
+
 # -- SQL ---------------------------------------------------------------------
 - id: typescript.sanitizer.sqlstring_escape
   enabled: true
@@ -551,6 +632,25 @@
       }
     expect_match_text: [isURL]
   description: "is-url(input) - boolean URL validator; pair with allowlist."
+
+- id: typescript.sanitizer.braintree_sanitize_url
+  enabled: true
+  language: typescript
+  tag: open-redirect-sanitize
+  packages: ["@braintree/sanitize-url"]
+  match:
+    kind: call
+    callee:
+      name: sanitizeUrl
+  match_examples:
+  - name: braintree sanitizeUrl
+    code: |
+      import { sanitizeUrl } from "@braintree/sanitize-url";
+      function ok(input: string) {
+        return sanitizeUrl(input);
+      }
+    expect_match_text: [sanitizeUrl]
+  description: "@braintree/sanitize-url sanitizeUrl - strips javascript:/data:/vbscript: schemes, returning about:blank for unsafe URLs; neutralises href-based XSS and open-redirect."
 
 - id: typescript.sanitizer.valid_url_iswebui
   enabled: true

@@ -16,7 +16,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <sqlite3.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  sqlite3_exec(arg);\n}\n"
+    code: |
+      #include <sqlite3.h>
+      void example(const char *input) {
+        sqlite3_exec("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -74,7 +78,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <sqlite3.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  sqlite3_get_table(arg);\n}\n"
+    code: |
+      #include <sqlite3.h>
+      void example(const char *input) {
+        sqlite3_get_table("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -185,7 +193,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <mysql/mysql.h>\n#include <mysql/mysql.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  mysql_query(arg);\n}\n"
+    code: |
+      #include <mysql/mysql.h>
+      void example(const char *input) {
+        mysql_query("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -214,7 +226,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <mysql/mysql.h>\n#include <mysql/mysql.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  mysql_real_query(arg);\n}\n"
+    code: |
+      #include <mysql/mysql.h>
+      void example(const char *input) {
+        mysql_real_query("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -328,7 +344,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <libpq-fe.h>\n#include <libpq-fe.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  PQexec(arg);\n}\n"
+    code: |
+      #include <libpq-fe.h>
+      void example(const char *input) {
+        PQexec("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -393,7 +413,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <odbc.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  SQLExecDirect(arg);\n}\n"
+    code: |
+      #include <odbc.h>
+      void example(const char *input) {
+        SQLExecDirect("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -419,7 +443,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <odbc.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  SQLExecDirectW(arg);\n}\n"
+    code: |
+      #include <odbc.h>
+      void example(const char *input) {
+        SQLExecDirectW("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {

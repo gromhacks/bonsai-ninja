@@ -13,6 +13,10 @@
     kind: call
     callee:
       attribute: [passport, authenticate]
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: "(?i)state\\s*[:=]\\s*false"
   match_examples:
   - name: passport state disabled
     code: |
@@ -20,7 +24,15 @@
       function demo(input, req, obj) {
         return passport.authenticate(input, { state: false });
       }
-  description: "passport.authenticate({state: false})."
+    expect_match_text: [passport.authenticate]
+  - name: passport state enabled negative
+    code: |
+      const _u = require("passport");
+      function demo(input, req, obj) {
+        return passport.authenticate(input, { state: true });
+      }
+    expect_no_match: true
+  description: "passport.authenticate(strategy, {state: false}) - disabling the OAuth state parameter removes the CSRF binding on the authorization callback. The arg-1 options regex pins the dangerous `state: false` so default/enabled calls stay quiet."
 
 - id: typescript.oauth.openid_client_callback_no_state
   enabled: true

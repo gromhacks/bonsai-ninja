@@ -886,6 +886,14 @@
       }
       class Map {}
     expect_match_text: [requestBody]
+  - name: unrelated parameter name negative
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void post(String name) {
+        }
+      }
+    expect_no_match: true
   description: "JAX-RS / Quarkus entity body parameter convention - unannotated String or Map body supplied by the HTTP request."
 
 - id: java.source.azure_http_trigger
@@ -950,9 +958,7 @@
   description: "Disabled - matcher only sees parameter identifiers, not @OnMessage annotations."
 
 - id: java.source.android_intent_getdata
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: remote
   tag: http-input
@@ -961,8 +967,19 @@
   match:
     kind: call
     callee:
-      attribute: [Intent, getData]
-  description: "Disabled - `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
+      name: getData
+  constraints:
+  - receiver_type_in: [Intent]
+  match_examples:
+  - name: android intent get data
+    code: |
+      import android.content.Intent;
+      class App {
+        void handle(Intent intent) throws Exception {
+          android.net.Uri data = intent.getData();
+        }
+      }
+  description: "Android Intent.getData() - deep-link/IPC URI from another app, read on a typed Intent receiver."
 
 - id: java.source.spring_httpentity_getbody
   enabled: true
@@ -1205,6 +1222,13 @@
         void handle(String payload) {
         }
       }
+  - name: unrelated parameter name negative
+    code: |
+      class App {
+        void handle(int count) {
+        }
+      }
+    expect_no_match: true
   description: "Generic `byte[] data | blob | payload | bytes | buf | buffer` parameter on deserialization-style entry points. Pairs with java.deser.* sinks (ObjectInputStream.readObject, Kryo, XMLDecoder, jackson-databind). Engine taint flow + sink shape are the second gate."
 
 - id: java.source.graphql_datafetching_environment_getargument
@@ -1898,6 +1922,15 @@
         static String get(Object... args) { return ""; }
       }
     expect_match_text: [ThreadContext.get]
+  - name: unrelated map get negative
+    code: |
+      import org.slf4j.*;
+      class App {
+        Object handle(java.util.Map cache) {
+          return cache.get("x-request-id");
+        }
+      }
+    expect_no_match: true
   description: "MDC/ThreadContext values often hold request headers or correlation IDs copied at the web boundary; treat reads as remote-controlled logging context input."
 
 - id: java.source.stomp_message_headers_get

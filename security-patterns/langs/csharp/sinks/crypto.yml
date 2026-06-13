@@ -13,7 +13,12 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MD5.Create(input); } }
+      class App { void Test() { MD5.Create(); } }
+    expect_match_text: [MD5.Create]
+  - name: strong hash negative
+    code: |
+      class App { void Test() { SHA256.Create(); } }
+    expect_no_match: true
   description: "MD5.Create - broken hash."
 
 - id: csharp.crypto.md5_new
@@ -47,7 +52,12 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SHA1.Create(input); } }
+      class App { void Test() { SHA1.Create(); } }
+    expect_match_text: [SHA1.Create]
+  - name: strong hash negative
+    code: |
+      class App { void Test() { SHA256.Create(); } }
+    expect_no_match: true
   description: "SHA1.Create - broken hash function; use SHA-256 or stronger for integrity / HMAC."
 
 - id: csharp.crypto.sha1_new
@@ -81,7 +91,12 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DES.Create(input); } }
+      class App { void Test() { DES.Create(); } }
+    expect_match_text: [DES.Create]
+  - name: strong cipher negative
+    code: |
+      class App { void Test() { Aes.Create(); } }
+    expect_no_match: true
   description: "DES.Create - broken cipher."
 
 - id: csharp.crypto.des_new
@@ -115,7 +130,12 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TripleDES.Create(input); } }
+      class App { void Test() { TripleDES.Create(); } }
+    expect_match_text: [TripleDES.Create]
+  - name: strong cipher negative
+    code: |
+      class App { void Test() { Aes.Create(); } }
+    expect_no_match: true
   description: "TripleDES.Create - deprecated for new designs."
 
 - id: csharp.crypto.rc2
@@ -252,7 +272,12 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MD5.HashData(input); } }
+      class App { void Test(byte[] input) { MD5.HashData(input); } }
+    expect_match_text: [MD5.HashData]
+  - name: strong hash negative
+    code: |
+      class App { void Test(byte[] input) { SHA256.HashData(input); } }
+    expect_no_match: true
   description: "MD5.HashData - one-shot static hash; broken function."
 
 - id: csharp.crypto.sha1_hashdata
@@ -269,7 +294,12 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SHA1.HashData(input); } }
+      class App { void Test(byte[] input) { SHA1.HashData(input); } }
+    expect_match_text: [SHA1.HashData]
+  - name: strong hash negative
+    code: |
+      class App { void Test(byte[] input) { SHA256.HashData(input); } }
+    expect_no_match: true
   description: "SHA1.HashData - one-shot static hash; broken function."
 
 - id: csharp.crypto.hmac_md5_new
@@ -321,6 +351,10 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RSAPKCS1KeyExchangeFormatter.CreateKeyExchange(input); } }
     expect_match_text: [RSAPKCS1KeyExchangeFormatter.CreateKeyExchange]
+  - name: oaep formatter negative
+    code: |
+      class App { void Test(byte[] input) { RSAOAEPKeyExchangeFormatter.CreateKeyExchange(input); } }
+    expect_no_match: true
   description: "RSAPKCS1KeyExchangeFormatter.CreateKeyExchange - PKCS#1 v1.5 RSA encryption padding; use OAEP."
 - id: csharp.crypto.rsa_pkcs1_key_exchange_deformatter
   enabled: true
@@ -338,6 +372,10 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange(input); } }
     expect_match_text: [RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange]
+  - name: oaep deformatter negative
+    code: |
+      class App { void Test(byte[] input) { RSAOAEPKeyExchangeDeformatter.DecryptKeyExchange(input); } }
+    expect_no_match: true
   description: "RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange - PKCS#1 v1.5 RSA decryption padding; use OAEP."
 
 - id: csharp.crypto.hmac_ripemd160_new
@@ -408,6 +446,11 @@
   - name: system random next
     code: |
       class App { void Test() { Random.Next(); } }
+    expect_match_text: [Random.Next]
+  - name: crypto rng negative
+    code: |
+      class App { void Test() { RandomNumberGenerator.GetInt32(100); } }
+    expect_no_match: true
   description: "System.Random.Next - non-cryptographic PRNG output; use RandomNumberGenerator for security-sensitive randomness."
 
 - id: csharp.crypto.random_nextbytes
@@ -425,6 +468,11 @@
   - name: system random next bytes
     code: |
       class App { void Test(byte[] bytes) { Random.NextBytes(bytes); } }
+    expect_match_text: [Random.NextBytes]
+  - name: crypto rng negative
+    code: |
+      class App { void Test(byte[] bytes) { RandomNumberGenerator.Fill(bytes); } }
+    expect_no_match: true
   description: "System.Random.NextBytes - non-cryptographic byte stream; use RandomNumberGenerator.Fill for secrets, tokens, nonces, and keys."
 
 - id: csharp.crypto.random_nextdouble
@@ -442,4 +490,9 @@
   - name: system random next double
     code: |
       class App { void Test() { Random.NextDouble(); } }
+    expect_match_text: [Random.NextDouble]
+  - name: crypto rng negative
+    code: |
+      class App { void Test() { RandomNumberGenerator.GetInt32(100); } }
+    expect_no_match: true
   description: "System.Random.NextDouble - non-cryptographic PRNG output; do not use for security-sensitive random values."

@@ -56,4 +56,11 @@
       void example(const char *message) {
         (void)message;
       }
+  - name: unrelated param name is not the message
+    code: |
+      #include <amqpcpp.h>
+      void example(const char *channel) {
+        (void)channel;
+      }
+    expect_no_match: true
   description: "AMQP-CPP onReceived message parameter."

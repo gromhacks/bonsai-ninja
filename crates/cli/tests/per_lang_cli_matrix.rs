@@ -443,8 +443,13 @@ pub const LANGS: &[LangExp] = &[
         // filtering, and source-to-sink scheduling removed duplicate /
         // overclaim rows from this fixture while preserving the real
         // command-injection, SQLi, template, path, SSRF, eval, and
-        // pickle findings.
-        min_findings_complex: 61,
+        // pickle findings. 61 -> 59: corridor-scoped source graphs now
+        // resolve the concrete `python.cli.builtin_input` lineage into
+        // deep_flow_sink's os_system, collapsing four inferred
+        // `decorator_handler.param_*` overclaims on that sink into one
+        // concrete finding (plus one new decorator chain in
+        // advanced_patterns).
+        min_findings_complex: 59,
         min_complex_decls: 200,
         refs_populated: true,
         has_classes: false,

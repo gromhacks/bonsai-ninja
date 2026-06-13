@@ -72,6 +72,12 @@ pub(crate) fn normalise_qualified_text(text: &str) -> String {
             }
             // Quotes inside brackets are subscript-key punctuation, not identifier text.
             '\'' | '"' if bracket_depth > 0 => {}
+            // Ruby / Elixir symbol-key sigil inside a subscript
+            // (`params[:token]`) is punctuation too — drop it so the
+            // key normalises to `params.token`, matching the kit's
+            // adapter-side `normalise_qualified_text` and the field
+            // seed spelling a rule author writes (`params.token`).
+            ':' if bracket_depth > 0 => {}
             _ => normalised.push(ch),
         }
     }

@@ -65,9 +65,7 @@
     expect_no_match: true
   description: "Headers.set() - overwrite a response header with a tainted value; newline injection splits the response."
 - id: python.header.django_response_setitem
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   tag: header-injection
   severity: high
@@ -81,11 +79,31 @@
       attribute:
       - HttpResponse
       - __setitem__
-  description: "Disabled - `response[name] = value` is a subscript-assign; the tree-sitter adapter does not surface it as an `__setitem__` attribute call so this never fires. Use python.header.django_response_headers_setitem once subscript matching lands."
+  constraints:
+  - any_arg_tainted: true
+  match_examples:
+  - name: django response setitem tainted name
+    code: |
+      from django.http import HttpResponse
+      def view(request):
+          response = HttpResponse()
+          name = request.GET.get('h')
+          response[name] = "x"
+          return response
+    expect_match_text: ["response.__setitem__"]
+  - name: django response setitem literal negative
+    code: |
+      from django.http import HttpResponse
+      def view(request):
+          response = HttpResponse()
+          response["Content-Type"] = "text/html"
+          return response
+    expect_no_match: true
+  description: "Django `response[name] = value` (HttpResponse.__setitem__) - a tainted header name or value is CRLF/header injection. Subscript-assign is surfaced as a synthetic __setitem__ call on the typed HttpResponse receiver."
 - id: python.header.fastapi_response_headers
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: python
   tag: header-injection
   severity: high

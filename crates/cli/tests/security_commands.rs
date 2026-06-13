@@ -1703,7 +1703,75 @@ fn taint_analysis_json_exposes_completion_metadata() {
 }
 
 #[test]
-fn taint_analysis_rejects_broad_precision() {
+fn taint_analysis_summary_json_exposes_triage_counts() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--summary",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint-analysis summary JSON");
+    assert!(
+        parsed["total_findings"].as_u64().unwrap_or(0) > 0,
+        "summary must report finding count:\n{out}"
+    );
+    assert!(
+        parsed["tag_counts"]["command-injection"].as_u64().unwrap_or(0) > 0
+            || parsed["tag_counts"]["sql-injection"].as_u64().unwrap_or(0) > 0,
+        "summary must expose tag counts for triage:\n{out}"
+    );
+    assert!(
+        parsed["sink_rule_counts"]
+            .as_object()
+            .is_some_and(|counts| !counts.is_empty()),
+        "summary must expose sink rule counts:\n{out}"
+    );
+    assert!(
+        parsed.get("rows").is_none(),
+        "summary mode must emit the summary object, not paged rows:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_summary_text_exposes_precision_counts() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--summary",
+    ])
+    .unwrap();
+    assert!(
+        out.contains("security taint-analysis summary"),
+        "summary text header missing:\n{out}"
+    );
+    assert!(
+        out.contains("precision") && (out.contains("exact") || out.contains("narrowed")),
+        "summary text must expose semantic precision counts:\n{out}"
+    );
+    assert!(
+        !out.contains("TAINT FLOW"),
+        "summary mode must not render finding bodies:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_rejects_precision_filter() {
     let Some(bin) = bin_path() else {
         return;
     };
@@ -1719,20 +1787,17 @@ fn taint_analysis_rejects_broad_precision() {
             "--rules-dir",
             &rules_dir(),
             "--precision",
-            "over-approximate",
+            "exact",
             "--no-color",
             "--no-progress",
         ])
         .output()
         .expect("run bonsai-ninja");
-    assert!(
-        !out.status.success(),
-        "taint-analysis --precision over-approximate should fail"
-    );
+    assert!(!out.status.success(), "taint-analysis --precision should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("semantic-only"),
-        "error should explain semantic-only precision, got:\n{stderr}"
+        stderr.contains("unexpected argument '--precision'"),
+        "error should reject the precision flag at the CLI parser, got:\n{stderr}"
     );
     assert!(
         !stderr.contains("ignoring stale or corrupt"),
@@ -2938,5 +3003,135 @@ fn pack_audit_has_no_unexplained_canonical_family_gaps() {
         gaps.is_empty(),
         "pack audit has unexplained canonical family gaps: {}\n{out}",
         gaps.join(", ")
+    );
+}
+
+#[test]
+fn taint_analysis_baseline_classifies_new_and_unchanged() {
+    let ws = temp_workspace("baseline-diff");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system("echo " + cmd)
+"#,
+    )
+    .expect("write fixture");
+    let rules = rules_dir();
+    let args = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules,
+        "taint-analysis",
+        "--source",
+        "^python\\.flask\\.request_args$",
+        "--sink",
+        "^python\\.cmdi\\.os_system$",
+        "--format",
+        "json",
+        "--all",
+        "--no-cache",
+    ];
+    let baseline = run(&args).expect("baseline run");
+    assert!(
+        baseline.contains("\"finding_id\""),
+        "baseline should have a finding:\n{baseline}"
+    );
+    let baseline_path = ws.join("baseline.json");
+    std::fs::write(&baseline_path, &baseline).expect("write baseline");
+
+    // Same code → the finding must classify as `unchanged`.
+    let mut with_baseline: Vec<&str> = args.to_vec();
+    with_baseline.push("--baseline");
+    with_baseline.push(baseline_path.to_str().unwrap());
+    let diffed = run(&with_baseline).expect("baseline diff run");
+    assert!(
+        diffed.contains("\"baseline_status\": \"unchanged\""),
+        "unchanged finding must be tagged against an identical baseline:\n{diffed}"
+    );
+
+    // Empty baseline → the finding must classify as `new`.
+    let empty_path = ws.join("empty.json");
+    std::fs::write(&empty_path, "[]").expect("write empty baseline");
+    let mut vs_empty: Vec<&str> = args.to_vec();
+    vs_empty.push("--baseline");
+    vs_empty.push(empty_path.to_str().unwrap());
+    let vs_empty_out = run(&vs_empty).expect("empty baseline run");
+    assert!(
+        vs_empty_out.contains("\"baseline_status\": \"new\""),
+        "finding absent from baseline must be tagged new:\n{vs_empty_out}"
+    );
+}
+
+#[test]
+fn taint_analysis_explain_distinguishes_connected_from_no_path() {
+    let ws = temp_workspace("explain");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def connected():
+    cmd = request.args.get("cmd")
+    os.system("echo " + cmd)
+
+def isolated_sink():
+    os.system("ls")
+"#,
+    )
+    .expect("write fixture");
+    let rules = rules_dir();
+    let base = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules,
+        "taint-analysis",
+        "--source",
+        "^python\\.flask\\.request_args$",
+    ];
+
+    // Both rules match and a flow exists -> connected.
+    let mut connected: Vec<&str> = base.to_vec();
+    connected.extend([
+        "--sink",
+        "^python\\.cmdi\\.os_system$",
+        "--explain",
+        "--format",
+        "json",
+        "--no-cache",
+    ]);
+    let out = run(&connected).expect("explain connected");
+    assert!(
+        out.contains("\"verdict\": \"connected\""),
+        "flask args reaching os.system must explain as connected:\n{out}"
+    );
+
+    // Source matches nothing -> no-source-match.
+    let no_src = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules,
+        "taint-analysis",
+        "--source",
+        "^python\\.does\\.not\\.exist$",
+        "--sink",
+        "^python\\.cmdi\\.os_system$",
+        "--explain",
+        "--format",
+        "json",
+        "--no-cache",
+    ];
+    let out = run(&no_src).expect("explain no-source");
+    assert!(
+        out.contains("\"verdict\": \"no-source-match\""),
+        "an unmatched source rule must explain as no-source-match:\n{out}"
     );
 }

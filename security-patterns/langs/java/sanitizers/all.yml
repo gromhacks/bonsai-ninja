@@ -349,6 +349,121 @@
     expect_match_text: [Encode.forJavaScript]
   description: "OWASP Java Encoder Encode.forJavaScript - JS string context encoder."
 
+- id: java.sanitizer.owasp_encoder_forhtmlattribute
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forHtmlAttribute]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forHtmlAttribute(input);
+        }
+      }
+    expect_match_text: [Encode.forHtmlAttribute]
+  description: "OWASP Java Encoder Encode.forHtmlAttribute - HTML attribute context encoder."
+
+- id: java.sanitizer.owasp_encoder_forcssstring
+  enabled: true
+  language: java
+  tag: css-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forCssString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forCssString(input);
+        }
+      }
+    expect_match_text: [Encode.forCssString]
+  description: "OWASP Java Encoder Encode.forCssString - CSS string context encoder."
+
+- id: java.sanitizer.owasp_encoder_forxmlcontent
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forXmlContent]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forXmlContent(input);
+        }
+      }
+    expect_match_text: [Encode.forXmlContent]
+  description: "OWASP Java Encoder Encode.forXmlContent - XML text content encoder."
+
+- id: java.sanitizer.owasp_encoder_forxmlattribute
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forXmlAttribute]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forXmlAttribute(input);
+        }
+      }
+    expect_match_text: [Encode.forXmlAttribute]
+  description: "OWASP Java Encoder Encode.forXmlAttribute - XML attribute context encoder."
+
+- id: java.sanitizer.owasp_encoder_foruri
+  enabled: true
+  language: java
+  tag: url-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forUri]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forUri(input);
+        }
+      }
+    expect_match_text: [Encode.forUri]
+  description: "OWASP Java Encoder Encode.forUri - full-URI context encoder."
+
 - id: java.sanitizer.owasp_html_sanitizer_policy
   enabled: true
   language: java
@@ -823,7 +938,7 @@
 - id: java.sanitizer.path_startswith
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: requires-constraint
   language: java
   tag: path-sanitize
   match:
@@ -978,7 +1093,28 @@
     expect_match_text: [SignedJWT.verify]
   description: "Nimbus SignedJWT.verify - enforces JWT signature verification with the configured verifier."
 
-# Additional encoder / sanitizer coverage --------------------------------
+- id: java.sanitizer.auth0_jwt_verify
+  enabled: true
+  language: java
+  tag: jwt-verify
+  packages: ["com.auth0.jwt"]
+  match:
+    kind: call
+    callee:
+      attribute: [JWTVerifier, verify]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.auth0.jwt.*;
+      class App {
+        void handle(String input) throws Exception {
+          JWTVerifier.verify(input);
+        }
+      }
+    expect_match_text: [JWTVerifier.verify]
+  description: "Auth0 java-jwt JWTVerifier.verify(token) - validates signature + registered claims and throws on failure."
+
+
 
   imports:
   - com.nimbusds.jwt
@@ -1088,6 +1224,48 @@
       }
     expect_match_text: [Argon2PasswordEncoder.matches]
   description: "Spring Security Argon2PasswordEncoder.matches - argon2 password verification."
+
+- id: java.sanitizer.pbkdf2_password_encoder_matches
+  enabled: true
+  language: java
+  tag: auth-sanitizer
+  packages: ["org.springframework.security.crypto"]
+  match:
+    kind: call
+    callee:
+      attribute: [Pbkdf2PasswordEncoder, matches]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.crypto.*;
+      class App {
+        void handle(String input) throws Exception {
+          Pbkdf2PasswordEncoder.matches(input);
+        }
+      }
+    expect_match_text: [Pbkdf2PasswordEncoder.matches]
+  description: "Spring Security Pbkdf2PasswordEncoder.matches - PBKDF2 password verification."
+
+- id: java.sanitizer.scrypt_password_encoder_matches
+  enabled: true
+  language: java
+  tag: auth-sanitizer
+  packages: ["org.springframework.security.crypto"]
+  match:
+    kind: call
+    callee:
+      attribute: [SCryptPasswordEncoder, matches]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.crypto.*;
+      class App {
+        void handle(String input) throws Exception {
+          SCryptPasswordEncoder.matches(input);
+        }
+      }
+    expect_match_text: [SCryptPasswordEncoder.matches]
+  description: "Spring Security SCryptPasswordEncoder.matches - scrypt password verification."
 
 - id: java.sanitizer.jsoup_parse_clean
   enabled: true

@@ -563,7 +563,7 @@
 - id: ruby.sqli.pg_exec
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: ruby
   tag: sql-injection
   severity: critical

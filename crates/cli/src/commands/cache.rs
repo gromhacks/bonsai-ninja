@@ -29,7 +29,11 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
         cli_println!("{}  {}", ui.label(&format!("{key:>26}")), value);
     };
     match action {
-        CacheAction::Stats { workspace, format } => {
+        CacheAction::Stats {
+            workspace,
+            format,
+            output: _,
+        } => {
             let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
             let cache = bonsai_sdk::WorkspaceCache::new(&workspace_root);
             let stats = cache.stats()?;

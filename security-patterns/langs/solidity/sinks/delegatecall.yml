@@ -29,6 +29,32 @@
         contract App { function test() public { address(0).delegatecall(""); } }
       expect_no_match: true
   description: "delegatecall(target, data) executes target's code in THIS contract's storage/context - a tainted target gains full write access to state, owner slot, implementation slot, and balance (arbitrary takeover / proxy hijack)."
+- id: solidity.delegatecall.oz_function_delegate_call
+  enabled: true
+  language: solidity
+  tag: access-control
+  severity: critical
+  cwe: [CWE-829, CWE-94]
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: functionDelegateCall
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+    - name: tainted oz function delegate call target
+      code: |
+        pragma solidity ^0.8.0;
+        import "@openzeppelin/contracts/utils/Address.sol";
+        contract App { function test(address target, bytes memory data) public { target.functionDelegateCall(data); } }
+    - name: literal oz function delegate call target negative
+      code: |
+        pragma solidity ^0.8.0;
+        import "@openzeppelin/contracts/utils/Address.sol";
+        contract App { function test(bytes memory data) public { address(0).functionDelegateCall(data); } }
+      expect_no_match: true
+  description: "OZ Address.functionDelegateCall(target, data) - library wrapper around delegatecall with the same proxy-hijack / arbitrary-storage-write hazard. A tainted target executes attacker code in this contract's storage/context."
 - id: solidity.delegatecall.callcode_legacy
   enabled: true
   language: solidity
@@ -76,7 +102,7 @@
 - id: solidity.code.self_call_dispatch
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: solidity
   tag: code-injection
   severity: critical

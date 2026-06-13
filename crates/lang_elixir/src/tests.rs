@@ -45,6 +45,41 @@ fn require_does_not_emit_local_wildcard_binding() {
     );
 }
 
+fn parse_field_reads(src: &str) -> Vec<Ref> {
+    let language = language_from_pack(PACK_NAME).expect("elixir grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set elixir grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse elixir source");
+    synthesize_elixir_request_field_reads(&tree, src.as_bytes(), FileId::new(0))
+}
+
+#[test]
+fn conn_field_dot_access_emits_named_read_ref() {
+    let reads = parse_field_reads(
+        "defmodule App do\n  def index(conn) do\n    q = conn.query_params\n    q\n  end\nend\n",
+    );
+    assert!(
+        reads
+            .iter()
+            .any(|r| r.name == "query_params" && r.kind == RefKind::Read),
+        "expected a query_params Read ref, got {reads:?}"
+    );
+}
+
+#[test]
+fn non_allowlisted_dot_access_emits_no_read_ref() {
+    // `conn.assigns` is a real Plug.Conn field but is NOT a request-input
+    // source — the synthesizer must stay bounded to the allowlist so it
+    // never invents reads for arbitrary `a.b` dot access.
+    let reads = parse_field_reads(
+        "defmodule App do\n  def index(conn) do\n    a = conn.assigns\n    a\n  end\nend\n",
+    );
+    assert!(
+        reads.is_empty(),
+        "non-allowlisted field should emit no Read ref, got {reads:?}"
+    );
+}
+
 #[test]
 fn short_clause_name_does_not_match_def_keyword() {
     let src = "def f(p, 0), do: sink(p)";

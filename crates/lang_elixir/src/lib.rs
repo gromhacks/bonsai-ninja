@@ -11,7 +11,7 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Visibility,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, Visibility,
 };
 use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use tree_sitter::{Language, Node, Tree};
@@ -29,6 +29,9 @@ const PACK_NAME: &str = "elixir";
 const HANDLER: GrammarHandler = GrammarHandler {
     assignment_kinds: &["binary_operator"],
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    // Elixir functions return their final expression; the kit emits a
+    // `Return` for the last statement of the `do` block.
+    tail_expression_returns: true,
     ..with_fn_kinds(&["call"])
 };
 
@@ -70,6 +73,11 @@ impl LanguageAdapter for ElixirAdapter {
         // the macro. Walk for `defp` call spans, then mark matching
         // decls private.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            decl_index.refs.extend(synthesize_elixir_request_field_reads(
+                &tree,
+                snapshot.text.as_bytes(),
+                file,
+            ));
             let module_spans = collect_elixir_module_spans(&tree, snapshot.text.as_bytes(), file);
             if module_spans.is_empty() {
                 bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
@@ -654,6 +662,71 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
     }
     imports
+}
+
+/// Plug.Conn / Oban request fields read via `conn.<field>` dot access.
+/// Elixir parses `conn.query_params` (no parens) as a `call` node whose
+/// `target` is a `dot` — the kit's generic read/write extractor only
+/// recognises member-expression node kinds, so the dotted field name is
+/// never surfaced as a `Read` ref. These are the framework-supplied
+/// request fields the taint sources query; the bare receiver `conn`
+/// remains a separate, intentionally-disabled over-broad source.
+const ELIXIR_REQUEST_FIELD_READS: &[&str] = &[
+    "params",
+    "query_params",
+    "body_params",
+    "cookies",
+    "req_headers",
+    "args",
+];
+
+/// Surface `conn.query_params` / `job.args`-style request-field accesses as
+/// `Read` refs named after the field. Bounded to [`ELIXIR_REQUEST_FIELD_READS`]
+/// so the adapter never emits a read for arbitrary `a.b` dot access — the
+/// same targeted-synthesis convention Ruby (`QUERY_STRING`) and Lua (`arg`)
+/// use, keeping the behavioural blast radius to exactly the field names the
+/// queue/HTTP source rules bind to.
+fn synthesize_elixir_request_field_reads(tree: &Tree, src: &[u8], file: FileId) -> Vec<Ref> {
+    let mut refs = Vec::new();
+    for call_node in collect_kinds(tree, &["call"]) {
+        let mut target_cursor = call_node.walk();
+        let target = match call_node.child_by_field_name("target") {
+            Some(target) => target,
+            None => match call_node.named_children(&mut target_cursor).next() {
+                Some(target) => target,
+                None => continue,
+            },
+        };
+        if target.kind() != "dot" {
+            continue;
+        }
+        // `dot` node for `recv.field` exposes the field as its last named
+        // child (the leading `.` is anonymous); older grammar revisions
+        // name it `right`.
+        let mut field_cursor = target.walk();
+        let field = match target.child_by_field_name("right") {
+            Some(field) => Some(field),
+            None => target.named_children(&mut field_cursor).last(),
+        };
+        let Some(field_node) = field else {
+            continue;
+        };
+        if field_node.kind() != "identifier" {
+            continue;
+        }
+        let name = node_text(&field_node, src).trim();
+        if !ELIXIR_REQUEST_FIELD_READS.contains(&name) {
+            continue;
+        }
+        refs.push(Ref {
+            span: span_of(file, &field_node),
+            name: name.to_string(),
+            kind: RefKind::Read,
+            scope: None,
+            resolved: None,
+        });
+    }
+    refs
 }
 
 fn call_target_text(call_node: &Node<'_>, src: &[u8]) -> Option<String> {

@@ -100,7 +100,7 @@
   language: perl
   tag: insecure-deserialization
   severity: critical
-  packages: [YAML, "YAML::XS", "YAML::Syck"]
+  packages: [YAML, "YAML::XS", "YAML::Syck", "JSON::Syck"]
   cwe: [CWE-502]
   match:
     kind: call
@@ -117,6 +117,14 @@
         my ($input, $url, $id, $payload, $request) = @_;
         Load($input)
       }
+  - name: perl.deser.json_syck_load example
+    code: |
+      use JSON::Syck;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Load($input)
+      }
+    expect_match_text: [Load]
   - name: literal yaml load negative
     code: |
       use YAML;
@@ -125,7 +133,7 @@
         Load("---\nname: alice\n")
       }
     expect_no_match: true
-  description: "YAML::Load / YAML::XS::Load / YAML::Syck::Load - historically process `!perl/code` tags that eval Perl; RCE on untrusted YAML. `top_level: true` rejects `obj->Load(...)` method decoys; `min_args: 1` rejects unrelated 0-arg overloads."
+  description: "YAML::Load / YAML::XS::Load / YAML::Syck::Load / JSON::Syck::Load - all share the Syck/loader gadget that historically processes `!perl/code` tags that eval Perl; RCE on untrusted input. JSON::Syck uses the same backend and exported `Load` name."
 
 - id: perl.deser.yaml_loadfile
   enabled: true

@@ -140,6 +140,8 @@
     kind: new
     callee:
       name: XMLParser
+  constraints:
+  - any_arg_matches_regex: "(?i)(processEntities|htmlEntities)\\s*[:=]\\s*true"
   match_examples:
   - name: fast xml parser process entities
     code: "import { XMLParser } from \"fast-xml-parser\";\nfunction parser() {\n  return new XMLParser({ processEntities: true });\n}\n"
@@ -153,7 +155,14 @@
       }
     expect_match_text:
     - XMLParser
-  description: "fast-xml-parser with entity processing enabled - audit tainted XML for entity expansion and unsafe downstream interpretation."
+  - name: fast xml parser entities disabled negative
+    code: |
+      const { XMLParser } = require("fast-xml-parser");
+      function parser() {
+        return new XMLParser({ processEntities: false });
+      }
+    expect_no_match: true
+  description: "fast-xml-parser constructed with processEntities/htmlEntities enabled - audit parser use for entity expansion and unsafe downstream XML interpretation. The options regex requires the entity flag set true so the safe default parser stays quiet."
 - id: typescript.xxe.parse_xml_resolve_entities
   enabled: true
   language: typescript

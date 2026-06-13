@@ -897,7 +897,11 @@ fn source_seed_nodes_from_idg(
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
     let mut seed_nodes: Vec<bonsai_idg::WsNodeId> = Vec::new();
-    let seed_names: Vec<String> = seeds.iter().cloned().collect();
+    // Bare container seeds (`args`) also address their projections
+    // (`args.q`) — same expansion the security scheduler applies, so
+    // the graph built here propagates exactly what the scheduling cut
+    // proved reachable.
+    let seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(seeds.iter());
     if let Some(anchor) = source_anchor {
         let anchor_nodes = idg.source_seed_nodes_at_span(source_func, anchor);
         let anchor_has_call_return = anchor_nodes.iter().any(|node| {
@@ -905,7 +909,11 @@ fn source_seed_nodes_from_idg(
                 .is_some_and(|point| point.kind == bonsai_idg::PointKind::CallRet)
         });
         if !anchor_has_call_return && !seed_names.is_empty() {
-            let named_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
+            let mut named_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
+            // A read-kind source whose matched name is a parameter
+            // taints from the parameter binding too — parity with the
+            // security scheduler's seed builder.
+            named_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
             if named_nodes.is_empty() {
                 seed_nodes.extend(anchor_nodes);
             } else {

@@ -135,6 +135,57 @@
         epgsql:equery(Input).
     expect_match_text: ["epgsql:equery"]
   description: "epgsql:equery uses $N bind parameters - server-side prepared statement, SQLi-safe."
+- id: erlang.sanitizer.epgsql_prepared_query
+  enabled: true
+  language: erlang
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^epgsql:prepared_query$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(C, Input) ->
+        epgsql:prepared_query(C, "stmt", [Input]).
+    expect_match_text: ["epgsql:prepared_query"]
+  description: "epgsql:prepared_query(C, Statement, Params) - runs a server-side prepared statement with bound parameters; the tainted value travels as a bind param, not concatenated SQL, so it is SQLi-safe."
+- id: erlang.sanitizer.epgsql_extended_query
+  enabled: true
+  language: erlang
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^epgsql:extended_query$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(C, Input) ->
+        epgsql:extended_query(C, "SELECT $1", [Input]).
+    expect_match_text: ["epgsql:extended_query"]
+  description: "epgsql:extended_query(C, Sql, Params) - extended-protocol query with $N bind parameters; parameterized, SQLi-safe."
+- id: erlang.sanitizer.odbc_param_query
+  enabled: true
+  language: erlang
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^odbc:param_query$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Ref, Input) ->
+        odbc:param_query(Ref, "SELECT * FROM t WHERE id = ?", [{sql_integer, [Input]}]).
+    expect_match_text: ["odbc:param_query"]
+  description: "odbc:param_query(Ref, SQL, Params) - OTP odbc parameterised query with `?` placeholders bound separately; the SQLi-safe counterpart to odbc:sql_query."
 - id: erlang.sanitizer.binary_to_integer
   enabled: true
   language: erlang

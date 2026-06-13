@@ -26,6 +26,11 @@
     code: |
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(msg.sender); } }
+  - name: unrelated field negative
+    code: |
+      pragma solidity ^0.8.0;
+      contract App { function test() public { uint256 result = uint256(tx.gasprice); } }
+    expect_no_match: true
   description: "msg.sender - the EOA/contract that made the current call. Authorised input for authz comparisons but tainted for identity-derived logic."
 - id: solidity.msg.value
   enabled: false
@@ -79,6 +84,11 @@
     code: |
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(tx.origin); } }
+  - name: unrelated field negative
+    code: |
+      pragma solidity ^0.8.0;
+      contract App { function test() public { uint256 result = block.number; } }
+    expect_no_match: true
   description: "tx.origin - the original external EOA. Auth-bypass-prone: phishing contract relays a victim call so msg.sender != tx.origin, and tx.origin == victim. Never use for authorisation; flag any flow into a require/comparison."
 - id: solidity.tx.gasprice
   enabled: true
@@ -94,6 +104,11 @@
     code: |
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(tx.gasprice); } }
+  - name: unrelated field negative
+    code: |
+      pragma solidity ^0.8.0;
+      contract App { function test() public { uint256 result = block.number; } }
+    expect_no_match: true
   description: "tx.gasprice - caller-supplied gas price; unsafe for ordering/fee logic."
 - id: solidity.openzeppelin.context_msg_sender
   enabled: true
@@ -112,6 +127,12 @@
       pragma solidity ^0.8.0;
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { _msgSender(input); } }
+  - name: unrelated call negative
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function helper(uint256 x) internal {} function test(uint256 input) public { helper(input); } }
+    expect_no_match: true
   description: "OZ Context._msgSender() - EIP-2771 meta-tx-aware msg.sender wrapper; tainted equivalently to msg.sender, plus the trusted-forwarder edge."
 - id: solidity.openzeppelin.context_msg_data
   enabled: true
@@ -130,4 +151,10 @@
       pragma solidity ^0.8.0;
       import "@openzeppelin/contracts/Foo.sol";
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { _msgData(input); } }
+  - name: unrelated call negative
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function helper(uint256 x) internal {} function test(uint256 input) public { helper(input); } }
+    expect_no_match: true
   description: "OZ Context._msgData() - EIP-2771 meta-tx-aware msg.data wrapper."

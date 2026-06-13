@@ -1,8 +1,6 @@
 # Swift CLI/local-trust sources.
 - id: swift.cli.argv
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: local
   tag: local-input
@@ -10,8 +8,16 @@
   match:
     kind: read
     target:
-      name: arguments
-  description: "Disabled - the current Swift adapter does not index property reads like `CommandLine.arguments`."
+      attribute: [CommandLine, arguments]
+  match_examples:
+  - name: command line arguments read
+    code: |
+      import Foundation
+      func run() -> [String] {
+        let a = CommandLine.arguments
+        return a
+      }
+  description: "CommandLine.arguments - process argv read via the `CommandLine.arguments` static property."
 - id: swift.cli.readline
   enabled: true
   language: swift
@@ -28,9 +34,7 @@
         func test() { let input = "x"; let amount = 1; readLine(input) }
   description: "readLine() - stdin."
 - id: swift.os.environment
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: local
   tag: local-input
@@ -38,8 +42,16 @@
   match:
     kind: read
     target:
-      name: environment
-  description: "Disabled - the current Swift adapter does not index property reads like `ProcessInfo.processInfo.environment`."
+      attribute: [ProcessInfo, processInfo, environment]
+  match_examples:
+  - name: process info environment read
+    code: |
+      import Foundation
+      func run() -> [String: String] {
+        let e = ProcessInfo.processInfo.environment
+        return e
+      }
+  description: "ProcessInfo.processInfo.environment - process environment variables read via the `environment` property."
 - id: swift.argparser_argument
   enabled: false
   disabled_reason:
@@ -84,32 +96,46 @@
   description: "Disabled - NSTextView.string overlaps with every Swift String."
 
 - id: swift.ui.textfield_text
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: local
   tag: ui-input
   payload_types: [text]
   match:
-    kind: call
-    callee:
-      attribute: [UITextField, text]
-  description: "Disabled - `field.text` is a property read, and the current Swift adapter does not index that shape."
+    kind: read
+    target:
+      name: text
+      receiver_type_in: [UITextField]
+  match_examples:
+  - name: uitextfield text read
+    code: |
+      import UIKit
+      func run(field: UITextField) -> String? {
+        let t = field.text
+        return t
+      }
+  description: "UITextField.text - user-entered text read on a typed UITextField receiver."
 
 - id: swift.ui.textview_string
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: local
   tag: ui-input
   payload_types: [text]
   match:
-    kind: call
-    callee:
-      attribute: [NSTextView, string]
-  description: "Disabled - `view.string` is a property read, and the current Swift adapter does not index that shape."
+    kind: read
+    target:
+      name: string
+      receiver_type_in: [NSTextView]
+  match_examples:
+  - name: nstextview string read
+    code: |
+      import AppKit
+      func run(view: NSTextView) -> String {
+        let s = view.string
+        return s
+      }
+  description: "NSTextView.string - user-entered text read on a typed NSTextView receiver."
 
 - id: swift.swiftui.textfield_binding
   enabled: false

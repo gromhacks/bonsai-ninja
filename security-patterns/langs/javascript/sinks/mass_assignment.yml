@@ -13,6 +13,8 @@
     kind: call
     callee:
       attribute: [Document, set]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: mongoose set body
     code: |
@@ -20,7 +22,14 @@
       function demo(input, req, obj) {
         return Document.set(input, req.body);
       }
-  description: "Mongoose Document.set(req.body) - bulk-merges request body into the document; admin / role fields slip through."
+  - name: mongoose set literal field negative
+    code: |
+      const _u = require("mongoose");
+      function demo() {
+        return Document.set("status", "active");
+      }
+    expect_no_match: true
+  description: "Mongoose Document.set(req.body) - bulk-merges request body into the document; admin / role fields slip through. The any_arg_tainted constraint keeps explicit single-field `.set('field', literal)` calls quiet."
 - id: javascript.mass_assign.object_assign_body
   enabled: false
   disabled_reason:

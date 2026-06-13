@@ -8,14 +8,14 @@
 use crate::matcher::RuleMatch;
 use crate::rule::{Rule, Severity};
 use bonsai_hash::fnv1a_names64;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Sanitizer outcome on the chain. Drives review priority and
 /// rendering — sanitization means the developer attempted to filter,
 /// not that the value is safe (see security-spec.mdx "Sanitized Does
 /// Not Mean Safe"). Findings are surfaced regardless; status governs
 /// where they appear and at what severity floor.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FindingStatus {
     /// No sanitizer credited the sink tag on any chain. Full severity,
@@ -71,7 +71,7 @@ impl Default for FindingStatus {
 
 /// One match site on either side of a finding. Mirrors the spec's
 /// `match_site` block.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FindingMatch {
     pub rule_id: String,
     pub file: String,
@@ -88,7 +88,7 @@ pub struct FindingMatch {
     pub category: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub payload_types: Vec<String>,
     /// Sink-side: the per-arg taint evidence at this sink call site.
     /// Source / sanitizer sides leave this empty. Lets the consumer
@@ -109,7 +109,7 @@ pub struct FindingMatch {
 /// Per-arg taint evidence rendered on the sink side of a finding. The
 /// SHAPE of evidence — bonsai surfaces it, the consumer (LLM or
 /// human) interprets it.
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TaintedArgInfo {
     /// Positional index in the call's argument list (`usize::MAX` for
     /// receiver, in keeping with the dump command's convention).
@@ -121,7 +121,7 @@ pub struct TaintedArgInfo {
 /// One taint-propagation edge preserved for report consumers. Unlike the
 /// display-only function chain, this names the concrete call site and
 /// every argument the taint engine propagated across that edge.
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TaintPropagationStep {
     pub caller: String,
     pub callee: String,
@@ -132,7 +132,7 @@ pub struct TaintPropagationStep {
     pub tainted_args: Vec<TaintPropagationArg>,
 }
 
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TaintPropagationArg {
     pub index: usize,
     pub value_text: String,
@@ -227,13 +227,13 @@ fn sanitised_indices_from_rule(rule: &Rule) -> Vec<u32> {
 
 /// One finding — a source / sink pair observed on at least one chain
 /// through the workspace.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Finding {
     pub finding_id: String,
     pub language: String,
     pub source: FindingMatch,
     pub sink: FindingMatch,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitizers_seen: Vec<FindingMatch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
@@ -266,9 +266,9 @@ pub struct Finding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<Severity>,
     pub precision: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cwe: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owasp: Vec<String>,
     /// Sanitizer outcome on the chain — see [`FindingStatus`] for the
     /// three variants and their rendering contract. Always serialized

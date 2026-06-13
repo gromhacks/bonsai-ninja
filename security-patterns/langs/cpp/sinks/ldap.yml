@@ -16,7 +16,11 @@
       index: 3
   match_examples:
   - name: generated direct match
-    code: "#include <openldap.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  ldap_search_ext_s(arg);\n}\n"
+    code: |
+      #include <openldap.h>
+      void example(const char *input) {
+        ldap_search_ext_s("safe", "safe", "safe", input);
+      }
   - name: literal arg 3 negative
     code: |
       void example() {
@@ -42,7 +46,11 @@
       index: 3
   match_examples:
   - name: generated direct match
-    code: "#include <openldap.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  ldap_search_s(arg);\n}\n"
+    code: |
+      #include <openldap.h>
+      void example(const char *input) {
+        ldap_search_s("safe", "safe", "safe", input);
+      }
   - name: literal arg 3 negative
     code: |
       void example() {
@@ -68,7 +76,11 @@
       index: 3
   match_examples:
   - name: generated direct match
-    code: "#include <openldap.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  ldap_search_ext(arg);\n}\n"
+    code: |
+      #include <openldap.h>
+      void example(const char *input) {
+        ldap_search_ext("safe", "safe", "safe", input);
+      }
   - name: literal arg 3 negative
     code: |
       void example() {

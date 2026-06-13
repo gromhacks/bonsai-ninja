@@ -22,15 +22,17 @@ use ui::Ui;
 
 mod args;
 mod commands;
+mod filter;
 mod footer;
 mod help_theme;
+mod output;
 mod page_cache;
 mod paging;
 mod progress;
 mod theme;
 mod ui;
 
-use args::{Cli, Cmd};
+use args::{CacheAction, Cli, Cmd, SecurityAction};
 use commands::{
     cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_diagnostics, cmd_dump_ast,
     cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolve, cmd_dump_taint,
@@ -175,6 +177,7 @@ pub(crate) mod out_count {
 macro_rules! cli_println {
     () => {{
         if $crate::page_cache::write("\n") {
+        } else if $crate::output::write_line("") {
         } else {
             use std::io::Write as _;
             let mut h = std::io::stdout().lock();
@@ -186,6 +189,7 @@ macro_rules! cli_println {
         use std::io::Write as _;
         let s: String = std::fmt::format(std::format_args!($($arg)*));
         if $crate::page_cache::write(&format!("{s}\n")) {
+        } else if $crate::output::write_line(&s) {
         } else {
             let mut h = std::io::stdout().lock();
             let _ = h.write_all(s.as_bytes());
@@ -203,6 +207,7 @@ macro_rules! cli_print {
         use std::io::Write as _;
         let s: String = std::fmt::format(std::format_args!($($arg)*));
         if $crate::page_cache::write(&s) {
+        } else if $crate::output::write_str(&s) {
         } else {
             let mut h = std::io::stdout().lock();
             let _ = h.write_all(s.as_bytes());
@@ -320,12 +325,22 @@ fn main() -> Result<()> {
     // without ANSI color; `--no-progress` / `NO_PROGRESS` hide it.
     progress::set_no_color(cli.no_color);
     progress::set_no_progress(cli.no_progress);
+    // Secondary output filters (`--contains` / `--not-contains`) are
+    // global flags applied at render time. They're part of the
+    // normalized argv, so the rendered-page cache key already varies by
+    // filter (a filtered run never replays an unfiltered run's pages);
+    // the expensive taint *analysis* payload is keyed separately so it
+    // is reused across filter changes.
+    filter::init(&cli.contains, &cli.not_contains);
+    let output_path = command_output_path(&cli.command).map(std::path::Path::to_path_buf);
+    output::init(output_path.as_deref())?;
     if let Some(workspace) = command_workspace_for_page_cache(&cli.command) {
         if page_cache::replay_if_hit(workspace)? {
+            output::finish()?;
             return Ok(());
         }
     }
-    match cli.command {
+    let result = match cli.command {
         Cmd::Index {
             workspace,
             watch,
@@ -346,6 +361,7 @@ fn main() -> Result<()> {
             max_branch_fanout,
             max_loop_iters,
             format,
+            output: _,
         } => {
             let fn_arg = function.or(symbol);
             let paging = paging_from_cli_output(context.as_deref(), page.as_deref(), all, format)?;
@@ -381,6 +397,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_dump_callgraph(
             &workspace,
             limit,
@@ -399,6 +416,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_dump_edges(
             &workspace,
             from.as_deref(),
@@ -423,6 +441,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => {
             // --function takes precedence over the positional symbol.
             let function_scope = function.or(symbol_pos);
@@ -447,6 +466,7 @@ fn main() -> Result<()> {
             compact,
             candidate,
             format,
+            output: _,
         } => {
             // --name takes precedence over the positional name.
             let query_name = name.or(name_pos).ok_or_else(|| {
@@ -472,6 +492,7 @@ fn main() -> Result<()> {
             compact,
             taint,
             format,
+            output: _,
         } => cmd_dump_taint(
             &workspace,
             &source,
@@ -500,6 +521,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_defs(
             &workspace,
             DefsFilters {
@@ -529,6 +551,7 @@ fn main() -> Result<()> {
             all,
             no_flows,
             format,
+            output: _,
         } => cmd_calls(
             &workspace,
             CallsFilters {
@@ -556,6 +579,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_imports(
             &workspace,
             ImportsFilters {
@@ -584,6 +608,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_vars(
             &workspace,
             VarsFilters {
@@ -612,6 +637,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_strings(
             &workspace,
             StringsFilters {
@@ -640,6 +666,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_comments(
             &workspace,
             CommentsFilters {
@@ -669,6 +696,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_args(
             &workspace,
             ArgsFilters {
@@ -699,6 +727,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => cmd_classes(
             &workspace,
             ClassesFilters {
@@ -728,6 +757,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => {
             let sym = resolve_symbol_arg(symbol_pos, symbol, "symbol")?;
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
@@ -759,6 +789,7 @@ fn main() -> Result<()> {
             page,
             all,
             format,
+            output: _,
         } => {
             let q = resolve_symbol_arg(query_pos, query, "query")?;
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
@@ -800,6 +831,7 @@ fn main() -> Result<()> {
             context,
             page,
             format,
+            output: _,
         } => {
             // Precedence: positional → --query → --symbol (legacy alias).
             // Query is OPTIONAL: when omitted, `--from` / `--to` /
@@ -872,6 +904,7 @@ fn main() -> Result<()> {
             complete_chains,
             all,
             format,
+            output: _,
         } => cmd_export(
             &workspace,
             full_propagations || all,
@@ -893,6 +926,7 @@ fn main() -> Result<()> {
             all,
             format,
             rules_dir,
+            output: _,
         } => commands::tree::cmd_tree(commands::tree::TreeArgs {
             workspace: &workspace,
             max_depth,
@@ -920,6 +954,7 @@ fn main() -> Result<()> {
             all,
             format,
             rules_dir,
+            output: _,
         } => commands::read_file::cmd_read_file(commands::read_file::ReadFileArgs {
             workspace: &workspace,
             path: &path,
@@ -934,7 +969,11 @@ fn main() -> Result<()> {
             format: &format,
             rules_dir: rules_dir.as_deref(),
         }),
-    }
+    };
+    let output_result = output::finish();
+    result?;
+    output_result?;
+    Ok(())
 }
 
 fn install_global_rayon_pool() {
@@ -980,5 +1019,51 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Tree { workspace, .. }
         | Cmd::ReadFile { workspace, .. } => Some(workspace.as_path()),
         Cmd::Cache { .. } => None,
+    }
+}
+
+fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
+    match cmd {
+        Cmd::Trace { output, .. }
+        | Cmd::DumpCallgraph { output, .. }
+        | Cmd::DumpEdges { output, .. }
+        | Cmd::DumpAst { output, .. }
+        | Cmd::DumpResolve { output, .. }
+        | Cmd::DumpTaint { output, .. }
+        | Cmd::Defs { output, .. }
+        | Cmd::Calls { output, .. }
+        | Cmd::Imports { output, .. }
+        | Cmd::Vars { output, .. }
+        | Cmd::Strings { output, .. }
+        | Cmd::Comments { output, .. }
+        | Cmd::Args { output, .. }
+        | Cmd::Classes { output, .. }
+        | Cmd::Refs { output, .. }
+        | Cmd::Search { output, .. }
+        | Cmd::Inspect { output, .. }
+        | Cmd::Export { output, .. }
+        | Cmd::Tree { output, .. }
+        | Cmd::ReadFile { output, .. } => output.output_path.as_deref(),
+        Cmd::Security { action, .. } => security_action_output_path(action),
+        Cmd::Cache {
+            action: CacheAction::Stats { output, .. },
+        } => output.output_path.as_deref(),
+        Cmd::Index { .. }
+        | Cmd::Diagnostics { .. }
+        | Cmd::DumpHir { .. }
+        | Cmd::DumpCfg { .. }
+        | Cmd::Cache { .. } => None,
+    }
+}
+
+fn security_action_output_path(action: &SecurityAction) -> Option<&std::path::Path> {
+    match action {
+        SecurityAction::Sources { output, .. }
+        | SecurityAction::Sinks { output, .. }
+        | SecurityAction::Sanitizers { output, .. }
+        | SecurityAction::Deps { output, .. }
+        | SecurityAction::TaintAnalysis { output, .. }
+        | SecurityAction::SourceAnalysis { output, .. }
+        | SecurityAction::Pack { output, .. } => output.output_path.as_deref(),
     }
 }

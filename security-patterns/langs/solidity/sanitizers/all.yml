@@ -14,6 +14,11 @@
       pragma solidity ^0.8.0;
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { require(input); } }
     expect_match_text: [require]
+  - name: member require negative
+    code: |
+      pragma solidity ^0.8.0;
+      contract App { function test(string memory input) public { obj.require(input); } }
+    expect_no_match: true
   description: "require(cond, reason) - revert-on-false guard; canonical authz / precondition / input-validation sanitizer. Includes the inline `require(msg.sender == owner, ...)` pattern used by hand-rolled access control. `top_level: true` keeps it on the Solidity statement form and rejects unrelated `obj.require(...)` member calls that share the verb."
 - id: solidity.sanitizer.assert
   enabled: true
@@ -309,3 +314,110 @@
       contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { div(input); } }
     expect_match_text: [div]
   description: "OpenZeppelin SafeMath.div - division with zero-check (pre-0.8); neutralises div-by-zero taint."
+- id: solidity.sanitizer.openzeppelin_safe_increase_allowance
+  enabled: true
+  language: solidity
+  tag: validation
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: safeIncreaseAllowance
+  match_examples:
+  - name: declared shape
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function test(address spender, uint256 amount) public { safeIncreaseAllowance(spender, amount); } }
+    expect_match_text: [safeIncreaseAllowance]
+  - name: member negative
+    code: |
+      pragma solidity ^0.8.0;
+      contract App { function test(uint256 amount) public { other.notAllowance(amount); } }
+    expect_no_match: true
+  description: "OZ SafeERC20.safeIncreaseAllowance - checked allowance bump that avoids the unchecked-return / non-standard-ERC20 silent-failure surface."
+- id: solidity.sanitizer.openzeppelin_safe_decrease_allowance
+  enabled: true
+  language: solidity
+  tag: validation
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: safeDecreaseAllowance
+  match_examples:
+  - name: declared shape
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function test(address spender, uint256 amount) public { safeDecreaseAllowance(spender, amount); } }
+    expect_match_text: [safeDecreaseAllowance]
+  description: "OZ SafeERC20.safeDecreaseAllowance - checked allowance reduction; neutralises unchecked-return on non-standard ERC20 tokens."
+- id: solidity.sanitizer.openzeppelin_force_approve
+  enabled: true
+  language: solidity
+  tag: validation
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: forceApprove
+  match_examples:
+  - name: declared shape
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function test(address spender, uint256 amount) public { forceApprove(spender, amount); } }
+    expect_match_text: [forceApprove]
+  description: "OZ SafeERC20.forceApprove - resets allowance to 0 before setting it, defeating the ERC20 approve front-running race and checking the return value of non-standard tokens."
+- id: solidity.sanitizer.openzeppelin_merkleproof_verify
+  enabled: true
+  language: solidity
+  tag: validation
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: verify
+  match_examples:
+  - name: declared shape
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function test(bytes32[] memory proof, bytes32 root, bytes32 leaf) public { verify(proof, root, leaf); } }
+    expect_match_text: [verify]
+  description: "OZ MerkleProof.verify(proof, root, leaf) - allowlist membership proof against a trusted Merkle root; gates airdrop/claim and whitelist flows. Reviewer should confirm the root is contract-controlled, not attacker-supplied."
+- id: solidity.sanitizer.openzeppelin_when_paused
+  enabled: true
+  language: solidity
+  tag: validation
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: whenPaused
+  match_examples:
+  - name: declared shape
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function test(uint256 amount) public { whenPaused(amount); } }
+    expect_match_text: [whenPaused]
+  description: "OZ Pausable.whenPaused modifier - restricts the guarded function to the paused state; companion kill-switch gate to whenNotPaused used on emergency-withdraw / recovery paths."
+- id: solidity.sanitizer.openzeppelin_check_owner
+  enabled: true
+  language: solidity
+  tag: auth-sanitizer
+  packages: ["@openzeppelin/contracts"]
+  match:
+    kind: call
+    callee:
+      name: _checkOwner
+  match_examples:
+  - name: declared shape
+    code: |
+      pragma solidity ^0.8.0;
+      import "@openzeppelin/contracts/Foo.sol";
+      contract App { function test() public { _checkOwner(); } }
+    expect_match_text: [_checkOwner]
+  description: "OZ Ownable._checkOwner - reverts unless msg.sender is the owner; internal authorization guard used by onlyOwner and custom owner checks."

@@ -158,12 +158,17 @@
     kind: call
     callee:
       name: AddWithValue
+  constraints:
+  - min_args: 2
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddWithValue(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddWithValue("@id", input); } }
     expect_match_text: [AddWithValue]
-  description: "SqlCommand.Parameters.AddWithValue - parameterised SQL."
+  - name: bare add with value zero-arg negative
+    code: "class App { void Test() { AddWithValue(); } }\n"
+    expect_no_match: true
+  description: "SqlCommand.Parameters.AddWithValue(name, value) - parameterised SQL. `min_args: 2` rejects 0/1-arg decoys that cannot be the bound name+value form."
 
 - id: csharp.sanitizer.parameter_add
   enabled: false
@@ -191,6 +196,9 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Parameters.Add(input); } }
     expect_match_text: [Parameters.Add]
+  - name: unrelated add negative
+    code: "class App { void Test() { dynamic list = null; list.Add(\"x\"); } }\n"
+    expect_no_match: true
   description: "command.Parameters.Add(...) - parameterised SQL binding."
 
 - id: csharp.sanitizer.ef_fromsqlinterpolated
@@ -366,6 +374,21 @@
     expect_match_text: [Path.GetFileName]
   description: "Path.GetFileName - strips directories."
 
+- id: csharp.sanitizer.path_getfilenamewithoutextension
+  enabled: true
+  language: csharp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, GetFileNameWithoutExtension]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Path.GetFileNameWithoutExtension(input); } }
+    expect_match_text: [Path.GetFileNameWithoutExtension]
+  description: "Path.GetFileNameWithoutExtension - strips directory components (and extension), preventing traversal segments in a downstream filename."
+
 - id: csharp.sanitizer.path_getfullpath
   enabled: false
   disabled_reason:
@@ -502,6 +525,81 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToInt64(input); } }
     expect_match_text: [Convert.ToInt64]
   description: "Convert.ToInt64 - coerces to long."
+
+- id: csharp.sanitizer.convert_todouble
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Convert, ToDouble]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToDouble(input); } }
+    expect_match_text: [Convert.ToDouble]
+  description: "Convert.ToDouble - coerces to double, throws on bad input; neutralises taint in numeric contexts."
+
+- id: csharp.sanitizer.convert_toboolean
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Convert, ToBoolean]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToBoolean(input); } }
+    expect_match_text: [Convert.ToBoolean]
+  description: "Convert.ToBoolean - coerces to bool, throws on non-boolean input."
+
+- id: csharp.sanitizer.decimal_tryparse
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Decimal, TryParse]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Decimal.TryParse(input); } }
+    expect_match_text: [Decimal.TryParse]
+  description: "Decimal.TryParse - parses to decimal or fails; neutralises taint in numeric contexts."
+
+- id: csharp.sanitizer.boolean_tryparse
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Boolean, TryParse]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Boolean.TryParse(input); } }
+    expect_match_text: [Boolean.TryParse]
+  description: "Boolean.TryParse - parses to bool or fails; output is a fixed two-valued domain."
+
+- id: csharp.sanitizer.datetime_tryparse
+  enabled: true
+  language: csharp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [DateTime, TryParse]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DateTime.TryParse(input); } }
+    expect_match_text: [DateTime.TryParse]
+  description: "DateTime.TryParse - validates and coerces to a DateTime; rejects non-date input."
 
 - id: csharp.sanitizer.jwt_validate_strict
   enabled: true
@@ -1171,6 +1269,50 @@
       class App { void Save(dynamic connection, string sql, string input) { connection.Execute(sql, new { id = input }); } }
     expect_match_text: [connection.Execute]
   description: "Dapper connection.Execute(sql, paramObject) binds the object properties as SQL parameters."
+
+- id: csharp.sanitizer.dapper_queryasync_parameters
+  enabled: true
+  language: csharp
+  tag: db-bind-parameter
+  packages: [Dapper]
+  match:
+    kind: call
+    callee:
+      name: QueryAsync
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: dapper query async with anonymous parameter object
+    code: |
+      using Dapper;
+      class App { void Load(dynamic connection, string sql, string input) { connection.QueryAsync(sql, new { id = input }); } }
+    expect_match_text: [connection.QueryAsync]
+  - name: dapper query async no params negative
+    code: "using Dapper;\nclass App { void Load(dynamic connection, string sql) { connection.QueryAsync(sql); } }\n"
+    expect_no_match: true
+  description: "Dapper connection.QueryAsync(sql, paramObject) binds the object properties as SQL parameters. `min_args: 2` requires the separate parameter object."
+
+- id: csharp.sanitizer.dapper_executeasync_parameters
+  enabled: true
+  language: csharp
+  tag: db-bind-parameter
+  packages: [Dapper]
+  match:
+    kind: call
+    callee:
+      name: ExecuteAsync
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: dapper execute async with anonymous parameter object
+    code: |
+      using Dapper;
+      class App { void Save(dynamic connection, string sql, string input) { connection.ExecuteAsync(sql, new { id = input }); } }
+    expect_match_text: [connection.ExecuteAsync]
+  - name: dapper execute async no params negative
+    code: "using Dapper;\nclass App { void Save(dynamic connection, string sql) { connection.ExecuteAsync(sql); } }\n"
+    expect_no_match: true
+  description: "Dapper connection.ExecuteAsync(sql, paramObject) binds the object properties as SQL parameters. `min_args: 2` requires the separate parameter object."
 
 - id: csharp.sanitizer.sqlparameter_constructor
   enabled: true

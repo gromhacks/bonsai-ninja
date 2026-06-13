@@ -674,7 +674,17 @@ where
             },
         )?;
     } else {
-        cli_println!("{}", serde_json::to_string_pretty(&rows)?);
+        // Bare-array path (no pagination wrapper) renders directly and
+        // so doesn't pass through `emit_paged_text`'s shared filter —
+        // apply the secondary `--contains` / `--not-contains` filter
+        // here so json `--all` matches the text path's filtered set.
+        let secondary = crate::filter::active();
+        if secondary.is_active() {
+            let kept: Vec<&T> = rows.iter().filter(|row| secondary.matches_value(row)).collect();
+            cli_println!("{}", serde_json::to_string_pretty(&kept)?);
+        } else {
+            cli_println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
     }
     Ok(())
 }

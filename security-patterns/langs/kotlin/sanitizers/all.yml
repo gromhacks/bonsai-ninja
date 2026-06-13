@@ -135,6 +135,26 @@
   description: "Spring HtmlUtils.htmlEscape - HTML entity encoding."
   imports:
   - org.springframework.web
+- id: kotlin.sanitizer.spring_uriutils_encode
+  enabled: true
+  language: kotlin
+  tag: url-encode
+  packages: [org.springframework.web]
+  match:
+    kind: call
+    callee:
+      attribute: [UriUtils, encode]
+  match_examples:
+  - name: spring uriutils encode
+    code: |
+      import org.springframework.web.util.*
+      class App {
+        fun handle(input: String) {
+          UriUtils.encode(input, "UTF-8")
+        }
+      }
+    expect_match_text: [UriUtils.encode]
+  description: "Spring UriUtils.encode - percent-encodes a value for safe use in a URI component."
 - id: kotlin.sanitizer.owasp_encoder
   enabled: true
   language: kotlin
@@ -155,6 +175,66 @@
       }
     expect_match_text: [Encode.forHtml]
   description: "OWASP Java Encoder Encode.forHtml - context-aware HTML encoding."
+- id: kotlin.sanitizer.owasp_encoder_forhtmlattribute
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forHtmlAttribute]
+  match_examples:
+  - name: owasp encoder for html attribute
+    code: |
+      import org.owasp.encoder.*
+      class App {
+        fun handle(input: String) {
+          Encode.forHtmlAttribute(input)
+        }
+      }
+    expect_match_text: [Encode.forHtmlAttribute]
+  description: "OWASP Java Encoder Encode.forHtmlAttribute - encodes a value for safe insertion into an HTML attribute context."
+- id: kotlin.sanitizer.owasp_encoder_forjavascript
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forJavaScript]
+  match_examples:
+  - name: owasp encoder for javascript
+    code: |
+      import org.owasp.encoder.*
+      class App {
+        fun handle(input: String) {
+          Encode.forJavaScript(input)
+        }
+      }
+    expect_match_text: [Encode.forJavaScript]
+  description: "OWASP Java Encoder Encode.forJavaScript - escapes a value for safe embedding in a JavaScript/script context (DOM XSS defense)."
+- id: kotlin.sanitizer.owasp_encoder_foruricomponent
+  enabled: true
+  language: kotlin
+  tag: url-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forUriComponent]
+  match_examples:
+  - name: owasp encoder for uri component
+    code: |
+      import org.owasp.encoder.*
+      class App {
+        fun handle(input: String) {
+          Encode.forUriComponent(input)
+        }
+      }
+    expect_match_text: [Encode.forUriComponent]
+  description: "OWASP Java Encoder Encode.forUriComponent - percent-encodes a value for safe use as a single URI component."
 - id: kotlin.sanitizer.jsoup_clean
   enabled: true
   language: kotlin
@@ -518,6 +598,60 @@
       }
     expect_match_text: [PasswordEncoder.matches]
   description: "Spring Security PasswordEncoder.matches - delegates to the encoder's constant-time hash compare (BCrypt/Argon2/PBKDF2)."
+
+# JWT signature-verification sanitizers (jwt-verify). The verify
+# path proves the token signature before its claims are trusted;
+# the unverified decode/parse path is the corresponding sink.
+- id: kotlin.sanitizer.auth0_jwt_verifier_verify
+  enabled: true
+  language: kotlin
+  tag: jwt-verify
+  packages: ["com.auth0.jwt"]
+  match:
+    kind: call
+    callee:
+      attribute: [JWTVerifier, verify]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: auth0 jwt verifier verify
+    code: |
+      import com.auth0.jwt.*
+      class App {
+        fun check(verifier: JWTVerifier, token: String) {
+          verifier.verify(token)
+        }
+      }
+    expect_match_text: [verifier.verify]
+  - name: auth0 jwt verifier verify negative constraint boundary
+    code: "import com.auth0.jwt.*\nclass App {\n  fun check(verifier: JWTVerifier) {\n    verifier.verify()\n  }\n}\n"
+    expect_no_match: true
+  description: "auth0 java-jwt JWTVerifier.verify(token) - validates the JWT signature and registered claims against the configured Algorithm before claims are trusted."
+- id: kotlin.sanitizer.nimbus_jwt_verify
+  enabled: true
+  language: kotlin
+  tag: jwt-verify
+  packages: ["com.nimbusds.jose"]
+  match:
+    kind: call
+    callee:
+      attribute: [SignedJWT, verify]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: nimbus signed jwt verify
+    code: |
+      import com.nimbusds.jose.*
+      class App {
+        fun check(jwt: SignedJWT, verifier: Any) {
+          jwt.verify(verifier as JWSVerifier)
+        }
+      }
+    expect_match_text: [jwt.verify]
+  - name: nimbus signed jwt verify negative constraint boundary
+    code: "import com.nimbusds.jose.*\nclass App {\n  fun check(jwt: SignedJWT) {\n    jwt.verify()\n  }\n}\n"
+    expect_no_match: true
+  description: "Nimbus JOSE SignedJWT.verify(JWSVerifier) - cryptographically verifies the JWS signature before the payload is trusted."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
@@ -1065,6 +1199,48 @@
       }
     expect_match_text: [Rdn.escapeValue]
   description: "javax.naming.ldap.Rdn.escapeValue - escapes attacker input for an LDAP RDN value."
+
+- id: kotlin.sanitizer.esapi_encode_for_ldap
+  enabled: true
+  language: kotlin
+  tag: ldap-escape
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForLDAP]
+  match_examples:
+  - name: esapi encode for ldap
+    code: |
+      import org.owasp.esapi.*
+      class App {
+        fun filter(encoder: Encoder, input: String): String {
+          return encoder.encodeForLDAP(input)
+        }
+      }
+    expect_match_text: [encoder.encodeForLDAP]
+  description: "OWASP ESAPI Encoder.encodeForLDAP - escapes LDAP filter metacharacters per RFC 4515."
+
+- id: kotlin.sanitizer.esapi_encode_for_dn
+  enabled: true
+  language: kotlin
+  tag: ldap-escape
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForDN]
+  match_examples:
+  - name: esapi encode for dn
+    code: |
+      import org.owasp.esapi.*
+      class App {
+        fun dn(encoder: Encoder, input: String): String {
+          return encoder.encodeForDN(input)
+        }
+      }
+    expect_match_text: [encoder.encodeForDN]
+  description: "OWASP ESAPI Encoder.encodeForDN - escapes characters that are special inside an LDAP distinguished name (RFC 2253)."
 
 - id: kotlin.sanitizer.uri_host_allowlist
   enabled: false

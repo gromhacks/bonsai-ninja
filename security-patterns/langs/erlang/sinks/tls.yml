@@ -17,6 +17,13 @@
         -export([test/1]).
         test(Input) ->
           ssl:connect(Input).
+    - name: ssl listen negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          ssl:listen(4443, []).
+      expect_no_match: true
   description: "ssl:connect - flag when options include {verify, verify_none}; no cert chain validation -> MITM."
 
 - id: erlang.tls.httpc_request_no_verify

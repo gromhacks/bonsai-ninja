@@ -18,6 +18,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn repo_root() -> PathBuf {
     let mut p = std::env::current_dir().expect("cwd");
@@ -89,6 +90,134 @@ fn assert_contains(out: &str, needle: &str, cmd: &str) {
         out.contains(needle),
         "{cmd}: expected output to contain `{needle}`. Got:\n{out}"
     );
+}
+
+fn temp_output_path(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "bonsai-output-path-{name}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+#[test]
+fn output_path_writes_selected_json_format_and_leaves_stdout_empty() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws();
+    let out_path = temp_output_path("defs-json");
+    let out = Command::new(&bin)
+        .args([
+            "defs",
+            ws.to_str().unwrap(),
+            "--format",
+            "json",
+            "--output-path",
+            out_path.to_str().unwrap(),
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("COLUMNS", "200")
+        .env_remove("BONSAI_CONTEXT")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "defs --output-path failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout should be empty when --output-path is set, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let written = std::fs::read_to_string(&out_path).expect("read output file");
+    let parsed: serde_json::Value = serde_json::from_str(&written).expect("output file JSON");
+    assert!(parsed.as_array().is_some_and(|rows| !rows.is_empty()));
+    let _ = std::fs::remove_file(out_path);
+}
+
+#[test]
+fn output_path_writes_paged_text_render() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws();
+    let out_path = temp_output_path("defs-text");
+    let out = Command::new(&bin)
+        .args([
+            "defs",
+            ws.to_str().unwrap(),
+            "--context",
+            "4k",
+            "--output-path",
+            out_path.to_str().unwrap(),
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("COLUMNS", "200")
+        .env_remove("BONSAI_CONTEXT")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "defs text --output-path failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout should be empty when --output-path is set, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let written = std::fs::read_to_string(&out_path).expect("read output file");
+    assert_contains(&written, "verify_token", "defs --output-path text");
+    assert_contains(&written, "page 1", "defs --output-path text");
+    let _ = std::fs::remove_file(out_path);
+}
+
+#[test]
+fn export_output_path_streams_native_json() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws();
+    let out_path = temp_output_path("export-json");
+    let out = Command::new(&bin)
+        .args([
+            "export",
+            ws.to_str().unwrap(),
+            "--format",
+            "json",
+            "--output-path",
+            out_path.to_str().unwrap(),
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("COLUMNS", "200")
+        .env_remove("BONSAI_CONTEXT")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "export --output-path failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout should be empty when --output-path is set, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let written = std::fs::read_to_string(&out_path).expect("read output file");
+    let parsed: serde_json::Value = serde_json::from_str(&written).expect("export output file JSON");
+    assert!(
+        parsed.get("files").is_some(),
+        "export JSON missing files: {parsed}"
+    );
+    let _ = std::fs::remove_file(out_path);
 }
 
 // -------- index --------

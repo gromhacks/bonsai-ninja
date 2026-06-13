@@ -17,6 +17,10 @@
       attribute:
       - crypto
       - createHash
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"](md5|md4|md2|sha1|sha-1)['\"]$"
   match_examples:
   - name: createhash md5
     code: |
@@ -24,7 +28,22 @@
       function demo(input, req, obj) {
         return crypto.createHash('md5');
       }
-  description: "crypto.createHash('md5') - broken hash. Merged aliases: typescript.crypto.createhash_sha1."
+    expect_match_text: [crypto.createHash]
+  - name: createhash sha1
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createHash('sha1');
+      }
+    expect_match_text: [crypto.createHash]
+  - name: createhash sha256 negative
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createHash('sha256');
+      }
+    expect_no_match: true
+  description: "crypto.createHash('md5'|'sha1') - broken/deprecated hash. The arg-0 algorithm regex pins the weak digests so sha256/sha512 stay quiet. Merged aliases: typescript.crypto.createhash_sha1."
   aliases:
   - typescript.crypto.createhash_sha1
 - id: typescript.crypto.createcipher_des
@@ -43,6 +62,10 @@
       attribute:
       - crypto
       - createCipheriv
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"](des|des-ede|des-ede3|des3|rc4|rc2|bf|blowfish|[a-z0-9-]*-ecb)['\"]$"
   match_examples:
   - name: createcipher des
     code: |
@@ -50,7 +73,22 @@
       function demo(input, req, obj) {
         return crypto.createCipheriv('des');
       }
-  description: "crypto.createCipheriv('des', ...). Merged aliases: typescript.crypto.createcipher_des_ede, typescript.crypto.createcipher_rc4, typescript.crypto.createcipher_aes_ecb."
+    expect_match_text: [crypto.createCipheriv]
+  - name: createcipher aes ecb
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createCipheriv('aes-128-ecb');
+      }
+    expect_match_text: [crypto.createCipheriv]
+  - name: createcipher aes gcm negative
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createCipheriv('aes-256-gcm', key, iv);
+      }
+    expect_no_match: true
+  description: "crypto.createCipheriv('des'|'rc4'|'*-ecb', ...) - weak cipher or ECB mode. The arg-0 algorithm regex pins broken ciphers/modes so aes-*-gcm/cbc stay quiet. Merged aliases: typescript.crypto.createcipher_des_ede, typescript.crypto.createcipher_rc4, typescript.crypto.createcipher_aes_ecb."
   aliases:
   - typescript.crypto.createcipher_des_ede
   - typescript.crypto.createcipher_rc4

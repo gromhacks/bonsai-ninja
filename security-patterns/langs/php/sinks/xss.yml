@@ -88,6 +88,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: php.template.twig_create_template
   language: php
   tag: xss
   severity: high

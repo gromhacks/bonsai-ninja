@@ -79,10 +79,8 @@
   - name: generated direct match
     code: |
       #include <libmicrohttpd/microhttpd.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        MHD_add_response_footer(arg);
+      void example(char *input) {
+        MHD_add_response_footer("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -110,10 +108,8 @@
   - name: generated direct match
     code: |
       #include <civetweb.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mg_response_header_add(arg);
+      void example(char *input) {
+        mg_response_header_add("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -170,10 +166,8 @@
   - name: generated direct match
     code: |
       #include <mongoose.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mg_send_header(arg);
+      void example(char *input) {
+        mg_send_header("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |

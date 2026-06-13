@@ -187,6 +187,15 @@ pub(super) fn normalise_qualified_text(text: &str) -> String {
             // Drop quote characters inside subscripts — we want
             // `env['cmd']` → `env.cmd`, not `env.'cmd'`.
             '\'' | '"' if inside_brackets => {}
+            // Drop the Ruby / Elixir symbol-key sigil inside
+            // subscripts so `params[:token]` → `params.token`, the
+            // same canonical projection the engine-side
+            // `bonsai_taint::text::normalise_qualified_text` and the
+            // kit's `extract_qualified_accesses` produce. Without this
+            // the symbol key kept its colon (`params.:token`) and a
+            // field-precise seed (`params.token`) could not address
+            // the projected read node.
+            ':' if inside_brackets => {}
             _ => canonical.push(ch),
         }
     }
