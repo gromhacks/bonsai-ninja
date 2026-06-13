@@ -35,3 +35,39 @@
 
   imports:
   - Stdlib
+
+- id: elixir.redos.regex_compile_bang
+  enabled: true
+  language: elixir
+  tag: redos
+  severity: medium
+  packages: [stdlib]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [Regex, compile!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Stdlib
+      defmodule App do
+        def test(input) do
+          Regex.compile!(input)
+        end
+      end
+  - name: literal regex compile bang negative
+    code: |
+      alias Stdlib
+      defmodule App do
+        def test(input) do
+          Regex.compile!("^[a-z]+$")
+        end
+      end
+    expect_no_match: true
+  description: "Regex.compile!/2 - bang variant of Regex.compile; a tainted pattern can trigger catastrophic backtracking (ReDoS)."
+  imports:
+  - Stdlib

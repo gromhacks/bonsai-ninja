@@ -311,6 +311,44 @@
     code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeUpdate(\"safe\")\n  }\n}\n"
     expect_no_match: true
   description: "java.sql.Statement.executeUpdate(sql) - no parameter binding."
+- id: scala.sqli.jdbc_statement_addbatch
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages: [java.sql]
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - addBatch
+  constraints:
+  - arg_tainted:
+      index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.sql._
+      object App {
+        def handle(input: String): Unit = {
+          Statement.addBatch(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.sql._
+      object App {
+        def handle(input: String): Unit = {
+          Statement.addBatch("insert into audit values (1)")
+        }
+      }
+    expect_no_match: true
+  description: "java.sql.Statement.addBatch(sql) accumulates raw SQL on the receiver; the tainted batch executes later via executeBatch(). Mirrors java.sqli.statement_executebatch."
 - id: scala.sqli.scalikejdbc_sql_interpolator
   enabled: false
   disabled_reason:

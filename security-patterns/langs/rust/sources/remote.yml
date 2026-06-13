@@ -414,6 +414,13 @@
           let query = "user";
           headers::get(target);
       }
+  - name: unrelated map insert negative
+    code: |
+      use hyper::dummy;
+      fn example() {
+          headers::insert("X-Trace", "1");
+      }
+    expect_no_match: true
   description: "HeaderMap::get(name) - attacker-controlled HTTP header value; sink-side risk is header-reflection XSS / log-injection / SSRF (Host, X-Forwarded-For)."
 - id: rust.hyper.request_uri_path
   enabled: true
@@ -541,6 +548,36 @@
           HttpRequest::headers(target);
       }
   description: "actix_web::HttpRequest::headers() - attacker-controlled HTTP header map."
+  imports:
+  - actix_web
+- id: rust.actix.request_query_string
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [actix-web]
+  packages: ["actix_web"]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpRequest, query_string]
+  match_examples:
+  - name: actix request query_string
+    code: |
+      use actix_web;
+      fn example() {
+          HttpRequest::query_string();
+      }
+    expect_match_text: ["HttpRequest::query_string"]
+  - name: actix request path negative
+    code: |
+      use actix_web;
+      fn example() {
+          HttpRequest::path();
+      }
+    expect_no_match: true
+  description: "actix_web::HttpRequest::query_string() - raw attacker-controlled querystring; commonly parsed manually without an extractor."
   imports:
   - actix_web
 - id: rust.actix.request_cookies

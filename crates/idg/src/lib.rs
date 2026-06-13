@@ -87,7 +87,10 @@ pub use bitset::NodeBitSet;
 pub use builder::{stitch_idg, CalleeResolver, FuncToSegment, ResolvedCallee};
 pub use csr::EdgeCsr;
 pub use query::ReachabilityIndex;
-pub use service::{CallRetAssignmentTarget, CrossCallEdge, IdgQueryService, PointKind, PointRef, WsNodeId};
+pub use service::{
+    expand_bare_seed_names_with_descendants, CallRetAssignmentTarget, CrossCallEdge, IdgQueryService,
+    PointKind, PointRef, WsNodeId,
+};
 pub use transfer::{
     transfer_for_many, transfer_for_many_with_options, transfer_function_for,
     transfer_function_for_with_options, CallSiteRef, CleanOutputOverwriteSpec, NameInterner,

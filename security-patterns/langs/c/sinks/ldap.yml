@@ -15,10 +15,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        ldap_search_ext_s(arg);
+      void example(char *input) {
+        ldap_search_ext_s("safe", "safe", "safe", input);
       }
   - name: literal arg 3 negative
     code: |
@@ -27,6 +25,33 @@
       }
     expect_no_match: true
   description: "OpenLDAP ldap_search_ext_s - flag tainted filter (5th arg)."
+
+- id: c.ldap.ldap_search_ext
+  enabled: true
+  language: c
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_search_ext
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(char *input) {
+        ldap_search_ext("safe", "safe", "safe", input);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        ldap_search_ext("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search_ext(ld, base, scope, tainted_filter, ...) - async variant of ldap_search_ext_s; same filter-injection bug class via unescaped metacharacters *()\\."
 
 - id: c.ldap.ldap_search_s
   enabled: true
@@ -44,10 +69,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        ldap_search_s(arg);
+      void example(char *input) {
+        ldap_search_s("safe", "safe", "safe", input);
       }
   - name: literal arg 3 negative
     code: |
@@ -73,10 +96,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        ldap_search(arg);
+      void example(char *input) {
+        ldap_search("safe", "safe", "safe", input);
       }
   - name: literal arg 3 negative
     code: |

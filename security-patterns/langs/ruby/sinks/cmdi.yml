@@ -92,7 +92,8 @@
 - id: ruby.cmdi.backticks_interp
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: ruby.cmdi.kernel_backtick
   language: ruby
   tag: command-injection
   severity: critical
@@ -311,6 +312,42 @@
       end
     expect_no_match: true
   description: Open3.capture2.
+- id: ruby.cmdi.open3_capture2e
+  enabled: true
+  language: ruby
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - open3
+  imports:
+  - open3
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Open3
+      - capture2e
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.cmdi.open3_capture2e example
+    code: |
+      require "open3"
+      def example(input, url, id, payload, request, params)
+        Open3.capture2e(input)
+      end
+  - name: ruby.cmdi.open3_capture2e literal negative
+    code: |
+      require "open3"
+      def example(input, url, id, payload, request, params)
+        Open3.capture2e("/usr/bin/id")
+      end
+    expect_no_match: true
+  description: "Open3.capture2e - captures merged stdout+stderr; single-string tainted command spawns via shell, same RCE surface as capture2/capture3."
 - id: ruby.cmdi.kernel_open_pipe
   enabled: true
   language: ruby

@@ -37,6 +37,9 @@
     kind: call
     callee:
       attribute: [Response, internalServerError]
+  constraints:
+  - arg_tainted:
+      kw: body
   match_examples:
   - name: dart shelf error response body
     code: |
@@ -45,9 +48,14 @@
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
-      void test(Object error) { Response.internalServerError(body: "stack: $error"); }
+      void test(Object error) { Response.internalServerError(body: error); }
     expect_match_text: [Response.internalServerError]
-  description: "shelf Response.internalServerError(body: error/stack) - sends diagnostic internals to the client."
+  - name: static error body negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { Response.internalServerError(body: "Internal Server Error"); }
+    expect_no_match: true
+  description: "shelf Response.internalServerError(body: error/stack) - sends diagnostic internals to the client. Gated on a tainted `body:` argument so generic static 500 responses stay quiet."
 
   imports:
   - shelf/shelf.dart

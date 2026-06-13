@@ -23,9 +23,7 @@
   imports:
   - firebase_messaging/firebase_messaging.dart
 - id: dart.queue.fcm_remote_message_data
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: service
   tag: push-message
@@ -34,12 +32,19 @@
     kind: read
     target:
       name: data
-  description: "Disabled - the current Dart adapter does not index property reads like `message.data`."
+      receiver_type_in: [RemoteMessage]
+  match_examples:
+  - name: fcm remote message data read
+    code: |
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      Map<String, dynamic> handle(RemoteMessage message) {
+        var d = message.data;
+        return d;
+      }
+  description: "RemoteMessage.data - FCM push payload read via `message.data` on a typed RemoteMessage receiver."
 
 - id: dart.queue.fcm_notification_title
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: service
   tag: push-message
@@ -48,4 +53,13 @@
     kind: read
     target:
       name: notification
-  description: "Disabled - the current Dart adapter does not index property reads like `message.notification`."
+      receiver_type_in: [RemoteMessage]
+  match_examples:
+  - name: fcm remote message notification read
+    code: |
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      RemoteNotification? handle(RemoteMessage message) {
+        var n = message.notification;
+        return n;
+      }
+  description: "RemoteMessage.notification - FCM notification block read via `message.notification` on a typed RemoteMessage receiver."

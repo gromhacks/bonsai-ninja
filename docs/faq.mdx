@@ -21,7 +21,7 @@ You passed `--inferred-sources`. That mode seeds synthetic sources at entry-poin
 
 <Accordion title="How do I make output smaller?">
 
-Use `--compact`, reduce `--context`, add `--severity`, `--tag`, `--source`, or `--sink`, and page with `--page next`.
+Use `--compact` on commands that support it, reduce `--context`, add `--severity`, `--tag`, `--source`, or `--sink`, and page with `--page next`. `security taint-analysis` is compact by default; use `--no-compact` only when you want repeated function bodies expanded.
 
 </Accordion>
 
@@ -51,7 +51,7 @@ Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidec
 
 <Accordion title="How do I keep results current while editing?">
 
-Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and rewrites `.bonsai/dataflow.v3.factstore` after affected dataflow entries are rebuilt. SDK `Project` facades use the same refresh path before commands run.
+Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and prints fresh structural stats. Combine it with `--prewarm-dataflow` only when you intentionally want save-time dataflow sidecar rebuilds. SDK `Project` facades use the same refresh path before commands run.
 
 </Accordion>
 

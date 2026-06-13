@@ -163,21 +163,28 @@ not the production source-to-sink scheduler. Sub-modules:
 `security`. It hides the orchestration: index a directory, run analysis,
 return facts.
 
-The workspace owns a battery of lazy + eager caches that turn every
-query path into a lookup against precomputed state:
+The workspace owns a battery of lazy caches and explicit prewarm paths.
+Default CLI query commands parse/index structurally, load valid persisted
+sidecars when present, and compute missing facts for the requested scope
+before rendering:
 
 - `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
-  `EntryTaintGraph` + transitive-dependency file set. Prewarmed at
-  open; persisted to `.bonsai/dataflow.v3.factstore` (legacy
-  `dataflow.v2.bin` is still readable for warm reopens).
+  `EntryTaintGraph` + transitive-dependency file set. Loaded when a
+  persisted sidecar is present, computed on demand for exact queries, and
+  fully rebuilt only by explicit prewarm paths such as
+  `index --prewarm-dataflow`; persisted to
+  `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
+  readable for warm reopens).
 - `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
   `ValueFlowGraph` plus a `returning_seed_names` set
   (precomputed at graph-build time so security-analysis answers
   "does this seed reach a Return?" with a hash-set intersection).
-  Prewarmed at open; persisted to `.bonsai/value_flow.v3.factstore`.
+  Loaded when present and computed for the requested scope; persisted to
+  `.bonsai/value_flow.v3.factstore`.
 - `FlowIdCache` (`flow_ids.rs`) — per-`FuncId` flow labels for
-  browse-row F-IDs. Prewarmed at open; shares the workspace-cached
-  resolved call graph via `seed_call_graph`.
+  browse-row F-IDs. Computed for the rendered browse scope; shares the
+  workspace-cached resolved call graph via `seed_call_graph` when that
+  graph is already available.
 - `TaintGraphIndex` (`taint_index.rs`) — workspace-wide
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map so a second `taint-analysis` /

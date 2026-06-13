@@ -14,6 +14,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { transferOwnership(input); } }
+    - name: unrelated callee negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(string memory input) public { renounceMembership(input); } }
+      expect_no_match: true
   description: "transferOwnership(newOwner) - privileged state change; unauthenticated callers can seize the contract. Requires onlyOwner / role guard."
 - id: solidity.access.mint
   enabled: true
@@ -31,6 +36,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { mint(input); } }
+    - name: unrelated callee negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(string memory input) public { imprint(input); } }
+      expect_no_match: true
   description: "mint(to, amount) - arbitrary supply inflation breaks token economics; must be authz-gated (onlyOwner / MINTER_ROLE)."
 - id: solidity.access.burn
   enabled: true
@@ -48,6 +58,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { burn(input); } }
+    - name: unrelated callee negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(string memory input) public { sunburn(input); } }
+      expect_no_match: true
   description: "burn(from, amount) - destroys balances; if not restricted to from==msg.sender or authz role, attackers can burn arbitrary holders."
 - id: solidity.access.set_owner
   enabled: true
@@ -65,6 +80,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { setOwner(input); } }
+    - name: unrelated callee negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(string memory input) public { setName(input); } }
+      expect_no_match: true
   description: "setOwner(addr) - rewrites the privileged owner slot; unrestricted variant is a full takeover primitive."
 - id: solidity.access.withdraw
   enabled: true
@@ -82,6 +102,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { withdraw(input); } }
+    - name: unrelated callee negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(string memory input) public { deposit(input); } }
+      expect_no_match: true
   description: "withdraw(...) - moves contract-held funds out; must restrict to caller's own balance or an authz role, else attackers drain the contract."
 - id: solidity.access.pause
   enabled: false

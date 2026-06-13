@@ -69,3 +69,75 @@
       }
     expect_no_match: true
   description: "regexp.MustCompile(tainted_pattern) - attacker-controlled regular expressions can consume excessive CPU or panic."
+
+- id: go.redos.regexp_compile_posix
+  enabled: true
+  language: go
+  tag: redos
+  severity: medium
+  packages: [stdlib]
+  imports: [regexp]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [regexp, CompilePOSIX]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted regexp posix pattern
+    code: |
+      package main
+      import "regexp"
+
+      func compile(pattern string) {
+        regexp.CompilePOSIX(pattern)
+      }
+    expect_match_text: [regexp.CompilePOSIX]
+  - name: literal regexp posix pattern negative
+    code: |
+      package main
+      import "regexp"
+
+      func compile() {
+        regexp.CompilePOSIX(`^[a-z]+$`)
+      }
+    expect_no_match: true
+  description: "regexp.CompilePOSIX(tainted_pattern) - POSIX leftmost-longest variant of Compile; attacker-controlled patterns still risk catastrophic backtracking / CPU exhaustion."
+
+- id: go.redos.regexp_must_compile_posix
+  enabled: true
+  language: go
+  tag: redos
+  severity: medium
+  packages: [stdlib]
+  imports: [regexp]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [regexp, MustCompilePOSIX]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mustcompile posix pattern
+    code: |
+      package main
+      import "regexp"
+
+      func compile(pattern string) {
+        regexp.MustCompilePOSIX(pattern)
+      }
+    expect_match_text: [regexp.MustCompilePOSIX]
+  - name: literal mustcompile posix pattern negative
+    code: |
+      package main
+      import "regexp"
+
+      func compile() {
+        regexp.MustCompilePOSIX(`^[a-z]+$`)
+      }
+    expect_no_match: true
+  description: "regexp.MustCompilePOSIX(tainted_pattern) - POSIX variant of MustCompile; attacker-controlled patterns risk CPU exhaustion or panic."

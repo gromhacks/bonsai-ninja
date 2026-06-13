@@ -1,9 +1,10 @@
-# Erlang CLI / env / stdin sources (trust: local).
+# Erlang CLI / env / stdin sources (trust: local / config).
 - id: erlang.source.init_get_plain_arguments
   enabled: true
   language: erlang
   trust: local
   tag: cli-input
+  payload_types: [text]
   match:
     kind: call
     callee:
@@ -15,13 +16,47 @@
         -export([test/1]).
         test(Input) ->
           init:get_plain_arguments(Input).
+    - name: init get_status negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          init:get_status(Input).
+      expect_no_match: true
   description: "init:get_plain_arguments/0 - command-line args."
+
+- id: erlang.source.init_get_argument
+  enabled: true
+  language: erlang
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^init:get_argument$"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          init:get_argument(Input).
+    - name: init get_arguments negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          init:get_status(Input).
+      expect_no_match: true
+  description: "init:get_argument/1 - value of a named `-flag` command-line argument supplied at VM start."
 
 - id: erlang.source.io_get_line
   enabled: true
   language: erlang
   trust: local
   tag: cli-input
+  payload_types: [text]
   match:
     kind: call
     callee:
@@ -33,13 +68,73 @@
         -export([test/1]).
         test(Input) ->
           io:get_line(Input).
+    - name: io format negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          io:format(Input).
+      expect_no_match: true
   description: "io:get_line/1 - stdin line."
+
+- id: erlang.source.io_read
+  enabled: true
+  language: erlang
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^io:read$"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          io:read(Input).
+    - name: io format negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          io:format(Input).
+      expect_no_match: true
+  description: "io:read/2 - reads and parses an Erlang term from stdin; the parsed term is caller-controlled."
+
+- id: erlang.source.io_fread
+  enabled: true
+  language: erlang
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^io:fread$"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          io:fread(Input).
+    - name: io format negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          io:format(Input).
+      expect_no_match: true
+  description: "io:fread/2,3 - formatted read from stdin; returned values are user-supplied."
 
 - id: erlang.source.os_getenv
   enabled: true
   language: erlang
-  trust: local
+  trust: config
   tag: env-input
+  payload_types: [text]
   match:
     kind: call
     callee:
@@ -51,4 +146,37 @@
         -export([test/1]).
         test(Input) ->
           os:getenv(Input).
-  description: "os:getenv/1 - environment variable."
+    - name: os putenv negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          os:putenv(Input).
+      expect_no_match: true
+  description: "os:getenv/1,2 - environment variable value; whoever launched the process controls these."
+
+- id: erlang.source.application_get_env
+  enabled: true
+  language: erlang
+  trust: config
+  tag: config-input
+  payload_types: [config-value]
+  match:
+    kind: call
+    callee:
+      regex: "^application:get_env$"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          application:get_env(Input).
+    - name: application set_env negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          application:set_env(Input).
+      expect_no_match: true
+  description: "application:get_env/1,2,3 - application configuration value read from sys.config / app env; externally provisioned."

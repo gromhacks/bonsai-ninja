@@ -65,10 +65,8 @@
   - name: generated direct match
     code: |
       #include <mongoose.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mg_http_upload(arg);
+      void example(char *input) {
+        mg_http_upload("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -82,6 +80,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: c.path.fopen
   language: c
   tag: file-upload
   severity: medium

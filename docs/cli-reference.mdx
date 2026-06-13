@@ -9,24 +9,26 @@ Global options accepted before the command include `--no-color`, `--theme`, `--n
 
 ## index
 
-`index` parses a workspace, builds the reusable dataflow sidecar, and prints workspace stats as JSON.
+`index` parses a workspace, builds the structural index, and prints workspace stats as JSON. It does not eagerly compute the full-workspace dataflow graph unless you pass `--prewarm-dataflow`.
 
 ```bash
 bonsai-ninja index ./src
 bonsai-ninja index ./src --watch
+bonsai-ninja index ./src --prewarm-dataflow
 ```
 
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root to analyze. |
-| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and rewrite `.bonsai/dataflow.v3.factstore`. |
+| `--prewarm-dataflow` | false | Compute and persist exact dataflow for every callable during this index run. This is intentionally expensive on large workspaces. |
+| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and print fresh structural stats. Combine with `--prewarm-dataflow` only when you want save-time dataflow rebuilds. |
 | `--interval-ms <N>` | 750 | Poll interval for `--watch`. Values below 100 ms are clamped to 100 ms. |
 
-Normal `index` runs are already incremental across processes: the command
-loads `.bonsai/dataflow.v3.factstore`, validates cached entries by source
-content and dependency hashes, computes only missing or stale dataflow
-facts, and writes the sidecar back. `--watch` keeps the same workspace
-alive so saved file edits reparse only changed files.
+Normal `index` runs are structural-only. Later browse, inspect, trace,
+security, export, and debug commands load reusable sidecars when present
+and compute the exact analysis scope they need before rendering. Use
+`--prewarm-dataflow` only when a benchmark or workflow explicitly needs
+the legacy full-workspace dataflow sidecar rebuilt up front.
 
 ## security
 
@@ -66,6 +68,7 @@ Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
 | `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
 | `--all` | false | Emit all rows or findings without paging. |
 | `--format <FORMAT>` | text | `text`, `json`, or `sarif` where supported. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## taint
 
@@ -73,7 +76,8 @@ The taint command surface is `security <workspace> taint-analysis`.
 
 ```bash
 bonsai-ninja security ./src taint-analysis --trust remote --tag command-injection
-bonsai-ninja security ./src taint-analysis --format sarif --all > findings.sarif.json
+bonsai-ninja security ./src taint-analysis --summary --format json
+bonsai-ninja security ./src taint-analysis --format sarif --all --output-path findings.sarif.json
 ```
 
 Text output is labelled `TAINT FLOW`. Each step is derived from the
@@ -81,7 +85,10 @@ finding's source-specific taint path and annotates the source, tainted
 argument propagation, receiver evidence where relevant, and sink operand.
 JSON and SARIF findings include `analysis_complete` and
 `analysis_incomplete_reasons`; emitted findings are complete semantic
-evidence, so complete findings carry an empty reason list.
+evidence, so complete findings carry an empty reason list. The command
+always runs at the semantic taint precision ceiling: exact and narrowed
+source-to-sink evidence is reported, while broad diagnostic precision is
+not a user-facing finding mode.
 
 | Flag | Default | Description |
 |---|---:|---|
@@ -100,14 +107,14 @@ evidence, so complete findings carry an empty reason list.
 | `--show-sanitized` | Compatibility | Sanitized reachable paths are already included with sanitizer evidence. |
 | `--taint-budget <N>` | 512 | Interprocedural function/seed chunk size; analysis resumes chunks to completion. |
 | `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
-| `--precision <LEVEL>` | None | Keep only semantic precision: `exact` or `narrowed`. Broad diagnostic classes are rejected by analysis commands. |
-| `--strict-flow` | false | Equivalent to keeping exact and narrowed paths. |
 | `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
 | `--context <BUDGET>` | 32k text | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
 | `--no-compact` | false | Expand every flow body. |
+| `--summary` | false | Emit only aggregate finding counts. Text shows compact tables; JSON emits the summary object without paged rows. |
 | `--format <FORMAT>` | text | `text`, `json`, or `sarif`. SARIF is supported for `taint-analysis` findings. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## inspect
 
@@ -142,6 +149,7 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--context <BUDGET>` | 32k text | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--format <FORMAT>` | text | `text` or `json`. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## trace
 
@@ -149,7 +157,7 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 
 ```bash
 bonsai-ninja trace ./src handle_request
-bonsai-ninja trace ./src --from handle_request --to os.system --format dot > flow.dot
+bonsai-ninja trace ./src --from handle_request --to os.system --format dot --output-path flow.dot
 ```
 
 | Flag | Default | Description |
@@ -167,6 +175,7 @@ bonsai-ninja trace ./src --from handle_request --to os.system --format dot > flo
 | `--max-branch-fanout <N>` | 4 | Branch fanout used to derive path budget. |
 | `--max-loop-iters <N>` | 1 | Loop iterations represented in metadata. |
 | `--format <FORMAT>` | text | `text`, `json`, or `dot`. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 JSON `summary.analysis_complete` is false when a trace hits a budget or
 cannot resolve a call it would need to expand. Budget failures are listed
@@ -177,11 +186,12 @@ as `non-semantic`; they are not reviewed flow evidence.
 
 ## export
 
-`export` writes the analyzed workspace graph to stdout.
+`export` writes the analyzed workspace graph to stdout, or to
+`--output-path` when provided.
 
 ```bash
-bonsai-ninja export ./src > index.json
-bonsai-ninja export ./src --format graphml > graph.graphml
+bonsai-ninja export ./src --output-path index.json
+bonsai-ninja export ./src --format graphml --output-path graph.graphml
 ```
 
 | Flag | Default | Description |
@@ -191,6 +201,7 @@ bonsai-ninja export ./src --format graphml > graph.graphml
 | `--complete-chains` | false | Request expanded semantic enumeration for chain and flow-id-label evidence; guarded rows remain semantic and are marked incomplete instead of reported complete. |
 | `--all` | false | Request every expensive export evidence section, equivalent to `--full-propagations --complete-chains` for native JSON. |
 | `--format <FORMAT>` | json | `json`, `networkx`, `graphml`, or `cypher`. |
+| `--output-path <PATH>` | stdout | Write the selected export format to a file. |
 
 ## source-analysis
 
@@ -227,6 +238,7 @@ JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 | `--all` | false | Emit every source flow. |
 | `--no-compact` | false | Expand every flow body. |
 | `--format <FORMAT>` | text | `text` or `json`. Source-flow mapping is not SARIF finding output; use `security taint-analysis --format sarif` for SARIF. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## cache
 
@@ -242,10 +254,13 @@ bonsai-ninja cache rebuild ./src
 
 | Subcommand or flag | Default | Description |
 |---|---:|---|
-| `stats <WORKSPACE>` | None | Print cache configuration, sidecar path, sidecar size, and entry count when present. |
-| `clear <WORKSPACE>` | None | Remove `.bonsai/` artifacts for the workspace. |
-| `rebuild <WORKSPACE>` | None | Delete and rebuild `.bonsai/dataflow.v3.factstore`. |
-| `--dataflow-only` | false | For `clear`, remove only the persisted dataflow sidecar. |
+| `stats [WORKSPACE]` | current directory | Print cache configuration plus dataflow, value-flow, flow-id, callgraph, IDG, taint-graph, and export sidecar paths and sizes when present. |
+| `stats --format <FORMAT>` | text | `text` or `json`; SARIF requests fall back to JSON for this non-finding command. |
+| `stats --output-path <PATH>` | stdout | Write the selected `stats --format` output to a file. |
+| `clear [WORKSPACE]` | current directory | Remove persisted `.bonsai/` analysis sidecars for the workspace. |
+| `--dataflow-only` | false | For `clear`, remove only `dataflow.v3.factstore` and the compatibility `dataflow.v2.bin`. |
+| `rebuild [WORKSPACE]` | current directory | Remove persisted analysis sidecars and rebuild bounded structural sidecars, currently callgraph and IDG. It does not run the legacy full-workspace dataflow prewarm. |
+| `rebuild --export` | false | Also warm the default export JSON cache. |
 
 ## Browse Commands
 
@@ -269,7 +284,7 @@ bonsai-ninja search ./src "request.args"
 | `strings` | String literals classified as `sql`, `url`, `shell`, `regex`, `path`, or `generic`. | `--category`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |
 | `comments` | Comments classified as `todo`, `fixme`, `security`, `doc`, `disabled_code`, or `generic`. | `--kind`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |
 | `args` | Call-site arguments by callee, position, keyword, and value text. | `--callee`, `--value`, `--position`, `--keyword`, `--file`, `--in-fn`, `--regex` |
-| `classes` | Classes, structs, traits, interfaces, and enums. | `--kind`, `--file`, `--name`, `--regex` |
+| `classes` | Classes, structs, traits, interfaces, and enums. | `--kind`, `--file`, `--name`, `--has-method`, `--min-methods`, `--regex` |
 | `refs` | References to symbols, including read/call/type facts. | positional symbol, `--symbol`, `--file`, `--kind`, `--regex` |
 | `search` | Prefix-first fuzzy search over all browse facts. | positional query, `--kind`, `--file`, `--regex` |
 
@@ -283,6 +298,7 @@ Common browse output flags:
 | `--all` | false | Emit all rows with no paging/context cap. |
 | `--no-flows` | false | Hide flow-id columns on commands that include them. |
 | `--format <FORMAT>` | text | `text` or `json`. |
+| `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 Flow columns are semantic-only navigation labels: exact/narrowed facts only,
 never unresolved fan-out. If a rendered flow cell
@@ -302,8 +318,8 @@ bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.ar
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `tree` | Workspace tree with file-level flow, edge, finding, and security annotations. | `--max-depth`, `--file`, `--severity`, `--tag`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--rules-dir` |
-| `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--rules-dir` |
+| `tree` | Workspace tree with file-level flow, edge, finding, and security annotations. | `--max-depth`, `--file`, `--exclude-file`, `--severity`, `--limit`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
+| `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
 
 `tree` and `read-file` are semantic-only for flow-bearing context. JSON
 includes top-level `analysis_complete` and
@@ -327,13 +343,13 @@ bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `dump-ast` | Tree-sitter parse tree by file, function, or stable `N:` node id. | `--file`, `--function`, `--compact`, `--max-depth`, `--node`, `--context`, `--page`, `--all`, `--format` |
+| `dump-ast` | Tree-sitter parse tree by file, function, or stable `N:` node id. | `--file`, `--function`, `--compact`, `--max-depth`, `--node`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
 | `dump-hir` | Flow-event tree for one function as JSON. | positional symbol, `--symbol` |
 | `dump-cfg` | Basic-block CFG for one function as JSON. | positional symbol, `--symbol` |
-| `dump-callgraph` | Per-function caller and outgoing counts. | `--limit`, `--context`, `--page`, `--all`, `--format` |
-| `dump-edges` | Resolved call edges with stable `E:` ids and precision. | `--from`, `--to`, `--precision`, `--compact`, `--edge`, `--context`, `--page`, `--all`, `--format` |
-| `dump-resolve` | Resolver stages and candidates for a name. | positional name, `--name`, `--in-file`, `--compact`, `--candidate`, `--format` |
-| `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sanitizer`, `--sink`, `--budget`, `--intra-worklist-cap`, `--compact`, `--taint`, `--format` |
+| `dump-callgraph` | Per-function caller and outgoing counts. | `--limit`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
+| `dump-edges` | Resolved call edges with stable `E:` ids and precision. | `--from`, `--to`, `--precision`, `--compact`, `--edge`, `--context`, `--page`, `--all`, `--format`, `--output-path` |
+| `dump-resolve` | Resolver stages and candidates for a name. | positional name, `--name`, `--in-file`, `--compact`, `--candidate`, `--format`, `--output-path` |
+| `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sanitizer`, `--sink`, `--budget`, `--intra-worklist-cap`, `--compact`, `--taint`, `--format`, `--output-path` |
 | `diagnostics` | Adapter diagnostic pass over the workspace. | `<WORKSPACE>` |
 
 `dump-taint --format json` includes top-level `analysis_complete` and

@@ -5,7 +5,6 @@
 //! analysis narrower and compare the machine-readable result to the
 //! corresponding `bonsai_sdk` facade call.
 
-use bonsai_common::Precision;
 use bonsai_sdk::{Severity, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -487,22 +486,6 @@ fn taint_analysis_cli_flags_map_one_to_one_to_sdk_options() {
             "rendering no-compact does not affect JSON analysis",
             vec!["--all", "--no-compact"],
             TaintAnalysisOptions::default(),
-        ),
-        (
-            "precision narrowed",
-            vec!["--all", "--precision", "narrowed"],
-            TaintAnalysisOptions {
-                max_precision: Some(Precision::Narrowed),
-                ..Default::default()
-            },
-        ),
-        (
-            "strict flow",
-            vec!["--all", "--strict-flow"],
-            TaintAnalysisOptions {
-                max_precision: Some(Precision::Narrowed),
-                ..Default::default()
-            },
         ),
     ];
 

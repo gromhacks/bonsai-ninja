@@ -17,6 +17,13 @@
       def handler(event)
         event
       end
+  - name: ruby.source.aws_lambda_event no event param negative
+    code: |
+      require "aws_lambda_ric"
+      def handler(context)
+        context
+      end
+    expect_no_match: true
   description: "AWS Lambda Ruby handler `event:` parameter (aws_lambda_ric)."
 
 - id: ruby.source.gcf_request
@@ -36,6 +43,13 @@
       def handler(request)
         request
       end
+  - name: ruby.source.gcf_request no request param negative
+    code: |
+      require "functions_framework"
+      def handler(context)
+        context
+      end
+    expect_no_match: true
   description: "Google Cloud Functions functions_framework http(request) handler."
 
 - id: ruby.source.azure_function_req
@@ -53,4 +67,10 @@
       def handler(req)
         req
       end
+  - name: ruby.source.azure_function_req no req param negative
+    code: |
+      def handler(context)
+        context
+      end
+    expect_no_match: true
   description: "Azure Functions HTTP trigger handler req parameter."

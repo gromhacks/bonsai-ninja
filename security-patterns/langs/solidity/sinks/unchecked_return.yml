@@ -1,7 +1,8 @@
 - id: solidity.unchecked_return.call
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: requires-constraint
+    reenable_when: "return-use analysis can prove the bool result from `.call(...)` is ignored or discarded."
   language: solidity
   tag: unchecked-return
   severity: medium
@@ -10,11 +11,12 @@
     kind: call
     callee:
       name: call
-  description: "Disabled - v1 matching sees only .call and cannot prove the bool return is unchecked; reentrancy.call covers the external-call sink shape."
+  description: "Disabled - v1 matching sees only .call and cannot prove the bool return is unchecked; solidity.reentrancy.call covers the generic external-call site."
 - id: solidity.unchecked_return.send
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: requires-constraint
+    reenable_when: "return-use analysis can prove the bool result from `.send(...)` is ignored or discarded."
   language: solidity
   tag: unchecked-return
   severity: medium
@@ -23,4 +25,4 @@
     kind: call
     callee:
       name: send
-  description: "Disabled - v1 matching sees only .send and cannot prove the bool return is unchecked; reentrancy.send covers the external-call sink shape."
+  description: "Disabled - v1 matching sees only .send and cannot prove the bool return is unchecked; solidity.reentrancy.send covers the generic external-call site."

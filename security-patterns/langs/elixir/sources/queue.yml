@@ -53,9 +53,7 @@
   imports:
   - Broadway
 - id: elixir.oban.job_args
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: elixir
   trust: service
   tag: queue-input
@@ -65,7 +63,20 @@
     kind: read
     target:
       name: args
-  description: "Disabled - current Elixir adapter does not emit `kind: read` property facts for `%Oban.Job{}.args`. The `elixir.oban.worker_perform` `job` param rule already taints the worker entrypoint; re-enable once the adapter exposes field reads."
+  match_examples:
+  - name: oban job args read
+    code: |
+      use Oban.Worker
+      defmodule MyWorker do
+        def perform(job) do
+          a = job.args
+          a
+        end
+      end
+  description: "Oban.Job.args - job payload read via `job.args` field access in a worker's perform/1."
+
+  imports:
+  - Oban
 
 - id: elixir.oban.worker_perform
   enabled: true

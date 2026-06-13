@@ -11,16 +11,24 @@
     kind: call
     callee:
       name: corsHeaders
+  constraints:
+  - any_arg_matches_regex: '\*'
   match_examples:
-  - name: declared shape
+  - name: wildcard origin header
     code: |
       import 'package:shelf_cors_headers/shelf_cors_headers.dart';
       import 'package:shelf_cors_headers/shelf_cors_headers.dart';
       import 'package:shelf_cors_headers/shelf_cors_headers.dart';
       import 'package:shelf_cors_headers/shelf_cors_headers.dart';
       import 'package:shelf_cors_headers/shelf_cors_headers.dart'; // shelf_cors_headers
-      void test() { var input = "x"; var amount = 1; corsHeaders("Access-Control-Allow-Origin: *"); }
+      void test() { corsHeaders({"Access-Control-Allow-Origin": "*"}); }
+    expect_match_text: [corsHeaders]
+  - name: restricted origin header negative
+    code: |
+      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
+      void test() { corsHeaders({"Access-Control-Allow-Origin": "https://app.example.com"}); }
+    expect_no_match: true
   description: |-
-    shelf_cors_headers with Access-Control-Allow-Origin: * - wildcard.
+    shelf_cors_headers with Access-Control-Allow-Origin: * - wildcard origin allows any site to read authenticated responses. The `any_arg_matches_regex: '\*'` gate fires only when a wildcard origin is configured, so explicitly-restricted origins stay quiet.
   imports:
   - shelf_cors_headers/shelf_cors_headers.dart

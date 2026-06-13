@@ -62,6 +62,22 @@
     expect_match_text: [HtmlEscape.convert]
   description: "dart:convert HtmlEscape.convert - escapes <>&\"' for safe HTML text-node insertion."
 
+- id: dart.sanitizer.html_escape_const_convert
+  enabled: true
+  language: dart
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [htmlEscape, convert]
+  match_examples:
+  - name: dart convert htmlEscape constant convert
+    code: |
+      import 'dart:convert';
+      void test() { var input = "x"; htmlEscape.convert(input); }
+    expect_match_text: [htmlEscape.convert]
+  description: "dart:convert top-level `htmlEscape` constant .convert - escapes <>&\"' for safe HTML text-node insertion. Idiomatic lowercase-constant form complementing dart.sanitizer.htmlescape_convert (the HtmlEscape class form)."
+
 - id: dart.sanitizer.html_unescape_convert
   enabled: false
   disabled_reason:
@@ -354,6 +370,30 @@
 
   imports:
   - validators/validators.dart
+- id: dart.sanitizer.bcrypt_checkpw
+  enabled: true
+  language: dart
+  tag: auth-sanitizer
+  packages: [bcrypt, dbcrypt]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt, checkpw]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: bcrypt checkpw verify
+    code: |
+      import 'package:bcrypt/bcrypt.dart';
+      void test(String password, String hash) { BCrypt.checkpw(password, hash); }
+    expect_match_text: [BCrypt.checkpw]
+  - name: bcrypt checkpw negative constraint boundary
+    code: "import 'package:bcrypt/bcrypt.dart';\nvoid test() { BCrypt.checkpw(); }\n"
+    expect_no_match: true
+  description: "package:bcrypt BCrypt.checkpw(password, hash) - constant-time-ish bcrypt password verification; the safe credential-check primitive."
+
+  imports:
+  - bcrypt/bcrypt.dart
 - id: dart.sanitizer.starts_with_same_origin
   enabled: true
   language: dart

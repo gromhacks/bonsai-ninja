@@ -11,6 +11,10 @@
     kind: call
     callee:
       attribute: [CrossOrigin, allowedOrigins]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"\*"$'
   match_examples:
   - name: generated shape example
     code: |
@@ -20,6 +24,15 @@
           CrossOrigin.allowedOrigins("*");
         }
       }
+  - name: explicit origin negative
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle() throws Exception {
+          CrossOrigin.allowedOrigins("https://app.example.com");
+        }
+      }
+    expect_no_match: true
   description: |-
     @CrossOrigin(origins = "*") - Spring controller-level allow-all CORS.
 - id: java.cors.cors_config_addallowedorigin_wildcard
@@ -34,6 +47,10 @@
     kind: call
     callee:
       attribute: [CorsConfiguration, addAllowedOrigin]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"\*"$'
   match_examples:
   - name: generated shape example
     code: |
@@ -43,5 +60,14 @@
           CorsConfiguration.addAllowedOrigin("*");
         }
       }
+  - name: explicit origin negative
+    code: |
+      import org.springframework.web.cors.*;
+      class App {
+        void handle() throws Exception {
+          CorsConfiguration.addAllowedOrigin("https://app.example.com");
+        }
+      }
+    expect_no_match: true
   description: |-
     CorsConfiguration.addAllowedOrigin('*') - Spring filter-chain allow-all CORS.

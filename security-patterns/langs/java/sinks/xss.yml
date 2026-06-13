@@ -501,6 +501,10 @@
       attribute:
       - Label
       - setEscapeModelStrings
+  constraints:
+  - arg_equals:
+      index: 0
+      value: 'false'
   match_examples:
   - name: wicket label escaping disabled
     code: |
@@ -515,6 +519,18 @@
       }
     expect_match_text:
     - label.setEscapeModelStrings
+  - name: wicket label escaping enabled negative
+    code: |
+      import org.apache.wicket.*;
+      class App {
+        void render(Label label) {
+          label.setEscapeModelStrings(true);
+        }
+      }
+      class Label {
+        void setEscapeModelStrings(Object... args) {}
+      }
+    expect_no_match: true
   description: "Wicket Label.setEscapeModelStrings(false) - disables HTML escaping for label model text."
 - id: java.xss.printwriter_write
   enabled: false

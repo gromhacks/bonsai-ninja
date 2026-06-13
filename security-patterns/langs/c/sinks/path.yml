@@ -65,7 +65,10 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  openat(arg);\n}\n"
+    code: |
+      void example(char *input) {
+        openat("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example(void) {
@@ -143,6 +146,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: c.toctou.access_check
   language: c
   tag: path-traversal
   severity: medium
@@ -436,7 +440,10 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  unlinkat(arg);\n}\n"
+    code: |
+      void example(char *input) {
+        unlinkat("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example(void) {

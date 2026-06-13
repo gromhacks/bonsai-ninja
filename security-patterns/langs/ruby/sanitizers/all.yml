@@ -118,6 +118,23 @@
     expect_match_text: ["Shellwords.shellescape"]
   description: "Shellwords.shellescape."
 
+- id: ruby.sanitizer.shellwords_split
+  enabled: true
+  language: ruby
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      attribute: [Shellwords, split]
+  match_examples:
+  - name: ruby.sanitizer.shellwords_split example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Shellwords.split(input)
+      end
+    expect_match_text: ["Shellwords.split"]
+  description: "Shellwords.split - parses a command line into an argv array suitable for the array form of system/exec (shell=false)."
+
 - id: ruby.sanitizer.action_controller_strong_params
   enabled: true
   language: ruby
@@ -601,6 +618,44 @@
     expect_match_text: ["Sanitize.fragment"]
   description: "Sanitize.fragment - gem-based HTML allowlist sanitizer."
 
+- id: ruby.sanitizer.sanitize_gem_document
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [sanitize]
+  match:
+    kind: call
+    callee:
+      regex: "^Sanitize\\.document$"
+  match_examples:
+  - name: ruby.sanitizer.sanitize_gem_document example
+    code: |
+      require "sanitize"
+      def example(input, url, id, payload, request, params)
+        Sanitize.document(input)
+      end
+    expect_match_text: ["Sanitize.document"]
+  description: "Sanitize.document - gem-based HTML allowlist sanitizer for full documents (peer of Sanitize.fragment)."
+
+- id: ruby.sanitizer.loofah_scrub_document
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [loofah]
+  match:
+    kind: call
+    callee:
+      attribute: [Loofah, scrub_document]
+  match_examples:
+  - name: ruby.sanitizer.loofah_scrub_document example
+    code: |
+      require "loofah"
+      def example(input, url, id, payload, request, params)
+        Loofah.scrub_document(input)
+      end
+    expect_match_text: ["Loofah.scrub_document"]
+  description: "Loofah.scrub_document - document-level HTML scrub (peer of Loofah.scrub_fragment)."
+
 - id: ruby.sanitizer.jwt_decode_verify
   enabled: true
   language: ruby
@@ -629,9 +684,7 @@
 
 # -- Open-redirect mitigations -------------------------------------------------
 - id: ruby.sanitizer.url_for_only_path
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
   tag: open-redirect-sanitize
   packages: [actionpack]
@@ -639,12 +692,24 @@
     kind: call
     callee:
       name: url_for
-  description: "Disabled - Rails url_for(only_path: true) is safe but bare url_for is not. Enable with kwarg-presence narrowing."
+  constraints:
+  - any_arg_matches_regex: |-
+      only_path:\s*true
+  match_examples:
+  - name: ruby.sanitizer.url_for_only_path example
+    code: |
+      require "actionpack"
+      def example(target)
+        url_for(only_path: true, controller: target)
+      end
+    expect_match_text: ["url_for"]
+  - name: ruby.sanitizer.url_for_only_path example negative constraint boundary
+    code: "require \"actionpack\"\ndef example(target)\n  url_for(target)\nend\n"
+    expect_no_match: true
+  description: "Rails url_for(only_path: true) - forces a root-relative path, so the result cannot redirect off-host."
 
 - id: ruby.sanitizer.redirect_to_only_path
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
   tag: open-redirect-sanitize
   packages: [actionpack]
@@ -652,8 +717,21 @@
     kind: call
     callee:
       name: redirect_to
-  description: "Disabled - redirect_to(allow_other_host: false) is safe in Rails 7+. Enable with kwarg-presence narrowing
-    for allow_other_host."
+  constraints:
+  - any_arg_matches_regex: |-
+      allow_other_host:\s*false
+  match_examples:
+  - name: ruby.sanitizer.redirect_to_only_path example
+    code: |
+      require "actionpack"
+      def example(target)
+        redirect_to(target, allow_other_host: false)
+      end
+    expect_match_text: ["redirect_to"]
+  - name: ruby.sanitizer.redirect_to_only_path example negative constraint boundary
+    code: "require \"actionpack\"\ndef example(target)\n  redirect_to(target)\nend\n"
+    expect_no_match: true
+  description: "Rails redirect_to(..., allow_other_host: false) - Rails 7+ refuses off-host redirect targets."
 
 # -- Audit-derived validation / binding sanitizers -----------------------------
 - id: ruby.sanitizer.same_origin_start_with

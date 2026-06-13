@@ -379,3 +379,119 @@
       }
     expect_no_match: true
   description: "zip::read::ZipArchive::extract - zip-slip: member names with `../` write outside dest."
+- id: rust.path.fs_copy_src
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, copy]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted copy source
+    code: |
+      use std::fs;
+      fn example(target: &str) {
+          fs::copy(target, "/var/app/output.txt");
+      }
+  - name: literal copy source negative
+    code: |
+      use std::fs;
+      fn example() {
+          fs::copy("/var/app/input.txt", "/var/app/output.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::copy(src, dest) - tainted source path reads arbitrary files into a destination (path traversal / info disclosure)."
+- id: rust.path.fs_copy_dest
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, copy]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted copy destination
+    code: |
+      use std::fs;
+      fn example(target: &str) {
+          fs::copy("/var/app/input.txt", target);
+      }
+  - name: literal copy destination negative
+    code: |
+      use std::fs;
+      fn example() {
+          fs::copy("/var/app/input.txt", "/var/app/output.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::copy(src, dest) - tainted destination path enables arbitrary-file overwrite outside the intended directory."
+- id: rust.path.fs_hard_link_dest
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22, CWE-59]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, hard_link]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted hard_link destination
+    code: |
+      use std::fs;
+      fn example(target: &str) {
+          fs::hard_link("/var/app/input.txt", target);
+      }
+  - name: literal hard_link destination negative
+    code: |
+      use std::fs;
+      fn example() {
+          fs::hard_link("/var/app/input.txt", "/var/app/link");
+      }
+    expect_no_match: true
+  description: "std::fs::hard_link(original, link) - tainted link path can plant a hard link outside the intended directory; combined with a tainted target it enables link-following file overwrite (CWE-59)."
+- id: rust.path.open_options_open
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [OpenOptions, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted open_options path
+    code: |
+      use std::fs::OpenOptions;
+      fn example(opts: &OpenOptions, target: &str) {
+          opts.open(target);
+      }
+  - name: literal open_options path negative
+    code: |
+      use std::fs::OpenOptions;
+      fn example(opts: &OpenOptions) {
+          opts.open("/var/app/config.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::OpenOptions::open(tainted) - the read/write/create flags are set on the builder, so a tainted path here reads or overwrites arbitrary files depending on the configured mode."

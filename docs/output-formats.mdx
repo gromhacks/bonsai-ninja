@@ -5,6 +5,11 @@ description: "Text, JSON, graph, train, SARIF, and dependency output shapes."
 
 # Output Formats
 
+Commands with a `--format` flag can write the selected payload to a file
+with `--output-path <PATH>`. This replaces shell redirection for JSON,
+SARIF, DOT, GraphML, Cypher, and text output; progress and diagnostics
+still use stderr.
+
 ## Grouped
 
 Grouped view clusters flows that share a tail. Use it when a sink has many source paths but the same final call chain.
@@ -17,10 +22,10 @@ GROUP 1 G:701fc172b976025d  3 flow(s)
 
 ## Compact
 
-Compact text keeps flow headers and step labels while omitting repeated source bodies. `inspect` uses `FLOW`; security source mapping uses `SOURCE FLOW`; security findings use `TAINT FLOW`.
+Compact text keeps flow headers and step labels while omitting repeated source bodies. `inspect` uses `FLOW`; security source mapping uses `SOURCE FLOW`; security findings use `TAINT FLOW`. `security taint-analysis` uses compact rendering by default; pass `--no-compact` only when you want repeated function bodies expanded.
 
 ```bash
-bonsai-ninja security ./src taint-analysis --compact
+bonsai-ninja security ./src taint-analysis
 bonsai-ninja inspect ./src --query execute --compact
 ```
 
@@ -37,14 +42,19 @@ handle_request -> run_pipeline -> orchestrate -> execute
 `export --format networkx`, `graphml`, and `cypher` project the same workspace graph into graph-tooling formats.
 
 ```bash
-bonsai-ninja export ./src --format networkx > graph.node_link.json
-bonsai-ninja export ./src --format graphml > graph.graphml
-bonsai-ninja export ./src --format cypher > graph.cypher
+bonsai-ninja export ./src --format networkx --output-path graph.node_link.json
+bonsai-ninja export ./src --format graphml --output-path graph.graphml
+bonsai-ninja export ./src --format cypher --output-path graph.cypher
 ```
 
 ## Train
 
 Training or evaluation pipelines usually consume native JSON because it preserves exact rule IDs, locations, tainted args, chains, taint path steps, and stable IDs.
+
+Use `security taint-analysis --summary --format json` when a tool only
+needs aggregate triage counts. Summary mode emits the summary object
+directly, including severity, status, precision, tag, language, source
+rule, and sink rule counts, without paged finding rows.
 
 ```json
 [
@@ -94,7 +104,7 @@ data.
 Dependency output lists imports that match package names mentioned by the loaded rulepack.
 
 ```bash
-bonsai-ninja security ./src deps --severity critical --format json
+bonsai-ninja security ./src deps --severity critical --format json --output-path deps.json
 ```
 
 ```json

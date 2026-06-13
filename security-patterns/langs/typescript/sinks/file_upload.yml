@@ -40,7 +40,8 @@
 - id: typescript.upload.express_fileupload_mv
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: typescript.upload.express_fileupload_mv_any_file
   language: typescript
   tag: file-upload
   severity: high

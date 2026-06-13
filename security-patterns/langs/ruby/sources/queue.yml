@@ -48,6 +48,13 @@
       def example(input, url, id, item, req_obj, options)
         message.body(input)
       end
+  - name: ruby.source.shoryuke_message_body zero-arg negative
+    code: |
+      require "shoryuken"
+      def example(input)
+        message.body()
+      end
+    expect_no_match: true
   description: "Shoryuken worker message.body(payload) - SQS payload accessor invoked with at least one argument. min_args:1 disambiguates from the 0-arg `request.body` Rails getter."
 
 - id: ruby.source.delayed_job_payload
@@ -67,6 +74,13 @@
       def example(input, url, id, item, req_obj, options)
         payload_object(input)
       end
+  - name: ruby.source.delayed_job_payload unrelated call negative
+    code: |
+      require "delayed_job"
+      def example(input)
+        enqueue(input)
+      end
+    expect_no_match: true
   description: "Delayed::Job payload_object - YAML-deserialised job instance."
 
 - id: ruby.source.karafka_payload
@@ -86,6 +100,13 @@
       def example(input, url, id, item, req_obj, options)
         message.payload(input)
       end
+  - name: ruby.source.karafka_payload unrelated accessor negative
+    code: |
+      require "karafka"
+      def example(input)
+        message.metadata(input)
+      end
+    expect_no_match: true
   description: "Karafka consumer message.payload - Kafka record body."
 
 - id: ruby.source.resque_perform_args

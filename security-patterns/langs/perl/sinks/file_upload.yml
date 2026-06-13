@@ -59,4 +59,4 @@
     kind: call
     callee:
       name: upload
-  description: "Disabled - merged into perl.upload.cgi_upload_filename (same bare `upload` name)."
+  description: "Disabled - same bare `upload` call shape as perl.upload.cgi_upload_filename; keep one placeholder until receiver/package facts distinguish CGI and Dancer2 upload APIs."

@@ -138,6 +138,29 @@
     code: "def example(input, url, id, payload, request, params)\n  Marshal.restore(\"\\x04\\bo:\\vObject\\x00\")\nend\n"
     expect_no_match: true
   description: "Marshal.restore - alias for load. `marshal_restore` core class has no canonical ecosystem package, so strict `['Marshal', 'restore']` match only."
+- id: ruby.deser.marshal_load_call
+  enabled: true
+  language: ruby
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Marshal
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.deser.marshal_load_call example
+    code: "def example(input, url, id, payload, request, params)\n  Marshal.load(input)\nend\n"
+  - name: ruby.deser.marshal_load_call literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Marshal.load(\"\\x04\\bo:\\vObject\\x00\")\nend\n"
+    expect_no_match: true
+  description: "Marshal.load(tainted) - deserializes arbitrary Ruby objects; the canonical Ruby insecure-deserialization RCE sink. The `[YAML, load]` rule's `marshal_load` alias does not cover this distinct `Marshal.load` callee shape, so it is flagged as its own strict `['Marshal', 'load']` match."
 - id: ruby.deser.oj_object_load
   enabled: true
   language: ruby

@@ -54,7 +54,7 @@
 - id: swift.nosql.realm_filter_string
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: requires-constraint
   language: swift
   tag: nosql-injection
   severity: high
@@ -64,7 +64,7 @@
     kind: call
     callee:
       name: filter
-  description: "Disabled - duplicate of realm_objects_filter_string; same overbroad `.filter` shape."
+  description: "Disabled - same overbroad `.filter` shape as swift.nosql.realm_objects_filter_string; enable only with receiver narrowing to Realm Results<>."
 
 - id: swift.nosql.coredata_fetch_predicate
   enabled: true
@@ -125,6 +125,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: swift.sqli.fmdb_executequery
   language: swift
   tag: sql-injection
   severity: low

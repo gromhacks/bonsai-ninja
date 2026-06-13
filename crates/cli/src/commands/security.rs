@@ -13,7 +13,7 @@
 
 #![allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 
-use crate::args::{BrowseFormat, PrecisionFilter, SecurityAction, SourceAnalysisFormat};
+use crate::args::{BrowseFormat, SecurityAction, SourceAnalysisFormat};
 use crate::commands::{
     emit_json_paged_cached, open_project_index_only, page_info_to_json, paged_json_incomplete_reasons,
     paging_from_cli, short_file,
@@ -23,19 +23,20 @@ use crate::page_cache;
 use crate::paging;
 use crate::ui::{extension_for, Ui};
 use crate::{cli_println, progress, ui};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_sdk::{
     load_rulepack, load_workspace_local_rules, parse_severity, security_match_rows, tree_file_rel,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventoryOptions, DependencyRow,
     Finding, FindingMatch, FindingStatus, PackInventoryOptions, PackRuleRow, Rule, RuleKind, RuleMatch,
     Rulepack, SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity, SourceAnalysisOptions,
-    SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions, TaintPropagationArg,
-    TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, FAMILY_NOT_APPLICABLE,
+    SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions, TaintAnalysisReport,
+    TaintPropagationArg, TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, FAMILY_NOT_APPLICABLE,
 };
 use comfy_table::Cell;
 use indicatif::ProgressBar;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -62,6 +63,61 @@ fn source_analysis_json_incomplete_reasons(
     reasons.sort();
     reasons.dedup();
     reasons
+}
+
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v4";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TaintAnalysisRenderReport {
+    summary: TaintAnalysisSummary,
+    findings: Vec<TaintAnalysisRenderFinding>,
+}
+
+/// One finding in the cached render report. Flow render structs are
+/// NOT stored here: a flow is derived purely from the finding's own
+/// `hops` (see [`flow_from_finding_hops`]), and materializing one per
+/// finding duplicates every hop body for the whole report at once —
+/// on a large corpus that is gigabytes held just to show one page.
+/// Flows are built lazily, only for the findings on a rendered page.
+#[derive(Clone, Serialize, Deserialize)]
+struct TaintAnalysisRenderFinding {
+    #[serde(flatten)]
+    finding: CombinedFindingWithChain,
+    /// `--baseline` diff status — `new` / `unchanged`. Set at render
+    /// time only (never in the cached payload), so the cached analysis
+    /// is reused across baseline-vs-no-baseline runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    baseline_status: Option<String>,
+}
+
+/// Result of classifying the current findings against a `--baseline`
+/// file: how many are new vs unchanged, and which baseline findings are
+/// gone now (fixed).
+#[derive(Clone, Serialize)]
+struct BaselineDiff {
+    new: usize,
+    fixed: usize,
+    unchanged: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fixed_finding_ids: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TaintAnalysisSummary {
+    total_findings: usize,
+    source_rule_count: usize,
+    sink_rule_count: usize,
+    sanitizer_rule_count: usize,
+    severity_counts: BTreeMap<String, usize>,
+    status_counts: BTreeMap<String, usize>,
+    precision_counts: BTreeMap<String, usize>,
+    tag_counts: BTreeMap<String, usize>,
+    language_counts: BTreeMap<String, usize>,
+    source_rule_counts: BTreeMap<String, usize>,
+    sink_rule_counts: BTreeMap<String, usize>,
+    source_trust_counts: BTreeMap<String, usize>,
+    source_category_counts: BTreeMap<String, usize>,
+    sink_file_counts: BTreeMap<String, usize>,
 }
 
 /// Open the workspace and attach the already-loaded rulepack so every
@@ -129,6 +185,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             page,
             all,
             format,
+            output: _,
         } => {
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_sources(
@@ -161,6 +218,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             page,
             all,
             format,
+            output: _,
         } => {
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_sinks(
@@ -193,6 +251,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             page,
             all,
             format,
+            output: _,
         } => {
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_sanitizers(
@@ -222,6 +281,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             page,
             all,
             format,
+            output: _,
         } => {
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_deps(
@@ -254,13 +314,15 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             show_sanitized,
             taint_budget,
             intra_worklist_cap,
-            precision,
-            strict_flow,
             mut context,
             page,
             all,
             no_compact,
+            summary,
             format,
+            baseline,
+            explain,
+            output: _,
         } => {
             apply_profile(
                 profile.as_deref(),
@@ -290,11 +352,12 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 show_sanitized,
                 taint_budget,
                 intra_worklist_cap,
-                precision,
-                strict_flow,
                 paging_cfg,
                 no_compact,
+                summary,
                 format,
+                baseline.as_deref(),
+                explain,
             )
         }
         SecurityAction::SourceAnalysis {
@@ -312,6 +375,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             all,
             no_compact,
             format,
+            output: _,
         } => {
             let mut ignored_severity: Option<String> = None;
             let mut exclude_tests = false;
@@ -356,6 +420,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             all,
             limit,
             format,
+            output: _,
         } => {
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_pack(
@@ -819,17 +884,85 @@ fn cmd_flows(
     show_sanitized: bool,
     taint_budget: Option<u32>,
     intra_worklist_cap: Option<u32>,
-    precision: Option<PrecisionFilter>,
-    strict_flow: bool,
     paging_cfg: paging::PagingConfig,
     no_compact: bool,
+    summary_only: bool,
     format: BrowseFormat,
+    baseline: Option<&Path>,
+    explain: bool,
 ) -> Result<()> {
     let sev_floor = parse_severity_flag(severity.as_deref())?;
-    let max_precision = max_precision_from_cli(precision, strict_flow)?;
+    let max_precision = Some(Precision::Narrowed);
+    if summary_only && matches!(format, BrowseFormat::Sarif) {
+        bail!("`security taint-analysis --summary` supports text or json output, not sarif");
+    }
+    if baseline.is_some() && matches!(format, BrowseFormat::Sarif) {
+        bail!("`security taint-analysis --baseline` supports text or json output, not sarif");
+    }
+    // Render-time diff input — does NOT enter the analysis cache key.
+    let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
+    let taint_budget_filter = taint_budget.map(|v| v.to_string()).unwrap_or_default();
+    let intra_worklist_cap_filter = intra_worklist_cap.map(|v| v.to_string()).unwrap_or_default();
+    // SEMANTIC analysis key: every input that changes the FINDING SET,
+    // and nothing else. Output-shaping flags (format, paging, the
+    // secondary `--contains` / `--not-contains` filters) are
+    // deliberately excluded so the cached analysis is reused when only
+    // the rendering changes. The `files`/`exclude_files`/
+    // `inferred_sources`/`exclude_tests` inputs MUST be here — they
+    // narrow the analysis, so omitting them would serve a stale result
+    // when they change.
+    let files_filter = files.join(",");
+    let exclude_files_filter = exclude_files.join(",");
+    let filters_hash = filter_signature(&[
+        ("kind", "taint-analysis"),
+        ("source", source.as_deref().unwrap_or("")),
+        ("trust", trust.as_deref().unwrap_or("")),
+        ("category", category.as_deref().unwrap_or("")),
+        ("sink", sink.as_deref().unwrap_or("")),
+        ("severity", severity.as_deref().unwrap_or("")),
+        ("tag", tag.as_deref().unwrap_or("")),
+        ("files", &files_filter),
+        ("exclude_files", &exclude_files_filter),
+        ("inferred_sources", if inferred_sources { "1" } else { "0" }),
+        ("exclude_tests", if exclude_tests { "1" } else { "0" }),
+        ("show_sanitized", if show_sanitized { "1" } else { "0" }),
+        ("taint_budget", &taint_budget_filter),
+        ("intra_worklist_cap", &intra_worklist_cap_filter),
+        ("precision", "semantic"),
+        (
+            "include_pattern_only",
+            if include_pattern_only { "1" } else { "0" },
+        ),
+    ]);
+
+    // `--explain` needs the project (to count source/sink match sites),
+    // so it bypasses the rendered-report fast path.
+    if !explain && !matches!(format, BrowseFormat::Sarif) {
+        if let Some(cached_report) = page_cache::read_keyed_payload::<TaintAnalysisRenderReport>(
+            workspace,
+            filters_hash,
+            TAINT_RENDER_CACHE_KIND,
+        )? {
+            let render_progress = ScopedProgress::new("rendering cached taint report");
+            emit_taint_render_report(
+                workspace,
+                pack,
+                &cached_report,
+                &paging_cfg,
+                no_compact,
+                summary_only,
+                format,
+                filters_hash,
+                None,
+                baseline_ids.as_ref(),
+            )?;
+            render_progress.finish();
+            return Ok(());
+        }
+    }
+
     let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
-    let ws = project.workspace();
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let report = project.security().taint_analysis_with_phase_progress(
         TaintAnalysisOptions {
@@ -851,71 +984,24 @@ fn cmd_flows(
         },
         |event| analysis_progress.handle(event),
     )?;
-    let (total_critical, total_high, total_medium) = report.severity_counts();
-    let findings = report.findings;
 
-    let filters_hash = filter_signature(&[
-        ("kind", "taint-analysis"),
-        ("source", source.as_deref().unwrap_or("")),
-        ("trust", trust.as_deref().unwrap_or("")),
-        ("category", category.as_deref().unwrap_or("")),
-        ("sink", sink.as_deref().unwrap_or("")),
-        ("severity", severity.as_deref().unwrap_or("")),
-        ("tag", tag.as_deref().unwrap_or("")),
-        ("show_sanitized", if show_sanitized { "1" } else { "0" }),
-        (
-            "taint_budget",
-            &taint_budget.map(|v| v.to_string()).unwrap_or_default(),
-        ),
-        (
-            "intra_worklist_cap",
-            &intra_worklist_cap.map(|v| v.to_string()).unwrap_or_default(),
-        ),
-        (
-            "precision",
-            precision.map(precision_filter_label).unwrap_or_default(),
-        ),
-        ("strict_flow", if strict_flow { "1" } else { "0" }),
-        (
-            "include_pattern_only",
-            if include_pattern_only { "1" } else { "0" },
-        ),
-    ]);
-    // Cheap header/JSON cost for JSON pagination. Text path uses a
-    // render-accurate per-finding cost built below.
-    let cost_finding_shallow = |f: &CombinedFindingWithChain| {
-        (f.finding.source.file.len()
-            + f.finding.sink.file.len()
-            + f.finding.source.text.len().min(120)
-            + f.finding.sink.text.len().min(120)
-            + f.finding.tag.as_deref().map_or(0, str::len)
-            + f.finding.finding_id.len()
-            + f.additional_sources
-                .iter()
-                .map(|s| s.rule_id.len() + s.file.len() + s.text.len().min(120))
-                .sum::<usize>()
-            + f.additional_sinks
-                .iter()
-                .map(|s| s.rule_id.len() + s.file.len() + s.text.len().min(120))
-                .sum::<usize>()
-            + 512) as u64
-            + paging::TABLE_ROW_CHROME_BYTES
-    };
+    if explain {
+        return emit_taint_explain(
+            &project,
+            source.as_deref(),
+            sink.as_deref(),
+            trust.as_deref(),
+            category.as_deref(),
+            sev_floor,
+            tag.as_deref(),
+            &files,
+            &exclude_files,
+            &report,
+            format,
+        );
+    }
 
     match format {
-        BrowseFormat::Json => {
-            let render_progress = ScopedProgress::new("rendering taint JSON");
-            emit_json_paged_cached(
-                workspace,
-                &findings,
-                &paging_cfg,
-                "security/taint-analysis",
-                filters_hash,
-                cost_finding_shallow,
-            )?;
-            render_progress.finish();
-            return Ok(());
-        }
         BrowseFormat::Sarif => {
             let render_progress = ScopedProgress::new("rendering SARIF");
             // SARIF 2.1.0 — direct serialization, no pagination.
@@ -923,7 +1009,7 @@ fn cmd_flows(
             // GitHub code scanning, and the CVEBench-SAST harness.
             // SARIF consumers expect the full result set in one
             // document; --all behavior is implicit.
-            let plain: Vec<Finding> = findings.iter().map(|f| f.finding.clone()).collect();
+            let plain: Vec<Finding> = report.findings.iter().map(|f| f.finding.clone()).collect();
             // Drain runtime-disabled rules collected by the matcher
             // (invalid regex, etc.) so the SARIF report surfaces them
             // alongside findings. Without this, rules silently
@@ -940,180 +1026,792 @@ fn cmd_flows(
             render_progress.finish();
             return Ok(());
         }
-        BrowseFormat::Text => {}
+        BrowseFormat::Json | BrowseFormat::Text => {}
     }
-    let render_progress = ScopedProgress::new("rendering taint page");
 
-    // Text path: `security taint-analysis` is a rulepack-driven
-    // wrapper around `inspect`. Each finding gets a security header
-    // (source rule, sanitizer rules, sink rule — with severity, CWE,
-    // OWASP, category, packages, and the rule's description) followed
-    // by an inspect-style FLOW block rendered from the finding's
-    // chain, with full source bodies inlined. We call `inspect`'s own
-    // `render_flow_with_cached_call_spans` + `render_flow_block` helpers
-    // directly so the body layout is byte-identical to
-    // `bonsai-ninja inspect --query X`.
-    // Paginate before rendering inspect-style FLOW bodies. Large
-    // workspaces can produce thousands of findings; building every
-    // rendered body just to show page 1 turns text mode into an
-    // accidental full-report render. JSON `--all` remains the complete
-    // machine-readable path.
-    let indexed: Vec<usize> = (0..findings.len()).collect();
-    let cost_progress = ScopedProgress::new("estimating taint page costs");
-    let function_costs = function_costs_for_paths(
-        ws,
-        findings
-            .iter()
-            .flat_map(|finding| finding.chain_funcs.iter().copied()),
-        true,
-    );
-    cost_progress.finish();
-    let cost_finding_text = |finding_index: &usize| {
-        finding_text_cost_bytes(&findings[*finding_index], pack, &function_costs)
-            + paging::TABLE_ROW_CHROME_BYTES
-    };
-    let pagination_progress = ScopedProgress::new("paginating taint findings");
-    let (_current_idx, current_info) = paging::paginate(
-        &indexed,
+    let render_report = build_taint_render_report(report, /* include_findings = */ !summary_only);
+    let render_progress = ScopedProgress::new(if summary_only {
+        "rendering taint summary"
+    } else if matches!(format, BrowseFormat::Json) {
+        "rendering taint JSON"
+    } else {
+        "rendering taint page"
+    });
+    emit_taint_render_report(
+        workspace,
+        pack,
+        &render_report,
         &paging_cfg,
+        no_compact,
+        summary_only,
+        format,
+        filters_hash,
+        Some(&render_report),
+        baseline_ids.as_ref(),
+    )?;
+    render_progress.finish();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+fn emit_taint_render_report(
+    workspace: &Path,
+    pack: &Rulepack,
+    report: &TaintAnalysisRenderReport,
+    paging_cfg: &paging::PagingConfig,
+    no_compact: bool,
+    summary_only: bool,
+    format: BrowseFormat,
+    filters_hash: u64,
+    cache_payload: Option<&TaintAnalysisRenderReport>,
+    baseline_ids: Option<&std::collections::BTreeSet<String>>,
+) -> Result<()> {
+    // Both the secondary `--contains` filter and the `--baseline` diff
+    // are RENDER-time: they shape what prints over an owned copy, while
+    // `cache_payload` keeps pointing at the unfiltered, un-baselined
+    // report — so the cached analysis is reused regardless of either.
+    let secondary = crate::filter::active();
+    let mut owned: Option<TaintAnalysisRenderReport> = None;
+    if secondary.is_active() {
+        owned = Some(filter_taint_render_report(report));
+    }
+    let baseline_diff = baseline_ids.map(|ids| {
+        let target = owned.get_or_insert_with(|| report.clone());
+        apply_baseline(target, ids)
+    });
+    let report: &TaintAnalysisRenderReport = owned.as_ref().unwrap_or(report);
+    let emit_result = emit_taint_render_report_inner(
+        workspace,
+        pack,
+        report,
+        paging_cfg,
+        no_compact,
+        summary_only,
+        format,
+        filters_hash,
+        cache_payload,
+    );
+    if let Some(diff) = &baseline_diff {
+        print_baseline_summary(diff, format);
+    }
+    emit_result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_taint_render_report_inner(
+    workspace: &Path,
+    pack: &Rulepack,
+    report: &TaintAnalysisRenderReport,
+    paging_cfg: &paging::PagingConfig,
+    no_compact: bool,
+    summary_only: bool,
+    format: BrowseFormat,
+    filters_hash: u64,
+    cache_payload: Option<&TaintAnalysisRenderReport>,
+) -> Result<()> {
+    match format {
+        BrowseFormat::Json if summary_only => {
+            cli_println!("{}", serde_json::to_string_pretty(&report.summary)?);
+            save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), cache_payload);
+        }
+        BrowseFormat::Text if summary_only => {
+            let text = page_cache::capture(|| {
+                render_taint_summary_text(&report.summary);
+                Ok(())
+            })?;
+            save_taint_payload_if_requested(workspace, filters_hash, Vec::new(), cache_payload);
+            page_cache::emit_cached_text(&text)?;
+        }
+        BrowseFormat::Json => {
+            let (pages, current_page) = build_taint_json_pages(report, paging_cfg, filters_hash)?;
+            save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
+            emit_cached_page(&pages, current_page)?;
+        }
+        BrowseFormat::Text => {
+            let (pages, current_page) =
+                build_taint_text_pages(pack, report, paging_cfg, no_compact, filters_hash)?;
+            save_taint_payload_if_requested(workspace, filters_hash, pages.clone(), cache_payload);
+            emit_cached_page(&pages, current_page)?;
+        }
+        BrowseFormat::Sarif => unreachable!("SARIF is rendered before the cached taint report path"),
+    }
+    Ok(())
+}
+
+fn save_taint_payload_if_requested(
+    workspace: &Path,
+    filters_hash: u64,
+    pages: Vec<page_cache::CachedPage>,
+    payload: Option<&TaintAnalysisRenderReport>,
+) {
+    // Rendered pages key on the full argv (format / paging / secondary
+    // filter) — they ARE the shaped output, so each variant caches its
+    // own bytes for an identical re-run.
+    if !pages.is_empty() {
+        if let Err(e) = page_cache::save_pages(workspace, pages) {
+            tracing::debug!("taint page cache save failed: {e}");
+        }
+    }
+    // The full (unfiltered) analysis report keys on the SEMANTIC hash
+    // only, so changing format / paging / `--contains` reuses it and
+    // re-renders instead of re-analyzing.
+    if let Some(payload) = payload {
+        if let Err(e) =
+            page_cache::save_keyed_payload(workspace, filters_hash, TAINT_RENDER_CACHE_KIND, payload)
+        {
+            tracing::debug!("taint report payload cache save failed: {e}");
+        }
+    }
+}
+
+fn emit_cached_page(pages: &[page_cache::CachedPage], current_page: u64) -> Result<()> {
+    let Some(page) = pages.iter().find(|p| p.number == current_page) else {
+        bail!("rendered taint page {current_page} missing from cache window");
+    };
+    page_cache::emit_cached_text(&page.text)?;
+    Ok(())
+}
+
+fn build_taint_pages<C, R>(
+    report: &TaintAnalysisRenderReport,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
+    cost_finding: C,
+    mut render_page: R,
+) -> Result<(Vec<page_cache::CachedPage>, u64)>
+where
+    C: Fn(&TaintAnalysisRenderFinding) -> u64,
+    R: FnMut(&[usize], &paging::PageInfo, &paging::PagingConfig) -> Result<()>,
+{
+    let indexed: Vec<usize> = (0..report.findings.len()).collect();
+    let cost = |finding_index: &usize| cost_finding(&report.findings[*finding_index]);
+    let (_, current_info) = paging::paginate(
+        &indexed,
+        paging_cfg,
         "security/taint-analysis",
         filters_hash,
-        cost_finding_text,
+        cost,
     );
-    let total_pages = current_info.total_pages;
     let current_page = current_info.page_number;
-    pagination_progress.finish();
-    let page_render_progress = ScopedProgress::new("rendering taint page window");
-    let mut cached_pages = Vec::new();
-    for page_number in page_cache::eager_window(current_page, total_pages) {
+    let mut pages = Vec::new();
+    for page_number in page_cache::eager_window(current_page, current_info.total_pages) {
         let mut page_cfg = paging_cfg.clone();
-        page_cfg.page = paging::PageArg::Number(page_number);
-        let (paged_idx, info) = paging::paginate(
-            &indexed,
-            &page_cfg,
-            "security/taint-analysis",
-            filters_hash,
-            cost_finding_text,
-        );
-        let text = page_cache::capture(|| {
-            render_taint_analysis_text_page(
-                ws,
-                pack,
-                &findings,
-                &paged_idx,
-                &info,
-                no_compact,
-                total_critical,
-                total_high,
-                total_medium,
-                report.source_rule_count,
-                report.sink_rule_count,
-                report.sanitizer_rule_count,
-            )
-        })?;
-        cached_pages.push(page_cache::CachedPage {
+        if page_number != current_page {
+            page_cfg.page = paging::PageArg::Number(page_number);
+        }
+        let (paged_idx, info) =
+            paging::paginate(&indexed, &page_cfg, "security/taint-analysis", filters_hash, cost);
+        let text = page_cache::capture(|| render_page(&paged_idx, &info, &page_cfg))?;
+        pages.push(page_cache::CachedPage {
             number: page_number,
             cursor: info.cursor,
             text,
         });
     }
-    page_render_progress.finish();
-    let _ = paging::paginate(
-        &indexed,
-        &paging_cfg,
-        "security/taint-analysis",
+    Ok((pages, current_page))
+}
+
+fn build_taint_json_pages(
+    report: &TaintAnalysisRenderReport,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
+) -> Result<(Vec<page_cache::CachedPage>, u64)> {
+    build_taint_pages(
+        report,
+        paging_cfg,
         filters_hash,
-        cost_finding_text,
-    );
-    let cache_progress = ScopedProgress::new("saving taint page cache");
-    if let Err(e) = page_cache::save_pages(workspace, cached_pages.clone()) {
-        tracing::debug!("page cache save failed: {e}");
-    }
-    cache_progress.finish();
-    render_progress.finish();
-    if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
-        page_cache::emit_cached_text(&page.text)?;
+        taint_json_cost_bytes,
+        |paged_idx, info, page_cfg| render_taint_json_page(report, paged_idx, info, page_cfg),
+    )
+}
+
+fn render_taint_json_page(
+    report: &TaintAnalysisRenderReport,
+    paged_idx: &[usize],
+    info: &paging::PageInfo,
+    paging_cfg: &paging::PagingConfig,
+) -> Result<()> {
+    // Serialize the render-finding wrapper (the finding fields are
+    // flattened in), so the `--baseline` `baseline_status` annotation
+    // rides along on each row when present.
+    let rows: Vec<&TaintAnalysisRenderFinding> = paged_idx.iter().map(|idx| &report.findings[*idx]).collect();
+    if paging_cfg.json_wrapped() {
+        let analysis_incomplete_reasons = paged_json_incomplete_reasons("security/taint-analysis", info);
+        let wrapped = serde_json::json!({
+            "analysis_complete": info.page_number == 1 && info.is_last,
+            "analysis_incomplete_reasons": analysis_incomplete_reasons,
+            "summary": &report.summary,
+            "rows": rows,
+            "page": page_info_to_json(info),
+        });
+        cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+    } else {
+        cli_println!("{}", serde_json::to_string_pretty(&rows)?);
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
-fn render_taint_analysis_text_page(
-    ws: &bonsai_sdk::Workspace,
+fn build_taint_text_pages(
     pack: &Rulepack,
-    findings: &[CombinedFindingWithChain],
-    paged_idx: &[usize],
-    info: &paging::PageInfo,
+    report: &TaintAnalysisRenderReport,
+    paging_cfg: &paging::PagingConfig,
     no_compact: bool,
-    total_critical: usize,
-    total_high: usize,
-    total_medium: usize,
+    filters_hash: u64,
+) -> Result<(Vec<page_cache::CachedPage>, u64)> {
+    build_taint_pages(
+        report,
+        paging_cfg,
+        filters_hash,
+        |finding| taint_text_cost_bytes(finding, pack) + paging::TABLE_ROW_CHROME_BYTES,
+        |paged_idx, info, _page_cfg| {
+            render_taint_analysis_text_page(pack, report, paged_idx, info, no_compact)
+        },
+    )
+}
+
+fn build_taint_render_report(
+    report: TaintAnalysisReport,
+    include_findings: bool,
+) -> TaintAnalysisRenderReport {
+    let summary = build_taint_summary(&report);
+    if !include_findings {
+        return TaintAnalysisRenderReport {
+            summary,
+            findings: Vec::new(),
+        };
+    }
+    let findings = report
+        .findings
+        .into_iter()
+        .map(|finding| TaintAnalysisRenderFinding {
+            finding,
+            baseline_status: None,
+        })
+        .collect();
+    TaintAnalysisRenderReport { summary, findings }
+}
+
+/// Load the set of stable finding ids from a previous `taint-analysis
+/// --format json` output file, accepting both the bare findings array
+/// and the `{ "rows": [...] }` paginated wrapper.
+fn load_baseline_finding_ids(path: &Path) -> Result<std::collections::BTreeSet<String>> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading baseline file {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing baseline JSON {}", path.display()))?;
+    let rows = value
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "baseline {} is not a taint-analysis findings array or {{rows: [...]}} object",
+                path.display()
+            )
+        })?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("finding_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Classify each current finding against the baseline ids, set its
+/// `baseline_status`, and report the new/fixed/unchanged counts. `fixed`
+/// = baseline findings with no current match.
+fn apply_baseline(
+    report: &mut TaintAnalysisRenderReport,
+    baseline_ids: &std::collections::BTreeSet<String>,
+) -> BaselineDiff {
+    let mut current_ids = std::collections::BTreeSet::new();
+    let (mut new, mut unchanged) = (0usize, 0usize);
+    for item in &mut report.findings {
+        let id = &item.finding.finding.finding_id;
+        current_ids.insert(id.clone());
+        if baseline_ids.contains(id) {
+            unchanged += 1;
+            item.baseline_status = Some("unchanged".to_string());
+        } else {
+            new += 1;
+            item.baseline_status = Some("new".to_string());
+        }
+    }
+    let fixed_finding_ids: Vec<String> = baseline_ids
+        .iter()
+        .filter(|id| !current_ids.contains(*id))
+        .cloned()
+        .collect();
+    BaselineDiff {
+        new,
+        fixed: fixed_finding_ids.len(),
+        unchanged,
+        fixed_finding_ids,
+    }
+}
+
+/// `--explain`: diagnose why a `--source`/`--sink` pair does or does not
+/// connect. Composes the source-site and sink-site inventories with the
+/// taint result so the report distinguishes the two failure modes a
+/// reviewer actually needs to tell apart — "the rule matched nothing"
+/// vs "the rule matched but the value never flows".
+#[allow(clippy::too_many_arguments)]
+fn emit_taint_explain(
+    project: &bonsai_sdk::Project,
+    source: Option<&str>,
+    sink: Option<&str>,
+    trust: Option<&str>,
+    category: Option<&str>,
+    severity: Option<Severity>,
+    tag: Option<&str>,
+    files: &[String],
+    exclude_files: &[String],
+    report: &TaintAnalysisReport,
+    format: BrowseFormat,
+) -> Result<()> {
+    let source_sites = project.security().sources(SecurityInventoryOptions {
+        rule_regex: source.map(str::to_string),
+        trust: trust.map(str::to_string),
+        category: category.map(str::to_string),
+        files: files.to_vec(),
+        exclude_files: exclude_files.to_vec(),
+        ..Default::default()
+    })?;
+    let sink_sites = project.security().sinks(SecurityInventoryOptions {
+        rule_regex: sink.map(str::to_string),
+        severity,
+        tag: tag.map(str::to_string),
+        files: files.to_vec(),
+        exclude_files: exclude_files.to_vec(),
+        ..Default::default()
+    })?;
+    let taint_paths = report.findings.len();
+
+    // Verdict: first failing gate wins. `--source` / `--sink` are
+    // optional, so an empty result only counts as a gate failure when
+    // the corresponding filter was actually requested.
+    let (verdict, message) = if source.is_some() && source_sites.is_empty() {
+        (
+            "no-source-match",
+            format!(
+                "no source site matched `{}` in this workspace — the source rule never fired, so no flow could begin.",
+                source.unwrap_or("")
+            ),
+        )
+    } else if sink.is_some() && sink_sites.is_empty() {
+        (
+            "no-sink-match",
+            format!(
+                "no sink site matched `{}` in this workspace — the sink rule never fired, so there is nothing to reach.",
+                sink.unwrap_or("")
+            ),
+        )
+    } else if taint_paths > 0 {
+        (
+            "connected",
+            format!(
+                "source and sink are connected by {taint_paths} taint path(s). Drop --explain to see the flow(s)."
+            ),
+        )
+    } else {
+        (
+            "no-path",
+            "source and sink both matched, but no taint path links them — the value does not flow end-to-end. \
+             Common causes: an intervening sanitizer credited the value, a broken assignment / alias chain, or a \
+             cross-function boundary the engine cannot follow. Re-run with BONSAI_DEBUG=security-taint for the \
+             per-source IDG cut detail."
+                .to_string(),
+        )
+    };
+
+    if matches!(format, BrowseFormat::Json) {
+        let preview = |sites: &[RuleMatch]| {
+            sites
+                .iter()
+                .take(5)
+                .map(|m| {
+                    serde_json::json!({
+                        "rule_id": m.rule_id,
+                        "file": m.file,
+                        "line": m.line,
+                        "column": m.column,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let out = serde_json::json!({
+            "explain": {
+                "source": source,
+                "sink": sink,
+                "source_sites": source_sites.len(),
+                "sink_sites": sink_sites.len(),
+                "taint_paths": taint_paths,
+                "verdict": verdict,
+                "message": message,
+                "source_site_preview": preview(&source_sites),
+                "sink_site_preview": preview(&sink_sites),
+            }
+        });
+        cli_println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let u = ui();
+    cli_println!(
+        "{}",
+        u.dim(&format!(
+            "explain  {} → {}",
+            source.unwrap_or("<any source>"),
+            sink.unwrap_or("<any sink>")
+        ))
+    );
+    let mut table = u.table(&["stage", "count"]);
+    table.add_row(vec![
+        Cell::new("source sites matched"),
+        Cell::new(source_sites.len()),
+    ]);
+    table.add_row(vec![Cell::new("sink sites matched"), Cell::new(sink_sites.len())]);
+    table.add_row(vec![Cell::new("taint paths"), Cell::new(taint_paths)]);
+    cli_println!("{table}");
+    let mark = if verdict == "connected" {
+        u.name("✓ CONNECTED")
+    } else {
+        u.warn("✗ NOT CONNECTED")
+    };
+    cli_println!();
+    cli_println!("  {}  {}", mark, message);
+    Ok(())
+}
+
+/// Surface the `--baseline` diff counts. In JSON mode the per-finding
+/// `baseline_status` carries the machine-readable signal, so the summary
+/// goes to stderr to keep stdout a clean findings document; in text mode
+/// it joins the rendered report on stdout.
+fn print_baseline_summary(diff: &BaselineDiff, format: BrowseFormat) {
+    if matches!(format, BrowseFormat::Json) {
+        eprintln!(
+            "baseline diff: {} new, {} fixed, {} unchanged",
+            diff.new, diff.fixed, diff.unchanged
+        );
+        return;
+    }
+    let u = ui();
+    cli_println!();
+    cli_println!(
+        "{}",
+        u.dim(&format!(
+            "baseline diff — {} new · {} fixed · {} unchanged",
+            diff.new, diff.fixed, diff.unchanged
+        ))
+    );
+}
+
+fn build_taint_summary(report: &TaintAnalysisReport) -> TaintAnalysisSummary {
+    summarize_taint_findings(
+        report.findings.iter(),
+        report.findings.len(),
+        report.source_rule_count,
+        report.sink_rule_count,
+        report.sanitizer_rule_count,
+    )
+}
+
+/// Build the aggregate summary from any sequence of findings. Shared
+/// between the fresh-analysis path (counts the full result) and the
+/// secondary-filter render path (counts only the findings that survive
+/// `--contains` / `--not-contains`), so `--summary --contains X`
+/// reports counts for the filtered set. Rule counts come from the
+/// analysis (they describe the loaded rulepack, not the result) and
+/// are passed through unchanged.
+fn summarize_taint_findings<'a>(
+    findings: impl Iterator<Item = &'a CombinedFindingWithChain>,
+    total_findings: usize,
     source_rule_count: usize,
     sink_rule_count: usize,
     sanitizer_rule_count: usize,
+) -> TaintAnalysisSummary {
+    let mut summary = TaintAnalysisSummary {
+        total_findings,
+        source_rule_count,
+        sink_rule_count,
+        sanitizer_rule_count,
+        severity_counts: BTreeMap::new(),
+        status_counts: BTreeMap::new(),
+        precision_counts: BTreeMap::new(),
+        tag_counts: BTreeMap::new(),
+        language_counts: BTreeMap::new(),
+        source_rule_counts: BTreeMap::new(),
+        sink_rule_counts: BTreeMap::new(),
+        source_trust_counts: BTreeMap::new(),
+        source_category_counts: BTreeMap::new(),
+        sink_file_counts: BTreeMap::new(),
+    };
+    for item in findings {
+        let finding = &item.finding;
+        inc_count(
+            &mut summary.severity_counts,
+            finding.severity.map_or("none", |severity| severity.as_str()),
+        );
+        inc_count(&mut summary.status_counts, finding.status.as_str());
+        inc_count(&mut summary.precision_counts, &finding.precision);
+        inc_count(
+            &mut summary.tag_counts,
+            finding.tag.as_deref().unwrap_or("untagged"),
+        );
+        inc_count(&mut summary.language_counts, &finding.language);
+        inc_count(&mut summary.source_rule_counts, &finding.source.rule_id);
+        for source in &item.additional_sources {
+            inc_count(&mut summary.source_rule_counts, &source.rule_id);
+        }
+        inc_count(&mut summary.sink_rule_counts, &finding.sink.rule_id);
+        for sink in &item.additional_sinks {
+            inc_count(&mut summary.sink_rule_counts, &sink.rule_id);
+        }
+        inc_count(
+            &mut summary.source_trust_counts,
+            finding.source.trust.as_deref().unwrap_or("unknown"),
+        );
+        inc_count(
+            &mut summary.source_category_counts,
+            finding.source.category.as_deref().unwrap_or("unknown"),
+        );
+        inc_count(&mut summary.sink_file_counts, &finding.sink.file);
+    }
+    summary
+}
+
+fn inc_count(counts: &mut BTreeMap<String, usize>, key: &str) {
+    *counts.entry(key.to_string()).or_insert(0) += 1;
+}
+
+/// Keep only the findings whose serialized string-values satisfy the
+/// active `--contains` / `--not-contains` filter, and recompute the
+/// summary over the survivors. Matches on the finding's JSON values
+/// (source/sink rule ids, files, code text, chain) — what a developer
+/// greps for. Returns a fresh owned report; the caller keeps the
+/// original for caching.
+fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalysisRenderReport {
+    let secondary = crate::filter::active();
+    let findings: Vec<TaintAnalysisRenderFinding> = report
+        .findings
+        .iter()
+        .filter(|rf| secondary.matches_value(&rf.finding))
+        .cloned()
+        .collect();
+    let summary = summarize_taint_findings(
+        findings.iter().map(|rf| &rf.finding),
+        findings.len(),
+        report.summary.source_rule_count,
+        report.summary.sink_rule_count,
+        report.summary.sanitizer_rule_count,
+    );
+    TaintAnalysisRenderReport { summary, findings }
+}
+
+fn flow_from_finding_hops(
+    finding: &CombinedFindingWithChain,
+    idx: usize,
+) -> Option<crate::commands::InspectFlowRendered> {
+    if finding.finding.hops.is_empty() {
+        return None;
+    }
+    let flow_number = u32::try_from(idx + 1).unwrap_or(u32::MAX);
+    let flow_label = (idx + 1).to_string();
+    let chain = if finding.finding.chain_display.is_empty() {
+        finding
+            .finding
+            .hops
+            .iter()
+            .map(|hop| hop.function.clone())
+            .collect::<Vec<_>>()
+    } else {
+        finding.finding.chain_display.clone()
+    };
+    let functions = finding
+        .finding
+        .hops
+        .iter()
+        .map(|hop| crate::commands::inspect::InspectFunctionRendered {
+            module_path: hop.file.clone(),
+            owners: Vec::new(),
+            name: hop.function.clone(),
+            signature: hop.function.clone(),
+            start_line: hop.start_line,
+            end_line: hop.lines.last().map_or(hop.start_line, |line| line.n),
+            lines: hop
+                .lines
+                .iter()
+                .map(|line| crate::commands::inspect::InspectLine {
+                    line_no: line.n,
+                    text: line.text.clone(),
+                    step: None,
+                    annotation: None,
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let mut flow = crate::commands::InspectFlowRendered {
+        flow_number,
+        flow_label,
+        flow_id: finding
+            .finding
+            .representative_flow_id
+            .clone()
+            .unwrap_or_else(|| finding.finding.finding_id.clone()),
+        chain_display: chain.join(" -> "),
+        chain,
+        precision: precision_from_finding_label(&finding.finding.precision),
+        functions,
+    };
+    annotate_taint_flow(
+        &mut flow,
+        &finding.finding.source,
+        &finding.additional_sources,
+        &finding.finding.taint_path,
+        Some(&finding.finding.sink),
+        SecurityFlowKind::Taint,
+    );
+    Some(flow)
+}
+
+fn render_taint_summary_text(summary: &TaintAnalysisSummary) {
+    let u = ui();
+    cli_println!(
+        "{}",
+        u.dim(&format!(
+            "security taint-analysis summary — {} finding(s)",
+            summary.total_findings
+        ))
+    );
+    let mut overview = u.table(&["metric", "count"]);
+    overview.add_row(vec![Cell::new("findings"), Cell::new(summary.total_findings)]);
+    overview.add_row(vec![
+        Cell::new("source rules"),
+        Cell::new(summary.source_rule_count),
+    ]);
+    overview.add_row(vec![Cell::new("sink rules"), Cell::new(summary.sink_rule_count)]);
+    overview.add_row(vec![
+        Cell::new("sanitizer rules"),
+        Cell::new(summary.sanitizer_rule_count),
+    ]);
+    cli_println!("{overview}");
+    render_count_table(u, "tags", "tag", &summary.tag_counts, 20);
+    render_count_table(u, "severities", "severity", &summary.severity_counts, 10);
+    render_count_table(u, "statuses", "status", &summary.status_counts, 10);
+    render_count_table(u, "precision", "precision", &summary.precision_counts, 10);
+    render_count_table(u, "sink rules", "sink", &summary.sink_rule_counts, 20);
+    render_count_table(u, "source rules", "source", &summary.source_rule_counts, 20);
+    render_count_table(u, "languages", "language", &summary.language_counts, 20);
+}
+
+fn render_count_table(u: &Ui, title: &str, key_header: &str, counts: &BTreeMap<String, usize>, limit: usize) {
+    if counts.is_empty() {
+        return;
+    }
+    cli_println!();
+    cli_println!("{}", u.dim(title));
+    let mut table = u.table(&[key_header, "count"]);
+    for (key, count) in sorted_counts(counts).into_iter().take(limit) {
+        table.add_row(vec![Cell::new(u.name(key)), Cell::new(*count)]);
+    }
+    cli_println!("{table}");
+}
+
+fn sorted_counts(counts: &BTreeMap<String, usize>) -> Vec<(&String, &usize)> {
+    let mut rows: Vec<_> = counts.iter().collect();
+    rows.sort_by(|(left_key, left_count), (right_key, right_count)| {
+        right_count.cmp(left_count).then_with(|| left_key.cmp(right_key))
+    });
+    rows
+}
+
+fn taint_json_cost_bytes(item: &TaintAnalysisRenderFinding) -> u64 {
+    finding_shallow_cost_bytes(&item.finding)
+}
+
+fn taint_text_cost_bytes(item: &TaintAnalysisRenderFinding, pack: &Rulepack) -> u64 {
+    let mut bytes = finding_shallow_cost_bytes(&item.finding).saturating_add(1800);
+    bytes = bytes.saturating_add(
+        synth_summary(&item.finding, pack)
+            .map(|summary| summary.len() as u64)
+            .unwrap_or(0),
+    );
+    // Cost the flow render from the finding's own hop bodies — the
+    // lazily-built flow renders exactly these lines, so the estimate
+    // stays render-accurate without materializing the flow here.
+    if !item.finding.finding.hops.is_empty() {
+        for hop in &item.finding.finding.hops {
+            bytes = bytes
+                .saturating_add(hop.file.len() as u64)
+                .saturating_add(hop.function.len() as u64)
+                .saturating_add(240);
+            for line in &hop.lines {
+                bytes = bytes.saturating_add(line.text.len() as u64).saturating_add(40);
+            }
+        }
+    } else {
+        bytes = bytes.saturating_add(
+            item.finding
+                .finding
+                .taint_path
+                .iter()
+                .map(|step| {
+                    step.caller.len()
+                        + step.callee.len()
+                        + step.file.len()
+                        + step
+                            .tainted_args
+                            .iter()
+                            .map(|arg| arg.value_text.len() + arg.param_name.len() + 16)
+                            .sum::<usize>()
+                })
+                .sum::<usize>() as u64,
+        );
+    }
+    bytes
+}
+
+fn finding_shallow_cost_bytes(f: &CombinedFindingWithChain) -> u64 {
+    (f.finding.source.file.len()
+        + f.finding.sink.file.len()
+        + f.finding.source.text.len().min(120)
+        + f.finding.sink.text.len().min(120)
+        + f.finding.tag.as_deref().map_or(0, str::len)
+        + f.finding.finding_id.len()
+        + f.additional_sources
+            .iter()
+            .map(|s| s.rule_id.len() + s.file.len() + s.text.len().min(120))
+            .sum::<usize>()
+        + f.additional_sinks
+            .iter()
+            .map(|s| s.rule_id.len() + s.file.len() + s.text.len().min(120))
+            .sum::<usize>()
+        + 512) as u64
+}
+
+fn render_taint_analysis_text_page(
+    pack: &Rulepack,
+    report: &TaintAnalysisRenderReport,
+    paged_idx: &[usize],
+    info: &paging::PageInfo,
+    no_compact: bool,
 ) -> Result<()> {
     let u = ui();
+    let summary = &report.summary;
     cli_println!(
         "{}",
         u.dim(&format!(
             "security taint-analysis — {} finding(s)  \
              (critical={}, high={}, medium={})  · \
              {} source rule(s) · {} sink rule(s) · {} sanitizer rule(s) loaded",
-            findings.len(),
-            total_critical,
-            total_high,
-            total_medium,
-            source_rule_count,
-            sink_rule_count,
-            sanitizer_rule_count,
+            summary.total_findings,
+            summary.severity_counts.get("critical").copied().unwrap_or(0),
+            summary.severity_counts.get("high").copied().unwrap_or(0),
+            summary.severity_counts.get("medium").copied().unwrap_or(0),
+            summary.source_rule_count,
+            summary.sink_rule_count,
+            summary.sanitizer_rule_count,
         ))
     );
-    let paged_fc: Vec<&CombinedFindingWithChain> = paged_idx.iter().map(|i| &findings[*i]).collect();
-    let paged_flows: Vec<Option<crate::commands::InspectFlowRendered>> = paged_idx
-        .iter()
-        .map(|i| {
-            let fc = &findings[*i];
-            if fc.chain_funcs.is_empty() {
-                return None;
-            }
-            let filters = crate::commands::InspectFilters {
-                from: None,
-                from_kind: None,
-                to: None,
-                to_kind: None,
-                file: None,
-                in_fn: None,
-            };
-            let label = format!("{}", *i + 1);
-            let chain_names = finding_chain_names(ws, fc);
-            let call_spans =
-                security_flow_call_spans(ws, &fc.chain_funcs, &chain_names, &fc.finding.taint_path);
-            let mut flow = crate::commands::render_flow_with_cached_call_spans(
-                ws,
-                &fc.chain_funcs,
-                &call_spans,
-                (*i + 1) as u32,
-                &label,
-                precision_from_finding_label(&fc.finding.precision),
-                None,
-                filters,
-                false,
-                false,
-            )?;
-            if let Some(flow_id) = fc.finding.representative_flow_id.as_deref() {
-                flow.flow_id = flow_id.to_string();
-            }
-            annotate_taint_flow(
-                &mut flow,
-                &fc.finding.source,
-                &fc.additional_sources,
-                &fc.finding.taint_path,
-                Some(&fc.finding.sink),
-                SecurityFlowKind::Taint,
-            );
-            Some(flow)
-        })
-        .collect();
 
     let render_opts = crate::commands::InspectRenderOptions {
         compact: false,
@@ -1123,10 +1821,19 @@ fn render_taint_analysis_text_page(
     };
     let mut seen_bodies: crate::commands::BodySet = ahash::AHashSet::new();
 
-    for (global_idx, (fc, prebuilt_flow)) in paged_idx.iter().zip(paged_fc.iter().zip(paged_flows.iter())) {
+    for global_idx in paged_idx {
+        let item = &report.findings[*global_idx];
+        let fc = &item.finding;
         render_finding_security_header(u, *global_idx + 1, fc, pack);
-        match prebuilt_flow.as_ref() {
-            Some(flow) => {
+        // `--baseline`: flag findings absent from the prior run so a
+        // reviewer's eye goes straight to what this change introduced.
+        if item.baseline_status.as_deref() == Some("new") {
+            cli_println!("  {}", u.warn("[NEW since baseline]"));
+        }
+        // Build the flow render lazily, only for findings on this page —
+        // it is derived entirely from the finding's recorded hops.
+        match flow_from_finding_hops(fc, *global_idx) {
+            Some(ref flow) => {
                 let header_name = if fc.additional_sinks.is_empty() {
                     fc.finding.sink.rule_id.clone()
                 } else {
@@ -1157,7 +1864,7 @@ fn render_taint_analysis_text_page(
                     );
                 }
             }
-            None => render_finding_block_compact(u, fc, pack, ws),
+            None => render_finding_block_compact(u, fc, pack),
         }
     }
 
@@ -1222,7 +1929,10 @@ fn cmd_source_analysis(
     )?;
     let source_rule_count = report.source_rule_count;
     let lineage_summary = report.lineage_summary;
-    let candidates = report.candidates;
+    // Secondary `--contains` / `--not-contains` filter, applied once to
+    // the candidate set that every render path (text + json) draws from.
+    let mut candidates = report.candidates;
+    crate::filter::active().retain(&mut candidates);
 
     let filters_hash = filter_signature(&[
         ("kind", "source-analysis"),
@@ -1488,23 +2198,6 @@ fn source_lineage_incomplete_reasons(lineage: SourceLineageStatus) -> Vec<String
         reasons.push("lineage incomplete".to_string());
     }
     reasons
-}
-
-fn finding_chain_names(ws: &bonsai_sdk::Workspace, finding: &CombinedFindingWithChain) -> Vec<String> {
-    if finding.finding.chain_display.len() == finding.chain_funcs.len() {
-        return finding.finding.chain_display.clone();
-    }
-    let global = ws.db().global_index();
-    finding
-        .chain_funcs
-        .iter()
-        .map(|func| {
-            global
-                .decl_of(bonsai_common::SymbolId::new(func.raw()))
-                .map(|decl| decl.name.clone())
-                .unwrap_or_default()
-        })
-        .collect()
 }
 
 fn security_flow_call_spans(
@@ -2094,12 +2787,7 @@ fn synth_summary(combined: &CombinedFindingWithChain, pack: &Rulepack) -> Option
 /// Same visual shape as the per-side blocks in the taint-analysis
 /// render, so same-file findings still read coherently without
 /// implying approximate analysis.
-fn render_finding_block_compact(
-    u: &Ui,
-    combined: &CombinedFindingWithChain,
-    pack: &Rulepack,
-    ws: &bonsai_sdk::Workspace,
-) {
+fn render_finding_block_compact(u: &Ui, combined: &CombinedFindingWithChain, pack: &Rulepack) {
     let f = &combined.finding;
     cli_println!();
     // The full per-function body render (`render_flow_with_cached_call_spans`)
@@ -2139,20 +2827,20 @@ fn render_finding_block_compact(
     } else {
         cli_println!("{}", u.dim("(same-file evidence — no cross-function chain)"));
     }
-    render_site_code(u, "SOURCE", &f.source, pack, ws);
+    render_site_code(u, "SOURCE", &f.source, pack);
     for source in &combined.additional_sources {
-        render_site_code(u, "SOURCE", source, pack, ws);
+        render_site_code(u, "SOURCE", source, pack);
     }
     for s in &f.sanitizers_seen {
-        render_site_code(u, "SANITIZER", s, pack, ws);
+        render_site_code(u, "SANITIZER", s, pack);
     }
-    render_site_code(u, "SINK", &f.sink, pack, ws);
+    render_site_code(u, "SINK", &f.sink, pack);
     for sink in &combined.additional_sinks {
-        render_site_code(u, "SINK", sink, pack, ws);
+        render_site_code(u, "SINK", sink, pack);
     }
 }
 
-fn render_site_code(u: &Ui, label: &str, m: &FindingMatch, pack: &Rulepack, ws: &bonsai_sdk::Workspace) {
+fn render_site_code(u: &Ui, label: &str, m: &FindingMatch, pack: &Rulepack) {
     cli_println!();
     cli_println!("{}  {}", u.kind(&format!("[{label}]")), u.name(&m.rule_id),);
     let loc = format!("{}:{}:{}", short_file(&m.file), m.line, m.column);
@@ -2165,9 +2853,8 @@ fn render_site_code(u: &Ui, label: &str, m: &FindingMatch, pack: &Rulepack, ws: 
                 .map_or_else(|| "<module>".to_string(), |f| format!("in {f}"))
         ),
     );
-    let code = read_line(ws, &m.file, m.line);
-    if !code.trim().is_empty() {
-        cli_println!("    {}", u.snippet(code.trim(), extension_for(&m.file)));
+    if !m.text.trim().is_empty() {
+        cli_println!("    {}", u.snippet(m.text.trim(), extension_for(&m.file)));
     }
     if let Some(r) = pack.find_rule_by_id(&m.rule_id) {
         let desc = r.description.trim();
@@ -2175,10 +2862,6 @@ fn render_site_code(u: &Ui, label: &str, m: &FindingMatch, pack: &Rulepack, ws: 
             cli_println!("    {}", u.dim(desc));
         }
     }
-}
-
-fn read_line(ws: &bonsai_sdk::Workspace, file_path: &str, line: u32) -> String {
-    crate::commands::browse::read_line(ws, file_path, line)
 }
 
 fn function_costs_for_paths<I>(
@@ -2265,60 +2948,6 @@ fn match_text_cost(m: &FindingMatch, pack: &Rulepack) -> u64 {
         + m.payload_types.iter().map(|p| p.len() + 2).sum::<usize>()) as u64
         + rule_desc
         + 384
-}
-
-fn finding_text_cost_bytes(
-    finding: &CombinedFindingWithChain,
-    pack: &Rulepack,
-    function_costs: &ahash::AHashMap<FuncId, u64>,
-) -> u64 {
-    let mut cost = 1600
-        + finding.finding.finding_id.len() as u64
-        + finding
-            .finding
-            .cwe
-            .iter()
-            .map(|c| c.len() as u64 + 2)
-            .sum::<u64>()
-        + finding
-            .finding
-            .owasp
-            .iter()
-            .map(|o| o.len() as u64 + 2)
-            .sum::<u64>()
-        + finding
-            .finding
-            .chain_display
-            .iter()
-            .map(|hop| hop.len() as u64 + 8)
-            .sum::<u64>();
-    cost += match_text_cost(&finding.finding.source, pack);
-    cost += match_text_cost(&finding.finding.sink, pack);
-    cost += finding
-        .additional_sources
-        .iter()
-        .map(|m| match_text_cost(m, pack))
-        .sum::<u64>();
-    cost += finding
-        .additional_sinks
-        .iter()
-        .map(|m| match_text_cost(m, pack))
-        .sum::<u64>();
-    cost += finding
-        .finding
-        .sanitizers_seen
-        .iter()
-        .map(|m| match_text_cost(m, pack))
-        .sum::<u64>();
-    if finding.chain_funcs.is_empty() {
-        return cost + 1024;
-    }
-    cost + 700
-        + finding
-            .chain_funcs
-            .iter()
-            .map(|func| function_costs.get(func).copied().unwrap_or(512))
-            .sum::<u64>()
 }
 
 fn source_analysis_text_cost_bytes(
@@ -2498,26 +3127,6 @@ fn parse_severity_flag(flag: Option<&str>) -> Result<Option<Severity>> {
     }
 }
 
-fn max_precision_from_cli(
-    precision: Option<PrecisionFilter>,
-    strict_flow: bool,
-) -> Result<Option<Precision>> {
-    // Semantic flow is now the default. Keep accepting
-    // `--strict-flow` for compatibility; it no longer needs to opt
-    // into exact/narrowed traversal.
-    let _ = strict_flow;
-    let max_precision = match precision {
-        Some(PrecisionFilter::Exact) => Precision::Exact,
-        Some(PrecisionFilter::Narrowed) | None => Precision::Narrowed,
-        Some(PrecisionFilter::OverApproximate | PrecisionFilter::Unknown) => {
-            anyhow::bail!(
-                "`security taint-analysis` is semantic-only; use `--precision exact` or `--precision narrowed`"
-            );
-        }
-    };
-    Ok(Some(max_precision))
-}
-
 fn precision_from_finding_label(label: &str) -> Precision {
     match label {
         "exact" => Precision::Exact,
@@ -2525,15 +3134,6 @@ fn precision_from_finding_label(label: &str) -> Precision {
         "over-approximate" | "over_approximate" => Precision::OverApproximate,
         "unknown" => Precision::Unknown,
         _ => Precision::Unknown,
-    }
-}
-
-fn precision_filter_label(precision: PrecisionFilter) -> &'static str {
-    match precision {
-        PrecisionFilter::Exact => "exact",
-        PrecisionFilter::Narrowed => "narrowed",
-        PrecisionFilter::OverApproximate => "over-approximate",
-        PrecisionFilter::Unknown => "unknown",
     }
 }
 

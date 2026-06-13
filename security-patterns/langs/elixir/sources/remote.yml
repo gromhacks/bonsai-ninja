@@ -45,19 +45,31 @@
   description: "Disabled - whole Plug.Conn taints too broadly without field-sensitive conn access tracking; params/read_body/header accessors stay enabled."
 
 - id: elixir.plug.conn_params_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: elixir
   trust: remote
   tag: http-input
   payload_types: [query]
   frameworks: [plug]
+  packages: [plug]
   match:
     kind: read
     target:
       name: params
-  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.params`; Phoenix `params` parameter rules cover the common source shape."
+  match_examples:
+  - name: plug conn params read
+    code: |
+      alias Plug
+      defmodule App do
+        def handle(conn) do
+          p = conn.params
+          p
+        end
+      end
+  description: "Plug.Conn.params - merged path/query/body params read via `conn.params` field access."
+
+  imports:
+  - Plug
 
 # Bare-name `conn` source on Plug.Conn. Distinct ID from the read-
 # shape rule above so the param-shape match (which the elixir adapter
@@ -91,69 +103,118 @@
   imports:
   - Plug
 - id: elixir.plug.query_params_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: elixir
   trust: remote
   tag: http-input
   payload_types: [query]
   frameworks: [plug]
+  packages: [plug]
   match:
     kind: read
     target:
       name: query_params
-  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.query_params`."
+  match_examples:
+  - name: plug conn query params read
+    code: |
+      alias Plug
+      defmodule App do
+        def handle(conn) do
+          q = conn.query_params
+          q
+        end
+      end
+  description: "Plug.Conn.query_params - parsed query-string params read via `conn.query_params` field access."
+
+  imports:
+  - Plug
 
 - id: elixir.plug.body_params_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: elixir
   trust: remote
   tag: http-input
   payload_types: [json]
   frameworks: [plug]
+  packages: [plug]
   match:
     kind: read
     target:
       name: body_params
-  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.body_params`."
+  match_examples:
+  - name: plug conn body params read
+    code: |
+      alias Plug
+      defmodule App do
+        def handle(conn) do
+          b = conn.body_params
+          b
+        end
+      end
+  description: "Plug.Conn.body_params - parsed request-body params read via `conn.body_params` field access."
+
+  imports:
+  - Plug
 
 - id: elixir.plug.cookies_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: elixir
   trust: remote
   tag: http-input
   payload_types: [cookie]
   frameworks: [plug]
+  packages: [plug]
   match:
     kind: read
     target:
       name: cookies
-  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.cookies`."
+  match_examples:
+  - name: plug conn cookies read
+    code: |
+      alias Plug
+      defmodule App do
+        def handle(conn) do
+          c = conn.cookies
+          c
+        end
+      end
+  description: "Plug.Conn.cookies - request cookies read via `conn.cookies` field access."
+
+  imports:
+  - Plug
 
 - id: elixir.plug.req_headers_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: elixir
   trust: remote
   tag: http-input
   payload_types: [header]
   frameworks: [plug]
+  packages: [plug]
   match:
     kind: read
     target:
       name: req_headers
-  description: "Disabled - current Elixir adapter does not emit property-read facts for `conn.req_headers`."
+  match_examples:
+  - name: plug conn req headers read
+    code: |
+      alias Plug
+      defmodule App do
+        def handle(conn) do
+          h = conn.req_headers
+          h
+        end
+      end
+  description: "Plug.Conn.req_headers - request headers read via `conn.req_headers` field access."
+
+  imports:
+  - Plug
 
 - id: elixir.plug.fetch_query_params
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: elixir.plug.query_params_read
   language: elixir
   trust: remote
   tag: http-input
@@ -164,23 +225,15 @@
     kind: call
     callee:
       attribute: [Plug, Conn, fetch_query_params]
-  match_examples:
-  - name: declared shape
-    code: |
-      alias Plug
-      defmodule App do
-        def test(input) do
-          Plug.Conn.fetch_query_params(input)
-        end
-      end
-  description: "Disabled - this returns a Plug.Conn with attacker-controlled conn.query_params, but field-insensitive return taint over-taints unrelated conn fields. Re-enable when conn.query_params field reads can be seeded precisely."
+  description: "Subsumed by elixir.plug.query_params_read: fetch_query_params/2 only populates conn.query_params, which is now seeded precisely as a `conn.query_params` read source. The whole-conn return taint this rule needed would over-taint unrelated conn fields."
 
   imports:
   - Plug
 - id: elixir.plug.fetch_cookies
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: elixir.plug.cookies_read
   language: elixir
   trust: remote
   tag: http-input
@@ -191,16 +244,7 @@
     kind: call
     callee:
       attribute: [Plug, Conn, fetch_cookies]
-  match_examples:
-  - name: declared shape
-    code: |
-      alias Plug
-      defmodule App do
-        def test(input) do
-          Plug.Conn.fetch_cookies(input)
-        end
-      end
-  description: "Disabled - this returns a Plug.Conn with attacker-controlled cookie fields, but field-insensitive return taint over-taints unrelated conn fields. Re-enable when conn.cookies/req_cookies field reads can be seeded precisely."
+  description: "Subsumed by elixir.plug.cookies_read: fetch_cookies/2 only populates conn.cookies/req_cookies, now seeded precisely as a `conn.cookies` read source. Whole-conn return taint would over-taint unrelated conn fields."
 
   imports:
   - Plug
@@ -341,7 +385,35 @@
           URI.decode_query(input)
         end
       end
+  - name: uri encode_query negative
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.encode_query(input)
+        end
+      end
+    expect_no_match: true
   description: "URI.decode_query/1,2 - query-string parser; when used on request URLs the returned parameter values are remote input."
+
+- id: elixir.uri_query_decoder
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      attribute: [URI, query_decoder]
+  match_examples:
+  - name: uri query decoder
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.query_decoder(input)
+        end
+      end
+  description: "URI.query_decoder/1,2 - lazy query-string decoder; when fed a request URL's query string the yielded key/value pairs are remote input."
 
 - id: elixir.phoenix.channel_handle_in
   enabled: true

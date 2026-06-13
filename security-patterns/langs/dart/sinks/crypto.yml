@@ -101,12 +101,22 @@
     kind: new
     callee:
       name: AES
+  constraints:
+  - keyword_arg_equals:
+      name: mode
+      value: AESMode.ecb
   match_examples:
-  - name: declared shape
+  - name: ecb mode shape
     code: |
       import 'package:encrypt/encrypt.dart' show AES;
       class AES { AES([dynamic input, {dynamic mode}]); }
-      void test() { var input = "x"; var result = AES(input, mode: "AESMode.ecb"); }
-  description: "encrypt package AES(mode: AESMode.ecb)."
+      void test(dynamic key) { var result = AES(key, mode: AESMode.ecb); }
+  - name: cbc mode negative
+    code: |
+      import 'package:encrypt/encrypt.dart' show AES;
+      class AES { AES([dynamic input, {dynamic mode}]); }
+      void test(dynamic key) { var result = AES(key, mode: AESMode.cbc); }
+    expect_no_match: true
+  description: "encrypt package AES(mode: AESMode.ecb) - ECB mode leaks plaintext structure (identical blocks encrypt identically). The keyword-arg value is now captured whole (`AESMode.ecb`), so ECB is distinguished from CBC/CTR."
   imports:
   - encrypt/encrypt.dart

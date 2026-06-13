@@ -135,6 +135,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: dart.deser.yaml_load
   language: dart
   tag: insecure-deserialization
   severity: low

@@ -17,5 +17,35 @@
   - name: declared shape
     code: |
       using Microsoft.AspNetCore.Mvc;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TryUpdateModel(input); } }
-  description: "ASP.NET Core TryUpdateModel(model) without a [Bind] include list - overpost vector."
+      class App { void Test() { TryUpdateModel(input); } }
+    expect_match_text: [TryUpdateModel]
+  - name: unrelated model call negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { ValidateModel(input); } }
+    expect_no_match: true
+  description: "ASP.NET Core TryUpdateModel(model) without a [Bind] include list - overpost vector. Config-shape sink: presence of the bulk-bind call is the finding."
+
+- id: csharp.mass_assign.updatemodel
+  enabled: true
+  language: csharp
+  tag: mass-assignment
+  severity: medium
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      name: UpdateModel
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { UpdateModel(input); } }
+    expect_match_text: [UpdateModel]
+  - name: unrelated model call negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { ValidateModel(input); } }
+    expect_no_match: true
+  description: "ASP.NET (Core) UpdateModel(model) without a [Bind] include list - throwing sibling of TryUpdateModel; same overpost / mass-assignment vector."

@@ -28,6 +28,13 @@
       function demo(input, req, obj) {
         return req.body;
       }
+  - name: unrelated req property negative
+    code: |
+      const _u = require("express");
+      function demo(req) {
+        return req.app;
+      }
+    expect_no_match: true
   description: req.body - HTTP request body for Express-compatible frameworks; attribute-chain avoids matching every `.body` read.
 
 - id: javascript.source.express_req_query
@@ -449,7 +456,8 @@
 - id: javascript.source.koa_ctx_headers_referer
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: javascript.source.koa_ctx_headers
   language: javascript
   trust: remote
   tag: http-input
@@ -461,7 +469,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
-  description: "Disabled duplicate - javascript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
+  description: "Subsumed by javascript.source.koa_ctx_headers, which taints the whole Koa request-header object (the adapter normalizes the `.headers[...]`/`.headers.referer` subscript read to the parent header object)."
 
 - id: javascript.source.koa_cookie_get
   enabled: true
@@ -913,6 +921,31 @@
     expect_match_text: [document.cookie]
   description: document.cookie - attacker-controllable when XSS or other-origin script has set cookies.
 
+- id: javascript.source.window_name
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: browser-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      attribute: [window, name]
+  match_examples:
+  - name: window name
+    code: |
+      function demo() {
+        return window.name;
+      }
+    expect_match_text: [window.name]
+  - name: unrelated window property negative
+    code: |
+      function demo() {
+        return window.length;
+      }
+    expect_no_match: true
+  description: "window.name - persists across navigations and is writable by any prior/cross-origin page, a classic DOM-XSS / data-smuggling source."
+
 - id: javascript.source.window_location_origin_path
   enabled: true
   language: javascript
@@ -1268,7 +1301,8 @@
 - id: javascript.source.hono_ctx_req_query
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: javascript.source.express_req_query
   language: javascript
   trust: remote
   tag: http-input

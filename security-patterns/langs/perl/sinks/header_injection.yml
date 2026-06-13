@@ -34,7 +34,7 @@
 - id: perl.header.mojolicious_headers_add
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: perl
   tag: header-injection
   severity: high

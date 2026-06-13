@@ -1,8 +1,6 @@
 # Swift IPC / cross-process input sources.
 - id: swift.notif.user_info
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: ipc
   tag: ipc-input
@@ -11,4 +9,13 @@
     kind: read
     target:
       name: userInfo
-  description: "Disabled - the current Swift adapter does not index property reads like `notification.userInfo`."
+      receiver_type_in: [Notification]
+  match_examples:
+  - name: notification user info read
+    code: |
+      import Foundation
+      func handle(notification: Notification) -> [AnyHashable: Any]? {
+        let u = notification.userInfo
+        return u
+      }
+  description: "Notification.userInfo - cross-process notification payload read via the `userInfo` dictionary on a typed Notification receiver."

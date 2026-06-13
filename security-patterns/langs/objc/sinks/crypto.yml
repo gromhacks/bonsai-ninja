@@ -61,11 +61,28 @@
     kind: call
     callee:
       name: CCCrypt
+  constraints:
+  - any_arg_matches_regex: "kCCAlgorithmDES|kCCAlgorithm3DES|kCCAlgorithmRC4|kCCAlgorithmRC2|kCCOptionECBMode"
   match_examples:
-    - name: declared shape
+    - name: weak algorithm des
       code: |
-        void test(id input) { id target = input; int amount = 1; CCCrypt(input); }
-  description: "CommonCrypto CCCrypt - flag when algorithm is kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2 or options include kCCOptionECBMode."
+        void test(const void *key, const void *in, void *out) {
+          CCCrypt(kCCEncrypt, kCCAlgorithmDES, kCCOptionPKCS7Padding, key, 8, NULL, in, 8, out, 8, NULL);
+        }
+      expect_match_text: [CCCrypt]
+    - name: ecb mode option
+      code: |
+        void test(const void *key, const void *in, void *out) {
+          CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionECBMode, key, 16, NULL, in, 16, out, 16, NULL);
+        }
+      expect_match_text: [CCCrypt]
+    - name: aes cbc negative
+      code: |
+        void test(const void *key, const void *iv, const void *in, void *out) {
+          CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding, key, 32, iv, in, 16, out, 16, NULL);
+        }
+      expect_no_match: true
+  description: "CommonCrypto CCCrypt with a broken algorithm (kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2) or ECB mode (kCCOptionECBMode). AES/CBC calls are quiet."
 
 - id: objc.crypto.cccryptor_create
   enabled: true
@@ -78,11 +95,28 @@
     kind: call
     callee:
       regex: "^(CCCryptorCreate|CCCryptorCreateWithMode)$"
+  constraints:
+  - any_arg_matches_regex: "kCCAlgorithmDES|kCCAlgorithm3DES|kCCAlgorithmRC4|kCCAlgorithmRC2|kCCModeECB"
   match_examples:
-    - name: declared shape
+    - name: weak algorithm 3des
       code: |
-        void test(id input) { id target = input; int amount = 1; CCCryptorCreate(input); }
-  description: "CommonCrypto CCCryptorCreate / CCCryptorCreateWithMode - flag weak algs (DES/3DES/RC4/RC2) or ECB mode."
+        void test(const void *key, CCCryptorRef *cryptor) {
+          CCCryptorCreate(kCCEncrypt, kCCAlgorithm3DES, kCCOptionPKCS7Padding, key, 24, NULL, cryptor);
+        }
+      expect_match_text: [CCCryptorCreate]
+    - name: ecb mode flagged
+      code: |
+        void test(const void *key, const void *iv, CCCryptorRef *cryptor) {
+          CCCryptorCreateWithMode(kCCEncrypt, kCCModeECB, kCCAlgorithmAES, ccNoPadding, iv, key, 16, NULL, 0, 0, 0, cryptor);
+        }
+      expect_match_text: [CCCryptorCreateWithMode]
+    - name: aes cbc negative
+      code: |
+        void test(const void *key, const void *iv, CCCryptorRef *cryptor) {
+          CCCryptorCreate(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding, key, 32, iv, cryptor);
+        }
+      expect_no_match: true
+  description: "CommonCrypto CCCryptorCreate / CCCryptorCreateWithMode with weak algs (DES/3DES/RC4/RC2) or ECB mode (kCCModeECB). AES/CBC calls are quiet."
 
 - id: objc.crypto.arc4random_uniform
   enabled: false

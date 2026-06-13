@@ -64,6 +64,27 @@
       }
     expect_match_text: [recvmsg]
   description: "recvmsg(fd, msg, flags) - remote bytes taint the caller-supplied message/iov buffer state."
+- id: c.input.recvmmsg
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: recvmmsg
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: recvmmsg output messages
+    code: |
+      #include <sys/socket.h>
+      void handle(int fd, struct mmsghdr *msgs) {
+        recvmmsg(fd, msgs, 8, 0, 0);
+      }
+    expect_match_text: [recvmmsg]
+  description: "recvmmsg(fd, msgvec, vlen, flags, timeout) - Linux scatter-gather multi-message receive; remote bytes taint the caller-supplied mmsghdr/iov buffers."
 - id: c.input.ssl_read
   enabled: true
   language: c
@@ -87,6 +108,52 @@
       }
     expect_match_text: [SSL_read]
   description: "SSL_read(ssl, buf, len) - TLS peer bytes taint the caller-supplied buffer argument."
+- id: c.input.ssl_peek
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [openssl]
+  match:
+    kind: call
+    callee:
+      name: SSL_peek
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: SSL_peek output buffer
+    code: |
+      #include <openssl/ssl.h>
+      void handle(SSL *ssl) {
+        char buf[4096];
+        SSL_peek(ssl, buf, sizeof(buf));
+      }
+    expect_match_text: [SSL_peek]
+  description: "SSL_peek(ssl, buf, len) - copies TLS peer bytes into the caller buffer without consuming them; same attacker-controlled payload as SSL_read."
+- id: c.input.bio_read
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [openssl]
+  match:
+    kind: call
+    callee:
+      name: BIO_read
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: BIO_read output buffer
+    code: |
+      #include <openssl/bio.h>
+      void handle(BIO *bio) {
+        char buf[4096];
+        BIO_read(bio, buf, sizeof(buf));
+      }
+    expect_match_text: [BIO_read]
+  description: "BIO_read(bio, buf, len) - reads bytes from an OpenSSL BIO; when the BIO wraps a socket/connect chain the data is peer-controlled."
 - id: c.input.mhd_lookup_connection_value
   enabled: true
   language: c

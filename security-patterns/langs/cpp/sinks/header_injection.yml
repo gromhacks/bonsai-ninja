@@ -17,12 +17,8 @@
   - name: generated direct match
     code: |
       #include <httplib.h>
-      #include <httplib.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        Response::set_header(arg);
+      void example(const char *input) {
+        Response::set_header("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -146,11 +142,8 @@
   - name: generated direct match
     code: |
       #include <drogon/drogon.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        HttpResponse::addHeader(arg);
+      void example(const char *input) {
+        HttpResponse::addHeader("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -239,11 +232,8 @@
   - name: generated direct match
     code: |
       #include <Poco/URI.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        HTTPResponse::set(arg);
+      void example(const char *input) {
+        HTTPResponse::set("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -300,11 +290,8 @@
   - name: generated direct match
     code: |
       #include <Poco/URI.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        HTTPResponse::add(arg);
+      void example(const char *input) {
+        HTTPResponse::add("safe", input);
       }
   - name: literal arg 1 negative
     code: |

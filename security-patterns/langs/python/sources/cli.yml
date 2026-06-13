@@ -76,6 +76,48 @@
           return input(user_input)
   description: input() - interactive prompt; returns a user-supplied string (Python 3; Python 2 input() is code-exec and covered by the eval sink).
 
+- id: python.cli.sys_stdin_bare
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  imports: [sys]
+  match:
+    kind: read
+    target:
+      attribute: [sys, stdin]
+  match_examples:
+  - name: cli sys stdin bare iteration
+    code: |
+      import sys
+      def example():
+          for line in sys.stdin:
+              return line
+    expect_match_text: [sys.stdin]
+  description: "Bare read of sys.stdin - covers `for line in sys.stdin:` iteration and `sys.stdin` passed to readers, where the per-call read accessors do not appear."
+
+- id: python.cli.fileinput_input
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  imports: [fileinput]
+  match:
+    kind: call
+    callee:
+      attribute: [fileinput, input]
+  match_examples:
+  - name: cli fileinput input
+    code: |
+      import fileinput
+      def example():
+          for line in fileinput.input():
+              return line
+    expect_match_text: [fileinput.input]
+  description: "fileinput.input() - iterates over lines of files named in sys.argv (or stdin when none given); the yielded lines are operator/attacker-controlled local input."
+
 - id: python.cli.argparse_parse_args
   enabled: true
   language: python

@@ -8,7 +8,7 @@ use bonsai_lang_api::{
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImplicitMemberReadCall, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
-    LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    LanguageCapabilities, LanguageId, Ref, RefKind, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -179,6 +179,9 @@ impl LanguageAdapter for DartAdapter {
             for decl in &mut decl_index.defs {
                 fix_dart_catch_params(&mut decl.flow_events, &tree, source_bytes);
             }
+            decl_index
+                .refs
+                .extend(synthesize_dart_property_reads(&tree, source_bytes, file));
         }
         // Recognised Dart lifecycle transitions — `close` for streams /
         // sinks / files, `cancel` for stream subscriptions and timers,
@@ -283,6 +286,85 @@ fn synthesize_dart_constructor_implicit_returns(index: &mut DeclIndex) {
 /// `collect_java_catch_param_name`. Plain `catch (e)` (no preceding
 /// `on` type) is already correct, so we only overwrite when we
 /// positively find a binding identifier.
+/// Request/queue input fields read via `<recv>.<field>` property access.
+/// Bounded so the adapter never synthesises a read for arbitrary `a.b`
+/// access — the same targeted-synthesis convention the Elixir / Ruby / Lua
+/// adapters use.
+const DART_REQUEST_FIELD_READS: &[&str] = &[
+    "environment",
+    "script",
+    "data",
+    "notification",
+    "queryParameters",
+    "queryParametersAll",
+];
+
+const DART_SELECTOR_KINDS: &[&str] = &[
+    "unconditional_assignable_selector",
+    "conditional_assignable_selector",
+];
+
+/// tree-sitter-dart splits `uri.queryParameters` into sibling nodes — a base
+/// expression and a trailing `(selector (unconditional_assignable_selector
+/// (identifier)))` — so the kit's member-chain extractor (which expects a
+/// nested member expression) returns `None` for the single-segment selector
+/// and never surfaces the dotted name. Reconstruct the full access via source
+/// span slicing (base start .. selector end) and emit a `Read` ref, bounded to
+/// [`DART_REQUEST_FIELD_READS`]. This is what lets the request/queue read
+/// source rules bind (`name: queryParameters` + `receiver_type_in: [Uri]`,
+/// `attribute: [Platform, environment]`).
+fn synthesize_dart_property_reads(tree: &Tree, src: &[u8], file: FileId) -> Vec<Ref> {
+    let mut refs = Vec::new();
+    for sel_inner in collect_kinds(tree, DART_SELECTOR_KINDS) {
+        let Some(prop) = first_named_child_of_kind(&sel_inner, "identifier") else {
+            continue;
+        };
+        let name = node_text(&prop, src).trim();
+        if !DART_REQUEST_FIELD_READS.contains(&name) {
+            continue;
+        }
+        // Navigate to the postfix `selector` wrapper (where the receiver is a
+        // preceding sibling), then walk back over any earlier selector levels
+        // to the base expression that opens the chain.
+        let selector_node = match sel_inner.parent() {
+            Some(parent) if parent.kind() == "selector" => parent,
+            _ => sel_inner,
+        };
+        let mut base = selector_node.prev_named_sibling();
+        loop {
+            match base {
+                Some(node) if node.kind() == "selector" => base = node.prev_named_sibling(),
+                _ => break,
+            }
+        }
+        let Some(base_node) = base else {
+            continue;
+        };
+        let start = base_node.start_byte();
+        let end = sel_inner.end_byte();
+        if start >= end {
+            continue;
+        }
+        let Ok(chain) = std::str::from_utf8(&src[start..end]) else {
+            continue;
+        };
+        let chain = chain.trim().to_string();
+        // Require a dotted access — a bare selector with no recoverable
+        // receiver is not a member read the source rules can bind.
+        if !chain.contains('.') {
+            continue;
+        }
+        refs.push(Ref {
+            span: span_of(file, &sel_inner),
+            name: chain,
+            kind: RefKind::Read,
+            scope: None,
+            resolved: None,
+        });
+    }
+    refs
+}
+
 fn fix_dart_catch_params(events: &mut [FlowEvent], tree: &Tree, src: &[u8]) {
     for event in events {
         match event {
@@ -1088,5 +1170,52 @@ fn collect_dart_base_names(parent_clause: Node<'_>, src: &[u8], bases: &mut Vec<
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod read_synth_tests {
+    use super::*;
+    use bonsai_lang_api::kit::language_from_pack;
+
+    fn property_reads(src: &str) -> Vec<Ref> {
+        let language = language_from_pack(PACK_NAME).expect("dart grammar");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set dart grammar");
+        let tree = parser.parse(src.as_bytes(), None).expect("parse dart source");
+        synthesize_dart_property_reads(&tree, src.as_bytes(), FileId::new(0))
+    }
+
+    #[test]
+    fn allowlisted_property_read_emits_full_chain_read_ref() {
+        let reads = property_reads("void f(Uri uri) {\n  var q = uri.queryParameters;\n}\n");
+        assert!(
+            reads
+                .iter()
+                .any(|r| r.name == "uri.queryParameters" && r.kind == RefKind::Read),
+            "expected uri.queryParameters Read ref, got {reads:?}"
+        );
+    }
+
+    #[test]
+    fn literal_static_receiver_property_read_emits_read_ref() {
+        let reads = property_reads("import 'dart:io';\nvoid f() {\n  var e = Platform.environment;\n}\n");
+        assert!(
+            reads
+                .iter()
+                .any(|r| r.name == "Platform.environment" && r.kind == RefKind::Read),
+            "expected Platform.environment Read ref, got {reads:?}"
+        );
+    }
+
+    #[test]
+    fn non_allowlisted_property_read_emits_nothing() {
+        // `widget.title` is a real Dart property but not a request-input
+        // source — the synthesizer must stay bounded to the allowlist.
+        let reads = property_reads("void f(Widget widget) {\n  var t = widget.title;\n}\n");
+        assert!(
+            reads.is_empty(),
+            "non-allowlisted read should emit nothing, got {reads:?}"
+        );
     }
 }

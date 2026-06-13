@@ -1,6 +1,7 @@
 # Rust memory-safety sinks. Unsafe-block raw-pointer operations and
-# transmutes - tainted offsets / lengths reach memory primitives that
-# bypass the borrow checker.
+# transmutes bypass the borrow checker; tainted pointers, lengths, or
+# byte values can turn those primitives into out-of-bounds access or
+# type-confusion bugs.
 - id: rust.memory.ptr_read
   enabled: true
   language: rust
@@ -8,21 +9,31 @@
   severity: high
   category: memory
   packages: [std, core]
-  cwe: [CWE-125, CWE-787]
+  cwe: [CWE-125, CWE-416]
   match:
     kind: call
     callee:
       attribute: [ptr, read]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: ptr read tainted pointer
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          ptr::read(target);
+      use std::ptr;
+      unsafe fn example(user_input: *const u8) -> u8 {
+          ptr::read(user_input)
       }
-  description: "std::ptr::read(src) - reads from a raw pointer; tainted offset/pointer = out-of-bounds read or use-after-free in unsafe blocks."
+  - name: ptr read safe pointer negative
+    code: |
+      use std::ptr;
+      unsafe fn example() -> u8 {
+          let safe = 7u8;
+          ptr::read(&safe)
+      }
+    expect_no_match: true
+  description: "std::ptr::read(src) - attacker-controlled raw pointer can cause out-of-bounds read or use-after-free in unsafe code."
+
 - id: rust.memory.ptr_write
   enabled: true
   language: rust
@@ -35,16 +46,26 @@
     kind: call
     callee:
       attribute: [ptr, write]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: ptr write tainted destination
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          ptr::write(target);
+      use std::ptr;
+      unsafe fn example(user_input: *mut u8) {
+          ptr::write(user_input, 1);
       }
-  description: "std::ptr::write(dst, val) - writes to a raw pointer; tainted destination = arbitrary memory write inside unsafe."
+  - name: ptr write safe destination negative
+    code: |
+      use std::ptr;
+      unsafe fn example() {
+          let mut safe = 0u8;
+          ptr::write(&mut safe, 1);
+      }
+    expect_no_match: true
+  description: "std::ptr::write(dst, val) - attacker-controlled raw destination pointer enables arbitrary memory write inside unsafe code."
+
 - id: rust.memory.ptr_copy_nonoverlapping
   enabled: true
   language: rust
@@ -52,21 +73,29 @@
   severity: critical
   category: memory
   packages: [std, core]
-  cwe: [CWE-787, CWE-120]
+  cwe: [CWE-787, CWE-120, CWE-125]
   match:
     kind: call
     callee:
       attribute: [ptr, copy_nonoverlapping]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: copy nonoverlapping tainted count
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          ptr::copy_nonoverlapping(target);
+      use std::ptr;
+      unsafe fn example(src: *const u8, dst: *mut u8, user_input: usize) {
+          ptr::copy_nonoverlapping(src, dst, user_input);
       }
-  description: "ptr::copy_nonoverlapping(src, dst, count) - memcpy primitive; tainted count or pointers cause buffer overflow."
+  - name: copy nonoverlapping literal count negative
+    code: |
+      use std::ptr;
+      unsafe fn example(src: *const u8, dst: *mut u8) {
+          ptr::copy_nonoverlapping(src, dst, 16);
+      }
+    expect_no_match: true
+  description: "ptr::copy_nonoverlapping(src, dst, count) - attacker-controlled pointer or count can cause out-of-bounds copy."
+
 - id: rust.memory.ptr_copy
   enabled: true
   language: rust
@@ -74,21 +103,29 @@
   severity: critical
   category: memory
   packages: [std, core]
-  cwe: [CWE-787, CWE-120]
+  cwe: [CWE-787, CWE-120, CWE-125]
   match:
     kind: call
     callee:
       attribute: [ptr, copy]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: ptr copy tainted count
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          ptr::copy(target);
+      use std::ptr;
+      unsafe fn example(src: *const u8, dst: *mut u8, user_input: usize) {
+          ptr::copy(src, dst, user_input);
       }
-  description: "ptr::copy(src, dst, count) - memmove primitive; same exposure as copy_nonoverlapping."
+  - name: ptr copy literal count negative
+    code: |
+      use std::ptr;
+      unsafe fn example(src: *const u8, dst: *mut u8) {
+          ptr::copy(src, dst, 16);
+      }
+    expect_no_match: true
+  description: "ptr::copy(src, dst, count) - attacker-controlled pointer or count can cause out-of-bounds memmove."
+
 - id: rust.memory.slice_from_raw_parts
   enabled: true
   language: rust
@@ -101,16 +138,24 @@
     kind: call
     callee:
       attribute: [slice, from_raw_parts]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: slice from raw parts tainted len
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          slice::from_raw_parts(target);
+      use std::slice;
+      unsafe fn example(data: *const u8, user_input: usize) -> &'static [u8] {
+          slice::from_raw_parts(data, user_input)
       }
-  description: "std::slice::from_raw_parts(data, len) - synthesises a slice from raw pointer + length; tainted len = out-of-bounds reads when the slice is later indexed."
+  - name: slice from raw parts literal len negative
+    code: |
+      use std::slice;
+      unsafe fn example(data: *const u8) -> &'static [u8] {
+          slice::from_raw_parts(data, 16)
+      }
+    expect_no_match: true
+  description: "std::slice::from_raw_parts(data, len) - attacker-controlled raw pointer or length can create an out-of-bounds slice."
+
 - id: rust.memory.slice_from_raw_parts_mut
   enabled: true
   language: rust
@@ -123,16 +168,24 @@
     kind: call
     callee:
       attribute: [slice, from_raw_parts_mut]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: slice from raw parts mut tainted len
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          slice::from_raw_parts_mut(target);
+      use std::slice;
+      unsafe fn example(data: *mut u8, user_input: usize) -> &'static mut [u8] {
+          slice::from_raw_parts_mut(data, user_input)
       }
-  description: "slice::from_raw_parts_mut - mutable slice from raw pointer + length; tainted len enables arbitrary writes."
+  - name: slice from raw parts mut literal len negative
+    code: |
+      use std::slice;
+      unsafe fn example(data: *mut u8) -> &'static mut [u8] {
+          slice::from_raw_parts_mut(data, 16)
+      }
+    expect_no_match: true
+  description: "slice::from_raw_parts_mut(data, len) - attacker-controlled pointer or length can create an arbitrary mutable slice."
+
 - id: rust.memory.transmute
   enabled: true
   language: rust
@@ -145,16 +198,25 @@
     kind: call
     callee:
       attribute: [mem, transmute]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: transmute tainted bytes
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          mem::transmute(target);
+      use std::mem;
+      unsafe fn example(user_input: [u8; 8]) -> usize {
+          mem::transmute(user_input)
       }
-  description: "std::mem::transmute - reinterprets bytes as another type; tainted bytes can forge invalid references / fat-pointer metadata."
+  - name: transmute literal bytes negative
+    code: |
+      use std::mem;
+      unsafe fn example() -> usize {
+          mem::transmute([0u8; 8])
+      }
+    expect_no_match: true
+  description: "std::mem::transmute(value) - attacker-controlled bytes can forge invalid values, references, or fat-pointer metadata."
+
 - id: rust.memory.ptr_offset
   enabled: false
   disabled_reason:
@@ -188,12 +250,10 @@
     callee:
       attribute: [ManuallyDrop, drop]
   match_examples:
-  - name: generated direct match
+  - name: manuallydrop explicit drop
     code: |
-      use std::process::Command;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          ManuallyDrop::drop(target);
+      use std::mem::ManuallyDrop;
+      unsafe fn example(mut value: ManuallyDrop<String>) {
+          ManuallyDrop::drop(&mut value);
       }
-  description: "ManuallyDrop::drop(&mut x) - manually runs Drop. Two calls on the same value double-free (CWE-415); the engine surfaces both sites for audit pairing."
+  description: "ManuallyDrop::drop(&mut x) - manually runs Drop. Repeating it on the same value can double-free; the engine surfaces explicit drop sites for audit pairing."

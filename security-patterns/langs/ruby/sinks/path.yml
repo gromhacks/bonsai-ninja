@@ -554,7 +554,7 @@
 - id: ruby.path.pathname_join
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: ruby
   tag: path-traversal
   severity: medium

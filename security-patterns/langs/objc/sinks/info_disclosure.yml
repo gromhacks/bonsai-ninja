@@ -10,13 +10,20 @@
     kind: call
     callee:
       name: DDLogError
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: objc cocoa lumberjack secret log
     code: |
       #import <CocoaLumberjack/CocoaLumberjack.h>
       void test(id input) { DDLogError(@"api_key=%@", input); }
     expect_match_text: [DDLogError]
-  description: "DDLogError with secret-shaped data - structured logs can persist credentials."
+  - name: literal lumberjack log negative
+    code: |
+      #import <CocoaLumberjack/CocoaLumberjack.h>
+      void test(void) { DDLogError(@"startup complete"); }
+    expect_no_match: true
+  description: "DDLogError with secret-shaped data - structured logs can persist credentials. Fires only when an argument is attacker/secret-tainted; constant diagnostic strings are quiet."
 
 - id: objc.info_disclosure.gcdwebserver_error_response
   enabled: true
@@ -29,10 +36,17 @@
     kind: call
     callee:
       name: responseWithStatusCode
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: objc gcdwebserver error response
     code: |
       #import <GCDWebServer/GCDWebServer.h>
       void test(id input) { [GCDWebServerDataResponse responseWithStatusCode:500 text:input]; }
     expect_match_text: [GCDWebServerDataResponse.responseWithStatusCode]
-  description: "GCDWebServer responseWithStatusCode:500 text:error - sends internal diagnostics in HTTP error pages."
+  - name: literal gcdwebserver error response negative
+    code: |
+      #import <GCDWebServer/GCDWebServer.h>
+      void test(void) { [GCDWebServerDataResponse responseWithStatusCode:500 text:@"Internal Error"]; }
+    expect_no_match: true
+  description: "GCDWebServer responseWithStatusCode:500 text:error - sends internal diagnostics in HTTP error pages. Fires only when the response body argument is tainted; constant error pages are quiet."

@@ -77,4 +77,11 @@
         -export([test/1]).
         test(Input) ->
           random:uniform(Input).
+    - name: strong rng negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          crypto:strong_rand_bytes(32).
+      expect_no_match: true
   description: "random:uniform / rand:uniform - PRNG seeded from wall clock; not for tokens/keys. Use crypto:strong_rand_bytes."

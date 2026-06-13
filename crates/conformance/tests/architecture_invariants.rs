@@ -2301,12 +2301,13 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
                 < dump_edges_body.find("open_project(root)?"),
         "dump-edges must reject diagnostic precision filters before opening/analyzing the workspace"
     );
-    let security_precision_body = function_body(&cli_security, "max_precision_from_cli");
+    let security_taint_body = function_body(&cli_security, "cmd_flows");
     assert!(
-        security_precision_body.contains("PrecisionFilter::OverApproximate | PrecisionFilter::Unknown")
-            && security_precision_body.contains("semantic-only")
-            && security_precision_body.contains("PrecisionFilter::Narrowed) | None => Precision::Narrowed"),
-        "security taint-analysis must reject diagnostic precision filters and default to narrowed semantic precision"
+        security_taint_body.contains("max_precision = Some(Precision::Narrowed)")
+            && !security_taint_body.contains("SemanticPrecisionFilter")
+            && !security_taint_body.contains("OverApproximate")
+            && !security_taint_body.contains("Unknown"),
+        "security taint-analysis must run one semantic taint precision mode without exposing diagnostic precision filters"
     );
     let export_callgraph_body = function_body(&native_export, "export_structural_callgraph");
     assert!(

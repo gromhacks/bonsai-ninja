@@ -376,6 +376,11 @@ impl IdgQueryService {
     /// IDG nodes those names address — used by browse-taint /
     /// security-analysis when the caller supplies explicit seeds.
     ///
+    /// Callers seeding a CONTAINER source (a bare name that stands
+    /// for the whole value, like GraphQL `args`) should pass the
+    /// names through [`expand_bare_seed_names_with_descendants`]
+    /// first so projections (`args.q`) seed too.
+    ///
     /// Names are looked up via the segment's persisted string pool
     /// (populated at merge time from each function's transfer
     /// output's name pool). Empty pool → empty result.
@@ -1635,6 +1640,32 @@ impl IdgQueryService {
             kind,
         }
     }
+}
+
+/// Expand bare container seed names with their descendant wildcard:
+/// `args` → `args` + `args.*`. A source rule whose seed names a bare
+/// container taints every projection of that container (`args.q`),
+/// while projected seeds (`x.y`) pass through unchanged so a tainted
+/// field never promotes its container or siblings. Both taint-graph
+/// seed builders (security analysis and the taint crate) MUST use
+/// this so scheduling cuts and graph construction see identical
+/// seeds.
+pub fn expand_bare_seed_names_with_descendants<'a, I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let mut out = Vec::new();
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        out.push(trimmed.to_string());
+        if !trimmed.contains(['.', '[']) {
+            out.push(format!("{trimmed}.*"));
+        }
+    }
+    out
 }
 
 fn split_projected_seed(seed: &str) -> Option<(&str, Vec<&str>)> {

@@ -22,6 +22,13 @@
       def example(input, url, id, item, req_obj, options)
         params(input)
       end
+  - name: ruby.source.params unrelated call negative
+    code: |
+      require "actionpack"
+      def example(input)
+        permit(input)
+      end
+    expect_no_match: true
   description: "Controller/action `params` - HTTP request parameters (Rails, Sinatra, Grape, Hanami, Roda)."
 
 - id: ruby.source.params_read
@@ -150,6 +157,180 @@
       end
   description: "Rails request.headers - attacker-controlled when crossing trust boundary. Property-style getter (no args)."
 
+- id: ruby.source.rails_request_url
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [url, path, query]
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, url]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_url example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.url()
+      end
+  - name: ruby.source.rails_request_url with args negative
+    code: |
+      require "actionpack"
+      def example(input)
+        request.url(input)
+      end
+    expect_no_match: true
+  description: "Rails request.url - full client-requested URL (path + query). Property-style getter (no args); `max_args: 0` rejects unrelated `request.url(...)` decoys."
+
+- id: ruby.source.rails_request_referer
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [url, header]
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, referer]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_referer example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.referer()
+      end
+  - name: ruby.source.rails_request_referer with args negative
+    code: |
+      require "actionpack"
+      def example(input)
+        request.referer(input)
+      end
+    expect_no_match: true
+  description: "Rails request.referer - client-controlled Referer header; classic back-link open-redirect vector. Property-style getter (no args); `max_args: 0` rejects unrelated decoys."
+
+- id: ruby.source.rails_request_user_agent
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [header]
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, user_agent]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_user_agent example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.user_agent()
+      end
+  - name: ruby.source.rails_request_user_agent with args negative
+    code: |
+      require "actionpack"
+      def example(input)
+        request.user_agent(input)
+      end
+    expect_no_match: true
+  description: "Rails request.user_agent - client-controlled User-Agent header; often logged or parsed and flows into log/SQL/template sinks. Property-style getter (no args); `max_args: 0` rejects unrelated decoys."
+
+- id: ruby.source.rails_request_remote_ip
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [ip, header]
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, remote_ip]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_remote_ip example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.remote_ip()
+      end
+  - name: ruby.source.rails_request_remote_ip with args negative
+    code: |
+      require "actionpack"
+      def example(input)
+        request.remote_ip(input)
+      end
+    expect_no_match: true
+  description: "Rails request.remote_ip - derived from X-Forwarded-For / Client-IP headers; spoofable when not stripped at a trusted edge. Property-style getter (no args); `max_args: 0` rejects unrelated decoys."
+
+- id: ruby.source.rails_request_get
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [query]
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, GET]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_get example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.GET()
+      end
+  - name: ruby.source.rails_request_get with args negative
+    code: |
+      require "actionpack"
+      def example(input)
+        request.GET(input)
+      end
+    expect_no_match: true
+  description: "Rails/Rack request.GET - parsed query-string parameters (alias of request.query_parameters). Property-style getter (no args); `max_args: 0` rejects unrelated decoys."
+
+- id: ruby.source.rails_request_post
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [form]
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, POST]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_post example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.POST()
+      end
+  - name: ruby.source.rails_request_post with args negative
+    code: |
+      require "actionpack"
+      def example(input)
+        request.POST(input)
+      end
+    expect_no_match: true
+  description: "Rails/Rack request.POST - parsed form body parameters (alias of request.request_parameters). Property-style getter (no args); `max_args: 0` rejects unrelated decoys."
+
 - id: ruby.source.rails_cookies
   enabled: true
   language: ruby
@@ -167,6 +348,13 @@
       def example(input, url, id, item, req_obj, options)
         cookies(input)
       end
+  - name: ruby.source.rails_cookies unrelated call negative
+    code: |
+      require "actionpack"
+      def example(input)
+        headers(input)
+      end
+    expect_no_match: true
   description: "Rails cookies - client-controlled."
 
 - id: ruby.source.rails_session
@@ -201,6 +389,26 @@
         Rack::Request.params(input)
       end
   description: "Rack::Request#params."
+
+- id: ruby.source.rack_request_cookies
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [cookie]
+  packages: [rack]
+  match:
+    kind: call
+    callee:
+      attribute: [Rack::Request, cookies]
+  match_examples:
+  - name: ruby.source.rack_request_cookies example
+    code: |
+      require "rack"
+      def example(input, url, id, item, req_obj, options)
+        Rack::Request.cookies(input)
+      end
+  description: "Rack::Request#cookies - client-controlled cookie mapping."
 
 - id: ruby.source.rack_env_query_string
   enabled: true
@@ -240,6 +448,13 @@
       def example(input, url, id, item, req_obj, options)
         original_filename(input)
       end
+  - name: ruby.source.rails_uploaded_file_filename unrelated call negative
+    code: |
+      require "actionpack"
+      def example(input)
+        content_type(input)
+      end
+    expect_no_match: true
   description: "ActionDispatch::Http::UploadedFile#original_filename - client-controlled filename."
 
 - id: ruby.source.actioncable_receive

@@ -22,7 +22,41 @@
       function demo(input, req, obj) {
         return message.value;
       }
+  - name: unrelated message property negative
+    code: |
+      const _u = require("kafkajs");
+      function demo() {
+        return message.offset;
+      }
+    expect_no_match: true
   description: "kafkajs consumer message.value - producer-controlled bytes."
+
+- id: javascript.source.kafkajs_message_key
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: [kafkajs]
+  match:
+    kind: read
+    target:
+      attribute: [message, key]
+  match_examples:
+  - name: kafkajs message key
+    code: |
+      const _u = require("kafkajs");
+      function demo() {
+        return message.key;
+      }
+    expect_match_text: [message.key]
+  - name: unrelated message property negative
+    code: |
+      const _u = require("kafkajs");
+      function demo() {
+        return message.offset;
+      }
+    expect_no_match: true
+  description: "kafkajs consumer message.key - producer-controlled partition key, frequently used downstream as a lookup/identifier value."
 
 - id: javascript.source.amqplib_msg_content
   enabled: true

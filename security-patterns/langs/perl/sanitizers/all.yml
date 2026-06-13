@@ -65,6 +65,46 @@
     expect_match_text: ["scrub"]
   description: "HTML::Scrubber scrub - allow-lists tags/attributes, strips the rest; safe HTML fragment."
 
+- id: perl.sanitizer.html_escape_escape_html
+  enabled: true
+  language: perl
+  tag: html-encode
+  packages: ["HTML::Escape"]
+  match:
+    kind: call
+    callee:
+      name: escape_html
+  match_examples:
+  - name: perl.sanitizer.html_escape_escape_html example
+    code: |
+      use HTML::Escape qw/escape_html/;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        escape_html($input)
+      }
+    expect_match_text: ["escape_html"]
+  description: "HTML::Escape::escape_html - fast XS HTML entity encoder for <, >, &, \", '; neutralises reflected XSS."
+
+- id: perl.sanitizer.mojo_util_xml_escape
+  enabled: true
+  language: perl
+  tag: html-encode
+  packages: ["Mojo::Util", "Mojolicious"]
+  match:
+    kind: call
+    callee:
+      name: xml_escape
+  match_examples:
+  - name: perl.sanitizer.mojo_util_xml_escape example
+    code: |
+      use Mojo::Util qw/xml_escape/;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        xml_escape($input)
+      }
+    expect_match_text: ["xml_escape"]
+  description: "Mojo::Util::xml_escape - HTML/XML-encodes &, <, >, \", ' for safe insertion into markup (Mojolicious default escaping)."
+
 # -- URLs ------------------------------------------------------------
 - id: perl.sanitizer.uri_escape
   enabled: true
@@ -105,6 +145,26 @@
       }
     expect_match_text: ["uri_escape_utf8"]
   description: "URI::Escape::uri_escape_utf8 - UTF-8-aware percent-encoding for URL components."
+
+- id: perl.sanitizer.mojo_util_url_escape
+  enabled: true
+  language: perl
+  tag: url-encode
+  packages: ["Mojo::Util", "Mojolicious"]
+  match:
+    kind: call
+    callee:
+      name: url_escape
+  match_examples:
+  - name: perl.sanitizer.mojo_util_url_escape example
+    code: |
+      use Mojo::Util qw/url_escape/;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        url_escape($input)
+      }
+    expect_match_text: ["url_escape"]
+  description: "Mojo::Util::url_escape - percent-encodes reserved URL chars (Mojolicious); prevents param-smuggling / redirect injection."
 
 # -- SQL -------------------------------------------------------------
 # DBI prepare with `?` placeholders is the canonical SQL-parameter
@@ -292,6 +352,26 @@
     expect_match_text: ["secure_compare"]
   description: "secure_compare from Bytes::Random::Secure / Plack::Util - constant-time byte compare; blocks timing oracles
     on HMAC/token equality."
+
+- id: perl.sanitizer.crypt_passphrase_verify_password
+  enabled: true
+  language: perl
+  tag: constant-time
+  packages: ["Crypt::Passphrase"]
+  match:
+    kind: call
+    callee:
+      name: verify_password
+  match_examples:
+  - name: perl.sanitizer.crypt_passphrase_verify_password example
+    code: |
+      use Crypt::Passphrase;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        verify_password($input)
+      }
+    expect_match_text: ["verify_password"]
+  description: "Crypt::Passphrase::verify_password - constant-time password verification against a stored hash (Argon2/bcrypt backends)."
 
 - id: perl.sanitizer.plack_util_secure_compare
   enabled: false
@@ -503,6 +583,26 @@
     expect_match_text: ["is_web_uri"]
   description: "Data::Validate::URI::is_web_uri - validates HTTP/HTTPS URI shape before use."
 
+- id: perl.sanitizer.data_validate_domain
+  enabled: true
+  language: perl
+  tag: validation
+  packages: ["Data::Validate::Domain"]
+  match:
+    kind: call
+    callee:
+      name: is_domain
+  match_examples:
+  - name: perl.sanitizer.data_validate_domain example
+    code: |
+      use Data::Validate::Domain;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        is_domain($input)
+      }
+    expect_match_text: ["is_domain"]
+  description: "Data::Validate::Domain::is_domain - validates a hostname against RFC syntax; SSRF/host-allowlist primitive."
+
 # -- Audit-derived validation / binding sanitizers -----------------------------
 - id: perl.sanitizer.same_origin_path_regex
   enabled: true
@@ -614,6 +714,9 @@
         $sth->execute($id);
       }
     expect_match_text: [sth->execute]
+  - name: perl.sanitizer.dbi_execute_bound_values example negative constraint boundary
+    code: "use DBI;\nsub example {\n  my ($sth) = @_;\n  $sth->execute();\n}\n"
+    expect_no_match: true
   description: "DBI statement execute($value, ...) - binds values to placeholders from a prepared statement."
 
 - id: perl.sanitizer.substitution_char_allowlist

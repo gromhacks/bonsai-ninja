@@ -2894,7 +2894,17 @@ fn walk_call(
             if !place.is_empty() && !source_filter.is_structural_base_token(place) {
                 let sid = ctx.intern_name(place);
                 if emitted.insert(sid) {
-                    ctx.bridge_read(place, arg_node, arg_meta);
+                    if place.contains('[') {
+                        // Subscripted places (`args["q"]`, `env[@"cmd"]`)
+                        // must intern under the same canonical dotted
+                        // form (`args.q`) the assign / return paths
+                        // produce — otherwise the arg's read node is a
+                        // literal-text island no field-precise writer or
+                        // descendant seed (`args.*`) can ever address.
+                        bridge_value_expr_to_node(place, arg_node, span, IdgEdgeKind::IntraRead, ctx);
+                    } else {
+                        ctx.bridge_read(place, arg_node, arg_meta);
+                    }
                 }
             }
         }

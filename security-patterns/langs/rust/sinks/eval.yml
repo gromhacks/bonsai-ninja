@@ -248,6 +248,7 @@
   language: rust
   tag: code-injection
   severity: high
+  packages: [libloading]
   cwe: [CWE-470]
   match:
     kind: call
@@ -259,11 +260,13 @@
   match_examples:
   - name: tainted library symbol
     code: |
+      use libloading::Library;
       fn example(target: &[u8]) {
           Library::get(target);
       }
   - name: literal library symbol negative
     code: |
+      use libloading::Library;
       fn example() {
           Library::get(b"safe_symbol");
       }

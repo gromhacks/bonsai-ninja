@@ -244,6 +244,8 @@
     kind: call
     callee:
       regex: ^[a-z_][A-Za-z0-9_]*\.render$
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: mako template render user value
     code: |
@@ -252,7 +254,13 @@
           return template.render(name=user_input)
     expect_match_text:
     - template.render
-  description: Mako Template.render(...tainted...) on any local receiver - unescaped context values can reach rendered HTML.
+  - name: mako template render literal negative
+    code: |
+      import mako
+      def example(template):
+          return template.render(name="safe")
+    expect_no_match: true
+  description: "Mako Template.render(...user_value...) on a local receiver - unescaped context values can reach rendered HTML."
 - id: python.template.chameleon_pagetemplate
   enabled: true
   language: python
@@ -520,6 +528,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: python.template.flask_render_template_string
   language: python
   tag: ssti
   severity: critical

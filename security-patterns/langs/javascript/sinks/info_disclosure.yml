@@ -85,6 +85,10 @@
       attribute:
       - res
       - render
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)\b(?:err|error|exception|e)\s*\.\s*(?:stack|message)\b|\b(?:stackTrace|stack_trace|errorStack|errStack)\b'
   match_examples:
   - name: response render error page
     code: |
@@ -94,6 +98,13 @@
       }
     expect_match_text:
     - res.render
+  - name: response render normal template negative
+    code: |
+      const _u = require("express");
+      function handler(req, res) {
+        return res.render("home", { title: "Welcome" });
+      }
+    expect_no_match: true
   description: "Express res.render(error, err/stack) - debug or exception details can be rendered into an error page."
 - id: javascript.info_disclosure.postmessage_wildcard_target
   enabled: true
@@ -107,6 +118,10 @@
     kind: call
     callee:
       regex: ^(window|parent|opener|targetWindow|frameWindow)\.postMessage$
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^[''"]\*[''"]$'
   match_examples:
   - name: window postmessage wildcard
     code: "function send(secret) {\n  return window.postMessage(secret, '*');\n}\n"
@@ -116,4 +131,7 @@
     code: "function send(token) {\n  return parent.postMessage(token, '*');\n}\n"
     expect_match_text:
     - parent.postMessage
-  description: postMessage with targetOrigin '*' can disclose data to an unexpected origin.
+  - name: postmessage explicit origin negative
+    code: "function send(token) {\n  return window.postMessage(token, 'https://trusted.example.com');\n}\n"
+    expect_no_match: true
+  description: postMessage with targetOrigin '*' can disclose data to an unexpected origin. The arg_matches_regex constraint pins the wildcard '*' targetOrigin so calls scoped to an explicit origin stay quiet.

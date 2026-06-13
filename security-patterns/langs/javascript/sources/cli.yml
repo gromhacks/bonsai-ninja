@@ -11,6 +11,8 @@
     kind: call
     callee:
       name: question
+  constraints:
+  - min_args: 1
   match_examples:
   - name: readline question
     code: |
@@ -18,7 +20,14 @@
       function demo(input, req, obj) {
         return question(input);
       }
-  description: "readline.Interface.question - interactive stdin prompt; callback arg is tainted."
+  - name: readline question no args negative
+    code: |
+      const _u = require("readline");
+      function demo() {
+        return question();
+      }
+    expect_no_match: true
+  description: "readline.Interface.question(query, callback) - interactive stdin prompt; the callback receives attacker-controlled input. Package-gated and requires at least the query argument so zero-arg same-name decoys stay quiet."
 
 - id: javascript.source.process_argv
   enabled: true
@@ -69,6 +78,12 @@
       function demo(input, req, obj) {
         return process.env;
       }
+  - name: unrelated process property negative
+    code: |
+      function demo() {
+        return process.pid;
+      }
+    expect_no_match: true
   description: "process.env - environment variables (attacker may influence via CI/CD, shells, or a compromised parent process)."
 
 - id: javascript.source.deno_args
@@ -138,6 +153,47 @@
         return Bun.argv;
       }
   description: "Bun.argv - CLI args."
+
+- id: javascript.source.bun_env
+  enabled: true
+  language: javascript
+  trust: local
+  tag: env-input
+  match:
+    kind: read
+    target:
+      attribute: [Bun, env]
+  match_examples:
+  - name: bun env
+    code: |
+      function demo(input, req, obj) {
+        return Bun.env;
+      }
+  - name: unrelated bun property negative
+    code: |
+      function demo() {
+        return Bun.version;
+      }
+    expect_no_match: true
+  description: "Bun.env - environment variables exposed by the Bun runtime; same trust profile as process.env."
+
+- id: javascript.source.deno_env_toobject
+  enabled: true
+  language: javascript
+  trust: local
+  tag: env-input
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, env, toObject]
+  match_examples:
+  - name: deno env toObject
+    code: |
+      function demo() {
+        return Deno.env.toObject();
+      }
+    expect_match_text: [Deno.env.toObject]
+  description: "Deno.env.toObject() - full environment-variable snapshot."
 
 - id: javascript.source.yargs_argv
   enabled: true

@@ -7,12 +7,12 @@
 use ahash::AHashMap;
 use bonsai_common::{cached_span_map_arc, FuncId, SymbolId};
 use bonsai_workspace::Workspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::finding::{FindingMatch, TaintPropagationStep};
 
 /// Role a flow step plays on the line it annotates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FlowRole {
     Source,
@@ -22,7 +22,7 @@ pub enum FlowRole {
 
 /// One source line within a hop body. `step`/`role` are present only on the
 /// lines that carry a flow event.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FlowSourceLine {
     pub n: u32,
     pub text: String,
@@ -33,7 +33,7 @@ pub struct FlowSourceLine {
 }
 
 /// One function along the flow, with its full body as numbered lines.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FlowFunctionBody {
     pub function: String,
     /// Workspace-relative module path, matching the text view's header.
@@ -91,40 +91,110 @@ impl<'a> FlowBodyCache<'a> {
         if chain_funcs.is_empty() {
             return Vec::new();
         }
-        let last_step = taint_path.len().saturating_sub(1);
-        let mut bodies = Vec::with_capacity(chain_funcs.len());
-        let mut step = 0u32;
+        // Resolve every hop body first; events are then placed by file +
+        // line-range containment, not by position. `normalize_taint_path`
+        // collapses same-line steps, so the path can be shorter than the
+        // chain and a positional zip would house annotations in the wrong
+        // hop (or drop the sink annotation entirely).
+        let mut hops: Vec<CachedFunctionBody> = chain_funcs
+            .iter()
+            .filter_map(|func| self.cached_body(*func).cloned())
+            .collect();
 
-        for (idx, func) in chain_funcs.iter().enumerate() {
-            let Some(cached) = self.cached_body(*func) else {
-                continue;
-            };
-            let mut lines = cached.lines.clone();
-
-            // Source sits in the entry hop.
-            if idx == 0 && source.line >= cached.start_line && source.line <= cached.end_line {
-                step += 1;
-                annotate_line(&mut lines, source.line, FlowRole::Source, step);
+        // Flow events in dataflow order: the source read first, then each
+        // propagation step; the final step carries `terminal_role`.
+        let mut events: Vec<(usize, u32, FlowRole)> = Vec::new();
+        if source.line > 0 {
+            if let Some(idx) = hop_index_for(&hops, &source.file, source.line, source.enclosing_fn.as_deref())
+            {
+                events.push((idx, source.line, FlowRole::Source));
             }
-            // The call that leaves this hop; the final step is the sink.
-            if let Some(call) = taint_path.get(idx) {
-                step += 1;
-                let role = if idx == last_step {
-                    terminal_role
-                } else {
-                    FlowRole::Taint
-                };
-                annotate_line(&mut lines, call.line, role, step);
-            }
-
-            bodies.push(FlowFunctionBody {
-                function: cached.function.clone(),
-                file: cached.file.clone(),
-                start_line: cached.start_line,
-                lines,
-            });
         }
-        bodies
+        let last_step = taint_path.len().saturating_sub(1);
+        for (idx, call) in taint_path.iter().enumerate() {
+            let role = if idx == last_step {
+                terminal_role
+            } else {
+                FlowRole::Taint
+            };
+            if let Some(hop) = hop_index_for(&hops, &call.file, call.line, Some(&call.caller)) {
+                events.push((hop, call.line, role));
+            }
+        }
+        // A line can bear several events (a source read feeding a sink
+        // call on the same line). One annotation per line: the strongest
+        // role wins so the sink marker is never silently dropped.
+        let mut placed: Vec<(usize, u32, FlowRole)> = Vec::new();
+        for (hop, line, role) in events {
+            if let Some(existing) = placed.iter_mut().find(|p| p.0 == hop && p.1 == line) {
+                if role_strength(role) > role_strength(existing.2) {
+                    existing.2 = role;
+                }
+            } else {
+                placed.push((hop, line, role));
+            }
+        }
+        for (step, (hop, line, role)) in placed.into_iter().enumerate() {
+            annotate_line(&mut hops[hop].lines, line, role, step as u32 + 1);
+        }
+
+        hops.into_iter()
+            .map(|cached| FlowFunctionBody {
+                function: cached.function,
+                file: cached.file,
+                start_line: cached.start_line,
+                lines: cached.lines,
+            })
+            .collect()
+    }
+}
+
+/// Hop whose body contains `file:line`. Prefers the hop matching the
+/// event's enclosing/caller function (bare name, `@file:line` suffix
+/// stripped), then the narrowest containing body so nested closures
+/// beat their parents.
+fn hop_index_for(
+    hops: &[CachedFunctionBody],
+    file: &str,
+    line: u32,
+    enclosing: Option<&str>,
+) -> Option<usize> {
+    let contains = |hop: &CachedFunctionBody| {
+        same_file(&hop.file, file) && line >= hop.start_line && line <= hop.end_line
+    };
+    let candidates: Vec<usize> = hops
+        .iter()
+        .enumerate()
+        .filter(|(_, hop)| contains(hop))
+        .map(|(idx, _)| idx)
+        .collect();
+    if let Some(name) = enclosing {
+        let bare = name.split('@').next().unwrap_or(name);
+        if let Some(&idx) = candidates.iter().find(|&&idx| hops[idx].function == bare) {
+            return Some(idx);
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by_key(|&idx| hops[idx].end_line - hops[idx].start_line)
+}
+
+/// Paths come from the same VFS so they normally compare equal; accept a
+/// path-component suffix so relative/absolute spellings still match.
+fn same_file(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    !short.is_empty() && long.ends_with(short) && long[..long.len() - short.len()].ends_with(['/', '\\'])
+}
+
+/// Sink > Source > Taint when several events share one line.
+fn role_strength(role: FlowRole) -> u8 {
+    match role {
+        FlowRole::Sink => 3,
+        FlowRole::Source => 2,
+        FlowRole::Taint => 1,
     }
 }
 
@@ -174,8 +244,10 @@ fn build_cached_function_body(ws: &Workspace, func: FuncId) -> Option<CachedFunc
 
 /// Build the per-hop function bodies for a resolved flow.
 ///
-/// `chain_funcs` is the entry -> ... -> terminal chain; `taint_path[i]` is the
-/// call that leaves `chain_funcs[i]`. Step numbers run in flow order (source =
+/// `chain_funcs` is the entry -> ... -> terminal chain. Each event (the
+/// source read, every propagation step) is placed in the hop whose body
+/// contains its file:line; the path may be shorter than the chain when
+/// same-line steps were collapsed. Step numbers run in flow order (source =
 /// 1, ...), matching the text renderer. `terminal_role` is the role of the last
 /// step - `Sink` for a taint finding, `Taint` for a source lineage that ends at
 /// a non-sink terminal. Returns empty when there is no multi-hop chain.

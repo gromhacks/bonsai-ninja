@@ -47,6 +47,8 @@
       attribute:
       - https
       - Agent
+  constraints:
+  - any_arg_matches_regex: "\\brejectUnauthorized\\s*:\\s*false\\b"
   match_examples:
   - name: axios https agent reject unauth
     code: |
@@ -54,7 +56,14 @@
       function demo(input, req, obj) {
         return new https.Agent(input, { rejectUnauthorized: false });
       }
-  description: "new https.Agent({rejectUnauthorized: false}) - agent ignores cert errors."
+  - name: https agent default options negative
+    code: |
+      const _u = require("https");
+      function demo() {
+        return new https.Agent({ keepAlive: true });
+      }
+    expect_no_match: true
+  description: "new https.Agent({rejectUnauthorized: false}) - agent ignores cert errors. The any_arg_matches_regex constraint pins the explicit `rejectUnauthorized: false` option so ordinary agent construction stays quiet."
 - id: javascript.tls.request_strict_ssl_false
   enabled: true
   language: javascript
@@ -93,6 +102,8 @@
       attribute:
       - tls
       - connect
+  constraints:
+  - any_arg_matches_regex: "\\brejectUnauthorized\\s*:\\s*false\\b"
   match_examples:
   - name: tls connect reject unauth
     code: |
@@ -100,7 +111,14 @@
       function demo(input, req, obj) {
         return tls.connect(input, { rejectUnauthorized: false });
       }
-  description: "tls.connect({rejectUnauthorized: false}) - raw TLS socket with validation off."
+  - name: tls connect default options negative
+    code: |
+      const _u = require("tls");
+      function demo() {
+        return tls.connect(443, { host: "api.example.com" });
+      }
+    expect_no_match: true
+  description: "tls.connect({rejectUnauthorized: false}) - raw TLS socket with validation off. The any_arg_matches_regex constraint pins the explicit `rejectUnauthorized: false` option."
 - id: javascript.tls.fetch_node_insecure
   enabled: false
   disabled_reason:
@@ -152,6 +170,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: javascript.tls.https_reject_unauthorized
   language: javascript
   tag: weak-tls
   severity: high
@@ -180,6 +199,8 @@
       attribute:
       - axios
       - create
+  constraints:
+  - any_arg_matches_regex: "\\brejectUnauthorized\\s*:\\s*false\\b"
   match_examples:
   - name: disable verify axios
     code: |
@@ -187,7 +208,14 @@
       function demo(input, req, obj) {
         return axios.create(input, { rejectUnauthorized: false });
       }
-  description: "axios.create({httpsAgent: new https.Agent({rejectUnauthorized: false})}) - global axios with TLS verification off."
+  - name: axios create default options negative
+    code: |
+      const _u = require("axios");
+      function demo() {
+        return axios.create({ baseURL: "https://api.example.com", timeout: 1000 });
+      }
+    expect_no_match: true
+  description: "axios.create({httpsAgent: new https.Agent({rejectUnauthorized: false})}) - global axios with TLS verification off. The any_arg_matches_regex constraint pins the explicit `rejectUnauthorized: false` option so ordinary client construction stays quiet."
 - id: javascript.tls.disable_verify_env
   enabled: false
   disabled_reason:

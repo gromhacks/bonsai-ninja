@@ -18,7 +18,10 @@
       index: 2
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  curl_easy_setopt(arg, CURLOPT_URL);\n}\n"
+    code: |
+      void example(const char *input) {
+        curl_easy_setopt("safe", "safe", input);
+      }
   - name: literal arg 2 negative
     code: |
       void example() {
@@ -200,7 +203,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <cpprestsdk.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  http_client::request(arg);\n}\n"
+    code: |
+      #include <cpprestsdk.h>
+      void example(const char *input) {
+        http_client::request("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -268,7 +275,11 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "#include <Poco/URI.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new HTTPRequest(arg);\n}\n"
+    code: |
+      #include <Poco/URI.h>
+      void example(const char *input) {
+        auto *x = new HTTPRequest("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {

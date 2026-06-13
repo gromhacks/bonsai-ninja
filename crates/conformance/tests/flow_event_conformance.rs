@@ -55,16 +55,28 @@ struct Conformance {
     /// shapes. Lookups go through the workspace, so qualified
     /// resolution paths must match.
     function_name: &'static str,
+    /// Callee name used for the branch-body call (`F` unless the
+    /// language forbids that spelling — Elixir capitalised
+    /// identifiers are module aliases, not callables).
+    branch_callee: &'static str,
+    /// Callee name used for the loop-body call (`G` by default).
+    loop_callee: &'static str,
     /// Shapes the language genuinely cannot express. Empty by default.
     skip: &'static [CanonicalShape],
 }
 
-fn run_conformance(c: &Conformance) -> Vec<(CanonicalShape, bool)> {
+struct ShapeResult {
+    shape: CanonicalShape,
+    found: bool,
+    skipped: bool,
+}
+
+fn run_conformance(c: &Conformance) -> Vec<ShapeResult> {
     let adapter = adapter_for_lang(c.lang);
     let ws = bonsai_testkit::workspace_with(vec![adapter], &[(c.fixture_path, c.fixture_source)]);
     let func_decl = find_decl(&ws, c.function_name)
         .unwrap_or_else(|| panic!("function `{}` not found in {}", c.function_name, c.lang));
-    let mut results: Vec<(CanonicalShape, bool)> = Vec::new();
+    let mut results: Vec<ShapeResult> = Vec::new();
     for shape in [
         CanonicalShape::BareRename,
         CanonicalShape::LiteralWrite,
@@ -74,11 +86,14 @@ fn run_conformance(c: &Conformance) -> Vec<(CanonicalShape, bool)> {
         CanonicalShape::LoopBody,
         CanonicalShape::BareReturn,
     ] {
-        if c.skip.contains(&shape) {
-            continue;
-        }
-        let found = shape_present(&func_decl.flow_events, shape);
-        results.push((shape, found));
+        // Skipped shapes are still evaluated: a skip that now passes
+        // is stale and must be removed so coverage can't regress
+        // silently.
+        results.push(ShapeResult {
+            shape,
+            found: shape_present(&func_decl.flow_events, shape, c),
+            skipped: c.skip.contains(&shape),
+        });
     }
     results
 }
@@ -104,8 +119,8 @@ fn find_decl(ws: &Workspace, name: &str) -> Option<Decl> {
     None
 }
 
-fn shape_present(events: &[FlowEvent], shape: CanonicalShape) -> bool {
-    walk_events(events, &|e| matches_shape(e, shape, events))
+fn shape_present(events: &[FlowEvent], shape: CanonicalShape, c: &Conformance) -> bool {
+    walk_events(events, &|e| matches_shape(e, shape, c))
 }
 
 fn walk_events(events: &[FlowEvent], pred: &dyn Fn(&FlowEvent) -> bool) -> bool {
@@ -147,7 +162,7 @@ fn walk_events(events: &[FlowEvent], pred: &dyn Fn(&FlowEvent) -> bool) -> bool 
     false
 }
 
-fn matches_shape(event: &FlowEvent, shape: CanonicalShape, _ctx: &[FlowEvent]) -> bool {
+fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> bool {
     match (shape, event) {
         (
             CanonicalShape::BareRename,
@@ -184,7 +199,7 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, _ctx: &[FlowEvent]) -
             // Adapters may render `x` or `(x)` or `x != null` etc.; only
             // assert that condition exists (or is omitted but body has F).
             let cond_ok = condition.as_deref().map(|c| !c.trim().is_empty()).unwrap_or(true);
-            cond_ok && body_contains_call(then_events, "F")
+            cond_ok && body_contains_call(then_events, c.branch_callee)
         }
         (
             CanonicalShape::CatchBind,
@@ -192,7 +207,7 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, _ctx: &[FlowEvent]) -
                 catch_param: Some(p), ..
             },
         ) => sigil_strip(p) == "e",
-        (CanonicalShape::LoopBody, FlowEvent::Loop { body, .. }) => body_contains_call(body, "G"),
+        (CanonicalShape::LoopBody, FlowEvent::Loop { body, .. }) => body_contains_call(body, c.loop_callee),
         (
             CanonicalShape::BareReturn,
             FlowEvent::Return {
@@ -295,6 +310,8 @@ fn fixture_for(lang: &str) -> Conformance {
     return y
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "javascript" => Conformance {
@@ -312,6 +329,8 @@ fn fixture_for(lang: &str) -> Conformance {
 }
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "typescript" => Conformance {
@@ -329,6 +348,8 @@ fn fixture_for(lang: &str) -> Conformance {
 }
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "java" => Conformance {
@@ -352,6 +373,8 @@ class Shape {
 }
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "csharp" => Conformance {
@@ -375,6 +398,8 @@ class Shape {
 }
 "#,
             function_name: "Shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "rust" => Conformance {
@@ -399,6 +424,8 @@ fn F(_a: &str) {}
 fn G(_a: &str) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // Rust expression returns bind through the final-expr rule;
             // adapter-level `Return` events are emitted for explicit
             // `return EXPR` only. Skip the BareReturn assertion.
@@ -424,6 +451,8 @@ func F(a string) {}
 func G(a string) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // Go has `defer recover()` but not catch-bind.
             skip: &[CanonicalShape::CatchBind],
         },
@@ -446,6 +475,8 @@ fun F(a: String) {}
 fun G(a: String) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "scala" => Conformance {
@@ -471,6 +502,8 @@ object Shape {
 }
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // Scala's value-final expression return: adapter emits no
             // `Return` event when the last expression is implicit.
             skip: &[CanonicalShape::BareReturn],
@@ -497,6 +530,8 @@ func F(_ a: String) {}
 func G(_ a: String) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "ruby" => Conformance {
@@ -518,16 +553,9 @@ func G(_ a: String) {}
 end
 "#,
             function_name: "shapes",
-            // Ruby implicit return — no `Return` event for the final
-            // expression. Ruby's modifier-if (`F(t) if x`) is emitted
-            // as a bare Call without a Branch wrapper; `items.each
-            // do |it| G(it) end` is a Method call against the
-            // iterator, not a structural Loop.
-            skip: &[
-                CanonicalShape::BareReturn,
-                CanonicalShape::SingleConditionBranch,
-                CanonicalShape::LoopBody,
-            ],
+            branch_callee: "F",
+            loop_callee: "G",
+            skip: &[],
         },
         "perl" => Conformance {
             lang: "perl",
@@ -551,6 +579,8 @@ sub G { }
 1;
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "php" => Conformance {
@@ -572,6 +602,8 @@ function F($a) {}
 function G($a) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "dart" => Conformance {
@@ -592,6 +624,8 @@ void F(String a) {}
 void G(String a) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "lua" => Conformance {
@@ -612,6 +646,8 @@ end
 return shapes
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // Lua has no try/catch.
             skip: &[CanonicalShape::CatchBind],
         },
@@ -635,21 +671,27 @@ void F(NSString *a) {}
 void G(NSString *a) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         "elixir" => Conformance {
             lang: "elixir",
             fixture_path: "shape.ex",
+            // Capitalised identifiers are module aliases in Elixir, so
+            // the canonical `F`/`G` callees are spelt `sink_f`/`sink_g`
+            // — the fixture must be valid syntax: the adapter refuses
+            // flow facts from files with parse errors.
             fixture_source: r#"defmodule Shape do
   def shapes(x, items, t) do
     y = x
     lit = "abc"
     z = f(x)
     if x do
-      F(t)
+      sink_f(t)
     end
     try do
-      Enum.each(items, fn it -> G(it) end)
+      Enum.each(items, fn it -> sink_g(it) end)
     rescue
       e -> e
     end
@@ -658,29 +700,14 @@ void G(NSString *a) {}
     y
   end
   def f(a), do: a
-  def F(a), do: a
-  def G(a), do: a
+  def sink_f(a), do: a
+  def sink_g(a), do: a
 end
 "#,
-            // Elixir lowers `def`/`defp` as macro `call` nodes; the
-            // adapter captures the macro body, and the canonical
-            // identifier appears as `__module__` for module-level
-            // bodies. We resolve our assertions on that body.
-            function_name: "__module__",
-            // Elixir is expression-based; `y` is the final expression
-            // returned. Adapter does not emit `Return`. Elixir's
-            // `Enum.each(fn -> G(it) end)` is a lambda — the engine
-            // sees the call but not a structural Loop.
-            // Direct call assertion holds since z = f(x) classifies.
-            // `if x do F(t) end` lowers to a Call { name: "if" }
-            // rather than a Branch; `try ... rescue` lowers to plain
-            // calls, not a Try. Adapter improvements — skip for now.
-            skip: &[
-                CanonicalShape::BareReturn,
-                CanonicalShape::LoopBody,
-                CanonicalShape::SingleConditionBranch,
-                CanonicalShape::CatchBind,
-            ],
+            function_name: "shapes",
+            branch_callee: "sink_f",
+            loop_callee: "sink_g",
+            skip: &[],
         },
         "erlang" => Conformance {
             lang: "erlang",
@@ -710,6 +737,8 @@ f(A) -> A.
 'G'(_) -> ok.
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // Erlang has no `for` loop — uses `lists:foreach`. Skip
             // LoopBody. Also no explicit Return event for tail expr.
             // Erlang uses `case` for branching — adapter may map case
@@ -750,6 +779,8 @@ contract Shape {
 }
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // Solidity has no try/catch in the catch-bind form used
             // here.
             skip: &[CanonicalShape::CatchBind],
@@ -774,6 +805,8 @@ void F(const char *a) {}
 void G(const char *a) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             // C has no try/catch — skip catch-bind.
             skip: &[CanonicalShape::CatchBind],
         },
@@ -801,6 +834,8 @@ void F(const std::string& a) {}
 void G(const std::string& a) {}
 "#,
             function_name: "shapes",
+            branch_callee: "F",
+            loop_callee: "G",
             skip: &[],
         },
         _ => panic!("no fixture for lang `{lang}`"),
@@ -815,9 +850,18 @@ fn flow_event_shape_conformance() {
         let lang = adapter.language_id().as_str().to_string();
         let fix = fixture_for(&lang);
         let results = run_conformance(&fix);
-        for (shape, found) in results {
-            if !found {
-                failures.push(format!("{lang}: {} not detected", shape.label()));
+        for result in results {
+            match (result.skipped, result.found) {
+                (false, false) => {
+                    failures.push(format!("{lang}: {} not detected", result.shape.label()));
+                }
+                (true, true) => {
+                    failures.push(format!(
+                        "{lang}: {} is skipped but now conforms — remove the stale skip",
+                        result.shape.label()
+                    ));
+                }
+                _ => {}
             }
         }
     }

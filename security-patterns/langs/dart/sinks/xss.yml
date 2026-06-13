@@ -119,7 +119,7 @@
 - id: dart.xss.html_parse
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: dart
   tag: xss
   severity: medium

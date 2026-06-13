@@ -14,15 +14,29 @@
       attribute:
       - client
       - CreateChatCompletion
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: openai create chat completion
-    code: "import \"github.com/sashabaranov/go-openai\"\npackage main\nfunc example(ctx\
-      \ context.Context, client *openai.Client, req openai.ChatCompletionRequest)\
-      \ {\n  client.CreateChatCompletion(ctx, req)\n}\n"
+  - name: openai create chat completion tainted request
+    code: |
+      package main
+      import "github.com/sashabaranov/go-openai"
+      func example(ctx context.Context, client *openai.Client, user_input openai.ChatCompletionRequest) {
+        client.CreateChatCompletion(ctx, user_input)
+      }
     expect_match_text:
     - client.CreateChatCompletion
-  description: "client.CreateChatCompletion(ctx, request) - tainted prompt/tool\
-    \ content reaches an LLM instruction surface."
+  - name: openai create chat completion literal negative
+    code: |
+      package main
+      import "github.com/sashabaranov/go-openai"
+      func example(ctx context.Context, client *openai.Client) {
+        client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{})
+      }
+    expect_no_match: true
+  description: "client.CreateChatCompletion(ctx, request) - attacker-controlled prompt/tool content reaches an LLM instruction surface."
+
 - id: go.llm.anthropic_messages_new
   enabled: true
   language: go
@@ -40,15 +54,29 @@
       - client
       - Messages
       - New
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: anthropic messages new
-    code: "import \"github.com/anthropics/anthropic-sdk-go\"\npackage main\nfunc example(ctx\
-      \ context.Context, client *anthropic.Client, params anthropic.MessageNewParams)\
-      \ {\n  client.Messages.New(ctx, params)\n}\n"
+  - name: anthropic messages new tainted params
+    code: |
+      package main
+      import "github.com/anthropics/anthropic-sdk-go"
+      func example(ctx context.Context, client *anthropic.Client, user_input anthropic.MessageNewParams) {
+        client.Messages.New(ctx, user_input)
+      }
     expect_match_text:
     - client.Messages.New
-  description: "client.Messages.New(ctx, params) - tainted prompt content can\
-    \ steer model output or tool calls."
+  - name: anthropic messages new literal negative
+    code: |
+      package main
+      import "github.com/anthropics/anthropic-sdk-go"
+      func example(ctx context.Context, client *anthropic.Client) {
+        client.Messages.New(ctx, anthropic.MessageNewParams{})
+      }
+    expect_no_match: true
+  description: "client.Messages.New(ctx, params) - attacker-controlled prompt content can steer model output or tool calls."
+
 - id: go.llm.bedrock_invoke_model
   enabled: true
   language: go
@@ -65,12 +93,25 @@
       attribute:
       - bedrock
       - InvokeModel
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: bedrock invoke model
-    code: "import \"github.com/aws/aws-sdk-go-v2/service/bedrockruntime\"\npackage\
-      \ main\nfunc example(ctx context.Context, bedrock *bedrockruntime.Client, input\
-      \ *bedrockruntime.InvokeModelInput) {\n  bedrock.InvokeModel(ctx, input)\n}\n"
+  - name: bedrock invoke model tainted input
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+      func example(ctx context.Context, bedrock *bedrockruntime.Client, user_input *bedrockruntime.InvokeModelInput) {
+        bedrock.InvokeModel(ctx, user_input)
+      }
     expect_match_text:
     - bedrock.InvokeModel
-  description: "bedrock.InvokeModel(ctx, input) - tainted model body reaches\
-    \ a foundation-model execution surface."
+  - name: bedrock invoke model literal negative
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+      func example(ctx context.Context, bedrock *bedrockruntime.Client) {
+        bedrock.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{})
+      }
+    expect_no_match: true
+  description: "bedrock.InvokeModel(ctx, input) - attacker-controlled model body reaches a foundation-model execution surface."

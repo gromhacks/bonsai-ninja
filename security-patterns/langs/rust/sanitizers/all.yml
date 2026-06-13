@@ -45,6 +45,25 @@
       }
     expect_match_text: ["htmlescape::encode_minimal"]
   description: "htmlescape::encode_minimal - HTML-encodes `<>&\"'` before rendering into HTML context."
+- id: rust.sanitizer.htmlescape_encode_attribute
+  enabled: true
+  language: rust
+  tag: html-encode
+  packages: [htmlescape]
+  match:
+    kind: call
+    callee:
+      attribute: [htmlescape, encode_attribute]
+  match_examples:
+  - name: htmlescape encode_attribute
+    code: |
+      use htmlescape::dummy;
+      fn example() {
+          let target = "tainted";
+          htmlescape::encode_attribute(target);
+      }
+    expect_match_text: ["htmlescape::encode_attribute"]
+  description: "htmlescape::encode_attribute - HTML attribute-context encode; escapes everything needed to safely place a value inside an HTML attribute (broader than encode_minimal)."
 - id: rust.sanitizer.ammonia_clean
   enabled: true
   language: rust
@@ -338,10 +357,67 @@
       }
     expect_match_text: ["u64::from_str"]
   description: "u64::from_str - parsed integer; narrows string to numeric domain."
+- id: rust.sanitizer.i64_from_str
+  enabled: true
+  language: rust
+  tag: numeric-coerce
+  packages: [std]
+  match:
+    kind: call
+    callee:
+      regex: "^i64::from_str$"
+  match_examples:
+  - name: i64 from_str numeric coerce
+    code: |
+      use std::str::FromStr;
+      fn example() {
+          let target = "tainted";
+          i64::from_str(target);
+      }
+    expect_match_text: ["i64::from_str"]
+  description: "i64::from_str - parsed integer; narrows string to numeric domain."
+- id: rust.sanitizer.u32_from_str
+  enabled: true
+  language: rust
+  tag: numeric-coerce
+  packages: [std]
+  match:
+    kind: call
+    callee:
+      regex: "^u32::from_str$"
+  match_examples:
+  - name: u32 from_str numeric coerce
+    code: |
+      use std::str::FromStr;
+      fn example() {
+          let target = "tainted";
+          u32::from_str(target);
+      }
+    expect_match_text: ["u32::from_str"]
+  description: "u32::from_str - parsed integer; narrows string to numeric domain."
+- id: rust.sanitizer.usize_from_str
+  enabled: true
+  language: rust
+  tag: numeric-coerce
+  packages: [std]
+  match:
+    kind: call
+    callee:
+      regex: "^usize::from_str$"
+  match_examples:
+  - name: usize from_str numeric coerce
+    code: |
+      use std::str::FromStr;
+      fn example() {
+          let target = "tainted";
+          usize::from_str(target);
+      }
+    expect_match_text: ["usize::from_str"]
+  description: "usize::from_str - parsed integer; narrows string to numeric domain (common for index/length parsing)."
 - id: rust.sanitizer.jwt_decode_with_validation
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: requires-constraint
   language: rust
   tag: jwt-verify
   packages: [jsonwebtoken]
@@ -737,3 +813,74 @@
       }
     expect_match_text: ["GovernorLayer::new"]
   description: 'tower-governor GovernorLayer - rate-limit middleware for axum/tower stacks.'
+
+# Ownership-transfer passthroughs. These stdlib calls return a raw
+# pointer (or reconstruct an owner) that ALIASES the value passed in,
+# so taint must propagate through them — `Box::into_raw(b)` hands back
+# a pointer to `b`'s contents, `Box::from_raw(p)` reconstitutes the
+# box from `p`. Modeling them as identity edges lets a tainted owner
+# reach a downstream unsafe `ptr::read`/`ptr::write` on the leaked
+# pointer (the canonical raw-pointer aliasing UAF shape). Tagged
+# `passthrough-transform` (canonical passthrough family); the engine
+# acts on `call_result_passthrough_args`.
+- id: rust.passthrough.box_into_raw
+  enabled: true
+  language: rust
+  tag: passthrough-transform
+  packages: [std, alloc]
+  match:
+    kind: call
+    callee:
+      attribute: [Box, into_raw]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::boxed::Box;
+      fn example() {
+          let b = Box::new(0u8);
+          Box::into_raw(b);
+      }
+    expect_match_text: ["Box::into_raw"]
+  description: "Box::into_raw(b) - leaks the box to a raw pointer aliasing its contents; taint flows through."
+- id: rust.passthrough.box_from_raw
+  enabled: true
+  language: rust
+  tag: passthrough-transform
+  packages: [std, alloc]
+  match:
+    kind: call
+    callee:
+      attribute: [Box, from_raw]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::boxed::Box;
+      fn example(p: *mut u8) {
+          let _b = unsafe { Box::from_raw(p) };
+      }
+    expect_match_text: ["Box::from_raw"]
+  description: "Box::from_raw(p) - reconstitutes a box from a raw pointer; taint flows through."
+- id: rust.passthrough.cstring_into_raw
+  enabled: true
+  language: rust
+  tag: passthrough-transform
+  packages: [std, alloc]
+  match:
+    kind: call
+    callee:
+      attribute: [CString, into_raw]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::ffi::CString;
+      fn example(s: CString) {
+          CString::into_raw(s);
+      }
+    expect_match_text: ["CString::into_raw"]
+  description: "CString::into_raw(s) - leaks the C string to a raw pointer aliasing its buffer; taint flows through."

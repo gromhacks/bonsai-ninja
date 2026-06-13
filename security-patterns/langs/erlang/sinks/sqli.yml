@@ -34,7 +34,8 @@
 - id: erlang.sqli.epgsql_squery3
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: erlang.sqli.epgsql_squery
   language: erlang
   tag: sql-injection
   severity: critical

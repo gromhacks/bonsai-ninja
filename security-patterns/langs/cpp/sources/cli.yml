@@ -138,6 +138,30 @@
         sscanf(arg);
       }
   description: "sscanf - parses external string into variables."
+- id: cpp.input.scanf
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: scanf
+  taint_semantics:
+    source_output_args: [1, 2, 3, 4]
+  match_examples:
+  - name: scanf stdin output args
+    code: |
+      void example() {
+        char a[64];
+        char b[64];
+        char c[64];
+        char d[64];
+        scanf("%63s %63s %63s %63s", a, b, c, d);
+      }
+    expect_match_text: [scanf]
+  description: "scanf - reads from stdin into the destination arguments; the parsed buffers carry user-supplied input."
 - id: cpp.input.qt_qcoreapplication_arguments
   enabled: true
   language: cpp

@@ -12,7 +12,7 @@ use bonsai_sdk::{
     ResolvedChain,
 };
 use comfy_table::Cell;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::args::{BrowseFormat, InspectView, GROUPED_VIEW_AUTO_THRESHOLD};
 use crate::footer::render_paging_footer;
@@ -67,7 +67,7 @@ struct InspectSummary {
 /// One start→sink execution flow, with the full call chain and, for each
 /// function in the chain, its source code with numbered annotations on the
 /// chain-advancing lines.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct InspectFlowRendered {
     /// Numeric flow index (for sorting / programmatic access).
     pub(crate) flow_number: u32,
@@ -92,7 +92,7 @@ pub(crate) struct InspectFlowRendered {
     pub(crate) functions: Vec<InspectFunctionRendered>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct InspectFunctionRendered {
     pub(crate) module_path: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -104,14 +104,14 @@ pub(crate) struct InspectFunctionRendered {
     pub(crate) lines: Vec<InspectLine>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct InspectOwnerRendered {
     pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) line: u32,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct InspectLine {
     pub(crate) line_no: u32,
     pub(crate) text: String,
@@ -1239,6 +1239,19 @@ pub(crate) fn cmd_inspect(
         summary,
     };
     refresh_inspect_completeness(&mut report);
+
+    // Secondary `--contains` / `--not-contains`: keep only the decl /
+    // occurrence records whose text (name, file, code, flow bodies)
+    // matches. A render-time narrow like `--flow` below — the analysis
+    // already ran; this just shapes what surfaces.
+    let secondary = crate::filter::active();
+    if secondary.is_active() {
+        report.decl_hits.retain(|hit| secondary.matches_value(hit));
+        report.hits.retain(|hit| secondary.matches_value(hit));
+        report.summary.total_decl_hits = report.decl_hits.len();
+        report.summary.total_hits = report.hits.len();
+        refresh_inspect_completeness(&mut report);
+    }
 
     // `--flow <id>`: keep only flows whose stable id matches, then
     // drop hit / decl records that no longer have any flows. Runs

@@ -327,9 +327,7 @@
       - filter
   description: "Disabled - mongoengine filter is type-bounded; flag only with __raw__."
 - id: python.nosql.mongoengine_raw
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   tag: nosql-injection
   severity: high
@@ -340,10 +338,24 @@
   match:
     kind: call
     callee:
-      attribute:
-      - QuerySet
-      - __raw__
-  description: "Disabled - MongoEngine `__raw__` is a keyword argument, not a callee; re-enable once keyword-argument presence constraints land."
+      name: objects
+  constraints:
+  - arg_tainted:
+      kw: __raw__
+  match_examples:
+  - name: mongoengine raw tainted
+    code: |
+      import mongoengine
+      def search(Model, payload):
+          return Model.objects(__raw__=payload)
+    expect_match_text: [Model.objects]
+  - name: mongoengine raw literal negative
+    code: |
+      import mongoengine
+      def search(Model):
+          return Model.objects(__raw__={"status": "active"})
+    expect_no_match: true
+  description: "MongoEngine Model.objects(__raw__=...) - raw BSON/Mongo query operator; a tainted `__raw__` kwarg is NoSQL injection (matched via arg_tainted: kw)."
 - id: python.nosql.redis_eval
   enabled: true
   language: python

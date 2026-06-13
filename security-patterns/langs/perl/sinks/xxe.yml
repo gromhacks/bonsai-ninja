@@ -102,7 +102,7 @@
   language: perl
   tag: xxe
   severity: high
-  packages: ["XML::Parser"]
+  packages: ["XML::Parser", "XML::Twig"]
   cwe: [CWE-611]
   match:
     kind: call
@@ -119,6 +119,14 @@
         my ($input, $url, $id, $payload, $request) = @_;
         parsefile($input)
       }
+  - name: perl.xxe.xml_twig_parsefile example
+    code: |
+      use XML::Twig;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parsefile($input)
+      }
+    expect_match_text: [parsefile]
   - name: literal xml parser parsefile negative
     code: |
       use XML::Parser;
@@ -127,7 +135,7 @@
         parsefile("config/trusted.xml")
       }
     expect_no_match: true
-  description: "XML::Parser $p->parsefile."
+  description: "XML::Parser / XML::Twig $p->parsefile - both expand external entities by default unless no_xxe/expand_external_ents is set. XML::Twig subclasses XML::Parser and shares the parsefile method name."
 
 - id: perl.xxe.xml_simple_xmlin
   enabled: true

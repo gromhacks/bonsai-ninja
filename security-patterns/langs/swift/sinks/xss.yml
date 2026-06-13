@@ -49,6 +49,33 @@
     expect_no_match: true
   description: "WKWebView.evaluateJavaScript with tainted JavaScript - executes attacker-controlled script in the webview."
 
+- id: swift.xss.wkwebview_call_async_javascript
+  enabled: true
+  language: swift
+  tag: xss
+  severity: high
+  packages: [WebKit]
+  cwe: [CWE-79, CWE-94]
+  match:
+    kind: call
+    callee:
+      name: callAsyncJavaScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swift wkwebview call async javascript
+    code: |
+      import WebKit
+      func test(input: String) { callAsyncJavaScript(input) }
+    expect_match_text: [callAsyncJavaScript]
+  - name: literal call async javascript negative
+    code: |
+      import WebKit
+      func test() { callAsyncJavaScript("return document.title") }
+    expect_no_match: true
+  description: "WKWebView.callAsyncJavaScript (iOS 14+) with tainted JavaScript body - executes attacker-controlled script in the webview, same risk as evaluateJavaScript."
+
 - id: swift.xss.wkusercontentcontroller_add_user_script
   enabled: true
   language: swift

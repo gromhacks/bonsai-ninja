@@ -21,10 +21,8 @@
   - name: generated direct match
     code: |
       #include <libmongoc/mongoc.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mongoc_collection_find_with_opts(arg);
+      void example(char *input) {
+        mongoc_collection_find_with_opts("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -52,10 +50,8 @@
   - name: generated direct match
     code: |
       #include <libmongoc/mongoc.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mongoc_collection_find(arg);
+      void example(char *input) {
+        mongoc_collection_find("safe", "safe", "safe", "safe", "safe", input);
       }
   - name: literal arg 5 negative
     code: |
@@ -83,10 +79,8 @@
   - name: generated direct match
     code: |
       #include <libmongoc/mongoc.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mongoc_collection_count_documents(arg);
+      void example(char *input) {
+        mongoc_collection_count_documents("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -114,10 +108,8 @@
   - name: generated direct match
     code: |
       #include <libmongoc/mongoc.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mongoc_collection_update_one(arg);
+      void example(char *input) {
+        mongoc_collection_update_one("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -174,10 +166,8 @@
   - name: generated direct match
     code: |
       #include <libmongoc/mongoc.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mongoc_collection_delete_many(arg);
+      void example(char *input) {
+        mongoc_collection_delete_many("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -186,6 +176,35 @@
       }
     expect_no_match: true
   description: "libmongoc mongoc_collection_delete_many - tainted filter can widen the delete to unintended documents (e.g. {$ne: null})."
+
+- id: c.nosql.mongoc_collection_aggregate
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_aggregate
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(char *input) {
+        mongoc_collection_aggregate("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        mongoc_collection_aggregate("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mongoc_collection_aggregate(collection, flags, tainted_pipeline, ...) - attacker-built BSON aggregation pipeline injects stages/operators ($match, $expr, $where) that rewrite the query."
 
 - id: c.nosql.mongoc_database_command
   enabled: true
@@ -205,10 +224,8 @@
   - name: generated direct match
     code: |
       #include <libmongoc/mongoc.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mongoc_database_command_simple(arg);
+      void example(char *input) {
+        mongoc_database_command_simple("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -268,10 +285,8 @@
   - name: generated direct match
     code: |
       #include <hiredis/hiredis.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        redisvCommand(arg);
+      void example(char *input) {
+        redisvCommand("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -299,10 +314,8 @@
   - name: generated direct match
     code: |
       #include <hiredis/hiredis.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        redisAppendCommand(arg);
+      void example(char *input) {
+        redisAppendCommand("safe", input);
       }
   - name: literal arg 1 negative
     code: |
@@ -330,10 +343,8 @@
   - name: generated direct match
     code: |
       #include <leveldb.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        leveldb_put(arg);
+      void example(char *input) {
+        leveldb_put("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -390,10 +401,8 @@
   - name: generated direct match
     code: |
       #include <leveldb.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        leveldb_delete(arg);
+      void example(char *input) {
+        leveldb_delete("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -421,10 +430,8 @@
   - name: generated direct match
     code: |
       #include <lmdb.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        mdb_put(arg);
+      void example(char *input) {
+        mdb_put("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |
@@ -481,10 +488,8 @@
   - name: generated direct match
     code: |
       #include <libmemcached/memcached.h>
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        memcached_set(arg);
+      void example(char *input) {
+        memcached_set("safe", input);
       }
   - name: literal arg 1 negative
     code: |

@@ -98,7 +98,14 @@
       function example(form)
         form.read()
       end
-  description: "lua-resty-upload form:read() - multipart headers/body chunks, including browser-supplied filename metadata."
+  - name: lua.source.openresty_resty_upload_read with args negative
+    code: |
+      local _lua_resty_upload = require("lua-resty-upload")
+      function example(form, size)
+        form.read(size)
+      end
+    expect_no_match: true
+  description: "lua-resty-upload form:read() - multipart headers/body chunks, including browser-supplied filename metadata. The `max_args: 0` constraint pins the no-argument reader call so argument-bearing `x.read(n)` byte-count readers do not over-match."
 
 - id: lua.source.openresty_get_headers
   enabled: true
@@ -233,9 +240,7 @@
   description: "Disabled - client IP; spoofable via X-Forwarded-For only if downstream proxy trusted. Enable for log-injection / rate-limit bypass analyses."
 
 - id: lua.source.lapis_params
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: lua
   trust: remote
   tag: http-input
@@ -244,8 +249,17 @@
   match:
     kind: read
     target:
-      name: params
-  description: "Disabled - current Lua adapter does not emit `self.params` as a property-read source, and bare `params` overmatches local variables."
+      attribute: [self, params]
+  match_examples:
+  - name: lapis self params read
+    code: |
+      local lapis = require("lapis")
+      local app = lapis.Application()
+      function app:index()
+        local p = self.params
+        return p
+      end
+  description: "Lapis self.params - request params read via `self.params` in a Lapis action (the `self.` receiver avoids matching a bare `params` local)."
 
 - id: lua.source.lapis_session
   enabled: false

@@ -701,6 +701,9 @@
         end
       end
     expect_match_text: [Postgrex.query]
+  - name: Postgrex without parameter list negative constraint boundary
+    code: "alias Postgrex\ndefmodule App do\n  def test(conn) do\n    Postgrex.query(conn, \"select 1\")\n  end\nend\n"
+    expect_no_match: true
   description: "Postgrex.query(conn, sql, params) - sends a separate parameter list for $N placeholders instead of SQL concatenation."
 
   imports:
@@ -950,3 +953,154 @@
   description: 'Hammer.check_rate - Elixir rate-limit primitive.'
   imports:
   - Hammer
+
+# -- JWT / signed-token verify (library coverage) -------------------
+# Joken and Guardian are the two dominant Elixir JWT libraries; the
+# pack previously covered only Phoenix.Token / Plug.Crypto verifiers.
+- id: elixir.sanitizer.joken_verify_and_validate
+  enabled: true
+  language: elixir
+  tag: jwt-verify
+  packages: [joken]
+  match:
+    kind: call
+    callee:
+      regex: "^Joken\\.verify_and_validate$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      defmodule App do
+        def test(token) do
+          Joken.verify_and_validate(%{}, token)
+        end
+      end
+    expect_match_text: [Joken.verify_and_validate]
+  description: "Joken.verify_and_validate/4 - verifies a JWT's signature and runs claim validators; rejects tampered or invalid tokens."
+  imports:
+  - Joken
+- id: elixir.sanitizer.joken_verify
+  enabled: true
+  language: elixir
+  tag: jwt-verify
+  packages: [joken]
+  match:
+    kind: call
+    callee:
+      regex: "^Joken\\.verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      defmodule App do
+        def test(token, signer) do
+          Joken.verify(token, signer)
+        end
+      end
+    expect_match_text: [Joken.verify]
+  description: "Joken.verify/3 - verifies a JWT signature against the configured signer; returns an error on a bad signature."
+  imports:
+  - Joken
+- id: elixir.sanitizer.guardian_decode_and_verify
+  enabled: true
+  language: elixir
+  tag: jwt-verify
+  packages: [guardian]
+  match:
+    kind: call
+    callee:
+      regex: "^Guardian\\.decode_and_verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Guardian
+      defmodule App do
+        def test(token) do
+          Guardian.decode_and_verify(token)
+        end
+      end
+    expect_match_text: [Guardian.decode_and_verify]
+  description: "Guardian.decode_and_verify/3 - verifies a Guardian JWT's signature and claims before returning the decoded payload."
+  imports:
+  - Guardian
+- id: elixir.sanitizer.plug_crypto_verify
+  enabled: true
+  language: elixir
+  tag: jwt-verify
+  packages: [plug_crypto]
+  match:
+    kind: call
+    callee:
+      regex: "^Plug\\.Crypto\\.verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug_crypto
+      defmodule App do
+        def test(token) do
+          Plug.Crypto.verify("secret", "salt", token)
+        end
+      end
+    expect_match_text: [Plug.Crypto.verify]
+  description: "Plug.Crypto.verify/4 - verifies a MAC-signed binary produced by Plug.Crypto.sign/4; rejects tampered data before decoding."
+  imports:
+  - Plug_crypto
+
+# -- SQL parameterisation (driver coverage) -------------------------
+# MyXQL is the canonical Elixir MySQL driver; Ecto.Adapters.SQL.query
+# is the repo-level raw-but-parameterised entry point. Both take a
+# separate parameter list, mirroring the existing Postgrex.query rule.
+- id: elixir.sanitizer.myxql_query_bind
+  enabled: true
+  language: elixir
+  tag: db-bind-parameter
+  packages: [myxql]
+  match:
+    kind: call
+    callee:
+      attribute: [MyXQL, query]
+  constraints:
+  - min_args: 3
+  match_examples:
+  - name: MyXQL parameter list
+    code: |
+      alias MyXQL
+      defmodule App do
+        def test(conn, input) do
+          MyXQL.query(conn, "select * from users where name = ?", [input])
+        end
+      end
+    expect_match_text: [MyXQL.query]
+  - name: MyXQL without parameter list negative constraint boundary
+    code: "alias MyXQL\ndefmodule App do\n  def test(conn) do\n    MyXQL.query(conn, \"select 1\")\n  end\nend\n"
+    expect_no_match: true
+  description: "MyXQL.query(conn, sql, params) - sends a separate parameter list for ? placeholders instead of SQL string concatenation."
+  imports:
+  - MyXQL
+- id: elixir.sanitizer.ecto_adapters_sql_query_bind
+  enabled: true
+  language: elixir
+  tag: db-bind-parameter
+  packages: [ecto_sql]
+  match:
+    kind: call
+    callee:
+      regex: "^Ecto\\.Adapters\\.SQL\\.query$"
+  constraints:
+  - min_args: 3
+  match_examples:
+  - name: Ecto.Adapters.SQL.query parameter list
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(repo, input) do
+          Ecto.Adapters.SQL.query(repo, "select * from users where name = $1", [input])
+        end
+      end
+    expect_match_text: [Ecto.Adapters.SQL.query]
+  - name: Ecto.Adapters.SQL.query without parameter list negative constraint boundary
+    code: "alias Ecto\ndefmodule App do\n  def test(repo) do\n    Ecto.Adapters.SQL.query(repo, \"select 1\")\n  end\nend\n"
+    expect_no_match: true
+  description: "Ecto.Adapters.SQL.query(repo, sql, params) - raw SQL executed with a separate parameter list; the $N placeholders bind through the driver instead of string concatenation."
+  imports:
+  - Ecto

@@ -606,6 +606,8 @@
     kind: call
     callee:
       name: entity
+  constraints:
+  - top_level: true
   match_examples:
   - name: generated shape example
     code: |
@@ -614,7 +616,15 @@
           entity(value)
         }
       }
-  description: "akka-http entity(as[T]) directive - unmarshals request body."
+  - name: method receiver entity negative
+    code: |
+      object App {
+        def handle(session: String): Unit = {
+          session.entity(value)
+        }
+      }
+    expect_no_match: true
+  description: "akka-http entity(as[T]) directive - unmarshals request body. `top_level: true` rejects receiver-qualified `session.entity(...)` ORM/persistence calls that are not the akka-http directive."
 
 - id: scala.akka.parameters
   enabled: true
@@ -627,6 +637,8 @@
     kind: call
     callee:
       name: parameters
+  constraints:
+  - top_level: true
   match_examples:
   - name: generated shape example
     code: |
@@ -635,7 +647,15 @@
           parameters(value)
         }
       }
-  description: "akka-http parameters(...) directive - query string."
+  - name: method receiver parameters negative
+    code: |
+      object App {
+        def handle(builder: String): Unit = {
+          builder.parameters(value)
+        }
+      }
+    expect_no_match: true
+  description: "akka-http parameters(...) directive - query string. `top_level: true` rejects receiver-qualified `obj.parameters(...)` builder calls that are not the akka-http directive."
 
 - id: scala.akka.formfields
   enabled: true
@@ -648,6 +668,8 @@
     kind: call
     callee:
       name: formFields
+  constraints:
+  - top_level: true
   match_examples:
   - name: generated shape example
     code: |
@@ -656,7 +678,15 @@
           formFields(value)
         }
       }
-  description: "akka-http formFields directive - form body."
+  - name: method receiver formFields negative
+    code: |
+      object App {
+        def handle(builder: String): Unit = {
+          builder.formFields(value)
+        }
+      }
+    expect_no_match: true
+  description: "akka-http formFields directive - form body. `top_level: true` rejects receiver-qualified `obj.formFields(...)` calls that are not the akka-http directive."
 
 - id: scala.akka.path
   enabled: true
@@ -753,6 +783,8 @@
     kind: call
     callee:
       name: cookie
+  constraints:
+  - top_level: true
   match_examples:
   - name: generated shape example
     code: |
@@ -761,7 +793,15 @@
           cookie(value)
         }
       }
-  description: "akka-http cookie(name) directive - extracts a request cookie."
+  - name: method receiver cookie negative
+    code: |
+      object App {
+        def handle(response: String): Unit = {
+          response.cookie(value)
+        }
+      }
+    expect_no_match: true
+  description: "akka-http cookie(name) directive - extracts a request cookie. `top_level: true` rejects receiver-qualified `resp.cookie(...)` builder calls that are not the akka-http directive."
 
 - id: scala.akka.parameter_singular
   enabled: true
@@ -774,6 +814,8 @@
     kind: call
     callee:
       name: parameter
+  constraints:
+  - top_level: true
   match_examples:
   - name: generated shape example
     code: |
@@ -782,7 +824,15 @@
           parameter(value)
         }
       }
-  description: "akka-http parameter(name) directive - singular form of parameters(...)."
+  - name: method receiver parameter negative
+    code: |
+      object App {
+        def handle(builder: String): Unit = {
+          builder.parameter(value)
+        }
+      }
+    expect_no_match: true
+  description: "akka-http parameter(name) directive - singular form of parameters(...). `top_level: true` rejects receiver-qualified `obj.parameter(...)` calls that are not the akka-http directive."
 
 - id: scala.http4s.request_body
   enabled: true
@@ -910,7 +960,8 @@
 - id: scala.zio.http_request_body
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: scala.http4s.request_body
   language: scala
   trust: remote
   tag: http-input

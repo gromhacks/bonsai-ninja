@@ -12,7 +12,7 @@
     kind: call
     callee:
       name: mg_http_reply
-  description: "Disabled - canonical rule is c.xss.mongoose_http_reply in xss.yml (no constraint differentiates Location-header calls from body calls, so we keep a single higher-coverage rule)."
+  description: "Disabled - open redirect needs header/status-aware constraints for Location responses; c.xss.mongoose_http_reply only covers the tainted response-body surface."
 
 - id: c.open_redirect.nginx_modsec_set_location
   enabled: false

@@ -371,7 +371,7 @@
 - id: scala.sanitizer.path_startswith
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: requires-constraint
   language: scala
   tag: path-sanitize
   match:
@@ -795,3 +795,214 @@
       }\n"
     expect_no_match: true
   description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."
+
+# --- OWASP Encoder URI component (XSS in URL context) ----------------
+- id: scala.sanitizer.owasp_encoder_uricomponent
+  enabled: true
+  language: scala
+  tag: url-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forUriComponent]
+  match_examples:
+  - name: owasp encoder for uri component
+    code: |
+      import org.owasp.encoder._
+      object App {
+        def handle(input: String): Unit = {
+          Encode.forUriComponent(input)
+        }
+      }
+    expect_match_text: [Encode.forUriComponent]
+  description: "OWASP Java Encoder Encode.forUriComponent - URI component encoder (Scala via Java interop)."
+
+# --- OWASP HTML sanitizer policy -------------------------------------
+- id: scala.sanitizer.owasp_html_sanitizer_policy
+  enabled: true
+  language: scala
+  tag: html-sanitize
+  packages: ["com.googlecode.owasp-java-html-sanitizer"]
+  match:
+    kind: call
+    callee:
+      regex: "^PolicyFactory\\.sanitize$"
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  imports:
+  - com.googlecode.owaspjavahtmlsanitizer
+  match_examples:
+  - name: owasp html sanitizer policy sanitize
+    code: |
+      import com.googlecode.owaspjavahtmlsanitizer._
+      object App {
+        def handle(input: String): Unit = {
+          PolicyFactory.sanitize(input)
+        }
+      }
+    expect_match_text: [PolicyFactory.sanitize]
+  description: "OWASP HTML Sanitizer PolicyFactory.sanitize - policy-driven HTML cleaner (Scala via Java interop)."
+
+# --- LDAP filter escaping --------------------------------------------
+- id: scala.sanitizer.spring_ldap_filter_encode
+  enabled: true
+  language: scala
+  tag: ldap-escape
+  packages: ["org.springframework.ldap"]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapEncoder, filterEncode]
+  match_examples:
+  - name: spring ldap filter encode
+    code: |
+      import org.springframework.ldap.support._
+      object App {
+        def filter(input: String): String = {
+          LdapEncoder.filterEncode(input)
+        }
+      }
+    expect_match_text: [LdapEncoder.filterEncode]
+  description: "Spring LDAP LdapEncoder.filterEncode - escapes LDAP filter metacharacters per RFC 4515 (Scala via Java interop)."
+
+- id: scala.sanitizer.esapi_encode_for_ldap
+  enabled: true
+  language: scala
+  tag: ldap-escape
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForLDAP$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: esapi encode for ldap
+    code: |
+      import org.owasp.esapi._
+      object App {
+        def handle(input: String): Unit = {
+          Encoder.encodeForLDAP(input)
+        }
+      }
+    expect_match_text: [Encoder.encodeForLDAP]
+  description: "OWASP ESAPI Encoder.encodeForLDAP - escapes LDAP filter metacharacters (Scala via Java interop)."
+
+# --- JWT signature verification --------------------------------------
+- id: scala.sanitizer.jjwt_verifywith
+  enabled: true
+  language: scala
+  tag: jwt-verify
+  packages: ["io.jsonwebtoken"]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtParserBuilder, verifyWith]
+  match_examples:
+  - name: jjwt verify with
+    code: |
+      import io.jsonwebtoken._
+      object App {
+        def handle(input: String): Unit = {
+          JwtParserBuilder.verifyWith(input)
+        }
+      }
+    expect_match_text: [JwtParserBuilder.verifyWith]
+  description: "jjwt parserBuilder().verifyWith(key) - enforces JWT signature verification (Scala via Java interop)."
+
+- id: scala.sanitizer.nimbus_verify
+  enabled: true
+  language: scala
+  tag: jwt-verify
+  packages: ["com.nimbusds.jwt"]
+  match:
+    kind: call
+    callee:
+      regex: "^SignedJWT\\.verify$"
+  match_examples:
+  - name: nimbus signed jwt verify
+    code: |
+      import com.nimbusds.jwt._
+      object App {
+        def handle(input: String): Unit = {
+          SignedJWT.verify(input)
+        }
+      }
+    expect_match_text: [SignedJWT.verify]
+  description: "Nimbus SignedJWT.verify - enforces JWT signature verification with the configured verifier (Scala via Java interop)."
+
+- id: scala.sanitizer.auth0_jwt_verify
+  enabled: true
+  language: scala
+  tag: jwt-verify
+  packages: ["com.auth0.jwt"]
+  match:
+    kind: call
+    callee:
+      attribute: [JWTVerifier, verify]
+  match_examples:
+  - name: auth0 jwt verifier verify
+    code: |
+      import com.auth0.jwt._
+      object App {
+        def handle(input: String): Unit = {
+          JWTVerifier.verify(input)
+        }
+      }
+    expect_match_text: [JWTVerifier.verify]
+  description: "Auth0 java-jwt JWTVerifier.verify(token) - validates signature + registered claims and throws on failure (Scala via Java interop)."
+
+# --- Password-encoder auth verification ------------------------------
+- id: scala.sanitizer.bcrypt_password_encoder_matches
+  enabled: true
+  language: scala
+  tag: auth-sanitizer
+  packages: ["org.springframework.security.crypto"]
+  match:
+    kind: call
+    callee:
+      attribute: [BCryptPasswordEncoder, matches]
+  match_examples:
+  - name: spring bcrypt password encoder matches
+    code: |
+      import org.springframework.security.crypto.bcrypt._
+      object App {
+        def handle(input: String): Unit = {
+          BCryptPasswordEncoder.matches(input)
+        }
+      }
+    expect_match_text: [BCryptPasswordEncoder.matches]
+  description: "Spring Security BCryptPasswordEncoder.matches - bcrypt password verification (constant-time within bcrypt; Scala via Java interop)."
+
+# --- XXE parser hardening --------------------------------------------
+- id: scala.sanitizer.xml_factory_disallow_doctype
+  enabled: true
+  language: scala
+  tag: xxe-sanitizer
+  packages: ["javax.xml.parsers", "jakarta.xml.parsers"]
+  match:
+    kind: call
+    callee:
+      name: setFeature
+  constraints:
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
+  - arg_matches_regex:
+      index: 0
+      regex: 'external-general-entities|external-parameter-entities|load-external-dtd|disallow-doctype-decl'
+  match_examples:
+  - name: scala document builder disable external entity feature
+    code: |
+      import javax.xml.parsers._
+      object App {
+        def configure(factory: DocumentBuilderFactory): Unit = {
+          factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }
+      }
+    expect_match_text: [factory.setFeature]
+  - name: scala document builder disable external entity feature negative constraint boundary
+    code: "import javax.xml.parsers._\nobject App {\n  def configure(factory: DocumentBuilderFactory): Unit = {\n    factory.setFeature()\n  }\n}\n"
+    expect_no_match: true
+  description: "XML parser feature hardening - disables external entity / external DTD loading or disallows DOCTYPE to block XXE (Scala via Java interop)."

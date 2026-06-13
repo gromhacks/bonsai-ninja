@@ -9,19 +9,27 @@
     kind: call
     callee:
       regex: "\\.Scan$"
+  constraints:
+  - min_args: 1
   match_examples:
-  - name: generated direct match
+  - name: sql rows scan
     code: |
-      import "database/sql"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.Scan(target)
+      import "database/sql"
+      func example(rows *sql.Rows) {
+        var name string
+        _ = rows.Scan(&name)
       }
-  description: "sql.Rows.Scan / Row.Scan - reads DB row values into destination vars."
+    expect_match_text: [rows.Scan]
+  - name: bufio scanner scan negative
+    code: |
+      package main
+      import "bufio"
+      func example(s *bufio.Scanner) {
+        _ = s.Scan()
+      }
+    expect_no_match: true
+  description: "sql.Rows.Scan / Row.Scan - reads DB row values into destination vars. `min_args: 1` rejects the zero-arg `bufio.Scanner.Scan()` iterator decoy that shares the `.Scan$` tail."
 
 - id: go.gorm.scan
   enabled: false
@@ -47,19 +55,26 @@
     kind: call
     callee:
       regex: "\\.First$"
+  constraints:
+  - min_args: 1
   match_examples:
-  - name: generated direct match
+  - name: gorm first
     code: |
-      import "gorm.io/gorm"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.First(target)
+      import "gorm.io/gorm"
+      func example(db *gorm.DB, out any) {
+        _ = db.First(out)
       }
-  description: "GORM DB.First(&model, ...) - populates `model` from a DB row; second-order taint origin when row data was attacker-supplied."
+    expect_match_text: [db.First]
+  - name: zero arg first negative
+    code: |
+      package main
+      import "gorm.io/gorm"
+      func example(db *gorm.DB) {
+        _ = db.First()
+      }
+    expect_no_match: true
+  description: "GORM DB.First(&model, ...) - populates `model` from a DB row; second-order taint origin when row data was attacker-supplied. `min_args: 1` requires the destination argument."
 
 - id: go.gorm.find
   enabled: true
@@ -71,16 +86,23 @@
     kind: call
     callee:
       regex: "\\.Find$"
+  constraints:
+  - min_args: 1
   match_examples:
-  - name: generated direct match
+  - name: gorm find
     code: |
-      import "gorm.io/gorm"
       package main
-
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.Find(target)
+      import "gorm.io/gorm"
+      func example(db *gorm.DB, out any) {
+        _ = db.Find(out)
       }
-  description: "GORM DB.Find(&models, ...) - populates a slice of models from DB rows; second-order taint origin."
+    expect_match_text: [db.Find]
+  - name: zero arg find negative
+    code: |
+      package main
+      import "gorm.io/gorm"
+      func example(db *gorm.DB) {
+        _ = db.Find()
+      }
+    expect_no_match: true
+  description: "GORM DB.Find(&models, ...) - populates a slice of models from DB rows; second-order taint origin. `min_args: 1` requires the destination argument."

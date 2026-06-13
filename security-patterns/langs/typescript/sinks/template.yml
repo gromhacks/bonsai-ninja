@@ -523,6 +523,8 @@
       attribute:
       - swig
       - setDefaults
+  constraints:
+  - any_arg_matches_regex: "(?i)autoescape\\s*[:=]\\s*false"
   match_examples:
   - name: swig setdefaults autoescape off
     code: |
@@ -530,7 +532,15 @@
       function demo(input, req, obj) {
         return swig.setDefaults(input, { autoescape: false });
       }
-  description: "swig.setDefaults({autoescape: false}) - TypeScript via the same swig API."
+    expect_match_text: [swig.setDefaults]
+  - name: swig setdefaults autoescape default negative
+    code: |
+      const _u = require("swig");
+      function demo(input, req, obj) {
+        return swig.setDefaults(input, { autoescape: true });
+      }
+    expect_no_match: true
+  description: "swig.setDefaults({autoescape: false}) - autoescape disabled. The options regex requires `autoescape: false` so safe configs stay quiet. TypeScript via the same swig API."
 - id: typescript.template.nunjucks_configure_autoescape_off
   enabled: true
   language: typescript
@@ -547,6 +557,8 @@
       attribute:
       - nunjucks
       - configure
+  constraints:
+  - any_arg_matches_regex: "(?i)autoescape\\s*[:=]\\s*false"
   match_examples:
   - name: nunjucks configure autoescape off
     code: |
@@ -554,7 +566,15 @@
       function demo(input, req, obj) {
         return nunjucks.configure(input, { autoescape: false });
       }
-  description: "nunjucks.configure(path, {autoescape: false}) - autoescape disabled."
+    expect_match_text: [nunjucks.configure]
+  - name: nunjucks configure autoescape default negative
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.configure(input, { autoescape: true });
+      }
+    expect_no_match: true
+  description: "nunjucks.configure(path, {autoescape: false}) - autoescape disabled. The options regex requires `autoescape: false` so the safe default/enabled config stays quiet."
 
 - id: typescript.template.nunjucks_environment_renderstring
   enabled: true

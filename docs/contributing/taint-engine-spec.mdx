@@ -264,18 +264,22 @@ second query of the same shape against the same workspace becomes a
 lookup instead of a fresh propagation pass.
 
 - **`DataFlowCache`** (`crates/workspace/src/dataflow.rs`) — per-`FuncId`
-  `KindedTokens` + `EntryTaintGraph`. Built at index time via
-  `prewarm_all`; persisted to `.bonsai/dataflow.v3.factstore` (legacy
-  `dataflow.v2.bin` is still readable for warm reopens). The cache
-  carries each entry's transitive dependency file set, so an edit to
-  any callee invalidates only the affected entries.
+  `KindedTokens` + `EntryTaintGraph`. Loaded from a valid persisted
+  sidecar when present, computed on demand for exact query scopes, and
+  fully rebuilt only by explicit prewarm paths such as
+  `index --prewarm-dataflow`; persisted to
+  `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
+  readable for warm reopens). The cache carries each entry's transitive
+  dependency file set, so an edit to any callee invalidates only the
+  affected entries.
 - **`ValueFlowCache`** (`crates/workspace/src/value_flow.rs`) — per-`FuncId`
-  seed-free `ValueFlowGraph`. Built at index time. Each entry also
-  ships a `returning_seed_names: AHashSet<String>` precomputed at
-  graph-build time — the set of param/assign-target names whose
-  forward closure reaches a `Return` node in the same function.
-  Security-analysis answers "does this seed reach a return?" with
-  a single hash-set intersection. Persisted to
+  seed-free `ValueFlowGraph`. Built for the requested scope and cached
+  for reuse. Each entry also ships a
+  `returning_seed_names: AHashSet<String>` precomputed at graph-build
+  time — the set of param/assign-target names whose forward closure
+  reaches a `Return` node in the same function. Security-analysis
+  answers "does this seed reach a return?" with a single hash-set
+  intersection. Persisted to
   `.bonsai/value_flow.v3.factstore`.
 - **`TaintGraphIndex`** (`crates/workspace/src/taint_index.rs`) —
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
@@ -292,8 +296,9 @@ lookup instead of a fresh propagation pass.
 - **`Workspace::cached_resolved_call_graph()`** — singleton
   `Arc<ResolvedCallGraph>` shared across `inspect`, `security`,
   `dump callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
-  data caches receive it via `seed_call_graph(arc)` at workspace
-  open so they don't rebuild identical content.
+  data caches receive it via `seed_call_graph(arc)` when a query or
+  explicit prewarm path has built it so they don't rebuild identical
+  content.
 
 All caches are `parking_lot::RwLock`-backed and safe to share
 across rayon worker threads. `Workspace::ingest_dir` clears or

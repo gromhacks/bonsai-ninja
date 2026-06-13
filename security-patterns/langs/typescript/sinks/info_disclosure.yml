@@ -82,6 +82,10 @@
       attribute:
       - res
       - render
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)\b(?:err|error|exception|stack|stackTrace|errorStack)\b'
   match_examples:
   - name: response render error page
     code: |
@@ -91,7 +95,14 @@
       }
     expect_match_text:
     - res.render
-  description: "Express res.render(error, err/stack) - debug or exception details can be rendered into an error page."
+  - name: response render normal view negative
+    code: |
+      const _u = require("express");
+      function handler(req: Request, res: Response, user: any) {
+        return res.render("profile", { name: user.name, title: "Profile" });
+      }
+    expect_no_match: true
+  description: "Express res.render(view, {error/stack/...}) - debug or exception details rendered into an error page. The arg-1 locals regex pins error/stack-shaped keys so ordinary view renders stay quiet."
 - id: typescript.info_disclosure.postmessage_wildcard_target
   enabled: true
   language: typescript
@@ -104,6 +115,10 @@
     kind: call
     callee:
       regex: ^(window|parent|opener|targetWindow|frameWindow)\.postMessage$
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: "^['\"]\\*['\"]$"
   match_examples:
   - name: window postmessage wildcard
     code: "function send(secret: string) {\n  return window.postMessage(secret, '*');\n}\n"
@@ -113,4 +128,7 @@
     code: "function send(token: string) {\n  return parent.postMessage(token, '*');\n}\n"
     expect_match_text:
     - parent.postMessage
-  description: postMessage with targetOrigin '*' can disclose data to an unexpected origin.
+  - name: postmessage explicit origin negative
+    code: "function send(token: string) {\n  return window.postMessage(token, 'https://app.example.com');\n}\n"
+    expect_no_match: true
+  description: "postMessage(data, '*') with wildcard targetOrigin can disclose data to an unexpected origin. The arg-1 regex requires the literal '*' so calls naming an explicit origin stay quiet."

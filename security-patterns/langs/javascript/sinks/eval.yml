@@ -35,6 +35,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: javascript.eval.function_constructor_call
   language: javascript
   tag: code-injection
   severity: critical

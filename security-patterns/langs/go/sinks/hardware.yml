@@ -11,19 +11,27 @@
     kind: call
     callee:
       regex: "\\.DigitalWrite$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: digital write tainted pin
     code: |
-      import "gobot.io/x/gobot"
       package main
+      import "gobot.io/x/gobot"
+
+      func example(target string) {
+        obj.DigitalWrite(target, 1)
+      }
+  - name: digital write literal negative
+    code: |
+      package main
+      import "gobot.io/x/gobot"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.DigitalWrite(target)
+        obj.DigitalWrite("D7", 1)
       }
-  description: "DigitalWrite - tainted pin/value toggles a physical output."
+    expect_no_match: true
+  description: "DigitalWrite(pin, value) - attacker-controlled pin or output value toggles a physical output."
 
 - id: go.hardware.analog_write
   enabled: true
@@ -37,19 +45,27 @@
     kind: call
     callee:
       regex: "\\.AnalogWrite$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: analog write tainted value
     code: |
-      import "gobot.io/x/gobot"
       package main
+      import "gobot.io/x/gobot"
+
+      func example(target byte) {
+        obj.AnalogWrite("A0", target)
+      }
+  - name: analog write literal negative
+    code: |
+      package main
+      import "gobot.io/x/gobot"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.AnalogWrite(target)
+        obj.AnalogWrite("A0", 127)
       }
-  description: "AnalogWrite - tainted duty/value drives PWM or DAC-backed hardware."
+    expect_no_match: true
+  description: "AnalogWrite(pin, value) - attacker-controlled PWM/DAC output can actuate hardware."
 
 - id: go.hardware.write_byte_data
   enabled: true
@@ -63,19 +79,27 @@
     kind: call
     callee:
       regex: "\\.WriteByteData$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: write byte data tainted register
     code: |
-      import "gobot.io/x/gobot"
       package main
+      import "periph.io/x/conn/v3/i2c"
+
+      func example(target byte) {
+        obj.WriteByteData(target, 0xff)
+      }
+  - name: write byte data literal negative
+    code: |
+      package main
+      import "periph.io/x/conn/v3/i2c"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.WriteByteData(target)
+        obj.WriteByteData(0x10, 0xff)
       }
-  description: "WriteByteData - tainted register/value mutates an attached I2C/SMBus device."
+    expect_no_match: true
+  description: "WriteByteData(register, value) - attacker-controlled I2C register/value mutates an attached device."
 
 - id: go.hardware.write_word_data
   enabled: true
@@ -89,19 +113,27 @@
     kind: call
     callee:
       regex: "\\.WriteWordData$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: write word data tainted value
     code: |
-      import "gobot.io/x/gobot"
       package main
+      import "periph.io/x/conn/v3/i2c"
+
+      func example(target uint16) {
+        obj.WriteWordData(0x10, target)
+      }
+  - name: write word data literal negative
+    code: |
+      package main
+      import "periph.io/x/conn/v3/i2c"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.WriteWordData(target)
+        obj.WriteWordData(0x10, 0x0203)
       }
-  description: "WriteWordData - tainted 16-bit register write controls peripheral state."
+    expect_no_match: true
+  description: "WriteWordData(register, value) - attacker-controlled 16-bit I2C write controls peripheral state."
 
 - id: go.hardware.write_reg_u8
   enabled: true
@@ -115,19 +147,27 @@
     kind: call
     callee:
       regex: "\\.WriteRegU8$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: write reg u8 tainted value
     code: |
-      import "periph.io/x/conn/v3/i2c"
       package main
+      import "periph.io/x/conn/v3/i2c"
+
+      func example(target byte) {
+        obj.WriteRegU8(0x10, target)
+      }
+  - name: write reg u8 literal negative
+    code: |
+      package main
+      import "periph.io/x/conn/v3/i2c"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.WriteRegU8(target)
+        obj.WriteRegU8(0x10, 0xff)
       }
-  description: "WriteRegU8 - tainted 8-bit device register write drives attached hardware."
+    expect_no_match: true
+  description: "WriteRegU8(register, value) - attacker-controlled 8-bit device register write drives attached hardware."
 
 - id: go.hardware.write_reg_u16be
   enabled: true
@@ -141,16 +181,24 @@
     kind: call
     callee:
       regex: "\\.WriteRegU16BE$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: write reg u16be tainted value
     code: |
-      import "periph.io/x/conn/v3/i2c"
       package main
+      import "periph.io/x/conn/v3/i2c"
+
+      func example(target uint16) {
+        obj.WriteRegU16BE(0x10, target)
+      }
+  - name: write reg u16be literal negative
+    code: |
+      package main
+      import "periph.io/x/conn/v3/i2c"
 
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.WriteRegU16BE(target)
+        obj.WriteRegU16BE(0x10, 0x0203)
       }
-  description: "WriteRegU16BE - tainted 16-bit register write mutates peripheral state."
+    expect_no_match: true
+  description: "WriteRegU16BE(register, value) - attacker-controlled 16-bit register write mutates peripheral state."

@@ -19,6 +19,14 @@
             System.argv(input)
           end
         end
+    - name: system halt negative
+      code: |
+        defmodule App do
+          def test(input) do
+            System.halt(input)
+          end
+        end
+      expect_no_match: true
   description: "System.argv/0 - command-line arguments passed to the VM; whoever launched the BEAM controls these."
 
 - id: elixir.cli.io_gets
@@ -61,6 +69,26 @@
         end
   description: "IO.read/2 - reads from a device (stdin by default)."
 
+- id: elixir.cli.io_binread
+  enabled: true
+  language: elixir
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      attribute: [IO, binread]
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def test(input) do
+            IO.binread(input)
+          end
+        end
+  description: "IO.binread/2 - reads raw bytes from a device (stdin by default); binary counterpart of IO.read/2."
+
 - id: elixir.cli.mix_task_args
   enabled: false
   disabled_reason:
@@ -95,6 +123,46 @@
           end
         end
   description: "System.get_env/1,2 - process environment variable; config-trust (same process set it, but still external input)."
+
+- id: elixir.config.system_fetch_env
+  enabled: true
+  language: elixir
+  trust: config
+  tag: config-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [System, fetch_env]
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def test(input) do
+            System.fetch_env(input)
+          end
+        end
+  description: "System.fetch_env/1 - process environment variable returned as {:ok, val}/:error; same origin as get_env/1."
+
+- id: elixir.config.system_fetch_env_bang
+  enabled: true
+  language: elixir
+  trust: config
+  tag: config-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [System, fetch_env!]
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def test(input) do
+            System.fetch_env!(input)
+          end
+        end
+  description: "System.fetch_env!/1 - process environment variable; raises on missing. Same origin as get_env/1."
 
 - id: elixir.config.application_get_env
   enabled: true

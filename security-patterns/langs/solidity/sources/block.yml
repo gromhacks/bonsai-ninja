@@ -18,6 +18,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.timestamp); } }
+    - name: unrelated field negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { uint256 height; function test() public { uint256 result = block.number; } }
+      expect_no_match: true
   description: "block.timestamp - proposer-influenceable within ~15s drift. Unsafe as entropy source, deadline boundary, or strict ordering key."
 - id: solidity.block.coinbase
   enabled: true
@@ -33,6 +38,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.coinbase); } }
+    - name: unrelated field negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test() public { uint256 result = block.number; } }
+      expect_no_match: true
   description: "block.coinbase - the proposer's address; chosen by proposer. Unsafe for fee-distribution / reward logic and for entropy."
 - id: solidity.block.difficulty
   enabled: true
@@ -48,6 +58,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.difficulty); } }
+    - name: unrelated field negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test() public { uint256 result = block.number; } }
+      expect_no_match: true
   description: "block.difficulty / prevrandao (post-Merge) - proposer can influence / bias. Unsafe as randomness."
 - id: solidity.block.gaslimit
   enabled: true
@@ -63,6 +78,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.gaslimit); } }
+    - name: unrelated field negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test() public { uint256 result = block.number; } }
+      expect_no_match: true
   description: "block.gaslimit - consensus-chosen per block; unsafe for branching / availability-critical logic."
 - id: solidity.block.basefee
   enabled: true
@@ -78,6 +98,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.basefee); } }
+    - name: unrelated field negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test() public { uint256 result = block.number; } }
+      expect_no_match: true
   description: "block.basefee - EIP-1559 base fee; proposer/MEV-influenceable, unsafe as a fee oracle or pricing input."
 - id: solidity.block.number
   enabled: false

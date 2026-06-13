@@ -80,6 +80,28 @@
         fgets(buf, sizeof(buf), stdin);
       }
   description: "fgets - reads a line from stdin or file."
+- id: c.input.fread
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: fread
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: fread output buffer
+    code: |
+      #include <stdio.h>
+      void example(FILE *fp) {
+        char buf[256];
+        fread(buf, 1, sizeof(buf), fp);
+      }
+    expect_match_text: [fread]
+  description: "fread(ptr, size, nmemb, stream) - libc binary read from a FILE* (stdin/file); the destination buffer becomes attacker-influenced. Unique libc name (no C++ stream collision)."
 - id: c.input.gets_unsafe
   enabled: true
   language: c
@@ -142,8 +164,11 @@
   - name: generated direct match
     code: |
       void example(void) {
-        char buf[256];
-        scanf("%255s", buf);
+        char a[64];
+        char b[64];
+        char c[64];
+        char d[64];
+        scanf("%63s %63s %63s %63s", a, b, c, d);
       }
   description: "scanf - reads from stdin."
 - id: c.input.readline

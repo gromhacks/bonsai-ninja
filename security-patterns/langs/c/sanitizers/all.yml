@@ -44,10 +44,9 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        snprintf(arg);
+      void example(char *input) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%s", input);
       }
     expect_match_text: [snprintf]
   description: "snprintf - bounded format."
@@ -68,6 +67,57 @@
       }
     expect_match_text: [isalnum]
   description: "isalnum - character allowlist predicate used to copy only alphanumeric bytes into a sanitized buffer."
+- id: c.sanitizer.isalpha_char_allowlist
+  enabled: true
+  language: c
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: isalpha
+  match_examples:
+  - name: alpha allowlist predicate
+    code: |
+      #include <ctype.h>
+      void example(unsigned char input) {
+        isalpha(input);
+      }
+    expect_match_text: [isalpha]
+  description: "isalpha - character allowlist predicate; copies only alphabetic bytes into a sanitized buffer."
+- id: c.sanitizer.isdigit_char_allowlist
+  enabled: true
+  language: c
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: isdigit
+  match_examples:
+  - name: digit allowlist predicate
+    code: |
+      #include <ctype.h>
+      void example(unsigned char input) {
+        isdigit(input);
+      }
+    expect_match_text: [isdigit]
+  description: "isdigit - character allowlist predicate; copies only decimal-digit bytes into a sanitized buffer."
+- id: c.sanitizer.isxdigit_char_allowlist
+  enabled: true
+  language: c
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: isxdigit
+  match_examples:
+  - name: xdigit allowlist predicate
+    code: |
+      #include <ctype.h>
+      void example(unsigned char input) {
+        isxdigit(input);
+      }
+    expect_match_text: [isxdigit]
+  description: "isxdigit - hexadecimal-digit allowlist predicate; copies only [0-9A-Fa-f] bytes into a sanitized buffer."
 - id: c.sanitizer.strlcpy
   enabled: true
   language: c
@@ -316,6 +366,38 @@
       }
     expect_match_text: [mysql_stmt_bind_param]
   description: "mysql_stmt_bind_param - prepared statement parameter binding."
+- id: c.sanitizer.mysql_real_escape_string
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^mysql_real_escape_string(_quote)?$"
+  match_examples:
+  - name: mysql real escape string
+    code: |
+      void example(MYSQL *conn, char *to, const char *from, unsigned long len) {
+        mysql_real_escape_string(conn, to, from, len);
+      }
+    expect_match_text: [mysql_real_escape_string]
+  description: "libmysqlclient mysql_real_escape_string / mysql_real_escape_string_quote - connection-aware SQL string escaping (last-resort; prepared statements preferred)."
+- id: c.sanitizer.pq_escape_string_conn
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^PQescape(StringConn|Literal|Identifier)$"
+  match_examples:
+  - name: libpq escape literal
+    code: |
+      void example(PGconn *conn, const char *raw) {
+        PQescapeLiteral(conn, raw, 0);
+      }
+    expect_match_text: [PQescapeLiteral]
+  description: "libpq PQescapeStringConn / PQescapeLiteral / PQescapeIdentifier - connection-aware escaping of SQL string literals and identifiers."
 - id: c.sanitizer.g_markup_escape_text
   enabled: true
   language: c
@@ -542,6 +624,24 @@
       }
     expect_match_text: [uriEscapeExA]
   description: "uriparser uriEscapeExA - RFC 3986 percent-encoding."
+- id: c.sanitizer.evhttp_encode_uri
+  enabled: true
+  language: c
+  tag: url-encode
+  packages: [libevent]
+  match:
+    kind: call
+    callee:
+      regex: "^evhttp_(u(ri)?encode|encode_uri)$"
+  match_examples:
+  - name: libevent encode uri
+    code: |
+      #include <libevent/event2/http.h>
+      void example(const char *raw) {
+        evhttp_encode_uri(raw);
+      }
+    expect_match_text: [evhttp_encode_uri]
+  description: "libevent evhttp_encode_uri / evhttp_uriencode - percent-encodes a string for safe URI inclusion."
 
 - id: c.sanitizer.sqlite3_bind_extended
   enabled: true

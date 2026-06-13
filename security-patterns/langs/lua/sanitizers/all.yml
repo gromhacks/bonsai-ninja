@@ -332,6 +332,86 @@
     expect_no_match: true
   description: "string.gsub(value, '[^safe]', '') - strips every character outside an explicit allowlist."
 
+# -- SQL escaping (pgmoon) ------------------------------------------------------
+# pgmoon is the canonical OpenResty Postgres driver; its db:query(sql)
+# sink (lua.sqli.luaresty_postgres_query) has no parameter binding, so
+# escape_literal / escape_identifier are the documented safe primitives.
+- id: lua.sanitizer.pgmoon_escape_literal
+  enabled: true
+  language: lua
+  tag: sql-parameter
+  packages: [pgmoon]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]escape_literal$
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: lua.sanitizer.pgmoon_escape_literal example
+    code: |
+      local _pgmoon = require("pgmoon")
+      function example(pg, value)
+        pg:escape_literal(value)
+      end
+    expect_match_text: ["pg:escape_literal"]
+  - name: lua.sanitizer.pgmoon_escape_literal negative constraint boundary
+    code: "local _pgmoon = require(\"pgmoon\")\nfunction example(pg)\n  pg:escape_literal()\nend\n"
+    expect_no_match: true
+  description: "pgmoon escape_literal(value) - quotes and escapes a value for safe SQL literal interpolation (the documented binding primitive for pgmoon's unparameterised db:query)."
+
+- id: lua.sanitizer.pgmoon_escape_identifier
+  enabled: true
+  language: lua
+  tag: sql-parameter
+  packages: [pgmoon]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]escape_identifier$
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: lua.sanitizer.pgmoon_escape_identifier example
+    code: |
+      local _pgmoon = require("pgmoon")
+      function example(pg, col)
+        pg:escape_identifier(col)
+      end
+    expect_match_text: ["pg:escape_identifier"]
+  - name: lua.sanitizer.pgmoon_escape_identifier negative constraint boundary
+    code: "local _pgmoon = require(\"pgmoon\")\nfunction example(pg)\n  pg:escape_identifier()\nend\n"
+    expect_no_match: true
+  description: "pgmoon escape_identifier(name) - double-quotes and escapes a table/column identifier for safe SQL interpolation."
+
+# -- JWT algorithm allowlist (lua-resty-jwt) -----------------------------------
+# Complements the lua.jwt.* sinks: lua-resty-jwt accepts alg=none unless
+# an explicit algorithm whitelist is configured. set_alg_whitelist is the
+# canonical mitigation, so credit it as a jwt-verify sanitizer.
+- id: lua.sanitizer.resty_jwt_set_alg_whitelist
+  enabled: true
+  language: lua
+  tag: jwt-verify
+  packages: [lua-resty-jwt]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]set_alg_whitelist$
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: lua.sanitizer.resty_jwt_set_alg_whitelist example
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(jwt)
+        jwt:set_alg_whitelist({ RS256 = 1 })
+      end
+    expect_match_text: ["jwt:set_alg_whitelist"]
+  - name: lua.sanitizer.resty_jwt_set_alg_whitelist negative constraint boundary
+    code: "local _lua_resty_jwt = require(\"lua-resty-jwt\")\nfunction example(jwt)\n  jwt:set_alg_whitelist()\nend\n"
+    expect_no_match: true
+  description: "lua-resty-jwt set_alg_whitelist({...}) - pins accepted signature algorithms, rejecting alg=none forgeries before jwt:verify trusts claims."
+
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
 # identity edge (T104) - taint propagates THROUGH instead of

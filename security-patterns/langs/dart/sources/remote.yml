@@ -48,9 +48,7 @@
   description: "Disabled - whole context object taints too broadly without field-sensitive Request access tracking."
 
 - id: dart.http.request_query_parameters
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: http-input
@@ -59,12 +57,18 @@
     kind: read
     target:
       name: queryParameters
-  description: "Disabled - the current Dart adapter does not index property reads like `uri.queryParameters`."
+      receiver_type_in: [Uri]
+  match_examples:
+  - name: uri query parameters read
+    code: |
+      Map<String, String> handle(Uri uri) {
+        var q = uri.queryParameters;
+        return q;
+      }
+  description: "Uri.queryParameters - parsed query-string parameters read via `uri.queryParameters` on a typed Uri receiver."
 
 - id: dart.http.request_query_parameters_all
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: remote
   tag: http-input
@@ -73,7 +77,15 @@
     kind: read
     target:
       name: queryParametersAll
-  description: "Disabled - the current Dart adapter does not index property reads like `uri.queryParametersAll`."
+      receiver_type_in: [Uri]
+  match_examples:
+  - name: uri query parameters all read
+    code: |
+      Map<String, List<String>> handle(Uri uri) {
+        var q = uri.queryParametersAll;
+        return q;
+      }
+  description: "Uri.queryParametersAll - multi-valued query-string parameters read via `uri.queryParametersAll` on a typed Uri receiver."
 
 - id: dart.http.request_headers
   enabled: false
@@ -112,6 +124,11 @@
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test() { var input = "x"; var amount = 1; request.readAsString(input); }
+  - name: unrelated request method negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { request.change(); }
+    expect_no_match: true
   description: "shelf Request.readAsString - body read. Signature: `readAsString([Encoding])` (0 or 1 arg); `max_args: 1` rejects same-name decoys with extra args."
 
   imports:
@@ -139,6 +156,11 @@
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test() { var input = "x"; var amount = 1; request.read(); }
+  - name: read with arg negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { var n = 1; request.read(n); }
+    expect_no_match: true
   description: "shelf Request.read - byte stream body. Signature: `read()` (0 args); `max_args: 0` rejects unrelated `read(n)` decoys (e.g. file readers)."
 
   imports:
@@ -183,6 +205,11 @@
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test() { var input = "x"; var amount = 1; request.url(); }
+  - name: url builder with arg negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; request.url(input); }
+    expect_no_match: true
   description: "shelf Request.url - tainted Uri (path + query). Property-style getter (no args); `max_args: 0` rejects unrelated `request.url(...)` setters/builders elsewhere."
 
   imports:
@@ -210,6 +237,11 @@
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test() { var input = "x"; var amount = 1; request.requestedUri(); }
+  - name: requestedUri with arg negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; request.requestedUri(input); }
+    expect_no_match: true
   description: "shelf Request.requestedUri - full requested URL including host. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
   imports:
@@ -237,6 +269,11 @@
       import 'package:shelf/shelf.dart';
       import 'package:shelf/shelf.dart';
       void test() { var input = "x"; var amount = 1; request.headers(); }
+  - name: headers setter with arg negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; request.headers(input); }
+    expect_no_match: true
   description: "shelf Request.headers - tainted header map. Property-style getter (no args); `max_args: 0` rejects unrelated `headers(...)` setters."
 
   imports:
@@ -278,6 +315,11 @@
       import 'package:aqueduct/aqueduct.dart';
       import 'package:aqueduct/aqueduct.dart'; // aqueduct
       void test() { var input = "x"; var amount = 1; body.decode(input); }
+  - name: unrelated body method negative
+    code: |
+      import 'package:aqueduct/aqueduct.dart';
+      void test() { var input = "x"; body.encode(input); }
+    expect_no_match: true
   description: "Aqueduct/Conduit Request.body.decode() - parsed body payload."
 
   imports:
@@ -305,6 +347,11 @@
       import 'package:dart_frog/dart_frog.dart';
       import 'package:dart_frog/dart_frog.dart'; // dart_frog
       void test() { var input = "x"; var amount = 1; request.uri(); }
+  - name: uri builder with arg negative
+    code: |
+      import 'package:dart_frog/dart_frog.dart';
+      void test() { var input = "x"; request.uri(input); }
+    expect_no_match: true
   description: "Dart Frog RequestContext.request.uri - tainted Uri. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
 
   imports:
@@ -332,7 +379,40 @@
       import 'package:dart_frog/dart_frog.dart';
       import 'package:dart_frog/dart_frog.dart'; // dart_frog
       void test() { var input = "x"; var amount = 1; request.json(); }
+  - name: json serializer with arg negative
+    code: |
+      import 'package:dart_frog/dart_frog.dart';
+      void test() { var input = "x"; request.json(input); }
+    expect_no_match: true
   description: "Dart Frog Request.json() - parsed body. `json()` takes no args; `max_args: 0` rejects same-name decoys (JSON serializers `json(value)` etc.)."
+
+  imports:
+  - dart_frog/dart_frog.dart
+- id: dart.dart_frog.request_body
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [form, text]
+  frameworks: [dart_frog]
+  packages: [dart_frog]
+  match:
+    kind: call
+    callee:
+      attribute: [request, body]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:dart_frog/dart_frog.dart';
+      void test() { var input = "x"; var amount = 1; request.body(); }
+  - name: body setter with arg negative
+    code: |
+      import 'package:dart_frog/dart_frog.dart';
+      void test() { var input = "x"; request.body(input); }
+    expect_no_match: true
+  description: "Dart Frog Request.body() - raw string request body. `body()` takes no args; `max_args: 0` rejects same-name setters/decoys (`body(value)`)."
 
   imports:
   - dart_frog/dart_frog.dart
@@ -351,6 +431,10 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; methodChannel.invokeMethod(input); }
+  - name: unrelated method channel method negative
+    code: |
+      void test() { var input = "x"; methodChannel.setMethodCallHandler(input); }
+    expect_no_match: true
   description: "Flutter MethodChannel.invokeMethod - return value crosses platform boundary (e.g. JS bridge, native plugin)."
 
 - id: dart.flutter.event_channel_receive
@@ -368,6 +452,10 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; eventChannel.receiveBroadcastStream(input); }
+  - name: unrelated event channel method negative
+    code: |
+      void test() { var input = "x"; eventChannel.binaryMessenger(input); }
+    expect_no_match: true
   description: "Flutter EventChannel.receiveBroadcastStream - values arrive from native/JS over platform channel."
 
 - id: dart.cloud.firebase_oncall_data
@@ -393,6 +481,11 @@
       import 'package:firebase_functions_interop/firebase_functions_interop.dart';
       import 'package:firebase_functions_interop/firebase_functions_interop.dart'; // firebase_functions_interop
       void test() { var input = "x"; var amount = 1; data.onCall(input); }
+  - name: zero-arg onCall accessor negative
+    code: |
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
+      void test() { data.onCall(); }
+    expect_no_match: true
   description: "Firebase Cloud Functions onCall handler - `data.data` is the caller-supplied payload. `onCall(handler)` is a registration call with at least one handler arg; `min_args: 1` rejects unrelated `data.onCall()` 0-arg accessors."
 
   imports:
@@ -450,6 +543,11 @@
       import 'package:grpc/grpc.dart';
       import 'package:grpc/grpc.dart'; // grpc
       void test() { var input = "x"; var amount = 1; call.request(input); }
+  - name: unrelated call method negative
+    code: |
+      import 'package:grpc/grpc.dart';
+      void test() { var input = "x"; call.sendTrailers(input); }
+    expect_no_match: true
   description: "gRPC ServiceCall.request - protobuf message off the call object."
 
   imports:
@@ -477,6 +575,11 @@
       import 'package:shelf_multipart/shelf_multipart.dart';
       import 'package:shelf_multipart/shelf_multipart.dart'; // shelf_multipart
       void test(part) { part.filename(); }
+  - name: filename setter with arg negative
+    code: |
+      import 'package:shelf_multipart/shelf_multipart.dart';
+      void test(part) { part.filename("x"); }
+    expect_no_match: true
   description: "shelf_multipart form-data part filename - browser-supplied multipart filename metadata."
 
 # `comment` parameter - the canonical "user-supplied content" name for

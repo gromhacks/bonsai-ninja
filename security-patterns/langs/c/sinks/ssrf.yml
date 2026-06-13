@@ -20,13 +20,9 @@
   - name: generated direct match
     code: |
       #include <curl/curl.h>
-      #include <curl/curl.h>
       #include <curl/curl.h> /* libcurl */
-      #include <curl/curl.h> /* libcurl */
-      void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        curl_easy_setopt(arg, CURLOPT_URL);
+      void example(char *input) {
+        curl_easy_setopt("safe", "safe", input);
       }
   - name: literal arg 2 negative
     code: |

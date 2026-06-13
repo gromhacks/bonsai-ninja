@@ -15,6 +15,12 @@
   - name: declared shape
     code: |
       using Microsoft.AspNetCore.Cors;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AllowAnyOrigin(input); } }
+      class App { void Test() { AllowAnyOrigin(); } }
+    expect_match_text: [AllowAnyOrigin]
+  - name: explicit origin policy negative
+    code: |
+      using Microsoft.AspNetCore.Cors;
+      class App { void Test() { WithOrigins("https://trusted.example.com"); } }
+    expect_no_match: true
   description: |-
-    ASP.NET Core CORS policy.AllowAnyOrigin() - wildcard allow-all.
+    ASP.NET Core CORS policy.AllowAnyOrigin() - wildcard allow-all. Config-shape sink: the call itself is the misconfiguration. A scoped WithOrigins(...) policy stays quiet.

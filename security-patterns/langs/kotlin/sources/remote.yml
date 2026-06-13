@@ -1261,6 +1261,8 @@
     kind: call
     callee:
       attribute: [Uri, getQueryParameter]
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated shape example
     code: |
@@ -1269,7 +1271,18 @@
           Uri.getQueryParameter(input)
         }
       }
-  description: "Android Uri.getQueryParameter(name) - pulls attacker-controlled query value out of a deep-link/intent URI."
+  - name: no-arg query parameter negative
+    code: |
+      class App {
+        fun handle(uri: Uri) {
+          uri.getQueryParameter()
+        }
+      }
+      class Uri {
+        fun getQueryParameter(vararg args: Any?): String = ""
+      }
+    expect_no_match: true
+  description: "Android Uri.getQueryParameter(name) - pulls attacker-controlled query value out of a deep-link/intent URI. min_args:1 rejects 0-arg same-name decoys."
 
 - id: kotlin.source.ktor_call_principal
   enabled: true
@@ -1320,7 +1333,7 @@
 - id: kotlin.source.coroutine_channel_receive
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: kotlin
   trust: service
   tag: queue-input
@@ -1335,7 +1348,7 @@
 - id: kotlin.source.grpc_oncall_request
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: kotlin
   trust: remote
   tag: rpc-input
@@ -1428,6 +1441,16 @@
           return id
         }
       }
+    expect_match_text: [id]
+  - name: unannotated argument param name negative
+    code: |
+      import org.springframework.graphql.*
+      class App {
+        fun bookById(Argument: String): String {
+          return Argument
+        }
+      }
+    expect_no_match: true
   description: "Spring GraphQL @Argument annotated resolver parameter - value supplied by the GraphQL caller."
 
 - id: kotlin.source.micronaut_queryvalue
@@ -1450,7 +1473,47 @@
         fun handle(@QueryValue value: String) {
         }
       }
+    expect_match_text: [value]
+  - name: unannotated query value name negative
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(QueryValue: String) {
+        }
+      }
+    expect_no_match: true
   description: "Micronaut @QueryValue annotated parameter - query value bound from the HTTP request."
+
+- id: kotlin.source.micronaut_header
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["io.micronaut.http"]
+  match:
+    kind: param
+    target:
+      annotation: Header
+  match_examples:
+  - name: micronaut header
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(@Header value: String) {
+        }
+      }
+    expect_match_text: [value]
+  - name: unannotated header param name negative
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(Header: String) {
+        }
+      }
+    expect_no_match: true
+  description: "Micronaut @Header annotated parameter - client-supplied HTTP header bound from the request."
 
 - id: kotlin.source.micronaut_body
   enabled: true
@@ -1472,6 +1535,15 @@
         fun handle(@Body value: String) {
         }
       }
+    expect_match_text: [value]
+  - name: unannotated body param name negative
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(Body: String) {
+        }
+      }
+    expect_no_match: true
   description: "Micronaut @Body annotated parameter - request body supplied by the HTTP caller."
 
 - id: kotlin.source.websocket_message_payload_text

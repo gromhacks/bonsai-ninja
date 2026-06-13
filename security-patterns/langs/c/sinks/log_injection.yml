@@ -4,7 +4,8 @@
 - id: c.log_injection.printf_format_user
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: c.format.printf_tainted
   language: c
   tag: format-string
   severity: high
@@ -25,7 +26,8 @@
 - id: c.log_injection.fprintf_format_user
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: c.format.fprintf_tainted
   language: c
   tag: format-string
   severity: high

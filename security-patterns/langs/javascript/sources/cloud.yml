@@ -39,6 +39,13 @@
       function demo(input, req, obj) {
         return event.body;
       }
+  - name: unrelated event property negative
+    code: |
+      const _u = require("aws-lambda");
+      function demo() {
+        return event.httpMethod;
+      }
+    expect_no_match: true
   description: "AWS Lambda/APIGateway event.body - cloud-delivered request payload."
 
 - id: javascript.cloud.aws_lambda_event_headers
@@ -103,6 +110,35 @@
         return event.pathParameters;
       }
   description: "AWS Lambda/APIGateway event.pathParameters - cloud-delivered route parameters."
+
+- id: javascript.cloud.aws_lambda_event_records
+  enabled: true
+  language: javascript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, Records]
+  match_examples:
+  - name: aws lambda event records
+    code: |
+      const _u = require("aws-lambda");
+      function demo() {
+        return event.Records;
+      }
+    expect_match_text: [event.Records]
+  - name: unrelated event property negative
+    code: |
+      const _u = require("aws-lambda");
+      function demo() {
+        return event.httpMethod;
+      }
+    expect_no_match: true
+  description: "AWS Lambda event.Records - batch of SQS/SNS/Kinesis/DynamoDB/S3 records delivered to the handler; producer-controlled payloads."
 
 - id: javascript.cloud.cloudevent_data
   enabled: true

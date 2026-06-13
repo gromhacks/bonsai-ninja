@@ -26,6 +26,8 @@
     kind: call
     callee:
       attribute: [passport, authenticate]
+  constraints:
+  - any_arg_matches_regex: "\\bstate\\s*:\\s*false\\b"
   match_examples:
   - name: passport state disabled
     code: |
@@ -33,7 +35,14 @@
       function demo(input, req, obj) {
         return passport.authenticate(input, { state: false });
       }
-  description: "passport.authenticate({state: false}) - disables OAuth state-CSRF defense."
+  - name: passport state enabled negative
+    code: |
+      const _u = require("passport");
+      function demo(input) {
+        return passport.authenticate(input, { state: true });
+      }
+    expect_no_match: true
+  description: "passport.authenticate({state: false}) - disables OAuth state-CSRF defense. The any_arg_matches_regex constraint pins the explicit `state: false` option so default/enabled-state calls stay quiet."
 
 - id: javascript.oauth.openid_client_callback_no_state
   enabled: true

@@ -28,6 +28,12 @@
         def example(input, url, id, item, req_obj, options)
           gets(input)
         end
+    - name: ruby.source.stdin_gets unrelated call negative
+      code: |
+        def example(input)
+          puts(input)
+        end
+      expect_no_match: true
   description: "Kernel#gets / STDIN.gets - reads one tainted line from stdin."
 
 - id: ruby.source.stdin_read

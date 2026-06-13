@@ -56,9 +56,7 @@
   description: "Disabled - `BasicDeliverEventArgs` is a type name; `kind: param` only matches parameter identifiers."
 
 - id: csharp.source.kafka_consume
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: csharp
   tag: queue-input
   trust: service
@@ -66,8 +64,29 @@
   match:
     kind: call
     callee:
-      attribute: [Consumer, Consume]
-  description: "Disabled - adapters index local receivers like `consumer.Consume`, not receiver types like `Consumer.Consume`."
+      name: Consume
+  constraints:
+  - receiver_type_in: [Consumer, IConsumer]
+  match_examples:
+  - name: kafka consumer consume
+    code: |
+      using Confluent.Kafka;
+      class App {
+        void OnMessage(IConsumer consumer) {
+          var result = consumer.Consume();
+        }
+      }
+    expect_match_text: [consumer.Consume]
+  - name: unrelated consume negative
+    code: |
+      using Confluent.Kafka;
+      class App {
+        void OnMessage(Widget consumer) {
+          var result = consumer.Consume();
+        }
+      }
+    expect_no_match: true
+  description: "Confluent.Kafka IConsumer.Consume() returns a ConsumeResult whose message payload is broker-supplied - attacker-controllable. Gated on the consumer receiver type (resolved from the local/param declaration) so unrelated Consume() methods stay quiet."
 
 - id: csharp.source.sqs_receivemessage
   enabled: true
@@ -85,4 +104,9 @@
       using AWSSDK.SQS;
       class App { void Test() { dynamic input = "x"; dynamic client = input; client.ReceiveMessageAsync(); } }
     expect_match_text: [client.ReceiveMessageAsync]
+  - name: unrelated send call negative
+    code: |
+      using AWSSDK.SQS;
+      class App { void Test() { dynamic input = "x"; dynamic client = input; client.SendMessageAsync(input); } }
+    expect_no_match: true
   description: "AmazonSQSClient.ReceiveMessageAsync - package-scoped SQS receive call on a local client receiver."

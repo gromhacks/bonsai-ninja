@@ -11,7 +11,7 @@
 //! `#[arg(default_value_t = ...)]` must be able to resolve them at
 //! attribute-expansion time.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::clap_help_styles;
@@ -51,11 +51,22 @@ pub(crate) enum BrowseFormat {
     Sarif,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SourceAnalysisFormat {
     Json,
     Text,
     Sarif,
+}
+
+fn parse_source_analysis_format(raw: &str) -> Result<SourceAnalysisFormat, String> {
+    match raw {
+        "json" => Ok(SourceAnalysisFormat::Json),
+        "text" => Ok(SourceAnalysisFormat::Text),
+        "sarif" => Ok(SourceAnalysisFormat::Sarif),
+        other => Err(format!(
+            "invalid format `{other}`; expected `text` or `json` (`sarif` is only for `security taint-analysis`)"
+        )),
+    }
 }
 
 impl From<SourceAnalysisFormat> for BrowseFormat {
@@ -78,6 +89,13 @@ pub(crate) enum ExportFormat {
     Graphml,
     /// Neo4j-compatible Cypher `MERGE` script.
     Cypher,
+}
+
+#[derive(Clone, Debug, Default, ClapArgs)]
+pub(crate) struct OutputPathArg {
+    /// Write the selected --format output to this file instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) output_path: Option<PathBuf>,
 }
 
 /// How `inspect` shapes its flow output. `trace` is the historical
@@ -209,6 +227,21 @@ pub(crate) struct Cli {
     /// pipes / CI / `--format json` scripts stay clean by default).
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
+
+    /// Secondary output filter: keep only result rows whose text
+    /// contains this substring (case-insensitive). Repeatable — a row
+    /// must contain ALL given substrings. Works across the browse,
+    /// inspect, and security commands. Applied AFTER the query, so the
+    /// expensive analysis is reused — iterating on `--contains`
+    /// re-renders instead of re-running.
+    #[arg(long = "contains", global = true, value_name = "TEXT")]
+    pub(crate) contains: Vec<String>,
+
+    /// Secondary output filter: drop result rows whose text contains
+    /// this substring (case-insensitive). Repeatable — a row matching
+    /// ANY given substring is removed. Pairs with `--contains`.
+    #[arg(long = "not-contains", global = true, value_name = "TEXT")]
+    pub(crate) not_contains: Vec<String>,
 
     /// Per-file tree-sitter parse timeout in milliseconds. Defaults
     /// to 30000 ms; `0` disables the timeout guard. Also respects
@@ -353,6 +386,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered trace, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
         format: OutputFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
     /// Workspace-wide diagnostics.
     #[command(
@@ -507,6 +542,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Dump semantic resolved call edges with `EdgeKind` + `Precision`.
@@ -580,6 +617,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Dump the tree-sitter parse tree per file or per function.
@@ -662,6 +701,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Trace the name resolver stage-by-stage.
@@ -727,6 +768,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Run the interprocedural taint pass from an entry function and
@@ -823,6 +866,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     // --- Browse & inspect --------------------------------------------------
@@ -912,6 +957,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Browse indexed call sites by callee / file / line.
@@ -991,6 +1038,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Review imports and using statements.
@@ -1083,6 +1132,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Inspect variables (assignments observed in flow events) with locations.
@@ -1155,6 +1206,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Find string / char literals and classify them.
@@ -1220,6 +1273,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Every comment in the workspace with an auto-classified kind.
@@ -1289,6 +1344,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Inspect call arguments with callee name, position, and verbatim text.
@@ -1366,6 +1423,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Review classes / structs / interfaces with method counts.
@@ -1436,6 +1495,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Every indexed reference to a symbol.
@@ -1512,6 +1573,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Fuzzy search across indexed browse facts.
@@ -1578,6 +1641,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
     /// Inspect a name / pattern across every fact with full cross-module
     /// flow chains — the tool's headline feature.
@@ -1769,6 +1834,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
     /// Export a semantic analyzed workspace document (index + taint graph).
     #[command(
@@ -1814,19 +1881,19 @@ pub(crate) enum Cmd {
                       `--format cypher` emits a Neo4j-compatible MERGE script."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Native semantic export to a file\n  \
-                      $ bonsai-ninja export ./src > index.json\n  \
+                      $ bonsai-ninja export ./src --output-path index.json\n  \
                       \n  \
                       # Expanded semantic audit export scope\n  \
-                      $ bonsai-ninja export ./src --all > audit.json\n  \
+                      $ bonsai-ninja export ./src --all --output-path audit.json\n  \
                       \n  \
                       # NetworkX node-link graph\n  \
-                      $ bonsai-ninja export ./src --format networkx > graph.node_link.json\n  \
+                      $ bonsai-ninja export ./src --format networkx --output-path graph.node_link.json\n  \
                       \n  \
                       # Generic graph database / graph-tooling import\n  \
-                      $ bonsai-ninja export ./src --format graphml > graph.graphml\n  \
+                      $ bonsai-ninja export ./src --format graphml --output-path graph.graphml\n  \
                       \n  \
                       # Neo4j / Cypher import script\n  \
-                      $ bonsai-ninja export ./src --format cypher > graph.cypher\n  \
+                      $ bonsai-ninja export ./src --format cypher --output-path graph.cypher\n  \
                       \n  \
                       # Count decls across the workspace\n  \
                       $ bonsai-ninja export ./src | jq '[.files[].decls | length] | add'\n  \
@@ -1860,6 +1927,8 @@ pub(crate) enum Cmd {
         /// graph-database-friendly node/edge formats.
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
         format: ExportFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Manage analyzer caches.
@@ -1878,7 +1947,7 @@ pub(crate) enum Cmd {
                       (plus backward-compatible `dataflow.v2.bin` reads), \
                       value-flow, flow-id, callgraph, IDG, and export \
                       sidecars; paginated commands also write rendered page \
-                      windows under `page-cache.v3/`. `cache stats` reports \
+                      windows under `page-cache.v5/`. `cache stats` reports \
                       the sidecar dir, `cache clear` removes it, and \
                       `cache rebuild` refreshes the reusable analysis facts."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
@@ -2018,6 +2087,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` or `json`.
         #[arg(long, default_value = "text")]
         format: String,
+        #[command(flatten)]
+        output: OutputPathArg,
         /// Directory containing the rulepack tree (for finding /
         /// severity annotations). Lookup when omitted:
         /// `BONSAI_RULES_DIR` env var, then
@@ -2101,6 +2172,8 @@ pub(crate) enum Cmd {
         /// Output shape — `text` or `json`.
         #[arg(long, default_value = "text")]
         format: String,
+        #[command(flatten)]
+        output: OutputPathArg,
         /// Directory containing the rulepack tree (for finding /
         /// severity annotations). Lookup when omitted:
         /// `BONSAI_RULES_DIR` env var, then
@@ -2202,6 +2275,8 @@ pub(crate) enum SecurityAction {
         /// Output shape — `text` for the rendered table, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Enumerate sink matches across the workspace. Same surface as
@@ -2304,6 +2379,8 @@ pub(crate) enum SecurityAction {
         /// Output shape — `text` for the rendered table, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Enumerate sanitizer matches across the workspace. Same surface
@@ -2380,6 +2457,8 @@ pub(crate) enum SecurityAction {
         /// Output shape — `text` for the rendered table, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Dependency inventory — every package the rulepack mentions whose
@@ -2446,6 +2525,8 @@ pub(crate) enum SecurityAction {
         /// Output shape — `text` for the rendered table, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Run automatic source→sink taint analysis using every loaded
@@ -2605,15 +2686,6 @@ pub(crate) enum SecurityAction {
         /// function. Default derives from CFG size.
         #[arg(long = "intra-worklist-cap")]
         intra_worklist_cap: Option<u32>,
-        /// Keep only findings at or below this flow precision. Default:
-        /// `narrowed` (semantic exact/narrowed flows). Analysis output
-        /// accepts `exact` or `narrowed`.
-        #[arg(long, value_enum)]
-        precision: Option<PrecisionFilter>,
-        /// Compatibility alias for the default semantic flow mode.
-        /// Exact/narrowed findings are already the default.
-        #[arg(long = "strict-flow", default_value_t = false)]
-        strict_flow: bool,
         /// Token-budget ceiling for text output. Shorthand `4k` /
         /// `32k` / `128k` / `1m`; `0` / `all` / `uncapped` disables.
         #[arg(long)]
@@ -2629,6 +2701,10 @@ pub(crate) enum SecurityAction {
         /// printed the same function body.
         #[arg(long = "no-compact", default_value_t = false)]
         no_compact: bool,
+        /// Emit only a finding summary. Text renders compact tables;
+        /// JSON renders a summary object for tag/severity/rule triage.
+        #[arg(long = "summary", default_value_t = false)]
+        summary: bool,
         /// Output shape — `text` for the paginated finding report,
         /// `json` for the bonsai-native machine-readable shape, or
         /// `sarif` for SARIF 2.1.0 (GitHub code scanning, IDE
@@ -2639,6 +2715,29 @@ pub(crate) enum SecurityAction {
         /// `inspect` and `dump-edges`.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        /// Code-review diff mode. Point this at a previous
+        /// `taint-analysis --format json --all` output file; each
+        /// finding is then classified against it as `new` /
+        /// `unchanged` (by stable finding id), and findings present in
+        /// the baseline but gone now are reported as `fixed`. Text mode
+        /// tags NEW findings and prints a `new/fixed/unchanged` summary;
+        /// JSON mode adds `baseline_status` per finding plus a
+        /// `baseline` summary object. Applied at render — it reuses the
+        /// cached analysis, so it does not re-scan.
+        #[arg(long = "baseline", value_name = "PREV_JSON")]
+        baseline: Option<PathBuf>,
+        /// Diagnose WHY a `--source`/`--sink` pair does or does not
+        /// connect, instead of rendering the report. Reports how many
+        /// source sites and sink sites matched and how many taint paths
+        /// link them, then a verdict — distinguishing "the rule didn't
+        /// match anything" from "matched but the value doesn't flow"
+        /// (the usual review question). For the per-source IDG cut
+        /// detail of a no-path verdict, re-run with
+        /// `BONSAI_DEBUG=security-taint`.
+        #[arg(long = "explain", default_value_t = false)]
+        explain: bool,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Render downstream taint/call paths starting at every matched
@@ -2745,10 +2844,20 @@ pub(crate) enum SecurityAction {
         /// printed the same function body.
         #[arg(long = "no-compact", default_value_t = false)]
         no_compact: bool,
-        /// Output shape — `text` for the paginated source-flow report,
-        /// `json` for machine-readable output.
-        #[arg(long, value_enum, default_value_t = SourceAnalysisFormat::Text)]
+        /// Output shape — `text` for the paginated source-flow report
+        /// or `json` for machine-readable output. `sarif` is reserved
+        /// for `security taint-analysis`; passing it here returns a
+        /// source-analysis-specific error instead of emitting misleading
+        /// vulnerability findings.
+        #[arg(
+            long,
+            value_name = "FORMAT",
+            value_parser = parse_source_analysis_format,
+            default_value = "text"
+        )]
         format: SourceAnalysisFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Inspect the loaded rulepack itself (no workspace scan). Lists
@@ -2835,6 +2944,8 @@ pub(crate) enum SecurityAction {
         /// Output shape — `text` for the rule listing / audit matrix, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 }
 
@@ -2869,6 +2980,8 @@ pub(crate) enum CacheAction {
         /// Output shape. Use `json` for benchmark tooling.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
     /// Remove on-disk cache artifacts under `<workspace>/.bonsai/`.
     /// Specifically deletes the persisted analysis sidecars written

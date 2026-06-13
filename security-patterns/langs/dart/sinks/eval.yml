@@ -63,6 +63,38 @@
 
   imports:
   - webview_flutter/webview_flutter.dart
+- id: dart.eval.inappwebview_evaluate_javascript
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: critical
+  packages: [flutter_inappwebview]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [controller, evaluateJavascript]
+  constraints:
+  - arg_tainted:
+      kw: source
+  match_examples:
+  - name: tainted inappwebview javascript source
+    code: |
+      import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+      import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+      import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+      import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+      import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+      void test(String input) { controller.evaluateJavascript(source: input); }
+  - name: literal inappwebview javascript source negative
+    code: |
+      import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+      void test() { controller.evaluateJavascript(source: "console.log('safe')"); }
+    expect_no_match: true
+  description: "flutter_inappwebview InAppWebViewController.evaluateJavascript(source: tainted) - runs attacker-controlled JavaScript in the embedded webview (CWE-94). Gated on the named `source:` argument being tainted."
+
+  imports:
+  - flutter_inappwebview/flutter_inappwebview.dart
 - id: dart.eval.isolate_spawn_uri
   enabled: true
   language: dart

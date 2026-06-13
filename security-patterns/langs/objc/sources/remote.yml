@@ -76,6 +76,10 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; downloadTaskWithURL(input); }
+  - name: unrelated call negative
+    code: |
+      void test(id input) { id target = input; int amount = 1; uploadTaskWithRequest(input); }
+    expect_no_match: true
   description: "NSURLSession -downloadTaskWithURL: / -downloadTaskWithRequest: - file downloaded from remote endpoint; bytes are tainted input."
 
 - id: objc.source.nsurlconnection_send_synchronous
@@ -92,6 +96,10 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; sendSynchronousRequest(input); }
+  - name: unrelated call negative
+    code: |
+      void test(id input) { id target = input; int amount = 1; cancelRequest(input); }
+    expect_no_match: true
   description: "NSURLConnection +sendSynchronousRequest:returningResponse:error: / +sendAsynchronousRequest:queue:completionHandler: (deprecated) - returns server-controlled NSData."
 
 - id: objc.source.nsdata_contents_of_url
@@ -142,6 +150,11 @@
     code: |
       #import <AFNetworking/AFNetworking.h>
       void test(AFHTTPSessionManager *manager, id input) { id target = input; int amount = 1; [manager GET:input]; }
+  - name: non-http-verb method negative
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(AFHTTPSessionManager *manager, id input) { id target = input; int amount = 1; [manager invalidateSessionCancelingTasks:input]; }
+    expect_no_match: true
   description: "AFNetworking AFHTTPSessionManager -GET:/-POST: - success block receives server-controlled responseObject (deserialized JSON)."
 
 - id: objc.source.nsurlrequest_param
@@ -173,9 +186,7 @@
   description: "Disabled - NSURLSession completion block `data` arg is not observable by param-name match; needs adapter selector-piece -> param binding (see header)."
 
 - id: objc.source.openurl_options_url
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: deep-link
@@ -183,13 +194,20 @@
   match:
     kind: param
     target:
-      name: url
-  description: "Disabled - `application:openURL:options:` deep-link handler `url` parameter. Needs adapter selector-piece -> param binding to scope match to handler enclosing function (see header)."
+      annotation: openURL
+  match_examples:
+  - name: openurl handler url param
+    code: |
+      #import <UIKit/UIKit.h>
+      @implementation AppDelegate
+      - (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary *)options {
+        return [self handle:url];
+      }
+      @end
+  description: "application:openURL:options: - the openURL: deep-link URL param is attacker-controlled (scoped by the openURL: selector piece)."
 
 - id: objc.source.openurl_options_dict
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: deep-link
@@ -197,13 +215,20 @@
   match:
     kind: param
     target:
-      name: options
-  description: "Disabled - `application:openURL:options:` `options` dict (UIApplicationOpenURLOptionsKey -> NSObject) carries attacker-controlled source-app payload. Needs adapter binding (see header)."
+      annotation: options
+  match_examples:
+  - name: openurl handler options param
+    code: |
+      #import <UIKit/UIKit.h>
+      @implementation AppDelegate
+      - (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary *)options {
+        return [self handle:options];
+      }
+      @end
+  description: "application:openURL:options: - the options: dict (UIApplicationOpenURLOptionsKey) carries the attacker-controlled source-app payload (scoped by the options: selector piece)."
 
 - id: objc.source.universal_link_continueuseractivity
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: deep-link
@@ -211,8 +236,17 @@
   match:
     kind: param
     target:
-      name: userActivity
-  description: "Disabled - `application:continueUserActivity:restorationHandler:` Universal Link handler. NSUserActivity.webpageURL is attacker-controlled. Needs adapter binding (see header)."
+      annotation: continueUserActivity
+  match_examples:
+  - name: universal link continue user activity param
+    code: |
+      #import <UIKit/UIKit.h>
+      @implementation AppDelegate
+      - (BOOL)application:(UIApplication *)app continueUserActivity:(NSUserActivity *)userActivity restorationHandler:(void (^)(NSArray *))handler {
+        return [self handle:userActivity];
+      }
+      @end
+  description: "application:continueUserActivity:restorationHandler: - Universal Link handler; NSUserActivity.webpageURL is attacker-controlled (scoped by the continueUserActivity: selector piece)."
 
 - id: objc.source.push_notification_userinfo
   enabled: true
@@ -233,7 +267,8 @@
 - id: objc.source.push_notification_userinfo_property
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: objc.source.notification_userinfo
   language: objc
   trust: remote
   tag: push-input
@@ -242,12 +277,10 @@
     kind: read
     target:
       attribute: [notification, userInfo]
-  description: "Disabled - property read `notification.userInfo` on UNNotification. Needs adapter property_expression read events (see header)."
+  description: "Subsumed by objc.source.notification_userinfo (`name: userInfo`), which already matches `notification.userInfo` reads regardless of receiver name."
 
 - id: objc.source.wkwebview_usercontentcontroller_message
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: ipc-input
@@ -255,8 +288,17 @@
   match:
     kind: param
     target:
-      name: message
-  description: "Disabled - `userContentController:didReceiveScriptMessage:` JS->native bridge payload (WKScriptMessage.body). Needs adapter selector-piece -> param binding (see header)."
+      annotation: didReceiveScriptMessage
+  match_examples:
+  - name: wkwebview script message param
+    code: |
+      #import <WebKit/WebKit.h>
+      @implementation Bridge
+      - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+        [self handle:message];
+      }
+      @end
+  description: "userContentController:didReceiveScriptMessage: - JS->native bridge payload (WKScriptMessage.body) is attacker-controlled (scoped by the didReceiveScriptMessage: selector piece)."
 
 - id: objc.source.message_compose_body
   enabled: false
@@ -273,9 +315,7 @@
   description: "Disabled - MFMessageComposeViewController.body assignment with attacker-controlled deep-link content; can hijack outbound SMS draft. Reflects sink-direction; enable only when modeling outbound-SMS surfaces."
 
 - id: objc.source.app_extension_input_items
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: objc
   trust: remote
   tag: ipc-input
@@ -284,7 +324,17 @@
     kind: read
     target:
       attribute: [extensionContext, inputItems]
-  description: "Disabled - Share/Action extension `self.extensionContext.inputItems` carries NSExtensionItem from the host app (any installed app on device). Needs adapter property_expression read events (see header)."
+  match_examples:
+  - name: extension context input items read
+    code: |
+      #import <Foundation/Foundation.h>
+      @implementation ShareViewController
+      - (void)handle {
+        NSArray *items = self.extensionContext.inputItems;
+        NSLog(@"%@", items);
+      }
+      @end
+  description: "NSExtensionContext.inputItems - Share/Action extension input items from the host app, read via `self.extensionContext.inputItems`."
 
 - id: objc.source.nsurlprotocol_canonical_request
   enabled: false

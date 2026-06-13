@@ -927,6 +927,95 @@
     expect_match_text:
     - $stmt->bindValue
   description: PDOStatement::bindValue - explicit parameter binding for prepared statements.
+- id: php.sanitizer.mysqli_stmt_bind_param
+  enabled: true
+  language: php
+  tag: db-bind-parameter
+  match:
+    kind: call
+    callee:
+      regex: ^\$?stmt->bind_param$
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: php.sanitizer.mysqli_stmt_bind_param example
+    code: "<?php\nfunction example($stmt, $id) {\n  $stmt->bind_param('i', $id);\n}\n"
+    expect_match_text:
+    - $stmt->bind_param
+  - name: php.sanitizer.mysqli_stmt_bind_param example negative constraint boundary
+    code: "<?php\nfunction example($stmt, $id) {\n  $stmt->bind_param();\n}\n"
+    expect_no_match: true
+  description: mysqli_stmt::bind_param(types, ...$vars) - binds values out-of-band to a prepared statement; min_args:2 rejects the zero-arg decoy.
+- id: php.sanitizer.doctrine_set_parameter
+  enabled: true
+  language: php
+  tag: db-bind-parameter
+  packages:
+  - doctrine/dbal
+  - doctrine/orm
+  match:
+    kind: call
+    callee:
+      regex: ^\$?[A-Za-z_][A-Za-z0-9_]*->setParameter$
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: php.sanitizer.doctrine_set_parameter example
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($qb, $id) {
+        $qb->setParameter('id', $id);
+      }
+    expect_match_text:
+    - $qb->setParameter
+  - name: php.sanitizer.doctrine_set_parameter example negative constraint boundary
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($qb, $id) {
+        $qb->setParameter();
+      }
+    expect_no_match: true
+  description: Doctrine DBAL/ORM QueryBuilder::setParameter(key, value) - binds a value to a named/positional placeholder instead of concatenating it into DQL/SQL.
+  imports:
+  - doctrine\dbal
+  - doctrine\orm
+  - doctrine
+- id: php.sanitizer.firebase_jwt_decode
+  enabled: true
+  language: php
+  tag: jwt-verify
+  packages:
+  - firebase/php-jwt
+  match:
+    kind: call
+    callee:
+      regex: ^JWT(?:::|\.)decode$
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: php.sanitizer.firebase_jwt_decode example
+    code: |
+      <?php
+      use firebase\jwt;
+      function example($token, $key) {
+        JWT::decode($token, $key);
+      }
+    expect_match_text:
+    - JWT::decode
+  - name: php.sanitizer.firebase_jwt_decode example negative constraint boundary
+    code: |
+      <?php
+      use firebase\jwt;
+      function example($token) {
+        JWT::decode($token);
+      }
+    expect_no_match: true
+  description: firebase/php-jwt JWT::decode(token, key, allowed_algos) - verifies the JWT signature against the supplied key/algorithm allow-list and throws on tampering; min_args:2 requires the verification key argument.
+  imports:
+  - firebase\jwt
+  - firebase
 - id: php.sanitizer.preg_replace_char_allowlist
   enabled: true
   language: php

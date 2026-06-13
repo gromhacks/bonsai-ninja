@@ -318,6 +318,92 @@ pub fn span_of(file: FileId, node: &Node<'_>) -> Span {
     )
 }
 
+/// True when this callable's syntax is broken — its node (or detached
+/// body, for split signature/body grammars) contains an ERROR or
+/// MISSING node. Flow facts must come only from syntactically correct
+/// code: a recovered parse can mis-scope reads, writes, and calls, so a
+/// broken callable contributes NO flow events (its decl is still
+/// indexed for browsing). `has_error` is the tree-sitter subtree flag —
+/// it covers MISSING nodes too and is O(1).
+fn callable_has_syntax_error(node: &Node<'_>, body_node: Option<&Node<'_>>) -> bool {
+    node.has_error() || body_node.is_some_and(tree_sitter::Node::has_error)
+}
+
+/// True when `span` overlaps any of `error_spans`. Zero-width MISSING
+/// spans (`start == end`) are treated as touching either side.
+fn span_overlaps_error(span: Span, error_spans: &[Span]) -> bool {
+    error_spans.iter().any(|err| {
+        if err.start == err.end {
+            span.start <= err.start && err.start <= span.end
+        } else {
+            span.start < err.end && err.start < span.end
+        }
+    })
+}
+
+/// Drop the LEAF flow events whose span falls inside a recovered
+/// ERROR / MISSING span, while keeping control-flow containers and
+/// recursing into their bodies. A container's span covers its whole
+/// extent, so filtering it by its own span would discard valid
+/// children — instead we keep the container and prune only the leaf
+/// events (calls, assigns, returns, …) that the error actually
+/// mis-scopes. This preserves flows from the correctly-parsed parts of
+/// a callable that has one localized parse error.
+fn retain_flow_events_outside_errors(events: &mut Vec<FlowEvent>, error_spans: &[Span]) {
+    events.retain_mut(|event| match event {
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            retain_flow_events_outside_errors(then_events, error_spans);
+            retain_flow_events_outside_errors(else_events, error_spans);
+            true
+        }
+        FlowEvent::Loop { body, .. } => {
+            retain_flow_events_outside_errors(body, error_spans);
+            true
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            retain_flow_events_outside_errors(body, error_spans);
+            retain_flow_events_outside_errors(catch_events, error_spans);
+            retain_flow_events_outside_errors(finally_events, error_spans);
+            true
+        }
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            retain_flow_events_outside_errors(body, error_spans);
+            true
+        }
+        leaf => !span_overlaps_error(leaf.span(), error_spans),
+    });
+}
+
+/// Byte spans of every ERROR / MISSING node in the tree. Mirrors the
+/// parser's diagnostic walk; only called when the root has errors.
+fn syntax_error_spans(tree: &tree_sitter::Tree, file: FileId) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            spans.push(span_of(file, &node));
+        }
+        if !node.is_error() {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.has_error() || child.is_missing() {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    spans
+}
+
 const LARGE_LITERAL_INITIALIZER_BYTES: usize = 64 * 1024;
 
 fn is_large_literal_initializer_node(kind: &str, node: &Node<'_>) -> bool {
@@ -1933,6 +2019,64 @@ fn walk_into(
                     value_kind: None,
                 });
             }
+            // Subscript-assign `obj[key] = value` is semantically
+            // `obj.__setitem__(key, value)`. Emit a synthetic Call so
+            // `kind: call` rules can match the item-set with the RHS value
+            // as a tainted arg (e.g. Django `response[name] = tainted`
+            // header injection). Gated to a simple `<ident>[...]` LHS so it
+            // never fires on member/nested-subscript shapes. Harmless for
+            // languages with no `__setitem__` rule — nothing matches it.
+            if let Some(bracket) = raw_target.find('[') {
+                let base = raw_target[..bracket].trim();
+                if !base.is_empty() && base.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+                    // arg 0 = subscript KEY (`name` in `obj[name]`), arg 1 =
+                    // RHS VALUE. Either being tainted is a header-injection
+                    // vector, so the rule uses any_arg_tainted.
+                    let key_text = raw_target
+                        .rfind(']')
+                        .filter(|close| *close > bracket)
+                        .map(|close| raw_target[bracket + 1..close].trim().to_string())
+                        .unwrap_or_default();
+                    let key_sources = if looks_like_bare_identifier(&key_text) {
+                        vec![key_text.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    let mut value_sources = source_names.clone();
+                    if let Some(sn) = source_name.clone() {
+                        if !value_sources.contains(&sn) {
+                            value_sources.push(sn);
+                        }
+                    }
+                    let value_text = rhs
+                        .map(|n| normalize_call_name_whitespace(node_text(&n, src)))
+                        .unwrap_or_default();
+                    let span = span_of(file, &node);
+                    out.push(FlowEvent::Call {
+                        span,
+                        receiver: Some(base.to_string()),
+                        receiver_types: Vec::new(),
+                        name: format!("{base}.__setitem__"),
+                        call_kind: crate::CallKind::Method,
+                        args: vec![
+                            crate::CallArg {
+                                span,
+                                name: None,
+                                place: None,
+                                source_names: key_sources,
+                                value_text: key_text,
+                            },
+                            crate::CallArg {
+                                span,
+                                name: None,
+                                place: rhs.and_then(|n| argument_place(&n, src)),
+                                source_names: value_sources,
+                                value_text,
+                            },
+                        ],
+                    });
+                }
+            }
             out.push(FlowEvent::Assign {
                 span: span_of(file, &node),
                 target,
@@ -2654,6 +2798,10 @@ fn body_has_implicit_return(body: &Node<'_>, handler: &GrammarHandler) -> bool {
             | "statements"
             | "declaration_list"
             | "program"
+            // Elixir / Ruby `do ... end` — a statement container, never
+            // itself the tail expression; the tail-expression-return
+            // path picks the block's last statement instead.
+            | "do_block"
     )
 }
 
@@ -5126,6 +5274,19 @@ pub fn decl_index_with_handler(
         };
     };
     let src = snapshot.text.as_bytes();
+    // Cheap subtree flag; per-decl gates below only fire when true.
+    let file_has_syntax_errors = tree.root_node().has_error();
+    // Exact ERROR / MISSING spans, computed once. A callable with a
+    // recovered parse error keeps the flow events from its
+    // correctly-parsed statements and drops only the events that
+    // actually fall inside an error span — so one malformed expression
+    // (a complex string interpolation, an unsupported attribute) no
+    // longer discards every call/flow in the enclosing function.
+    let error_spans: Vec<Span> = if file_has_syntax_errors {
+        syntax_error_spans(&tree, file)
+    } else {
+        Vec::new()
+    };
 
     // Pass 1: collect classes — needed to recognize ctor calls during walk.
     let class_nodes = collect_kinds(&tree, handler.class_kinds);
@@ -5262,6 +5423,7 @@ pub fn decl_index_with_handler(
                 let p_sib = parent.next_named_sibling()?;
                 matches!(p_sib.kind(), "function_body" | "block" | "body_statement").then_some(p_sib)
             });
+        let syntax_broken = file_has_syntax_errors && callable_has_syntax_error(&node, body_node.as_ref());
         let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
         let body_implicit_returns = implicit_return_node.is_some();
         let mut flow_events = if let Some(b) = body_node {
@@ -5279,6 +5441,11 @@ pub fn decl_index_with_handler(
         if !pre_body_events.is_empty() {
             pre_body_events.extend(flow_events);
             flow_events = pre_body_events;
+        }
+        // Narrow syntax-error gating: keep flows from the cleanly-parsed
+        // statements, drop only the events inside a recovered error span.
+        if syntax_broken {
+            retain_flow_events_outside_errors(&mut flow_events, &error_spans);
         }
 
         // For Elixir def-macros, params live on the SIGNATURE call
@@ -5426,9 +5593,10 @@ pub fn decl_index_with_handler(
                 first_named_child_of_kind(&lambda, "fun_clause")
                     .and_then(|fc| first_named_child_of_kind(&fc, "clause_body"))
             });
+        let syntax_broken = file_has_syntax_errors && callable_has_syntax_error(&lambda, body_node.as_ref());
         let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
         let body_implicit_returns = implicit_return_node.is_some();
-        let flow_events = if let Some(b) = body_node {
+        let mut flow_events = if let Some(b) = body_node {
             let mut events = walk_flow_events(b, file, src, handler, &class_names);
             if let Some(return_node) = implicit_return_node {
                 append_expression_body_return(&mut events, &return_node, file, src);
@@ -5439,6 +5607,9 @@ pub fn decl_index_with_handler(
         } else {
             Vec::new()
         };
+        if syntax_broken {
+            retain_flow_events_outside_errors(&mut flow_events, &error_spans);
+        }
         if params.is_empty() && flow_events.is_empty() {
             continue;
         }
@@ -5539,7 +5710,22 @@ pub fn decl_index_with_handler(
     //
     // Root walks skip nested fn/class bodies, so this keeps true
     // top-level statements even when the file also declares handlers.
-    let root_events = walk_flow_events(tree.root_node(), file, src, handler, &class_names);
+    // Module-scope facts only when module-scope syntax is correct: an
+    // ERROR / MISSING outside every indexed decl means top-level code
+    // did not parse cleanly, so the synthetic `__module__` decl emits
+    // no flow events. Errors INSIDE a broken callable are already
+    // handled by that callable's own gate above.
+    let module_syntax_broken = error_spans.iter().any(|err| {
+        !defs
+            .iter()
+            .any(|decl| decl.span.start <= err.start && err.end <= decl.span.end)
+    });
+    let mut root_events = walk_flow_events(tree.root_node(), file, src, handler, &class_names);
+    if module_syntax_broken {
+        // Top-level code didn't parse cleanly: keep the module-scope
+        // statements outside the error spans, drop only those inside.
+        retain_flow_events_outside_errors(&mut root_events, &error_spans);
+    }
     let has_actionable_event = root_events.iter().any(|ev| {
         matches!(
             ev,
@@ -8413,14 +8599,35 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
                     });
                     // The value is the first named sibling AFTER the
                     // label (tree-sitter-dart named_argument is
-                    // `label expr` — value has no field name).
-                    let value_node = {
+                    // `label expr` — value has no field name). Dart splits
+                    // a member value like `AESMode.ecb` into a base
+                    // identifier plus trailing `selector` siblings, so the
+                    // base alone truncates to `AESMode`; extend the value
+                    // span through any trailing selectors to capture the
+                    // whole chain (so `keyword_arg_equals: AESMode.ecb`
+                    // can distinguish ECB from CBC/CTR).
+                    let (value_node, value_text) = {
                         let mut kids = arg.walk();
                         let all: Vec<_> = arg.named_children(&mut kids).collect();
                         let label_idx = all.iter().position(|c| c.kind() == "label").unwrap_or(0);
-                        all.get(label_idx + 1).copied().unwrap_or(arg)
+                        let base = all.get(label_idx + 1).copied().unwrap_or(arg);
+                        let mut chain_end = base.end_byte();
+                        for sib in all.iter().skip(label_idx + 2) {
+                            if sib.kind() == "selector" {
+                                chain_end = sib.end_byte();
+                            } else {
+                                break;
+                            }
+                        }
+                        let text = if chain_end > base.end_byte() {
+                            normalize_call_name_whitespace(
+                                std::str::from_utf8(&src[base.start_byte()..chain_end]).unwrap_or(""),
+                            )
+                        } else {
+                            normalize_call_name_whitespace(node_text(&base, src))
+                        };
+                        (base, text)
                     };
-                    let value_text = normalize_call_name_whitespace(node_text(&value_node, src));
                     if value_text.is_empty() {
                         continue;
                     }
@@ -8699,13 +8906,14 @@ fn emit_elixir_control_flow_call(
                 };
                 walk_elixir_do_block_as_try(do_block, file, src, handler, class_names, &mut events);
             }
+            let (catch_param, catch_types) = elixir_rescue_binding(node, src);
             out.push(FlowEvent::Try {
                 span: span_of(file, node),
                 body,
                 catch_events,
                 finally_events,
-                catch_param: extract_catch_param(node, src),
-                catch_types: Vec::new(),
+                catch_param: catch_param.or_else(|| extract_catch_param(node, src)),
+                catch_types,
             });
             true
         }
@@ -8857,6 +9065,56 @@ fn emit_ruby_block_loop_call(
         body,
     });
     true
+}
+
+/// Extract the rescue/catch binding from an Elixir `try` call:
+/// `rescue e -> ...` binds `e`; `rescue e in RuntimeError -> ...`
+/// binds `e` and names `RuntimeError` as the caught type; Erlang-style
+/// `catch :exit, reason -> ...` binds `reason` (the atom is the kind
+/// tag, not a binding). The rescue arms live inside the `do_block`,
+/// so the generic [`extract_catch_param`] walk over the call node's
+/// direct children cannot see them.
+fn elixir_rescue_binding(node: &Node<'_>, src: &[u8]) -> (Option<String>, Vec<String>) {
+    let Some(do_block) = first_named_child_of_kind(node, "do_block") else {
+        return (None, Vec::new());
+    };
+    let mut cursor = do_block.walk();
+    for child in do_block.named_children(&mut cursor) {
+        if !matches!(child.kind(), "rescue_block" | "catch_block") {
+            continue;
+        }
+        let Some(stab) = first_named_child_of_kind(&child, "stab_clause") else {
+            continue;
+        };
+        // Clause head = every named child before the `->` body.
+        let mut head_cursor = stab.walk();
+        let Some(head) = stab.named_children(&mut head_cursor).find(|n| n.kind() != "body") else {
+            continue;
+        };
+        let param = first_identifier_descendant(head).map(|id| node_text(&id, src).trim().to_string());
+        let mut types = Vec::new();
+        collect_elixir_alias_texts(&head, src, &mut types);
+        if param.is_some() || !types.is_empty() {
+            return (param, types);
+        }
+    }
+    (None, Vec::new())
+}
+
+/// Collect `alias` node texts (module names such as `RuntimeError`)
+/// under an Elixir rescue clause head.
+fn collect_elixir_alias_texts(node: &Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if node.kind() == "alias" {
+        let text = node_text(node, src).trim().to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push(text);
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_elixir_alias_texts(&child, src, out);
+    }
 }
 
 fn elixir_call_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
@@ -9630,6 +9888,53 @@ pub fn apply_assign_value_kind(idx: &mut crate::DeclIndex) {
         classify_assign_value_kinds(&mut decl.flow_events);
     }
 }
+
+/// Adapter-independent enforcement that flow facts come only from
+/// syntactically correct code. `error_spans` are the parser's ERROR /
+/// MISSING node spans for this file; every decl that overlaps one
+/// loses its flow events (and the receiver facts derived from them).
+/// The synthetic `__module__` decl spans the whole file, so it is
+/// gated only by errors OUTSIDE every real decl — a broken function
+/// must not strip valid module-scope facts, and vice versa.
+///
+/// The shared kit walker already skips broken callables during
+/// extraction; this backstop covers adapter-specific augment passes
+/// that synthesize events from their own tree walks.
+pub fn strip_syntax_broken_flow_events(idx: &mut crate::DeclIndex, error_spans: &[Span]) {
+    if error_spans.is_empty() {
+        return;
+    }
+    let contains = |outer: Span, err: Span| outer.start <= err.start && err.end <= outer.end;
+    let decl_spans: Vec<Span> = idx
+        .defs
+        .iter()
+        .filter(|decl| decl.name != MODULE_DECL_NAME)
+        .map(|decl| decl.span)
+        .collect();
+    for decl in &mut idx.defs {
+        let broken = if decl.name == MODULE_DECL_NAME {
+            error_spans
+                .iter()
+                .any(|err| !decl_spans.iter().any(|span| contains(*span, *err)))
+        } else {
+            // Overlap, not containment: zero-width MISSING spans sit
+            // between tokens and recovered ERROR nodes can extend past
+            // a decl's recognized boundary.
+            error_spans.iter().any(|err| {
+                err.start < decl.span.end && decl.span.start < err.end || contains(decl.span, *err)
+            })
+        };
+        if broken {
+            decl.flow_events.clear();
+            decl.receiver_field_writes.clear();
+            decl.receiver_state_sources.clear();
+        }
+    }
+}
+
+/// Name of the synthetic module-scope decl emitted in Pass 4 of
+/// [`decl_index_with_handler`].
+const MODULE_DECL_NAME: &str = "__module__";
 
 /// Emit exact local callable-alias facts for C-family function-pointer
 /// declarations such as `void (*cb)(char*) = helper;`.

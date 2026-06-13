@@ -6,8 +6,10 @@
 //! the visible column contract — so a regression in header labels,
 //! filter handling, or JSON field names will fail here loudly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 fn repo_root() -> PathBuf {
     // Crate dir is `<repo>/crates/cli`; repo root is two up.
@@ -22,15 +24,75 @@ fn ws_path() -> PathBuf {
 
 fn bin_path() -> Option<PathBuf> {
     let p = repo_root().join("target/release/bonsai-ninja");
-    if p.exists() {
-        Some(p)
-    } else {
+    if !p.exists() {
         eprintln!(
             "skipping browse integration test: release binary not built ({})",
             p.display()
         );
-        None
+        return None;
     }
+    assert_release_binary_is_fresh(&p);
+    Some(p)
+}
+
+/// Panic loudly if the release binary is older than the engine sources
+/// or the rulepack. These integration tests run `target/release/bonsai-
+/// ninja` (debug taint analysis is too slow), so a STALE release binary
+/// silently tests yesterday's behaviour and produces phantom failures
+/// that look like real regressions. Fail fast with the exact rebuild
+/// command instead. Runs once per test-binary process.
+fn assert_release_binary_is_fresh(bin: &Path) {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    CHECKED.get_or_init(|| {
+        let Ok(bin_mtime) = bin.metadata().and_then(|m| m.modified()) else {
+            return;
+        };
+        let root = repo_root();
+        let newest = [root.join("crates"), root.join("security-patterns")]
+            .iter()
+            .filter_map(|dir| newest_mtime(dir, &["rs", "yml"]))
+            .max();
+        if let Some(newest) = newest {
+            assert!(
+                bin_mtime >= newest,
+                "STALE release binary: target/release/bonsai-ninja is older than the engine \
+                 sources / rulepack. These tests would silently exercise an old build. \
+                 Rebuild first:  cargo build --release -p bonsai_cli"
+            );
+        }
+    });
+}
+
+/// Newest modification time of any file under `dir` with one of `exts`.
+fn newest_mtime(dir: &Path, exts: &[&str]) -> Option<SystemTime> {
+    let mut newest: Option<SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                // Skip build output / VCS dirs.
+                if !matches!(
+                    p.file_name().and_then(|n| n.to_str()),
+                    Some("target") | Some(".git") | Some(".bonsai")
+                ) {
+                    stack.push(p);
+                }
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e))
+            {
+                if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+                    newest = Some(newest.map_or(mtime, |cur| cur.max(mtime)));
+                }
+            }
+        }
+    }
+    newest
 }
 
 /// Run `bonsai-ninja` with `args` and `--no-color`. Returns `None` if the

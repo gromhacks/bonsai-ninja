@@ -7,9 +7,7 @@
 #     an import-time package signal, or
 #   - rule constraints allow per-receiver-type narrowing.
 - id: php.xpath.domxpath_query
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: xpath-injection
   severity: high
@@ -17,13 +15,32 @@
   match:
     kind: call
     callee:
-      attribute: [DOMXPath, query]
-  description: "DOMXPath::query - disabled pending PHP built-in class recognition."
+      name: query
+  constraints:
+  - receiver_type_in: [DOMXPath]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: domxpath query tainted
+    code: |
+      <?php
+      function handle(DOMDocument $doc, $q) {
+        $xpath = new DOMXPath($doc);
+        return $xpath->query($q);
+      }
+    expect_match_text: ["$xpath->query"]
+  - name: domxpath query literal negative
+    code: |
+      <?php
+      function handle(DOMDocument $doc) {
+        $xpath = new DOMXPath($doc);
+        return $xpath->query("//user");
+      }
+    expect_no_match: true
+  description: "DOMXPath::query(expr) - tainted XPath expression = injection; receiver-typed to a DOMXPath instance."
 
 - id: php.xpath.domxpath_evaluate
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: xpath-injection
   severity: high
@@ -31,5 +48,26 @@
   match:
     kind: call
     callee:
-      attribute: [DOMXPath, evaluate]
-  description: "DOMXPath::evaluate - disabled pending PHP built-in class recognition."
+      name: evaluate
+  constraints:
+  - receiver_type_in: [DOMXPath]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: domxpath evaluate tainted
+    code: |
+      <?php
+      function handle(DOMDocument $doc, $q) {
+        $xpath = new DOMXPath($doc);
+        return $xpath->evaluate($q);
+      }
+    expect_match_text: ["$xpath->evaluate"]
+  - name: domxpath evaluate literal negative
+    code: |
+      <?php
+      function handle(DOMDocument $doc) {
+        $xpath = new DOMXPath($doc);
+        return $xpath->evaluate("//user");
+      }
+    expect_no_match: true
+  description: "DOMXPath::evaluate(expr) - tainted XPath expression = injection; receiver-typed to a DOMXPath instance."

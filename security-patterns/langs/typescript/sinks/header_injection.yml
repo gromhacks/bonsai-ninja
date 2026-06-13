@@ -414,6 +414,13 @@
     kind: call
     callee:
       name: Header
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^['\"]X-XSS-Protection['\"]$"
+  - arg_matches_regex:
+      index: 1
+      regex: "^['\"]0['\"]$"
   match_examples:
   - name: nest header xss protection disabled
     code: |
@@ -423,4 +430,11 @@
       }
     expect_match_text:
     - Header
-  description: NestJS @Header('X-XSS-Protection', '0') disables the legacy browser XSS filter.
+  - name: nest header content type negative
+    code: |
+      const _u = require("@nestjs/common");
+      function routeHeader(Header: any) {
+        return Header("Content-Type", "application/json");
+      }
+    expect_no_match: true
+  description: "NestJS @Header('X-XSS-Protection', '0') disables the legacy browser XSS filter. The arg-0/arg-1 regexes pin the specific header and `0` value so unrelated @Header(...) decorators stay quiet."

@@ -109,6 +109,8 @@
     kind: call
     callee:
       name: read_line
+  constraints:
+  - min_args: 1
   taint_semantics:
     source_output_args: [0]
   match_examples:
@@ -119,7 +121,13 @@
           let query = "user";
           read_line(target);
       }
-  description: "std::io::Stdin::read_line - interactive input."
+  - name: read_line no-arg negative
+    code: |
+      fn example() {
+          read_line();
+      }
+    expect_no_match: true
+  description: "std::io::Stdin::read_line(&mut buf) - interactive input fills the buffer arg. `min_args: 1` rejects zero-arg same-name decoys."
 - id: rust.cli.env_var
   enabled: true
   language: rust
@@ -138,4 +146,10 @@
           let query = "user";
           env::var(target);
       }
+  - name: env set_var negative
+    code: |
+      fn example() {
+          env::set_var("KEY", "value");
+      }
+    expect_no_match: true
   description: "std::env::var - process environment variable."

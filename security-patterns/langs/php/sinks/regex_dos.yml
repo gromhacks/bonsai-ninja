@@ -1,29 +1,289 @@
 - id: php.redos.preg_match
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: php
   tag: redos
   severity: medium
-  packages: [stdlib]
   cwe: [CWE-1333]
   match:
     kind: call
     callee:
       name: preg_match
-  description: "Disabled - preg_match is usually called with tainted subject text; enable only when arg-specific taint can prove the pattern is attacker-controlled."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: preg_match tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return preg_match($pattern, "aaaaaaaaaaaaaaaa!");
+      }
+  - name: preg_match literal pattern negative
+    code: |
+      <?php
+      function example($subject) {
+        return preg_match('/^[a-z]+$/', $subject);
+      }
+    expect_no_match: true
+  description: "preg_match(tainted_pattern, subject) - attacker-controlled PCRE patterns can trigger catastrophic backtracking."
 
-- id: php.redos.preg_replace
-  enabled: false
-  disabled_reason:
-    code: over-broad
+- id: php.redos.preg_match_all
+  enabled: true
   language: php
   tag: redos
   severity: medium
-  packages: [stdlib]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: preg_match_all
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: preg_match_all tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return preg_match_all($pattern, "aaaaaaaaaaaaaaaa!");
+      }
+  - name: preg_match_all literal pattern negative
+    code: |
+      <?php
+      function example($subject) {
+        return preg_match_all('/\\w+/', $subject);
+      }
+    expect_no_match: true
+  description: "preg_match_all(tainted_pattern, subject) - repeated PCRE evaluation amplifies regex backtracking DoS."
+
+- id: php.redos.preg_replace
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
   cwe: [CWE-1333]
   match:
     kind: call
     callee:
       name: preg_replace
-  description: "Disabled - preg_replace is noisy without arg-specific taint proving the regex pattern, not the replacement subject, is attacker-controlled."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: preg_replace tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return preg_replace($pattern, "x", "aaaaaaaaaaaaaaaa!");
+      }
+  - name: preg_replace literal pattern negative
+    code: |
+      <?php
+      function example($replacement, $subject) {
+        return preg_replace('/\\s+/', $replacement, $subject);
+      }
+    expect_no_match: true
+  description: "preg_replace(tainted_pattern, replacement, subject) - attacker-controlled PCRE replacement patterns can consume excessive CPU."
+
+- id: php.redos.preg_filter
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: preg_filter
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: preg_filter tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return preg_filter($pattern, "x", "aaaaaaaaaaaaaaaa!");
+      }
+  - name: preg_filter literal pattern negative
+    code: |
+      <?php
+      function example($replacement, $subject) {
+        return preg_filter('/\\s+/', $replacement, $subject);
+      }
+    expect_no_match: true
+  description: "preg_filter(tainted_pattern, replacement, subject) - PCRE filter with caller-controlled pattern."
+
+- id: php.redos.preg_split
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: preg_split
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: preg_split tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return preg_split($pattern, "aaaaaaaaaaaaaaaa!");
+      }
+  - name: preg_split literal pattern negative
+    code: |
+      <?php
+      function example($subject) {
+        return preg_split('/,\\s*/', $subject);
+      }
+    expect_no_match: true
+  description: "preg_split(tainted_pattern, subject) - caller-controlled delimiter regex can trigger backtracking DoS."
+
+- id: php.redos.mb_ereg
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: mb_ereg
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mb_ereg tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return mb_ereg($pattern, "aaaaaaaaaaaaaaaa!");
+      }
+  - name: mb_ereg literal pattern negative
+    code: |
+      <?php
+      function example($subject) {
+        return mb_ereg('^[a-z]+$', $subject);
+      }
+    expect_no_match: true
+  description: "mb_ereg(tainted_pattern, string) - multibyte regex with attacker-controlled pattern."
+
+- id: php.redos.mb_eregi
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: mb_eregi
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mb_eregi tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return mb_eregi($pattern, "aaaaaaaaaaaaaaaa!");
+      }
+  - name: mb_eregi literal pattern negative
+    code: |
+      <?php
+      function example($subject) {
+        return mb_eregi('^[a-z]+$', $subject);
+      }
+    expect_no_match: true
+  description: "mb_eregi(tainted_pattern, string) - case-insensitive multibyte regex with attacker-controlled pattern."
+
+- id: php.redos.mb_ereg_replace
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: mb_ereg_replace
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mb_ereg_replace tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return mb_ereg_replace($pattern, "x", "aaaaaaaaaaaaaaaa!");
+      }
+  - name: mb_ereg_replace literal pattern negative
+    code: |
+      <?php
+      function example($replacement, $subject) {
+        return mb_ereg_replace('\\s+', $replacement, $subject);
+      }
+    expect_no_match: true
+  description: "mb_ereg_replace(tainted_pattern, replacement, string) - multibyte regex replacement with caller-controlled pattern."
+
+- id: php.redos.mb_eregi_replace
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: mb_eregi_replace
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mb_eregi_replace tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return mb_eregi_replace($pattern, "x", "aaaaaaaaaaaaaaaa!");
+      }
+  - name: mb_eregi_replace literal pattern negative
+    code: |
+      <?php
+      function example($replacement, $subject) {
+        return mb_eregi_replace('\\s+', $replacement, $subject);
+      }
+    expect_no_match: true
+  description: "mb_eregi_replace(tainted_pattern, replacement, string) - case-insensitive multibyte regex replacement with caller-controlled pattern."
+
+- id: php.redos.mb_split
+  enabled: true
+  language: php
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: mb_split
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mb_split tainted pattern
+    code: |
+      <?php
+      function example($pattern) {
+        return mb_split($pattern, "aaaaaaaaaaaaaaaa!");
+      }
+  - name: mb_split literal pattern negative
+    code: |
+      <?php
+      function example($subject) {
+        return mb_split(',\\s*', $subject);
+      }
+    expect_no_match: true
+  description: "mb_split(tainted_pattern, string) - multibyte split regex with caller-controlled pattern."

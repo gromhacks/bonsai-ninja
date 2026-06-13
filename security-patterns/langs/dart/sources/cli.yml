@@ -45,6 +45,10 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; stdin.readLineSync(input); }
+  - name: unrelated stdin method negative
+    code: |
+      void test() { var input = "x"; stdin.flush(); }
+    expect_no_match: true
   description: "stdin.readLineSync - interactive input."
 
 - id: dart.cli.stdin_read_byte_sync
@@ -61,12 +65,14 @@
   - name: declared shape
     code: |
       void test() { var input = "x"; var amount = 1; stdin.readByteSync(input); }
+  - name: unrelated stdin method negative
+    code: |
+      void test() { var input = "x"; stdin.flush(); }
+    expect_no_match: true
   description: "stdin.readByteSync."
 
 - id: dart.os.platform_environment
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: local
   tag: local-input
@@ -74,13 +80,19 @@
   match:
     kind: read
     target:
-      name: environment
-  description: "Disabled - the current Dart adapter does not index `Platform.environment` property reads."
+      attribute: [Platform, environment]
+  match_examples:
+  - name: platform environment read
+    code: |
+      import 'dart:io';
+      Map<String, String> run() {
+        var e = Platform.environment;
+        return e;
+      }
+  description: "Platform.environment - process environment variables read via the static `Platform.environment` map."
 
 - id: dart.os.platform_script
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   trust: local
   tag: local-input
@@ -88,8 +100,16 @@
   match:
     kind: read
     target:
-      name: script
-  description: "Disabled - the current Dart adapter does not index `Platform.script` property reads."
+      attribute: [Platform, script]
+  match_examples:
+  - name: platform script read
+    code: |
+      import 'dart:io';
+      Uri run() {
+        var s = Platform.script;
+        return s;
+      }
+  description: "Platform.script - the URI of the executing script via the static `Platform.script` property."
 
 - id: dart.args.argparser_parse
   enabled: true
@@ -111,6 +131,11 @@
       import 'package:args/args.dart';
       import 'package:args/args.dart'; // args
       void test() { var input = "x"; var amount = 1; parser.parse(input); }
+  - name: unrelated parser method negative
+    code: |
+      import 'package:args/args.dart';
+      void test() { var input = "x"; parser.addOption(input); }
+    expect_no_match: true
   description: "package:args ArgParser.parse."
 
   imports:

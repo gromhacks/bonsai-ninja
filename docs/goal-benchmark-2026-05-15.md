@@ -769,8 +769,10 @@ Current release verification:
 ## Diagnostic Precision Rejection Contract
 
 Diagnostic precision classes remain internal troubleshooting states. Public
-analysis surfaces may emit exact/narrowed semantic evidence; requests for
-`over-approximate` or `unknown` are rejected before analysis output renders.
+analysis surfaces may emit exact/narrowed semantic evidence. `dump-edges`
+keeps an explicit semantic precision filter for debugging edge inventory;
+`security taint-analysis` has no user-facing precision mode and always uses
+the semantic taint precision ceiling.
 
 Current release verification:
 
@@ -779,14 +781,15 @@ Current release verification:
 - `cargo build -q --release -p bonsai_cli`: passed.
 - Added conformance source guard in
   `source_and_debug_flow_surfaces_are_semantic_only` to keep `dump-edges`
-  and `security taint-analysis` broad-precision rejection in place.
+  broad-precision rejection and `security taint-analysis` semantic-only
+  execution in place.
 - `./target/release/bonsai-ninja dump-edges examples --precision
   over-approximate --format json --no-color --no-progress`: exited `1` with
   `dump-edges is semantic-only`.
 - `./target/release/bonsai-ninja security examples/python/micro
-  taint-analysis --rules-dir security-patterns --precision unknown --format
-  json --no-color --no-progress`: exited `1` with `security taint-analysis is
-  semantic-only`.
+  taint-analysis --rules-dir security-patterns --precision exact --format
+  json --no-color --no-progress`: exited `2` with `unexpected argument
+  '--precision'`.
 
 ## Constructor Ambiguity Contract
 

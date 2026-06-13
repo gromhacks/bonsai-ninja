@@ -13,6 +13,11 @@
       code: |
         pragma solidity ^0.8.0;
         contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { setPrice(input); } }
+    - name: read-only price getter negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test() public view returns (uint256) { return getPrice(); } }
+      expect_no_match: true
   description: "Privileged price setter - must be authz-checked."
 - id: solidity.oracle.spot_price_lookup
   enabled: true

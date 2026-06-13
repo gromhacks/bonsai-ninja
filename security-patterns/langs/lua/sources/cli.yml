@@ -49,3 +49,20 @@
           io.read(input)
         end
   description: "io.read - local stdin input."
+
+- id: lua.source.io_lines
+  enabled: true
+  language: lua
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [io, lines]
+  match_examples:
+    - name: lua.source.io_lines example
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          for line in io.lines(input) do end
+        end
+  description: "io.lines - iterates lines from stdin (no arg) or a named file; each line is local/file-controlled input."

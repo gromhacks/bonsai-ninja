@@ -35,6 +35,11 @@
     code: |
       using System.Web;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.ParseQueryString(input); } }
+  - name: unrelated httputility encode negative
+    code: |
+      using System.Web;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.HtmlEncode(input); } }
+    expect_no_match: true
   description: "HttpUtility.ParseQueryString(rawQuery) - parses the request query-string into a NameValueCollection; the input is attacker-controlled."
 
 - id: csharp.source.streamreader_readtoend
@@ -243,6 +248,38 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Unvalidated; } }
   description: "ASP.NET Request.Unvalidated property read - unvalidated request values."
 
+- id: csharp.source.aspnet_legacy_files
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [file]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Files]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Files; } }
+  description: "ASP.NET legacy Request.Files property read - uploaded files (HttpFileCollection) supplied by the remote client."
+
+- id: csharp.source.aspnet_legacy_servervariables
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  match:
+    kind: read
+    target:
+      attribute: [Request, ServerVariables]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.ServerVariables; } }
+  description: "ASP.NET legacy Request.ServerVariables property read - includes client-controlled values such as HTTP_X_FORWARDED_FOR and request headers."
+
 - id: csharp.source.controller_bind_parameter
   enabled: false
   disabled_reason:
@@ -409,6 +446,11 @@
       using System.Net.WebSockets;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.ReceiveAsync(input); } }
     expect_match_text: [WebSocket.ReceiveAsync]
+  - name: websocket send async negative
+    code: |
+      using System.Net.WebSockets;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.SendAsync(input); } }
+    expect_no_match: true
   description: "System.Net.WebSockets WebSocket.ReceiveAsync - frame bytes supplied by the websocket peer."
 
 - id: csharp.source.graphql_resolvefieldcontext_getargument

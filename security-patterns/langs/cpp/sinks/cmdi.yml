@@ -603,7 +603,10 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  posix_spawn(arg);\n}\n"
+    code: |
+      void example(const char *input) {
+        posix_spawn("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -681,7 +684,10 @@
       index: 1
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  posix_spawnp(arg);\n}\n"
+    code: |
+      void example(const char *input) {
+        posix_spawnp("safe", input);
+      }
   - name: literal arg 1 negative
     code: |
       void example() {
@@ -806,6 +812,174 @@
   imports:
   - boost/process.hpp
   - boost
+- id: cpp.cmdi.win_create_process_a
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: CreateProcessA
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted command line
+    code: |
+      #include <windows.h>
+      void example(const char *input) {
+        CreateProcessA("C:\\app.exe", input);
+      }
+  - name: literal command line negative
+    code: |
+      void example() {
+        CreateProcessA("C:\\app.exe", "safe");
+      }
+    expect_no_match: true
+  description: "Win32 CreateProcessA(lpApplicationName, lpCommandLine, ...) - tainted command line is parsed for the executable and arguments."
+- id: cpp.cmdi.win_create_process_w
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: CreateProcessW
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted command line
+    code: |
+      #include <windows.h>
+      void example(const wchar_t *input) {
+        CreateProcessW(L"C:\\app.exe", input);
+      }
+  - name: literal command line negative
+    code: |
+      void example() {
+        CreateProcessW(L"C:\\app.exe", L"safe");
+      }
+    expect_no_match: true
+  description: "Win32 CreateProcessW(lpApplicationName, lpCommandLine, ...) - tainted wide command line is parsed for the executable and arguments."
+- id: cpp.cmdi.win_winexec
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: WinExec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command line
+    code: |
+      #include <windows.h>
+      void example(const char *input) {
+        WinExec(input, 1);
+      }
+  - name: literal command line negative
+    code: |
+      void example() {
+        WinExec("safe", 1);
+      }
+    expect_no_match: true
+  description: "Win32 WinExec(tainted_cmdline, show) - legacy command-line exec; deprecated but still in use."
+- id: cpp.cmdi.win_shell_execute_a
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteA
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted shell execute file
+    code: |
+      #include <windows.h>
+      void example(const char *input) {
+        ShellExecuteA(0, "open", input, 0, 0, 1);
+      }
+  - name: literal shell execute file negative
+    code: |
+      void example() {
+        ShellExecuteA(0, "open", "safe.txt", 0, 0, 1);
+      }
+    expect_no_match: true
+  description: "Win32 ShellExecuteA(hwnd, op, lpFile, lpParams, ...) - tainted file/verb launches arbitrary programs or documents."
+- id: cpp.cmdi.win_shell_execute_w
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteW
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted shell execute file
+    code: |
+      #include <windows.h>
+      void example(const wchar_t *input) {
+        ShellExecuteW(0, L"open", input, 0, 0, 1);
+      }
+  - name: literal shell execute file negative
+    code: |
+      void example() {
+        ShellExecuteW(0, L"open", L"safe.txt", 0, 0, 1);
+      }
+    expect_no_match: true
+  description: "Win32 ShellExecuteW(hwnd, op, lpFile, lpParams, ...) - tainted wide file/verb launches arbitrary programs or documents."
+- id: cpp.cmdi.fexecve
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: fexecve
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted argv
+    code: |
+      void example(char *const *input) {
+        fexecve(3, input, 0);
+      }
+  - name: literal argv negative
+    code: |
+      void example() {
+        char *argv[] = {"git", "status", 0};
+        fexecve(3, argv, 0);
+      }
+    expect_no_match: true
+  description: "fexecve(fd, argv, envp) - exec from an open fd; tainted argv runs the program with attacker-controlled arguments."
 - id: cpp.cmdi.asio_io_context_post
   enabled: false
   disabled_reason:

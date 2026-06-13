@@ -268,6 +268,68 @@
     expect_no_match: true
   description: "List.to_atom/1 - charlist variant; same unbounded atom-table growth risk as String.to_atom."
 
+- id: elixir.eval.erlang_binary_to_atom
+  enabled: true
+  language: elixir
+  tag: dos
+  severity: medium
+  cwe: [CWE-770]
+  match:
+    kind: call
+    callee:
+      regex: "^:erlang\\.binary_to_atom$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.binary_to_atom(input, :utf8)
+        end
+      end
+  - name: literal binary to atom negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.binary_to_atom("ready", :utf8)
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :erlang.binary_to_atom/1,2 - creates a new atom from a tainted binary; same unbounded atom-table exhaustion (CWE-770) as String.to_atom. Prefer :erlang.binary_to_existing_atom."
+
+- id: elixir.eval.erlang_list_to_atom
+  enabled: true
+  language: elixir
+  tag: dos
+  severity: medium
+  cwe: [CWE-770]
+  match:
+    kind: call
+    callee:
+      regex: "^:erlang\\.list_to_atom$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.list_to_atom(input)
+        end
+      end
+  - name: literal list to atom negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.list_to_atom('ready')
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :erlang.list_to_atom/1 - creates a new atom from a tainted charlist; same atom-table-exhaustion DoS as List.to_atom. Prefer :erlang.list_to_existing_atom."
+
 - id: elixir.eval.erl_eval
   enabled: true
   language: elixir

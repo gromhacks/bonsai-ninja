@@ -110,14 +110,25 @@
     kind: call
     callee:
       attribute: [crypto, digest]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^["''](md5|md4|md2|sha1|sha-1)["'']$'
   match_examples:
   - name: lua.crypto.openssl_md5 example
     code: |
       local _luacrypto = require("luacrypto")
       function example(input, url, id, payload, request, params, user)
-        crypto.digest(input)
+        crypto.digest("md5", payload)
       end
-  description: "crypto.digest(algo, ...) - flag when algo is 'md5', 'md4', 'sha1'."
+  - name: strong digest algorithm negative
+    code: |
+      local _luacrypto = require("luacrypto")
+      function example(input, url, id, payload, request, params, user)
+        crypto.digest("sha256", payload)
+      end
+    expect_no_match: true
+  description: "crypto.digest(algo, ...) - flagged when algo is a broken hash (md5/md4/md2/sha1). Strong algorithms (sha256+) are exempt via the algorithm-name constraint."
 
 - id: lua.crypto.openssl_evp_digest
   enabled: true
@@ -131,14 +142,25 @@
     kind: call
     callee:
       attribute: [evp, digest]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)^["''](md5|md4|md2|sha1|sha-1)["'']$'
   match_examples:
   - name: lua.crypto.openssl_evp_digest example
     code: |
       local _lua_openssl = require("lua-openssl")
       function example(input, url, id, payload, request, params, user)
-        evp.digest(input)
+        evp.digest("sha1", payload)
       end
-  description: "lua-openssl evp.digest(algo) - flag weak algorithms (md5/md4/sha1)."
+  - name: strong digest algorithm negative
+    code: |
+      local _lua_openssl = require("lua-openssl")
+      function example(input, url, id, payload, request, params, user)
+        evp.digest("sha512", payload)
+      end
+    expect_no_match: true
+  description: "lua-openssl evp.digest(algo) - flagged for broken hashes (md5/md4/md2/sha1); strong algorithms exempt via the algorithm-name constraint."
 
 - id: lua.crypto.openssl_cipher_des
   enabled: true
@@ -152,14 +174,25 @@
     kind: call
     callee:
       attribute: [cipher, new]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(^des|3des|des-ede|^rc4|^rc2|blowfish|^bf-|-ecb)'
   match_examples:
   - name: lua.crypto.openssl_cipher_des example
     code: |
       local _lua_openssl = require("lua-openssl")
       function example(input, url, id, payload, request, params, user)
-        cipher.new(input)
+        cipher.new("des-ede3-cbc")
       end
-  description: "openssl.cipher.new - flag when algorithm is DES/3DES/RC4/AES-ECB (no confidentiality)."
+  - name: aes-gcm strong cipher negative
+    code: |
+      local _lua_openssl = require("lua-openssl")
+      function example(input, url, id, payload, request, params, user)
+        cipher.new("aes-256-gcm")
+      end
+    expect_no_match: true
+  description: "openssl.cipher.new - flagged when algorithm is DES/3DES/RC4/RC2/Blowfish or any ECB mode (no confidentiality). Strong AEAD ciphers (aes-*-gcm) exempt via the algorithm-name constraint."
 
 - id: lua.crypto.openssl_cipher_encrypt_ecb
   enabled: false

@@ -1,6 +1,8 @@
 # Rust hardware-control / bus-write sinks (GPIO, PWM, I2C/SMBus, SPI).
 - id: rust.hardware.set_high
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: rust
   tag: state-manipulation
   severity: high
@@ -11,23 +13,14 @@
     kind: call
     callee:
       regex: "\\.set_high$"
-  match_examples:
-  - name: generated direct match
-    code: |
-      use embedded_hal;
-      use embedded_hal;
-      use embedded_hal::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          obj.set_high(target);
-      }
-  description: "set_high - tainted control flow drives a digital output high."
-
+  description: "Disabled - embedded-hal set_high() is a no-argument state change; tainted control-flow reachability is not expressible in the current YAML constraint vocabulary."
   imports:
   - embedded_hal
+
 - id: rust.hardware.set_low
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: rust
   tag: state-manipulation
   severity: high
@@ -38,21 +31,10 @@
     kind: call
     callee:
       regex: "\\.set_low$"
-  match_examples:
-  - name: generated direct match
-    code: |
-      use embedded_hal;
-      use embedded_hal;
-      use embedded_hal::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          obj.set_low(target);
-      }
-  description: "set_low - tainted control flow drives a digital output low."
-
+  description: "Disabled - embedded-hal set_low() is a no-argument state change; flagging remote-controlled control flow needs a control-dependence constraint."
   imports:
   - embedded_hal
+
 - id: rust.hardware.set_duty_cycle
   enabled: true
   language: rust
@@ -82,7 +64,7 @@
           obj.set_duty_cycle(0.5);
       }
     expect_no_match: true
-  description: "set_duty_cycle - tainted PWM value actuates attached hardware."
+  description: "set_duty_cycle(value) - attacker-controlled PWM duty cycle actuates attached hardware."
 
 - id: rust.hardware.smbus_write_byte_data
   enabled: true
@@ -96,16 +78,23 @@
     kind: call
     callee:
       regex: "\\.smbus_write_byte_data$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: smbus write byte data tainted register
+    code: |
+      use i2cdev::dummy;
+      fn example(target: u8) {
+          obj.smbus_write_byte_data(target, 0xff);
+      }
+  - name: smbus write byte data literal negative
     code: |
       use i2cdev::dummy;
       fn example() {
-          let target = "tainted";
-          let query = "user";
-          obj.smbus_write_byte_data(target);
+          obj.smbus_write_byte_data(0x10, 0xff);
       }
-  description: "smbus_write_byte_data - tainted register/value mutates an attached I2C/SMBus device."
+    expect_no_match: true
+  description: "smbus_write_byte_data(register, value) - attacker-controlled I2C register/value mutates an attached device."
 
 - id: rust.hardware.smbus_write_word_data
   enabled: true
@@ -119,16 +108,23 @@
     kind: call
     callee:
       regex: "\\.smbus_write_word_data$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
-  - name: generated direct match
+  - name: smbus write word data tainted value
+    code: |
+      use i2cdev::dummy;
+      fn example(target: u16) {
+          obj.smbus_write_word_data(0x10, target);
+      }
+  - name: smbus write word data literal negative
     code: |
       use i2cdev::dummy;
       fn example() {
-          let target = "tainted";
-          let query = "user";
-          obj.smbus_write_word_data(target);
+          obj.smbus_write_word_data(0x10, 0x0203);
       }
-  description: "smbus_write_word_data - tainted 16-bit register write controls peripheral state."
+    expect_no_match: true
+  description: "smbus_write_word_data(register, value) - attacker-controlled 16-bit I2C write controls peripheral state."
 
 - id: rust.hardware.transfer_in_place
   enabled: true
@@ -149,7 +145,6 @@
   - name: tainted spi transfer buffer
     code: |
       use embedded_hal;
-      use embedded_hal;
       use embedded_hal::dummy;
       fn example(target: &mut [u8]) {
           obj.transfer_in_place(target);
@@ -157,13 +152,12 @@
   - name: safe spi transfer buffer negative
     code: |
       use embedded_hal;
-      use embedded_hal;
       use embedded_hal::dummy;
       fn example() {
           let safe = [0u8, 1u8];
           obj.transfer_in_place(safe);
       }
     expect_no_match: true
-  description: "transfer_in_place - tainted SPI frame bytes are sent to an attached peripheral."
+  description: "transfer_in_place(buffer) - attacker-controlled SPI frame bytes are sent to an attached peripheral."
   imports:
   - embedded_hal

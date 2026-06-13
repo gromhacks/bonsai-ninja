@@ -15,9 +15,7 @@
   description: "Disabled - too broad; enable per-project via a narrower rule."
 
 - id: php.source.bref_handler_handle
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: php
   tag: cloud-event
   trust: service
@@ -25,5 +23,19 @@
   match:
     kind: call
     callee:
-      attribute: [Handler, handle]
-  description: "Disabled - adapters index local receivers like `$handler->handle(...)`, not Bref Handler type facts; a bare `handle` fallback would match unrelated APIs."
+      name: handle
+  constraints:
+  - receiver_type_in: [Handler]
+  match_examples:
+  - name: bref handler handle
+    code: |
+      <?php
+      use Bref\Event\Handler;
+      function run(Handler $handler, $event) {
+        $r = $handler->handle($event, $event);
+        return $r;
+      }
+  description: "Bref Handler.handle() - Lambda event payload processed by a typed Bref Handler receiver."
+
+  imports:
+  - Bref

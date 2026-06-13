@@ -86,11 +86,13 @@
     expect_no_match: true
   description: "Velocity.evaluate(tainted template) - RCE."
 - id: scala.template.freemarker_process
-  enabled: false
+  enabled: true
   language: scala
   tag: ssti
   severity: high
   packages:
+  - freemarker
+  imports:
   - freemarker
   cwe:
   - CWE-1336
@@ -100,13 +102,20 @@
       attribute:
       - Template
       - process
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated shape example
+  - name: freemarker template process tainted
     code: "import freemarker._\n// uses freemarker\nobject App {\n  def handle(input:\
       \ String): Unit = {\n    Template.process(\"{{\" + input)\n  }\n}\n"
-  description: "Freemarker Template.process - SSTI if template text is tainted."
-  disabled_reason:
-    code: over-broad
+    expect_match_text:
+    - Template.process
+  - name: arg tainted literal negative
+    code: "import freemarker._\n// uses freemarker\nobject App {\n  def handle(input:\
+      \ String): Unit = {\n    Template.process(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Freemarker Template.process - SSTI if template text is tainted. Gated on arg_tainted so literal template names stay quiet (mirrors scala.template.thymeleaf_fragment_concat)."
 - id: scala.template.freemarker_template_process_local
   enabled: false
   disabled_reason:

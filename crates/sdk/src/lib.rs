@@ -793,7 +793,7 @@ impl WorkspaceCache {
         export_cache_is_fresh_via_fd(&self.root, self.rulepack_root.as_deref(), &file)
     }
 
-    pub fn stream_default_export_cache_if_fresh<W: Write>(&self, writer: &mut W) -> Result<bool> {
+    pub fn stream_default_export_cache_if_fresh<W: Write + ?Sized>(&self, writer: &mut W) -> Result<bool> {
         let cache = self.default_export_cache_path();
         // Open the cache file FIRST, then validate freshness from
         // the open fd's metadata. A separate `fs::metadata` + later
@@ -1500,7 +1500,7 @@ impl Export<'_> {
         self.export_workspace_cache().default_export_cache_is_fresh()
     }
 
-    pub fn stream_default_json_cache_if_fresh<W: Write>(&self, writer: &mut W) -> Result<bool> {
+    pub fn stream_default_json_cache_if_fresh<W: Write + ?Sized>(&self, writer: &mut W) -> Result<bool> {
         self.export_workspace_cache()
             .stream_default_export_cache_if_fresh(writer)
     }

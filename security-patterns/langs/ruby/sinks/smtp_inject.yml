@@ -7,7 +7,7 @@
 - id: ruby.smtpinj.mail_new
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: ruby
   tag: smtp-injection
   severity: medium

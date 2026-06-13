@@ -10,11 +10,22 @@
     kind: call
     callee:
       name: strcpy
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
-      \ arg;\n  const char *query = arg;\n  strcpy(arg);\n}\n"
-  description: "strcpy(dst, src) - unbounded copy; src length controls overflow."
+  - name: strcpy tainted source
+    code: |
+      void example(char *dst, const char *user_input) {
+        strcpy(dst, user_input);
+      }
+  - name: strcpy literal source negative
+    code: |
+      void example(char *dst) {
+        strcpy(dst, "fixed");
+      }
+    expect_no_match: true
+  description: "strcpy(dst, tainted_src) - unbounded copy; source length controls stack/heap overflow."
 - id: cpp.memory.stpcpy
   enabled: true
   language: cpp
@@ -26,11 +37,22 @@
     kind: call
     callee:
       name: stpcpy
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
-      \ arg;\n  const char *query = arg;\n  stpcpy(arg);\n}\n"
-  description: "stpcpy - unbounded copy variant."
+  - name: stpcpy tainted source
+    code: |
+      void example(char *dst, const char *user_input) {
+        stpcpy(dst, user_input);
+      }
+  - name: stpcpy literal source negative
+    code: |
+      void example(char *dst) {
+        stpcpy(dst, "fixed");
+      }
+    expect_no_match: true
+  description: "stpcpy(dst, tainted_src) - unbounded copy variant returning the end pointer."
 - id: cpp.memory.strcat
   enabled: true
   language: cpp
@@ -42,13 +64,26 @@
     kind: call
     callee:
       name: strcat
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
-      \ arg;\n  const char *query = arg;\n  strcat(arg);\n}\n"
-  description: "strcat(dst, src) - unbounded concat."
+  - name: strcat tainted source
+    code: |
+      void example(char *dst, const char *user_input) {
+        strcat(dst, user_input);
+      }
+  - name: strcat literal source negative
+    code: |
+      void example(char *dst) {
+        strcat(dst, "fixed");
+      }
+    expect_no_match: true
+  description: "strcat(dst, tainted_src) - unbounded concat; source length controls overflow."
 - id: cpp.memory.strncat
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: cpp
   tag: memory-safety
   severity: high
@@ -59,11 +94,7 @@
     kind: call
     callee:
       name: strncat
-  match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
-      \ arg;\n  const char *query = arg;\n  strncat(arg);\n}\n"
-  description: "strncat - easy to get wrong (n is remaining space, not total)."
+  description: "Disabled - strncat requires capacity/arithmetic context: n must be remaining destination capacity, not total buffer size."
 - id: cpp.memory.wcscpy
   enabled: true
   language: cpp
@@ -75,11 +106,22 @@
     kind: call
     callee:
       name: wcscpy
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
-      \ arg;\n  const char *query = arg;\n  wcscpy(arg);\n}\n"
-  description: "wcscpy - wide-char unbounded copy."
+  - name: wcscpy tainted source
+    code: |
+      void example(wchar_t *dst, const wchar_t *user_input) {
+        wcscpy(dst, user_input);
+      }
+  - name: wcscpy literal source negative
+    code: |
+      void example(wchar_t *dst) {
+        wcscpy(dst, L"fixed");
+      }
+    expect_no_match: true
+  description: "wcscpy(dst, tainted_src) - wide-char unbounded copy."
 - id: cpp.memory.wcscat
   enabled: true
   language: cpp
@@ -91,11 +133,22 @@
     kind: call
     callee:
       name: wcscat
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
-      \ arg;\n  const char *query = arg;\n  wcscat(arg);\n}\n"
-  description: "wcscat - wide-char unbounded concat."
+  - name: wcscat tainted source
+    code: |
+      void example(wchar_t *dst, const wchar_t *user_input) {
+        wcscat(dst, user_input);
+      }
+  - name: wcscat literal source negative
+    code: |
+      void example(wchar_t *dst) {
+        wcscat(dst, L"fixed");
+      }
+    expect_no_match: true
+  description: "wcscat(dst, tainted_src) - wide-char unbounded concat."
 - id: cpp.memory.gets
   enabled: true
   language: cpp
@@ -128,8 +181,7 @@
   - name: generated direct match
     code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
       \ arg;\n  const char *query = arg;\n  vsprintf(arg, \"%s\", arg);\n}\n"
-  description: "vsprintf - va_list variant of sprintf; unbounded output into\
-    \ destination buffer; tainted-format cases are covered by cpp format-string rules."
+  description: "vsprintf(dst, fmt, ap) - va_list sprintf variant with unbounded output into the destination buffer; format-string cases are covered by cpp format rules."
 - id: cpp.memory.wsprintf
   enabled: true
   language: cpp

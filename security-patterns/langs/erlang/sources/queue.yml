@@ -17,6 +17,14 @@
       -export([test/1]).
       test(Input) ->
         amqp_channel:call(Input).
+  - name: amqp_channel close negative
+    code: |
+      -module(example).
+      -include_lib("amqp_client/include/amqp_client.hrl").
+      -export([test/1]).
+      test(Input) ->
+        amqp_channel:close(Input).
+    expect_no_match: true
   description: "RabbitMQ amqp_channel:call - Delivery.payload contents flow from broker."
 
 - id: erlang.source.brod_consume
@@ -37,6 +45,14 @@
       -export([test/1]).
       test(Input) ->
         brod:fetch(Input).
+  - name: brod produce negative
+    code: |
+      -include_lib("brod/include/brod.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        brod:produce(Input).
+    expect_no_match: true
   description: "Kafka brod fetch/subscribe - consumer payload originates off-box."
 
 - id: erlang.source.amqp_basic_get
@@ -57,6 +73,14 @@
       -export([test/1]).
       test(Input) ->
         amqp_channel:cast(Input).
+  - name: amqp_channel close negative
+    code: |
+      -module(example).
+      -include_lib("amqp_client/include/amqp_client.hrl").
+      -export([test/1]).
+      test(Input) ->
+        amqp_channel:close(Input).
+    expect_no_match: true
   description: "RabbitMQ amqp_channel:cast - Basic.Get / publish flow; payload originates off-box."
 
 - id: erlang.source.gen_server_handle_call

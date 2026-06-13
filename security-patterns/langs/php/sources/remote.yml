@@ -303,6 +303,14 @@
       }
     expect_match_text:
     - "$file->getClientOriginalName"
+  - name: php.source.uploaded_file_client_original_name negative arity boundary
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($file) {
+        return $file->getClientOriginalName($file);
+      }
+    expect_no_match: true
   description: Symfony/Laravel UploadedFile::getClientOriginalName() - browser-supplied multipart filename; preserve taint into path/file-upload sinks.
   imports:
   - symfony
@@ -338,6 +346,14 @@
       }
     expect_match_text:
     - "$uploadedFile->getClientFilename"
+  - name: php.source.psr7_uploaded_file_client_filename negative arity boundary
+    code: |
+      <?php
+      use psr\httpmessage;
+      function example($uploadedFile) {
+        return $uploadedFile->getClientFilename($uploadedFile);
+      }
+    expect_no_match: true
   description: PSR-7 UploadedFileInterface::getClientFilename() - untrusted Content-Disposition filename from multipart upload.
   imports:
   - psr/httpmessage
@@ -424,15 +440,58 @@
       }
     expect_match_text:
     - "$request->getContent"
+  - name: php.source.symfony_request_get_content negative arity boundary
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($request) {
+        return $request->getContent($request, $request);
+      }
+    expect_no_match: true
   description: Symfony Request::getContent() on local request receivers; receiver-regex match is package/import gated and does not match a free `getContent()` helper.
   imports:
   - symfony
   - symfony/httpfoundation
   - symfony\httpfoundation
+- id: php.source.symfony_request_get_payload
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getPayload$"
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: php.source.symfony_request_get_payload example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      function example($input, $url, $id, $payload, $request) {
+        return $request->getPayload();
+      }
+    expect_match_text:
+    - "$request->getPayload"
+  - name: php.source.symfony_request_get_payload negative arity boundary
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($request) {
+        return $request->getPayload($request, 1);
+      }
+    expect_no_match: true
+  description: "Symfony Request::getPayload() (6.3+) - InputBag over the JSON or form-encoded request body; receiver-regex match is package/import gated. Signature is zero-arg, so max_args:0 rejects same-name decoys."
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
 - id: php.source.laravel_request_input
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   trust: remote
   tag: http-input
@@ -441,10 +500,22 @@
   match:
     kind: call
     callee:
-      attribute:
-      - Request
-      - input
-  description: Disabled - adapters index local `$request->input(...)` calls by receiver name, not Illuminate Request type facts; a bare `input` fallback would match unrelated APIs.
+      name: input
+  constraints:
+  - receiver_type_in: [Request]
+  match_examples:
+  - name: laravel request input
+    code: |
+      <?php
+      use Illuminate\Http\Request;
+      function handle(Request $request) {
+        $x = $request->input('name');
+        return $x;
+      }
+  description: "Laravel/Lumen Illuminate Request.input() - request parameter read on a typed Request receiver (covers both Laravel and Lumen, which reuse Illuminate\\Http\\Request)."
+
+  imports:
+  - Illuminate
 - id: php.source.laravel_request_all
   enabled: false
   disabled_reason:
@@ -629,6 +700,14 @@
       }
     expect_match_text:
     - "$request->getQueryParams"
+  - name: php.source.slim_request_get_params negative arity boundary
+    code: |
+      <?php
+      use slim\slim;
+      function example($request) {
+        return $request->getQueryParams($request);
+      }
+    expect_no_match: true
   description: Slim PSR-7 ServerRequestInterface::getQueryParams() on local request receivers; receiver-regex match is package/import gated.
   imports:
   - slim\slim
@@ -673,6 +752,14 @@
       }
     expect_match_text:
     - "$request->getParsedBody"
+  - name: php.source.slim_request_parsed negative arity boundary
+    code: |
+      <?php
+      use slim\slim;
+      function example($request) {
+        return $request->getParsedBody($request);
+      }
+    expect_no_match: true
   description: Slim PSR-7 ServerRequestInterface::getParsedBody() on local request receivers; receiver-regex match is package/import gated.
   imports:
   - slim\slim
@@ -974,6 +1061,32 @@
   - name: php.source.server_http_x_forwarded_for example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_FOR;;\n}\n"
   description: $_SERVER['HTTP_X_FORWARDED_FOR'] - proxy-supplied client IP chain; spoofable when the app does not strip it at the trusted edge.
+- id: php.source.server_http_x_forwarded_host
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: HTTP_X_FORWARDED_HOST
+  match_examples:
+  - name: php.source.server_http_x_forwarded_host example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_HOST;;\n}\n"
+  description: $_SERVER['HTTP_X_FORWARDED_HOST'] - proxy-supplied host header; the classic host-header-injection vector for password-reset poisoning and cache poisoning when the app builds absolute URLs from it.
+- id: php.source.server_http_x_forwarded_proto
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: HTTP_X_FORWARDED_PROTO
+  match_examples:
+  - name: php.source.server_http_x_forwarded_proto example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_PROTO;;\n}\n"
+  description: $_SERVER['HTTP_X_FORWARDED_PROTO'] - proxy-supplied scheme header; spoofable and used in scheme-relative redirect/URL construction.
 - id: php.source.wp_unslash
   enabled: true
   language: php
@@ -1019,7 +1132,7 @@
 - id: php.source.laravel_auth_user
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: over-broad
   language: php
   trust: remote
   tag: http-input
@@ -1033,7 +1146,8 @@
 - id: php.source.lumen_request_input
   enabled: false
   disabled_reason:
-    code: pending-adapter-fact
+    code: subsumed
+    subsumed_by: php.source.laravel_request_input
   language: php
   trust: remote
   tag: http-input
@@ -1045,7 +1159,7 @@
       attribute:
       - Request
       - input
-  description: Disabled - Lumen reuses Illuminate\Http\Request; same typed-receiver limitation as php.source.laravel_request_input. Tracked here so audits know Lumen is intentionally covered by the Laravel rules once the adapter resolves typed receivers.
+  description: "Subsumed by php.source.laravel_request_input: Lumen reuses Illuminate\\Http\\Request, so the now-enabled receiver-typed Laravel rule (imports: [Illuminate]) already covers `$request->input(...)` in Lumen apps."
 
 - id: php.source.graphql_resolver_args_param
   enabled: true

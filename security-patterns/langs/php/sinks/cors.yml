@@ -12,6 +12,10 @@
     kind: call
     callee:
       regex: ^header$
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: 'Access-Control-Allow-Origin:\s*\*'
   match_examples:
   - name: php.cors.allow_origin_wildcard_header example
     code: |
@@ -21,7 +25,15 @@
       function example($input, $url, $id, $payload, $request) {
         header("Access-Control-Allow-Origin: *");
       }
-  description: 'header(''Access-Control-Allow-Origin: *'') - explicit wildcard CORS via header(). Merged aliases: php.header.builtin, php.smuggle.header_dual_cl_te.'
+  - name: php.cors.allow_origin_wildcard_header content type negative
+    code: |
+      <?php
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        header("Content-Type: application/json");
+      }
+    expect_no_match: true
+  description: 'header(''Access-Control-Allow-Origin: *'') - explicit wildcard CORS via header(). The arg_matches_regex gate keeps this off ordinary header() calls (Content-Type, Location, etc.) and fires only on the wildcard ACAO shape. Merged aliases: php.header.builtin, php.smuggle.header_dual_cl_te.'
   aliases:
   - php.header.builtin
   - php.smuggle.header_dual_cl_te

@@ -1413,6 +1413,8 @@
     kind: call
     callee:
       regex: "\\.Body$"
+  constraints:
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: fiber body
     code: |
@@ -1422,7 +1424,17 @@
         _ = c.Body()
       }
     expect_match_text: [c.Body]
-  description: "fiber c.Body() - raw attacker-controlled request body bytes."
+  - name: unrelated receiver body negative
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      type resp struct{}
+      func (r resp) Body() []byte { return nil }
+      func handler(r resp) {
+        _ = r.Body()
+      }
+    expect_no_match: true
+  description: "fiber c.Body() - raw attacker-controlled request body bytes. Receiver-type gate keeps the bare `.Body()` tail off unrelated receivers (HTTP client responses, third-party readers)."
 - id: go.fiber.context_bodyparser
   enabled: true
   language: go
@@ -1592,6 +1604,49 @@
       }
     expect_match_text: [ctx.PostArgs]
   description: "fasthttp RequestCtx.PostArgs() - attacker-controlled POST form values."
+- id: go.fasthttp.request_input
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form, path]
+  packages: ["github.com/valyala/fasthttp"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(FormValue|UserValue)$"
+  constraints:
+  - receiver_type_in: [RequestCtx]
+  - min_args: 1
+  match_examples:
+  - name: fasthttp form value
+    code: |
+      package main
+      import "github.com/valyala/fasthttp"
+      func handler(ctx *fasthttp.RequestCtx) {
+        _ = ctx.FormValue("name")
+      }
+    expect_match_text: [ctx.FormValue]
+  - name: fasthttp user value
+    code: |
+      package main
+      import "github.com/valyala/fasthttp"
+      func handler(ctx *fasthttp.RequestCtx) {
+        _ = ctx.UserValue("id")
+      }
+    expect_match_text: [ctx.UserValue]
+  - name: unrelated receiver form value negative
+    code: |
+      package main
+      import "github.com/valyala/fasthttp"
+      type form struct{}
+      func (f form) FormValue(k string) string { return "" }
+      func handler(f form) {
+        _ = f.FormValue("name")
+      }
+    expect_no_match: true
+  description: "fasthttp RequestCtx.FormValue(key) / UserValue(key) (router path param) - attacker-controlled request input. Receiver-type gate to RequestCtx keeps the common `.FormValue`/`.UserValue` tails off unrelated receivers."
 
 - id: go.websocket.conn_readmessage
   enabled: true

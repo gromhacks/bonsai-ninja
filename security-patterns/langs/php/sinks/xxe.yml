@@ -188,7 +188,9 @@
   description: "XMLReader::xml."
 
 - id: php.xxe.xml_parser_create
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: php
   tag: xxe
   category: source-independent
@@ -198,14 +200,7 @@
     kind: call
     callee:
       name: xml_parser_create
-  match_examples:
-    - name: php.xxe.xml_parser_create example
-      code: |
-        <?php
-        function example($input, $url, $id, $payload, $request) {
-          xml_parser_create($input);
-        }
-  description: "xml_parser_create - expat (no DTD by default); paired with xml_parse feeds tainted XML."
+  description: "Disabled - xml_parser_create only constructs an expat parser and DTD processing is not enabled by default; php.xxe.xml_parse models the untrusted XML data path."
 
 - id: php.xxe.xml_parse
   enabled: true

@@ -32,7 +32,7 @@ use bonsai_taint::{
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
@@ -382,7 +382,7 @@ pub const ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS: &[&str] = &["solidity"];
 /// deliberate design choice, not missing coverage.
 pub const FAMILY_NOT_APPLICABLE: &[(&str, &str)] = &[("c", "deserialization")];
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FindingWithChain {
     #[serde(flatten)]
     pub finding: Finding,
@@ -392,21 +392,21 @@ pub struct FindingWithChain {
 
 /// A rendered finding may contain multiple source/sink sites when they
 /// collapse onto the same resolved semantic flow.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CombinedFindingWithChain {
     #[serde(flatten)]
     pub finding: Finding,
     #[serde(skip)]
     pub chain_funcs: Vec<FuncId>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_sources: Vec<FindingMatch>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_sinks: Vec<FindingMatch>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_finding_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaintAnalysisReport {
     pub findings: Vec<CombinedFindingWithChain>,
     pub source_rule_count: usize,
@@ -449,7 +449,7 @@ pub struct SourceAnalysisCandidate {
     pub lineage: SourceLineageStatus,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CombinedSourceAnalysisCandidate {
     pub source: FindingMatch,
     pub chain_names: Vec<String>,
@@ -3511,10 +3511,10 @@ struct CallEvidence {
     sink_tainted_args: Vec<TaintedArgInfo>,
 }
 
-fn build_call_evidence(
+fn build_call_evidence<'a>(
     ws: &Workspace,
-    trace_index: &AHashMap<u64, &TaintedCallEdge>,
-    canonical_chain_index: &CanonicalChainIndex,
+    trace_index: &AHashMap<u64, &'a TaintedCallEdge>,
+    canonical_chain_index: &CanonicalChainIndex<'a>,
     source_func: FuncId,
     call: &TaintedCall,
     graph_saturated: bool,
@@ -3528,14 +3528,24 @@ fn build_call_evidence(
     if graph_saturated {
         return None;
     }
-    let records = lineage_records_for_call_indexed(trace_index, call)?;
+    let mut records = lineage_records_for_call_indexed(trace_index, call)?;
     let primary = chain_funcs_for_lineage(&records, source_func, call.caller)?;
     // Chain-quality upgrade: when the lineage walk anchored on
     // `parent_trace_id` goes through synthetic edges (Phase 3c field-flow
     // stitches, Phase 3d receiver-method propagation, or Return back-edges),
     // prefer an equivalent canonical call sequence with fewer synthetic hops.
-    let chain_funcs =
-        rewrite_chain_with_canonical_path(primary, canonical_chain_index, source_func, call.caller);
+    let mut chain_funcs =
+        rewrite_chain_with_canonical_path(primary.clone(), canonical_chain_index, source_func, call.caller);
+    // The chain and the taint_path must describe the SAME route: rebuild
+    // the step records along the rewritten chain from the recorded edges
+    // it was found through. If any hop lacks a recorded edge, the rewrite
+    // cannot be evidenced — keep the original lineage route instead.
+    if chain_funcs != primary {
+        match canonical_chain_index.records_along_chain(&chain_funcs) {
+            Some(rewritten) => records = rewritten,
+            None => chain_funcs = primary,
+        }
+    }
     let chain_precision = chain_precision_for_records(&records);
     if !chain_precision.is_semantic() {
         return None;
@@ -3619,17 +3629,22 @@ fn lineage_records_for_trace_id_indexed<'a>(
 /// sentinel `arg_idx == usize::MAX`). Only fires when the alternative
 /// strictly reduces synthetic-edge count AND covers at least as many
 /// distinct functions. Otherwise the original chain is returned.
-struct CanonicalChainIndex {
+struct CanonicalChainIndex<'a> {
     adjacency: AHashMap<FuncId, Vec<(FuncId, bool)>>,
     edge_has_any: AHashSet<(FuncId, FuncId)>,
     edge_has_real: AHashSet<(FuncId, FuncId)>,
+    /// Representative record per edge — a real (non-synthetic) one when
+    /// any exists. Lets a canonically rewritten chain rebuild its
+    /// taint_path from the actual recorded propagation on each hop.
+    edge_record: AHashMap<(FuncId, FuncId), &'a TaintedCallEdge>,
 }
 
-impl CanonicalChainIndex {
-    fn new(records: &[TaintedCallEdge], call_graph: &bonsai_callgraph::ResolvedCallGraph) -> Self {
+impl<'a> CanonicalChainIndex<'a> {
+    fn new(records: &'a [TaintedCallEdge], call_graph: &bonsai_callgraph::ResolvedCallGraph) -> Self {
         let mut edge_synthetic: AHashMap<(FuncId, FuncId), bool> = AHashMap::default();
         let mut edge_has_any = AHashSet::default();
         let mut edge_has_real = AHashSet::default();
+        let mut edge_record: AHashMap<(FuncId, FuncId), &'a TaintedCallEdge> = AHashMap::default();
         let mut callgraph_edge_cache: AHashMap<(FuncId, FuncId), bool> = AHashMap::default();
         for record in records {
             let edge = (record.caller, record.callee);
@@ -3639,7 +3654,14 @@ impl CanonicalChainIndex {
             let is_synthetic = edge_is_synthetic(record, has_semantic_call_edge);
             edge_has_any.insert(edge);
             if !is_synthetic {
+                // First real record wins (record order is deterministic);
+                // a real record always replaces a synthetic placeholder.
+                if !edge_has_real.contains(&edge) {
+                    edge_record.insert(edge, record);
+                }
                 edge_has_real.insert(edge);
+            } else {
+                edge_record.entry(edge).or_insert(record);
             }
             edge_synthetic
                 .entry(edge)
@@ -3657,7 +3679,22 @@ impl CanonicalChainIndex {
             adjacency,
             edge_has_any,
             edge_has_real,
+            edge_record,
         }
+    }
+
+    /// Recorded propagation edges along `chain`, one per adjacent pair.
+    /// `None` when any hop has no recorded edge — the chain then cannot
+    /// be evidenced step-by-step and callers must keep the original
+    /// lineage instead.
+    fn records_along_chain(&self, chain: &[FuncId]) -> Option<Vec<&'a TaintedCallEdge>> {
+        if chain.len() < 2 {
+            return None;
+        }
+        chain
+            .windows(2)
+            .map(|pair| self.edge_record.get(&(pair[0], pair[1])).copied())
+            .collect()
     }
 }
 
@@ -3673,7 +3710,7 @@ fn semantic_callgraph_has_edge(
 
 fn rewrite_chain_with_canonical_path(
     primary: Vec<FuncId>,
-    index: &CanonicalChainIndex,
+    index: &CanonicalChainIndex<'_>,
     source_func: FuncId,
     terminal_func: FuncId,
 ) -> Vec<FuncId> {
@@ -3715,7 +3752,7 @@ fn edge_is_synthetic(record: &TaintedCallEdge, has_semantic_call_edge: bool) -> 
         .all(|arg| arg.index == usize::MAX || arg.index == 255)
 }
 
-fn chain_synth_count(chain: &[FuncId], index: &CanonicalChainIndex) -> usize {
+fn chain_synth_count(chain: &[FuncId], index: &CanonicalChainIndex<'_>) -> usize {
     let mut count = 0;
     for window in chain.windows(2) {
         let (a, b) = (window[0], window[1]);
@@ -3736,7 +3773,7 @@ fn chain_synth_count(chain: &[FuncId], index: &CanonicalChainIndex) -> usize {
 /// search at `MAX_HOPS` per path so degenerate fanouts don't
 /// blow up the heap.
 fn best_chain_through_real_edges(
-    index: &CanonicalChainIndex,
+    index: &CanonicalChainIndex<'_>,
     source_func: FuncId,
     terminal_func: FuncId,
 ) -> Option<Vec<FuncId>> {
@@ -3841,24 +3878,17 @@ fn chain_funcs_for_lineage(
     Some(deduped)
 }
 
-fn propagation_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> Option<TaintPropagationStep> {
+fn propagation_step_for_edge(
+    ws: &Workspace,
+    record: &TaintedCallEdge,
+    names: &AHashMap<FuncId, String>,
+) -> Option<TaintPropagationStep> {
     if record.caller == record.callee {
         return None;
     }
     let (file, line, column) = resolve_span_location(ws, record.call_span);
-    let caller = func_display_name(ws, record.caller);
-    let callee = func_display_name(ws, record.callee);
-    let same_name = caller == callee;
-    let caller = if same_name {
-        func_display_name_with_site(ws, record.caller)
-    } else {
-        caller
-    };
-    let callee = if same_name {
-        func_display_name_with_site(ws, record.callee)
-    } else {
-        callee
-    };
+    let caller = path_display_name(ws, names, record.caller);
+    let callee = path_display_name(ws, names, record.callee);
     TaintPropagationStep {
         caller,
         callee,
@@ -3878,7 +3908,11 @@ fn propagation_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> Option
     .into()
 }
 
-fn propagation_step_for_terminal_call(ws: &Workspace, call: &TaintedCall) -> TaintPropagationStep {
+fn propagation_step_for_terminal_call(
+    ws: &Workspace,
+    call: &TaintedCall,
+    names: &AHashMap<FuncId, String>,
+) -> TaintPropagationStep {
     let (file, line, column) = resolve_span_location(ws, call.call_span);
     let mut tainted_args: Vec<TaintPropagationArg> = call
         .tainted_args
@@ -3896,7 +3930,7 @@ fn propagation_step_for_terminal_call(ws: &Workspace, call: &TaintedCall) -> Tai
             param_name: receiver.to_string(),
         });
     }
-    let caller = func_display_name(ws, call.caller);
+    let caller = path_display_name(ws, names, call.caller);
     TaintPropagationStep {
         caller: if caller == call.name {
             func_display_name_with_site(ws, call.caller)
@@ -3916,14 +3950,67 @@ fn taint_path_for_lineage(
     records: &[&TaintedCallEdge],
     terminal_call: Option<&TaintedCall>,
 ) -> Vec<TaintPropagationStep> {
+    let names = path_display_names(ws, records, terminal_call);
     let mut path: Vec<TaintPropagationStep> = records
         .iter()
-        .filter_map(|record| propagation_step_for_edge(ws, record))
+        .filter_map(|record| propagation_step_for_edge(ws, record, &names))
         .collect();
     if let Some(call) = terminal_call {
-        path.push(propagation_step_for_terminal_call(ws, call));
+        path.push(propagation_step_for_terminal_call(ws, call, &names));
     }
     normalize_taint_path(path)
+}
+
+/// Display names for every function on a taint path. A bare name that
+/// covers more than one distinct function anywhere on the path is
+/// qualified with `@file:line` on EVERY step — the same policy
+/// `chain_names_for_path` applies to the chain — so adjacent steps'
+/// callee/caller strings always join and the path agrees with
+/// `chain_display`. Per-step qualification (the old behavior) rendered
+/// the same function bare in one step and qualified in the next,
+/// making connected chains look broken.
+fn path_display_names(
+    ws: &Workspace,
+    records: &[&TaintedCallEdge],
+    terminal_call: Option<&TaintedCall>,
+) -> AHashMap<FuncId, String> {
+    let mut funcs: Vec<FuncId> = Vec::with_capacity(records.len() * 2 + 1);
+    for record in records {
+        funcs.push(record.caller);
+        funcs.push(record.callee);
+    }
+    if let Some(call) = terminal_call {
+        funcs.push(call.caller);
+    }
+    funcs.sort_unstable();
+    funcs.dedup();
+    let mut by_name: BTreeMap<String, Vec<FuncId>> = BTreeMap::new();
+    for func in &funcs {
+        by_name
+            .entry(func_display_name(ws, *func))
+            .or_default()
+            .push(*func);
+    }
+    let mut names = AHashMap::with_capacity(funcs.len());
+    for (name, ids) in by_name {
+        let ambiguous = ids.len() > 1;
+        for func in ids {
+            let display = if ambiguous {
+                func_display_name_with_site(ws, func)
+            } else {
+                name.clone()
+            };
+            names.insert(func, display);
+        }
+    }
+    names
+}
+
+fn path_display_name(ws: &Workspace, names: &AHashMap<FuncId, String>, func: FuncId) -> String {
+    names
+        .get(&func)
+        .cloned()
+        .unwrap_or_else(|| func_display_name(ws, func))
 }
 
 fn normalize_taint_path(path: Vec<TaintPropagationStep>) -> Vec<TaintPropagationStep> {
@@ -4298,15 +4385,22 @@ fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> 
         })
         .collect();
     let named_funcs = named_funcs?;
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for (_, name) in &named_funcs {
-        *counts.entry(name.clone()).or_default() += 1;
+    // Qualify only when one bare name covers more than one DISTINCT
+    // function — same policy as `path_display_names`, so the chain and
+    // the taint path render every hop identically. A function repeated
+    // in the chain (recursion) stays bare.
+    let mut funcs_by_name: BTreeMap<String, BTreeSet<FuncId>> = BTreeMap::new();
+    for (func, name) in &named_funcs {
+        funcs_by_name.entry(name.clone()).or_default().insert(*func);
     }
     Some(
         named_funcs
             .into_iter()
             .map(|(func, name)| {
-                if counts.get(&name).copied().unwrap_or_default() > 1 {
+                if funcs_by_name
+                    .get(&name)
+                    .is_some_and(|distinct| distinct.len() > 1)
+                {
                     func_display_name_with_site(ws, func)
                 } else {
                     name
@@ -4332,9 +4426,9 @@ fn rule_match_identity_token(rule_id: &str, m: &RuleMatch) -> String {
 }
 
 /// Join a chain into a key of the hop names as rendered. `chain_names_for_path`
-/// suffixes repeated names with `@file:line` to keep the raw chain unique, but
-/// that suffix never reaches the output — strip it so equivalently-rendered
-/// chains share one key.
+/// suffixes ambiguous names with `@file:line` so the rendered chain stays
+/// unambiguous; strip the suffix here so equivalently-named chains share one
+/// grouping key regardless of which concrete decl each hop resolved to.
 fn displayed_chain_key(chain_names: &[String]) -> String {
     chain_names
         .iter()
@@ -4591,42 +4685,29 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
     let mut groups: Vec<CombinedFindingWithChain> = Vec::new();
     let mut index: AHashMap<String, usize> = AHashMap::new();
 
-    // Stable-sort so that within each `(language, group_id,
-    // representative_flow_id, chain, sink.rule_id)` bucket — which is
-    // what `combined_finding_key` collapses into one group — the most
-    // specific source becomes the primary one preserved on the merged
-    // finding. The combiner's `merge_finding_into_group` keeps the
-    // first-seen source as primary and demotes everything else to
-    // `additional_sources`; without a deterministic preference,
-    // co-tainted siblings can win and mis-label the chain (e.g. php's
-    // `$_SERVER` taking precedence over the real `readline` source for
-    // a cmd-injection finding even though both reach the sink through
-    // the same `$envelope` container).
+    // Stable-sort so that within each `(language, group_id, sink site)`
+    // bucket — which is what `combined_finding_key` collapses into one
+    // group — the most specific source becomes the primary one preserved
+    // on the merged finding. The combiner's `merge_finding_into_group`
+    // keeps the first-seen finding's source AND flow evidence
+    // (`chain_display` / `taint_path` / `representative_flow_id` /
+    // `chain_funcs`) as primary and demotes other members' sources to
+    // `additional_sources`, dropping their evidence.
     //
-    // Ordering criteria (lower is better → becomes primary):
-    //   1. Sources whose `rule_id` starts with `entry-point.` or
-    //      contains `.unreferenced_entry.` are inferred over-approxi-
-    //      mations — push them to the back so a concrete source rule
-    //      always wins when both are present in the same group.
-    //   2. Sources whose `tag == sink.tag` are direct semantic matches
-    //      (a `cli-input` source reaching a `command-injection` sink
-    //      via the cmd-channel is more specific than a co-tainted
-    //      `web-input` source threading through the same envelope).
-    //   3. Otherwise: alphabetical by `rule_id`. Source rule IDs use
-    //      `<lang>.<category>.<name>` so this prefers e.g.
-    //      `php.source.readline` over `php.source.superglobal_server`,
-    //      matching the "more specific / less broad" intuition.
+    // The ordering here MUST therefore agree with the source ranking
+    // `finalize_combined_finding` applies later
+    // (`source_preference_rank_for_sink`, then source location, then
+    // rule id). If the two disagree, finalize promotes a merged member's
+    // source onto a finding that kept a DIFFERENT member's flow
+    // evidence — the reported source then never appears on the reported
+    // path and the hops carry no source-role line. Within a bucket every
+    // member shares the same sink site and rule, so ranking against the
+    // member's own sink is the same as ranking against the merged
+    // group's primary sink.
     findings.sort_by(|a, b| {
-        let inferred = |rule_id: &str| {
-            rule_id.starts_with("entry-point.")
-                || rule_id.contains(".unreferenced_entry.")
-                || rule_id.contains(".class_field.inherited")
-        };
-        let inferred_a = inferred(&a.finding.source.rule_id);
-        let inferred_b = inferred(&b.finding.source.rule_id);
         // Sort bucket MUST match `combined_finding_key`'s grouping
         // dimensions (language, group_id, sink site) — excluding
-        // `representative_flow_id` / chain — so the inferred / source-rule
+        // `representative_flow_id` / chain — so the source-preference
         // tiebreakers below decide the primary source WITHIN each merge
         // group rather than being pre-split by flow id.
         let bucket_a = (
@@ -4645,7 +4726,23 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
         );
         bucket_a
             .cmp(&bucket_b)
-            .then(inferred_a.cmp(&inferred_b))
+            .then_with(|| {
+                source_preference_rank_for_sink(&a.finding.source, Some(&a.finding.sink)).cmp(
+                    &source_preference_rank_for_sink(&b.finding.source, Some(&b.finding.sink)),
+                )
+            })
+            .then_with(|| {
+                (
+                    a.finding.source.file.as_str(),
+                    a.finding.source.line,
+                    a.finding.source.column,
+                )
+                    .cmp(&(
+                        b.finding.source.file.as_str(),
+                        b.finding.source.line,
+                        b.finding.source.column,
+                    ))
+            })
             .then_with(|| a.finding.source.rule_id.cmp(&b.finding.source.rule_id))
     });
 
@@ -6355,6 +6452,31 @@ fn source_index_sink_corridor(
         config.max_edge_precision,
     );
     if cut.is_empty() {
+        if bonsai_diagnostics::debug::is_enabled("security-taint") {
+            let describe = |nodes: &[bonsai_idg::WsNodeId]| {
+                nodes
+                    .iter()
+                    .map(|n| {
+                        idg.resolve_point(*n)
+                            .map(|p| format!("{n:?}@func{}:{:?}", p.func.raw(), p.kind))
+                            .unwrap_or_else(|| format!("{n:?}:unresolved"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let unscoped =
+                idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, sink_target_nodes, None);
+            bonsai_diagnostics::debug_log!(
+                "security-taint",
+                "empty cut rule={} seed_names={:?} anchor={:?} seeds=[{}] targets=[{}] unscoped_cut={}",
+                src.rule_id,
+                seeds.iter().collect::<Vec<_>>(),
+                anchor,
+                describe(&seed_nodes),
+                describe(sink_target_nodes),
+                unscoped.len()
+            );
+        }
         return (!sink_target_nodes_complete).then(|| coarse_corridor.clone());
     }
     let mut corridor = SourceSinkCorridor::default();
@@ -6592,16 +6714,20 @@ fn effective_source_seed_nodes(
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<bonsai_idg::WsNodeId> {
     let mut seed_nodes = Vec::new();
-    let seed_names: Vec<String> = seeds.iter().cloned().collect();
+    // A source rule whose seed names a bare container (`args`, `env`)
+    // taints every projection of that container: expand each bare name
+    // with its descendant wildcard so `read_or_write_nodes_for_names`
+    // also returns field-precise reads like `args.q`. Projected seeds
+    // (`x.y`) stay as-is — a tainted field must never promote its
+    // container or siblings.
+    let seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(seeds.iter());
     if anchor.is_none() {
         if seed_names.is_empty() {
             seed_nodes.extend(idg.param_nodes_of(source_func));
         } else {
             seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
         }
-        if seed_nodes.is_empty() {
-            seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
-        }
+        seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
         seed_nodes.sort();
         seed_nodes.dedup();
         return seed_nodes;
@@ -6628,6 +6754,14 @@ fn effective_source_seed_nodes(
             }
         } else {
             seed_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
+            // A read-kind source whose matched name is a parameter of
+            // the enclosing function taints from the parameter binding.
+            // The IDG routes consumers from the param / last-writer
+            // node (shared `Read` places are span-less introspection
+            // anchors with no forward edges of their own), so the param
+            // node is what connects a bare seed like `args` to its
+            // projected consumers (`args["q"]` → sink-call argument).
+            seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
             if seed_nodes.is_empty() {
                 seed_nodes = anchor_nodes;
             }
