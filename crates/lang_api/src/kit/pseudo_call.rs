@@ -33,8 +33,8 @@ use bonsai_common::FileId;
 use tree_sitter::Node;
 
 use super::{
-    argument_place, extract_rhs_expr_operands, first_named_child, looks_like_bare_identifier,
-    looks_like_identifier, node_text, normalize_call_name_whitespace, span_of, CallArg, CallKind, FlowEvent,
+    argument_place, extract_rhs_expr_operands, first_named_child, looks_like_bare_identifier, node_text,
+    normalize_call_name_whitespace, span_of, CallArg, CallKind, FlowEvent,
 };
 
 pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
@@ -217,9 +217,6 @@ fn jsx_call_from_opening(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<Fl
 /// expression args like `eval $expr`, `echo "x"`, and `delete obj.field`
 /// without needing to enumerate every literal/identifier kind upfront.
 fn named_child_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
-    // Suppress `looks_like_identifier` unused-import warning — we keep
-    // the import so the predicate stays available for future filters.
-    let _ = looks_like_identifier;
     let mut call_args = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {

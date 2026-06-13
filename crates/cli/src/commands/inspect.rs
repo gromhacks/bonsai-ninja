@@ -2031,7 +2031,22 @@ fn render_inspect_report_text(
             .copied()
             .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == *c)
             .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0)),
-        paging::PageArg::Next => page_starts.first().copied().unwrap_or(0),
+        paging::PageArg::Next => {
+            // `--page next` advances past the page recorded in the
+            // last-cursor history; falls back to page 1 with no history.
+            // (The hand-rolled resolver here must mirror
+            // `paging::paginate`'s Next handling.)
+            paging::last_cursor("inspect", filters_hash)
+                .and_then(|cur| {
+                    page_starts
+                        .iter()
+                        .position(|off| {
+                            paging::cursor_id("inspect", filters_hash, *off as u64) == cur
+                        })
+                        .and_then(|idx| page_starts.get(idx + 1).copied())
+                })
+                .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0))
+        }
     };
     let page_number = page_starts
         .iter()
@@ -2039,6 +2054,13 @@ fn render_inspect_report_text(
         .map(|i| (i + 1) as u64)
         .unwrap_or(1);
     let start_offset = requested_start_offset;
+    // Persist this page's cursor so a subsequent `--page next` advances
+    // from here, matching `paging::paginate`'s behavior.
+    paging::write_last_cursor(
+        "inspect",
+        filters_hash,
+        &paging::cursor_id("inspect", filters_hash, start_offset as u64),
+    );
     // Estimate uncapped render size: sum every unit's full-cost
     // estimate (chain bodies + headers). Gives the user an honest
     // "the full inspect output would be ~N tokens if you passed
@@ -3357,6 +3379,11 @@ pub(crate) fn render_flow_with_cached_call_spans(
     if !precision.is_semantic() {
         return None;
     }
+    // An empty chain has nothing to render and would underflow the
+    // `chain_len - 1` default match index below.
+    if chain.is_empty() {
+        return None;
+    }
     let global = ws.db().global_index();
     // Chains now carry FuncIds all the way from enumeration, so each
     // hop resolves to exactly one decl — no name collision, no fallback
@@ -3488,11 +3515,11 @@ fn group_flows_by_suffix(flows: &[InspectFlowRendered]) -> Vec<InspectFlowGroup>
     let mut bucket_index_by_sink: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
     let mut buckets: Vec<(String, Vec<&InspectFlowRendered>)> = Vec::new();
     for flow in flows {
-        let sink_name = flow
-            .chain
-            .last()
-            .cloned()
-            .unwrap_or_else(|| "<empty>".to_string());
+        // Empty chains can't be grouped (the suffix math below subtracts
+        // from `chain.len()`) and have no sink to bucket on — skip them.
+        let Some(sink_name) = flow.chain.last().cloned() else {
+            continue;
+        };
         let bucket_idx = *bucket_index_by_sink.entry(sink_name.clone()).or_insert_with(|| {
             buckets.push((sink_name.clone(), Vec::new()));
             buckets.len() - 1

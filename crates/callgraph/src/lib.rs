@@ -5110,12 +5110,14 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         // bare-tail fallback ONLY when the qualifier resolves to
         // an in-workspace alias. See the matching guard at the
         // build-time call site above for the full rationale.
-        // The legacy taint engine still routes through this entry
-        // and doesn't share the callgraph build's WorkspaceAliasIndex,
-        // so we build a local one — call-frequency here is bounded
-        // by the legacy engine's per-source pass.
-        let local_alias_index = WorkspaceAliasIndex::build(global);
         let allow_short_fallback = if let Some(idx) = name.find("::") {
+            // The legacy taint engine still routes through this entry and
+            // doesn't share the callgraph build's WorkspaceAliasIndex, so we
+            // build a local one. Build it lazily inside this `::` arm only:
+            // the no-qualifier majority (the `else` below) never consults it,
+            // and an unconditional per-call-site build is the rewalk pattern
+            // the project forbids.
+            let local_alias_index = WorkspaceAliasIndex::build(global);
             let qualifier = &name[..idx];
             alias_targets
                 .get(qualifier)
@@ -5200,9 +5202,11 @@ pub fn short_callee(name: &str) -> &str {
 /// once per `resolve_callable_symbol` call when entered standalone)
 /// and trusted across every alias lookup inside that pass.
 ///
-/// * `class_names` — every `DeclKind::Class` decl's bare name.
-///   Covers `AliasTarget::Type` rebindings (`let r: Repository`)
-///   and Rust-style `Foo::method` where `Foo` is a user struct.
+/// * `class_names` — every class-like type decl's bare name
+///   (`Class`/`Struct`/`Trait`/`Interface`/`Enum`). Covers
+///   `AliasTarget::Type` rebindings (`let r: Repository`) and
+///   Rust-style `Foo::method` where `Foo` is a user struct, trait,
+///   or enum — not just a `class`.
 /// * `module_canonicals` — every decl's `module_path.segments`
 ///   joined with both `::` and `.` separators, so alias targets
 ///   spelled `crate::storage`, `storage`, or `app.storage` all
@@ -5224,7 +5228,14 @@ impl WorkspaceAliasIndex {
         let mut module_canonicals: ahash::AHashSet<String> = ahash::AHashSet::default();
         for file in global.all_files() {
             for decl in global.decls_in(file) {
-                if matches!(decl.kind, DeclKind::Class) {
+                if matches!(
+                    decl.kind,
+                    DeclKind::Class
+                        | DeclKind::Struct
+                        | DeclKind::Trait
+                        | DeclKind::Interface
+                        | DeclKind::Enum
+                ) {
                     class_names.insert(decl.name.clone());
                 }
                 if !decl.module_path.is_empty() {

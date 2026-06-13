@@ -473,7 +473,7 @@ fn cursor_store() -> &'static std::sync::Mutex<AHashMap<(String, u64), String>> 
     LAST_CURSORS.get_or_init(|| std::sync::Mutex::new(AHashMap::new()))
 }
 
-fn last_cursor(command: &str, filters_hash: u64) -> Option<String> {
+pub(crate) fn last_cursor(command: &str, filters_hash: u64) -> Option<String> {
     let key = cursor_key(command, filters_hash);
     if let Some(cursor) = cursor_store()
         .lock()
@@ -485,7 +485,7 @@ fn last_cursor(command: &str, filters_hash: u64) -> Option<String> {
     read_cursor_file().get(&key).cloned()
 }
 
-fn write_last_cursor(command: &str, filters_hash: u64, cursor: &str) {
+pub(crate) fn write_last_cursor(command: &str, filters_hash: u64, cursor: &str) {
     let key = cursor_key(command, filters_hash);
     if let Ok(mut m) = cursor_store().lock() {
         m.insert((key.clone(), filters_hash), cursor.to_string());

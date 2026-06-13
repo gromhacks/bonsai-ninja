@@ -312,8 +312,6 @@ impl IdgWorkspace {
         &self.cross_file
     }
 
-    /// Mutably borrow the cross-file edge index. Used by the Phase 3
-    /// builder when it stitches inter-segment edges.
     /// Read-only access to the cross-method field-flow links.
     pub fn field_flow(&self) -> &[FieldFlowLink] {
         &self.field_flow

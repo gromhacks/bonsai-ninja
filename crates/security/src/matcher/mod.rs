@@ -2932,7 +2932,11 @@ fn canonical_flow_read_match_span(ws: &Workspace, file: FileId, span: Span, matc
     if start >= end || end > source.len() {
         return span;
     }
-    let raw = &source[start..end];
+    // `start`/`end` are adapter span offsets; bail rather than panic if a
+    // multi-byte UTF-8 char straddles either bound.
+    let Some(raw) = source.get(start..end) else {
+        return span;
+    };
     let preferred_start = raw.find('=').map_or(0, |idx| idx + 1);
     let offset = raw[preferred_start..]
         .find(match_text)
@@ -3575,8 +3579,7 @@ fn collect_decl_decorator_names(ws: &Workspace, file: FileId, decl_span: Span) -
         if let Some(text) = source_text.as_deref() {
             let start = r.span.start as usize;
             let end = r.span.end as usize;
-            if start < text.len() && end <= text.len() && start < end {
-                let raw = &text[start..end];
+            if let Some(raw) = (start < end).then(|| text.get(start..end)).flatten() {
                 let head = raw
                     .trim_start_matches('@')
                     .split(|c: char| c == '(' || c.is_whitespace())
@@ -3915,9 +3918,14 @@ fn lifecycle_state_at(
 ) -> Option<String> {
     let mut state: Option<&str> = None;
     for (span, n, t) in transitions {
-        // Sorted ascending; once we pass the call site we can stop.
+        // Transitions are sorted by `span.start`, which does NOT make
+        // `span.end` monotonic — a wide early span can end after the call
+        // while a later narrow span ends before it. So `skip` (continue)
+        // transitions that end after the call rather than `break`, or we'd
+        // miss a valid later transition behind a wide earlier one. The last
+        // matching transition in start order is the latest state.
         if span.end > call_span_start {
-            break;
+            continue;
         }
         if n == name {
             state = Some(t.as_str());
@@ -4695,7 +4703,7 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 /// | `ArgCount`                   | exact arg count match                              |
 /// | `MinArgs` / `MaxArgs`        | min / max arg-count gate                           |
 /// | `SecondArgEquals`            | `arg[1]` equals literal                            |
-/// | `ArgEquals`                  | `arg[index]` equals literal (or one of a list)     |
+/// | `ArgEquals`                  | `arg[index]` equals the literal value              |
 /// | `KeywordArgEquals`           | named arg equals literal                           |
 /// | `ArgTainted`                 | `arg[index/kw]` is tainted (RealCall/NestedRecv)   |
 /// | `ReceiverTainted`            | call receiver is tainted (RealCall/NestedRecv)     |

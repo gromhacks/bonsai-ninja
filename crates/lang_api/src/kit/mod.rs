@@ -1773,11 +1773,13 @@ fn walk_into(
         return;
     }
     if handler.is_throw(kind) {
-        out.push(FlowEvent::Throw {
-            span: span_of(file, &node),
-            value_name: extract_throw_value_name(&node, src),
-            thrown_type: None,
-        });
+        // Walk children FIRST so call events nested inside the thrown
+        // expression (e.g. `throw new Foo(tainted())`) surface BEFORE the
+        // terminator — same rationale as the `is_return` arm above: CFG
+        // construction ends the block at the throw, so any event ordered
+        // after it would land in a dead block and be lost. Assignment
+        // children are skipped: a thrown expression's own sub-assignments
+        // are not statement-level writes in the enclosing block.
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             if handler.is_assignment(child.kind()) {
@@ -1785,6 +1787,11 @@ fn walk_into(
             }
             walk_into(child, file, src, handler, class_names, out, false);
         }
+        out.push(FlowEvent::Throw {
+            span: span_of(file, &node),
+            value_name: extract_throw_value_name(&node, src),
+            thrown_type: None,
+        });
         return;
     }
 
@@ -4881,16 +4888,6 @@ fn push_text_identifier(out: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
-/// Clean up an assign-target string picked up from a grammar
-/// whose named-child exposure loses the bare identifier. Drops
-/// the RHS when the text has shape `lhs = rhs`, strips trailing
-/// declaration-only keywords (types / `my` / `let`), and keeps
-/// only the last whitespace-delimited token when a type prefix
-/// survives (`bytes32 t` → `t`, `my $query` → `$query`). Tuple
-/// targets (Go `result, _`) keep only the first binding so the
-/// emitted `target` is a plain identifier callers can substring
-/// on.
-#[must_use]
 /// True when `op` is a compound (read-modify-write) assignment operator
 /// like `+=`, `||=`, `.=`, `<<=`. A bare `=` is NOT compound, nor are
 /// comparisons (`==`, `<=`), the walrus/short-var `:=`, or the arrow `=>`.
@@ -4932,6 +4929,16 @@ fn assignment_is_compound(node: &Node<'_>, kind: &str, src: &[u8]) -> bool {
         .any(|child| !child.is_named() && is_compound_assignment_operator(node_text(child, src)))
 }
 
+/// Clean up an assign-target string picked up from a grammar
+/// whose named-child exposure loses the bare identifier. Drops
+/// the RHS when the text has shape `lhs = rhs`, strips trailing
+/// declaration-only keywords (types / `my` / `let`), and keeps
+/// only the last whitespace-delimited token when a type prefix
+/// survives (`bytes32 t` → `t`, `my $query` → `$query`). Tuple
+/// targets (Go `result, _`) keep only the first binding so the
+/// emitted `target` is a plain identifier callers can substring
+/// on.
+#[must_use]
 pub fn sanitize_assign_target(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -7596,29 +7603,6 @@ pub enum AliasTarget {
 /// those lookups semantic by constraining matches to the imported module.
 pub const WILDCARD_IMPORT_ALIAS_PREFIX: &str = "__bonsai_wildcard_import__:";
 
-/// Build the canonical `local_name -> AliasTarget` map directly from
-/// an [`crate::ImportIndex`]. This is the ONE alias-resolution entry
-/// point — every consumer (resolver, security matcher, chain-filter
-/// tokens) goes through it so there is a single source of truth for
-/// "what module does this local name resolve to".
-///
-/// Adapters own language-specific import syntax via `parse_imports`
-/// and emit uniform `ImportSpec` entries (including shorthand
-/// destructures tagged `ImportScope::Local`). This helper is
-/// adapter-agnostic: it walks the uniform structure and classifies
-/// each binding.
-///
-/// Examples:
-///
-/// | ImportSpec                                                       | local → target                                |
-/// |------------------------------------------------------------------|-----------------------------------------------|
-/// | `import { exec } from "child_process"`                           | `exec → Member{ child_process, exec }`        |
-/// | `const { exec } = require("child_process")`                      | `exec → Member{ child_process, exec }`        |
-/// | `from os import system`                                          | `system → Member{ os, system }`               |
-/// | `import { exec as doExec } from "child_process"`                 | `doExec → Member{ child_process, exec }`      |
-/// | `import os as o`                                                 | `o → Namespace{ os }`                         |
-/// | `import * as cp from "child_process"`                            | `cp → Namespace{ child_process }`             |
-/// | `const cp = require("child_process")`                            | `cp → Namespace{ child_process }`             |
 /// Extend an `import`-derived alias map with intra-procedural
 /// variable-reassignment aliases pulled from a function's
 /// [`crate::FlowEvent`] tree. Every `FlowEvent::Assign { target,
@@ -7815,6 +7799,29 @@ fn factory_type_from_source_names(source_names: &[String]) -> Option<String> {
     }
 }
 
+/// Build the canonical `local_name -> AliasTarget` map directly from
+/// an [`crate::ImportIndex`]. This is the ONE alias-resolution entry
+/// point — every consumer (resolver, security matcher, chain-filter
+/// tokens) goes through it so there is a single source of truth for
+/// "what module does this local name resolve to".
+///
+/// Adapters own language-specific import syntax via `parse_imports`
+/// and emit uniform `ImportSpec` entries (including shorthand
+/// destructures tagged `ImportScope::Local`). This helper is
+/// adapter-agnostic: it walks the uniform structure and classifies
+/// each binding.
+///
+/// Examples:
+///
+/// | ImportSpec                                                       | local → target                                |
+/// |------------------------------------------------------------------|-----------------------------------------------|
+/// | `import { exec } from "child_process"`                           | `exec → Member{ child_process, exec }`        |
+/// | `const { exec } = require("child_process")`                      | `exec → Member{ child_process, exec }`        |
+/// | `from os import system`                                          | `system → Member{ os, system }`               |
+/// | `import { exec as doExec } from "child_process"`                 | `doExec → Member{ child_process, exec }`      |
+/// | `import os as o`                                                 | `o → Namespace{ os }`                         |
+/// | `import * as cp from "child_process"`                            | `cp → Namespace{ child_process }`             |
+/// | `const cp = require("child_process")`                            | `cp → Namespace{ child_process }`             |
 #[must_use]
 pub fn alias_map_from_imports(
     imports: &crate::ImportIndex,

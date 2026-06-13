@@ -332,13 +332,10 @@ impl ValueFlowCache {
                 inner.disk.clone(),
             )
         };
-        // Carry the writer behind a Mutex: the rayon worker pool
-        // races on `intern` and `add`, both of which mutate the
-        // writer's interior buffers. Encoding the entry runs under
-        // The new channel-based writer takes `&self` for both `add`
-        // and `intern`, so workers share the writer directly without
-        // a Mutex wrapper. File I/O happens off the rayon hot path
-        // on the writer's dedicated thread; intern serializes on a
+        // The channel-based writer takes `&self` for both `add` and
+        // `intern`, so the rayon workers share the writer directly
+        // without a Mutex wrapper. File I/O happens off the rayon hot
+        // path on the writer's dedicated thread; intern serializes on a
         // small mutex internal to the writer.
         let writer = FactStoreWriter::create_with_capacity(
             path,

@@ -333,6 +333,12 @@ fn load_index(file: &File, header: &Header) -> FactStoreResult<Box<[u8]>> {
 
 /// Verify every section the header points at fits inside the file.
 fn validate_section_bounds(header: &Header, file_len: u64) -> FactStoreResult<()> {
+    // Every `offset`/`len` below is a raw `u64` read straight off disk, so
+    // a corrupt or hostile header could overflow these derived sizes. Use
+    // saturating arithmetic for the section-relative offset and length so an
+    // out-of-range field pins to `u64::MAX` and is caught by the `end >
+    // file_len` check below rather than wrapping to a small value that
+    // sneaks a malformed file past validation (release) or panics (debug).
     let bounds = [
         (
             header.string_pool_offset,
@@ -340,13 +346,15 @@ fn validate_section_bounds(header: &Header, file_len: u64) -> FactStoreResult<()
             "string pool bytes",
         ),
         (
-            header.string_pool_offset + header.string_pool_bytes_len,
-            (header.string_count + 1) * 4,
+            header
+                .string_pool_offset
+                .saturating_add(header.string_pool_bytes_len),
+            (header.string_count.saturating_add(1)).saturating_mul(4),
             "string pool offsets",
         ),
         (
             header.index_offset,
-            header.index_count * INDEX_ENTRY_SIZE as u64,
+            header.index_count.saturating_mul(INDEX_ENTRY_SIZE as u64),
             "index",
         ),
         (header.payload_offset, header.payload_len, "payload"),
@@ -375,7 +383,15 @@ fn validate_index_sorted_and_bounded(header: &Header, index_bytes: &[u8]) -> Fac
     if count == 0 {
         return Ok(());
     }
-    let payload_section_end = header.payload_offset + header.payload_len;
+    // Header fields are read off disk; guard the derived end against
+    // overflow rather than wrapping (debug panic / silent bypass in release).
+    let payload_section_end = header
+        .payload_offset
+        .checked_add(header.payload_len)
+        .ok_or(FactStoreError::Truncated {
+            expected: u64::MAX,
+            actual: header.payload_offset,
+        })?;
     let mut prev_key = u64::MIN;
     for i in 0..count {
         let row = &index_bytes[i * INDEX_ENTRY_SIZE..(i + 1) * INDEX_ENTRY_SIZE];

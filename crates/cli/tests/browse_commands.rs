@@ -77,7 +77,7 @@ fn newest_mtime(dir: &Path, exts: &[&str]) -> Option<SystemTime> {
                 // Skip build output / VCS dirs.
                 if !matches!(
                     p.file_name().and_then(|n| n.to_str()),
-                    Some("target") | Some(".git") | Some(".bonsai")
+                    Some("target" | ".git" | ".bonsai")
                 ) {
                     stack.push(p);
                 }
