@@ -385,13 +385,14 @@ fn validate_index_sorted_and_bounded(header: &Header, index_bytes: &[u8]) -> Fac
     }
     // Header fields are read off disk; guard the derived end against
     // overflow rather than wrapping (debug panic / silent bypass in release).
-    let payload_section_end = header
-        .payload_offset
-        .checked_add(header.payload_len)
-        .ok_or(FactStoreError::Truncated {
-            expected: u64::MAX,
-            actual: header.payload_offset,
-        })?;
+    let payload_section_end =
+        header
+            .payload_offset
+            .checked_add(header.payload_len)
+            .ok_or(FactStoreError::Truncated {
+                expected: u64::MAX,
+                actual: header.payload_offset,
+            })?;
     let mut prev_key = u64::MIN;
     for i in 0..count {
         let row = &index_bytes[i * INDEX_ENTRY_SIZE..(i + 1) * INDEX_ENTRY_SIZE];

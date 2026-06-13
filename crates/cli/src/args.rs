@@ -2928,6 +2928,13 @@ pub(crate) enum SecurityAction {
         /// are rejected before this mode runs by the rulepack loader.
         #[arg(long, default_value_t = false)]
         validate: bool,
+        /// With `--validate`: also replay each taint-dependent rule's
+        /// positive match_examples through live taint analysis and
+        /// report any whose own example no longer fires
+        /// (`match-example-taint-miss`). Slower (runs taint per
+        /// example); intended for the deep CI gate.
+        #[arg(long, default_value_t = false)]
+        taint_replay: bool,
         /// Token-budget ceiling for text output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,

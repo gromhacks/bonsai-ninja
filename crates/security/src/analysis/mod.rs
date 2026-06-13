@@ -226,6 +226,13 @@ pub struct PackInventoryOptions {
     pub category: Option<String>,
     pub kind: Option<RuleKind>,
     pub severity: Option<Severity>,
+    /// When set, `validate_pack` replays each taint-dependent rule's
+    /// positive `match_examples` through live taint analysis (seeding the
+    /// example's inferred inputs as sources) and asserts the rule fires,
+    /// instead of skipping it as "not statically checkable". Off by default
+    /// because it runs taint per example — opt in for the deep CI gate via
+    /// `pack --validate --taint-replay`.
+    pub taint_replay_examples: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2078,18 +2085,24 @@ pub fn validate_pack(
             // Taint-dependent examples require source-to-sink dataflow,
             // not just static owner matching. Running full taint analysis
             // for every rulepack example makes `pack --validate` scale
-            // with thousands of tiny whole-pack scans, and the owner-miss
-            // path below already treats these examples as not statically
-            // checkable. Keep validation focused on static metadata here;
-            // taint behavior is covered by rulepack conformance and
-            // security pipeline fixtures.
-            let match_texts = if taint_dependent {
+            // with thousands of tiny whole-pack scans, so by default the
+            // owner-miss path below treats these examples as not statically
+            // checkable and taint behavior is covered by rulepack
+            // conformance and security pipeline fixtures. When
+            // `taint_replay_examples` is set (the deep CI gate), replay them
+            // through live taint instead — `match_example_owner_texts`
+            // routes taint-dependent sinks through `run_taint_analysis` — so
+            // a rule whose own positive example silently stopped firing is
+            // caught rather than shipped.
+            let replay_taint = options.taint_replay_examples;
+            let skip_taint_example = taint_dependent && !replay_taint;
+            let match_texts = if skip_taint_example {
                 Vec::new()
             } else {
                 match_example_owner_texts(pack, rule, &ws)
             };
             if example.expect_no_match {
-                if taint_dependent {
+                if skip_taint_example {
                     continue;
                 }
                 if example.expect_no_match_text.is_empty() {
@@ -2128,21 +2141,31 @@ pub fn validate_pack(
                 // Rules with taint-dependent constraints require live
                 // taint analysis to fire; the static
                 // `match_example_owner_texts` check cannot satisfy
-                // them. The same skip is applied by the
-                // `declared_rule_match_examples_fire` test
-                // (`rule_uses_arg_tainted`); apply it here too so
-                // the validator and the test agree on which
+                // them. Unless we're replaying through taint (above),
+                // skip them here so the validator and the
+                // `declared_rule_match_examples_fire` test agree on which
                 // examples are statically checkable.
-                if taint_dependent {
+                if skip_taint_example {
                     continue;
                 }
+                // A taint-dependent example that produced no finding under
+                // live replay gets its own code so the deep gate can be
+                // tracked separately from the static owner-miss path.
+                let (code, detail) = if taint_dependent {
+                    (
+                        "match-example-taint-miss",
+                        "produced no taint finding for its owner rule under example replay",
+                    )
+                } else {
+                    ("match-example-owner-miss", "produced no match for its owner rule")
+                };
                 push_validation_issue(
                     &mut issues,
                     "warning",
-                    "match-example-owner-miss",
+                    code,
                     Some(rule),
                     &format!(
-                        "example `{}` produced no match for its owner rule",
+                        "example `{}` {detail}",
                         example.name.as_deref().unwrap_or("<unnamed>")
                     ),
                 );

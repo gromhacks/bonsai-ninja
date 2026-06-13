@@ -2040,9 +2040,7 @@ fn render_inspect_report_text(
                 .and_then(|cur| {
                     page_starts
                         .iter()
-                        .position(|off| {
-                            paging::cursor_id("inspect", filters_hash, *off as u64) == cur
-                        })
+                        .position(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == cur)
                         .and_then(|idx| page_starts.get(idx + 1).copied())
                 })
                 .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0))

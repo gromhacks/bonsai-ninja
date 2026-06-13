@@ -415,6 +415,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             audit,
             tree,
             validate,
+            taint_replay,
             context,
             page,
             all,
@@ -424,7 +425,18 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
         } => {
             let paging_cfg = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             cmd_pack(
-                workspace, &pack, lang, category, kind, severity, audit, tree, validate, limit, paging_cfg,
+                workspace,
+                &pack,
+                lang,
+                category,
+                kind,
+                severity,
+                audit,
+                tree,
+                validate,
+                taint_replay,
+                limit,
+                paging_cfg,
                 format,
             )
         }
@@ -3420,6 +3432,7 @@ fn cmd_pack(
     audit: bool,
     tree: bool,
     validate: bool,
+    taint_replay: bool,
     limit: usize,
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
@@ -3439,6 +3452,7 @@ fn cmd_pack(
         category: category.clone(),
         kind: kind_filter,
         severity: sev_floor,
+        taint_replay_examples: taint_replay,
     };
 
     if audit {
