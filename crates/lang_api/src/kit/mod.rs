@@ -10456,6 +10456,93 @@ pub fn populate_decl_return_types(
     }
 }
 
+/// The class name an assignment's RHS constructs, if its callee is
+/// constructor-shaped: the bare tail after the last `.`/`::` separator
+/// (dropping a leading `new`/generic args) when that tail is
+/// `PascalCase`. `ldap3.Connection` → `Connection`, `new Foo<T>` →
+/// `Foo`, `socket.socket` → `None` (lowercase tail, not a constructor),
+/// `obj.method` → `None`. This is the language-agnostic convention used
+/// for lightweight local type inference (`x = Pkg.Class(...)`), distinct
+/// from the `new`-only `receiver_type_from_constructor_expr` used for
+/// inline receiver expressions.
+fn constructor_call_type_name(callee: &str) -> Option<String> {
+    let expr = callee.trim().strip_prefix("new ").unwrap_or(callee.trim());
+    let without_generics = expr.split('<').next().unwrap_or(expr);
+    let bare = without_generics
+        .rsplit(['.', ':'])
+        .next()
+        .unwrap_or(without_generics)
+        .trim();
+    if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    // Reject SHOUTY_CONSTANT tails (`Foo.BAR(...)`) — those are not
+    // constructor calls. A real class name has at least one lowercase
+    // letter after the leading uppercase.
+    if bare
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(bare.to_string())
+}
+
+/// Collect `local -> ConstructedType` aliases from constructor-shaped
+/// assignments (`conn = ldap3.Connection(server)`) in a callable's flow
+/// events, so subsequent `conn.method(...)` calls carry a resolved
+/// receiver type and `receiver_type_in` / `[Type, method]` rules match
+/// without loosening any package gate. Walks branch / loop / try bodies
+/// so a connection constructed inside control flow is still typed.
+/// Language-agnostic; adapters opt in by merging the result into
+/// `Decl.type_aliases` before the central receiver-type pass runs.
+pub fn collect_constructor_result_type_aliases(
+    events: &[crate::FlowEvent],
+    out: &mut Vec<crate::TypeAliasBinding>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_call: Some(callee),
+                ..
+            } => {
+                if target.is_empty() {
+                    continue;
+                }
+                if let Some(type_name) = constructor_call_type_name(callee) {
+                    out.push(crate::TypeAliasBinding {
+                        name: target.clone(),
+                        type_name,
+                    });
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_constructor_result_type_aliases(then_events, out);
+                collect_constructor_result_type_aliases(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_constructor_result_type_aliases(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_constructor_result_type_aliases(body, out);
+                collect_constructor_result_type_aliases(catch_events, out);
+                collect_constructor_result_type_aliases(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Propagate adapter-extracted `Decl.return_type` onto LHS
 /// type_aliases for `let y = f()` shaped assignments. Phase-6
 /// lightweight type inference — when the callee's return type is
