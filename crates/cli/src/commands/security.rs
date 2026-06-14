@@ -3422,6 +3422,10 @@ fn render_dep_block(u: &Ui, idx: usize, r: &DependencyRow, pack: &Rulepack) {
 }
 
 // ---- pack — rulepack inspector / auditor ----
+// Mode flags (audit / tree / validate / taint_replay) mirror the `pack`
+// subcommand's CLI flags one-to-one; grouping them into a struct would
+// just shift the boolean surface without improving the call site.
+#[allow(clippy::fn_params_excessive_bools)]
 fn cmd_pack(
     workspace: &Path,
     pack: &Rulepack,
