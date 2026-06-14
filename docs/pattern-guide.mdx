@@ -248,10 +248,23 @@ varargs / option-bag sinks where the relevant flag can land in any slot.
 - receiver_type_in: [HttpClient]
 ```
 
-`receiver_type_in` is derived from adapter-emitted type facts and is not
-tied to local variable names. For untyped dynamic APIs, use a
-receiver-agnostic regex plus adapter-visible `packages:` / `imports:` /
-`modules:` signals and taint/argument constraints.
+`receiver_type_in` is derived from adapter-emitted type facts, not from
+local variable names. Those facts come from typed parameters and fields
+(`def handle(conn: Connection)`), class-field bindings, and — for
+dynamically-typed languages — **local constructor assignments**
+(`conn = ldap3.Connection(server)` types `conn` as `Connection`). So the
+preferred shape for a receiver-specific sink on a dynamic API is a
+receiver-agnostic callee regex **plus** a `receiver_type_in` constraint:
+the type constraint resolves the receiver by structure and keeps the rule
+precise without leaning on the package gate alone. Write the rule's
+`match_examples` so they *construct* the receiver, otherwise the type
+fact (and the match) won't be there.
+
+When the receiver genuinely cannot be typed (an untyped parameter with no
+constructor in scope), fall back to a receiver-agnostic regex plus
+adapter-visible `packages:` / `imports:` / `modules:` signals and
+taint/argument constraints — but expect lower precision than a
+`receiver_type_in` rule.
 
 ### `format_arg_index`
 

@@ -110,7 +110,7 @@ Constraints are post-filters applied after the basic match. All must pass.
 
 | Constraint | Effect |
 |---|---|
-| `receiver_type_in: [HttpClient, Request]` | Receiver type fact must match one of the listed types. Preferred for typed receiver APIs. |
+| `receiver_type_in: [HttpClient, Request]` | Receiver type fact must match one of the listed types. Preferred whenever the receiver is typed — from annotations, fields, or a local constructor assignment (`x = Pkg.Class(...)`). A receiver-agnostic callee regex plus this constraint stays precise without relying on the package gate alone. |
 | `arg_equals: { index, value }` | Arg N must equal `value`. |
 | `arg_tainted: { index \| kw }` | Engine must prove the named arg flows from a source. |
 | `receiver_tainted: true` | Engine must prove the call receiver flows from a source. |

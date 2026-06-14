@@ -46,6 +46,32 @@ python3 scripts/validate-pattern-pack.py \
   --json-out /tmp/pattern-pack-validator.json
 ```
 
+`pack --validate` checks schema, required metadata, and statically replays
+each rule's `match_examples` against the matcher. By default it cannot
+replay **taint-dependent** rules (`arg_tainted` / `any_arg_tainted` /
+`receiver_tainted`) — those need live source-to-sink dataflow, so the
+static pass skips them.
+
+Add `--taint-replay` for the deep gate: it seeds each taint-dependent
+rule's positive example through live taint analysis (treating inferred
+inputs as sources) and reports any rule whose own example no longer fires
+as `match-example-taint-miss`. This catches a rule that silently stopped
+matching after a gate, receiver-name, or arg-index change. It runs taint
+per example, so it is slower than the default — intended for the deep CI
+gate rather than every edit.
+
+```bash
+./target/release/bonsai-ninja security . pack --validate --taint-replay \
+  --rules-dir security-patterns \
+  --format json --no-color --no-progress
+```
+
+A `match-example-taint-miss` usually means one of: the rule is genuinely
+broken; its package gate rejects the receiver (give the rule a
+`receiver_type_in` constraint and construct the receiver in the example —
+see [Pattern Guide](pattern-guide)); or the example uses a literal instead
+of a function-parameter source, so there is nothing to taint.
+
 ## Integration Fixtures
 
 Use `examples/<lang>/micro` for small command-surface checks, `mega_flow` for construct coverage, and focused fixtures for sanitizer or lifecycle behavior.

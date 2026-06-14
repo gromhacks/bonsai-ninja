@@ -48,7 +48,13 @@ bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
 | `deps` | None | Show package imports referenced by the rulepack. |
 | `taint-analysis` | None | Run source-to-sink taint analysis. |
 | `source-analysis` | None | Map downstream paths from sources without requiring sinks. |
-| `pack` | None | Audit, list, tree, or validate the rulepack. |
+| `pack` | None | Audit (`--audit`), list, tree (`--tree`), or validate (`--validate`) the rulepack. |
+
+`pack --validate` checks rule schema, metadata, and `match_examples`. Add
+`--taint-replay` to also replay each taint-dependent rule's positive
+example through live taint analysis and report any whose own example no
+longer fires (`match-example-taint-miss`) — slower, for the deep CI gate.
+See [Rule Testing](rule-testing).
 
 Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
 
