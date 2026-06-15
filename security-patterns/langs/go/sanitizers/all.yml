@@ -1284,6 +1284,25 @@
       }
     expect_match_text: [append]
   description: "append(slice, value, ...) - returned slice derives from the input slice and appended values; preserves taint."
+- id: go.passthrough.string_conversion
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: string
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string conversion preserves byte-slice taint
+    code: |
+      package main
+      func example(b []byte) string {
+        return string(b)
+      }
+    expect_match_text: [string]
+  description: "string(b) - the []byte->string conversion changes representation but preserves attacker-controlled content (WS3 coercion passthrough; mirrors python str())."
 - id: go.passthrough.strings_trim_space
   enabled: true
   language: go

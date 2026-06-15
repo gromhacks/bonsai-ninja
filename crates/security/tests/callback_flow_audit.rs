@@ -192,3 +192,46 @@ fn object_config_route_handler_body_is_analyzed() {
         "Hapi object-config route handler body must be analyzed (request.query -> cp.exec), got {n} findings"
     );
 }
+
+/// WS3 coercion passthrough (Go). A Go type conversion `string(b)` /
+/// `string([]byte(input))` changes representation but preserves
+/// attacker-controlled content — the analogue of Python `str()`/`bytes()`
+/// (which are registered passthrough). Before `go.passthrough.string_conversion`
+/// the `string(...)` conversion-call dropped taint, so
+/// `x := string([]byte(input)); exec.Command(x)` did not fire while the
+/// direct `exec.Command(input)` did. (`[]byte(x)` assignments already
+/// propagate via the adapter; only the `string(...)` call needed a rule.)
+#[test]
+fn go_string_conversion_preserves_taint() {
+    let dir = std::env::temp_dir().join("bonsai_go_string_conv_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("m.go"),
+        "package main\n\
+         import \"os/exec\"\n\
+         func h(input string) {\n\
+         \tx := string([]byte(input))\n\
+         \texec.Command(x)\n\
+         }\n",
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(
+        &ws,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("taint");
+    let n = report.findings.len();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        n >= 1,
+        "Go `string([]byte(input))` must preserve taint into exec.Command, got {n} findings"
+    );
+}
