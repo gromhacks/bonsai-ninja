@@ -10468,10 +10468,20 @@ pub fn populate_decl_return_types(
 fn constructor_call_type_name(callee: &str) -> Option<String> {
     let expr = callee.trim().strip_prefix("new ").unwrap_or(callee.trim());
     let without_generics = expr.split('<').next().unwrap_or(expr);
-    let bare = without_generics
+    // Ruby / Crystal / Smalltalk-family `Foo.new` (and `Foo::new`):
+    // the constructor is the `new` method ON the class, so the type is
+    // the qualifier before `.new`, not the bare `new` tail. Only strip
+    // it when a qualifier remains (the uppercase check below then
+    // confirms it names a class), so a bare `new(...)` is unaffected.
+    let constructor_target = without_generics
+        .strip_suffix(".new")
+        .or_else(|| without_generics.strip_suffix("::new"))
+        .filter(|head| !head.is_empty())
+        .unwrap_or(without_generics);
+    let bare = constructor_target
         .rsplit(['.', ':'])
         .next()
-        .unwrap_or(without_generics)
+        .unwrap_or(constructor_target)
         .trim();
     if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
         return None;
@@ -10500,7 +10510,7 @@ pub fn collect_constructor_result_type_aliases(
     events: &[crate::FlowEvent],
     out: &mut Vec<crate::TypeAliasBinding>,
 ) {
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         match event {
             FlowEvent::Assign {
                 target,
@@ -10511,6 +10521,31 @@ pub fn collect_constructor_result_type_aliases(
                     continue;
                 }
                 if let Some(type_name) = constructor_call_type_name(callee) {
+                    out.push(crate::TypeAliasBinding {
+                        name: target.clone(),
+                        type_name,
+                    });
+                }
+            }
+            // JS/TS shape: `const client = new ApolloClient({})` reaches
+            // the kit as an `Assign` with NO `source_call` (the grammar
+            // emits `new_expression` as its own `Call` event) plus a
+            // sibling `Call` for the constructor. Recover the receiver
+            // type by matching a constructor `Call` whose span lies
+            // inside the assignment's RHS, so `client.query(...)` carries
+            // a resolved `ApolloClient` receiver type just like the
+            // `source_call` languages.
+            FlowEvent::Assign {
+                target,
+                source_call: None,
+                source_name: None,
+                span,
+                ..
+            } => {
+                if target.is_empty() {
+                    continue;
+                }
+                if let Some(type_name) = adjacent_constructor_call_type(events, index, *span) {
                     out.push(crate::TypeAliasBinding {
                         name: target.clone(),
                         type_name,
@@ -10539,6 +10574,65 @@ pub fn collect_constructor_result_type_aliases(
                 collect_constructor_result_type_aliases(finally_events, out);
             }
             _ => {}
+        }
+    }
+}
+
+/// Find the constructor type for a `new`-expression RHS that the
+/// grammar surfaced as a sibling `Call` event rather than the
+/// assignment's `source_call` (the JS/TS shape). Scans `events` for a
+/// constructor `Call` whose span lies strictly inside `assign_span`'s
+/// RHS, preferring the leftmost (outermost) one so
+/// `x = new Foo(new Bar())` resolves to `Foo`. Returns `None` when no
+/// contained constructor call exists, so unrelated adjacent statements
+/// (`x = compute(); Helper();`) never mistype `x`.
+fn adjacent_constructor_call_type(
+    events: &[crate::FlowEvent],
+    assign_index: usize,
+    assign_span: Span,
+) -> Option<String> {
+    let mut best: Option<(u64, String)> = None;
+    for (idx, event) in events.iter().enumerate() {
+        if idx == assign_index {
+            continue;
+        }
+        let FlowEvent::Call { name, span, .. } = event else {
+            continue;
+        };
+        // The constructor call must be the assignment's RHS: its span
+        // sits within the assign span and starts after the LHS target.
+        if span.file != assign_span.file || span.start <= assign_span.start || span.end > assign_span.end {
+            continue;
+        }
+        if let Some(type_name) = constructor_call_type_name(name) {
+            match &best {
+                Some((best_start, _)) if *best_start <= span.start => {}
+                _ => best = Some((span.start, type_name)),
+            }
+        }
+    }
+    best.map(|(_, type_name)| type_name)
+}
+
+/// Apply local constructor-result type inference across every decl in
+/// an index: `conn = ldap3.Connection(server)` types `conn` as
+/// `Connection`, `client = new ApolloClient()` types `client` as
+/// `ApolloClient`, so subsequent `conn.search(...)` / `client.query(...)`
+/// calls carry a resolved receiver type and `receiver_type_in` /
+/// `[Type, method]` rules match semantically — the proper alternative to
+/// loosening the package gate for receiver-variable calls. Runs
+/// centrally (in the db/index decl-index builders) so every language
+/// gets it without per-adapter wiring. Existing aliases (param
+/// annotations, resolved call-result return types) take precedence over
+/// an inferred constructor type for the same name.
+pub fn apply_constructor_result_type_aliases(idx: &mut crate::DeclIndex) {
+    for decl in &mut idx.defs {
+        let mut ctor_aliases = Vec::new();
+        collect_constructor_result_type_aliases(&decl.flow_events, &mut ctor_aliases);
+        for binding in ctor_aliases {
+            if !decl.type_aliases.iter().any(|alias| alias.name == binding.name) {
+                decl.type_aliases.push(binding);
+            }
         }
     }
 }
@@ -11252,6 +11346,11 @@ fn param_alias_from_node(
     src: &[u8],
     vocab: &TypeAliasVocabulary,
 ) -> Option<crate::TypeAliasBinding> {
+    let type_node = node
+        .child_by_field_name(vocab.type_field)
+        // Kotlin / Dart / Scala expose the type as an unnamed
+        // child of a known kind, not under a `type` field.
+        .or_else(|| first_named_type_descendant(node))?;
     let name_node = node
         .child_by_field_name(vocab.name_field)
         // C / C++ / Objective-C wrap the binding identifier inside
@@ -11263,13 +11362,11 @@ fn param_alias_from_node(
         // shapes (Kotlin's `parameter` carries `simple_identifier`
         // and `user_type` as unnamed children, Dart's
         // `formal_parameter` mixes `type_identifier` + named-field
-        // `name`) participate without per-language helpers.
-        .or_else(|| first_param_identifier_descendant(node))?;
-    let type_node = node
-        .child_by_field_name(vocab.type_field)
-        // Kotlin / Dart / Scala expose the type as an unnamed
-        // child of a known kind, not under a `type` field.
-        .or_else(|| first_named_type_descendant(node))?;
+        // `name`) participate without per-language helpers. Skip any
+        // identifier that lives inside the type node so a type-first
+        // local declaration (`Foo c`, C#/Dart `variable_declaration`)
+        // binds `c`, not the leading `Foo`.
+        .or_else(|| first_param_identifier_descendant_outside(node, type_node))?;
     let name = leaf_identifier_text(name_node, src)?;
     let type_short = canonical_short_type_name(node_text(&type_node, src))?;
     if name.is_empty() || name == type_short {
@@ -11281,30 +11378,46 @@ fn param_alias_from_node(
     })
 }
 
-/// Find the first identifier-like leaf inside a parameter wrapper
-/// node. Distinct from the public `first_identifier_descendant`
-/// helper above (which excludes the start node) — for parameter
-/// shapes the wrapper IS the binding root and we want to accept
-/// it directly when its kind is already identifier-like.
-fn first_param_identifier_descendant<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
-    if matches!(
-        node.kind(),
-        "identifier"
-            | "simple_identifier"
-            | "shorthand_property_identifier_pattern"
-            | "type_identifier"
-            | "variable_name"
-            | "name"
-    ) {
-        return Some(node);
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Some(found) = first_param_identifier_descendant(child) {
-            return Some(found);
+/// Find the first identifier-like leaf inside a parameter / binding
+/// wrapper node, skipping any node inside `exclude` (the resolved type
+/// node) — its identifiers are the type's, not the binding's. This lets
+/// a type-first declaration (`Foo c`, C#/Dart `variable_declaration`)
+/// bind the trailing `c` instead of the leading type identifier, while
+/// name-first shapes (`c: Foo`) are unaffected. For parameter shapes the
+/// wrapper IS the binding root, so an identifier-kind start node is
+/// accepted directly.
+fn first_param_identifier_descendant_outside<'a>(
+    node: tree_sitter::Node<'a>,
+    exclude: tree_sitter::Node<'_>,
+) -> Option<tree_sitter::Node<'a>> {
+    let ex_start = exclude.start_byte();
+    let ex_end = exclude.end_byte();
+    fn rec<'a>(node: tree_sitter::Node<'a>, ex_start: usize, ex_end: usize) -> Option<tree_sitter::Node<'a>> {
+        // Inside the type node's subtree — its identifiers are the
+        // type's, not the binding's.
+        if node.start_byte() >= ex_start && node.end_byte() <= ex_end {
+            return None;
         }
+        if matches!(
+            node.kind(),
+            "identifier"
+                | "simple_identifier"
+                | "shorthand_property_identifier_pattern"
+                | "type_identifier"
+                | "variable_name"
+                | "name"
+        ) {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if let Some(found) = rec(child, ex_start, ex_end) {
+                return Some(found);
+            }
+        }
+        None
     }
-    None
+    rec(node, ex_start, ex_end)
 }
 
 fn first_named_type_descendant<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {

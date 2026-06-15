@@ -151,6 +151,15 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+      base_name_in:
+      - connection
+      - conn
+      - db
+      - database
+      - session
+      - ctx
+      - c
+      - stmt
   constraints:
   - arg_tainted:
       index: 0

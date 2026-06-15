@@ -209,7 +209,7 @@
   category: http-input
   payload_types: [file]
   frameworks: [django, django-rest-framework]
-  packages: [django, djangorestframework]
+  packages: [django, rest_framework]
   match:
     kind: read
     target:
@@ -252,7 +252,7 @@
   trust: remote
   category: http-input
   frameworks: [fastapi, starlette, django-rest-framework]
-  packages: [fastapi, starlette, djangorestframework]
+  packages: [fastapi, starlette, rest_framework]
   payload_types: [query]
   match:
     kind: read

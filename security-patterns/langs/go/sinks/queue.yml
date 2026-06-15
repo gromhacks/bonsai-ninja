@@ -18,8 +18,7 @@
       import "github.com/aws/aws-sdk-go/service/sqs"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.SendMessage(target)
@@ -55,8 +54,7 @@
       import "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.SendMessages(target)

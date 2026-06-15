@@ -22,11 +22,8 @@
   - name: generated direct match
     code: |
       #include <spdlog/spdlog.h>
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        spdlog::info("user\\n");
+      void example(const char *arg) {
+        spdlog::info(std::string("user ") + arg);
       }
   - name: spdlog ordinary info negative
     code: |

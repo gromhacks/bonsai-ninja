@@ -44,6 +44,13 @@
     kind: call
     callee:
       regex: "^[A-Za-z_][A-Za-z0-9_]*\\.search$"
+      base_name_in:
+      - conn
+      - connection
+      - c
+      - ldap
+      - server
+      - ld
   constraints:
   - arg_tainted:
       index: 1

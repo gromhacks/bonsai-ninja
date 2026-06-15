@@ -723,7 +723,7 @@
   tag: http-input
   payload_types: [query]
   frameworks: [fastapi, starlette, django-rest-framework]
-  packages: [fastapi, starlette, djangorestframework]
+  packages: [fastapi, starlette, rest_framework]
   match:
     kind: call
     callee:
@@ -904,7 +904,7 @@
   tag: http-input
   payload_types: [json, form]
   frameworks: [django-rest-framework]
-  packages: [djangorestframework]
+  packages: [rest_framework]
   match:
     kind: read
     target:
@@ -912,7 +912,7 @@
   match_examples:
   - name: drf serializer validated data
     code: |
-      import djangorestframework
+      import rest_framework
       def example():
           value = serializer.validated_data
           return value
@@ -925,7 +925,7 @@
   tag: http-input
   payload_types: [json, form]
   frameworks: [django-rest-framework]
-  packages: [djangorestframework]
+  packages: [rest_framework]
   match:
     kind: read
     target:
@@ -933,7 +933,7 @@
   match_examples:
   - name: drf request data
     code: |
-      import djangorestframework
+      import rest_framework
       def example():
           value = request.data
           return value
@@ -1121,7 +1121,7 @@
   tag: http-input
   payload_types: [query]
   frameworks: [django-rest-framework]
-  packages: [djangorestframework]
+  packages: [rest_framework]
   match:
     kind: read
     target:

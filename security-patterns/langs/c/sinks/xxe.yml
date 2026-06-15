@@ -16,8 +16,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         xmlReadFile(arg);
       }
@@ -46,8 +45,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         xmlReadMemory(arg);
       }
@@ -76,8 +74,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         xmlParseFile(arg);
       }
@@ -153,8 +150,7 @@
   - name: generated direct match
     code: |
       #include <libxslt/transform.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         xsltParseStylesheetFile(arg);
       }

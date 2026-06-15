@@ -1006,3 +1006,23 @@
     code: "import javax.xml.parsers._\nobject App {\n  def configure(factory: DocumentBuilderFactory): Unit = {\n    factory.setFeature()\n  }\n}\n"
     expect_no_match: true
   description: "XML parser feature hardening - disables external entity / external DTD loading or disallows DOCTYPE to block XXE (Scala via Java interop)."
+- id: scala.passthrough.string_format
+  enabled: true
+  language: scala
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, format]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string format preserves arg taint
+    code: |
+      object App {
+        def h(input: String): String = {
+          String.format("q=%s", input)
+        }
+      }
+    expect_match_text: [String.format]
+  description: "Scala String.format(fmt, args...) - formatted string derives from its arguments; preserves taint."

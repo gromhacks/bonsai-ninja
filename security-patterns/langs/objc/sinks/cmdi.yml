@@ -176,7 +176,7 @@
   match_examples:
   - name: declared shape
     code: |
-      void test(id input) { id target = input; int amount = 1; posix_spawn(input); }
+      void test(id input) { posix_spawn(pid, input); }
   - name: literal arg 1 negative
     code: |
       void example(void) {

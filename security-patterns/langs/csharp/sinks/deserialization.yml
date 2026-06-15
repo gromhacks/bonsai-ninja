@@ -337,7 +337,7 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; FormatterServices.GetSafeUninitializedObject(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; FormatterServices.GetSafeUninitializedObject(input); } }
   - name: literal formatterservices type negative
     code: |
       class App { void Test() { FormatterServices.GetSafeUninitializedObject("System.String"); } }

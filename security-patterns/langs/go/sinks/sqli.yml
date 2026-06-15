@@ -10,7 +10,7 @@
   match:
     kind: call
     callee:
-      regex: ^(db|tx|stmt|conn|database|d|t|client|sqlDB|sqlTx)\.Query$
+      regex: ^(db|tx|stmt|conn|database|d|t|client|sqlDB|sqlTx|DB|Tx|Stmt|Conn|Database|dbConn|sqlConn)\.Query$
   constraints:
   - arg_tainted:
       index: 0

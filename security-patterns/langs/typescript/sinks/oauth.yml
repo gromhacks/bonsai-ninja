@@ -46,6 +46,11 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.callback$"
+      base_name_in:
+      - client
+      - openid
+      - oidc
+      - issuer
   constraints:
   - arg_tainted:
       index: 1

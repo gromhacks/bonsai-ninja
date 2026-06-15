@@ -14,7 +14,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  fopen(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        fopen(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -92,7 +96,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  unlink(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        unlink(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -176,7 +184,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  chmod(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        chmod(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -200,7 +212,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  chown(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        chown(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -225,7 +241,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  symlink(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        symlink(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -278,7 +298,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  link(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        link(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -330,7 +354,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  creat(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        creat(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -354,7 +382,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  mkdir(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        mkdir(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -378,7 +410,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  rmdir(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        rmdir(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -402,7 +438,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  remove(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        remove(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -467,7 +507,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  freopen(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        freopen(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -491,7 +535,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  fopen64(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        fopen64(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -515,7 +563,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  opendir(arg);\n}\n"
+    code: |
+      void example(char *arg) {
+        char *fmt = arg;
+        opendir(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -541,7 +593,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  CreateFileA(arg);\n}\n"
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(char *arg) {
+        char *fmt = arg;
+        CreateFileA(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -570,7 +630,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  CreateFileW(arg);\n}\n"
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(char *arg) {
+        char *fmt = arg;
+        CreateFileW(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -599,7 +667,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  DeleteFileA(arg);\n}\n"
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(char *arg) {
+        char *fmt = arg;
+        DeleteFileA(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {
@@ -628,7 +704,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  DeleteFileW(arg);\n}\n"
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(char *arg) {
+        char *fmt = arg;
+        DeleteFileW(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example(void) {

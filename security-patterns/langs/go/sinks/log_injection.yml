@@ -19,7 +19,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Println(name + value)\n}\n"
+    code: |
+      package main
+
+      func example(name string, value string) {
+        target := "tainted"
+        log.Println(name + value)
+      }
   - name: log println ordinary value negative
     code: |
       package main
@@ -49,7 +55,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Print(name + value)\n}\n"
+    code: |
+      package main
+
+      func example(name string, value string) {
+        target := "tainted"
+        log.Print(name + value)
+      }
   - name: log print ordinary value negative
     code: |
       package main
@@ -79,7 +91,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Fatal(name + value)\n}\n"
+    code: |
+      package main
+
+      func example(name string, value string) {
+        target := "tainted"
+        log.Fatal(name + value)
+      }
   - name: log fatal ordinary value negative
     code: |
       package main
@@ -109,7 +127,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Panic(name + value)\n}\n"
+    code: |
+      package main
+
+      func example(name string, value string) {
+        target := "tainted"
+        log.Panic(name + value)
+      }
   - name: log panic ordinary value negative
     code: |
       package main
@@ -139,7 +163,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Info(name + value)\n}\n"
+    code: |
+      package main
+
+      func example(name string, value string) {
+        target := "tainted"
+        logger.Info(name + value)
+      }
   - name: logger info ordinary value negative
     code: |
       package main
@@ -288,7 +318,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Error(name + value)\n}\n"
+    code: |
+      package main
+
+      func example(name string, value string) {
+        target := "tainted"
+        logger.Error(name + value)
+      }
   - name: logger error ordinary value negative
     code: |
       package main

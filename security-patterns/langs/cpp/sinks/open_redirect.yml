@@ -18,7 +18,14 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Response::set_redirect(target);\n}\n"
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Response::set_redirect( arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -49,7 +56,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::newRedirectionResponse(target);\n}\n"
+    code: |
+      #include <drogon/drogon.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpResponse::newRedirectionResponse( arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -77,7 +90,13 @@
       index: 0
   match_examples:
   - name: tainted crow redirect
-    code: "#include <crow.h> /* crow */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  response::redirect(arg);\n}\n"
+    code: |
+      #include <crow.h> /* crow */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        response::redirect(arg);
+      }
   - name: literal crow redirect negative
     code: |
       #include <crow.h>
@@ -109,8 +128,7 @@
   - name: tainted poco redirect
     code: |
       #include <Poco/Net/HTTPServerResponse.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         HTTPResponse::redirect(arg);
       }
   - name: literal poco redirect negative

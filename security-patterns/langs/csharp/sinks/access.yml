@@ -16,7 +16,7 @@
   - name: declared shape
     code: |
       using AWSSDK.S3;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonS3Client.GetObjectAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AmazonS3Client.GetObjectAsync(input); } }
   - name: literal s3 request negative
     code: |
       using AWSSDK.S3;
@@ -68,7 +68,7 @@
   - name: declared shape
     code: |
       using AWSSDK.S3;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonS3Client.PutObjectAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AmazonS3Client.PutObjectAsync(input); } }
   - name: literal s3 put request negative
     code: |
       using AWSSDK.S3;
@@ -120,7 +120,7 @@
   - name: declared shape
     code: |
       using AWSSDK.SecretsManager;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonSecretsManagerClient.GetSecretValueAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AmazonSecretsManagerClient.GetSecretValueAsync(input); } }
   - name: literal secret id negative
     code: |
       using AWSSDK.SecretsManager;
@@ -186,7 +186,7 @@
   - name: declared shape
     code: |
       using Azure.Security.KeyVault.Secrets;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SecretClient.GetSecretAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; SecretClient.GetSecretAsync(input); } }
   - name: literal key vault secret negative
     code: |
       using Azure.Security.KeyVault.Secrets;
@@ -212,7 +212,7 @@
   - name: declared shape
     code: |
       using Google.Cloud.Storage.V1;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; StorageClient.DownloadObject(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; StorageClient.DownloadObject(input); } }
   - name: literal gcs download selector negative
     code: |
       using Google.Cloud.Storage.V1;
@@ -264,7 +264,7 @@
   - name: declared shape
     code: |
       using Google.Cloud.Storage.V1;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; StorageClient.UploadObject(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; StorageClient.UploadObject(input); } }
   - name: literal gcs upload selector negative
     code: |
       using Google.Cloud.Storage.V1;
@@ -316,7 +316,7 @@
   - name: declared shape
     code: |
       using Google.Cloud.SecretManager.V1;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SecretManagerServiceClient.AccessSecretVersion(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; SecretManagerServiceClient.AccessSecretVersion(input); } }
   - name: literal secret version negative
     code: |
       using Google.Cloud.SecretManager.V1;

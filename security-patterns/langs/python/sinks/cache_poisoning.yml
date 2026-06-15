@@ -14,10 +14,15 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.headers\.(add|set)$
+      base_name_in:
+      - response
+      - resp
+      - res
+      - r
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: (?i)^(cache-control|vary|surrogate-control|cdn-cache-control)$
+      regex: (?i)^["']?(cache-control|vary|surrogate-control|cdn-cache-control)["']?$
   - arg_tainted:
       index: 1
   match_examples:

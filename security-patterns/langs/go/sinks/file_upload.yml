@@ -47,10 +47,8 @@
       import "github.com/gin-gonic/gin"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string, value string) {
         name := "user"
-        value := "value"
         obj.SaveUploadedFile(value, target)
       }
   - name: literal gin upload destination negative
@@ -110,10 +108,8 @@
       import "github.com/gofiber/fiber"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string, value string) {
         name := "user"
-        value := "value"
         obj.SaveFile(value, target)
       }
   - name: literal fiber upload destination negative

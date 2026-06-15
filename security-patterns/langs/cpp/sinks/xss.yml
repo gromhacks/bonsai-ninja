@@ -21,7 +21,14 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Response::set_content(\"<p>\" + arg + \"</p>\", \"text/html\");\n}\n"
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Response::set_content("<p>" + arg + "</p>", "text/html");
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -52,7 +59,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <crow.h> /* crow */\nvoid example() {\n  res.body = \"tainted\";\n}\n"
+    code: |
+      #include <crow.h>
+      void example(const char *arg) {
+        res.body = arg;
+      }
   - name: literal crow body negative
     code: |
       #include <crow.h>
@@ -81,7 +92,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::setBody(arg);\n}\n"
+    code: |
+      #include <drogon/drogon.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpResponse::setBody(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -129,8 +146,7 @@
   - name: tainted pistache response body
     code: |
       #include <pistache/endpoint.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         ResponseWriter::send(200, arg);
       }
   - name: literal pistache response body negative
@@ -159,7 +175,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QWebEngineView::setHtml(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QWebEngineView::setHtml(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -188,7 +212,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QWebEnginePage::setHtml(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QWebEnginePage::setHtml(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -220,7 +252,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QWebEnginePage::runJavaScript(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QWebEnginePage::runJavaScript(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -253,8 +293,7 @@
   - name: tainted crow response body
     code: |
       #include <crow.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         response::write(arg);
       }
   - name: literal crow response body negative
@@ -285,7 +324,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::appendBody(arg);\n}\n"
+    code: |
+      #include <drogon/drogon.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpResponse::appendBody(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -315,8 +360,7 @@
   - name: tainted drogon redirect target
     code: |
       #include <drogon/drogon.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         HttpResponse::redirect(arg);
       }
   - name: literal drogon redirect target negative

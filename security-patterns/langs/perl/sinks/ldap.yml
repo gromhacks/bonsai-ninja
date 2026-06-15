@@ -13,7 +13,7 @@
       name: search
   constraints:
   - arg_tainted:
-      index: 1
+      kw: filter
   match_examples:
   - name: perl.ldap.net_ldap_search example
     code: |

@@ -17,7 +17,7 @@
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
-      func test() { let input = "x"; let amount = 1; sendMessage(input) }
+      func test(input: String) { let amount = 1; sendMessage(input) }
   - name: literal send message negative
     code: |
       import AWSCore // aws-sdk-swift

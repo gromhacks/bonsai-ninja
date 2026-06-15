@@ -77,8 +77,7 @@
   - name: literal http post url negative
     code: 'import ''package:http/http.dart'' as http;
 
-      void test(String input) { http.post(Uri.parse("https://example.com"), body:
-      input); }
+      void test(String input) { http.post(Uri.parse("https://example.com"), body: input); }
 
       '
     expect_no_match: true
@@ -121,8 +120,7 @@
   - name: literal http put url negative
     code: 'import ''package:http/http.dart'' as http;
 
-      void test(String input) { http.put(Uri.parse("https://example.com"), body: input);
-      }
+      void test(String input) { http.put(Uri.parse("https://example.com"), body: input); }
 
       '
     expect_no_match: true
@@ -165,8 +163,7 @@
   - name: literal http delete url negative
     code: 'import ''package:http/http.dart'' as http;
 
-      void test(String input) { http.delete(Uri.parse("https://example.com"), body:
-      input); }
+      void test(String input) { http.delete(Uri.parse("https://example.com"), body: input); }
 
       '
     expect_no_match: true
@@ -209,8 +206,7 @@
   - name: literal http patch url negative
     code: 'import ''package:http/http.dart'' as http;
 
-      void test(String input) { http.patch(Uri.parse("https://example.com"), body:
-      input); }
+      void test(String input) { http.patch(Uri.parse("https://example.com"), body: input); }
 
       '
     expect_no_match: true
@@ -339,8 +335,7 @@
   - name: literal http client request negative
     code: 'import ''package:http/http.dart'' as http;
 
-      void test() { client.send(http.Request("GET", Uri.parse("https://example.com")));
-      }
+      void test() { client.send(http.Request("GET", Uri.parse("https://example.com"))); }
 
       '
     expect_no_match: true
@@ -387,8 +382,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.get(url) - HTTP GET to tainted URL allows SSRF to internal\
-    \ services / cloud metadata."
+  description: "Dio.get(url) - HTTP GET to tainted URL allows SSRF to internal services / cloud metadata."
   imports:
   - dio/dio.dart
 - id: dart.ssrf.dio_post
@@ -431,8 +425,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.post(url) - HTTP POST to tainted URL allows SSRF with request-body\
-    \ exfiltration."
+  description: "Dio.post(url) - HTTP POST to tainted URL allows SSRF with request-body exfiltration."
   imports:
   - dio/dio.dart
 - id: dart.ssrf.dio_put
@@ -475,8 +468,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.put(url) - HTTP PUT to tainted URL allows SSRF with write-capable\
-    \ verbs."
+  description: "Dio.put(url) - HTTP PUT to tainted URL allows SSRF with write-capable verbs."
   imports:
   - dio/dio.dart
 - id: dart.ssrf.dio_delete
@@ -562,8 +554,7 @@
 
       '
     expect_no_match: true
-  description: "Dio.patch(url) - HTTP PATCH to tainted URL allows SSRF with write-capable\
-    \ verbs."
+  description: "Dio.patch(url) - HTTP PATCH to tainted URL allows SSRF with write-capable verbs."
   imports:
   - dio/dio.dart
 - id: dart.ssrf.dio_request
@@ -915,8 +906,7 @@
 
       import ''package:flutter/material.dart''; // flutter
 
-      class NetworkImage { NetworkImage([dynamic input, {dynamic htmlEscapeValues}]);
-      }
+      class NetworkImage { NetworkImage([dynamic input, {dynamic htmlEscapeValues}]); }
 
       void test(String input) { var result = NetworkImage(input); }
 
@@ -954,20 +944,13 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      import ''package:webview_flutter/webview_flutter.dart'';
-
-      void test() { var input = "x"; var amount = 1; controller.loadRequest(input);
-      }
-
-      '
+    code: |
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      void test(String input) { var amount = 1; controller.loadRequest(input); }
   - name: literal webview request negative
     code: |
       import 'package:webview_flutter/webview_flutter.dart';
@@ -1003,8 +986,7 @@
 
       import ''package:webview_flutter/webview_flutter.dart'';
 
-      void test() { var input = "x"; var amount = 1; controller.loadHtmlString(input);
-      }
+      void test() { var input = "x"; var amount = 1; controller.loadHtmlString(input); }
 
       '
   description: "WebViewController.loadHtmlString - tainted HTML/URI."
@@ -1026,9 +1008,7 @@
     kind: call
     callee:
       regex: ^Uri\.parse$
-  description: "Disabled audit-only - Uri.parse(tainted) by itself does not perform\
-    \ a network or filesystem call. Enable when triaging URL-construction sites; the\
-    \ dangerous sinks are the http/HttpClient/File rules that consume the parsed Uri."
+  description: "Disabled audit-only - Uri.parse(tainted) by itself does not perform a network or filesystem call. Enable when triaging URL-construction sites; the dangerous sinks are the http/HttpClient/File rules that consume the parsed Uri."
 - id: dart.ssrf.uri_https_constructor
   enabled: true
   language: dart
@@ -1055,9 +1035,7 @@
 
       '
     expect_no_match: true
-  description: "TODO(only-when-packaged): Uri lives in dart:core which is auto-imported\
-    \ - Uri.https(tainted host or path) - host parameter is attacker-controlled,\
-    \ enabling SSRF when later fetched."
+  description: "TODO(only-when-packaged): Uri lives in dart:core which is auto-imported - Uri.https(tainted host or path) - host parameter is attacker-controlled, enabling SSRF when later fetched."
 - id: dart.ssrf.uri_http_constructor
   enabled: true
   language: dart
@@ -1084,5 +1062,4 @@
 
       '
     expect_no_match: true
-  description: "Uri.http(tainted host or path) - host parameter is attacker-controlled,\
-    \ enabling SSRF when later fetched."
+  description: "Uri.http(tainted host or path) - host parameter is attacker-controlled, enabling SSRF when later fetched."

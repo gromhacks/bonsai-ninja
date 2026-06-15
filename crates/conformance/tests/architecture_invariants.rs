@@ -1267,7 +1267,12 @@ fn enabled_discriminating_constraints_have_negative_examples() {
 
 #[test]
 fn arg_tainted_keyword_rules_use_kw_capable_adapters() {
-    let kw_capable = ["python", "dart"];
+    // Adapters that populate `CallArg.name` so `arg_tainted { kw }` can
+    // match a named argument. Perl's `combine_perl_fat_comma_call_args`
+    // collapses `f(key => $v)` into one CallArg with `name = Some("key")`,
+    // so fat-comma named-arg sinks (Net::LDAP search filter, XML::LibXML
+    // load_xml string, Mojolicious render text, ...) match via `kw`.
+    let kw_capable = ["python", "dart", "perl"];
     let mut violations = Vec::new();
     for rule in rulepack_rules() {
         if rule.arg_tainted_kw && !kw_capable.contains(&rule.lang.as_str()) {

@@ -1353,3 +1353,21 @@
       val ACCESS_EXTERNAL_DTD = \"\"\n}\n"
     expect_no_match: true
   description: "XMLConstants ACCESS_EXTERNAL_* set to empty string - blocks external DTD/schema/stylesheet resolution."
+- id: kotlin.passthrough.string_format
+  enabled: true
+  language: kotlin
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, format]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string format preserves arg taint
+    code: |
+      fun h(input: String): String {
+        return String.format("q=%s", input)
+      }
+    expect_match_text: [String.format]
+  description: "Kotlin String.format(fmt, args...) - formatted string derives from its arguments; preserves taint."

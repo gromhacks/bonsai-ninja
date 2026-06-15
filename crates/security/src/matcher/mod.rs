@@ -989,6 +989,15 @@ impl<'a> PreparedRule<'a> {
                 || candidates
                     .iter()
                     .any(|candidate| crate::pkg::import_matches_package(candidate, signal))
+                // WS1 FQN-no-import: a Go-style path package (`os/exec`,
+                // `net/http`) binds its last segment as the call qualifier
+                // (`exec.Command`, `http.Get`), which the prefix matcher
+                // above misses. Credit a call CANDIDATE that equals that
+                // last segment — the fully-qualified call is itself the
+                // package evidence, no in-file import required.
+                || candidates
+                    .iter()
+                    .any(|candidate| crate::pkg::call_candidate_matches_package_tail(candidate, signal))
         });
         allowed
     }
@@ -2278,10 +2287,11 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
     } else {
         None
     };
-    let workspace_package_fingerprint = workspace_packages
+    let manifest_fingerprint = workspace_packages
         .as_ref()
         .map(|packages| packages.fingerprint)
         .unwrap_or(0);
+    let workspace_package_fingerprint = manifest_fingerprint;
     let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snapshot| {
         (
             snapshot.version,

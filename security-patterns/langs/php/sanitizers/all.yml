@@ -1123,6 +1123,86 @@
     expect_match_text:
     - strtolower
   description: PHP strtolower($x) - case-normalizes but preserves taint from $x.
+- id: php.passthrough.sprintf
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: sprintf
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: sprintf preserves arg taint
+    code: "<?php\nfunction example($input) {\n  return sprintf(\"q=%s\", $input);\n}\n"
+    expect_match_text:
+    - sprintf
+  description: PHP sprintf($fmt, ...$args) - formatted string derives from its arguments; preserves taint.
+- id: php.passthrough.vsprintf
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: vsprintf
+  taint_semantics:
+    call_result_passthrough_args: [0, 1]
+  match_examples:
+  - name: vsprintf preserves arg taint
+    code: "<?php\nfunction example($input) {\n  return vsprintf(\"q=%s\", [$input]);\n}\n"
+    expect_match_text:
+    - vsprintf
+  description: PHP vsprintf($fmt, $args) - formatted string derives from the args array; preserves taint.
+- id: php.passthrough.implode
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: implode
+  taint_semantics:
+    call_result_passthrough_args: [0, 1]
+  match_examples:
+  - name: implode preserves taint
+    code: "<?php\nfunction example($parts) {\n  return implode(\",\", $parts);\n}\n"
+    expect_match_text:
+    - implode
+  description: PHP implode($glue, $parts) - the joined string derives from the parts array; preserves taint.
+- id: php.passthrough.str_replace
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: str_replace
+  taint_semantics:
+    call_result_passthrough_args: [1, 2]
+  match_examples:
+  - name: str_replace preserves taint
+    code: "<?php\nfunction example($input) {\n  return str_replace(\"a\", $input, \"abc\");\n}\n"
+    expect_match_text:
+    - str_replace
+  description: PHP str_replace($search, $replace, $subject) - result derives from the replacement + subject; preserves taint.
+- id: php.passthrough.strval
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: strval
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: strval preserves taint
+    code: "<?php\nfunction example($input) {\n  return strval($input);\n}\n"
+    expect_match_text:
+    - strval
+  description: PHP strval($x) - string coercion; the resulting string still carries attacker content.
 - id: php.csrf.laravel_verify_csrf_token
   enabled: true
   language: php

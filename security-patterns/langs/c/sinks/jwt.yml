@@ -17,14 +17,12 @@
   - name: generated direct match
     code: |
       #include <libjwt/jwt.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         jwt_decode(arg);
       }
   - name: literal jwt negative
-    code: "#include <libjwt/jwt.h>\nvoid example(void) {\n  char *arg = \"tainted\"\
-      ;\n  char *fmt = arg;\n  jwt_decode(arg);\n}\n"
+    code: "#include <libjwt/jwt.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  jwt_decode(arg);\n}\n"
     expect_no_match: true
   description: "libjwt jwt_decode - flag if jwt_set_alg not pinned."
 
@@ -65,9 +63,7 @@
         char *fmt = arg;
         cjose_jws_verify(arg);
       }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. cjose cjose_jws_verify - flag if
-    alg whitelist missing."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. cjose cjose_jws_verify - flag if alg whitelist missing."
 
 - id: c.jwt.l8w8jwt_decode
   enabled: true
@@ -87,14 +83,12 @@
   - name: generated direct match
     code: |
       #include <l8w8jwt.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         l8w8jwt_decode(arg);
       }
   - name: literal jwt negative
-    code: "#include <l8w8jwt.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n\
-      \  char *fmt = arg;\n  l8w8jwt_decode(arg);\n}\n"
+    code: "#include <l8w8jwt.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  l8w8jwt_decode(arg);\n}\n"
     expect_no_match: true
   description: "l8w8jwt_decode."
 
@@ -120,5 +114,4 @@
         char *fmt = arg;
         jose_jws_ver(arg);
       }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. libjose jose_jws_ver."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. libjose jose_jws_ver."

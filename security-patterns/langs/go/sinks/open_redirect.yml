@@ -15,16 +15,31 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Redirect$
+      base_name_in:
+      - c
+      - ctx
+      - ctxt
+      - e
   constraints:
   - arg_tainted:
       index: 1
   match_examples:
   - name: gin context redirect status url
-    code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc redirect(c *gin.Context) {\n  target := \"/next\"\n  c.Redirect(302, target)\n}\n"
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func redirect(c *gin.Context, target string) {
+        c.Redirect(302, target)
+      }
     expect_match_text:
     - c.Redirect
   - name: echo redirect status url
-    code: "package main\nimport \"github.com/labstack/echo\"\nfunc redirect(ctx echo.Context) error {\n  target := ctx.QueryParam(\"next\")\n  return ctx.Redirect(302, target)\n}\n"
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func redirect(ctx echo.Context, target string) error {
+        return ctx.Redirect(302, target)
+      }
     expect_match_text:
     - ctx.Redirect
   - name: literal redirect target negative

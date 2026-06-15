@@ -200,11 +200,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'import Alamofire
-
-      func test() { let input = "x"; let amount = 1; AF.upload(input) }
-
-      '
+    code: |
+      import Alamofire
+      func test(input: String) { let amount = 1; AF.upload(input) }
   - name: literal arg 0 negative
     code: |
       func test() { AF.upload("safe") }

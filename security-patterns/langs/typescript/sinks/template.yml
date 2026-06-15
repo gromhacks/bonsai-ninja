@@ -592,6 +592,11 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.renderString$"
+      base_name_in:
+      - env
+      - nunjucks
+      - njk
+      - tmpl
   constraints:
   - arg_tainted:
       index: 0

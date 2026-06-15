@@ -11,6 +11,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chats\.create$
+      base_name_in:
+      - chats
+      - messages
+      - client
+      - completions
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -38,6 +44,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.messages\.create$
+      base_name_in:
+      - anthropic
+      - client
+      - messages
+      - chats
+      - c
   constraints:
   - arg_tainted:
       index: 0

@@ -48,9 +48,8 @@
   - name: tainted sqlite3 prepare sql
     code: |
       #include <sqlite3.h>
-      void example(sqlite3 *db) {
-        const char *arg = "tainted";
-        sqlite3_prepare_v2(db, arg, -1, 0, 0);
+      void example(sqlite3 *db, const char *arg) {
+        sqlite3_prepare_v2(db,arg, -1, 0, 0);
       }
   - name: literal sqlite3 prepare sql negative
     code: |
@@ -110,7 +109,13 @@
       index: 0
   match_examples:
   - name: tainted mysql connector execute sql
-    code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::execute(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <mysqlcppconn/mysql_driver.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Statement::execute("SELECT " + query);
+      }
   - name: literal mysql connector execute negative
     code: |
       #include <mysqlcppconn/mysql_driver.h>
@@ -139,7 +144,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::executeQuery(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <mysqlcppconn/mysql_driver.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Statement::executeQuery("SELECT " + query);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -167,7 +178,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::executeUpdate(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <mysqlcppconn/mysql_driver.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Statement::executeUpdate("SELECT " + query);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -261,7 +278,13 @@
       index: 0
   match_examples:
   - name: tainted libpqxx exec sql
-    code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <libpqxx/pqxx.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        work::exec("SELECT " + query);
+      }
   - name: literal libpqxx exec negative
     code: |
       #include <libpqxx/pqxx.h>
@@ -290,7 +313,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec0(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <libpqxx/pqxx.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        work::exec0("SELECT " + query);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -318,7 +347,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec1(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <libpqxx/pqxx.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        work::exec1("SELECT " + query);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -379,9 +414,8 @@
   - name: tainted pqexecparams sql
     code: |
       #include <libpq-fe.h> /* libpq */
-      void example(PGconn *conn) {
-        const char *arg = "tainted";
-        PQexecParams(conn, arg, 0, 0, 0, 0, 0, 0);
+      void example(PGconn *conn, const char *arg) {
+        PQexecParams(conn,arg, 0, 0, 0, 0, 0, 0);
       }
   - name: literal pqexecparams sql negative
     code: |
@@ -475,7 +509,15 @@
       index: 0
   match_examples:
   - name: tainted qsqlquery exec sql
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QSqlQuery::exec(\"SELECT \" + query);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QSqlQuery::exec("SELECT " + query);
+      }
   - name: literal qsqlquery exec negative
     code: |
       #include <QtCore/Qt>
@@ -509,8 +551,7 @@
   - name: tainted soci once sql
     code: |
       #include <soci/soci.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         Session::once(arg);
       }
   - name: literal soci once sql negative

@@ -96,8 +96,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new regex(arg);
       }
   - name: literal arg 0 negative

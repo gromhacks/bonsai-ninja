@@ -67,6 +67,11 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.add$
+      base_name_in:
+      - headers
+      - response
+      - res
+      - h
   constraints:
   - arg_tainted:
       index: 1
@@ -96,6 +101,11 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.add$
+      base_name_in:
+      - headers
+      - response
+      - res
+      - h
   constraints:
   - arg_tainted:
       index: 0

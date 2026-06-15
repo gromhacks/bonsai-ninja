@@ -223,18 +223,18 @@
   - name: generated direct match
     code: |
       use redis::dummy;
-      fn example() {
+      fn example(tainted: &str) {
           let target = "tainted";
           let query = "user";
-          redis::cmd("EVAL");
+          redis::cmd( tainted);
       }
   - name: generated direct match
     code: |
       use redis::dummy;
-      fn example() {
+      fn example(tainted: &str) {
           let target = "tainted";
           let query = "user";
-          redis::cmd("EVALSHA");
+          redis::cmd( tainted);
       }
   - name: literal arg 0 negative
     code: |

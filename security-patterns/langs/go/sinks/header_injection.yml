@@ -37,21 +37,21 @@
       import "github.com/labstack/echo"
       package main
       import "net/http"
-      func hdr(w http.ResponseWriter, r *http.Request) {
+      func hdr(w http.ResponseWriter, r *http.Request, val string) {
         name := "X-" + input
-        val := "ok" + input
         w.Header().Set(name, val)
       }
     expect_match_text:
     - w.Header().Set
   - name: content disposition concat
     code: |
-      import "github.com/labstack/echo"
       package main
-      import "net/http"
-      func download(w http.ResponseWriter, r *http.Request) {
-        name := input
-        w.Header().Set("Content-Disposition", "attachment; filename=" + name)
+      import (
+        "net/http"
+        _ "github.com/labstack/echo"
+      )
+      func download(w http.ResponseWriter, r *http.Request, name string) {
+        w.Header().Set("Content-Disposition", "attachment; filename="+name)
       }
     expect_match_text:
     - w.Header().Set
@@ -126,8 +126,7 @@
       import "github.com/go-ldap/ldap"
       package main
       import "net/http"
-      func hdr(w http.ResponseWriter, r *http.Request) {
-        val := token
+      func hdr(w http.ResponseWriter, r *http.Request, val string) {
         w.Header().Add("X-Token", val)
       }
     expect_match_text:
@@ -198,7 +197,13 @@
       index: 1
   match_examples:
   - name: http header variable set
-    code: "package main\nimport \"net/http\"\nfunc hdr(r *http.Request) {\n  h := http.Header{}\n  value := input\n  h.Set(\"X-User\", value)\n}\n"
+    code: |
+      package main
+      import "net/http"
+      func hdr(r *http.Request, value string) {
+        h := http.Header{}
+        h.Set("X-User", value)
+      }
     expect_match_text:
     - h.Set
   - name: literal http header variable set negative

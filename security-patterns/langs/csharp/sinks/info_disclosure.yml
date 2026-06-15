@@ -17,7 +17,7 @@
   match_examples:
   - name: declared shape
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Console.WriteLine("password=" + input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Console.WriteLine("password=" + input); } }
     expect_match_text: [Console.WriteLine]
   - name: literal console output negative
     code: |
@@ -45,7 +45,7 @@
   - name: declared shape
     code: |
       using Microsoft.Extensions.Logging;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ILogger.LogError("api_key={Key}", input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ILogger.LogError("api_key={Key}", input); } }
     expect_match_text: [ILogger.LogError]
   - name: literal structured log value negative
     code: |

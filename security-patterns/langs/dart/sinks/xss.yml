@@ -66,9 +66,8 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'void test() { var input = "x"; var amount = 1; document.write(input); }
-
-      '
+    code: |
+      void test(String input) { var amount = 1; document.write(input); }
   - name: literal document write negative
     code: 'void test() { document.write("<p>safe</p>"); }
 
@@ -131,10 +130,7 @@
     kind: call
     callee:
       name: parse
-  description: "Disabled - bare `parse` name is FP-prone (matches every parse()\
-    \ across the codebase). Re-enable with import-scoped matching when adapter supports\
-    \ it. The dangerous flow is package:html parse + downstream innerHtml/setInnerHtml\
-    \ sink, which the existing XSS rules already catch."
+  description: "Disabled - bare `parse` name is FP-prone (matches every parse() across the codebase). Re-enable with import-scoped matching when adapter supports it. The dangerous flow is package:html parse + downstream innerHtml/setInnerHtml sink, which the existing XSS rules already catch."
 - id: dart.xss.html_parse_fragment
   enabled: true
   language: dart
@@ -173,8 +169,6 @@
 
       '
     expect_no_match: true
-  description: "package:html parseFragment(tainted) - fragment parser with un-escaped\
-    \ DOM-build risk. `parseFragment` is a sufficiently distinctive name to scope\
-    \ without import context."
+  description: "package:html parseFragment(tainted) - fragment parser with un-escaped DOM-build risk. `parseFragment` is a sufficiently distinctive name to scope without import context."
   imports:
   - html/html.dart

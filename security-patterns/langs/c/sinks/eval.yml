@@ -15,8 +15,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         dlopen(arg);
       }
@@ -71,8 +70,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         LoadLibraryA(arg);
       }
@@ -100,8 +98,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         LoadLibraryW(arg);
       }
@@ -248,8 +245,7 @@
       #include <Python.h>
       #include <python3.10/Python.h>
       #include <python3.10/Python.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         PyRun_SimpleString(arg);
       }
@@ -287,8 +283,7 @@
       #include <Python.h>
       #include <python3.10/Python.h>
       #include <python3.10/Python.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         PyRun_String(arg);
       }

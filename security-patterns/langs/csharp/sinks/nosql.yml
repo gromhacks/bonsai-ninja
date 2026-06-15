@@ -17,7 +17,7 @@
   - name: declared shape
     code: |
       using MongoDB.Driver;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoCollection.Find(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; IMongoCollection.Find(input); } }
   - name: literal mongo find filter negative
     code: |
       using MongoDB.Driver;
@@ -43,7 +43,7 @@
   - name: declared shape
     code: |
       using MongoDB.Driver;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoCollection.FindAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; IMongoCollection.FindAsync(input); } }
   - name: literal mongo findasync filter negative
     code: |
       using MongoDB.Driver;
@@ -69,7 +69,7 @@
   - name: declared shape
     code: |
       using MongoDB.Driver;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoCollection.Aggregate(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; IMongoCollection.Aggregate(input); } }
   - name: literal mongo aggregate pipeline negative
     code: |
       using MongoDB.Driver;
@@ -95,7 +95,7 @@
   - name: declared shape
     code: |
       using MongoDB.Driver;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoDatabase.RunCommand(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; IMongoDatabase.RunCommand(input); } }
   - name: literal mongo command negative
     code: |
       using MongoDB.Driver;
@@ -121,7 +121,7 @@
   - name: declared shape
     code: |
       using MongoDB.Bson;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BsonDocument.Parse(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; BsonDocument.Parse(input); } }
   - name: literal bson parse negative
     code: |
       using MongoDB.Bson;
@@ -147,7 +147,7 @@
   - name: declared shape
     code: |
       using Microsoft.Azure.Cosmos;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Container.GetItemQueryIterator(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Container.GetItemQueryIterator(input); } }
   - name: literal cosmos query negative
     code: |
       using Microsoft.Azure.Cosmos;
@@ -173,7 +173,7 @@
   - name: declared shape
     code: |
       using RavenDB.Client;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Advanced.RawQuery(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Advanced.RawQuery(input); } }
   - name: literal ravendb raw query negative
     code: |
       using RavenDB.Client;
@@ -199,7 +199,7 @@
   - name: declared shape
     code: |
       using StackExchange.Redis;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IDatabase.ScriptEvaluate(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; IDatabase.ScriptEvaluate(input); } }
   - name: literal redis script negative
     code: |
       using StackExchange.Redis;

@@ -22,8 +22,7 @@
       import "github.com/go-ldap/ldap"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         conn.Search(target)
@@ -62,8 +61,7 @@
       import "github.com/go-ldap/ldap"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         conn.SearchWithPaging(target)
@@ -102,8 +100,7 @@
       import "github.com/go-ldap/ldap"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         conn.Modify(target)
@@ -142,8 +139,7 @@
       import "github.com/go-ldap/ldap"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         conn.Del(target)

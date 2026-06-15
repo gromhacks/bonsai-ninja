@@ -17,7 +17,10 @@ use tree_sitter::Node;
 
 const SCALA_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_definition", "function_declaration"],
-    param_kinds: &["parameter", "class_parameter"],
+    // `val_definition` / `var_definition` capture typed locals
+    // (`val c: Foo = make()`) so cast / factory-typed receivers resolve
+    // `receiver_type_in`; the binding name sits in the `pattern` field.
+    param_kinds: &["parameter", "class_parameter", "val_definition", "var_definition"],
     name_field: "name",
     type_field: "type",
 };
@@ -233,6 +236,11 @@ impl LanguageAdapter for ScalaAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`val c = new Foo()`
+        // / `Foo()` → `c: Foo`) so `c.method(...)` carries a resolved
+        // receiver type for `receiver_type_in` / `[Type, method]` rules.
+        // Scala class names are PascalCase; the heuristic is reliable.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }

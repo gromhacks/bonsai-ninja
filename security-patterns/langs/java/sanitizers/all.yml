@@ -1397,6 +1397,89 @@
       }
     expect_match_text: [URLDecoder.decode]
   description: "java.net.URLDecoder.decode(s, charset) - preserves taint."
+- id: java.passthrough.string_value_of
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, valueOf]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string valueof preserves taint
+    code: |
+      class App {
+        String handle(Object input) {
+          return String.valueOf(input);
+        }
+      }
+    expect_match_text: [String.valueOf]
+  description: "String.valueOf(x) - text coercion; the resulting string still carries attacker content, so it preserves taint."
+- id: java.passthrough.string_format
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, format]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string format preserves arg taint
+    code: |
+      class App {
+        String handle(String input) {
+          return String.format("q=%s", input);
+        }
+      }
+    expect_match_text: [String.format]
+  description: "String.format(fmt, args...) - the formatted string derives from its arguments; preserves taint from any interpolated value."
+- id: java.passthrough.string_join
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, join]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string join preserves taint
+    code: |
+      class App {
+        String handle(String input) {
+          return String.join(",", input, "b");
+        }
+      }
+    expect_match_text: [String.join]
+  description: "String.join(delim, elems...) - the joined string derives from the joined elements; preserves taint."
+- id: java.passthrough.stringbuilder_append
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.append$"
+      base_name_in: [sb, builder, buf, buffer, out, sql, query, b]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: stringbuilder append preserves taint
+    code: |
+      class App {
+        String handle(String input) {
+          StringBuilder sb = new StringBuilder();
+          return sb.append(input).toString();
+        }
+      }
+    expect_match_text: [sb.append]
+  description: "StringBuilder.append(x) - returns the same builder carrying appended content; preserves taint from the receiver and the appended value."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink

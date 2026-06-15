@@ -17,7 +17,7 @@
   - name: declared shape
     code: |
       using OpenAI;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ChatClient.CompleteChat(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ChatClient.CompleteChat(input); } }
     expect_match_text: [ChatClient.CompleteChat]
   - name: literal chat prompt negative
     code: |
@@ -44,7 +44,7 @@
   - name: declared shape
     code: |
       using Azure.AI.OpenAI;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; OpenAIClient.GetChatCompletionsAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; OpenAIClient.GetChatCompletionsAsync(input); } }
     expect_match_text: [OpenAIClient.GetChatCompletionsAsync]
   - name: literal azure chat request negative
     code: |
@@ -98,7 +98,7 @@
   - name: declared shape
     code: |
       using Anthropic;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AnthropicClient.CreateMessageAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AnthropicClient.CreateMessageAsync(input); } }
     expect_match_text: [AnthropicClient.CreateMessageAsync]
   - name: literal anthropic message negative
     code: |
@@ -125,7 +125,7 @@
   - name: declared shape
     code: |
       using AWSSDK.BedrockRuntime;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonBedrockRuntimeClient.InvokeModelAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AmazonBedrockRuntimeClient.InvokeModelAsync(input); } }
     expect_match_text: [AmazonBedrockRuntimeClient.InvokeModelAsync]
   - name: literal bedrock request negative
     code: |
@@ -152,7 +152,7 @@
   - name: declared shape
     code: |
       using Microsoft.SemanticKernel;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IChatCompletionService.GetChatMessageContentAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; IChatCompletionService.GetChatMessageContentAsync(input); } }
     expect_match_text: [IChatCompletionService.GetChatMessageContentAsync]
   - name: literal semantic kernel prompt negative
     code: |

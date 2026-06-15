@@ -22,8 +22,7 @@
       use actix_web;
       use actix_web;
       use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           HttpResponseBuilder::insert_header(target);
       }
@@ -60,8 +59,7 @@
       use actix_web;
       use actix_web;
       use actix_web::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           HttpResponseBuilder::append_header(target);
       }
@@ -167,8 +165,7 @@
   - name: generated direct match
     code: |
       use rocket::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           Response::set_header(target);
       }

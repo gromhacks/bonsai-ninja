@@ -246,8 +246,9 @@
   match:
     kind: call
     callee:
-      regex: "^ApolloClient\\.query$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query$"
   constraints:
+  - receiver_type_in: [ApolloClient]
   - arg_tainted:
       index: 0
   match_examples:

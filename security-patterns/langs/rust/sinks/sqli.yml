@@ -378,8 +378,7 @@
   - name: tainted sea-orm sql string
     code: |
       use sea_orm;
-      fn example(db: DbBackend) {
-          let target = "tainted";
+      fn example(db: DbBackend, target: &str) {
           Statement::from_sql_and_values(db, target, vec![]);
       }
   - name: literal sea-orm sql string negative

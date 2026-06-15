@@ -38,7 +38,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  std::system(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        std::system(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -125,7 +130,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execve(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        execve(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -203,7 +213,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execl(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        execl(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -227,7 +242,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execlp(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        execlp(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -255,7 +275,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::system(arg);\n}\n"
+    code: |
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        process::system(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -286,7 +314,15 @@
       index: 0
   match_examples:
   - name: tainted boost process spawn command
-    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::spawn(arg);\n}\n"
+    code: |
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        process::spawn(arg);
+      }
   - name: literal boost process spawn negative
     code: |
       #include <boost/process.hpp>
@@ -316,7 +352,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new child(arg);\n}\n"
+    code: |
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      void example(const char *arg) {
+        auto *x = new child(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -347,7 +389,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::start(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QProcess::start(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -378,7 +428,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::startCommand(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QProcess::startCommand(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -409,7 +467,15 @@
       index: 0
   match_examples:
   - name: tainted qprocess execute command
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::execute(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QProcess::execute(arg);
+      }
   - name: literal qprocess execute negative
     code: |
       #include <QtCore/Qt>
@@ -441,7 +507,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::startDetached(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QProcess::startDetached(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -472,7 +546,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <Poco/URI.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Process::launch(arg);\n}\n"
+    code: |
+      #include <Poco/URI.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Process::launch(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -528,7 +608,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execv(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        execv(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -579,7 +664,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execle(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        execle(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -769,7 +859,13 @@
       index: 0
   match_examples:
   - name: tainted boost process v2 process
-    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new process_v2::process(arg);\n}\n"
+    code: |
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      void example(const char *arg) {
+        auto *x = new process_v2::process(arg);
+      }
   - name: literal boost process v2 negative
     code: |
       #include <boost/process.hpp>
@@ -801,7 +897,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::shell(arg);\n}\n"
+    code: |
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      #include <boost/process.hpp>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        process::shell(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {

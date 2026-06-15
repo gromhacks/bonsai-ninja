@@ -203,6 +203,12 @@ impl LanguageAdapter for JavaAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`Foo c = new Foo()`
+        // → `c: Foo`) so `c.method(...)` carries a resolved receiver type
+        // for `receiver_type_in` / `[Type, method]` rules. Java class
+        // names are PascalCase and methods camelCase, so the constructor
+        // heuristic is reliable (unlike Go's uppercase exported functions).
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut index);
         index
     }
@@ -270,26 +276,73 @@ fn java_type_aliases_from_decl(node: Node<'_>, src: &[u8]) -> Vec<TypeAliasBindi
     let Some(type_node) = node.child_by_field_name("type") else {
         return Vec::new();
     };
-    let Some(canonical_type) = canonical_java_type_name(node_text(&type_node, src)) else {
-        return Vec::new();
-    };
+    let type_text = node_text(&type_node, src);
     let mut aliases = Vec::new();
-    // Single-name declarations (most parameter shapes).
-    if let Some(name_node) = node.child_by_field_name("name") {
-        push_type_alias(&mut aliases, node_text(&name_node, src), &canonical_type);
+    if let Some(canonical_type) = canonical_java_type_name(type_text) {
+        // Single-name declarations (most parameter shapes).
+        if let Some(name_node) = node.child_by_field_name("name") {
+            push_type_alias(&mut aliases, node_text(&name_node, src), &canonical_type);
+            return aliases;
+        }
+        // Multi-name `Foo a, b, c;` — one `variable_declarator` per name.
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "variable_declarator" {
+                continue;
+            }
+            if let Some(name_node) = child.child_by_field_name("name") {
+                push_type_alias(&mut aliases, node_text(&name_node, src), &canonical_type);
+            }
+        }
         return aliases;
     }
-    // Multi-name `Foo a, b, c;` — one `variable_declarator` per name.
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() != "variable_declarator" {
-            continue;
-        }
-        if let Some(name_node) = child.child_by_field_name("name") {
-            push_type_alias(&mut aliases, node_text(&name_node, src), &canonical_type);
+    // WS2: `var c = (Foo) make()` — the inferred (`var`) LHS carries no
+    // class, so the type lives only on the cast initializer. Read the
+    // declarator's `value` field directly (a cast nested in a call
+    // argument must NOT mistype the local) and type the binding by it.
+    if type_text.trim() == "var" {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(name_node) = child.child_by_field_name("name") else {
+                continue;
+            };
+            let Some(value) = child.child_by_field_name("value") else {
+                continue;
+            };
+            if let Some(cast_raw) = java_cast_type_of_init(value, src) {
+                if let Some(canonical) = canonical_java_type_name(&cast_raw) {
+                    push_type_alias(&mut aliases, node_text(&name_node, src), &canonical);
+                }
+            }
         }
     }
     aliases
+}
+
+/// The cast type of a direct initializer (`(Foo) x` → `Foo`), unwrapping
+/// redundant parentheses. Java has no `as`-cast, so only `cast_expression`
+/// counts. Returns `None` for any other initializer shape so only a cast
+/// that IS the initializer types the local.
+fn java_cast_type_of_init(init: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut n = init;
+    while n.kind() == "parenthesized_expression" {
+        let mut cursor = n.walk();
+        let mut inner = None;
+        for child in n.named_children(&mut cursor) {
+            inner = Some(child);
+            break;
+        }
+        n = inner?;
+    }
+    if n.kind() == "cast_expression" {
+        return n
+            .child_by_field_name("type")
+            .map(|t| node_text(&t, src).to_string());
+    }
+    None
 }
 
 /// Canonicalize a Java type expression to its short, generics/array-free

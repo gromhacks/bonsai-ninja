@@ -110,8 +110,7 @@
   - name: tainted ldap-cpp search filter
     code: |
       #include <ldapcpp.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         LDAPAsynConnection::search("ou=People", 2, arg);
       }
   - name: literal ldap-cpp search filter negative

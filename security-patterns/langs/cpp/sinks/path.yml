@@ -14,7 +14,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  fopen(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        fopen(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -41,8 +46,7 @@
   - name: tainted posix open path
     code: |
       #include <fcntl.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         open(arg, 0);
       }
   - name: literal open path negative
@@ -96,7 +100,10 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new ifstream(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        auto *x = new ifstream(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -120,7 +127,10 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new ofstream(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        auto *x = new ofstream(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -144,7 +154,10 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new fstream(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        auto *x = new fstream(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -173,7 +186,14 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <stdio.h>\n#include <stdio.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::remove(arg);\n}\n"
+    code: |
+      #include <stdio.h>
+      #include <stdio.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        filesystem::remove(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -202,7 +222,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::remove_all(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        filesystem::remove_all(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -390,7 +415,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::create_directory(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        filesystem::create_directory(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -416,7 +446,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::create_directories(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        filesystem::create_directories(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -442,7 +477,13 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new QFile(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        auto *x = new QFile(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -473,7 +514,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QDir::mkpath(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QDir::mkpath(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -504,7 +553,15 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QFile::remove(arg);\n}\n"
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        QFile::remove(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -550,7 +607,12 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::read_symlink(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        filesystem::read_symlink(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -574,7 +636,10 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new directory_iterator(arg);\n}\n"
+    code: |
+      void example(const char *arg) {
+        auto *x = new directory_iterator(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {

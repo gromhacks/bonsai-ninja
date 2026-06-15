@@ -10,6 +10,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.find$
+      base_name_in:
+      - collection
+      - coll
+      - col
+      - db
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -42,6 +48,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.findOne$
+      base_name_in:
+      - collection
+      - coll
+      - col
+      - db
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -74,6 +86,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.aggregate$
+      base_name_in:
+      - collection
+      - coll
+      - col
+      - db
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -106,6 +124,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.update$
+      base_name_in:
+      - collection
+      - coll
+      - col
+      - db
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -138,6 +162,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.update$
+      base_name_in:
+      - collection
+      - coll
+      - col
+      - db
+      - c
   constraints:
   - arg_tainted:
       index: 1
@@ -165,6 +195,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.remove$
+      base_name_in:
+      - collection
+      - coll
+      - col
+      - db
+      - c
   constraints:
   - arg_tainted:
       index: 0

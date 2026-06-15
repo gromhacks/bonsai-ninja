@@ -206,6 +206,10 @@ impl LanguageAdapter for TypeScriptAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing
+        // (`const c = new Foo()` → `c: Foo`); see the JS adapter for the
+        // rationale. TypeScript shares the JS naming convention.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
     }

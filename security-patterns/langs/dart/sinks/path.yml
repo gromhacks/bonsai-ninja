@@ -440,7 +440,7 @@
   - name: tainted file constructor
     code: |
       class File { File([dynamic input, {dynamic htmlEscapeValues}]); }
-      void test() { var input = "x"; var result = File(input); }
+      void test(String input) { var result = File(input); }
   - name: literal file constructor negative
     code: |
       class File { File([dynamic input, {dynamic htmlEscapeValues}]); }
@@ -465,7 +465,7 @@
   - name: tainted directory constructor
     code: |
       class Directory { Directory([dynamic input, {dynamic htmlEscapeValues}]); }
-      void test() { var input = "x"; var result = Directory(input); }
+      void test(String input) { var result = Directory(input); }
   - name: literal directory constructor negative
     code: |
       class Directory { Directory([dynamic input, {dynamic htmlEscapeValues}]); }

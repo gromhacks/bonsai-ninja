@@ -531,3 +531,22 @@
         lists:foldr(fun(Value, Acc) -> Value ++ Acc end, "", Input).
     expect_match_text: ["lists:foldr"]
   description: "lists:foldr(Fun, Acc0, List) - reducer output can be derived from List elements; preserves element taint from List."
+- id: erlang.passthrough.io_lib_format
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [io_lib, format]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1]
+  match_examples:
+  - name: io_lib format preserves arg taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        io_lib:format("q=~s", [Input]).
+    expect_match_text: ["io_lib:format"]
+  description: "io_lib:format(Format, Args) - the formatted iolist derives from Args; preserves taint from any interpolated value."

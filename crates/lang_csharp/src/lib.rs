@@ -136,6 +136,8 @@ impl LanguageAdapter for CSharpAdapter {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_csharp_visibility(tree.root_node(), file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CSHARP_TYPE_ALIASES);
+            // Locally-declared receiver types (casts / typed locals).
+            let local_alias_map = collect_csharp_local_type_aliases(&tree, file, src);
             // Class-level field/property type bindings extend each
             // method's `type_aliases`. A field declared as `private
             // readonly AuthService _authService = new AuthService();`
@@ -162,6 +164,15 @@ impl LanguageAdapter for CSharpAdapter {
                     decl.visibility = vis;
                 }
                 let mut aliases = alias_map.get(&decl.span).cloned().unwrap_or_default();
+                if let Some(locals) = local_alias_map.get(&decl.span) {
+                    for alias in locals {
+                        // Param annotations (added first) take precedence
+                        // over a local of the same name.
+                        if !aliases.iter().any(|existing| existing.name == alias.name) {
+                            aliases.push(alias.clone());
+                        }
+                    }
+                }
                 if matches!(
                     decl.kind,
                     DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -251,6 +262,11 @@ impl LanguageAdapter for CSharpAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`var c = new Foo()`
+        // → `c: Foo`) so `c.Method(...)` carries a resolved receiver type
+        // for `receiver_type_in` / `[Type, method]` rules. C# class names
+        // are PascalCase; the constructor heuristic is reliable here.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }
@@ -1149,6 +1165,185 @@ fn csharp_using_is_static(using_node: &tree_sitter::Node<'_>, src: &[u8]) -> boo
 /// per-method merge can attach a class's bindings to every method
 /// nested inside it, matching the resolver's caller-decl
 /// `type_aliases` lookup contract.
+/// Collect locally-declared receiver types per method
+/// (`SqlCommand c = (SqlCommand) o;`, `using var conn = Open();`),
+/// keyed by the owning method/constructor span. The cast type the goal
+/// (WS2) calls out surfaces on the LOCAL DECLARATION, not the
+/// taint-engine flow event (which strips it), so capturing the declared
+/// type here lets `receiver_type_in` / `[Type, method]` resolve a cast
+/// or factory-typed receiver. Reuses the field extractor since a C#
+/// `local_declaration_statement` wraps the same `variable_declaration`
+/// (`type` + `variable_declarator`) shape as a `field_declaration`.
+fn collect_csharp_local_type_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
+    let fn_kinds = &[
+        "method_declaration",
+        "constructor_declaration",
+        "local_function_statement",
+    ];
+    let mut out = std::collections::HashMap::new();
+    for fn_node in collect_kinds(tree, fn_kinds) {
+        let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let mut work = vec![fn_node];
+        while let Some(node) = work.pop() {
+            // A nested local function owns its own locals; let its own
+            // iteration scope them rather than leaking into the parent.
+            if node != fn_node && fn_kinds.contains(&node.kind()) {
+                continue;
+            }
+            if node.kind() == "local_declaration_statement" {
+                extend_aliases_from_field_or_event(node, src, &mut aliases);
+                // WS2: `var c = (Foo) x` / `var c = x as Foo` — an inferred
+                // (`var`) LHS leaves the type only on the cast, which the
+                // declared-type extractor (it sees `var`) drops. Capture the
+                // cast/as type so `c.Method(...)` resolves receiver_type_in.
+                extend_aliases_from_var_cast(node, src, &mut aliases);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                work.push(child);
+            }
+        }
+        // Keep only class-like (PascalCase) declared types — the only
+        // shape `receiver_type_in` / `[Type, method]` rules key on. C#
+        // primitives / pseudo-types (`string`, `int`, `var`, `dynamic`,
+        // `object`) are lowercase keywords; capturing them is useless and
+        // aliasing a control-flow local (`string t = ""` in a try, or a
+        // `var` callback) to such a name disturbs clean-overwrite /
+        // callable-binding resolution (regressed the try-catch and
+        // callback-flow audits). Mirrors the constructor heuristic's
+        // uppercase = class rule.
+        aliases.retain(|alias| {
+            alias
+                .type_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+        });
+        if !aliases.is_empty() {
+            out.insert(span_of(file, &fn_node), aliases);
+        }
+    }
+    out
+}
+
+/// WS2 cast-expression typing for inferred (`var`) locals. The declared
+/// type `var` carries no class, so the only type signal is the cast on the
+/// initializer (`var c = (Foo) x` / `var c = x as Foo`). Reads ONLY the
+/// direct initializer (not nested casts in arguments, which would mistype
+/// the local), and only when the declared type is `var` — so it never
+/// clobbers a real declared type already captured by the field extractor.
+fn extend_aliases_from_var_cast(
+    node: tree_sitter::Node<'_>,
+    src: &[u8],
+    aliases: &mut Vec<TypeAliasBinding>,
+) {
+    let mut var_decl = node.child_by_field_name("declaration");
+    if var_decl.is_none() {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "variable_declaration" {
+                var_decl = Some(child);
+                break;
+            }
+        }
+    }
+    let Some(var_decl) = var_decl else {
+        return;
+    };
+    let Some(type_node) = var_decl.child_by_field_name("type") else {
+        return;
+    };
+    if node_text(&type_node, src).trim() != "var" {
+        return;
+    }
+    let mut cursor = var_decl.walk();
+    for declarator in var_decl.named_children(&mut cursor) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let mut name_node = declarator.child_by_field_name("name");
+        if name_node.is_none() {
+            let mut inner = declarator.walk();
+            for child in declarator.named_children(&mut inner) {
+                if child.kind() == "identifier" {
+                    name_node = Some(child);
+                    break;
+                }
+            }
+        }
+        let Some(name_node) = name_node else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        // The initializer is the declarator's `value` field (the
+        // top-level RHS expression). Use the field directly so a cast
+        // nested inside a call argument (`var c = Wrap((Foo) x)`) does NOT
+        // mistype the local — only a cast that IS the initializer counts.
+        let mut init = declarator.child_by_field_name("value");
+        if init.is_none() {
+            // Fallback for grammars that don't field-tag the value: take
+            // the last named child that is not the binding name.
+            let mut inner = declarator.walk();
+            for child in declarator.named_children(&mut inner) {
+                if child.id() != name_node.id() {
+                    init = Some(child);
+                }
+            }
+        }
+        let Some(init) = init else {
+            continue;
+        };
+        let Some(type_name) = csharp_cast_type_of_init(init, src) else {
+            continue;
+        };
+        let canonical = canonical_simple_type_name(&type_name);
+        if canonical.is_empty()
+            || !canonical
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+        {
+            continue;
+        }
+        // Replace any non-useful `var`-typed binding the field extractor
+        // added for this same local; the cast type is the real one.
+        aliases.retain(|a| a.name != name);
+        aliases.push(TypeAliasBinding {
+            name,
+            type_name: canonical,
+        });
+    }
+}
+
+/// The cast/as type of a direct initializer expression (`(Foo) x` →
+/// `Foo`, `x as Foo` → `Foo`), unwrapping redundant parentheses. Returns
+/// `None` for any other initializer shape so only genuine casts type the
+/// local.
+fn csharp_cast_type_of_init(init: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let mut n = init;
+    while n.kind() == "parenthesized_expression" {
+        let mut cursor = n.walk();
+        n = n.named_children(&mut cursor).next()?;
+    }
+    match n.kind() {
+        "cast_expression" => n
+            .child_by_field_name("type")
+            .map(|t| node_text(&t, src).to_string()),
+        "as_expression" => n
+            .child_by_field_name("type")
+            .or_else(|| n.child_by_field_name("right"))
+            .map(|t| node_text(&t, src).to_string()),
+        _ => None,
+    }
+}
+
 fn collect_csharp_class_field_aliases(
     tree: &Tree,
     file: FileId,

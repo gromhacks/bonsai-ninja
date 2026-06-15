@@ -45,7 +45,7 @@
       import vapor
       import Vapor // vapor
       import Vapor // vapor
-      func test() { let input = "x"; let amount = 1; collectFile(input) }
+      func test(input: String) { let amount = 1; collectFile(input) }
   - name: literal arg 0 negative
     code: |
       func test() { collectFile("safe") }
@@ -68,7 +68,7 @@
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; uploadTask(input) }
+      func test(input: String) { let amount = 1; uploadTask(input) }
   - name: literal arg 0 negative
     code: |
       func test() { uploadTask("safe") }

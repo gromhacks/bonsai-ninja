@@ -9,6 +9,13 @@
     kind: call
     callee:
       regex: "^[A-Za-z_][A-Za-z0-9_]*\\.sendmail$"
+      base_name_in:
+      - smtp
+      - server
+      - conn
+      - s
+      - client
+      - mailer
   constraints:
   - arg_tainted:
       index: 2
@@ -38,6 +45,13 @@
     kind: call
     callee:
       regex: "^[A-Za-z_][A-Za-z0-9_]*\\.sendmail$"
+      base_name_in:
+      - smtp
+      - server
+      - conn
+      - s
+      - client
+      - mailer
   constraints:
   - arg_tainted:
       index: 0
@@ -67,6 +81,13 @@
     kind: call
     callee:
       regex: "^[A-Za-z_][A-Za-z0-9_]*\\.sendmail$"
+      base_name_in:
+      - smtp
+      - server
+      - conn
+      - s
+      - client
+      - mailer
   constraints:
   - arg_tainted:
       index: 1

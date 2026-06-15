@@ -50,8 +50,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         getaddrinfo(arg);
       }
@@ -92,8 +91,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         gethostbyname(arg);
       }

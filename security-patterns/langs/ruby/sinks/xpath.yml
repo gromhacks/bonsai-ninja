@@ -10,6 +10,13 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.xpath$
+      base_name_in:
+      - doc
+      - document
+      - node
+      - xml
+      - html
+      - nokogiri
   constraints:
   - arg_tainted:
       index: 0

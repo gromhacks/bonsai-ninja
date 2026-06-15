@@ -17,11 +17,10 @@
   - name: generated direct match
     code: |
       #include <mongocxx/client.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        collection::find("$where");
+        collection::find( arg);
       }
   - name: literal arg 0 negative
     code: |
@@ -49,11 +48,10 @@
   - name: generated direct match
     code: |
       #include <mongocxx/client.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        collection::find_one("$where");
+        collection::find_one( arg);
       }
   - name: literal arg 0 negative
     code: |
@@ -81,11 +79,10 @@
   - name: generated direct match
     code: |
       #include <mongocxx/client.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        collection::aggregate("$where");
+        collection::aggregate( arg);
       }
   - name: literal arg 0 negative
     code: |
@@ -113,11 +110,10 @@
   - name: generated direct match
     code: |
       #include <mongocxx/client.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        collection::update_one("$where");
+        collection::update_one( arg);
       }
   - name: literal arg 0 negative
     code: |
@@ -174,11 +170,10 @@
   - name: generated direct match
     code: |
       #include <mongocxx/client.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        collection::delete_one("$where");
+        collection::delete_one( arg);
       }
   - name: literal arg 0 negative
     code: |
@@ -206,11 +201,10 @@
   - name: generated direct match
     code: |
       #include <mongocxx/client.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        database::run_command("$where");
+        database::run_command( arg);
       }
   - name: literal arg 0 negative
     code: |
@@ -241,9 +235,8 @@
   - name: tainted redis eval script
     code: |
       #include <hiredis/hiredis.h>
-      void example(redisContext *ctx) {
-        const char *arg = "tainted";
-        redisCommand(ctx, "EVAL %s 0", arg);
+      void example(redisContext *ctx, const char *arg) {
+        redisCommand(ctx, "EVAL %s 0",arg);
       }
   - name: literal arg 1 negative
     code: |
@@ -272,9 +265,8 @@
   - name: tainted redisCommand format
     code: |
       #include <hiredis/hiredis.h>
-      void example(redisContext *ctx) {
-        const char *arg = "tainted";
-        redisCommand(ctx, arg);
+      void example(redisContext *ctx, const char *arg) {
+        redisCommand(ctx,arg);
       }
   - name: tainted value with literal format negative
     code: |
