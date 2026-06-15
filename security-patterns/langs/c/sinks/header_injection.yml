@@ -19,8 +19,7 @@
   - name: generated direct match
     code: |
       #include <libmicrohttpd/microhttpd.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         MHD_add_response_header(arg, "X-User", arg);
       }

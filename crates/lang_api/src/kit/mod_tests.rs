@@ -1,6 +1,7 @@
 use super::{
-    apply_assign_call_result_types, canonical_simple_type_name, normalize_call_result_assignment_sources,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches,
+    apply_assign_call_result_types, apply_constructor_result_type_aliases, canonical_simple_type_name,
+    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
@@ -239,6 +240,72 @@ fn call_result_types_fail_closed_on_same_name_overload_conflict() {
             .any(|a| a.name == "z" && a.type_name == "Baz"),
         "unique callee `single` must still stamp z -> Baz, got {:?}",
         consumer.type_aliases
+    );
+}
+
+#[test]
+fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
+    let file = FileId::new(0);
+    let sp = |lo: u64, hi: u64| Span::new(file, lo, hi);
+    let assign = |target: &str, source_call: Option<&str>, span: Span| FlowEvent::Assign {
+        span,
+        target: target.to_string(),
+        source_name: None,
+        source_call: source_call.map(str::to_string),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: Some(AssignValueKind::Compound),
+    };
+    let call = |name: &str, span: Span| FlowEvent::Call {
+        span,
+        name: name.to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: Vec::new(),
+    };
+
+    let mut idx = DeclIndex::default();
+    idx.defs.push(m9_func_decl(
+        0,
+        "handler",
+        None,
+        vec![
+            // `source_call` languages (Python/Java/C#/Go): `conn = Connection(...)`.
+            assign("conn", Some("Connection"), sp(10, 30)),
+            // JS/TS shape: `const client = new ApolloClient({})` is an
+            // Assign with no source_call plus a sibling constructor Call
+            // whose span lies inside the assignment's RHS.
+            assign("client", None, sp(40, 80)),
+            call("ApolloClient", sp(56, 78)),
+            // Negative: an Assign with no source_call followed by an
+            // UNRELATED constructor call outside its span must not type it.
+            assign("misc", None, sp(90, 100)),
+            call("Helper", sp(120, 140)),
+        ],
+    ));
+
+    apply_constructor_result_type_aliases(&mut idx);
+    let decl = &idx.defs[0];
+    let typed = |name: &str| {
+        decl.type_aliases
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.type_name.as_str())
+    };
+    assert_eq!(typed("conn"), Some("Connection"), "{:?}", decl.type_aliases);
+    assert_eq!(
+        typed("client"),
+        Some("ApolloClient"),
+        "adjacent new-expr Call within assign span must type the receiver: {:?}",
+        decl.type_aliases
+    );
+    assert_eq!(
+        typed("misc"),
+        None,
+        "a constructor call outside the assign span must not type the target: {:?}",
+        decl.type_aliases
     );
 }
 

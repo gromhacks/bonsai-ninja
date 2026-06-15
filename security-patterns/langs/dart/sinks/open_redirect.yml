@@ -111,7 +111,7 @@
   match_examples:
   - name: window location href member write
     code: |
-      void test() { var input = "x"; var amount = 1; location.href = input; }
+      void test(String input) { var amount = 1; location.href = input; }
   - name: local href variable negative
     code: |
       void test(input) { var href = input; }

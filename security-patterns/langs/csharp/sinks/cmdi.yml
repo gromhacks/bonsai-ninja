@@ -28,8 +28,7 @@
 
       '
     expect_no_match: true
-  description: "System.Diagnostics.Process.Start - flag if FileName/Arguments\
-    \ tainted."
+  description: "System.Diagnostics.Process.Start - flag if FileName/Arguments tainted."
 - id: csharp.cmdi.process_start_shell_wrapper
   enabled: true
   language: csharp
@@ -52,8 +51,7 @@
       index: 1
   match_examples:
   - name: tainted shell command argument
-    code: 'class App { void Test(string input) { Process.Start("sh", "-c " + input);
-      } }
+    code: 'class App { void Test(string input) { Process.Start("sh", "-c " + input); } }
 
       '
     expect_match_text:
@@ -63,8 +61,7 @@
 
       '
     expect_no_match: true
-  description: "Process.Start(shell, tainted arguments) - shell command string\
-    \ is interpreted by the selected shell."
+  description: "Process.Start(shell, tainted arguments) - shell command string is interpreted by the selected shell."
 - id: csharp.cmdi.process_start_info_args
   enabled: true
   language: csharp
@@ -82,8 +79,7 @@
       index: 0
   match_examples:
   - name: process start info arguments property
-    code: 'class App { void Test(string input) { var psi = new ProcessStartInfo();
-      psi.Arguments = input; } }
+    code: 'class App { void Test(string input) { var psi = new ProcessStartInfo(); psi.Arguments = input; } }
 
       '
   - name: local arguments variable negative
@@ -109,8 +105,7 @@
       index: 0
   match_examples:
   - name: process start info filename property
-    code: 'class App { void Test(string input) { var psi = new ProcessStartInfo();
-      psi.FileName = input; } }
+    code: 'class App { void Test(string input) { var psi = new ProcessStartInfo(); psi.FileName = input; } }
 
       '
   - name: local filename variable negative
@@ -135,8 +130,7 @@
       name: UseShellExecute
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; UseShellExecute = input; } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; UseShellExecute = input; } }
 
       '
   description: "Disabled - UseShellExecute is only dangerous with receiver FileName/Arguments state; enable when receiver-state constraints can join those writes."
@@ -220,8 +214,7 @@
 
       '
     expect_no_match: true
-  description: "CliWrap WithArguments(string) - flag interpolated string form\
-    \ (IList<string> overload is safe)."
+  description: "CliWrap WithArguments(string) - flag interpolated string form (IList<string> overload is safe)."
 - id: csharp.cmdi.powershell_addscript
   enabled: true
   language: csharp
@@ -311,8 +304,7 @@
   - name: declared shape
     code: 'using System.Management.Automation;
 
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; Pipeline.Invoke(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Pipeline.Invoke(input); } }
 
       '
   description: "Pipeline.Invoke - PowerShell pipeline executes queued commands."
@@ -335,14 +327,11 @@
       index: 0
   match_examples:
   - name: tainted filename
-    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic input) { } } class
-      App { void Test(string input) { var result = new ProcessStartInfo(input); }
-      }
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic input) { } } class App { void Test(string input) { var result = new ProcessStartInfo(input); } }
 
       '
   - name: literal filename negative
-    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic input) { } } class
-      App { void Test() { var result = new ProcessStartInfo("dotnet"); } }
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic input) { } } class App { void Test() { var result = new ProcessStartInfo("dotnet"); } }
 
       '
     expect_no_match: true
@@ -364,14 +353,11 @@
       index: 1
   match_examples:
   - name: tainted arguments
-    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic fileName, dynamic arguments) { } } class
-      App { void Test(string input) { var result = new ProcessStartInfo("dotnet", input);
-      } }
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic fileName, dynamic arguments) { } } class App { void Test(string input) { var result = new ProcessStartInfo("dotnet", input); } }
 
       '
   - name: literal arguments negative
-    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic fileName, dynamic arguments) { } } class
-      App { void Test() { var result = new ProcessStartInfo("dotnet", "--info"); } }
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic fileName, dynamic arguments) { } } class App { void Test() { var result = new ProcessStartInfo("dotnet", "--info"); } }
 
       '
     expect_no_match: true
@@ -397,19 +383,15 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using System.Management;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; ManagementObject.InvokeMethod(input); } }
-
-      '
+    code: |
+      using System.Management;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ManagementObject.InvokeMethod(input); } }
   - name: literal wmi method negative
     code: |
       using System.Management;
       class App { void Test() { ManagementObject.InvokeMethod("Create"); } }
     expect_no_match: true
-  description: "ManagementObject.InvokeMethod (WMI Create) - used to spawn processes\
-    \ via Win32_Process; tainted command-line argument is RCE."
+  description: "ManagementObject.InvokeMethod (WMI Create) - used to spawn processes via Win32_Process; tainted command-line argument is RCE."
 - id: csharp.cmdi.management_object_invoke_args
   enabled: true
   language: csharp
@@ -433,15 +415,13 @@
   - name: tainted wmi method arguments
     code: 'using System.Management;
 
-      class App { void Test(string input) { ManagementObject.InvokeMethod("Create",
-      input); } }
+      class App { void Test(string input) { ManagementObject.InvokeMethod("Create", input); } }
 
       '
   - name: literal wmi method arguments negative
     code: 'using System.Management;
 
-      class App { void Test() { ManagementObject.InvokeMethod("Create", "calc.exe");
-      } }
+      class App { void Test() { ManagementObject.InvokeMethod("Create", "calc.exe"); } }
 
       '
     expect_no_match: true
@@ -467,12 +447,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using System.Management;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; ManagementClass.InvokeMethod(input); } }
-
-      '
+    code: |
+      using System.Management;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ManagementClass.InvokeMethod(input); } }
   - name: literal wmi class method negative
     code: |
       using System.Management;
@@ -502,15 +479,13 @@
   - name: tainted wmi class invoke arguments
     code: 'using System.Management;
 
-      class App { void Test(string input) { ManagementClass.InvokeMethod("Create",
-      input); } }
+      class App { void Test(string input) { ManagementClass.InvokeMethod("Create", input); } }
 
       '
   - name: literal wmi class invoke arguments negative
     code: 'using System.Management;
 
-      class App { void Test() { ManagementClass.InvokeMethod("Create", "calc.exe");
-      } }
+      class App { void Test() { ManagementClass.InvokeMethod("Create", "calc.exe"); } }
 
       '
     expect_no_match: true
@@ -549,8 +524,7 @@
 
       '
     expect_no_match: true
-  description: "Renci.SshNet SshClient.RunCommand - executes attacker-supplied\
-    \ shell command on remote host."
+  description: "Renci.SshNet SshClient.RunCommand - executes attacker-supplied shell command on remote host."
 - id: csharp.cmdi.sshnet_createcommand
   enabled: true
   language: csharp
@@ -585,8 +559,7 @@
 
       '
     expect_no_match: true
-  description: "Renci.SshNet SshClient.CreateCommand(string) - wraps a shell\
-    \ command for later Execute()."
+  description: "Renci.SshNet SshClient.CreateCommand(string) - wraps a shell command for later Execute()."
 - id: csharp.cmdi.runspace_invoke_command
   enabled: true
   language: csharp
@@ -620,8 +593,7 @@
 
       '
     expect_no_match: true
-  description: "RunspaceInvoke.Invoke(scriptText) - executes raw PowerShell text\
-    \ in a runspace."
+  description: "RunspaceInvoke.Invoke(scriptText) - executes raw PowerShell text in a runspace."
 - id: csharp.cmdi.cliwrap_targetfile
   enabled: true
   language: csharp
@@ -653,5 +625,4 @@
 
       '
     expect_no_match: true
-  description: "CliWrap Cli.Wrap(...).WithTargetFile(tainted) - executable path\
-    \ is attacker-controlled."
+  description: "CliWrap Cli.Wrap(...).WithTargetFile(tainted) - executable path is attacker-controlled."

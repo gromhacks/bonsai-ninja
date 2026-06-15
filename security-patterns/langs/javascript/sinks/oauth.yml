@@ -56,6 +56,11 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.callback$"
+      base_name_in:
+      - client
+      - openid
+      - oidc
+      - issuer
   constraints:
   - arg_tainted:
       index: 1
@@ -66,7 +71,6 @@
       function done(client, redirectUri, input) {
         return client.callback(redirectUri, input);
       }
-      done({ callback: () => null }, "", "");
     expect_match_text: [client.callback]
   - name: openid-client callback literal negative
     code: |

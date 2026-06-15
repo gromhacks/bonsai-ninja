@@ -19,14 +19,13 @@
   - name: declared shape
     code: |
       using System.IdentityModel.Tokens.Jwt;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JwtSecurityTokenHandler.ValidateToken(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; JwtSecurityTokenHandler.ValidateToken(input); } }
   - name: literal validate token negative
     code: |
       using System.IdentityModel.Tokens.Jwt;
       class App { void Test() { JwtSecurityTokenHandler.ValidateToken("eyJhbGciOiJIUzI1NiJ9.safe.sig"); } }
     expect_no_match: true
-  description: "JwtSecurityTokenHandler.ValidateToken - verify signing key is set.
-    Also covers merged aliases: csharp.jwt.alg_confusion."
+  description: "JwtSecurityTokenHandler.ValidateToken - verify signing key is set. Also covers merged aliases: csharp.jwt.alg_confusion."
 
 - id: csharp.jwt.tokenhandler_readtoken_unverified
   enabled: true
@@ -46,7 +45,7 @@
   - name: declared shape
     code: |
       using System.IdentityModel.Tokens.Jwt;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JwtSecurityTokenHandler.ReadJwtToken(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; JwtSecurityTokenHandler.ReadJwtToken(input); } }
   - name: literal read jwt token negative
     code: |
       using System.IdentityModel.Tokens.Jwt;
@@ -72,9 +71,7 @@
     code: |
       using Microsoft.IdentityModel.Tokens;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateIssuerSigningKey = input; } }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. ValidateIssuerSigningKey = false
-    - signature verification disabled."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. ValidateIssuerSigningKey = false - signature verification disabled."
 
 - id: csharp.jwt.validate_lifetime_off
   enabled: false
@@ -94,9 +91,7 @@
     code: |
       using Microsoft.IdentityModel.Tokens;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateLifetime = input; } }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. ValidateLifetime = false - accepts
-    expired tokens."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. ValidateLifetime = false - accepts expired tokens."
 
 - id: csharp.jwt.jwt_decode_no_verify
   enabled: true
@@ -116,14 +111,13 @@
   - name: declared shape
     code: |
       using JWT;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JwtBuilder.Decode(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; JwtBuilder.Decode(input); } }
   - name: literal jwtbuilder decode negative
     code: |
       using JWT;
       class App { void Test() { JwtBuilder.Decode("eyJhbGciOiJIUzI1NiJ9.safe.sig"); } }
     expect_no_match: true
-  description: "jwt-dotnet JwtBuilder.Decode - flag if .MustVerifySignature() not
-    called."
+  description: "jwt-dotnet JwtBuilder.Decode - flag if .MustVerifySignature() not called."
 
 - id: csharp.jwt.jose_decode_no_key
   enabled: true
@@ -143,7 +137,7 @@
   - name: declared shape
     code: |
       using josejwt;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JWT.Decode(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; JWT.Decode(input); } }
   - name: literal jose jwt decode negative
     code: |
       using josejwt;
@@ -171,9 +165,7 @@
     code: |
       using Microsoft.IdentityModel.Tokens;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateIssuer = input; } }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. ValidateIssuer = false - accepts
-    tokens from any issuer."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. ValidateIssuer = false - accepts tokens from any issuer."
 
 - id: csharp.jwt.validate_audience_off
   enabled: false
@@ -193,9 +185,7 @@
     code: |
       using Microsoft.IdentityModel.Tokens;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateAudience = input; } }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. ValidateAudience = false - accepts
-    tokens minted for any audience."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. ValidateAudience = false - accepts tokens minted for any audience."
 
 - id: csharp.jwt.require_signed_off
   enabled: false
@@ -215,9 +205,7 @@
     code: |
       using Microsoft.IdentityModel.Tokens;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RequireSignedTokens = input; } }
-  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT
-    configuration, not just the broad API shape. RequireSignedTokens = false - permits
-    unsigned JWTs (alg=none)."
+  description: "Disabled - requires a rulepack constraint that proves the unsafe JWT configuration, not just the broad API shape. RequireSignedTokens = false - permits unsigned JWTs (alg=none)."
 
 # JWT alg-confusion (T400). HMAC verify with an RSA public
 # key - when both HS* and RS* algorithms are allowed in the

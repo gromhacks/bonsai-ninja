@@ -118,7 +118,7 @@
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; copyItem(input) }
+      func test(input: String) { let amount = 1; copyItem(input) }
   - name: literal arg 0 negative
     code: |
       func test() { copyItem("safe") }
@@ -162,7 +162,7 @@
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; moveItem(input) }
+      func test(input: String) { let amount = 1; moveItem(input) }
   - name: literal arg 0 negative
     code: |
       func test() { moveItem("safe") }
@@ -252,7 +252,7 @@
   - name: declared shape
     code: |
       import ZIPFoundation // ZIPFoundation
-      func test() { let input = "x"; let amount = 1; unzipItem(input) }
+      func test(input: String) { let amount = 1; unzipItem(input) }
   - name: literal arg 0 negative
     code: |
       func test() { unzipItem("safe") }

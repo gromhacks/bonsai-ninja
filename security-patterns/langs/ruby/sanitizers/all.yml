@@ -1008,3 +1008,39 @@
       end
     expect_match_text: ["Rack::Attack.throttle"]
   description: "Rack::Attack.throttle declaration - sensitive-route throttling."
+- id: ruby.passthrough.sprintf
+  enabled: true
+  language: ruby
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: sprintf
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: sprintf preserves arg taint
+    code: |
+      def h(input)
+        sprintf("q=%s", input)
+      end
+    expect_match_text: [sprintf]
+  description: "Ruby sprintf(fmt, *args) - formatted string derives from its arguments; preserves taint."
+- id: ruby.passthrough.format
+  enabled: true
+  language: ruby
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: format
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: format preserves arg taint
+    code: |
+      def h(input)
+        format("q=%s", input)
+      end
+    expect_match_text: [format]
+  description: "Ruby Kernel#format(fmt, *args) - alias of sprintf; preserves taint from its arguments."

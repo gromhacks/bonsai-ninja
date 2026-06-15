@@ -228,6 +228,11 @@ impl LanguageAdapter for KotlinAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`val c = Foo()` →
+        // `c: Foo`) so `c.method(...)` carries a resolved receiver type
+        // for `receiver_type_in` / `[Type, method]` rules. Kotlin class
+        // names are PascalCase; the constructor heuristic is reliable.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }
@@ -1139,14 +1144,24 @@ fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
                 // `property_declaration` wraps the binding identifier
                 // inside a `variable_declaration` node — descend so
                 // type-inferred fields like `private val x = Y()` get
-                // a name. Without this, every type-inferred property
-                // is silently dropped from the class alias map.
+                // a name. The explicit type annotation (`val c: Foo`)
+                // also lives INSIDE the variable_declaration, so pull
+                // it from there too; otherwise typed locals
+                // (`val c: Foo = make()` — WS2 cast / factory case)
+                // fall through to the type-inferred path and lose `Foo`.
                 "variable_declaration" if name_node.is_none() => {
                     let mut inner = child.walk();
                     for grandchild in child.named_children(&mut inner) {
-                        if matches!(grandchild.kind(), "simple_identifier" | "identifier") {
-                            name_node = Some(grandchild);
-                            break;
+                        match grandchild.kind() {
+                            "simple_identifier" | "identifier" if name_node.is_none() => {
+                                name_node = Some(grandchild);
+                            }
+                            "user_type" | "type_identifier" | "function_type" | "nullable_type"
+                                if type_node.is_none() =>
+                            {
+                                type_node = Some(grandchild);
+                            }
+                            _ => {}
                         }
                     }
                 }

@@ -47,7 +47,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <curlpp.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new Url(arg);\n}\n"
+    code: |
+      #include <curlpp.h>
+      void example(const char *arg) {
+        auto *x = new Url(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {
@@ -75,7 +79,14 @@
       index: 0
   match_examples:
   - name: tainted cpp-httplib get path
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Get(arg);\n}\n"
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Client::Get(arg);
+      }
   - name: literal cpp-httplib get path negative
     code: |
       #include <httplib.h>
@@ -107,7 +118,14 @@
       index: 0
   match_examples:
   - name: tainted cpp-httplib post path
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Post(arg);\n}\n"
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Client::Post(arg);
+      }
   - name: literal cpp-httplib post path negative
     code: |
       #include <httplib.h>
@@ -139,7 +157,14 @@
       index: 0
   match_examples:
   - name: tainted cpp-httplib put path
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Put(arg);\n}\n"
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Client::Put(arg);
+      }
   - name: literal cpp-httplib put path negative
     code: |
       #include <httplib.h>
@@ -171,7 +196,14 @@
       index: 0
   match_examples:
   - name: tainted cpp-httplib delete path
-    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Delete(arg);\n}\n"
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example(const char *arg) {
+        const char *fmt = arg;
+        const char *query = arg;
+        Client::Delete(arg);
+      }
   - name: literal cpp-httplib delete path negative
     code: |
       #include <httplib.h>
@@ -233,7 +265,11 @@
       index: 0
   match_examples:
   - name: generated direct match
-    code: "#include <Poco/URI.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new HTTPClientSession(arg);\n}\n"
+    code: |
+      #include <Poco/URI.h>
+      void example(const char *arg) {
+        auto *x = new HTTPClientSession(arg);
+      }
   - name: literal arg 0 negative
     code: |
       void example() {

@@ -52,11 +52,9 @@
       index: 0
   match_examples:
   - name: express res location
-    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return\
-      \ res.location(input);\n}\n"
+    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return res.location(input);\n}\n"
   - name: arg tainted literal negative
-    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return\
-      \ res.location(\"/account\");\n}\n"
+    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return res.location(\"/account\");\n}\n"
     expect_no_match: true
   description: "Express res.location(tainted) - sets Location header."
 - id: typescript.open_redirect.koa_redirect
@@ -79,11 +77,9 @@
       index: 0
   match_examples:
   - name: koa redirect
-    code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return\
-      \ ctx.redirect(input);\n}\n"
+    code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return ctx.redirect(input);\n}\n"
   - name: arg tainted literal negative
-    code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return\
-      \ ctx.redirect(\"/account\");\n}\n"
+    code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return ctx.redirect(\"/account\");\n}\n"
     expect_no_match: true
   description: Koa ctx.redirect(tainted).
 - id: typescript.open_redirect.fastify_redirect
@@ -140,11 +136,9 @@
       index: 0
   match_examples:
   - name: hapi redirect
-    code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n\
-      \  return h.redirect(input);\n}\n"
+    code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n  return h.redirect(input);\n}\n"
   - name: arg tainted literal negative
-    code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n\
-      \  return h.redirect(\"/account\");\n}\n"
+    code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n  return h.redirect(\"/account\");\n}\n"
     expect_no_match: true
   description: Hapi h.redirect(tainted).
 - id: typescript.open_redirect.next_response_redirect
@@ -167,11 +161,9 @@
       index: 0
   match_examples:
   - name: next response redirect
-    code: "const _u = require(\"next\");\nfunction demo(input, req, obj) {\n  return\
-      \ NextResponse.redirect(input);\n}\n"
+    code: "const _u = require(\"next\");\nfunction demo(input, req, obj) {\n  return NextResponse.redirect(input);\n}\n"
   - name: arg tainted literal negative
-    code: "const _u = require(\"next\");\nfunction demo(input, req, obj) {\n  return\
-      \ NextResponse.redirect(\"https://example.com/account\");\n}\n"
+    code: "const _u = require(\"next\");\nfunction demo(input, req, obj) {\n  return NextResponse.redirect(\"https://example.com/account\");\n}\n"
     expect_no_match: true
   description: Next.js NextResponse.redirect(tainted).
 - id: typescript.open_redirect.window_location_assign
@@ -194,8 +186,7 @@
   - name: window location assign
     code: "function demo(input, req, obj) {\n  return location.assign(input);\n}\n"
   - name: arg tainted literal negative
-    code: "function demo(input, req, obj) {\n  return location.assign(\"/account\"\
-      );\n}\n"
+    code: "function demo(input, req, obj) {\n  return location.assign(\"/account\");\n}\n"
     expect_no_match: true
   description: window.location.assign(tainted).
 - id: typescript.open_redirect.window_location_replace
@@ -218,8 +209,7 @@
   - name: window location replace
     code: "function demo(input, req, obj) {\n  return location.replace(input);\n}\n"
   - name: arg tainted literal negative
-    code: "function demo(input, req, obj) {\n  return location.replace(\"/account\"\
-      );\n}\n"
+    code: "function demo(input, req, obj) {\n  return location.replace(\"/account\");\n}\n"
     expect_no_match: true
   description: window.location.replace(tainted).
 - id: typescript.open_redirect.window_location_href_assign
@@ -235,9 +225,7 @@
     kind: write
     target:
       name: location
-  description: "Disabled - `target.name: location` matches any `x.location =\
-    \ y` assignment (too broad); flag `location.href = tainted` downstream via href\
-    \ target once receiver narrowing is supported."
+  description: "Disabled - `target.name: location` matches any `x.location = y` assignment (too broad); flag `location.href = tainted` downstream via href target once receiver narrowing is supported."
 
 - id: typescript.open_redirect.simple_oauth2_redirect_tainted
   enabled: true
@@ -251,6 +239,10 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.authorizeURL$"
+      base_name_in:
+      - client
+      - oauth2
+      - oauth
   constraints:
   - arg_tainted:
       index: 0

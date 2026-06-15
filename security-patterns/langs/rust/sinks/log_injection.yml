@@ -22,10 +22,8 @@
   - name: generated direct match
     code: |
       use log::dummy;
-      fn example() {
-          let target = "tainted";
-          let query = "user";
-          log::info("user\\n");
+      fn example(tainted: &str) {
+          log::info(format!("user {}", tainted));
       }
   - name: rust log info ordinary negative
     code: |

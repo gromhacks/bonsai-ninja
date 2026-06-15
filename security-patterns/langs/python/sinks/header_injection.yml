@@ -292,6 +292,11 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.headers\.(add|set)$
+      base_name_in:
+      - response
+      - resp
+      - res
+      - r
   constraints:
   - arg_tainted:
       index: 1

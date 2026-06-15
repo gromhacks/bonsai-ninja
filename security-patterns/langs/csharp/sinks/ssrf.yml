@@ -20,8 +20,7 @@
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { HttpClient.GetAsync("https://example.com/status");
-      } }
+    code: 'class App { void Test() { HttpClient.GetAsync("https://example.com/status"); } }
 
       '
     expect_no_match: true
@@ -44,13 +43,11 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test(string input) { HttpClient.GetStringAsync(input);
-      } }
+    code: 'class App { void Test(string input) { HttpClient.GetStringAsync(input); } }
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { HttpClient.GetStringAsync("https://example.com/status");
-      } }
+    code: 'class App { void Test() { HttpClient.GetStringAsync("https://example.com/status"); } }
 
       '
     expect_no_match: true
@@ -73,13 +70,11 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test(string input) { HttpClient.GetByteArrayAsync(input);
-      } }
+    code: 'class App { void Test(string input) { HttpClient.GetByteArrayAsync(input); } }
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { HttpClient.GetByteArrayAsync("https://example.com/image.png");
-      } }
+    code: 'class App { void Test() { HttpClient.GetByteArrayAsync("https://example.com/image.png"); } }
 
       '
     expect_no_match: true
@@ -106,8 +101,7 @@
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { HttpClient.PostAsync("https://example.com/api");
-      } }
+    code: 'class App { void Test() { HttpClient.PostAsync("https://example.com/api"); } }
 
       '
     expect_no_match: true
@@ -134,8 +128,7 @@
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { HttpClient.PutAsync("https://example.com/api");
-      } }
+    code: 'class App { void Test() { HttpClient.PutAsync("https://example.com/api"); } }
 
       '
     expect_no_match: true
@@ -158,10 +151,8 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; HttpClient.SendAsync(input); } }
-
-      '
+    code: |
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; HttpClient.SendAsync(input); } }
   - name: literal sendasync request negative
     code: |
       class App { void Test() { HttpClient.SendAsync("https://example.com/status"); } }
@@ -189,8 +180,7 @@
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { WebRequest.Create("https://example.com/status");
-      } }
+    code: 'class App { void Test() { WebRequest.Create("https://example.com/status"); } }
 
       '
     expect_no_match: true
@@ -217,8 +207,7 @@
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { HttpWebRequest.Create("https://example.com/status");
-      } }
+    code: 'class App { void Test() { HttpWebRequest.Create("https://example.com/status"); } }
 
       '
     expect_no_match: true
@@ -241,13 +230,11 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test(string input) { WebClient.DownloadString(input);
-      } }
+    code: 'class App { void Test(string input) { WebClient.DownloadString(input); } }
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { WebClient.DownloadString("https://example.com/status");
-      } }
+    code: 'class App { void Test() { WebClient.DownloadString("https://example.com/status"); } }
 
       '
     expect_no_match: true
@@ -276,13 +263,11 @@
     expect_match_text:
     - WebClient.OpenRead
   - name: literal url negative
-    code: 'class App { void Test() { WebClient.OpenRead("https://example.com/status");
-      } }
+    code: 'class App { void Test() { WebClient.OpenRead("https://example.com/status"); } }
 
       '
     expect_no_match: true
-  description: "WebClient.OpenRead(tainted URL) - opens an attacker-selected\
-    \ network resource."
+  description: "WebClient.OpenRead(tainted URL) - opens an attacker-selected network resource."
 - id: csharp.ssrf.webclient_openreadasync
   enabled: true
   language: csharp
@@ -301,20 +286,17 @@
       index: 0
   match_examples:
   - name: webclient openread async
-    code: 'class App { void Test(string input) { WebClient.OpenReadAsync(input); }
-      }
+    code: 'class App { void Test(string input) { WebClient.OpenReadAsync(input); } }
 
       '
     expect_match_text:
     - WebClient.OpenReadAsync
   - name: literal url negative
-    code: 'class App { void Test() { WebClient.OpenReadAsync("https://example.com/status");
-      } }
+    code: 'class App { void Test() { WebClient.OpenReadAsync("https://example.com/status"); } }
 
       '
     expect_no_match: true
-  description: "WebClient.OpenReadAsync(tainted URL) - async network fetch to\
-    \ an attacker-selected destination."
+  description: "WebClient.OpenReadAsync(tainted URL) - async network fetch to an attacker-selected destination."
 - id: csharp.ssrf.webclient_downloaddata
   enabled: true
   language: csharp
@@ -333,13 +315,11 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test(string input) { WebClient.DownloadData(input); }
-      }
+    code: 'class App { void Test(string input) { WebClient.DownloadData(input); } }
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { WebClient.DownloadData("https://example.com/file.bin");
-      } }
+    code: 'class App { void Test() { WebClient.DownloadData("https://example.com/file.bin"); } }
 
       '
     expect_no_match: true
@@ -363,13 +343,11 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test(string input) { WebClient.DownloadFile(input); }
-      }
+    code: 'class App { void Test(string input) { WebClient.DownloadFile(input); } }
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { WebClient.DownloadFile("https://example.com/file.bin");
-      } }
+    code: 'class App { void Test() { WebClient.DownloadFile("https://example.com/file.bin"); } }
 
       '
     expect_no_match: true
@@ -392,13 +370,11 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class App { void Test(string input) { WebClient.UploadString(input); }
-      }
+    code: 'class App { void Test(string input) { WebClient.UploadString(input); } }
 
       '
   - name: literal url negative
-    code: 'class App { void Test() { WebClient.UploadString("https://example.com/api");
-      } }
+    code: 'class App { void Test() { WebClient.UploadString("https://example.com/api"); } }
 
       '
     expect_no_match: true
@@ -422,8 +398,7 @@
   - name: declared shape
     code: 'using RestSharp;
 
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; RestClient.Execute(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RestClient.Execute(input); } }
 
       '
   description: RestSharp RestClient.Execute.
@@ -449,8 +424,7 @@
   - name: restsharp client constructor
     code: 'using RestSharp;
 
-      class RestClient { public RestClient(string input) { } } class App { void Test(string
-      input) { var result = new RestClient(input); } }
+      class RestClient { public RestClient(string input) { } } class App { void Test(string input) { var result = new RestClient(input); } }
 
       '
     expect_match_text:
@@ -458,13 +432,11 @@
   - name: literal base url negative
     code: 'using RestSharp;
 
-      class RestClient { public RestClient(string input) { } } class App { void Test()
-      { var result = new RestClient("https://api.example.com"); } }
+      class RestClient { public RestClient(string input) { } } class App { void Test() { var result = new RestClient("https://api.example.com"); } }
 
       '
     expect_no_match: true
-  description: "new RestClient(tainted base URL) - attacker-controlled RestSharp\
-    \ base URL creates an SSRF client."
+  description: "new RestClient(tainted base URL) - attacker-controlled RestSharp base URL creates an SSRF client."
 - id: csharp.ssrf.restsharp_executeasync
   enabled: true
   language: csharp
@@ -485,12 +457,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using RestSharp;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; RestClient.ExecuteAsync(input); } }
-
-      '
+    code: |
+      using RestSharp;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; RestClient.ExecuteAsync(input); } }
   - name: literal restsharp request negative
     code: |
       using RestSharp;
@@ -512,8 +481,7 @@
     kind: call
     callee:
       name: GetAsync
-  description: "Disabled - bare GetAsync collides with HttpClient.GetAsync and\
-    \ many async APIs; HttpClient rules already cover the concrete risk."
+  description: "Disabled - bare GetAsync collides with HttpClient.GetAsync and many async APIs; HttpClient rules already cover the concrete risk."
 - id: csharp.ssrf.refit_client
   enabled: false
   disabled_reason:
@@ -529,8 +497,7 @@
     kind: call
     callee:
       name: For
-  description: "Disabled - Refit interface clients; flag only when base URL is\
-    \ tainted."
+  description: "Disabled - Refit interface clients; flag only when base URL is tainted."
 - id: csharp.ssrf.smtpclient_send
   enabled: false
   disabled_reason:
@@ -564,8 +531,7 @@
       - GetStringAsync
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; HttpClient.GetStringAsync(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpClient.GetStringAsync(input); } }
 
       '
   description: "Disabled duplicate - same matcher as canonical csharp.ssrf.httpclient_getstringasync."

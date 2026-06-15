@@ -275,6 +275,10 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.authorizeURL$"
+      base_name_in:
+      - client
+      - oauth2
+      - oauth
   constraints:
   - arg_tainted:
       index: 0
@@ -285,7 +289,6 @@
       function login(client, input) {
         return client.authorizeURL({ redirect_uri: input, scope: "read" });
       }
-      login({ authorizeURL: () => null }, "");
     expect_match_text: [client.authorizeURL]
   - name: simple-oauth2 authorizeURL literal negative
     code: |

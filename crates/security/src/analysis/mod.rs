@@ -6953,12 +6953,21 @@ fn same_function_clean_overwrite_kills_sink_arg(
     let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
         return false;
     };
-    clean_overwrite_between(ws, &decl.flow_events, source_span, sink_span, &targets, true)
+    clean_overwrite_between(
+        ws,
+        &decl.flow_events,
+        &decl.flow_events,
+        source_span,
+        sink_span,
+        &targets,
+        true,
+    )
 }
 
 fn clean_overwrite_between(
     ws: &Workspace,
     events: &[bonsai_lang_api::FlowEvent],
+    func_events: &[bonsai_lang_api::FlowEvent],
     source_span: Span,
     sink_span: Span,
     targets: &[String],
@@ -6992,6 +7001,16 @@ fn clean_overwrite_between(
                                 source_call_args,
                                 *value_kind,
                             )
+                            // A clean overwrite only kills the sink arg
+                            // when it is the LAST write to the target
+                            // before the sink. If the target is written
+                            // again after this overwrite (e.g.
+                            // `cmd = ""; cmd = user_input; sink(cmd)` or a
+                            // conditional re-taint), the later write
+                            // supersedes it and the IDG closure already
+                            // accounts for the live value — suppressing
+                            // here would drop a real finding.
+                            && !target_written_between(func_events, target_key, *span, sink_span)
                     })
                 {
                     return true;
@@ -7014,14 +7033,36 @@ fn clean_overwrite_between(
                 {
                     return true;
                 }
-                if clean_overwrite_between(ws, then_events, source_span, sink_span, targets, false)
-                    || clean_overwrite_between(ws, else_events, source_span, sink_span, targets, false)
-                {
+                if clean_overwrite_between(
+                    ws,
+                    then_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    false,
+                ) || clean_overwrite_between(
+                    ws,
+                    else_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    false,
+                ) {
                     return true;
                 }
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if clean_overwrite_between(ws, body, source_span, sink_span, targets, allow_direct_assign) {
+                if clean_overwrite_between(
+                    ws,
+                    body,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    allow_direct_assign,
+                ) {
                     return true;
                 }
             }
@@ -7035,6 +7076,7 @@ fn clean_overwrite_between(
                 if clean_overwrite_between(
                     ws,
                     finally_events,
+                    func_events,
                     source_span,
                     sink_span,
                     targets,
@@ -7060,6 +7102,7 @@ fn clean_overwrite_between(
                         let body_cleans_after_source = clean_overwrite_between(
                             ws,
                             body,
+                            func_events,
                             source_span,
                             sink_span,
                             &single_target,
@@ -7068,6 +7111,7 @@ fn clean_overwrite_between(
                         let catch_cleans_after_source = clean_overwrite_between(
                             ws,
                             catch_events,
+                            func_events,
                             source_span,
                             sink_span,
                             &single_target,
@@ -7088,6 +7132,53 @@ fn clean_overwrite_between(
         }
     }
     false
+}
+
+/// True when `target_key` is assigned again at a span strictly after
+/// `after_span` and at/before the sink. A later write supersedes an
+/// earlier clean overwrite of the same variable, so the earlier
+/// overwrite is dead and must not be treated as the value that reaches
+/// the sink. Recurses through control-flow regions so a conditional
+/// re-taint (`v = ""; if c { v = user }; sink(v)`) is also seen as a
+/// later write. Scans the whole function body, not just the current
+/// statement list, because the later write may live in a nested arm.
+fn target_written_between(
+    events: &[bonsai_lang_api::FlowEvent],
+    target_key: &str,
+    after_span: Span,
+    sink_span: Span,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    events.iter().any(|event| match event {
+        FlowEvent::Assign { span, target, .. } => {
+            span.file == after_span.file
+                && span.start > after_span.start
+                && span.end <= sink_span.start
+                && clean_overwrite_target_key(target).as_deref() == Some(target_key)
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            target_written_between(then_events, target_key, after_span, sink_span)
+                || target_written_between(else_events, target_key, after_span, sink_span)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            target_written_between(body, target_key, after_span, sink_span)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            target_written_between(body, target_key, after_span, sink_span)
+                || target_written_between(catch_events, target_key, after_span, sink_span)
+                || target_written_between(finally_events, target_key, after_span, sink_span)
+        }
+        _ => false,
+    })
 }
 
 fn assignment_cleanly_overwrites_target(

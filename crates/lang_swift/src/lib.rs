@@ -16,7 +16,10 @@ use tree_sitter::Node;
 
 const SWIFT_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_declaration", "init_declaration"],
-    param_kinds: &["parameter"],
+    // `property_declaration` captures typed locals (`let c: Foo = make()`,
+    // `let c = x as Foo`) so cast / factory-typed receivers resolve
+    // `receiver_type_in`; the name is recovered outside the type span.
+    param_kinds: &["parameter", "property_declaration"],
     name_field: "name",
     type_field: "type",
 };
@@ -258,6 +261,11 @@ impl LanguageAdapter for SwiftAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`let c = Foo()` →
+        // `c: Foo`) so `c.method(...)` carries a resolved receiver type
+        // for `receiver_type_in` / `[Type, method]` rules. Swift type
+        // names are UpperCamelCase; the constructor heuristic is reliable.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }

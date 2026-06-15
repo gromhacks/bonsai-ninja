@@ -166,6 +166,14 @@ impl LanguageAdapter for JavaScriptAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing
+        // (`const c = new Foo()` → `c: Foo`) so `c.method(...)` carries a
+        // resolved receiver type for `receiver_type_in` / `[Type, method]`
+        // rules — the memory-endorsed alternative to loosening the package
+        // gate for receiver-variable calls. JS class names are uppercase
+        // and free functions are camelCase, so the constructor heuristic
+        // is reliable here (unlike Go's uppercase-exported-function form).
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
     }
@@ -201,6 +209,7 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
                     .trim_matches(|c: char| matches!(c, '"' | '\''))
                     .to_string()
             });
+        let module = normalize_node_builtin_scheme(&module);
         if module.is_empty() {
             continue;
         }
@@ -1101,6 +1110,18 @@ fn spans_overlap_or_contain(left: bonsai_common::Span, right: bonsai_common::Spa
 /// CommonJS `const x = require("y")` / `const { a } = require("y")` /
 /// `const { a: b } = require("y")`. Walks `call_expression` nodes whose
 /// function name is `require`.
+/// Normalize a Node.js builtin-module specifier by dropping the
+/// explicit `node:` scheme. `require("node:child_process")` and
+/// `import "node:fs/promises"` name the exact same builtins as their
+/// bare forms (`child_process`, `fs/promises`); rules and the resolver
+/// key on the bare name, so canonicalizing here keeps the prefixed
+/// form from silently bypassing package gates and alias-based callee
+/// rewrites. Non-builtin specifiers (relative paths, scoped packages)
+/// are returned unchanged.
+fn normalize_node_builtin_scheme(module: &str) -> String {
+    module.strip_prefix("node:").unwrap_or(module).to_string()
+}
+
 pub fn js_ts_require_calls(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<ImportSpec> {
     let mut imports = Vec::new();
     for call_node in collect_kinds(tree, &["call_expression"]) {
@@ -1120,6 +1141,7 @@ pub fn js_ts_require_calls(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -
             .and_then(|string_node| first_named_child_of_kind(&string_node, "string_fragment"))
             .map(|fragment| node_text(&fragment, src).to_string())
             .unwrap_or_default();
+        let module = normalize_node_builtin_scheme(&module);
         if module.is_empty() {
             continue;
         }

@@ -142,8 +142,7 @@
   - name: generated direct match
     code: |
       use duct::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           duct::sh(target);
       }
@@ -240,8 +239,7 @@
   - name: generated direct match
     code: |
       use cmd_lib::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           run_cmd(target);
       }
@@ -479,8 +477,7 @@
   - name: generated direct match
     code: |
       use std::process::Command;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           Command::envs(target);
       }

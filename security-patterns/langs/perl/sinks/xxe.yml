@@ -78,7 +78,7 @@
       name: load_xml
   constraints:
   - arg_tainted:
-      index: 1
+      kw: string
   match_examples:
   - name: perl.xxe.xml_libxml_load_xml example
     code: |

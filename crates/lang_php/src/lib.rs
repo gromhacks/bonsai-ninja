@@ -226,6 +226,13 @@ impl LanguageAdapter for PhpAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing
+        // (`$x = new Foo()` → `$x: Foo`) so `$x->method(...)` carries a
+        // resolved receiver type for `receiver_type_in` / `[Type, method]`
+        // rules. PHP class names are conventionally PascalCase while
+        // functions are snake_case, so the constructor heuristic is
+        // reliable here.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }

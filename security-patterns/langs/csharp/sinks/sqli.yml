@@ -14,16 +14,13 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'class SqlCommand { public SqlCommand(dynamic input) { } } class App { void
-      Test() { dynamic input = "x"; var result = new SqlCommand(input); } }
-
-      '
+    code: |
+      class SqlCommand { public SqlCommand(dynamic input) { } } class App { void Test(dynamic input) { var result = new SqlCommand(input); } }
   - name: literal sqlcommand text negative
     code: |
       class SqlCommand { public SqlCommand(dynamic input) { } } class App { void Test() { var result = new SqlCommand("select 1"); } }
     expect_no_match: true
-  description: "new SqlCommand(tainted) - System.Data.SqlClient/Microsoft.Data.SqlClient;\
-    \ flag if first arg is interpolated SQL."
+  description: "new SqlCommand(tainted) - System.Data.SqlClient/Microsoft.Data.SqlClient; flag if first arg is interpolated SQL."
 - id: csharp.sqli.sqlcommand_executereader
   enabled: false
   disabled_reason:
@@ -41,8 +38,7 @@
       - ExecuteReader
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; SqlCommand.ExecuteReader(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SqlCommand.ExecuteReader(input); } }
 
       '
   description: "Disabled - SqlCommand.ExecuteReader() executes SQL stored on CommandText/constructor state; use the CommandText/SqlCommand constructor sinks until receiver-state tracking exists."
@@ -63,8 +59,7 @@
       - ExecuteNonQuery
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; SqlCommand.ExecuteNonQuery(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SqlCommand.ExecuteNonQuery(input); } }
 
       '
   description: "Disabled - SqlCommand.ExecuteNonQuery() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
@@ -85,8 +80,7 @@
       - ExecuteScalar
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; SqlCommand.ExecuteScalar(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SqlCommand.ExecuteScalar(input); } }
 
       '
   description: "Disabled - SqlCommand.ExecuteScalar() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
@@ -106,8 +100,7 @@
       index: 0
   match_examples:
   - name: sql command command text property
-    code: 'class App { void Test(string input) { var cmd = new SqlCommand(); cmd.CommandText
-      = input; } }
+    code: 'class App { void Test(string input) { var cmd = new SqlCommand(); cmd.CommandText = input; } }
 
       '
   - name: local commandtext variable negative
@@ -133,8 +126,7 @@
       - ExecuteNonQuery
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; OracleCommand.ExecuteNonQuery(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; OracleCommand.ExecuteNonQuery(input); } }
 
       '
   description: "Disabled - OracleCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
@@ -159,8 +151,7 @@
   - name: declared shape
     code: 'using Npgsql;
 
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; NpgsqlCommand.ExecuteNonQuery(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; NpgsqlCommand.ExecuteNonQuery(input); } }
 
       '
   description: "Disabled - NpgsqlCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
@@ -185,8 +176,7 @@
   - name: declared shape
     code: 'using MySql.Data;
 
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; MySqlCommand.ExecuteReader(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MySqlCommand.ExecuteReader(input); } }
 
       '
   description: "Disabled - MySqlCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
@@ -212,8 +202,7 @@
   - name: declared shape
     code: 'using System.Data.SQLite;
 
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; SQLiteCommand.ExecuteReader(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SQLiteCommand.ExecuteReader(input); } }
 
       '
   description: "Disabled - SQLiteCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
@@ -234,8 +223,7 @@
       - ExecuteReader
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; OleDbCommand.ExecuteReader(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; OleDbCommand.ExecuteReader(input); } }
 
       '
   description: "Disabled - OleDbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
@@ -259,12 +247,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using Microsoft.EntityFrameworkCore;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; Database.ExecuteSqlRaw(input); } }
-
-      '
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Database.ExecuteSqlRaw(input); } }
   - name: literal executesqlraw negative
     code: |
       using Microsoft.EntityFrameworkCore;
@@ -291,12 +276,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using Microsoft.EntityFrameworkCore;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; Database.ExecuteSqlRawAsync(input); } }
-
-      '
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Database.ExecuteSqlRawAsync(input); } }
   - name: literal executesqlrawasync negative
     code: |
       using Microsoft.EntityFrameworkCore;
@@ -323,12 +305,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using Microsoft.EntityFrameworkCore;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; Database.SqlQueryRaw(input); } }
-
-      '
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Database.SqlQueryRaw(input); } }
   - name: literal sqlqueryraw negative
     code: |
       using Microsoft.EntityFrameworkCore;
@@ -353,12 +332,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using Microsoft.EntityFrameworkCore;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; FromSqlRaw(input); } }
-
-      '
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; FromSqlRaw(input); } }
   - name: literal fromsqlraw negative
     code: |
       using Microsoft.EntityFrameworkCore;
@@ -385,12 +361,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using EntityFramework;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; Database.ExecuteSqlCommand(input); } }
-
-      '
+    code: |
+      using EntityFramework;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Database.ExecuteSqlCommand(input); } }
   - name: literal executesqlcommand negative
     code: |
       using EntityFramework;
@@ -525,12 +498,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using NHibernate;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; ISession.CreateSQLQuery(input); } }
-
-      '
+    code: |
+      using NHibernate;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ISession.CreateSQLQuery(input); } }
   - name: literal nhibernate sql query negative
     code: |
       using NHibernate;
@@ -557,12 +527,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using NHibernate;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; ISession.CreateQuery(input); } }
-
-      '
+    code: |
+      using NHibernate;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ISession.CreateQuery(input); } }
   - name: literal nhibernate hql negative
     code: |
       using NHibernate;
@@ -584,8 +551,7 @@
     kind: call
     callee:
       name: Query
-  description: "Disabled - bare Query collides with Dapper / LINQ; enable only\
-    \ when linq2db DataConnection receiver confirmed."
+  description: "Disabled - bare Query collides with Dapper / LINQ; enable only when linq2db DataConnection receiver confirmed."
 - id: csharp.sqli.dbcommand_executenonquery
   enabled: false
   disabled_reason:
@@ -603,8 +569,7 @@
       - ExecuteNonQuery
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; DbCommand.ExecuteNonQuery(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DbCommand.ExecuteNonQuery(input); } }
 
       '
   description: "Disabled - DbCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
@@ -625,8 +590,7 @@
       - ExecuteReader
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; DbCommand.ExecuteReader(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DbCommand.ExecuteReader(input); } }
 
       '
   description: "Disabled - DbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
@@ -647,8 +611,7 @@
       - ExecuteScalar
   match_examples:
   - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; DbCommand.ExecuteScalar(input); } }
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DbCommand.ExecuteScalar(input); } }
 
       '
   description: "Disabled - DbCommand.ExecuteScalar() executes receiver CommandText state, not a taintable SQL argument."
@@ -672,20 +635,15 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using EntityFramework;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; Database.SqlQuery(input); } }
-
-      '
+    code: |
+      using EntityFramework;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; Database.SqlQuery(input); } }
   - name: literal database sqlquery negative
     code: |
       using EntityFramework;
       class App { void Test() { Database.SqlQuery("select 1"); } }
     expect_no_match: true
-  description: "EF6 Database.SqlQuery<T>(string sql, ...) - string-built variant;\
-    \ FromSqlInterpolated/SqlQuery<T>(FormattableString) is the safe form (covered\
-    \ as sanitizer)."
+  description: "EF6 Database.SqlQuery<T>(string sql, ...) - string-built variant; FromSqlInterpolated/SqlQuery<T>(FormattableString) is the safe form (covered as sanitizer)."
 - id: csharp.sqli.ef_dbset_sqlquery
   enabled: true
   language: csharp
@@ -706,12 +664,9 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using EntityFramework;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; DbSet.SqlQuery(input); } }
-
-      '
+    code: |
+      using EntityFramework;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; DbSet.SqlQuery(input); } }
   - name: literal dbset sqlquery negative
     code: |
       using EntityFramework;
@@ -737,12 +692,10 @@
   - name: declared shape
     code: 'using Microsoft.EntityFrameworkCore;
 
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; SqlQueryRaw(input); } }
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SqlQueryRaw(input); } }
 
       '
-  description: "Disabled - bare SqlQueryRaw is too broad; canonical EF Core\
-    \ raw SQL coverage is csharp.sqli.ef_database_sqlquery_raw."
+  description: "Disabled - bare SqlQueryRaw is too broad; canonical EF Core raw SQL coverage is csharp.sqli.ef_database_sqlquery_raw."
 - id: csharp.sqli.ef_dbset_fromsql
   enabled: true
   language: csharp
@@ -762,19 +715,15 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using Microsoft.EntityFrameworkCore;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; FromSql(input); } }
-
-      '
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; FromSql(input); } }
   - name: literal fromsql negative
     code: |
       using Microsoft.EntityFrameworkCore;
       class App { void Test() { FromSql("select 1"); } }
     expect_no_match: true
-  description: "EF Core DbSet.FromSql (legacy 2.x) - string-built variant; FromSqlInterpolated\
-    \ is the safe form."
+  description: "EF Core DbSet.FromSql (legacy 2.x) - string-built variant; FromSqlInterpolated is the safe form."
 - id: csharp.sqli.dapper_query_attr
   enabled: true
   language: csharp
@@ -803,8 +752,7 @@
       using Dapper;
       class App { void Test(object conn) { SqlMapper.Query(conn, "select 1"); } }
     expect_no_match: true
-  description: "Dapper SqlMapper.Query (extension call form) - flag when SQL\
-    \ string is built from taint; parameter object should be used instead of concat."
+  description: "Dapper SqlMapper.Query (extension call form) - flag when SQL string is built from taint; parameter object should be used instead of concat."
 - id: csharp.sqli.dapper_execute_attr
   enabled: true
   language: csharp
@@ -856,8 +804,7 @@
   - name: declared shape
     code: 'using Dapper;
 
-      class App { void Test(object conn, string input) { SqlMapper.QueryAsync(conn,
-      input); } }
+      class App { void Test(object conn, string input) { SqlMapper.QueryAsync(conn, input); } }
 
       '
   - name: literal dapper queryasync sql negative
@@ -888,8 +835,7 @@
   - name: declared shape
     code: 'using Dapper;
 
-      class App { void Test(object conn, string input) { SqlMapper.ExecuteAsync(conn,
-      input); } }
+      class App { void Test(object conn, string input) { SqlMapper.ExecuteAsync(conn, input); } }
 
       '
   - name: literal dapper executeasync sql negative
@@ -916,16 +862,12 @@
       index: 0
   match_examples:
   - name: declared shape
-    code: 'using ServiceStack.OrmLite;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; SqlList(input); } }
-
-      '
+    code: |
+      using ServiceStack.OrmLite;
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; SqlList(input); } }
   - name: literal servicestack sql negative
     code: |
       using ServiceStack.OrmLite;
       class App { void Test() { SqlList("select 1"); } }
     expect_no_match: true
-  description: "ServiceStack OrmLite IDbConnection.SqlList(rawSql) - raw SQL\
-    \ execution."
+  description: "ServiceStack OrmLite IDbConnection.SqlList(rawSql) - raw SQL execution."

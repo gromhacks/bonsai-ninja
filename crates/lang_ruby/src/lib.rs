@@ -156,6 +156,13 @@ impl LanguageAdapter for RubyAdapter {
             // resolver's `type_alias_for_receiver(method, "self.field")`
             // returns the constructor-supplied type without re-walking
             // sibling decls per call site.
+            // Local constructor-result receiver typing (`c = Foo.new` →
+            // `c: Foo`) so `c.method(...)` carries a resolved receiver
+            // type for `receiver_type_in` / `[Type, method]` rules. Ruby
+            // class names are CamelCase and the constructor is the `.new`
+            // method, which `constructor_call_type_name` resolves to the
+            // class qualifier.
+            bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
             bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
             return idx;
         }

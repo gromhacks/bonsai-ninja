@@ -253,9 +253,8 @@
   - name: tainted redisCommand format
     code: |
       #include <hiredis/hiredis.h>
-      void example(redisContext *ctx) {
-        char *arg = "tainted";
-        redisCommand(ctx, arg);
+      void example(redisContext *ctx, char *arg) {
+        redisCommand(ctx,arg);
       }
   - name: tainted value with literal format negative
     code: |

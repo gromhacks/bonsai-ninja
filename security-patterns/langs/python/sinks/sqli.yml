@@ -83,6 +83,120 @@
     expect_no_match: true
   description: "sqlite3 cursor.executescript - multi-statement. sqlite3-only DB-API extension."
 
+- id: python.sqli.cursor_execute_abbrev
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
+      base_name_in: [cur, crsr, csr, dbcur, db_cursor, cur1]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: abbreviated cursor execute
+    code: |
+      import sqlite3
+      def example(user_input):
+          cur = sqlite3.connect("x").cursor()
+          return cur.execute(user_input)
+    expect_match_text: [cur.execute]
+  - name: abbreviated cursor execute literal negative
+    code: |
+      import sqlite3
+      def example():
+          cur = sqlite3.connect("x").cursor()
+          return cur.execute("SELECT 1")
+    expect_no_match: true
+  - name: unrelated receiver negative
+    code: |
+      import sqlite3
+      def example(client, user_input):
+          return client.execute(user_input)
+    expect_no_match: true
+  description: "DB-API cursor.execute on abbreviated cursor variable names (cur/crsr/csr/...) - companion to cursor_execute, which matches the literal `cursor` receiver and inline `.cursor().execute` chains. base_name_in keeps it precise + package-gated."
+
+- id: python.sqli.cursor_executemany_abbrev
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.executemany$"
+      base_name_in: [cur, crsr, csr, dbcur, db_cursor, cur1]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: abbreviated cursor executemany
+    code: |
+      import sqlite3
+      def example(user_input):
+          cur = sqlite3.connect("x").cursor()
+          return cur.executemany(user_input)
+    expect_match_text: [cur.executemany]
+  - name: abbreviated cursor executemany literal negative
+    code: |
+      import sqlite3
+      def example():
+          cur = sqlite3.connect("x").cursor()
+          return cur.executemany("SELECT 1")
+    expect_no_match: true
+  - name: unrelated receiver negative
+    code: |
+      import sqlite3
+      def example(client, user_input):
+          return client.executemany(user_input)
+    expect_no_match: true
+  description: "DB-API cursor.executemany on abbreviated cursor variable names - companion to cursor_executemany."
+
+- id: python.sqli.cursor_executescript_abbrev
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.executescript$"
+      base_name_in: [cur, crsr, csr, dbcur, db_cursor, cur1]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: abbreviated cursor executescript
+    code: |
+      import sqlite3
+      def example(user_input):
+          cur = sqlite3.connect("x").cursor()
+          return cur.executescript(user_input)
+    expect_match_text: [cur.executescript]
+  - name: abbreviated cursor executescript literal negative
+    code: |
+      import sqlite3
+      def example():
+          cur = sqlite3.connect("x").cursor()
+          return cur.executescript("SELECT 1")
+    expect_no_match: true
+  - name: unrelated receiver negative
+    code: |
+      import sqlite3
+      def example(client, user_input):
+          return client.executescript(user_input)
+    expect_no_match: true
+  description: "sqlite3 cursor.executescript on abbreviated cursor variable names - companion to cursor_executescript."
+
 - id: python.sqli.connection_execute
   enabled: true
   language: python

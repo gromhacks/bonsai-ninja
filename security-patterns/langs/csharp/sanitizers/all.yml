@@ -1345,3 +1345,68 @@
       class App { object Bind(SqlCommand command) { return command.CreateParameter(); } }
     expect_match_text: [command.CreateParameter]
   description: "SqlCommand.CreateParameter creates a command parameter object for bound values."
+- id: csharp.passthrough.string_format
+  enabled: true
+  language: csharp
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, Format]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string format preserves arg taint
+    code: |
+      class App { string H(string input){ return string.Format("q={0}", input); } }
+    expect_match_text: [string.Format]
+  description: "string.Format(fmt, args...) - formatted string derives from its arguments; preserves taint."
+- id: csharp.passthrough.string_concat
+  enabled: true
+  language: csharp
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, Concat]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string concat preserves taint
+    code: |
+      class App { string H(string input){ return string.Concat("a", input); } }
+    expect_match_text: [string.Concat]
+  description: "string.Concat(args...) - concatenation derives from its arguments; preserves taint."
+- id: csharp.passthrough.string_join
+  enabled: true
+  language: csharp
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, Join]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: string join preserves taint
+    code: |
+      class App { string H(string input){ return string.Join(",", input, "b"); } }
+    expect_match_text: [string.Join]
+  description: "string.Join(sep, values...) - the joined string derives from the joined values; preserves taint."
+- id: csharp.passthrough.convert_tostring
+  enabled: true
+  language: csharp
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [Convert, ToString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: convert tostring preserves taint
+    code: |
+      using System;
+      class App { string H(object input){ return Convert.ToString(input); } }
+    expect_match_text: [Convert.ToString]
+  description: "Convert.ToString(x) - string coercion; the resulting string still carries attacker content."

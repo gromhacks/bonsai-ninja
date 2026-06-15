@@ -264,6 +264,10 @@ impl LanguageAdapter for ObjCAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
+        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
+        // types PascalCase callees, so language exported-function calls are unaffected.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
     }

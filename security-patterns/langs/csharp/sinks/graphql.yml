@@ -17,7 +17,7 @@
   - name: declared shape
     code: |
       using GraphQL;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DocumentExecuter.ExecuteAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; DocumentExecuter.ExecuteAsync(input); } }
     expect_match_text: [DocumentExecuter.ExecuteAsync]
   - name: literal graphql execution negative
     code: |

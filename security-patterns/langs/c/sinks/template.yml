@@ -32,8 +32,7 @@
   - name: generated direct match
     code: |
       #include <mustach.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         mustach_mem(arg);
       }
@@ -63,8 +62,7 @@
   - name: generated direct match
     code: |
       #include <mustach.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         mustach_file(arg);
       }

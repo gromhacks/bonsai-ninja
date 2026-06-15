@@ -538,7 +538,14 @@
   match:
     kind: call
     callee:
-      attribute: [Mysql2::Client, query]
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
+      base_name_in:
+      - client
+      - db
+      - conn
+      - mysql
+      - mysql2
+      - c
   constraints:
   - arg_tainted:
       index: 0

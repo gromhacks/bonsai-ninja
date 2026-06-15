@@ -809,3 +809,22 @@
     code: "sub example {\n  my ($input, $url, $id, $payload, $request) = @_;\n  cookie()\n}\n"
     expect_no_match: true
   description: "CGI::Cookie->new(... -httponly => 1, -secure => 1, ...)."
+- id: perl.passthrough.sprintf
+  enabled: true
+  language: perl
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: sprintf
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: sprintf preserves arg taint
+    code: |
+      sub example {
+        my ($input) = @_;
+        return sprintf("q=%s", $input);
+      }
+    expect_match_text: ["sprintf"]
+  description: "Perl sprintf(FORMAT, LIST) - the formatted string derives from its arguments; preserves taint from any interpolated value."

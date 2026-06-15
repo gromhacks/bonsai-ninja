@@ -17,8 +17,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         xmlReadFile(arg);
@@ -49,8 +48,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         xmlReadMemory(arg);
@@ -81,8 +79,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         xmlCtxtReadFile(arg);
@@ -113,8 +110,7 @@
   - name: generated direct match
     code: |
       #include <libxml2/libxml/parser.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         xmlParseFile(arg);
@@ -145,8 +141,7 @@
   - name: generated direct match
     code: |
       #include <xerces-c.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         XercesDOMParser::parse(arg);
@@ -177,8 +172,7 @@
   - name: generated direct match
     code: |
       #include <xerces-c.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         SAXParser::parse(arg);
@@ -211,8 +205,7 @@
       #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         QXmlSimpleReader::parse(arg);

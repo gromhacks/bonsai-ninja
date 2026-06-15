@@ -17,19 +17,15 @@
   - name: generated direct match
     code: |
       #include <jwt-cpp.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         jwt::decode(arg);
       }
   - name: literal jwt negative
-    code: "#include <jwt-cpp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
-      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  jwt::decode(arg);\n\
-      }\n"
+    code: "#include <jwt-cpp.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  jwt::decode(arg);\n}\n"
     expect_no_match: true
-  description: "jwt::decode (jwt-cpp / cpp-jwt) - flag when verify() is not called
-    on returned token."
+  description: "jwt::decode (jwt-cpp / cpp-jwt) - flag when verify() is not called on returned token."
 
 - id: cpp.jwt.jwtcpp_verifier_algnone
   enabled: true
@@ -73,15 +69,12 @@
   - name: generated direct match
     code: |
       #include <l8w8jwt.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         l8w8jwt_decode(arg);
       }
   - name: literal jwt negative
-    code: "#include <l8w8jwt.h>\nvoid example() {\n  const char *arg = \"tainted\"\
-      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  l8w8jwt_decode(arg);\n\
-      }\n"
+    code: "#include <l8w8jwt.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  l8w8jwt_decode(arg);\n}\n"
     expect_no_match: true
   description: "l8w8jwt_decode - verify alg allow-list is supplied in params."

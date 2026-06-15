@@ -16,7 +16,7 @@
   - name: declared shape
     code: |
       using AWSSDK.SQS;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonSQSClient.SendMessageAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AmazonSQSClient.SendMessageAsync(input); } }
   - name: literal sqs request negative
     code: |
       using AWSSDK.SQS;
@@ -68,7 +68,7 @@
   - name: declared shape
     code: |
       using AWSSDK.SimpleNotificationService;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonSimpleNotificationServiceClient.PublishAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; AmazonSimpleNotificationServiceClient.PublishAsync(input); } }
   - name: literal sns request negative
     code: |
       using AWSSDK.SimpleNotificationService;
@@ -120,7 +120,7 @@
   - name: declared shape
     code: |
       using Azure.Messaging.ServiceBus;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServiceBusSender.SendMessageAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; ServiceBusSender.SendMessageAsync(input); } }
   - name: literal service bus message negative
     code: |
       using Azure.Messaging.ServiceBus;
@@ -146,7 +146,7 @@
   - name: declared shape
     code: |
       using Azure.Messaging.EventHubs.Producer;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; EventHubProducerClient.SendAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; EventHubProducerClient.SendAsync(input); } }
   - name: literal event batch negative
     code: |
       using Azure.Messaging.EventHubs.Producer;
@@ -172,7 +172,7 @@
   - name: declared shape
     code: |
       using Google.Cloud.PubSub.V1;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; PublisherClient.PublishAsync(input); } }
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; PublisherClient.PublishAsync(input); } }
   - name: literal pubsub publish negative
     code: |
       using Google.Cloud.PubSub.V1;

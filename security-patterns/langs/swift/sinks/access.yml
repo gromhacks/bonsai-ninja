@@ -17,7 +17,7 @@
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
-      func test() { let input = "x"; let amount = 1; getObject(input) }
+      func test(input: String) { let amount = 1; getObject(input) }
   - name: literal aws get object negative
     code: |
       import AWSCore // aws-sdk-swift
@@ -46,7 +46,7 @@
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
-      func test() { let input = "x"; let amount = 1; putObject(input) }
+      func test(input: String) { let amount = 1; putObject(input) }
   - name: literal aws put object negative
     code: |
       import AWSCore // aws-sdk-swift
@@ -75,7 +75,7 @@
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
-      func test() { let input = "x"; let amount = 1; getSecretValue(input) }
+      func test(input: String) { let amount = 1; getSecretValue(input) }
   - name: literal aws get secret value negative
     code: |
       import AWSCore // aws-sdk-swift

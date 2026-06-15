@@ -19,8 +19,7 @@
       #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new text_iarchive(arg);
       }
   - name: literal arg 0 negative
@@ -54,8 +53,7 @@
       #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new binary_iarchive(arg);
       }
   - name: literal arg 0 negative
@@ -89,8 +87,7 @@
       #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
       #include <boost/serialization/serialization.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new xml_iarchive(arg);
       }
   - name: literal arg 0 negative
@@ -122,8 +119,7 @@
   - name: generated direct match
     code: |
       #include <cereal/archives/binary.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new BinaryInputArchive(arg);
       }
   - name: literal arg 0 negative
@@ -152,8 +148,7 @@
   - name: generated direct match
     code: |
       #include <cereal/archives/binary.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new PortableBinaryInputArchive(arg);
       }
   - name: literal arg 0 negative
@@ -182,8 +177,7 @@
   - name: generated direct match
     code: |
       #include <cereal/archives/binary.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new JSONInputArchive(arg);
       }
   - name: literal arg 0 negative
@@ -212,8 +206,7 @@
   - name: generated direct match
     code: |
       #include <cereal/archives/binary.hpp>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new XMLInputArchive(arg);
       }
   - name: literal arg 0 negative
@@ -244,8 +237,7 @@
       #include <QtCore/Qt>
       #include <QtCore/Qt>
       #include <QtCore/Qt> /* Qt */
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         auto *x = new QDataStream(arg);
       }
   - name: literal arg 0 negative

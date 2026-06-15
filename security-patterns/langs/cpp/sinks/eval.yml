@@ -15,8 +15,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         dlopen(arg);
@@ -99,8 +98,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         LoadLibraryA(arg);
@@ -129,8 +127,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         LoadLibraryW(arg);
@@ -159,8 +156,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         LoadLibraryExA(arg);
@@ -252,8 +248,7 @@
       #include <sol/sol.hpp>
       #include <sol/sol.hpp> /* sol2 */
       #include <sol/sol.hpp> /* sol2 */
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         state::do_string(arg);
@@ -290,8 +285,7 @@
       #include <sol/sol.hpp>
       #include <sol/sol.hpp> /* sol2 */
       #include <sol/sol.hpp> /* sol2 */
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         state::script(arg);
@@ -326,8 +320,7 @@
     code: |
       #include <Python.h>
       #include <Python.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         PyRun_SimpleString(arg);
@@ -362,8 +355,7 @@
     code: |
       #include <Python.h>
       #include <Python.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         PyRun_String(arg);
@@ -397,8 +389,7 @@
   - name: generated direct match
     code: |
       #include <v8.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         Script::Compile(arg);
@@ -516,8 +507,7 @@
   - name: generated direct match
     code: |
       #include <chaiscript.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         ChaiScript::eval(arg);
@@ -548,8 +538,7 @@
   - name: generated direct match
     code: |
       #include <chaiscript.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         ChaiScript::eval_file(arg);

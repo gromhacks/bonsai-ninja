@@ -15,7 +15,7 @@
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; launch(input) }
+      func test(input: String) { let amount = 1; launch(input) }
   - name: literal arg 0 negative
     code: |
       func test() { launch("safe") }
@@ -103,7 +103,7 @@
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; execlp(input) }
+      func test(input: String) { let amount = 1; execlp(input) }
   - name: literal arg 0 negative
     code: |
       func test() { execl_family("safe") }
@@ -125,7 +125,7 @@
   match_examples:
   - name: declared shape
     code: |
-      func test() { let input = "x"; let amount = 1; posix_spawn(p)(input) }
+      func test(input: String) { posix_spawn(pid, input) }
   - name: literal arg 1 negative
     code: |
       func test() { posix_spawn("safe", "safe") }

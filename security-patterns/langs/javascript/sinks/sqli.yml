@@ -295,6 +295,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$
+      base_name_in:
+      - prisma
+      - db
+      - client
+      - tx
+      - conn
   constraints:
   - arg_tainted:
       index: 0
@@ -346,6 +352,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$executeRawUnsafe$
+      base_name_in:
+      - prisma
+      - db
+      - client
+      - tx
+      - conn
   constraints:
   - arg_tainted:
       index: 0

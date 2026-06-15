@@ -182,7 +182,7 @@
       attribute: ["Net::HTTP", "new"]
   constraints:
   - arg_tainted:
-      index: 1
+      kw: Host
   match_examples:
   - name: perl.ssrf.net_http_new example
     code: |

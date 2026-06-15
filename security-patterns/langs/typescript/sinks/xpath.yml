@@ -11,6 +11,13 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.select$"
+      base_name_in:
+      - xpath
+      - xpath2
+      - xp
+      - dom
+      - doc
+      - select
   constraints:
   - arg_tainted: {index: 0}
   match_examples:

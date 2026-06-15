@@ -11,7 +11,10 @@ use bonsai_lang_api::{
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_item"],
-    param_kinds: &["parameter"],
+    // `let_declaration` captures typed locals (`let c: Foo = make();`)
+    // so cast / factory-typed receivers resolve `receiver_type_in` — it
+    // exposes the same `pattern` (name) + `type` fields as a parameter.
+    param_kinds: &["parameter", "let_declaration"],
     name_field: "pattern",
     type_field: "type",
 };
@@ -287,6 +290,10 @@ impl LanguageAdapter for RustAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
+        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
+        // types PascalCase callees, so language exported-function calls are unaffected.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }

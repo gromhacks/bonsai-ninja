@@ -16,8 +16,7 @@
   - name: generated direct match
     code: |
       #include <aws-sdk-cpp-sqs.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         SQSClient::SendMessage(arg);
@@ -64,8 +63,7 @@
   - name: generated direct match
     code: |
       #include <azure-messaging-servicebus-cpp.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         ServiceBusSender::SendMessage(arg);

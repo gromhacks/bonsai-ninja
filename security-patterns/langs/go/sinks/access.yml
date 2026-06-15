@@ -17,8 +17,7 @@
       import "github.com/aws/aws-sdk-go/service/s3"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.GetObject(target)
@@ -52,8 +51,7 @@
       import "github.com/aws/aws-sdk-go/service/s3"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.PutObject(target)
@@ -87,8 +85,7 @@
       import "github.com/aws/aws-sdk-go/service/secretsmanager"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.GetSecretValue(target)
@@ -122,8 +119,7 @@
       import "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.DownloadBuffer(target)
@@ -238,8 +234,7 @@
       import "cloud.google.com/go/secretmanager/apiv1"
       package main
 
-      func example() {
-        target := "tainted"
+      func example(target string) {
         name := "user"
         value := "value"
         obj.AccessSecretVersion(target)

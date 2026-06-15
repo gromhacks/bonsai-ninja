@@ -9,6 +9,10 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chat$
+      base_name_in:
+      - client
+      - openai
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -40,6 +44,10 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.messages$
+      base_name_in:
+      - client
+      - anthropic
+      - c
   constraints:
   - arg_tainted:
       index: 0
@@ -71,6 +79,11 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.invoke_model$
+      base_name_in:
+      - bedrock
+      - client
+      - c
+      - runtime
   constraints:
   - arg_tainted:
       index: 0

@@ -18,8 +18,7 @@
       use aws_sdk_s3;
       use aws_sdk_s3;
       use aws_sdk_s3::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           obj.get_object(target);
       }
@@ -54,8 +53,7 @@
       use aws_sdk_s3;
       use aws_sdk_s3;
       use aws_sdk_s3::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           obj.put_object(target);
       }
@@ -90,8 +88,7 @@
       use aws_sdk_secretsmanager;
       use aws_sdk_secretsmanager;
       use aws_sdk_secretsmanager::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           obj.get_secret_value(target);
       }
@@ -126,8 +123,7 @@
       use google_cloud_secretmanager;
       use google_cloud_secretmanager;
       use google_cloud_secretmanager::dummy;
-      fn example() {
-          let target = "tainted";
+      fn example(target: &str) {
           let query = "user";
           obj.access_secret_version(target);
       }

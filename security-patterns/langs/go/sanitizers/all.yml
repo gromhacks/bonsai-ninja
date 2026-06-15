@@ -1304,6 +1304,26 @@
       }
     expect_match_text: [strings.TrimSpace]
   description: "strings.TrimSpace(s) - trims surrounding whitespace but preserves taint from s."
+- id: go.passthrough.http_dir
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [http, Dir]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: http dir preserves taint
+    code: |
+      package main
+      import "net/http"
+      func example(root string) http.Dir {
+        return http.Dir(root)
+      }
+    expect_match_text: [http.Dir]
+  description: "http.Dir(s) - converts a path string to a FileSystem; preserves taint from s (a tainted root flows into http.FileServer / http.StripPrefix)."
 - id: go.passthrough.strings_to_upper
   enabled: true
   language: go
@@ -1596,6 +1616,186 @@
       }
     expect_match_text: [url.PathUnescape]
   description: "net/url.PathUnescape(s) - preserves taint."
+- id: go.passthrough.fmt_sprintf
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, Sprintf]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: sprintf preserves arg taint
+    code: |
+      package main
+      import "fmt"
+      func example(target string) string {
+        return fmt.Sprintf("q=%s", target)
+      }
+    expect_match_text: [fmt.Sprintf]
+  description: "fmt.Sprintf(format, args...) - the formatted string derives from its arguments; preserves taint from any interpolated value."
+- id: go.passthrough.fmt_sprint
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, Sprint]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: sprint preserves arg taint
+    code: |
+      package main
+      import "fmt"
+      func example(target string) string {
+        return fmt.Sprint(target)
+      }
+    expect_match_text: [fmt.Sprint]
+  description: "fmt.Sprint(args...) - concatenates operands into a string; preserves taint from any operand."
+- id: go.passthrough.fmt_sprintln
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, Sprintln]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: sprintln preserves arg taint
+    code: |
+      package main
+      import "fmt"
+      func example(target string) string {
+        return fmt.Sprintln(target)
+      }
+    expect_match_text: [fmt.Sprintln]
+  description: "fmt.Sprintln(args...) - concatenates operands with spaces + newline; preserves taint from any operand."
+- id: go.passthrough.strings_join
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, Join]
+  taint_semantics:
+    call_result_passthrough_args: [0, 1]
+  match_examples:
+  - name: join preserves element taint
+    code: |
+      package main
+      import "strings"
+      func example(parts []string) string {
+        return strings.Join(parts, ",")
+      }
+    expect_match_text: [strings.Join]
+  description: "strings.Join(elems, sep) - the joined string derives from the element slice; preserves taint."
+- id: go.passthrough.strings_replace
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, Replace]
+  taint_semantics:
+    call_result_passthrough_args: [0, 2]
+  match_examples:
+  - name: replace preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.Replace(target, "a", "b", -1)
+      }
+    expect_match_text: [strings.Replace]
+  description: "strings.Replace(s, old, new, n) - result derives from s and the replacement; preserves taint from either."
+- id: go.passthrough.strings_replace_all
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, ReplaceAll]
+  taint_semantics:
+    call_result_passthrough_args: [0, 2]
+  match_examples:
+  - name: replaceall preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.ReplaceAll(target, "a", "b")
+      }
+    expect_match_text: [strings.ReplaceAll]
+  description: "strings.ReplaceAll(s, old, new) - result derives from s and the replacement; preserves taint from either."
+- id: go.passthrough.strings_trim
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, Trim]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: trim preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.Trim(target, " ")
+      }
+    expect_match_text: [strings.Trim]
+  description: "strings.Trim(s, cutset) - trims surrounding runes but preserves taint from s."
+- id: go.passthrough.strings_trim_prefix
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, TrimPrefix]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: trimprefix preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.TrimPrefix(target, "/")
+      }
+    expect_match_text: [strings.TrimPrefix]
+  description: "strings.TrimPrefix(s, prefix) - strips a leading prefix but preserves taint from s."
+- id: go.passthrough.strings_trim_suffix
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, TrimSuffix]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: trimsuffix preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.TrimSuffix(target, "/")
+      }
+    expect_match_text: [strings.TrimSuffix]
+  description: "strings.TrimSuffix(s, suffix) - strips a trailing suffix but preserves taint from s."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink

@@ -48,8 +48,7 @@
   - name: generated direct match
     code: |
       #include <mongoose.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         mg_http_reply(200, "Content-Type: text/html\r\n", "<p>%s</p>", arg);
       }
@@ -79,8 +78,7 @@
   - name: generated direct match
     code: |
       #include <mongoose.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         mg_printf(arg);
       }
@@ -110,8 +108,7 @@
   - name: generated direct match
     code: |
       #include <civetweb.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         mg_printf_html(arg);
       }

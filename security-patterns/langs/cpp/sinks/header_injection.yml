@@ -81,11 +81,10 @@
   - name: generated direct match
     code: |
       #include <crow.h> /* crow */
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
-        response::add_header(arg);
+        response::add_header(arg,arg);
       }
   - name: literal arg 1 negative
     code: |
@@ -200,8 +199,7 @@
   - name: generated direct match
     code: |
       #include <drogon/drogon.h>
-      void example() {
-        const char *arg = "tainted";
+      void example(const char *arg) {
         const char *fmt = arg;
         const char *query = arg;
         HttpResponse::addCookie(arg);

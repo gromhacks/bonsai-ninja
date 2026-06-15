@@ -120,6 +120,12 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.setHeader$
+      base_name_in:
+      - res
+      - response
+      - reply
+      - ctx
+      - resp
   constraints:
   - arg_tainted:
       index: 1
@@ -377,6 +383,11 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.response\([^)]*\)\.header$|^[A-Za-z_$][A-Za-z0-9_$]*\.response\.header$
+      base_name_in:
+      - h
+      - reply
+      - res
+      - response
   constraints:
   - arg_tainted:
       index: 1

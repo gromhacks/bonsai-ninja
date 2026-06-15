@@ -419,11 +419,8 @@
     callee:
       name: extract
   constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: "^to$"
   - arg_tainted:
-      index: 1
+      kw: to
   match_examples:
   - name: perl.path.archive_extract_extract example
     code: |

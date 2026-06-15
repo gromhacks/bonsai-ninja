@@ -67,8 +67,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         execl(arg);
       }
@@ -95,8 +94,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         execlp(arg);
       }
@@ -123,8 +121,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         execv(arg);
       }
@@ -283,8 +280,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         execve(arg);
       }
@@ -519,8 +515,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         wordexp(arg);
       }
@@ -547,8 +542,7 @@
   match_examples:
   - name: generated direct match
     code: |
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         execle(arg);
       }
@@ -577,8 +571,7 @@
   - name: generated direct match
     code: |
       #include <glib.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         g_spawn_command_line_async(arg);
       }
@@ -607,8 +600,7 @@
   - name: generated direct match
     code: |
       #include <glib.h>
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         g_spawn_command_line_sync(arg);
       }
@@ -921,8 +913,7 @@
       #include <windows.h>
       #include <windows.h> /* win32 */
       #include <windows.h> /* win32 */
-      void example(void) {
-        char *arg = "tainted";
+      void example(char *arg) {
         char *fmt = arg;
         WinExec(arg);
       }

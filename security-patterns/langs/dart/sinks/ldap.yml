@@ -12,6 +12,13 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.search$
+      base_name_in:
+      - connection
+      - conn
+      - ldap
+      - ldapConn
+      - c
+      - client
   constraints:
   - arg_tainted:
       index: 0

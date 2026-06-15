@@ -1428,6 +1428,181 @@
           return list(items)
     expect_match_text: [list]
   description: "list(iterable) - materializes iterable elements; preserves taint from the iterable value."
+- id: python.passthrough.builtin_str
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: str
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: str coercion preserves taint
+    code: |
+      def example(value):
+          return str(value)
+    expect_match_text: [str]
+  description: "str(value) - text coercion; the resulting string still carries attacker content, so it preserves taint."
+- id: python.passthrough.builtin_bytes
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: bytes
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: bytes coercion preserves taint
+    code: |
+      def example(value):
+          return bytes(value)
+    expect_match_text: [bytes]
+  description: "bytes(value) - byte coercion; preserves taint from the source value."
+- id: python.passthrough.builtin_bytearray
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: bytearray
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: bytearray coercion preserves taint
+    code: |
+      def example(value):
+          return bytearray(value)
+    expect_match_text: [bytearray]
+  description: "bytearray(value) - mutable byte coercion; preserves taint from the source value."
+- id: python.passthrough.builtin_tuple
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: tuple
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: tuple materializes tainted iterable
+    code: |
+      def example(items):
+          return tuple(items)
+    expect_match_text: [tuple]
+  description: "tuple(iterable) - materializes iterable elements; preserves taint from the iterable value."
+- id: python.passthrough.builtin_repr
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: repr
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: repr preserves taint
+    code: |
+      def example(value):
+          return repr(value)
+    expect_match_text: [repr]
+  description: "repr(value) - debug-string coercion; the rendered text still embeds attacker content, so it preserves taint."
+- id: python.passthrough.json_loads
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [json, loads]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: json loads preserves taint
+    code: |
+      import json
+      def example(body):
+          return json.loads(body)
+    expect_match_text: [json.loads]
+  description: "json.loads(s) - parses a string into Python objects whose values derive from the input; preserves taint."
+- id: python.passthrough.json_load
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [json, load]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: json load preserves taint
+    code: |
+      import json
+      def example(fp):
+          return json.load(fp)
+    expect_match_text: [json.load]
+  description: "json.load(fp) - parses a stream into Python objects whose values derive from the input; preserves taint."
+- id: python.passthrough.base64_b64decode
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [base64, b64decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: b64decode preserves taint
+    code: |
+      import base64
+      def example(value):
+          return base64.b64decode(value)
+    expect_match_text: [base64.b64decode]
+  description: "base64.b64decode(s) - decodes attacker-controlled data; representation changes but taint is preserved."
+- id: python.passthrough.base64_b64encode
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [base64, b64encode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: b64encode preserves taint
+    code: |
+      import base64
+      def example(value):
+          return base64.b64encode(value)
+    expect_match_text: [base64.b64encode]
+  description: "base64.b64encode(s) - encodes attacker-controlled data; representation changes but taint is preserved."
+- id: python.passthrough.base64_urlsafe_b64decode
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [base64, urlsafe_b64decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: urlsafe b64decode preserves taint
+    code: |
+      import base64
+      def example(value):
+          return base64.urlsafe_b64decode(value)
+    expect_match_text: [base64.urlsafe_b64decode]
+  description: "base64.urlsafe_b64decode(s) - decodes attacker-controlled data; preserves taint."
 - id: python.passthrough.builtin_map
   enabled: true
   language: python

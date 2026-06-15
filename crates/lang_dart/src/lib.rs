@@ -239,6 +239,11 @@ impl LanguageAdapter for DartAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
+        // Local constructor-result receiver typing (`var c = Foo()` →
+        // `c: Foo`) so `c.method(...)` carries a resolved receiver type
+        // for `receiver_type_in` / `[Type, method]` rules. Dart class
+        // names are UpperCamelCase; the constructor heuristic is reliable.
+        bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
         decl_index
     }
@@ -965,12 +970,44 @@ fn collect_dart_method_type_aliases(
                 collect_dart_parameter_aliases(child, src, &mut aliases);
             }
         }
+        // WS2: typed locals (`Foo c = make();`) declared in the body —
+        // the cast / factory-typed receiver case. The body is the
+        // signature's sibling, not a child, so reach for it explicitly.
+        if let Some(body) = signature_node
+            .next_named_sibling()
+            .filter(|sibling| sibling.kind() == "function_body")
+        {
+            collect_dart_local_decl_aliases(body, src, &mut aliases);
+        }
         dedup_dart_type_aliases(&mut aliases);
         if !aliases.is_empty() {
             aliases_per_signature.push((span_of(file, &signature_node), aliases));
         }
     }
     aliases_per_signature
+}
+
+/// Walk a Dart `function_body` for typed local declarations
+/// (`Foo c = make();`) and emit `(name, type)` aliases, so cast /
+/// factory-typed receivers resolve `receiver_type_in`. The
+/// `initialized_variable_definition` node carries a `name` field + a
+/// leading `type_identifier`, the same shape `dart_typed_parameter_alias`
+/// already handles. Nested function bodies are skipped — their locals
+/// scope to themselves.
+fn collect_dart_local_decl_aliases(body: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    let mut work = vec![body];
+    while let Some(node) = work.pop() {
+        if node != body && node.kind() == "function_body" {
+            continue;
+        }
+        if node.kind() == "initialized_variable_definition" {
+            dart_typed_parameter_alias(node, src, aliases);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            work.push(child);
+        }
+    }
 }
 
 /// Recurse through a Dart `formal_parameter_list` and emit a type-alias

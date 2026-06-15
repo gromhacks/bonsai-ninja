@@ -77,10 +77,10 @@
   - name: generated direct match
     code: |
       use ldap3::dummy;
-      fn example() {
+      fn example(tainted: &str) {
           let target = "tainted";
           let query = "user";
-          LdapConn::modify("(uid=user)");
+          LdapConn::modify( tainted);
       }
   - name: literal arg 0 negative
     code: |
@@ -137,10 +137,10 @@
   - name: generated direct match
     code: |
       use ldap3::dummy;
-      fn example() {
+      fn example(tainted: &str) {
           let target = "tainted";
           let query = "user";
-          LdapConn::add("(uid=user)");
+          LdapConn::add( tainted);
       }
   - name: literal arg 0 negative
     code: |

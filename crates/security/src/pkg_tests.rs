@@ -1,8 +1,37 @@
+use super::call_candidate_matches_package_tail;
 use super::import_matches_package;
 
 #[test]
 fn exact_match() {
     assert!(import_matches_package("asyncpg", "asyncpg"));
+}
+
+#[test]
+fn go_path_package_tail_credits_fqn_call_candidate() {
+    // WS1 FQN-no-import: `exec.Command(...)` / `http.Get(...)` with no
+    // in-file import — the bare qualifier equals the package's last
+    // `/`-segment.
+    assert!(call_candidate_matches_package_tail("exec", "os/exec"));
+    // The candidate is often the whole qualified callee, not the bare head.
+    assert!(call_candidate_matches_package_tail("exec.Command", "os/exec"));
+    assert!(call_candidate_matches_package_tail("http.Get", "net/http"));
+    assert!(call_candidate_matches_package_tail("http", "net/http"));
+    assert!(call_candidate_matches_package_tail("gin", "github.com/gin-gonic/gin"));
+    assert!(call_candidate_matches_package_tail("s3", "github.com/aws/aws-sdk-go/service/s3"));
+}
+
+#[test]
+fn package_tail_does_not_credit_non_tail_or_scoped() {
+    // Non-tail segment must not match.
+    assert!(!call_candidate_matches_package_tail("os", "os/exec"));
+    // Single-segment packages are covered by import_matches_package, not here.
+    assert!(!call_candidate_matches_package_tail("flask", "flask"));
+    // npm scoped packages excluded — `client`/`hapi` are too generic to
+    // credit without a real import (would loosen the gate).
+    assert!(!call_candidate_matches_package_tail("client", "@prisma/client"));
+    assert!(!call_candidate_matches_package_tail("hapi", "@hapi/hapi"));
+    // Empty candidate never matches.
+    assert!(!call_candidate_matches_package_tail("", "os/exec"));
 }
 
 #[test]
@@ -43,6 +72,20 @@ fn no_partial_match() {
 #[test]
 fn empty_needle_never_matches() {
     assert!(!import_matches_package("anything", ""));
+}
+
+#[test]
+fn node_builtin_scheme_strip() {
+    // Node.js builtin modules imported with the explicit `node:`
+    // scheme must match rules keyed on the bare builtin name.
+    assert!(import_matches_package("node:child_process", "child_process"));
+    assert!(import_matches_package("node:fs", "fs"));
+    assert!(import_matches_package("node:fs/promises", "fs"));
+    // The bare form still matches.
+    assert!(import_matches_package("child_process", "child_process"));
+    // A non-builtin specifier that merely starts with `node` is not
+    // stripped (only the `node:` scheme is).
+    assert!(!import_matches_package("nodemailer", "mailer"));
 }
 
 #[test]

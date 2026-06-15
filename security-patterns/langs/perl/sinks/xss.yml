@@ -48,7 +48,7 @@
       name: render
   constraints:
   - arg_tainted:
-      index: 1
+      kw: text
   match_examples:
   - name: perl.xss.mojolicious_render example
     code: |
@@ -80,7 +80,7 @@
       name: send_as
   constraints:
   - arg_tainted:
-      index: 1
+      kw: html
   match_examples:
   - name: perl.xss.dancer2_send_as example
     code: |

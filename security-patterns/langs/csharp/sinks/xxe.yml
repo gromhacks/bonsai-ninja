@@ -13,13 +13,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlDocument.LoadXml(input); } }
-    - name: literal loadxml negative
-      code: |
-        class App { void Test() { XmlDocument.LoadXml("<root />"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; XmlDocument.LoadXml(input); } }
+  - name: literal loadxml negative
+    code: |
+      class App { void Test() { XmlDocument.LoadXml("<root />"); } }
+    expect_no_match: true
   description: "XmlDocument.LoadXml - set XmlResolver=null to disable entities."
 
 - id: csharp.xxe.xmldocument_load
@@ -36,13 +36,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlDocument.Load(input); } }
-    - name: literal xmldocument load negative
-      code: |
-        class App { void Test() { XmlDocument.Load("safe.xml"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; XmlDocument.Load(input); } }
+  - name: literal xmldocument load negative
+    code: |
+      class App { void Test() { XmlDocument.Load("safe.xml"); } }
+    expect_no_match: true
   description: "XmlDocument.Load - file/stream loader."
 
 - id: csharp.xxe.xmltextreader_ctor
@@ -59,13 +59,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class XmlTextReader { public XmlTextReader(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new XmlTextReader(input); } }
-    - name: literal xmltextreader negative
-      code: |
-        class XmlTextReader { public XmlTextReader(dynamic input) { } } class App { void Test() { var result = new XmlTextReader("safe.xml"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class XmlTextReader { public XmlTextReader(dynamic input) { } } class App { void Test(dynamic input) { var result = new XmlTextReader(input); } }
+  - name: literal xmltextreader negative
+    code: |
+      class XmlTextReader { public XmlTextReader(dynamic input) { } } class App { void Test() { var result = new XmlTextReader("safe.xml"); } }
+    expect_no_match: true
   description: "new XmlTextReader - ProhibitDtd defaults to false on .NET Framework <4.0."
 
 - id: csharp.xxe.xmlreader_create_default
@@ -96,13 +96,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class XPathDocument { public XPathDocument(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new XPathDocument(input); } }
-    - name: literal xpathdocument negative
-      code: |
-        class XPathDocument { public XPathDocument(dynamic input) { } } class App { void Test() { var result = new XPathDocument("safe.xml"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class XPathDocument { public XPathDocument(dynamic input) { } } class App { void Test(dynamic input) { var result = new XPathDocument(input); } }
+  - name: literal xpathdocument negative
+    code: |
+      class XPathDocument { public XPathDocument(dynamic input) { } } class App { void Test() { var result = new XPathDocument("safe.xml"); } }
+    expect_no_match: true
   description: "new XPathDocument - uses XmlTextReader internally."
 
 - id: csharp.xxe.xslcompiledtransform_load
@@ -119,13 +119,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XslCompiledTransform.Load(input); } }
-    - name: literal xsl load negative
-      code: |
-        class App { void Test() { XslCompiledTransform.Load("safe.xsl"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; XslCompiledTransform.Load(input); } }
+  - name: literal xsl load negative
+    code: |
+      class App { void Test() { XslCompiledTransform.Load("safe.xsl"); } }
+    expect_no_match: true
   description: "XslCompiledTransform.Load - XSLT can run scripts and load entities."
 
 - id: csharp.xxe.xdocument_load_with_resolver
@@ -156,13 +156,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DataSet.ReadXml(input); } }
-    - name: literal dataset readxml negative
-      code: |
-        class App { void Test() { DataSet.ReadXml("safe.xml"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; DataSet.ReadXml(input); } }
+  - name: literal dataset readxml negative
+    code: |
+      class App { void Test() { DataSet.ReadXml("safe.xml"); } }
+    expect_no_match: true
   description: "DataSet.ReadXml - uses XmlTextReader internally; DTD/external entities resolved unless overridden."
 
 - id: csharp.xxe.datatable_readxml
@@ -179,13 +179,13 @@
   - arg_tainted:
       index: 0
   match_examples:
-    - name: declared shape
-      code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DataTable.ReadXml(input); } }
-    - name: literal datatable readxml negative
-      code: |
-        class App { void Test() { DataTable.ReadXml("safe.xml"); } }
-      expect_no_match: true
+  - name: declared shape
+    code: |
+      class App { void Test(dynamic input) { dynamic target = input; dynamic amount = 1; DataTable.ReadXml(input); } }
+  - name: literal datatable readxml negative
+    code: |
+      class App { void Test() { DataTable.ReadXml("safe.xml"); } }
+    expect_no_match: true
   description: "DataTable.ReadXml - same XXE path as DataSet.ReadXml."
 
 - id: csharp.xxe.xmldictionaryreader_create
@@ -214,13 +214,13 @@
     target:
       regex: ^[^\.\s]+\.DtdProcessing$
   match_examples:
-    - name: xml reader settings dtd processing member write
-      code: |
-        class App { void Test(dynamic input) { settings.DtdProcessing = input; } }
-    - name: local dtdprocessing variable negative
-      code: |
-        class App { void Test(dynamic input) { var DtdProcessing = input; } }
-      expect_no_match: true
+  - name: xml reader settings dtd processing member write
+    code: |
+      class App { void Test(dynamic input) { settings.DtdProcessing = input; } }
+  - name: local dtdprocessing variable negative
+    code: |
+      class App { void Test(dynamic input) { var DtdProcessing = input; } }
+    expect_no_match: true
   description: "XmlReaderSettings.DtdProcessing = Parse - explicitly re-enables DTD/XXE parsing on otherwise-safe XmlReader."
 
 - id: csharp.xxe.prohibitdtd_false
@@ -235,11 +235,11 @@
     target:
       regex: ^[^\.\s]+\.ProhibitDtd$
   match_examples:
-    - name: xml reader prohibitdtd member write
-      code: |
-        class App { void Test(dynamic input) { reader.ProhibitDtd = input; } }
-    - name: local prohibitdtd variable negative
-      code: |
-        class App { void Test(dynamic input) { var ProhibitDtd = input; } }
-      expect_no_match: true
+  - name: xml reader prohibitdtd member write
+    code: |
+      class App { void Test(dynamic input) { reader.ProhibitDtd = input; } }
+  - name: local prohibitdtd variable negative
+    code: |
+      class App { void Test(dynamic input) { var ProhibitDtd = input; } }
+    expect_no_match: true
   description: "XmlReaderSettings.ProhibitDtd = false (legacy .NET) - re-enables DTD parsing."
