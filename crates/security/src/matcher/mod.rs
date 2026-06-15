@@ -331,6 +331,7 @@ where
         ConstraintMode::Strict,
         None,
         None,
+        &empty_factory_returns(),
     )
 }
 
@@ -353,6 +354,7 @@ where
         ConstraintMode::Strict,
         None,
         Some(files),
+        &empty_factory_returns(),
     )
 }
 
@@ -373,6 +375,7 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
         ConstraintMode::Strict,
         Some(taint_view),
         None,
+        &empty_factory_returns(),
     )
 }
 
@@ -385,12 +388,13 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
     rule: &Rule,
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
+    factory: &FactoryReturns,
 ) -> bool {
     let Some(prepared) = PreparedRule::new(rule) else {
         return false;
     };
     if let Some(verdict) =
-        exact_rule_match_passes_constraints_at_expected_hit(ws, &prepared, expected, taint_view)
+        exact_rule_match_passes_constraints_at_expected_hit(ws, &prepared, expected, taint_view, factory)
     {
         return verdict;
     }
@@ -404,6 +408,7 @@ fn exact_rule_match_passes_constraints_at_expected_hit(
     prepared: &PreparedRule<'_>,
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
+    factory: &FactoryReturns,
 ) -> Option<bool> {
     // Taint-analysis already has the exact endpoint span from the
     // constraint-agnostic sink scan. Rebuild the same per-fact
@@ -414,7 +419,7 @@ fn exact_rule_match_passes_constraints_at_expected_hit(
     }
     match prepared.rule.match_spec.kind {
         MatchKind::Call | MatchKind::New => Some(call_rule_match_passes_constraints_at_expected_hit(
-            ws, prepared, expected, taint_view,
+            ws, prepared, expected, taint_view, factory,
         )),
         MatchKind::Write => Some(write_rule_match_passes_constraints_at_expected_hit(
             ws, prepared, expected, taint_view,
@@ -428,11 +433,12 @@ fn call_rule_match_passes_constraints_at_expected_hit(
     prepared: &PreparedRule<'_>,
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
+    factory: &FactoryReturns,
 ) -> bool {
     let file = expected.span.file;
     let global = ws.db().global_index();
     let file_packages = file_package_set(ws, file);
-    let bundle = decl_match_facts_for(ws, file);
+    let bundle = decl_match_facts_for(ws, file, factory);
     let constructor_names = if prepared.rule.match_spec.kind == MatchKind::New {
         collect_constructor_names(global.as_ref())
     } else {
@@ -667,6 +673,7 @@ pub(crate) fn match_rules_against_facts_for_taint_with_progress_on_files<F>(
     ws: &Workspace,
     rules: &[&Rule],
     files: &[FileId],
+    factory: &Arc<FactoryReturns>,
     mut on_file_done: F,
 ) -> Vec<RuleMatch>
 where
@@ -679,6 +686,7 @@ where
         ConstraintMode::TaintEndpoint,
         None,
         Some(files),
+        factory,
     )
 }
 
@@ -702,6 +710,7 @@ where
         ConstraintMode::SinkInventory,
         None,
         Some(files),
+        &empty_factory_returns(),
     )
 }
 
@@ -712,6 +721,7 @@ fn match_rules_against_facts_with_progress_and_mode<F>(
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
     scan_files: Option<&[FileId]>,
+    factory: &Arc<FactoryReturns>,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(),
@@ -730,7 +740,7 @@ where
         }
         return Vec::new();
     }
-    let prepared_by_language = build_prepared_rule_batches(&prepared);
+    let prepared_by_language = build_prepared_rule_batches(&prepared, factory);
     let constructor_names = if prepared.iter().any(|r| r.rule.match_spec.kind == MatchKind::New) {
         collect_constructor_names(global.as_ref())
     } else {
@@ -1224,10 +1234,13 @@ struct PreparedRuleBatch<'p, 'rule> {
     param_rules: Vec<&'p PreparedRule<'rule>>,
     return_rules: Vec<&'p PreparedRule<'rule>>,
     missing_rules: Vec<&'p PreparedRule<'rule>>,
+    /// Rulepack factory-return map for this run (shared across batches;
+    /// empty/0-fingerprint unless the pack ships `returns_type` rules).
+    factory: Arc<FactoryReturns>,
 }
 
 impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
-    fn new(rules: &[&'p PreparedRule<'rule>]) -> Self {
+    fn new(rules: &[&'p PreparedRule<'rule>], factory: Arc<FactoryReturns>) -> Self {
         let mut out = Self {
             call_rules: Vec::new(),
             call_wildcard_rules: Vec::new(),
@@ -1237,6 +1250,7 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             param_rules: Vec::new(),
             return_rules: Vec::new(),
             missing_rules: Vec::new(),
+            factory,
         };
         for &rule in rules {
             match rule.rule.match_spec.kind {
@@ -1257,6 +1271,7 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
 
 fn build_prepared_rule_batches<'p, 'rule>(
     prepared: &'p [PreparedRule<'rule>],
+    factory: &Arc<FactoryReturns>,
 ) -> AHashMap<String, PreparedRuleBatch<'p, 'rule>> {
     let mut by_language: AHashMap<String, Vec<&'p PreparedRule<'rule>>> = AHashMap::new();
     for rule in prepared {
@@ -1267,7 +1282,7 @@ fn build_prepared_rule_batches<'p, 'rule>(
     }
     by_language
         .into_iter()
-        .map(|(language, rules)| (language, PreparedRuleBatch::new(&rules)))
+        .map(|(language, rules)| (language, PreparedRuleBatch::new(&rules, factory.clone())))
         .collect()
 }
 
@@ -1676,7 +1691,7 @@ fn scan_calls_batch(
     let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     let decls = global.decls_in(file);
-    let bundle = decl_match_facts_for(ws, file);
+    let bundle = decl_match_facts_for(ws, file, &rules.factory);
     let mut decl_call_keys: AHashSet<(String, u64)> = AHashSet::new();
 
     for decl in decls {
@@ -1710,7 +1725,12 @@ fn scan_calls_batch(
                 if !prepared.base_name_allows(&matched_callee) {
                     continue;
                 }
-                if !base_receiver_type_allows(prepared, Some(decl), &matched_callee) {
+                if !base_receiver_type_allows(
+                    prepared,
+                    Some(decl),
+                    &matched_callee,
+                    &facts.factory_type_aliases,
+                ) {
                     continue;
                 }
                 if !prepared.call_context_allows(
@@ -1964,7 +1984,8 @@ fn scan_missing_batch(
     let global = ws.db().global_index();
     let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
-    let bundle = decl_match_facts_for(ws, file);
+    // Missing-call rules don't use factory-return typing.
+    let bundle = decl_match_facts_for(ws, file, &empty_factory_returns());
 
     for decl in global.decls_in(file) {
         if !matches!(
@@ -2120,7 +2141,7 @@ fn missing_target_in_reachable_callees(
             // per (file, decl) pair across the whole search.
             let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
             let callee_file_packages = file_package_set(ws, callee_file);
-            let callee_bundle = decl_match_facts_for(ws, callee_file);
+            let callee_bundle = decl_match_facts_for(ws, callee_file, &empty_factory_returns());
             // Bundle covers every decl in the file; index by
             // span. Fallback: if the cache layer didn't
             // materialise this decl (rare — adapters that emit
@@ -2457,6 +2478,11 @@ struct DeclMatchFacts {
     alias_chains: AHashMap<String, String>,
     runtime_types: Vec<RuntimeTypeNarrowing>,
     lifecycle_transitions: Vec<(Span, String, String)>,
+    /// `local → ReturnType` aliases synthesized from rulepack-declared
+    /// factory returns (`returns_type`). Empty unless the pack ships
+    /// such rules. Consulted by `base_receiver_type_allows` so a sink
+    /// keyed on `receiver_type_in` resolves on a factory-typed local.
+    factory_type_aliases: Vec<TypeAliasBinding>,
 }
 
 /// Bundle of per-decl facts for one file, keyed by `decl.span` (the
@@ -2483,18 +2509,169 @@ struct FileDeclFactsBundle {
 // no state in the cached bundle other than what's derived from
 // `decl.flow_events` + content_hash, so two workspaces with
 // byte-identical files produce byte-identical bundles.
-type FileDeclFactsMap = AHashMap<(FileId, u64, u64), Arc<FileDeclFactsBundle>>;
+/// Rulepack-declared factory-method return types. A rule with
+/// `returns_type: Cursor` whose structured callee names a method
+/// (`name: cursor` or `attribute: [Connection, cursor]`) declares that
+/// a call to that method yields a `Cursor`. The matcher uses this to
+/// type a local assigned from a factory chain
+/// (`c = engine.connect().cursor()` → `c: Cursor`) so a
+/// `receiver_type_in: [Cursor]` sink on `c.execute(...)` resolves —
+/// without the engine owning any method-name list (the names come from
+/// the rulepack, mirroring `taint_receiver_from_args`).
+#[derive(Debug, Default)]
+pub(crate) struct FactoryReturns {
+    /// Factory method name (last structured-callee segment) → return type.
+    method_to_type: AHashMap<String, String>,
+    /// `0` when empty, so the decl-facts cache key is byte-identical to a
+    /// no-factory run — the feature is dormant unless the pack ships
+    /// `returns_type` rules.
+    fingerprint: u64,
+}
+
+impl FactoryReturns {
+    fn is_empty(&self) -> bool {
+        self.method_to_type.is_empty()
+    }
+}
+
+static EMPTY_FACTORY_RETURNS: std::sync::LazyLock<Arc<FactoryReturns>> =
+    std::sync::LazyLock::new(|| Arc::new(FactoryReturns::default()));
+
+/// Shared empty map for the non-taint match paths (sink inventory,
+/// source enumeration, tests). Cloning the `Arc` is O(1) and keeps the
+/// cache key fingerprint at 0.
+pub(crate) fn empty_factory_returns() -> Arc<FactoryReturns> {
+    EMPTY_FACTORY_RETURNS.clone()
+}
+
+/// Build the factory-return map from every rule that declares
+/// `returns_type`. The factory method is read from the rule's
+/// structured callee (`name`, or the last `attribute` segment);
+/// `regex`-only callees are skipped (no clean method name to key on).
+pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
+    let mut method_to_type: AHashMap<String, String> = AHashMap::new();
+    for rule in rules {
+        let Some(ty) = rule.returns_type.as_deref() else {
+            continue;
+        };
+        if ty.is_empty() {
+            continue;
+        }
+        let Some(target) = rule_primary_target(rule) else {
+            continue;
+        };
+        let method = target
+            .name
+            .as_deref()
+            .or_else(|| target.attribute.as_deref().and_then(|attr| attr.last().map(String::as_str)));
+        let Some(method) = method else {
+            continue;
+        };
+        if method.is_empty() {
+            continue;
+        }
+        method_to_type.insert(method.to_string(), ty.to_string());
+    }
+    if method_to_type.is_empty() {
+        return empty_factory_returns();
+    }
+    // Deterministic fingerprint over sorted (method, type) pairs so the
+    // decl-facts cache never serves a bundle built for a different pack.
+    let mut pairs: Vec<(&String, &String)> = method_to_type.iter().collect();
+    pairs.sort();
+    let mut fingerprint_input = String::new();
+    for (method, ty) in pairs {
+        fingerprint_input.push_str(method);
+        fingerprint_input.push('\0');
+        fingerprint_input.push_str(ty);
+        fingerprint_input.push('\n');
+    }
+    let fingerprint = bonsai_hash::fnv1a_bytes64(fingerprint_input.as_bytes());
+    Arc::new(FactoryReturns {
+        method_to_type,
+        fingerprint,
+    })
+}
+
+/// Extract the method name of the OUTERMOST call in an assignment RHS:
+/// `engine.connect().cursor()` → `cursor`, `make_cursor()` →
+/// `make_cursor`. Returns `None` when the RHS is not a call expression.
+fn final_call_method(rhs: &str) -> Option<&str> {
+    let rhs = rhs.trim();
+    if !rhs.ends_with(')') {
+        return None;
+    }
+    // Find the `(` that opens the final argument list by scanning back
+    // with paren depth so nested calls don't confuse the split.
+    let bytes = rhs.as_bytes();
+    let mut depth = 0i32;
+    let mut open = None;
+    for (i, &b) in bytes.iter().enumerate().rev() {
+        match b {
+            b')' => depth += 1,
+            b'(' => {
+                depth -= 1;
+                if depth == 0 {
+                    open = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let callee = rhs[..open?].trim_end();
+    // The method is the last identifier segment after a `.` / `::` / `->`.
+    let start = callee.rfind(['.', ':', '>']).map_or(0, |p| p + 1);
+    let method = callee[start..].trim();
+    if method.is_empty() || !method.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+        return None;
+    }
+    Some(method)
+}
+
+/// Synthesize `local → ReturnType` aliases for assignments whose RHS is
+/// a factory call named in the rulepack map. Empty (no allocation) when
+/// the pack ships no `returns_type` rules.
+fn synth_factory_type_aliases(
+    assignment_map: &AHashMap<String, String>,
+    factory: &FactoryReturns,
+) -> Vec<TypeAliasBinding> {
+    if factory.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (name, rhs) in assignment_map {
+        let Some(method) = final_call_method(rhs) else {
+            continue;
+        };
+        if let Some(type_name) = factory.method_to_type.get(method) {
+            out.push(TypeAliasBinding {
+                name: name.clone(),
+                type_name: type_name.clone(),
+            });
+        }
+    }
+    out
+}
+
+type FileDeclFactsMap = AHashMap<(FileId, u64, u64, u64), Arc<FileDeclFactsBundle>>;
 static DECL_FACTS_CACHE: std::sync::LazyLock<parking_lot::RwLock<FileDeclFactsMap>> =
     std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
 /// Return the per-decl matcher fact bundle for `file`. Builds the
-/// bundle on miss; cached on `(file, version, text_hash)` so source
-/// edits naturally invalidate.
-fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle> {
+/// bundle on miss; cached on `(file, version, text_hash, factory_fp)`
+/// so source edits — and a change of factory-return map — naturally
+/// invalidate. `factory_fp` is 0 when the pack ships no `returns_type`
+/// rules, keeping the key (and behavior) identical to a no-factory run.
+fn decl_match_facts_for(
+    ws: &Workspace,
+    file: FileId,
+    factory: &FactoryReturns,
+) -> Arc<FileDeclFactsBundle> {
     let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snap| {
         (snap.version, package_cache_content_hash(snap.text.as_bytes()))
     });
-    let key = (file, version, text_hash);
+    let key = (file, version, text_hash, factory.fingerprint);
     let cached = DECL_FACTS_CACHE.read().get(&key).cloned();
     if let Some(hit) = cached {
         return hit;
@@ -2507,10 +2684,17 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
+        let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
+        let factory_type_aliases = synth_factory_type_aliases(&assignment_map, factory);
         let mut calls = collect_calls(&decl.flow_events);
         enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
+        if !factory_type_aliases.is_empty() {
+            // Factory-typed locals participate in receiver-type matching
+            // and the package gate's receiver-type candidate chase.
+            enrich_call_fact_receiver_types(&mut calls, &factory_type_aliases);
+            extend_alias_map_with_declared_types(&mut alias_map, &factory_type_aliases);
+        }
         let receiver_counts = receiver_method_call_counts(&calls);
-        let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
         let decl_decorators = collect_decl_decorator_names(ws, file, decl.span);
         let alias_chains = collect_must_alias_pairs(&decl.flow_events);
         let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
@@ -2526,6 +2710,7 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle
                 alias_chains,
                 runtime_types,
                 lifecycle_transitions,
+                factory_type_aliases,
             }),
         );
     }
@@ -2748,7 +2933,7 @@ fn scan_refs_batch(
             if !base_param_index_allows(prepared, enclosing_decl, &r.name) {
                 continue;
             }
-            if !base_receiver_type_allows(prepared, enclosing_decl, &r.name) {
+            if !base_receiver_type_allows(prepared, enclosing_decl, &r.name, &[]) {
                 continue;
             }
             // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
@@ -2804,7 +2989,7 @@ fn scan_flow_reads_batch(
                 if !base_param_index_allows(prepared, Some(decl), &match_text) {
                     continue;
                 }
-                if !base_receiver_type_allows(prepared, Some(decl), &match_text) {
+                if !base_receiver_type_allows(prepared, Some(decl), &match_text, &[]) {
                     continue;
                 }
                 // Same package-signal gate that `scan_refs_batch`
@@ -2905,6 +3090,7 @@ fn base_receiver_type_allows(
     prepared: &PreparedRule<'_>,
     decl: Option<&bonsai_lang_api::Decl>,
     match_text: &str,
+    factory_aliases: &[TypeAliasBinding],
 ) -> bool {
     let Some(target) = rule_primary_target(prepared.rule) else {
         return true;
@@ -2912,10 +3098,20 @@ fn base_receiver_type_allows(
     if target.receiver_type_in.is_empty() {
         return true;
     }
-    let Some(decl) = decl else {
+    let Some(base) = match_base_name(match_text) else {
         return false;
     };
-    let Some(base) = match_base_name(match_text) else {
+    // Rulepack-declared factory-return types stand in for adapter
+    // type-aliases the constructor heuristic can't see
+    // (`c = engine.connect().cursor()` → `c: Cursor`).
+    if factory_aliases
+        .iter()
+        .filter(|alias| alias.name == base)
+        .any(|alias| receiver_type_matches_wanted(&alias.type_name, &target.receiver_type_in))
+    {
+        return true;
+    }
+    let Some(decl) = decl else {
         return false;
     };
     decl.type_aliases

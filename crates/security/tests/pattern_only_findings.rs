@@ -91,6 +91,7 @@ fn base_rule(lang: &str, id: &str, tag: &str, kind: MatchKind) -> Rule {
             search_depth: 0,
         },
         taint_semantics: None,
+        returns_type: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test rule".to_string(),

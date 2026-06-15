@@ -226,6 +226,7 @@ fn base_rule(id: &str, kind: RuleKind, match_kind: MatchKind) -> Rule {
             search_depth: 0,
         },
         taint_semantics: None,
+        returns_type: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test rule".to_string(),

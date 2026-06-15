@@ -879,6 +879,16 @@ pub struct Rule {
     pub match_spec: MatchSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint_semantics: Option<TaintSemantics>,
+    /// Rulepack-declared factory-method return type. When a rule names
+    /// a factory method via its structured `match` callee (`name:
+    /// cursor` or `attribute: [Connection, cursor]`) and sets
+    /// `returns_type: Cursor`, the matcher types a local assigned from
+    /// that factory (`c = engine.connect().cursor()` → `c: Cursor`) so
+    /// `receiver_type_in` sinks on the local resolve. The engine owns no
+    /// method-name list — the names come from the rulepack (mirrors
+    /// `taint_receiver_from_args`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns_type: Option<String>,
     #[serde(default, skip_serializing_if = "RuleConstraint::is_empty")]
     pub constraints: RuleConstraint,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

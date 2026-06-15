@@ -141,6 +141,7 @@ fn compile_rule_produces_non_empty_inspect_args_for_sink() {
             search_depth: 0,
         },
         taint_semantics: None,
+        returns_type: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "os.system".into(),
