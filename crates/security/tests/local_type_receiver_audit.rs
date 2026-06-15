@@ -247,6 +247,28 @@ fn kotlin_as_cast_resolves_receiver_type() {
 }
 
 #[test]
+fn typescript_as_cast_resolves_receiver_type() {
+    let n = typed_local_findings(
+        "typescript",
+        "ts",
+        "run",
+        "import {Foo} from 'acme';\nfunction make(): any { return null; }\nfunction h(x: string){ const c = make() as Foo; c.run(x); }\n",
+    );
+    assert!(n >= 1, "typescript `const c = make() as Foo` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn typescript_angle_cast_resolves_receiver_type() {
+    let n = typed_local_findings(
+        "typescript",
+        "ts",
+        "run",
+        "import {Foo} from 'acme';\nfunction make(): any { return null; }\nfunction h(x: string){ const c = <Foo>make(); c.run(x); }\n",
+    );
+    assert!(n >= 1, "typescript `const c = <Foo>make()` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
 fn dart_as_cast_resolves_receiver_type() {
     let n = typed_local_findings(
         "dart",
