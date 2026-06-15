@@ -148,6 +148,50 @@ fn kotlin_typed_local_resolves_receiver_type() {
 }
 
 #[test]
+fn kotlin_as_cast_resolves_receiver_type() {
+    let n = typed_local_findings(
+        "kotlin",
+        "kt",
+        "run",
+        "import acme.Foo\nfun h(x: String){ val c = make() as Foo; c.run(x) }\nfun make(): Any = TODO()\n",
+    );
+    assert!(n >= 1, "kotlin `val c = make() as Foo` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn dart_as_cast_resolves_receiver_type() {
+    let n = typed_local_findings(
+        "dart",
+        "dart",
+        "run",
+        "import 'package:acme/acme.dart';\nvoid h(String x){ var c = make() as Foo; c.run(x); }\ndynamic make() => 0;\n",
+    );
+    assert!(n >= 1, "dart `var c = make() as Foo` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn go_type_assertion_resolves_receiver_type() {
+    let n = typed_local_findings(
+        "go",
+        "go",
+        "Run",
+        "package main\nimport \"acme\"\nfunc h(x string){ c := acme.Make().(Foo); c.Run(x) }\n",
+    );
+    assert!(n >= 1, "go `c := acme.Make().(Foo)` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn scala_asinstanceof_resolves_receiver_type() {
+    let n = typed_local_findings(
+        "scala",
+        "scala",
+        "run",
+        "import acme.Foo\nclass A { def h(x: String): Unit = { val c = make().asInstanceOf[Foo]; c.run(x) }; def make(): Any = ??? }\n",
+    );
+    assert!(n >= 1, "scala `val c = make().asInstanceOf[Foo]` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
 fn java_var_cast_resolves_receiver_type() {
     // WS2: Java 10+ `var c = (Foo) make()` — inferred LHS, type on cast.
     let n = typed_local_findings(

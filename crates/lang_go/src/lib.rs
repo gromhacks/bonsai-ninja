@@ -658,15 +658,72 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
         let concrete_type = var_spec
             .child_by_field_name("value")
             .and_then(|value_node| first_go_composite_literal_type(value_node, src));
-        for name in names {
+        // WS2: `var c = make().(Foo)` — the type assertion is the only
+        // type signal; binds the (first) name to the asserted type.
+        let assertion_type = var_spec
+            .child_by_field_name("value")
+            .and_then(|value_node| go_direct_type_assertion_type(value_node, src));
+        for (index, name) in names.iter().enumerate() {
             if let Some(ty) = declared_type.as_deref() {
-                push_go_type_alias(aliases, &name, ty);
+                push_go_type_alias(aliases, name, ty);
             }
             if let Some(ty) = concrete_type.as_deref() {
-                push_go_type_alias(aliases, &name, ty);
+                push_go_type_alias(aliases, name, ty);
+            }
+            if index == 0 {
+                if let Some(ty) = assertion_type.as_deref() {
+                    push_go_type_alias(aliases, name, ty);
+                }
             }
         }
     }
+    // WS2: `c := make().(Foo)` — short var declaration with a type
+    // assertion RHS (not a `var_spec`, so the loop above never sees it).
+    for short_var in collect_kinds_under(&node, &["short_var_declaration"]) {
+        let Some(ty) = short_var
+            .child_by_field_name("right")
+            .and_then(|right| go_direct_type_assertion_type(right, src))
+        else {
+            continue;
+        };
+        // Bind the FIRST LHS name (the value; a comma-ok `v, ok :=` form
+        // makes `ok` a bool, never the asserted type).
+        if let Some(left) = short_var.child_by_field_name("left") {
+            let mut cursor = left.walk();
+            for child in left.named_children(&mut cursor) {
+                if child.kind() == "identifier" {
+                    let name = node_text(&child, src).trim();
+                    if !name.is_empty() {
+                        push_go_type_alias(aliases, name, &ty);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// WS2: the asserted type of a direct type-assertion RHS (`x.(Foo)` ->
+/// `Foo`), unwrapping a single-element `expression_list` / parens. Returns
+/// `None` for any other RHS shape so only a genuine assertion types the
+/// local (a nested assertion inside a call arg must not leak).
+fn go_direct_type_assertion_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut n = node;
+    loop {
+        match n.kind() {
+            "expression_list" | "parenthesized_expression" => {
+                let mut cursor = n.walk();
+                let first = n.named_children(&mut cursor).next()?;
+                n = first;
+            }
+            _ => break,
+        }
+    }
+    if n.kind() == "type_assertion_expression" {
+        let type_node = n.child_by_field_name("type")?;
+        return canonical_go_type_name(node_text(&type_node, src));
+    }
+    None
 }
 
 fn apply_go_projected_receiver_aliases(idx: &mut DeclIndex) {
