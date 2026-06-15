@@ -2520,8 +2520,10 @@ struct FileDeclFactsBundle {
 /// the rulepack, mirroring `taint_receiver_from_args`).
 #[derive(Debug, Default)]
 pub(crate) struct FactoryReturns {
-    /// Factory method name (last structured-callee segment) → return type.
-    method_to_type: AHashMap<String, String>,
+    /// language → (factory method name → return type). Scoped by
+    /// language so a Python `cursor → Cursor` rule can never type a
+    /// `.cursor()` call in a JS/Ruby/etc. file.
+    by_language: AHashMap<String, AHashMap<String, String>>,
     /// `0` when empty, so the decl-facts cache key is byte-identical to a
     /// no-factory run — the feature is dormant unless the pack ships
     /// `returns_type` rules.
@@ -2530,7 +2532,10 @@ pub(crate) struct FactoryReturns {
 
 impl FactoryReturns {
     fn is_empty(&self) -> bool {
-        self.method_to_type.is_empty()
+        self.by_language.is_empty()
+    }
+    fn methods_for(&self, language: &str) -> Option<&AHashMap<String, String>> {
+        self.by_language.get(language)
     }
 }
 
@@ -2549,7 +2554,7 @@ pub(crate) fn empty_factory_returns() -> Arc<FactoryReturns> {
 /// structured callee (`name`, or the last `attribute` segment);
 /// `regex`-only callees are skipped (no clean method name to key on).
 pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
-    let mut method_to_type: AHashMap<String, String> = AHashMap::new();
+    let mut by_language: AHashMap<String, AHashMap<String, String>> = AHashMap::new();
     for rule in rules {
         let Some(ty) = rule.returns_type.as_deref() else {
             continue;
@@ -2570,25 +2575,35 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
         if method.is_empty() {
             continue;
         }
-        method_to_type.insert(method.to_string(), ty.to_string());
+        by_language
+            .entry(rule.language.clone())
+            .or_default()
+            .insert(method.to_string(), ty.to_string());
     }
-    if method_to_type.is_empty() {
+    if by_language.is_empty() {
         return empty_factory_returns();
     }
-    // Deterministic fingerprint over sorted (method, type) pairs so the
-    // decl-facts cache never serves a bundle built for a different pack.
-    let mut pairs: Vec<(&String, &String)> = method_to_type.iter().collect();
-    pairs.sort();
+    // Deterministic fingerprint over sorted (language, method, type)
+    // triples so the decl-facts cache never serves a bundle built for a
+    // different pack.
+    let mut langs: Vec<&String> = by_language.keys().collect();
+    langs.sort();
     let mut fingerprint_input = String::new();
-    for (method, ty) in pairs {
-        fingerprint_input.push_str(method);
-        fingerprint_input.push('\0');
-        fingerprint_input.push_str(ty);
-        fingerprint_input.push('\n');
+    for lang in langs {
+        fingerprint_input.push_str(lang);
+        fingerprint_input.push('\u{1}');
+        let mut pairs: Vec<(&String, &String)> = by_language[lang].iter().collect();
+        pairs.sort();
+        for (method, ty) in pairs {
+            fingerprint_input.push_str(method);
+            fingerprint_input.push('\0');
+            fingerprint_input.push_str(ty);
+            fingerprint_input.push('\n');
+        }
     }
     let fingerprint = bonsai_hash::fnv1a_bytes64(fingerprint_input.as_bytes());
     Arc::new(FactoryReturns {
-        method_to_type,
+        by_language,
         fingerprint,
     })
 }
@@ -2635,16 +2650,17 @@ fn final_call_method(rhs: &str) -> Option<&str> {
 fn synth_factory_type_aliases(
     assignment_map: &AHashMap<String, String>,
     factory: &FactoryReturns,
+    language: &str,
 ) -> Vec<TypeAliasBinding> {
-    if factory.is_empty() {
+    let Some(methods) = factory.methods_for(language) else {
         return Vec::new();
-    }
+    };
     let mut out = Vec::new();
     for (name, rhs) in assignment_map {
         let Some(method) = final_call_method(rhs) else {
             continue;
         };
-        if let Some(type_name) = factory.method_to_type.get(method) {
+        if let Some(type_name) = methods.get(method) {
             out.push(TypeAliasBinding {
                 name: name.clone(),
                 type_name: type_name.clone(),
@@ -2679,13 +2695,22 @@ fn decl_match_facts_for(
     let global = ws.db().global_index();
     let import_aliases = file_alias_map(ws, file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    // File language scopes factory-return typing (a Python `cursor`
+    // factory must not type `.cursor()` in a JS file). Skipped entirely
+    // when the pack ships no `returns_type` rules.
+    let file_language = (!factory.is_empty())
+        .then(|| ws.db().adapter_for(file).map(|a| a.language_id().as_str().to_string()))
+        .flatten();
     let mut by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>> = AHashMap::new();
     for decl in global.decls_in(file) {
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
         let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
-        let factory_type_aliases = synth_factory_type_aliases(&assignment_map, factory);
+        let factory_type_aliases = file_language
+            .as_deref()
+            .map(|lang| synth_factory_type_aliases(&assignment_map, factory, lang))
+            .unwrap_or_default();
         let mut calls = collect_calls(&decl.flow_events);
         enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
         if !factory_type_aliases.is_empty() {
