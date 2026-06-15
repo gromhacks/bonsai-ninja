@@ -105,6 +105,94 @@ fn typed_local_findings(lang: &str, ext: &str, method: &str, src: &str) -> usize
         .count()
 }
 
+/// Like [`typed_local_findings`], but ALSO ships a `returns_type` typing
+/// rule declaring that the factory method `factory` yields `Foo`. This
+/// exercises the rulepack-declared factory-return mechanism: a local
+/// assigned from a factory chain (`c = builder().make()`) is typed
+/// `Foo` so the `receiver_type_in: [Foo]` sink on `c.run(...)` resolves.
+fn factory_typed_local_findings(lang: &str, ext: &str, method: &str, factory: &str, src: &str) -> usize {
+    let rules = TempTree::new(&format!("{lang}-frules"));
+    rules.write(
+        &format!("langs/{lang}/sinks/t.yml"),
+        &format!(
+            r#"- id: {lang}.test.typed_local_run
+  enabled: true
+  language: {lang}
+  tag: command-injection
+  severity: high
+  packages: [acme]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.{method}$"
+  constraints:
+  - receiver_type_in: [Foo]
+  - arg_tainted:
+      index: 0
+  description: test
+- id: {lang}.test.foo_factory
+  enabled: true
+  language: {lang}
+  description: factory typing rule ({factory} returns Foo)
+  returns_type: Foo
+  match:
+    kind: call
+    callee:
+      name: {factory}
+"#,
+        ),
+    );
+    let ws = TempTree::new(&format!("{lang}-fws"));
+    ws.write(&format!("m.{ext}"), src);
+
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules.path).expect("rulepack");
+    let workspace = bonsai_workspace::Workspace::index(&ws.path, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(
+        &workspace,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("taint");
+    report
+        .findings
+        .iter()
+        .filter(|f| f.finding.sink.rule_id == format!("{lang}.test.typed_local_run"))
+        .count()
+}
+
+#[test]
+fn factory_return_typing_resolves_receiver_type() {
+    // Factory chain `c = builder().make()` — the constructor heuristic
+    // can't type `c` (lowercase `make`), so without a `returns_type`
+    // rule the `receiver_type_in: [Foo]` sink stays dark. (`import acme`
+    // satisfies the sink's `packages: [acme]` gate.)
+    let chain = "import acme\ndef h(x):\n    c = builder().make()\n    c.run(x)\n";
+    let baseline = typed_local_findings("python", "py", "run", chain);
+    assert_eq!(
+        baseline, 0,
+        "control: factory chain must NOT resolve without a returns_type rule, got {baseline}"
+    );
+    // With a `returns_type: Foo` rule on `make`, the local is typed and
+    // the sink fires.
+    let with_typing = factory_typed_local_findings("python", "py", "run", "make", chain);
+    assert!(
+        with_typing >= 1,
+        "factory chain `c = builder().make()` must resolve receiver_type_in via returns_type, got {with_typing}"
+    );
+    // Negative: a factory whose method isn't declared stays untyped.
+    let other = "import acme\ndef h(x):\n    c = builder().other()\n    c.run(x)\n";
+    let untyped = factory_typed_local_findings("python", "py", "run", "make", other);
+    assert_eq!(
+        untyped, 0,
+        "a non-declared factory method must NOT type the local, got {untyped}"
+    );
+}
+
 #[test]
 fn rust_typed_local_resolves_receiver_type() {
     let n = typed_local_findings(

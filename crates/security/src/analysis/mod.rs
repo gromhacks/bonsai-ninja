@@ -659,6 +659,14 @@ where
             && options.tag.as_deref().is_none_or(|t| r.tag.as_deref() == Some(t))
     })?;
     let mut sanitizers = select_rules(pack, RuleKind::Sanitizer, None, None, |_| true)?;
+    // `returns_type` rules are typing-only: they declare a factory
+    // method's return type for receiver-typing and must not themselves
+    // produce findings. They are still read (from the full pack) by
+    // `build_factory_returns` below. No-op until the pack ships such
+    // rules.
+    sources.retain(|r| r.returns_type.is_none());
+    sinks.retain(|r| r.returns_type.is_none());
+    sanitizers.retain(|r| r.returns_type.is_none());
     filter_rules_to_workspace_languages(ws, &mut sources);
     filter_rules_to_workspace_languages(ws, &mut sinks);
     filter_rules_to_workspace_languages(ws, &mut sanitizers);
@@ -745,10 +753,20 @@ where
         label: "matching sink rules",
         total: total_files,
     });
-    let mut sink_hits =
-        match_rules_against_facts_for_taint_with_progress_on_files(ws, &sinks, &scan_files, || {
+    // Rulepack-declared factory-method return types (`returns_type`).
+    // Empty (and dormant) unless the pack ships such rules; threaded
+    // into both the sink scan and the finding-time constraint re-check
+    // so a `receiver_type_in` sink resolves on a factory-typed local.
+    let factory_returns = crate::matcher::build_factory_returns(&pack.all_rules());
+    let mut sink_hits = match_rules_against_facts_for_taint_with_progress_on_files(
+        ws,
+        &sinks,
+        &scan_files,
+        &factory_returns,
+        || {
             on_progress(AnalysisProgress::PhaseTicked);
-        });
+        },
+    );
     on_progress(AnalysisProgress::PhaseFinished);
     let mut sanitizer_hits = gather_matches_phased(
         ws,
@@ -808,6 +826,7 @@ where
         options.interprocedural_budget,
         options.intra_worklist_cap,
         options.max_precision,
+        &factory_returns,
         &mut on_progress,
     );
     on_progress(AnalysisProgress::PhaseStarted {
@@ -5239,6 +5258,7 @@ fn build_findings_chain_aware<F>(
     interprocedural_budget: Option<u32>,
     intra_worklist_cap: Option<u32>,
     max_precision: Option<Precision>,
+    factory_returns: &crate::matcher::FactoryReturns,
     on_progress: &mut F,
 ) -> Vec<FindingWithChain>
 where
@@ -5916,6 +5936,7 @@ where
                             sink_rule,
                             snk,
                             &current_call_taint_view,
+                            factory_returns,
                         ) {
                             bonsai_diagnostics::debug_log!(
                                 "security-taint",

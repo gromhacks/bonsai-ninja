@@ -43,6 +43,7 @@ fn package_rule(package: &str) -> Rule {
             search_depth: 0,
         },
         taint_semantics: None,
+        returns_type: None,
         constraints: RuleConstraint::default(),
         match_examples: Vec::new(),
         description: "test".to_string(),
