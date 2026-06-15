@@ -300,3 +300,29 @@ fn erlang_binary_to_list_preserves_taint() {
         "Erlang unicode:characters_to_list(Input) must preserve taint into os:cmd"
     );
 }
+
+/// WS3 module-function-return passthrough (base64 decode). Decoding a
+/// base64 payload changes representation but preserves attacker-controlled
+/// content — the goal's "module-function returns not propagated
+/// (base64.*decode)". Probed across langs: python `base64.b64decode` and
+/// js `Buffer.from(x,'base64')` already passed; php `base64_decode`, ruby
+/// `Base64.decode64`, js/ts `atob` dropped taint → added passthrough rules.
+#[test]
+fn base64_decode_preserves_taint_across_langs() {
+    assert!(
+        coercion_findings("php_b64", "php", "<?php\nfunction h($input){ system(base64_decode($input)); }\n") >= 1,
+        "PHP base64_decode must preserve taint"
+    );
+    assert!(
+        coercion_findings("ruby_b64", "rb", "require 'base64'\ndef h(input)\n  system(Base64.decode64(input))\nend\n") >= 1,
+        "Ruby Base64.decode64 must preserve taint"
+    );
+    assert!(
+        coercion_findings("js_atob", "js", "const cp=require('child_process')\nfunction h(input){ cp.exec(atob(input)) }\n") >= 1,
+        "JS atob must preserve taint"
+    );
+    assert!(
+        coercion_findings("ts_atob", "ts", "const cp=require('child_process')\nfunction h(input: string){ cp.exec(atob(input)) }\n") >= 1,
+        "TS atob must preserve taint"
+    );
+}

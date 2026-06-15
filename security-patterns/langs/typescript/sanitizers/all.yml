@@ -1212,6 +1212,24 @@
       }
     expect_match_text: [decodeURIComponent]
   description: "decodeURIComponent(s) - preserves taint."
+- id: typescript.passthrough.atob
+  enabled: true
+  language: typescript
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: atob
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: atob passthrough
+    code: |
+      function decode(input: string) {
+        return atob(input);
+      }
+    expect_match_text: [atob]
+  description: "atob(s) - base64 decode; changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough)."
 - id: typescript.passthrough.decode_uri
   enabled: true
   language: typescript
