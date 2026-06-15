@@ -1190,7 +1190,10 @@ fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
         // dispatch. Without this, classes that use idiomatic
         // type-inferred field initialization (`private val authService
         // = AuthService()`) lose receiver-type info downstream.
-        kotlin_property_constructor_type(node, src)?
+        // WS2: `val c = make() as Foo` / `as?` — the cast on the RHS is
+        // the only type signal for an inferred local; prefer it, then fall
+        // back to the constructor-shape inference.
+        kotlin_property_cast_type(node, src).or_else(|| kotlin_property_constructor_type(node, src))?
     };
     if name == type_short {
         return None;
@@ -1199,6 +1202,33 @@ fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
         name,
         type_name: type_short,
     })
+}
+
+/// WS2: when an inferred local is initialized by a Kotlin `as` / `as?`
+/// cast (`val c = make() as Foo`), the cast's right operand is the static
+/// type. Scans the property's named children for the `as_expression` that
+/// is the RHS and returns its canonical type. Returns `None` for any
+/// non-cast RHS so only a genuine cast types the local.
+fn kotlin_property_cast_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "as_expression" {
+            // The cast target is a `user_type` / `type_identifier` /
+            // `nullable_type` operand of the `as_expression` (the grammar
+            // exposes operands as positional children, not a `right`
+            // field).
+            let mut inner = child.walk();
+            for operand in child.named_children(&mut inner) {
+                if matches!(
+                    operand.kind(),
+                    "user_type" | "type_identifier" | "nullable_type"
+                ) {
+                    return canonical_short_type(node_text(&operand, src));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// When a `property_declaration` lacks an explicit type annotation,

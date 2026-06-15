@@ -1002,11 +1002,67 @@ fn collect_dart_local_decl_aliases(body: Node<'_>, src: &[u8], aliases: &mut Vec
         }
         if node.kind() == "initialized_variable_definition" {
             dart_typed_parameter_alias(node, src, aliases);
+            // WS2: `var c = make() as Foo` — an inferred local typed only
+            // by an `as` cast on its initializer.
+            dart_cast_local_alias(node, src, aliases);
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             work.push(child);
         }
+    }
+}
+
+/// WS2 cast typing for dart inferred locals: `var c = expr as Foo`. The
+/// `as` cast surfaces as a `type_cast` / `type_cast_expression` node that
+/// is a DIRECT child of the `initialized_variable_definition` (a cast
+/// nested in a call argument is not a direct child, so it can't mistype
+/// the local). Binds the definition's name to the cast's target type when
+/// that type is class-like (PascalCase).
+fn dart_cast_local_alias(def: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    let Some(name_node) = def.child_by_field_name("name") else {
+        return;
+    };
+    let name = node_text(&name_node, src).trim().to_string();
+    // Only fire when the initializer IS directly an `as` cast
+    // (`type_cast` / `type_cast_expression`) — a cast nested in a call
+    // argument is not the `value`, so it can't mistype the local.
+    let Some(value) = def.child_by_field_name("value") else {
+        return;
+    };
+    if !matches!(value.kind(), "type_cast" | "type_cast_expression") {
+        return;
+    }
+    // The cast target `type_identifier` is nested
+    // (type_cast_expression -> type_cast -> type_identifier); take the
+    // outermost (smallest start byte) so a generic `Foo<Bar>` resolves to
+    // `Foo`.
+    let mut best: Option<Node<'_>> = None;
+    let mut stack = vec![value];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "type_identifier" {
+            if best.is_none_or(|b| n.start_byte() < b.start_byte()) {
+                best = Some(n);
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    let Some(type_node) = best else {
+        return;
+    };
+    let ty = node_text(&type_node, src).trim().to_string();
+    if name.is_empty()
+        || ty.is_empty()
+        || !ty.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    {
+        return;
+    }
+    let binding = TypeAliasBinding { name, type_name: ty };
+    if !aliases.contains(&binding) {
+        aliases.push(binding);
     }
 }
 

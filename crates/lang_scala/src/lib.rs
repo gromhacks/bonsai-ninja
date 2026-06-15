@@ -124,12 +124,27 @@ impl LanguageAdapter for ScalaAdapter {
             // dispatch `authService.runAdminCommand(...)` to the real
             // `AuthService` decl.
             let class_field_aliases = collect_scala_class_field_aliases(&tree, file, src);
+            // WS2: method-local `val c = make().asInstanceOf[Foo]` casts,
+            // keyed by the enclosing method span (the class-field walk
+            // skips method bodies, and the kit vocabulary only types
+            // explicitly-annotated locals).
+            let local_cast_aliases = collect_scala_local_cast_aliases(&tree, file, src);
             synthesize_scala_constructor_decls(&mut idx, file, &tree, src);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
                 let mut aliases = alias_map.get(&decl.span).cloned().unwrap_or_default();
+                if let Some(casts) = local_cast_aliases
+                    .iter()
+                    .find_map(|(span, list)| (*span == decl.span).then_some(list))
+                {
+                    for alias in casts {
+                        if !aliases.contains(alias) {
+                            aliases.push(alias.clone());
+                        }
+                    }
+                }
                 if let Some((_, owner_span, owner_kind)) =
                     method_owners.iter().find(|(span, _, _)| *span == decl.span)
                 {
@@ -819,7 +834,8 @@ fn scala_field_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
         .child_by_field_name("type")
         .map(|t| node_text(&t, src).to_string())
         .and_then(|t| canonical_simple_type_name(&t))
-        .or_else(|| scala_value_constructor_type(node, src))?;
+        .or_else(|| scala_value_constructor_type(node, src))
+        .or_else(|| scala_value_cast_type(node, src))?;
     if type_short.is_empty() || name == type_short {
         return None;
     }
@@ -827,6 +843,86 @@ fn scala_field_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
         name,
         type_name: type_short,
     })
+}
+
+/// WS2: collect method-LOCAL `asInstanceOf` cast type bindings, keyed by
+/// the enclosing function span. The class-field walk skips method bodies
+/// and the kit vocabulary only types explicitly-annotated locals, so an
+/// inferred local typed by a cast (`val c = make().asInstanceOf[Foo]`)
+/// would otherwise lose its receiver type.
+fn collect_scala_local_cast_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<TypeAliasBinding>)> {
+    let fn_kinds = &["function_definition", "function_declaration"];
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(tree, fn_kinds) {
+        let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let mut work = vec![fn_node];
+        while let Some(node) = work.pop() {
+            if node != fn_node && fn_kinds.contains(&node.kind()) {
+                continue;
+            }
+            if matches!(node.kind(), "val_definition" | "var_definition")
+                && node.child_by_field_name("type").is_none()
+            {
+                if let Some(ty) = scala_value_cast_type(node, src) {
+                    if let Some(pattern) = node
+                        .child_by_field_name("pattern")
+                        .or_else(|| node.child_by_field_name("name"))
+                    {
+                        let name = node_text(&pattern, src).trim().to_string();
+                        if !name.is_empty() && !ty.is_empty() && name != ty {
+                            let binding = TypeAliasBinding {
+                                name,
+                                type_name: ty,
+                            };
+                            if !aliases.contains(&binding) {
+                                aliases.push(binding);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                work.push(child);
+            }
+        }
+        if !aliases.is_empty() {
+            out.push((span_of(file, &fn_node), aliases));
+        }
+    }
+    out
+}
+
+/// WS2: `val c = make().asInstanceOf[Foo]` — Scala's `asInstanceOf[T]`
+/// cast. The initializer is a `call_expression` whose `field` is the
+/// `asInstanceOf` identifier and which carries the target type as a
+/// `type_identifier` / `generic_type` argument. Returns that type so a
+/// cast-typed receiver resolves `receiver_type_in`.
+fn scala_value_cast_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let value = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("expression"))?;
+    if value.kind() != "call_expression" {
+        return None;
+    }
+    let field = value.child_by_field_name("field")?;
+    if node_text(&field, src).trim() != "asInstanceOf" {
+        return None;
+    }
+    let mut cursor = value.walk();
+    for child in value.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "type_identifier" | "generic_type" | "simple_type" | "user_type"
+        ) {
+            return canonical_simple_type_name(node_text(&child, src));
+        }
+    }
+    None
 }
 
 fn scala_value_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
