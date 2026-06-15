@@ -901,6 +901,24 @@
       end
     expect_match_text: ["CGI.unescape"]
   description: "CGI.unescape(s) - preserves taint; classic Rack/CGI decode."
+- id: ruby.passthrough.base64_decode64
+  enabled: true
+  language: ruby
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [Base64, decode64]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: ruby.passthrough.base64_decode64 example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Base64.decode64(input)
+      end
+    expect_match_text: ["Base64.decode64"]
+  description: "Base64.decode64(s) - decoding changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough)."
 - id: ruby.passthrough.uri_decode_www_form_component
   enabled: true
   language: ruby

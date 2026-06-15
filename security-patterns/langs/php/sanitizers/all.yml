@@ -1075,6 +1075,22 @@
     - urldecode
   description: PHP urldecode($x) - preserves taint; %2F%2E%2E%2F decoded to /../ after a path-safety check is the Bludit CVE-2019-16113
     amplifier.
+- id: php.passthrough.base64_decode
+  enabled: true
+  language: php
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: base64_decode
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: php.passthrough.base64_decode example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  base64_decode($input);\n}\n"
+    expect_match_text:
+    - base64_decode
+  description: "base64_decode($x) - decoding changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough; base64 is a common payload-evasion wrapper)."
 - id: php.passthrough.rawurldecode
   enabled: true
   language: php
