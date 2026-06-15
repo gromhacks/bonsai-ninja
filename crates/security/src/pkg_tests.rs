@@ -35,6 +35,15 @@ fn package_tail_does_not_credit_non_tail_or_scoped() {
 }
 
 #[test]
+fn perl_arrow_method_separator() {
+    // Perl FQN-no-use: `Net::HTTP->new` qualifier matches package Net::HTTP.
+    assert!(import_matches_package("Net::HTTP->new", "Net::HTTP"));
+    assert!(import_matches_package("LWP::UserAgent->new", "LWP::UserAgent"));
+    // Must not match an unrelated package.
+    assert!(!import_matches_package("Net::HTTP->new", "Net::FTP"));
+}
+
+#[test]
 fn c_header_strip() {
     assert!(import_matches_package("sqlite3.h", "sqlite3"));
     assert!(import_matches_package("openssl/ssl.hpp", "openssl"));

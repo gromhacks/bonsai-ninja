@@ -47,6 +47,12 @@ pub(crate) fn import_matches_package(imported: &str, needle: &str) -> bool {
         // PHP namespaces use backslash separators
         // (`Cake\Datasource`, `Symfony\Component\Console`).
         || imported.starts_with(&format!("{needle}\\"))
+        // Perl method calls separate the package qualifier from the method
+        // with `->` (`Net::HTTP->new`, `LWP::UserAgent->new`). The
+        // qualifier before `->` IS the exact package, so a fully-qualified
+        // call credits the gate even with no `use` — precise, no widening
+        // beyond the named package.
+        || imported.starts_with(&format!("{needle}->"))
 }
 
 /// Go-style path packages (`os/exec`, `net/http`, `github.com/x/gin`) bind
