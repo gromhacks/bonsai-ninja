@@ -7,7 +7,7 @@
   match:
     kind: call
     callee:
-      regex: "^Runtime\\.getRuntime(?:\\(\\))?\\.exec$"
+      regex: "^(?:java\\.lang\\.)?Runtime\\.getRuntime(?:\\(\\))?\\.exec$"
   constraints:
   - arg_tainted:
       index: 0
@@ -24,6 +24,13 @@
       class App {
         fun handle(input: String) {
           Runtime.getRuntime().exec(input)
+        }
+      }
+  - name: fully-qualified no-import shape
+    code: |
+      class App {
+        fun handle(input: String) {
+          java.lang.Runtime.getRuntime().exec(input)
         }
       }
   - name: literal runtime exec negative
@@ -110,7 +117,7 @@
   match:
     kind: call
     callee:
-      regex: "^Runtime\\.exec$"
+      regex: "^(?:java\\.lang\\.)?Runtime\\.exec$"
   constraints:
   - arg_tainted:
       index: 0
