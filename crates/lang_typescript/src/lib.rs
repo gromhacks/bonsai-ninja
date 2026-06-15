@@ -7,7 +7,8 @@ use bonsai_lang_api::{
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasVocabulary, Visibility,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary,
+    Visibility,
 };
 use tree_sitter::Node;
 
@@ -131,12 +132,20 @@ impl LanguageAdapter for TypeScriptAdapter {
             let visibility_by_span =
                 collect_modifier_visibility(tree.root_node(), file, src, &TYPESCRIPT_VOCAB);
             let type_aliases_by_span = collect_param_type_aliases(&tree, file, src, &TYPESCRIPT_TYPE_ALIASES);
+            // WS2 cast typing: `const c = make() as Foo` / `const c = <Foo>make()`.
+            // The cast type lives only on the initializer (the declared-type /
+            // return-type paths don't see it), so capture it as a local type
+            // alias so `c.method(...)` resolves `receiver_type_in` / `[Foo, m]`.
+            let cast_aliases_by_span = collect_typescript_cast_aliases(&tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(vis) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
                 if let Some(aliases) = type_aliases_by_span.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
+                }
+                if let Some(cast_aliases) = cast_aliases_by_span.get(&decl.span) {
+                    decl.type_aliases.extend(cast_aliases.iter().cloned());
                 }
             }
             // ECMAScript `#name` private fields/methods are syntactically marked.
@@ -331,6 +340,125 @@ fn is_class_like(kind: DeclKind) -> bool {
         kind,
         DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct | DeclKind::Enum
     )
+}
+
+/// WS2 cast-expression typing. A `const c = make() as Foo` / `const c =
+/// <Foo>make()` carries its type ONLY on the cast — the declared-type
+/// extractor (`collect_param_type_aliases` handles params, not locals)
+/// and the return-type path (`make(): Foo`) both miss it. Capture the
+/// cast type as a per-enclosing-function `c -> Foo` alias so
+/// `c.method(tainted)` resolves `receiver_type_in: [Foo]` / `[Foo, m]`.
+///
+/// Keyed by the enclosing function declaration's span (matching how
+/// `collect_param_type_aliases` keys), and restricted to PascalCase
+/// (class-like) types — the only shape receiver-type rules key on —
+/// mirroring the C#/Java cast extractors.
+fn collect_typescript_cast_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<TypeAliasBinding>> {
+    const FN_KINDS: &[&str] = &[
+        "function_declaration",
+        "function_expression",
+        "method_definition",
+        "arrow_function",
+        "generator_function_declaration",
+    ];
+    let mut out = std::collections::HashMap::new();
+    for fn_node in collect_kinds(tree, FN_KINDS) {
+        let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let mut work = vec![fn_node];
+        while let Some(node) = work.pop() {
+            // A nested function owns its own locals — let its own
+            // iteration scope them rather than leaking into the parent.
+            if node != fn_node && FN_KINDS.contains(&node.kind()) {
+                continue;
+            }
+            if node.kind() == "variable_declarator" {
+                extend_ts_aliases_from_cast(node, src, &mut aliases);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                work.push(child);
+            }
+        }
+        // Only PascalCase class-like types — `string`/`any`/`number` etc.
+        // are useless for receiver-type matching and aliasing a local to
+        // them would disturb clean-overwrite / callable-binding resolution.
+        aliases.retain(|alias| alias.type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+        if !aliases.is_empty() {
+            out.insert(span_of(file, &fn_node), aliases);
+        }
+    }
+    out
+}
+
+/// Emit a `name -> Type` alias when a `variable_declarator`'s initializer
+/// IS a cast (`x as Foo` / `<Foo>x`). Reads only the declarator's `value`
+/// field, so a cast nested in a call argument (`const c = wrap(x as Foo)`)
+/// does NOT mistype the local — only a cast that is the whole initializer.
+fn extend_ts_aliases_from_cast(declarator: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    let Some(name_node) = declarator.child_by_field_name("name") else {
+        return;
+    };
+    // Only simple identifier bindings (`const c = ...`); destructuring
+    // patterns don't bind a single receiver.
+    if name_node.kind() != "identifier" {
+        return;
+    }
+    let name = node_text(&name_node, src).trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    let Some(value) = declarator.child_by_field_name("value") else {
+        return;
+    };
+    // `x as Foo` is `as_expression`; `<Foo>x` is `type_assertion`.
+    if !matches!(value.kind(), "as_expression" | "type_assertion") {
+        return;
+    }
+    let Some(type_name) = ts_cast_type_name(value, src) else {
+        return;
+    };
+    if type_name.is_empty() {
+        return;
+    }
+    aliases.push(TypeAliasBinding { name, type_name });
+}
+
+/// The cast's target type. For `x as Foo` the `type_identifier` is the
+/// trailing child; for `<Foo>x` it is the leading child. Generic casts
+/// (`as Foo<T>`) surface a `generic_type` whose `name` is the base type.
+fn ts_cast_type_name(cast: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = cast.walk();
+    for child in cast.named_children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" => return Some(node_text(&child, src).trim().to_string()),
+            "generic_type" => {
+                if let Some(name) = child.child_by_field_name("name") {
+                    return Some(node_text(&name, src).trim().to_string());
+                }
+            }
+            // `<Foo>x` (type_assertion) nests the type under `type_arguments`.
+            "type_arguments" => {
+                let mut inner = child.walk();
+                for ty in child.named_children(&mut inner) {
+                    match ty.kind() {
+                        "type_identifier" => return Some(node_text(&ty, src).trim().to_string()),
+                        "generic_type" => {
+                            if let Some(name) = ty.child_by_field_name("name") {
+                                return Some(node_text(&name, src).trim().to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Walk TS class / interface / abstract-class declarations and
