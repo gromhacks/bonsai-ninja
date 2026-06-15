@@ -453,6 +453,24 @@
       end
     expect_match_text: ["string.upper"]
   description: "string.upper(s) - case-normalizes but preserves taint from s."
+- id: lua.passthrough.tostring
+  enabled: true
+  language: lua
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: tostring
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: tostring preserves taint
+    code: |
+      function example(input)
+        return tostring(input)
+      end
+    expect_match_text: [tostring]
+  description: "tostring(v) - changes representation but preserves attacker-controlled content (WS3 coercion passthrough; mirrors python str()/go string()). (tonumber is numeric and intentionally NOT passthrough.)"
 - id: lua.passthrough.string_lower
   enabled: true
   language: lua

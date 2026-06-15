@@ -235,3 +235,48 @@ fn go_string_conversion_preserves_taint() {
         "Go `string([]byte(input))` must preserve taint into exec.Command, got {n} findings"
     );
 }
+
+/// WS3 coercion passthrough (Lua / Elixir). `tostring(v)` (Lua) and
+/// `to_string(term)` (Elixir) change representation but preserve
+/// attacker-controlled content — the analogues of Python `str()` / Go
+/// `string()`. Before `lua.passthrough.tostring` /
+/// `elixir.sanitizer.passthrough.to_string` these coercion calls dropped
+/// taint. (Numeric `tonumber` stays non-passthrough, like `int()`.)
+#[test]
+fn lua_tostring_preserves_taint() {
+    assert!(
+        coercion_findings("lua", "lua", "function h(input) os.execute(tostring(input)) end\n") >= 1,
+        "Lua tostring(input) must preserve taint into os.execute"
+    );
+}
+
+#[test]
+fn elixir_to_string_preserves_taint() {
+    let src = "defmodule App do\n  def h(input), do: System.cmd(to_string(input), [])\nend\n";
+    assert!(
+        coercion_findings("elixir", "ex", src) >= 1,
+        "Elixir to_string(input) must preserve taint into System.cmd"
+    );
+}
+
+fn coercion_findings(tag: &str, ext: &str, src: &str) -> usize {
+    let dir = std::env::temp_dir().join(format!("bonsai_coercion_{tag}_audit"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join(format!("m.{ext}")), src).expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(
+        &ws,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("taint");
+    let n = report.findings.len();
+    let _ = std::fs::remove_dir_all(&dir);
+    n
+}

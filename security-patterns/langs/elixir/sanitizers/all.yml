@@ -778,6 +778,26 @@
       end
     expect_match_text: [String.upcase]
   description: "String.upcase(s) - case-normalizes but preserves taint from s."
+- id: elixir.sanitizer.passthrough.to_string
+  enabled: true
+  language: elixir
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: to_string
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: to_string preserves taint
+    code: |
+      defmodule App do
+        def test(input) do
+          to_string(input)
+        end
+      end
+    expect_match_text: [to_string]
+  description: "Kernel.to_string(term) - changes representation but preserves attacker-controlled content (WS3 coercion passthrough; mirrors python str()/go string())."
 - id: elixir.sanitizer.passthrough.string_downcase
   enabled: true
   language: elixir
