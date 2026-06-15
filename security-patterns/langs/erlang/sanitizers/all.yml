@@ -417,6 +417,44 @@
         string:to_upper(Input).
     expect_match_text: ["string:to_upper"]
   description: "string:to_upper(s) - case-normalizes but preserves taint from s."
+- id: erlang.passthrough.binary_to_list
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: binary_to_list
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: binary_to_list preserves taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        binary_to_list(Input).
+    expect_match_text: [binary_to_list]
+  description: "binary_to_list(B) - binary->string-list conversion changes representation but preserves attacker-controlled content (WS3 coercion passthrough; integer_to_list is numeric and intentionally NOT passthrough)."
+- id: erlang.passthrough.unicode_characters_to_list
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [unicode, characters_to_list]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: unicode:characters_to_list preserves taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        unicode:characters_to_list(Input).
+    expect_match_text: ["unicode:characters_to_list"]
+  description: "unicode:characters_to_list(Data) - changes representation but preserves attacker-controlled content (WS3 coercion passthrough)."
 - id: erlang.passthrough.string_to_lower
   enabled: true
   language: erlang

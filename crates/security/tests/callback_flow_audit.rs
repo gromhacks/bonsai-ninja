@@ -280,3 +280,23 @@ fn coercion_findings(tag: &str, ext: &str, src: &str) -> usize {
     let _ = std::fs::remove_dir_all(&dir);
     n
 }
+
+/// WS3 coercion passthrough (Erlang). `binary_to_list(B)` /
+/// `unicode:characters_to_list(Data)` change representation but preserve
+/// attacker-controlled content — the analogues of Python `str()` / Go
+/// `string()`. Before `erlang.passthrough.binary_to_list` /
+/// `erlang.passthrough.unicode_characters_to_list` these dropped taint.
+/// (Numeric `integer_to_list` stays non-passthrough, like `int()`. Swift
+/// `String(...)` is intentionally NOT registered — too generic a callee;
+/// see the note in swift/sanitizers/all.yml.)
+#[test]
+fn erlang_binary_to_list_preserves_taint() {
+    assert!(
+        coercion_findings("erlang_b2l", "erl", "h(Input) -> os:cmd(binary_to_list(Input)).\n") >= 1,
+        "Erlang binary_to_list(Input) must preserve taint into os:cmd"
+    );
+    assert!(
+        coercion_findings("erlang_c2l", "erl", "h(Input) -> os:cmd(unicode:characters_to_list(Input)).\n") >= 1,
+        "Erlang unicode:characters_to_list(Input) must preserve taint into os:cmd"
+    );
+}

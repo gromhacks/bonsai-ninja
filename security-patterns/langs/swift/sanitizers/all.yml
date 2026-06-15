@@ -1,4 +1,11 @@
 # Swift sanitizers.
+# NOTE: a `String(value)` coercion passthrough was intentionally NOT
+# added — `String(...)` is Swift's pervasive string constructor (used for
+# every string literal interpolation / data decode), so a `name: String`
+# passthrough rule matches everywhere and pollutes the sanitizer
+# inventory (regressed `per_lang_cli_matrix::swift_matrix` which pins the
+# micro fixture to zero sanitizer matches). A safe fix needs a narrower
+# mechanism than a callee-name rule; left as a known minor gap.
 - id: swift.sanitizer.url_query_allowed
   enabled: false
   disabled_reason:
