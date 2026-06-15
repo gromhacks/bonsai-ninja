@@ -159,3 +159,36 @@ fn callback_flow_audit_per_language() {
         panic!("{msg}");
     }
 }
+
+/// Regression: an arrow function that is an object-literal property
+/// value INSIDE a call argument — e.g. a Hapi config-object route
+/// handler `server.route({ handler: (request) => { ... } })`, or a
+/// callback stored in an array/config literal — must have its body
+/// analyzed. Previously `lambda_is_inlined_call_argument` saw the
+/// enclosing call and skipped the arrow from Pass-2b decl synthesis,
+/// while the direct-call-argument inliner never descended into the
+/// object literal — so the handler body (and every source/sink inside
+/// it) was invisible. (WS3 framework inline/object-literal handler gap.)
+#[test]
+fn object_config_route_handler_body_is_analyzed() {
+    let dir = std::env::temp_dir().join("bonsai_objcfg_handler_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("m.js"),
+        "const cp = require('child_process');\n\
+         const Hapi = require('@hapi/hapi');\n\
+         server.route({ method: 'GET', path: '/x', handler: (request, h) => { cp.exec(request.query.q); } });\n",
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let n = report.findings.len();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        n >= 1,
+        "Hapi object-config route handler body must be analyzed (request.query -> cp.exec), got {n} findings"
+    );
+}

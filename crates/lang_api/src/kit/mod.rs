@@ -9546,9 +9546,22 @@ fn nearest_class_owner_span<'tree>(node: &Node<'tree>, handler: &GrammarHandler)
 }
 
 fn lambda_is_inlined_call_argument(node: &Node<'_>, handler: &GrammarHandler) -> bool {
+    // Collection / property-literal containers that hold the lambda as a
+    // VALUE rather than passing it directly as a call argument. A lambda
+    // nested inside one of these — e.g. a config-object route handler
+    // `server.route({ handler: (request) => { ... } })` (Hapi), or a
+    // callback stored in an array literal — is NOT inlined by the
+    // direct-call-argument path (`walk_lambda_body`), so it must keep its
+    // own Pass-2b decl; otherwise its body is never walked and every
+    // source/sink inside it is invisible. Stop the upward scan here and
+    // report "not an inlined argument" so the decl survives.
+    const VALUE_CONTAINER_KINDS: &[&str] = &["object", "pair", "array", "object_literal", "array_literal"];
     let mut parent = node.parent();
     while let Some(candidate) = parent {
         let kind = candidate.kind();
+        if VALUE_CONTAINER_KINDS.contains(&kind) {
+            return false;
+        }
         if handler.is_call(kind) {
             return true;
         }
