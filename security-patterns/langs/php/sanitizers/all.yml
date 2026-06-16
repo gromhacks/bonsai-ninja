@@ -1091,6 +1091,22 @@
     expect_match_text:
     - base64_decode
   description: "base64_decode($x) - decoding changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough; base64 is a common payload-evasion wrapper)."
+- id: php.passthrough.json_decode
+  enabled: true
+  language: php
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: json_decode
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: php.passthrough.json_decode example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  json_decode($input);\n}\n"
+    expect_match_text:
+    - json_decode
+  description: "json_decode($x) - parses attacker JSON into a value that stays attacker-controlled (WS3 module-function-return passthrough)."
 - id: php.passthrough.rawurldecode
   enabled: true
   language: php

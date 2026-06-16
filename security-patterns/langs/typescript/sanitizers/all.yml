@@ -1230,6 +1230,24 @@
       }
     expect_match_text: [atob]
   description: "atob(s) - base64 decode; changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough)."
+- id: typescript.passthrough.json_parse
+  enabled: true
+  language: typescript
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [JSON, parse]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: JSON.parse passthrough
+    code: |
+      function decode(input: string) {
+        return JSON.parse(input);
+      }
+    expect_match_text: ["JSON.parse"]
+  description: "JSON.parse(s) - parses attacker JSON into a value that stays attacker-controlled (WS3 module-function-return passthrough)."
 - id: typescript.passthrough.decode_uri
   enabled: true
   language: typescript
