@@ -1509,6 +1509,25 @@ fn walk_deep_sequence_executable_nodes(
 /// `is_root=true` only on the top-level call from `walk_flow_events`;
 /// recursive calls pass `false` so nested fn/class definitions are
 /// correctly skipped.
+///
+/// Comprehension / generator-expression node kinds whose `for_in_clause`
+/// binds the loop variable and whose body holds calls/sinks. Shared by
+/// the comprehension branch of `walk_into` and the call-argument loop
+/// (a genexpr passed as a call arg — `any(f(t) for t in xs)` — exposes
+/// the `generator_expression` directly as the call's `arguments` field,
+/// so it must be walked AS a comprehension, not iterated as a container).
+fn is_comprehension_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "list_comprehension"
+            | "dict_comprehension"
+            | "dictionary_comprehension"
+            | "set_comprehension"
+            | "generator_expression"
+            | "array_comprehension"
+    )
+}
+
 fn walk_into(
     node: Node<'_>,
     file: FileId,
@@ -1567,23 +1586,26 @@ fn walk_into(
     // scope's flow events. Adapter-agnostic: relies only on the
     // common `for_in_clause` / `comp_for` shape that all three
     // grammars expose.
-    const COMPREHENSION_KINDS: &[&str] = &[
-        // Python tree-sitter
-        "list_comprehension",
-        "dict_comprehension",
-        "dictionary_comprehension",
-        "set_comprehension",
-        "generator_expression",
-        // JS / TS legacy comprehension proposal
-        "array_comprehension",
-    ];
-    if COMPREHENSION_KINDS.contains(&kind) {
+    if is_comprehension_kind(kind) {
+        // Emit the `for_in_clause` loop-variable bindings BEFORE the body,
+        // regardless of AST order (python lays the body out first). This
+        // gives the natural flow order — bindings then body — so a NESTED
+        // comprehension's chained bindings resolve: `[f(t) for row in rows
+        // for t in row]` emits `row<-rows` then `t<-row` then the body, so
+        // taint flows rows -> row -> t into the sink. (A single-clause comp
+        // worked even body-first since its binding is a direct param, but
+        // the two-hop nested chain needs binding-before-body.)
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             let child_kind = child.kind();
             if child_kind == "for_in_clause" || child_kind == "comp_for" {
                 out.extend(extract_comprehension_for_clause_assigns(file, &child, src));
-            } else {
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            let child_kind = child.kind();
+            if child_kind != "for_in_clause" && child_kind != "comp_for" {
                 walk_into(child, file, src, handler, class_names, out, false);
             }
         }
@@ -2261,6 +2283,17 @@ fn walk_into(
         };
         let mut walked_closures = std::collections::HashSet::new();
         for container in arg_containers {
+            // `any(f(t) for t in xs)` / `list(g(t) for t in xs)`: python
+            // exposes the bare generator_expression DIRECTLY as the call's
+            // `arguments` field (no `argument_list` wrapper). Iterating its
+            // children would walk the body call and `for_in_clause`
+            // separately — losing the loop-variable binding so the sink's
+            // arg stays untainted. Walk the comprehension AS a whole so the
+            // COMPREHENSION_KINDS branch binds the iterator and emits the body.
+            if is_comprehension_kind(container.kind()) {
+                walk_into(container, file, src, handler, class_names, out, false);
+                continue;
+            }
             let mut cursor = container.walk();
             for arg in container.named_children(&mut cursor) {
                 if is_closure_arg(arg.kind(), handler) {
