@@ -326,3 +326,28 @@ fn base64_decode_preserves_taint_across_langs() {
         "TS atob must preserve taint"
     );
 }
+
+/// WS3 module-function-return passthrough (JSON parse). Parsing an
+/// attacker JSON string yields an attacker-controlled value — the goal's
+/// "module-function returns not propagated (json.loads)". Python
+/// `json.loads` already passed; php `json_decode`, ruby/js/ts `JSON.parse`
+/// dropped taint → added passthrough rules.
+#[test]
+fn json_parse_preserves_taint_across_langs() {
+    assert!(
+        coercion_findings("php_json", "php", "<?php\nfunction h($input){ system(json_decode($input)); }\n") >= 1,
+        "PHP json_decode must preserve taint"
+    );
+    assert!(
+        coercion_findings("ruby_json", "rb", "require 'json'\ndef h(input)\n  system(JSON.parse(input))\nend\n") >= 1,
+        "Ruby JSON.parse must preserve taint"
+    );
+    assert!(
+        coercion_findings("js_json", "js", "const cp=require('child_process')\nfunction h(input){ cp.exec(JSON.parse(input)) }\n") >= 1,
+        "JS JSON.parse must preserve taint"
+    );
+    assert!(
+        coercion_findings("ts_json", "ts", "const cp=require('child_process')\nfunction h(input: string){ cp.exec(JSON.parse(input)) }\n") >= 1,
+        "TS JSON.parse must preserve taint"
+    );
+}

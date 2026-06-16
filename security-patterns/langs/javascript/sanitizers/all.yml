@@ -1523,6 +1523,24 @@
       }
     expect_match_text: [atob]
   description: "atob(s) - base64 decode; changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough; Buffer.from(x,'base64') is already covered)."
+- id: javascript.passthrough.json_parse
+  enabled: true
+  language: javascript
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [JSON, parse]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: JSON.parse passthrough
+    code: |
+      function decode(input) {
+        return JSON.parse(input);
+      }
+    expect_match_text: ["JSON.parse"]
+  description: "JSON.parse(s) - parses attacker JSON into a value that stays attacker-controlled (WS3 module-function-return passthrough)."
 
 - id: javascript.passthrough.path_resolve
   enabled: true
