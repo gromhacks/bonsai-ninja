@@ -259,6 +259,70 @@ fn elixir_to_string_preserves_taint() {
     );
 }
 
+/// WS3 conditional reassignment (Elixir engine fix). The INLINE keyword-list
+/// conditional `cmd = if flag, do: input, else: ""` bound to a variable used to
+/// drop taint (only the multi-line `do ... end` block form and the
+/// conditional-as-direct-call-arg form propagated). `elixir_do_else_body` now
+/// also parses the inline `do:`/`else:` form so its branch values flow to the LHS.
+#[test]
+fn elixir_inline_keyword_conditional_preserves_taint() {
+    let src = "defmodule App do\n  def h(input, flag) do\n    cmd = if flag, do: input, else: \"\"\n    System.shell(cmd)\n  end\nend\n";
+    assert!(
+        coercion_findings("elixir_inline_if", "ex", src) >= 1,
+        "Elixir inline `if flag, do: input` reassignment must preserve taint into System.shell"
+    );
+    // No-tainted-branch control must NOT produce a finding (no false positive).
+    let safe = "defmodule App do\n  def h(flag) do\n    cmd = if flag, do: \"safe\", else: \"ok\"\n    System.shell(cmd)\n  end\nend\n";
+    assert_eq!(
+        coercion_findings("elixir_inline_if_safe", "ex", safe),
+        0,
+        "Elixir inline if with only literal branches must not create a finding"
+    );
+}
+
+/// WS3 free-function string coercion. The method/operator coercion forms already
+/// propagated, but the free-function/module forms dropped taint until the
+/// per-language audit added these passthroughs. (js/ts `String(p)` failed
+/// specifically when used INLINE as a sink arg.)
+#[test]
+fn free_function_string_coercion_preserves_taint() {
+    // scala String.valueOf (mirrors java)
+    let scala = "object App {\n  def h(input: String): Unit = {\n    val v = String.valueOf(input)\n    Runtime.getRuntime().exec(v)\n  }\n}\n";
+    assert!(
+        coercion_findings("scala_valueof", "scala", scala) >= 1,
+        "scala String.valueOf(input) must preserve taint"
+    );
+    // rust String::from (.to_string()/format! already worked)
+    let rust = "use std::process::Command;\nfn run(p: &str) {\n    Command::new(String::from(p));\n}\n";
+    assert!(
+        coercion_findings("rust_string_from", "rs", rust) >= 1,
+        "rust String::from(p) must preserve taint"
+    );
+    // erlang lists:flatten (the os:cmd(lists:flatten(io_lib:format(...))) idiom)
+    let erlang = "-module(example).\n-export([test/1]).\ntest(Input) ->\n  S = lists:flatten(io_lib:format(\"~s\", [Input])),\n  os:cmd(S).\n";
+    assert!(
+        coercion_findings("erlang_flatten", "erl", erlang) >= 1,
+        "erlang lists:flatten(io_lib:format(...)) must preserve taint"
+    );
+    // ruby Kernel String() (x.to_s already worked)
+    let ruby = "def example(input)\n  system(String(input))\nend\n";
+    assert!(
+        coercion_findings("ruby_string", "rb", ruby) >= 1,
+        "ruby system(String(input)) must preserve taint"
+    );
+    // js/ts String() used INLINE as a sink argument
+    let js = "const child_process = require(\"child_process\");\nfunction demo(input) {\n  return child_process.exec(String(input));\n}\n";
+    assert!(
+        coercion_findings("js_string", "js", js) >= 1,
+        "js exec(String(input)) inline must preserve taint"
+    );
+    let ts = "const child_process = require(\"child_process\");\nfunction demo(input: string) {\n  return child_process.exec(String(input));\n}\n";
+    assert!(
+        coercion_findings("ts_string", "ts", ts) >= 1,
+        "ts exec(String(input)) inline must preserve taint"
+    );
+}
+
 fn coercion_findings(tag: &str, ext: &str, src: &str) -> usize {
     let dir = std::env::temp_dir().join(format!("bonsai_coercion_{tag}_audit"));
     let _ = std::fs::remove_dir_all(&dir);

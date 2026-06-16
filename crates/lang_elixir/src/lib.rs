@@ -411,6 +411,14 @@ struct ElixirDoElseBody<'a> {
 }
 
 fn elixir_do_else_body(text: &str) -> Option<ElixirDoElseBody<'_>> {
+    // Inline keyword-list form first: `if cond, do: <then>[, else: <else>]`.
+    // The block form below requires a standalone `do` AND a closing `end`; the
+    // inline form has neither (`do`/`else` are keyword-pair keys, no `end`), so
+    // the block parser returned None and the assignment never got its branch
+    // sources -> taint was dropped (e.g. `cmd = if flag, do: input, else: ""`).
+    if let Some(inline) = elixir_inline_keyword_do_else_body(text) {
+        return Some(inline);
+    }
     let mut scanner = ElixirKeywordScanner::new(text);
     let mut do_end = None;
     let mut else_range = None;
@@ -446,6 +454,32 @@ fn elixir_do_else_body(text: &str) -> Option<ElixirDoElseBody<'_>> {
         then_body: text[do_end..then_end].trim(),
         else_body,
     })
+}
+
+/// Parse the INLINE keyword-list conditional form `if cond, do: then[, else: else]`
+/// (also `unless`). Returns `None` for the block `do ... end` form (handled by the
+/// caller's block parser) — distinguished by whether the standalone `do` word is
+/// immediately followed by `:`. Everything after `do:` is returned as the branch
+/// text: it carries BOTH the then-value and any `else:`-value identifiers, while
+/// the condition (which precedes `do:`) is excluded. `else:` and string literals
+/// are harmless to over-collect (never tainted); the value-name collector skips
+/// string contents.
+fn elixir_inline_keyword_do_else_body(text: &str) -> Option<ElixirDoElseBody<'_>> {
+    let mut scanner = ElixirKeywordScanner::new(text);
+    while let Some((word, _start, end)) = scanner.next_word() {
+        if word == "do" {
+            return if text[end..].starts_with(':') {
+                Some(ElixirDoElseBody {
+                    then_body: text[end + 1..].trim(),
+                    else_body: None,
+                })
+            } else {
+                // Standalone `do` -> block form; let the block parser handle it.
+                None
+            };
+        }
+    }
+    None
 }
 
 struct ElixirKeywordScanner<'a> {
