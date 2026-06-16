@@ -351,3 +351,34 @@ fn json_parse_preserves_taint_across_langs() {
         "TS JSON.parse must preserve taint"
     );
 }
+
+/// WS3 comprehension / generator-expression sink analysis. A sink call
+/// inside a comprehension must be analyzed and the loop variable tainted
+/// from the iterable. The basic list-comp worked, but two shapes missed:
+/// (1) a generator expression passed AS a call argument
+/// (`any(os.system(t) for t in items)`) — python exposes the genexpr
+/// directly as the call's `arguments` field, so it must be walked as a
+/// comprehension, not iterated; (2) a NESTED comprehension
+/// (`[os.system(t) for row in rows for t in row]`) — the chained
+/// bindings must be emitted before the body so taint flows
+/// rows -> row -> t. Shared-kit fix (walk_into comprehension handling).
+#[test]
+fn comprehension_and_generator_sinks_are_analyzed() {
+    assert!(
+        coercion_findings("py_genexpr_call", "py", "import os\ndef h(items):\n    any(os.system(t) for t in items)\n") >= 1,
+        "generator expr as call arg must taint the sink"
+    );
+    assert!(
+        coercion_findings("py_genexpr_list", "py", "import os\ndef h(items):\n    list(os.system(t) for t in items)\n") >= 1,
+        "generator expr in list() must taint the sink"
+    );
+    assert!(
+        coercion_findings("py_nested_comp", "py", "import os\ndef h(rows):\n    [os.system(t) for row in rows for t in row]\n") >= 1,
+        "nested comprehension must chain rows -> row -> t into the sink"
+    );
+    // regression: the basic single-clause list comp still fires.
+    assert!(
+        coercion_findings("py_list_comp", "py", "import os\ndef h(items):\n    [os.system(t) for t in items]\n") >= 1,
+        "single-clause list comprehension must still taint the sink"
+    );
+}
