@@ -1026,3 +1026,23 @@
       }
     expect_match_text: [String.format]
   description: "Scala String.format(fmt, args...) - formatted string derives from its arguments; preserves taint."
+- id: scala.passthrough.string_value_of
+  enabled: true
+  language: scala
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, valueOf]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string valueof preserves taint
+    code: |
+      object App {
+        def h(input: String): String = {
+          String.valueOf(input)
+        }
+      }
+    expect_match_text: [String.valueOf]
+  description: "Scala String.valueOf(x) - text coercion; the resulting string still carries attacker content, so it preserves taint (WS3 coercion passthrough; mirrors java.passthrough.string_value_of - per-language audit found scala had no String.valueOf passthrough though toString already worked)."

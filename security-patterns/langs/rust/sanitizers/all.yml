@@ -680,6 +680,26 @@
       }
     expect_match_text: ["urlencoding::decode"]
   description: "urlencoding::decode(s) - preserves taint."
+- id: rust.passthrough.string_from
+  enabled: true
+  language: rust
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, from]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string from preserves taint
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          String::from(target);
+      }
+    expect_match_text: ["String::from"]
+  description: "String::from(s) - owned-string conversion; the result still carries attacker content, so it preserves taint (WS3 coercion passthrough; per-language audit found .to_string()/format!() already propagated but String::from did not). Only propagates when arg0 is tainted, so String::from(\"literal\") adds nothing."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink
