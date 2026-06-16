@@ -840,6 +840,24 @@
       }
     expect_match_text: [curl_easy_unescape]
   description: "libcurl curl_easy_unescape - preserves taint (C++ via libcurl)."
+- id: cpp.passthrough.std_string
+  enabled: true
+  language: cpp
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [std, string]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: std::string ctor preserves taint
+    code: |
+      void example(char *input) {
+        std::string s = std::string(input);
+      }
+    expect_match_text: ["std::string"]
+  description: "std::string(x) explicit constructor - string construction preserves attacker content (WS3 coercion passthrough). The inline form already propagated via arg-walking; this rule makes the assignment-RHS form `std::string s = std::string(p)` flow too. Only propagates when arg0 is tainted, so std::string(\"literal\") adds nothing; the type-declaration usage `std::string s` is not a call and is unaffected."
 
 # Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
 # reviewer enumerates guarded sections; the in-scope-cleanse
