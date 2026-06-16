@@ -421,3 +421,25 @@ fn yaml_safe_load_preserves_taint() {
         "ruby YAML.safe_load must preserve taint"
     );
 }
+
+/// WS3 module-return passthrough (Go base64, chained-selector callee).
+/// `base64.StdEncoding.DecodeString(input)` is a method on a package-var
+/// receiver (`base64.StdEncoding` is a `*base64.Encoding`) — a chained
+/// selector callee. It returns `([]byte, error)`; the decoded bytes stay
+/// attacker-controlled. Keyed via `attribute: [<Encoding>, DecodeString]`
+/// (the std-lib `base64` package name can't be a `regex:` receiver — the
+/// validator rejects hardcoded lowercase receivers). The multi-return
+/// propagates to the first assigned var; `string(b)` carries it onward
+/// via go.passthrough.string_conversion.
+#[test]
+fn go_base64_decodestring_preserves_taint() {
+    for enc in ["StdEncoding", "URLEncoding", "RawStdEncoding", "RawURLEncoding"] {
+        let src = format!(
+            "package main\nimport (\"os/exec\"; \"encoding/base64\")\nfunc h(input string){{ b,_:=base64.{enc}.DecodeString(input); exec.Command(string(b)) }}\n"
+        );
+        assert!(
+            coercion_findings(&format!("go_b64_{enc}"), "go", &src) >= 1,
+            "go base64.{enc}.DecodeString must preserve taint into exec.Command"
+        );
+    }
+}

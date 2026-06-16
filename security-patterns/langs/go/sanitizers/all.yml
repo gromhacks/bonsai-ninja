@@ -1303,6 +1303,86 @@
       }
     expect_match_text: [string]
   description: "string(b) - the []byte->string conversion changes representation but preserves attacker-controlled content (WS3 coercion passthrough; mirrors python str())."
+- id: go.passthrough.base64_stdencoding_decodestring
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [StdEncoding, DecodeString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: base64.StdEncoding.DecodeString preserves taint
+    code: |
+      package main
+      import "encoding/base64"
+      func example(input string) ([]byte, error) {
+        return base64.StdEncoding.DecodeString(input)
+      }
+    expect_match_text: ["base64.StdEncoding.DecodeString"]
+  description: "base64.StdEncoding.DecodeString(s) - std-lib base64 decode; changes representation but preserves attacker-controlled content (WS3 module-return passthrough). The multi-return ([]byte, error) propagates to the first assigned var; string(b) carries it onward via go.passthrough.string_conversion."
+- id: go.passthrough.base64_urlencoding_decodestring
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [URLEncoding, DecodeString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: base64.URLEncoding.DecodeString preserves taint
+    code: |
+      package main
+      import "encoding/base64"
+      func example(input string) ([]byte, error) {
+        return base64.URLEncoding.DecodeString(input)
+      }
+    expect_match_text: ["base64.URLEncoding.DecodeString"]
+  description: "base64.URLEncoding.DecodeString(s) - URL-safe base64 decode; preserves attacker content (WS3 module-return passthrough)."
+- id: go.passthrough.base64_rawstdencoding_decodestring
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [RawStdEncoding, DecodeString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: base64.RawStdEncoding.DecodeString preserves taint
+    code: |
+      package main
+      import "encoding/base64"
+      func example(input string) ([]byte, error) {
+        return base64.RawStdEncoding.DecodeString(input)
+      }
+    expect_match_text: ["base64.RawStdEncoding.DecodeString"]
+  description: "base64.RawStdEncoding.DecodeString(s) - unpadded base64 decode; preserves attacker content (WS3 module-return passthrough)."
+- id: go.passthrough.base64_rawurlencoding_decodestring
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [RawURLEncoding, DecodeString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: base64.RawURLEncoding.DecodeString preserves taint
+    code: |
+      package main
+      import "encoding/base64"
+      func example(input string) ([]byte, error) {
+        return base64.RawURLEncoding.DecodeString(input)
+      }
+    expect_match_text: ["base64.RawURLEncoding.DecodeString"]
+  description: "base64.RawURLEncoding.DecodeString(s) - unpadded URL-safe base64 decode; preserves attacker content (WS3 module-return passthrough)."
 - id: go.passthrough.strings_trim_space
   enabled: true
   language: go
