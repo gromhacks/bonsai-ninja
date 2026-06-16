@@ -976,7 +976,8 @@
   language: python
   tag: sql-injection
   severity: critical
-  packages: [mysqlclient]
+  packages: [MySQLdb, mysqlclient]
+  imports: [MySQLdb]
   cwe: [CWE-89]
   match:
     kind: call
@@ -988,17 +989,17 @@
   match_examples:
   - name: sqli mysqlclient query
     code: |
-      import mysqlclient
+      import MySQLdb
       def example(user_input):
           return Connection.query(user_input)
   - name: mysqlclient query literal negative
     code: |
-      import mysqlclient
+      import MySQLdb
 
       def example(user_input):
           return Connection.query('safe')
     expect_no_match: true
-  description: "mysqlclient Connection.query. DB-API exempt; `min_args: 1` rejects 0-arg decoys."
+  description: "mysqlclient Connection.query (raw MySQLdb low-level query). WS4 fix: the PyPI distribution is `mysqlclient` but the IMPORT name is `MySQLdb` — keyed on the import name (dist kept as a manifest specifier). DB-API exempt; `min_args: 1` rejects 0-arg decoys."
 
 - id: python.sqli.duckdb_execute
   enabled: true
