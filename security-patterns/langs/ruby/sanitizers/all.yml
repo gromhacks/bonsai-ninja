@@ -937,6 +937,24 @@
       end
     expect_match_text: ["JSON.parse"]
   description: "JSON.parse(s) - parses attacker JSON into a value that stays attacker-controlled (WS3 module-function-return passthrough)."
+- id: ruby.passthrough.yaml_safe_load
+  enabled: true
+  language: ruby
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [YAML, safe_load]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: ruby.passthrough.yaml_safe_load example
+    code: |
+      def example(input, url, id, payload, request, params)
+        YAML.safe_load(input)
+      end
+    expect_match_text: ["YAML.safe_load"]
+  description: "YAML.safe_load(s) - the SAFE parser parses attacker YAML into a value that stays attacker-controlled (WS3 module-function-return passthrough). YAML.load/unsafe_load/load_file remain deser SINKS."
 - id: ruby.passthrough.uri_decode_www_form_component
   enabled: true
   language: ruby

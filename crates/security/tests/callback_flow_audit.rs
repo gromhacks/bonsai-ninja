@@ -403,3 +403,21 @@ fn hex_decode_preserves_taint_across_langs() {
         "php hex2bin must preserve taint"
     );
 }
+
+/// WS3 module-return passthrough (safe YAML parse). The SAFE yaml parser
+/// (`yaml.safe_load` / `YAML.safe_load`) is NOT a deserialization sink,
+/// but it parses attacker YAML into a value that stays attacker-
+/// controlled — so taint must flow through it (analogue of json.loads).
+/// It had no rule and dropped taint. (The UNSAFE `yaml.load`/`YAML.load`
+/// remain deser SINKS — unchanged.)
+#[test]
+fn yaml_safe_load_preserves_taint() {
+    assert!(
+        coercion_findings("py_yaml", "py", "import os, yaml\ndef h(input):\n    os.system(yaml.safe_load(input))\n") >= 1,
+        "python yaml.safe_load must preserve taint"
+    );
+    assert!(
+        coercion_findings("ruby_yaml", "rb", "require 'yaml'\ndef h(input)\n  system(YAML.safe_load(input))\nend\n") >= 1,
+        "ruby YAML.safe_load must preserve taint"
+    );
+}

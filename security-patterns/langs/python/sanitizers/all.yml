@@ -1531,6 +1531,24 @@
           return json.loads(body)
     expect_match_text: [json.loads]
   description: "json.loads(s) - parses a string into Python objects whose values derive from the input; preserves taint."
+- id: python.passthrough.yaml_safe_load
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [yaml, safe_load]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: yaml.safe_load preserves taint
+    code: |
+      import yaml
+      def example(body):
+          return yaml.safe_load(body)
+    expect_match_text: ["yaml.safe_load"]
+  description: "yaml.safe_load(s) - the SAFE parser (no object construction, not a deser sink) parses attacker YAML into values that stay attacker-controlled; preserves taint (WS3 module-return passthrough). yaml.load/unsafe_load remain deser SINKS."
 - id: python.passthrough.json_load
   enabled: true
   language: python
