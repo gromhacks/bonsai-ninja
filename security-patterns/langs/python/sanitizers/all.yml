@@ -1567,6 +1567,41 @@
           return base64.b64decode(value)
     expect_match_text: [base64.b64decode]
   description: "base64.b64decode(s) - decodes attacker-controlled data; representation changes but taint is preserved."
+- id: python.passthrough.binascii_unhexlify
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [binascii, unhexlify]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: binascii.unhexlify preserves taint
+    code: |
+      import binascii
+      def example(value):
+          return binascii.unhexlify(value)
+    expect_match_text: ["binascii.unhexlify"]
+  description: "binascii.unhexlify(s) - hex decode; representation changes but attacker content is preserved (WS3 module-return passthrough)."
+- id: python.passthrough.bytes_fromhex
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [bytes, fromhex]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: bytes.fromhex preserves taint
+    code: |
+      def example(value):
+          return bytes.fromhex(value)
+    expect_match_text: ["bytes.fromhex"]
+  description: "bytes.fromhex(s) - hex decode; representation changes but attacker content is preserved (WS3 module-return passthrough)."
 - id: python.passthrough.base64_b64encode
   enabled: true
   language: python

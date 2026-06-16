@@ -1107,6 +1107,22 @@
     expect_match_text:
     - json_decode
   description: "json_decode($x) - parses attacker JSON into a value that stays attacker-controlled (WS3 module-function-return passthrough)."
+- id: php.passthrough.hex2bin
+  enabled: true
+  language: php
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: hex2bin
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: php.passthrough.hex2bin example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  hex2bin($input);\n}\n"
+    expect_match_text:
+    - hex2bin
+  description: "hex2bin($x) - hex decode; representation changes but attacker content is preserved (WS3 module-function-return passthrough)."
 - id: php.passthrough.rawurldecode
   enabled: true
   language: php
