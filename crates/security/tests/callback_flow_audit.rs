@@ -382,3 +382,24 @@ fn comprehension_and_generator_sinks_are_analyzed() {
         "single-clause list comprehension must still taint the sink"
     );
 }
+
+/// WS3 module-return passthrough (hex decode). Hex decoding preserves
+/// attacker content (hex string -> bytes), the analogue of base64/json
+/// decode. python `binascii.unhexlify` / `bytes.fromhex` and php
+/// `hex2bin` dropped taint -> added passthrough rules. (url-decode and
+/// querystring-parse already passthrough.)
+#[test]
+fn hex_decode_preserves_taint_across_langs() {
+    assert!(
+        coercion_findings("py_unhex", "py", "import os, binascii\ndef h(input):\n    os.system(binascii.unhexlify(input))\n") >= 1,
+        "python binascii.unhexlify must preserve taint"
+    );
+    assert!(
+        coercion_findings("py_fromhex", "py", "import os\ndef h(input):\n    os.system(bytes.fromhex(input))\n") >= 1,
+        "python bytes.fromhex must preserve taint"
+    );
+    assert!(
+        coercion_findings("php_hex2bin", "php", "<?php\nfunction h($input){ system(hex2bin($input)); }\n") >= 1,
+        "php hex2bin must preserve taint"
+    );
+}
