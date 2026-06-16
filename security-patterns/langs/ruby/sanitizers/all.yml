@@ -919,6 +919,24 @@
       end
     expect_match_text: ["Base64.decode64"]
   description: "Base64.decode64(s) - decoding changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough)."
+- id: ruby.passthrough.string_coerce
+  enabled: true
+  language: ruby
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: String
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: ruby.passthrough.string_coerce example
+    code: |
+      def example(input, url, id, payload, request, params)
+        String(input)
+      end
+    expect_match_text: [String]
+  description: "String(x) - Kernel conversion to string; the result still carries attacker content, so it preserves taint (WS3 coercion passthrough). Per-language audit found x.to_s already propagated but the Kernel String() converter dropped taint. Only propagates when arg0 is tainted; the String class constant (String.new etc) is an attribute callee, not name:String, so it is unaffected."
 - id: ruby.passthrough.json_parse
   enabled: true
   language: ruby
