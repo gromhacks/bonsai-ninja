@@ -436,6 +436,44 @@
         binary_to_list(Input).
     expect_match_text: [binary_to_list]
   description: "binary_to_list(B) - binary->string-list conversion changes representation but preserves attacker-controlled content (WS3 coercion passthrough; integer_to_list is numeric and intentionally NOT passthrough)."
+- id: erlang.passthrough.lists_flatten
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [lists, flatten]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: lists:flatten preserves taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:flatten(Input).
+    expect_match_text: ["lists:flatten"]
+  description: "lists:flatten(DeepList) - flattens a deep iolist into a flat string but preserves attacker content (WS3 coercion passthrough). The canonical os:cmd(lists:flatten(io_lib:format(...))) idiom flows taint only if flatten is a passthrough; per-language audit found it was missing."
+- id: erlang.passthrough.lists_concat
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [lists, concat]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: lists:concat preserves taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:concat([Input, "x"]).
+    expect_match_text: ["lists:concat"]
+  description: "lists:concat(List) - concatenates terms to a flat string, preserving attacker content (WS3 coercion passthrough; sibling of lists:flatten)."
 - id: erlang.passthrough.unicode_characters_to_list
   enabled: true
   language: erlang
