@@ -1230,6 +1230,24 @@
       }
     expect_match_text: [atob]
   description: "atob(s) - base64 decode; changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough)."
+- id: typescript.passthrough.string_coerce
+  enabled: true
+  language: typescript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: String
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: String() coercion preserves taint
+    code: |
+      function coerce(input: string) {
+        return String(input);
+      }
+    expect_match_text: [String]
+  description: "String(x) - explicit string coercion; the result still carries attacker content, so it preserves taint (WS3 coercion passthrough; mirrors javascript.passthrough.string_coerce - TS has its own pack). Only propagates when arg0 is tainted."
 - id: typescript.passthrough.json_parse
   enabled: true
   language: typescript

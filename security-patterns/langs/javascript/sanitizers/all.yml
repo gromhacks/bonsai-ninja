@@ -1523,6 +1523,24 @@
       }
     expect_match_text: [atob]
   description: "atob(s) - base64 decode; changes representation but preserves attacker-controlled content (WS3 module-function-return passthrough; Buffer.from(x,'base64') is already covered)."
+- id: javascript.passthrough.string_coerce
+  enabled: true
+  language: javascript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: String
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: String() coercion preserves taint
+    code: |
+      function coerce(input) {
+        return String(input);
+      }
+    expect_match_text: [String]
+  description: "String(x) - explicit string coercion; the result still carries attacker content, so it preserves taint (WS3 coercion passthrough). Per-language audit found p.toString()/`${p}`/p+'' already propagated but a free-function String(p) used inline as a sink arg dropped taint. Only propagates when arg0 is tainted, so String('literal') adds nothing."
 - id: javascript.passthrough.json_parse
   enabled: true
   language: javascript
