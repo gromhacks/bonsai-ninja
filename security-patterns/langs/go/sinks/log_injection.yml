@@ -149,12 +149,17 @@
   severity: medium
   cwe:
   - CWE-117
+  packages:
+  - github.com/sirupsen/logrus
+  - go.uber.org/zap
+  - github.com/rs/zerolog
+  imports:
+  - github.com/sirupsen/logrus
   match:
     kind: call
     callee:
-      attribute:
-      - logger
-      - Info
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Info$"
+      base_name_in: [logger, log, lgr, _logger, sugar, slogger, zlog]
   constraints:
   - arg_matches_regex:
       index: 0
@@ -165,19 +170,30 @@
   - name: generated direct match
     code: |
       package main
-
+      import "github.com/sirupsen/logrus"
       func example(name string, value string) {
-        target := "tainted"
+        logger := logrus.New()
         logger.Info(name + value)
       }
+  - name: log var alias match
+    code: |
+      package main
+      import "github.com/sirupsen/logrus"
+      func example(name string, value string) {
+        log := logrus.New()
+        log.Info(name + value)
+      }
+    expect_match_text: [log.Info]
   - name: logger info ordinary value negative
     code: |
       package main
+      import "github.com/sirupsen/logrus"
       func example(user string) {
+        logger := logrus.New()
         logger.Info(user)
       }
     expect_no_match: true
-  description: "logger.Info(... + tainted) - log-injection via concat (logrus/zap/slog)."
+  description: "<receiver>.Info(... + tainted) - log-injection via concat (logrus/zap/zerolog). WS4 receiver-name keying: was attribute:[logger,Info] which missed the common var aliases (log/lgr/sugar); now regex+base_name_in over conventional logger var names, gated on the logger frameworks (required for receiver-agnostic regexes). The stdlib `log` package has no .Info (Print/Println/Fatal/Panic), so log.Info is always a structured logger - no collision with go.log_injection.log_*; slog excluded (its own rule)."
 - id: go.log_injection.slog_info_concat
   enabled: true
   language: go
@@ -304,12 +320,17 @@
   severity: medium
   cwe:
   - CWE-117
+  packages:
+  - github.com/sirupsen/logrus
+  - go.uber.org/zap
+  - github.com/rs/zerolog
+  imports:
+  - github.com/sirupsen/logrus
   match:
     kind: call
     callee:
-      attribute:
-      - logger
-      - Error
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Error$"
+      base_name_in: [logger, log, lgr, _logger, sugar, slogger, zlog]
   constraints:
   - arg_matches_regex:
       index: 0
@@ -320,16 +341,27 @@
   - name: generated direct match
     code: |
       package main
-
+      import "github.com/sirupsen/logrus"
       func example(name string, value string) {
-        target := "tainted"
+        logger := logrus.New()
         logger.Error(name + value)
       }
+  - name: log var alias match
+    code: |
+      package main
+      import "github.com/sirupsen/logrus"
+      func example(name string, value string) {
+        log := logrus.New()
+        log.Error(name + value)
+      }
+    expect_match_text: [log.Error]
   - name: logger error ordinary value negative
     code: |
       package main
+      import "github.com/sirupsen/logrus"
       func example(user string) {
+        logger := logrus.New()
         logger.Error(user)
       }
     expect_no_match: true
-  description: "logger.Error(... + tainted) - log-injection via concat."
+  description: "<receiver>.Error(... + tainted) - log-injection via concat (logrus/zap/zerolog). WS4 receiver-name keying: was attribute:[logger,Error] which missed var aliases (log/lgr/sugar); now regex+base_name_in, gated on the logger frameworks. base_name_in excludes bare error vars so err.Error() (the error-interface stringer) never matches; slog excluded (its own rule)."
