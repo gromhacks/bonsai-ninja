@@ -321,6 +321,12 @@ fn free_function_string_coercion_preserves_taint() {
         coercion_findings("ts_string", "ts", ts) >= 1,
         "ts exec(String(input)) inline must preserve taint"
     );
+    // cpp explicit std::string(p) ctor bound to a local (inline already worked)
+    let cpp = "#include <string>\n#include <cstdlib>\nvoid run(char *p) {\n  std::string s = std::string(p);\n  system(s.c_str());\n}\n";
+    assert!(
+        coercion_findings("cpp_stdstring", "cpp", cpp) >= 1,
+        "cpp `std::string s = std::string(p)` must preserve taint into system"
+    );
 }
 
 fn coercion_findings(tag: &str, ext: &str, src: &str) -> usize {

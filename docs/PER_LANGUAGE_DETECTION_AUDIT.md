@@ -51,7 +51,7 @@ Dimensions:
 | go | PASS | PASS | PASS | PASS |
 | rust | PASS | FIXED² | PASS | PASS |
 | c | PASS | PASS | PASS | N/A |
-| cpp | PASS | gap³ | PASS | N/A |
+| cpp | PASS | FIXED³ | PASS | N/A |
 | java | PASS | PASS | PASS | PASS |
 | csharp | PASS | PASS | PASS | PASS |
 | kotlin | PASS | PASS | PASS | PASS |
@@ -60,7 +60,7 @@ Dimensions:
 | objc | PASS | PASS | PASS | N/A |
 | dart | PASS | PASS | PASS | N/A |
 | solidity | PASS | N/A⁴ | PASS | N/A |
-| elixir | PASS | PASS | gap⁵ | PASS |
+| elixir | PASS | PASS | FIXED⁵ | PASS |
 | erlang | PASS | FIXED² | PASS | PASS |
 
 ### Fixes applied this audit (rulepack passthrough rules)
@@ -78,27 +78,36 @@ Dimensions:
    canonical `os:cmd(lists:flatten(io_lib:format(...)))` idiom now flows). All are
    specific attribute callees — no inventory pollution.
 
-### Known remaining engine gaps (adapter-level; deferred, regression-risky)
+### Engine gaps fixed in a follow-up pass
 
-3. **cpp** — `std::string s = std::string(p); system(s.c_str())` drops taint, while
-   the inline form `system(std::string(p).c_str())` and the implicit-conversion
-   form `std::string s = p` both propagate. Root cause: the cpp adapter does not
-   propagate taint when an assignment RHS is an *explicit* `std::string(...)`
-   constructor call bound to a named local. Low-frequency real-world shape
-   (the explicit redundant ctor is unusual). A `name: string` passthrough would
-   work but `std::string` is pervasive → sanitizer-inventory pollution (the swift
-   `String` lesson), so the correct fix is in the adapter's assignment handling.
-4. **solidity** — no enabled injection sink consumes a string argument (the
+3. **cpp** — `std::string s = std::string(p); system(s.c_str())` dropped taint,
+   while the inline form `system(std::string(p).c_str())` and the
+   implicit-conversion form `std::string s = p` both propagated. Root cause: the
+   shared kit only extracted call-argument operands for *nested* calls, so an
+   assignment RHS that IS a direct `std::string(...)` constructor call contributed
+   no source. FIXED with a scoped rulepack passthrough `cpp.passthrough.std_string`
+   (`attribute:[std, string]`, `call_result_passthrough_args:[0]`) rather than the
+   broad shared-kit change (which would alter taint semantics for all 21 langs).
+   Safe: the cpp micro fixture has no `std::string(` constructor *call* (only type
+   declarations, which are not calls) so `min_sanitizers_micro: 0` holds; only
+   propagates when arg0 is tainted. Now → 1 finding.
+4. **elixir** — `cmd = if flag, do: input, else: ""` (and `, do:` no-else) bound to
+   a variable dropped taint, while the multi-line `if ... do ... end` block form and
+   passing the conditional *directly* as a call argument both propagated. Root
+   cause: `elixir_do_else_body` (`lang_elixir/src/lib.rs`) only parsed the block
+   form (needs a standalone `do` AND a closing `end`); the inline keyword-list form
+   has neither, so the assignment never got its branch sources. FIXED
+   (language-scoped) with `elixir_inline_keyword_do_else_body`: detects the inline
+   form by whether `do` is immediately followed by `:` and captures the branch text
+   after `do:` (the condition, before `do:`, is excluded). Now → 1 finding;
+   all-literal-branch control correctly stays 0 (no false positive).
+
+### Remaining (genuinely N/A, not a failure)
+
+5. **solidity** — no enabled injection sink consumes a string argument (the
    `call`/`delegatecall`/inline-assembly sinks key on an address operand/receiver),
    so there is no string-arg sink to route a coerced string into. Coercion is
-   genuinely N/A, not a failure.
-5. **elixir** — `cmd = if flag, do: input, else: ""` (and the `case` form) bound to
-   a variable drops taint, while the multi-line `if ... do ... end` block form and
-   passing the conditional *directly* as a call argument both propagate. Root
-   cause: the elixir adapter does not flow branch-value taint to the LHS when the
-   assignment RHS is the **inline keyword-list** (`, do:` / `, else:`) conditional
-   form. This is the most common Elixir one-liner conditional-assignment shape.
-   Adapter-level fix, deferred for regression safety.
+   genuinely N/A.
 
 Notes: go/c are intentionally excluded from constructor-type inference (uppercase
 exported funcs / no constructor convention); their baselines use direct sinks.
