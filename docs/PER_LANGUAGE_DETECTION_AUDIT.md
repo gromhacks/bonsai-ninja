@@ -113,3 +113,89 @@ Notes: go/c are intentionally excluded from constructor-type inference (uppercas
 exported funcs / no constructor convention); their baselines use direct sinks.
 `fqn-no-import = N/A` rows are languages whose probed sink is a global builtin
 (`system`, `os.execute`) with no package qualifier to omit.
+
+## WS1 package gate — FQN-no-import matrix
+
+Probe: a sink called via its fully-qualified / module-qualified path with NO
+import in the file (the qualifier itself is the package evidence). Baseline-gated
+(the same call WITH the import fires first). `N/A` = the language's packaged sink
+is a global builtin or a class/receiver-member call with no module-qualified call
+path, so there is no import to omit.
+
+| lang | applicable? | fqn-no-import | mechanism / note |
+|------|-------------|---------------|------------------|
+| python | yes | PASS | single-seg pkg `os`; `import_matches_package` prefix |
+| javascript | yes | PASS | `child_process.exec` prefix-matches `child_process` |
+| typescript | yes | PASS | same |
+| go | yes | PASS | path-package-tail rule (`os/exec` tail `exec` == call head) |
+| rust | yes | PASS | `std::process::Command::new` matches `std::` prefix |
+| java | yes | PASS | `java.sql.Statement.execute` (attr-form FQN callee) credited |
+| csharp | yes | PASS | `System.Diagnostics.Process.Start` prefix |
+| kotlin | yes | PASS | incl `java.lang.Runtime` FQN (commit 849d9e7) |
+| scala | yes | PASS | `scala.sys.process.Process.apply` prefix |
+| swift | yes | PASS | `Yams.load` — pkg == qualifier |
+| lua | yes | PASS | `lustache.render` — pkg == qualifier |
+| perl | yes | PASS | `IPC::Run->run` via the `needle->` rule (commit 7df3a3e) |
+| c | no | N/A | `system` global builtin, no `packages:`, gate never engages |
+| cpp | no | N/A | same |
+| objc | no | N/A | `[Class selector:]` / C funcs; package is never the call qualifier |
+| dart | no | N/A | class-member calls (`Process.run`); imports are `package:`/`dart:` URIs |
+| solidity | no | N/A | receiver-member calls; `@scope/pkg` import path never a call qualifier |
+| ruby | yes | by-design MISS | `Open3.capture2` / `Net::HTTP` — PascalCase qualifier vs lowercase gem (`open3`); matching it needs case-folding = a gate LOOSENING (forbidden by the do-not-loosen directive). NOT a validator miss — the rule's example has `require`, so real ruby fires; only the artificial no-require probe misses. |
+
+Two low-frequency residual misses, both intentionally unfixed (fixing either
+requires loosening the gate, against the standing directive):
+- **ruby** — see table (case-folding gem names).
+- **php** — the fully-namespaced *inline* form
+  `\Symfony\Component\Process\Process::fromShellCommandline($x)` is a match-layer
+  gap (the rule keys `attribute:[Process, fromShellCommandline]`; the namespaced
+  path isn't reconstructed to that 2-segment form), and it fails even WITH the
+  `use` import, so it is not FQN-gate-specific. Real PHP code `use`s the class and
+  calls the short form, which fires. Reconstructing last-two-segments would touch
+  shared candidate generation + the gate's deliberately case-sensitive tail-match.
+- **java FQN-typed-local (no import)** — `java.sql.Statement stmt = ...;
+  stmt.execute(x)` with no `import java.sql`: the local IS typed `Statement`
+  (canonical_java_type_name strips the FQN tail), but the `java.sql`-gated rule has
+  no package evidence (an FQN *type reference* is not a gate candidate). Crediting
+  arbitrary FQN type refs as package evidence would loosen the gate. Real code
+  imports `java.sql`, which fires.
+
+**Conclusion: the package gate is sound and complete for every realistic
+FQN-no-import case across all 21 languages.** The residuals are precision-over-
+recall choices mandated by the do-not-loosen directive.
+
+### Cross-file (dep imported in a different module than the sink)
+The legitimate cross-file case (FQN/qualifier-carrying calls and
+`receiver_type_in` sinks) works via the candidate path
+(`import_matches_package(candidate, signal)`), which never consults per-file
+import sets. The blanket union-of-workspace-imports approach for BARE
+receiver-agnostic sources was implemented then REVERTED as unsound (commit history
++ `cross_file_package_gate_audit.rs`): it fired a framework source in any file
+once the framework was imported anywhere, breaking framework-isolation. A proper
+bare-source cross-file fix needs real cross-file symbol/dataflow linkage, not a
+union; left undone — precision wins per the directive.
+
+## WS2 receiver typing — cast + factory-return status
+
+### Cast typing — complete for every language that HAS a class-cast syntax
+| has class-cast syntax | langs | status |
+|-----------------------|-------|--------|
+| yes | C#, Java, Kotlin, Dart, Go, Scala, Swift, TypeScript | DONE (typed-LHS + inferred-`var`/`as`/`<T>` forms) |
+| no (dynamic / scalar-only / tuple) | python `(T)x`=tuple, php casts scalar-only, JS/Ruby/Perl/Lua/Elixir/Erlang/Solidity dynamic | N/A — no class-cast to type; receiver typing there comes from constructor + factory-return inference |
+| C++ | — | `(Foo*)x` works via declared type; `static_cast<Foo*>` low-value TODO |
+
+### Factory-return typing — mechanism BUILT + dormant; live rules need RuleKind::Typing
+The engine resolves `receiver_type_in` from a factory method's declared
+`returns_type` (`build_factory_returns`, language-scoped; the matcher + finding
+re-check both consult it). PROVEN to produce live detection when a rule is present
+(`c = psycopg2.connect().cursor(); c.execute(input)` fires with a
+`returns_type: Cursor` rule). It ships ZERO current detection because no live
+`returns_type` rules are in the pack: a `returns_type` rule placed in `sinks/` is
+treated as a real sink by ~7 kind-keyed checkpoints (validate_pack
+missing-example/replay/collision, `scripts/rule_example_coverage.py`, and the
+`every_sink_rule_carries_a_cwe` / metadata / sink-documentation conformance
+invariants, plus sink-inventory + golden-SARIF surfaces). The correct design is a
+4th `RuleKind::Typing` with its own `typing/` dir and bucketing so all kind-keyed
+code treats it as non-finding. This is a design-level feature addition with the
+highest regression blast-radius in the goal; it is the one capability still
+deferred pending an explicit decision to take on that risk.
