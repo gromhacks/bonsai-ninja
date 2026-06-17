@@ -58,6 +58,10 @@ pub fn compile_rule_to_inspect_args(rule: &Rule) -> CompiledRule {
             // Sanitizers are evidence, not a query — leave every field
             // empty. See `crate::finding::attach_sanitizers`.
         }
+        RuleKind::Typing => {
+            // Typing rules are not a query either — they feed
+            // factory-return resolution, not inspect/finding output.
+        }
     }
     // Regex-qualifier propagation: a rule whose callee/target is a regex
     // tells the caller to pass `--regex` alongside the needle.

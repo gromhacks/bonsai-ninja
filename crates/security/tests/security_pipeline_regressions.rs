@@ -400,6 +400,7 @@ fn rulepack(lang: &str, source_name: &str, sink_name: &str) -> Rulepack {
                 sink_name,
             )],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
     pack
@@ -460,6 +461,7 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
             sources: vec![source],
             sinks: vec![sink],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
     pack
@@ -495,6 +497,7 @@ fn constrained_call_sink_rulepack(lang: &str, source_name: &str, sink_name: &str
             )],
             sinks: vec![sink],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
     pack
@@ -539,6 +542,7 @@ fn c_recv_output_rulepack() -> Rulepack {
             sources: vec![source],
             sinks: vec![sink],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
     pack

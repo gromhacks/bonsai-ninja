@@ -340,6 +340,13 @@ fn enabled_rules_keep_required_metadata() {
                     missing.push(format!("sanitizer missing tag: {}", rule.id));
                 }
             }
+            RuleKind::Typing => {
+                // Typing rules carry no tag/severity/trust/cwe — their
+                // required metadata is `returns_type`.
+                if rule.enabled && rule.returns_type.is_none() {
+                    missing.push(format!("typing rule missing returns_type: {}", rule.id));
+                }
+            }
         }
     }
     assert!(
@@ -1244,6 +1251,7 @@ fn enabled_rules_must_have_match_examples() {
                 RuleKind::Source => "source",
                 RuleKind::Sink => "sink",
                 RuleKind::Sanitizer => "sanitizer",
+                RuleKind::Typing => "typing",
             },
             rule.source_path
         ));

@@ -1807,6 +1807,9 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
                     entry.1 += 1;
                 }
             }
+            // Typing-only rules are not part of the source/sink/sanitizer
+            // inventory — they only feed factory-return resolution.
+            RuleKind::Typing => {}
         }
     }
 
@@ -2579,6 +2582,19 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                         "missing-tag",
                         Some(rule),
                         "enabled sanitizer is missing tag",
+                    );
+                }
+            }
+            // Typing rules carry no tag/severity/trust/cwe — their whole
+            // contract is `returns_type` (the factory's result type).
+            RuleKind::Typing => {
+                if rule.returns_type.is_none() {
+                    push_validation_issue(
+                        issues,
+                        "error",
+                        "missing-returns-type",
+                        Some(rule),
+                        "enabled typing rule must declare returns_type (it exists only to type a factory-method result)",
                     );
                 }
             }
@@ -6216,6 +6232,7 @@ fn rule_kind_token(kind: RuleKind) -> &'static str {
         RuleKind::Source => "source",
         RuleKind::Sink => "sink",
         RuleKind::Sanitizer => "sanitizer",
+        RuleKind::Typing => "typing",
     }
 }
 
@@ -8810,6 +8827,7 @@ fn rule_kind_str(kind: RuleKind) -> &'static str {
         RuleKind::Source => "source",
         RuleKind::Sink => "sink",
         RuleKind::Sanitizer => "sanitizer",
+        RuleKind::Typing => "typing",
     }
 }
 

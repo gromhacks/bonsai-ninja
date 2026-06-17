@@ -3445,7 +3445,10 @@ fn cmd_pack(
         Some("source") => Some(RuleKind::Source),
         Some("sink") => Some(RuleKind::Sink),
         Some("sanitizer") => Some(RuleKind::Sanitizer),
-        Some(other) => anyhow::bail!("unknown --kind `{other}` (expected source|sink|sanitizer)"),
+        Some("typing") => Some(RuleKind::Typing),
+        Some(other) => {
+            anyhow::bail!("unknown --kind `{other}` (expected source|sink|sanitizer|typing)")
+        }
         None => None,
     };
     let sev_floor = parse_severity_flag(severity.as_deref())?;
@@ -3914,6 +3917,7 @@ fn rule_kind_str(k: RuleKind) -> &'static str {
         RuleKind::Source => "source",
         RuleKind::Sink => "sink",
         RuleKind::Sanitizer => "sanitizer",
+        RuleKind::Typing => "typing",
     }
 }
 

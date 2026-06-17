@@ -71,6 +71,7 @@ fn dependency_inventory_treats_manifest_package_name_as_evidence() {
             sources: Vec::new(),
             sinks: vec![package_rule("log4j-core")],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
 
@@ -107,6 +108,7 @@ fn dependency_inventory_does_not_project_one_package_signal_onto_siblings() {
             sources: Vec::new(),
             sinks: vec![rule],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
 

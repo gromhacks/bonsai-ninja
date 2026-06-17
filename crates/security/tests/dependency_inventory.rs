@@ -81,6 +81,7 @@ fn dependency_inventory_scans_deep_workspace_manifests() {
             sources: Vec::new(),
             sinks: vec![package_rule("log4j-core")],
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
 

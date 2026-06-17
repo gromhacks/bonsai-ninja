@@ -1,0 +1,24 @@
+# Typing-only rules (RuleKind::Typing). They declare a factory method's
+# return type via `returns_type` so the matcher resolves a sink's
+# receiver type on a local assigned from that factory chain
+# (`c = sqlite3.connect("db").cursor()` -> `c: cursor`), without the
+# engine owning any method-name list. These NEVER produce findings; they
+# feed `build_factory_returns`. The match_example MUST construct the
+# receiver so a paired receiver-typed sink replays.
+- id: python.typing.dbapi_cursor
+  enabled: true
+  language: python
+  returns_type: cursor
+  match:
+    kind: call
+    callee:
+      name: cursor
+  match_examples:
+  - name: cursor() factory returns a DB-API cursor
+    code: |
+      import sqlite3
+      def example(user_input, conn):
+          c = conn.cursor()
+          c.execute(user_input)
+    expect_match_text: [conn.cursor]
+  description: "DB-API `.cursor()` returns a cursor object; type the local so a factory-returned cursor (`c = conn.cursor()`) matches the receiver-typed cursor.execute sink that an explicitly-named `cursor` var already matched. Typing-only — never a finding."
