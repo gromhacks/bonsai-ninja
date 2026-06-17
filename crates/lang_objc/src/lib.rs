@@ -1140,10 +1140,55 @@ fn objc_declaration_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAl
         }
         if let Some(declarator) = child.child_by_field_name("declarator") {
             if let Some(name) = objc_declarator_identifier(declarator, src) {
-                push_objc_type_alias(aliases, &name, &canonical_type);
+                // WS2 cast typing: when the declared type is the dynamic `id`
+                // placeholder, a C-style cast on the initializer carries the
+                // real receiver type — `id f = (Foo *)make()` → `f: Foo`.
+                // Read the init_declarator's DIRECT `value` so a cast nested in
+                // a call argument cannot mistype the local; only override `id`,
+                // never a real declared type.
+                let effective_type = if canonical_type == "id" {
+                    child
+                        .child_by_field_name("value")
+                        .and_then(|value| objc_cast_type_of_value(&value, src))
+                        .unwrap_or_else(|| canonical_type.clone())
+                } else {
+                    canonical_type.clone()
+                };
+                push_objc_type_alias(aliases, &name, &effective_type);
             }
         }
     }
+}
+
+/// The cast target type of a direct initializer value (`(Foo *) x` →
+/// `Foo`), or `None` for any non-cast shape. ObjC has only the C-style
+/// `cast_expression` (no `static_cast`).
+fn objc_cast_type_of_value(value: &Node<'_>, src: &[u8]) -> Option<String> {
+    if value.kind() != "cast_expression" {
+        return None;
+    }
+    let type_node = value.child_by_field_name("type")?;
+    let ti = if type_node.kind() == "type_identifier" {
+        type_node
+    } else {
+        objc_first_descendant_of_kind(&type_node, "type_identifier")?
+    };
+    canonical_objc_type_name(node_text(&ti, src))
+}
+
+/// First descendant (BFS) of the given kind, or `None`.
+fn objc_first_descendant_of_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut stack = vec![*node];
+    while let Some(n) = stack.pop() {
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+            stack.push(child);
+        }
+    }
+    None
 }
 
 fn objc_declaration_type_node(node: Node<'_>) -> Option<Node<'_>> {
