@@ -7,7 +7,8 @@ use bonsai_lang_api::{
         language_from_pack, node_text, parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
+    Visibility,
 };
 
 /// C++ parameter shape: `parameter_declaration` carries `type` and
@@ -164,6 +165,10 @@ impl LanguageAdapter for CppAdapter {
             let bases_by_span = collect_cpp_class_bases(&tree, file, src);
             let access_by_span = collect_cpp_member_visibility(&tree, file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CPP_TYPE_ALIASES);
+            // WS2: `auto c = static_cast<Foo>(x)` / `auto c = (Foo) x` — the
+            // kit types declared-type locals (`Foo c = make()`) but not the
+            // inferred-`auto` form, where the type lives only on the cast.
+            let cast_aliases = collect_cpp_cast_aliases(&tree, file, src);
             let initializer_specs = collect_cpp_initializer_field_specs(&tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(visibility) = access_by_span.get(&decl.span).copied() {
@@ -171,6 +176,11 @@ impl LanguageAdapter for CppAdapter {
                 }
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
+                }
+                for (fn_span, binding) in &cast_aliases {
+                    if *fn_span == decl.span {
+                        decl.type_aliases.push(binding.clone());
+                    }
                 }
                 // Repair catch-param bindings: the kit's generic
                 // extractor picks the first identifier descendant of
@@ -532,6 +542,129 @@ fn collect_cpp_class_bases(
         }
     }
     bases_by_class
+}
+
+/// WS2 cast typing for `auto`-LHS locals: `auto c = static_cast<Foo>(x)` and
+/// `auto c = (Foo) x`. The kit's param-alias extractor already types the
+/// declared-type form `Foo c = make()`, but NOT the inferred-`auto` form where
+/// the class lives only on the cast initializer. Mirrors the Java/C#
+/// `var c = (Foo) x` handling. Returns `(enclosing-fn span, binding)` pairs;
+/// the fn span matches the function decl's `span` so the caller merges into
+/// `decl.type_aliases`. Only fires when the declared type IS `auto`
+/// (`placeholder_type_specifier`) — never clobbers a real declared type — and
+/// reads the init_declarator's DIRECT `value` so a cast nested in a call
+/// argument cannot mistype the local.
+fn collect_cpp_cast_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, TypeAliasBinding)> {
+    let mut out = Vec::new();
+    for decl_node in collect_kinds(tree, &["declaration"]) {
+        let Some(type_node) = decl_node.child_by_field_name("type") else {
+            continue;
+        };
+        if type_node.kind() != "placeholder_type_specifier" {
+            continue;
+        }
+        let Some(init) = first_named_child_of_kind(&decl_node, "init_declarator") else {
+            continue;
+        };
+        let Some(decl_field) = init.child_by_field_name("declarator") else {
+            continue;
+        };
+        let name_node = if decl_field.kind() == "identifier" {
+            decl_field
+        } else {
+            match cpp_first_descendant_of_kind(&decl_field, "identifier") {
+                Some(n) => n,
+                None => continue,
+            }
+        };
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(value) = init.child_by_field_name("value") else {
+            continue;
+        };
+        let Some(type_name) = cpp_cast_type_of_value(&value, src) else {
+            continue;
+        };
+        let Some(fn_span) = cpp_enclosing_fn_span(&decl_node, file) else {
+            continue;
+        };
+        out.push((fn_span, TypeAliasBinding { name, type_name }));
+    }
+    out
+}
+
+/// Cast target type of a direct initializer value, or `None` for any non-cast
+/// shape. Handles C-style `(Foo) x` (`cast_expression`) and the `*_cast<Foo>(x)`
+/// family (a `call_expression` whose `function` is a `template_function` named
+/// `static_cast` / `reinterpret_cast` / `dynamic_cast` / `const_cast`).
+fn cpp_cast_type_of_value(value: &Node<'_>, src: &[u8]) -> Option<String> {
+    match value.kind() {
+        "cast_expression" => {
+            let type_node = value.child_by_field_name("type")?;
+            cpp_type_descriptor_name(&type_node, src)
+        }
+        "call_expression" => {
+            let func = value.child_by_field_name("function")?;
+            if func.kind() != "template_function" {
+                return None;
+            }
+            let name = func.child_by_field_name("name")?;
+            if !matches!(
+                node_text(&name, src).trim(),
+                "static_cast" | "reinterpret_cast" | "dynamic_cast" | "const_cast"
+            ) {
+                return None;
+            }
+            let args = func.child_by_field_name("arguments")?;
+            cpp_type_descriptor_name(&args, src)
+        }
+        _ => None,
+    }
+}
+
+/// Bare tail name of the first `type_identifier` under a `type_descriptor` /
+/// `template_argument_list` node (`ns::Foo<T>*` → `Foo`).
+fn cpp_type_descriptor_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    let ti = if node.kind() == "type_identifier" {
+        *node
+    } else {
+        cpp_first_descendant_of_kind(node, "type_identifier")?
+    };
+    canonical_cpp_base_name(node_text(&ti, src))
+}
+
+/// First descendant (BFS) of the given kind, or `None`.
+fn cpp_first_descendant_of_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut stack = vec![*node];
+    while let Some(n) = stack.pop() {
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+            stack.push(child);
+        }
+    }
+    None
+}
+
+/// Span of the nearest enclosing `function_definition` (matches the function
+/// decl's `span` so cast aliases merge into the right method's type_aliases).
+fn cpp_enclosing_fn_span(node: &Node<'_>, file: FileId) -> Option<bonsai_common::Span> {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if n.kind() == "function_definition" {
+            return Some(span_of(file, &n));
+        }
+        cur = n.parent();
+    }
+    None
 }
 
 /// Reduce a base-class type expression to its bare tail identifier:

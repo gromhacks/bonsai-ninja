@@ -360,3 +360,117 @@ fn dart_typed_local_resolves_receiver_type() {
         "dart typed local `Foo c = make()` must resolve receiver_type_in, got {n}"
     );
 }
+
+// ---- WS2 cast-typing probes for the remaining statically-typed langs ----
+
+#[test]
+fn cpp_declared_value_local_resolves_receiver_type() {
+    // Calibration: a value-receiver local declared with the class type
+    // resolves receiver_type_in (so `\.run$` matches `c.run`).
+    let n = typed_local_findings(
+        "cpp",
+        "cpp",
+        "run",
+        "#include <acme>\nFoo make();\nvoid h(char* x) { Foo c = make(); c.run(x); }\n",
+    );
+    assert!(n >= 1, "cpp `Foo c = make()` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn cpp_static_cast_resolves_receiver_type() {
+    // `auto c = static_cast<Foo>(make())` — the type lives only on the cast.
+    let n = typed_local_findings(
+        "cpp",
+        "cpp",
+        "run",
+        "#include <acme>\nvoid h(char* x) { auto c = static_cast<Foo>(make()); c.run(x); }\n",
+    );
+    assert!(n >= 1, "cpp `auto c = static_cast<Foo>(make())` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn cpp_c_cast_auto_local_resolves_receiver_type() {
+    // `auto c = (Foo) make()` — C-style cast, inferred local.
+    let n = typed_local_findings(
+        "cpp",
+        "cpp",
+        "run",
+        "#include <acme>\nvoid h(char* x) { auto c = (Foo) make(); c.run(x); }\n",
+    );
+    assert!(n >= 1, "cpp `auto c = (Foo) make()` must resolve receiver_type_in, got {n}");
+}
+
+#[test]
+fn rust_as_cast_resolves_receiver_type() {
+    // Rust `as`-cast receiver typing — already supported via the kit vocab;
+    // pinned here so the WS2 sweep covers it explicitly.
+    let n = typed_local_findings(
+        "rust",
+        "rs",
+        "run",
+        "use acme::Foo;\nfn make() -> Box<dyn std::any::Any> { todo!() }\nfn h(x: String) { let c = make() as Foo; c.run(x); }\n",
+    );
+    assert!(n >= 1, "rust `let c = make() as Foo` must resolve receiver_type_in, got {n}");
+}
+
+/// Like [`typed_local_findings`] but the synthetic sink uses the
+/// receiver-prefix-optional regex (`^(?:.*\.)?run$`) that matches an ObjC
+/// `[f run:x]` message send — the strict `<ident>.run` form does not.
+fn objc_typed_local_findings(src: &str) -> usize {
+    let rules = TempTree::new("objc-cast-rules");
+    rules.write(
+        "langs/objc/sinks/t.yml",
+        r#"- id: objc.test.typed_local_run
+  enabled: true
+  language: objc
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?run$"
+  constraints:
+  - receiver_type_in: [Foo]
+  - arg_tainted:
+      index: 0
+  description: test
+"#,
+    );
+    let ws = TempTree::new("objc-cast-ws");
+    ws.write("m.m", src);
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules.path).expect("rulepack");
+    let workspace = bonsai_workspace::Workspace::index(&ws.path, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(
+        &workspace,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("taint");
+    report
+        .findings
+        .iter()
+        .filter(|f| f.finding.sink.rule_id == "objc.test.typed_local_run")
+        .count()
+}
+
+#[test]
+fn objc_id_cast_resolves_receiver_type() {
+    // ObjC `id f = (Foo *) make()` — the dynamic `id` LHS carries no class, so
+    // the receiver type lives only on the C-style cast. The declared form
+    // `Foo *f = (Foo *) make()` already worked; this is the cast-into-id form.
+    let declared =
+        objc_typed_local_findings("Foo* make(void);\nvoid h(char *x) { Foo *f = (Foo *)make(); [f run:x]; }\n");
+    assert!(declared >= 1, "objc declared `Foo *f = (Foo *)make()` must resolve, got {declared}");
+    let cast =
+        objc_typed_local_findings("id make(void);\nvoid h(char *x) { id f = (Foo *)make(); [f run:x]; }\n");
+    assert!(cast >= 1, "objc `id f = (Foo *)make()` must resolve receiver_type_in, got {cast}");
+    // Wrong-type cast must NOT fire (no false positive).
+    let wrong =
+        objc_typed_local_findings("id make(void);\nvoid h(char *x) { id f = (Bar *)make(); [f run:x]; }\n");
+    assert_eq!(wrong, 0, "objc `id f = (Bar *)make()` must not mistype as Foo, got {wrong}");
+}
