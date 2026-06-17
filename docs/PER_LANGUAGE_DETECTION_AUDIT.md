@@ -184,18 +184,20 @@ union; left undone — precision wins per the directive.
 | no (dynamic / scalar-only / tuple) | python `(T)x`=tuple, php casts scalar-only, JS/Ruby/Perl/Lua/Elixir/Erlang/Solidity dynamic | N/A — no class-cast to type; receiver typing there comes from constructor + factory-return inference |
 | C++ | — | `(Foo*)x` works via declared type; `static_cast<Foo*>` low-value TODO |
 
-### Factory-return typing — mechanism BUILT + dormant; live rules need RuleKind::Typing
+### Factory-return typing — SHIPPED as a first-class `RuleKind::Typing`
 The engine resolves `receiver_type_in` from a factory method's declared
 `returns_type` (`build_factory_returns`, language-scoped; the matcher + finding
-re-check both consult it). PROVEN to produce live detection when a rule is present
-(`c = psycopg2.connect().cursor(); c.execute(input)` fires with a
-`returns_type: Cursor` rule). It ships ZERO current detection because no live
-`returns_type` rules are in the pack: a `returns_type` rule placed in `sinks/` is
-treated as a real sink by ~7 kind-keyed checkpoints (validate_pack
-missing-example/replay/collision, `scripts/rule_example_coverage.py`, and the
-`every_sink_rule_carries_a_cwe` / metadata / sink-documentation conformance
-invariants, plus sink-inventory + golden-SARIF surfaces). The correct design is a
-4th `RuleKind::Typing` with its own `typing/` dir and bucketing so all kind-keyed
-code treats it as non-finding. This is a design-level feature addition with the
-highest regression blast-radius in the goal; it is the one capability still
-deferred pending an explicit decision to take on that risk.
+re-check both consult it). This is now a 4th rule kind with its own `typing/` dir:
+typing rules feed `build_factory_returns` via `all_rules()` but are excluded from
+every source/sink/sanitizer finding + inventory path and from sink-only
+validation/conformance (cwe, severity, sink-doc, golden-SARIF). A typing rule's
+only required metadata is `returns_type`.
+
+Live rule shipped: `python.typing.dbapi_cursor` (`returns_type: cursor` on
+`.cursor()`). A factory-returned cursor `c = sqlite3.connect("db").cursor();
+c.execute(input)` now types `c` and fires the existing receiver-typed
+`cursor.execute` SQLi sink — previously a miss (`c` is not literally named
+`cursor`). Verified: sqlite3 factory → 1 finding, psycopg2 → 3, safe input → 0
+(no FP). The typing rule itself never produces a finding. Authoring more typing
+rules (other factory chains, per language) is now a pure rulepack-content task —
+add a `<lang>/typing/*.yml` entry whose `match_example` constructs the receiver.
