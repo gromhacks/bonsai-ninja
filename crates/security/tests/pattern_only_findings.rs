@@ -32,6 +32,7 @@ fn pack_for(lang: &str, sinks: Vec<Rule>) -> Rulepack {
             sources: Vec::new(),
             sinks,
             sanitizers: Vec::new(),
+            typing: Vec::new(),
         },
     );
     pack

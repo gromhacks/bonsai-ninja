@@ -1095,6 +1095,9 @@ impl<'a> PreparedRule<'a> {
         match self.rule.kind {
             crate::rule::RuleKind::Source => true,
             crate::rule::RuleKind::Sanitizer => false,
+            // Typing rules never participate in the finding/gate path —
+            // they feed factory-return resolution via build_factory_returns.
+            crate::rule::RuleKind::Typing => false,
             crate::rule::RuleKind::Sink => {
                 if is_lifecycle_audit_pair_sink(self.rule) {
                     return true;

@@ -329,6 +329,28 @@ fn free_function_string_coercion_preserves_taint() {
     );
 }
 
+/// WS2 factory-method return typing (RuleKind::Typing). `python.typing.dbapi_cursor`
+/// (`returns_type: cursor` on `.cursor()`) types a factory-returned cursor so a
+/// receiver that is NOT literally named `cursor` still matches the receiver-typed
+/// `cursor.execute` SQLi sink. Without the typing rule `c.execute` is a miss
+/// (`c` is not named `cursor`). The typing rule itself is never a finding — it
+/// feeds build_factory_returns via all_rules().
+#[test]
+fn factory_return_cursor_typing_fires() {
+    let src = "import sqlite3\ndef example(user_input):\n    c = sqlite3.connect(\"db\").cursor()\n    c.execute(user_input)\n";
+    assert!(
+        coercion_findings("py_factory_cursor", "py", src) >= 1,
+        "factory-returned cursor (c = connect().cursor()) must type c and fire cursor.execute via python.typing.dbapi_cursor"
+    );
+    // Safe input through the same factory must NOT fire (no false positive).
+    let safe = "import sqlite3\ndef example():\n    c = sqlite3.connect(\"db\").cursor()\n    c.execute(\"SELECT 1\")\n";
+    assert_eq!(
+        coercion_findings("py_factory_cursor_safe", "py", safe),
+        0,
+        "factory-typed cursor with a literal query must not create a finding"
+    );
+}
+
 fn coercion_findings(tag: &str, ext: &str, src: &str) -> usize {
     let dir = std::env::temp_dir().join(format!("bonsai_coercion_{tag}_audit"));
     let _ = std::fs::remove_dir_all(&dir);

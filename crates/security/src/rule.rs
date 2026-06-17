@@ -16,6 +16,15 @@ pub enum RuleKind {
     Source,
     Sink,
     Sanitizer,
+    /// Typing-only rules (`typing/` dir). They declare a factory
+    /// method's return type via `returns_type` so the matcher can
+    /// resolve `receiver_type_in` on locals assigned from that factory
+    /// (`c = engine.connect().cursor()` → `c: Cursor`). They NEVER
+    /// produce findings — `build_factory_returns` reads them via
+    /// `all_rules()`, but they are excluded from every source/sink/
+    /// sanitizer finding + inventory path, and from sink-only
+    /// validation/conformance checks (cwe, severity, sink-doc, SARIF).
+    Typing,
 }
 
 impl Default for RuleKind {
@@ -37,6 +46,7 @@ impl RuleKind {
             Self::Source => "sources",
             Self::Sink => "sinks",
             Self::Sanitizer => "sanitizers",
+            Self::Typing => "typing",
         }
     }
 }

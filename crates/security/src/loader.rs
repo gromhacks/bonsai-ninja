@@ -29,6 +29,10 @@ pub struct LanguagePack {
     pub sources: Vec<Rule>,
     pub sinks: Vec<Rule>,
     pub sanitizers: Vec<Rule>,
+    /// Typing-only rules (`typing/` dir, `RuleKind::Typing`). They feed
+    /// `build_factory_returns` via `all_rules()` but never appear in any
+    /// finding/inventory path. See [`RuleKind::Typing`].
+    pub typing: Vec<Rule>,
 }
 
 impl LanguagePack {
@@ -38,6 +42,7 @@ impl LanguagePack {
             .iter()
             .chain(self.sinks.iter())
             .chain(self.sanitizers.iter())
+            .chain(self.typing.iter())
             .collect()
     }
 }
@@ -91,6 +96,7 @@ enum RuleKindBucket {
     Source,
     Sink,
     Sanitizer,
+    Typing,
 }
 
 impl Clone for Rulepack {
@@ -140,6 +146,12 @@ impl Rulepack {
                         (language.clone(), RuleKindBucket::Sanitizer, idx),
                     );
                 }
+                for (idx, rule) in pack.typing.iter().enumerate() {
+                    map.insert(
+                        rule.id.clone(),
+                        (language.clone(), RuleKindBucket::Typing, idx),
+                    );
+                }
             }
             map
         });
@@ -149,6 +161,7 @@ impl Rulepack {
             RuleKindBucket::Source => pack.sources.get(*idx),
             RuleKindBucket::Sink => pack.sinks.get(*idx),
             RuleKindBucket::Sanitizer => pack.sanitizers.get(*idx),
+            RuleKindBucket::Typing => pack.typing.get(*idx),
         }
     }
 
@@ -185,6 +198,9 @@ impl Rulepack {
             }
             for rule in overlay_pack.sanitizers {
                 replace_or_push(&mut target.sanitizers, rule, &mut overridden);
+            }
+            for rule in overlay_pack.typing {
+                replace_or_push(&mut target.typing, rule, &mut overridden);
             }
         }
         overridden.sort();
@@ -245,14 +261,19 @@ pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, 
         };
         // Reserve `sources/` / `sinks/` / `sanitizers/` for the
         // flat-layout pass below — they aren't languages.
-        if matches!(lang.as_str(), "sources" | "sinks" | "sanitizers") {
+        if matches!(lang.as_str(), "sources" | "sinks" | "sanitizers" | "typing") {
             continue;
         }
         let mut lp = LanguagePack {
             language: lang.clone(),
             ..Default::default()
         };
-        for kind in [RuleKind::Source, RuleKind::Sink, RuleKind::Sanitizer] {
+        for kind in [
+            RuleKind::Source,
+            RuleKind::Sink,
+            RuleKind::Sanitizer,
+            RuleKind::Typing,
+        ] {
             let dir = path.join(kind.dir_name());
             if !dir.exists() {
                 continue;
@@ -269,6 +290,7 @@ pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, 
                     RuleKind::Source => lp.sources.extend(rules),
                     RuleKind::Sink => lp.sinks.extend(rules),
                     RuleKind::Sanitizer => lp.sanitizers.extend(rules),
+                    RuleKind::Typing => lp.typing.extend(rules),
                 }
             }
         }
@@ -384,7 +406,12 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
                 language: lang.clone(),
                 ..Default::default()
             });
-            for kind in [RuleKind::Source, RuleKind::Sink, RuleKind::Sanitizer] {
+            for kind in [
+                RuleKind::Source,
+                RuleKind::Sink,
+                RuleKind::Sanitizer,
+                RuleKind::Typing,
+            ] {
                 let dir = path.join(kind.dir_name());
                 if !dir.exists() {
                     continue;
@@ -402,6 +429,7 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
                         RuleKind::Source => lp.sources.extend(rules),
                         RuleKind::Sink => lp.sinks.extend(rules),
                         RuleKind::Sanitizer => lp.sanitizers.extend(rules),
+                        RuleKind::Typing => lp.typing.extend(rules),
                     }
                 }
             }
@@ -443,7 +471,12 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
 /// found to the matching language pack within `pack`. YAML must
 /// declare `language:` for each rule (enforced by `parse_rule_file`).
 fn load_flat_layout_into(root: &Path, pack: &mut Rulepack) -> Result<(), LoadError> {
-    for kind in [RuleKind::Source, RuleKind::Sink, RuleKind::Sanitizer] {
+    for kind in [
+        RuleKind::Source,
+        RuleKind::Sink,
+        RuleKind::Sanitizer,
+        RuleKind::Typing,
+    ] {
         let dir = root.join(kind.dir_name());
         if !dir.exists() {
             continue;
@@ -468,6 +501,7 @@ fn load_flat_layout_into(root: &Path, pack: &mut Rulepack) -> Result<(), LoadErr
                     RuleKind::Source => lp.sources.push(r),
                     RuleKind::Sink => lp.sinks.push(r),
                     RuleKind::Sanitizer => lp.sanitizers.push(r),
+                    RuleKind::Typing => lp.typing.push(r),
                 }
             }
         }
