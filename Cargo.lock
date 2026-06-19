@@ -264,6 +264,7 @@ dependencies = [
  "bonsai_taint",
  "clap",
  "comfy-table",
+ "ignore",
  "indicatif",
  "once_cell",
  "owo-colors",

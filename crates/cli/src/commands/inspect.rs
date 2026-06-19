@@ -2898,8 +2898,16 @@ fn render_inspect_report_text(
     // model exactly. Stored as numerator/denominator so we can
     // express fractional factors without rationals.
     const COST_SAFETY_NUM: u64 = 8;
-    const COST_SAFETY_DEN: u64 = 5; // 8/5 = 1.6×
-    let scale = |raw: u64| raw * COST_SAFETY_NUM / COST_SAFETY_DEN;
+    const COST_SAFETY_DEN: u64 = 5;
+    // A flow/render unit carries more chrome than its source-body
+    // bytes alone: FLOW headers, chain displays, match-point rows,
+    // annotation prefixes, owner context, and dedup placeholders.
+    // The per-function estimator intentionally stays cheap, so put
+    // a floor on each unit. Without this, the planner could predict
+    // one page while the live renderer stopped after a handful of
+    // units, producing a next-page cursor with no stable page start.
+    const UNIT_RENDER_FLOOR_BYTES: u64 = 1_200;
+    let scale = |raw: u64| (raw * COST_SAFETY_NUM / COST_SAFETY_DEN).max(UNIT_RENDER_FLOOR_BYTES);
     // Per-function dedup-aware cost. Functions whose body has
     // already been rendered earlier on the same page collapse to
     // a one-line `(body already rendered above)` placeholder —
@@ -2994,8 +3002,17 @@ fn render_inspect_report_text(
     // capped pages at ~50 % budget fill — closing the gap so
     // pages now hit ~70-75 % of the stated budget.
     let unit_budget_bytes: Option<u64> = budget_bytes.map(|b| b - (b * 12 / 100));
+    const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
+    let first_page_unit_budget_bytes = match (unit_budget_bytes, budget_bytes) {
+        (Some(unit_budget), Some(total_budget)) if !report.taint_flows.is_empty() => {
+            let taint_budget = (total_budget * 35 / 100).max(TAINT_FLOW_ROW_AVG_BYTES);
+            Some(unit_budget.saturating_sub(taint_budget))
+        }
+        _ => unit_budget_bytes,
+    };
     let page_starts: Vec<usize> = simulate_page_starts(
         total_units,
+        first_page_unit_budget_bytes,
         unit_budget_bytes,
         &unit_dedup_cost,
         &add_unit_keys,
@@ -3070,7 +3087,6 @@ fn render_inspect_report_text(
         // so it must take its own slice of the page budget. Otherwise broad
         // rulepack-free taint rows can consume the entire first page before
         // the normal unit paginator has a chance to enforce --context.
-        const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
         const TAINT_FLOW_TEXT_LIMIT: usize = 50;
         let taint_flow_text_limit = budget_bytes
             .map(|budget| {
@@ -3128,7 +3144,6 @@ fn render_inspect_report_text(
     // rendered on THIS page. Every hit in this table points at a
     // FLOW block that appears below.
     const HITS_ROW_AVG_BYTES: u64 = 220;
-    let mut occurrence_hits_truncated = false;
     if !page_hits.is_empty() {
         cli_println!();
         cli_println!("{}", u.heading("══ OCCURRENCE HITS"));
@@ -3191,7 +3206,6 @@ fn render_inspect_report_text(
         cli_println!("{hits_table}");
         if rendered_hits < page_hits.len() {
             let skipped = page_hits.len() - rendered_hits;
-            occurrence_hits_truncated = true;
             cli_println!(
                 "{}",
                 u.dim(&format!(
@@ -3247,7 +3261,7 @@ fn render_inspect_report_text(
     let strict_emitted = || emitted_so_far(bytes_before_payload as u64);
     let strict_remaining =
         || -> Option<u64> { strict_budget_bytes.map(|b| b.saturating_sub(strict_emitted())) };
-    for unit_index in start_offset..total_units {
+    for unit_index in start_offset..page_end_unit {
         if let Some(b) = unit_budget_bytes {
             if emitted_so_far(bytes_before_units as u64) >= b {
                 break;
@@ -3367,7 +3381,12 @@ fn render_inspect_report_text(
     paging_info.page_size = rendered_units as u64;
     paging_info.start_offset = start_offset as u64;
     paging_info.total_rows = total_units as u64;
-    let any_truncation = !units_fully_rendered || occurrence_hits_truncated;
+    // Page cursors advance over render units (decl / flow blocks). The
+    // occurrence table is an index for the current page, not its own
+    // pageable result set; when only that table is capped, its inline
+    // `--all` hint is the correct continuation. Advertising a next
+    // page would replay an empty or duplicate render-unit page.
+    let any_truncation = !units_fully_rendered;
     if any_truncation {
         paging_info.is_last = false;
         if paging_info.total_pages <= paging_info.page_number {
@@ -3406,6 +3425,7 @@ type UnitCostFn<'a> = dyn Fn(usize) -> u64 + 'a;
 
 fn simulate_page_starts(
     total_units: usize,
+    first_page_budget_bytes: Option<u64>,
     budget_bytes: Option<u64>,
     dedup_cost: &DedupCostFn<'_>,
     add_unit_keys: &AddKeysFn<'_>,
@@ -3414,12 +3434,17 @@ fn simulate_page_starts(
     if total_units == 0 {
         return vec![0];
     }
-    let Some(b) = budget_bytes else {
-        return vec![0];
-    };
     let mut starts = vec![0usize];
     let mut unit_index = 0usize;
     while unit_index < total_units {
+        let page_budget = if starts.len() == 1 {
+            first_page_budget_bytes
+        } else {
+            budget_bytes
+        };
+        let Some(b) = page_budget else {
+            return vec![0];
+        };
         // Per-page dedup state — functions seen on the current
         // page collapse to placeholders for subsequent units, so
         // packing flows that share functions onto one page lets

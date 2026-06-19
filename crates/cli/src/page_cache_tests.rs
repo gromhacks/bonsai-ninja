@@ -1,6 +1,7 @@
 use super::{
     cache_is_fresh, content_tree_fingerprint, dependency_metadata_fingerprint, eager_window,
-    rulepack_dir_skipped, workspace_fingerprint, PageCacheFile, RENDER_CACHE_VERSION,
+    rulepack_dir_skipped, workspace_fingerprint, workspace_metadata_fingerprint, PageCacheFile,
+    RENDER_CACHE_VERSION,
 };
 use std::path::PathBuf;
 
@@ -31,6 +32,19 @@ fn workspace_fingerprint_changes_when_indexed_file_changes() {
     let before = workspace_fingerprint(&root).expect("fingerprint before");
     std::fs::write(&file, "print('b')\n").expect("rewrite app");
     let after = workspace_fingerprint(&root).expect("fingerprint after");
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_ne!(before, after);
+}
+
+#[test]
+fn workspace_metadata_fingerprint_changes_when_indexed_file_metadata_changes() {
+    let root = tempdir("metadata-change");
+    let file = root.join("app.py");
+    std::fs::write(&file, "print('a')\n").expect("write app");
+    let before = workspace_metadata_fingerprint(&root).expect("metadata fingerprint before");
+    std::fs::write(&file, "print('longer value')\n").expect("rewrite app");
+    let after = workspace_metadata_fingerprint(&root).expect("metadata fingerprint after");
     std::fs::remove_dir_all(&root).ok();
 
     assert_ne!(before, after);
@@ -134,6 +148,8 @@ fn cache_file_for(workspace: &std::path::Path) -> PageCacheFile {
         binary_version: super::binary_cache_fingerprint().to_string(),
         matcher_policy_fingerprint: bonsai_common::MATCHER_POLICY_FINGERPRINT,
         workspace_fingerprint: workspace_fingerprint(workspace).expect("workspace fingerprint"),
+        workspace_metadata_fingerprint: workspace_metadata_fingerprint(workspace)
+            .expect("workspace metadata fingerprint"),
         dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)
             .expect("dependency fingerprint"),
         rulepack_fingerprint: super::rulepack_fingerprint_for_command(workspace)
@@ -141,6 +157,22 @@ fn cache_file_for(workspace: &std::path::Path) -> PageCacheFile {
         normalized_argv_hash: 0,
         pages: Vec::new(),
     }
+}
+
+#[test]
+fn cache_freshness_rejects_source_metadata_change() {
+    let root = tempdir("cache-source-metadata");
+    std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");
+
+    let cache = cache_file_for(&root);
+    assert!(cache_is_fresh(&root, &cache).expect("fresh before"));
+
+    std::fs::write(root.join("app.py"), "print('changed root')\n").expect("rewrite source");
+    assert!(
+        !cache_is_fresh(&root, &cache).expect("fresh after"),
+        "page cache must not replay when source metadata changes"
+    );
+    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
