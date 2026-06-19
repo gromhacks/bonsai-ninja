@@ -1688,6 +1688,167 @@ fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
 }
 
 #[test]
+fn nested_fully_qualified_esapi_sanitizer_inside_sink_arg_attaches() {
+    let ws = workspace(&[(
+        "/app/App.java",
+        "class App {\n  static String source() { return \"\"; }\n  static void sink(String value) {}\n\n\
+         void handle() {\n    String input = source();\n    sink(\"Sensitive value '\" + org.owasp.esapi.ESAPI.encoder().encodeForHTML(input) + \"'\");\n  }\n}\n",
+    )]);
+    let mut pack = rulepack("java", "source", "sink");
+    let java_pack = pack.packs.get_mut("java").expect("java pack");
+    java_pack.sinks[0].tag = Some("xss".to_string());
+    java_pack.sanitizers.push(Rule {
+        id: "java.test.esapi_html_fqn".to_string(),
+        aliases: Vec::new(),
+        enabled: true,
+        disabled_reason: None,
+        title: None,
+        tag: Some("html-encode".to_string()),
+        severity: None,
+        trust: None,
+        category: Some("test".to_string()),
+        cwe: Vec::new(),
+        owasp: Vec::new(),
+        frameworks: Vec::new(),
+        packages: Vec::new(),
+        imports: Vec::new(),
+        modules: Vec::new(),
+        manifests: Vec::new(),
+        lockfiles: Vec::new(),
+        payload_types: Vec::new(),
+        match_spec: MatchSpec {
+            kind: MatchKind::Call,
+            callee: Some(RuleTarget {
+                regex: Some(
+                    r"^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForHTML$".to_string(),
+                ),
+                ..Default::default()
+            }),
+            target: None,
+            search_depth: 0,
+        },
+        taint_semantics: Some(TaintSemantics {
+            clean_output_overwrite: None,
+            source_output_args: Vec::new(),
+            source_callback_args: Vec::new(),
+            call_result_passthrough_args: vec![0],
+            call_result_passthrough_receiver: false,
+            output_arg_flows: Vec::new(),
+            taint_receiver_from_args: false,
+        }),
+        returns_type: None,
+        constraints: RuleConstraint::default(),
+        match_examples: Vec::new(),
+        description: "test fully qualified ESAPI sanitizer".to_string(),
+        kind: RuleKind::Sanitizer,
+        language: "java".to_string(),
+        source_path: String::new(),
+    });
+
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    let finding = &report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "java.test.esapi_html_fqn"),
+        "expected FQN ESAPI sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn sanitizer_in_helper_return_attaches_after_chain_display_collapse() {
+    let ws = workspace(&[(
+        "/app/App.java",
+        "class App {\n  static String source() { return \"\"; }\n  static void sink(String value) {}\n\n\
+         void handle() {\n    String input = source();\n    String clean = escape(input);\n    sink(clean);\n  }\n\n\
+         static String escape(String value) {\n    String out = org.owasp.esapi.ESAPI.encoder().encodeForHTML(value);\n    return out;\n  }\n}\n",
+    )]);
+    let mut pack = rulepack("java", "source", "sink");
+    let java_pack = pack.packs.get_mut("java").expect("java pack");
+    java_pack.sinks[0].tag = Some("xss".to_string());
+    java_pack.sanitizers.push(Rule {
+        id: "java.test.esapi_html_helper_return".to_string(),
+        aliases: Vec::new(),
+        enabled: true,
+        disabled_reason: None,
+        title: None,
+        tag: Some("html-encode".to_string()),
+        severity: None,
+        trust: None,
+        category: Some("test".to_string()),
+        cwe: Vec::new(),
+        owasp: Vec::new(),
+        frameworks: Vec::new(),
+        packages: Vec::new(),
+        imports: Vec::new(),
+        modules: Vec::new(),
+        manifests: Vec::new(),
+        lockfiles: Vec::new(),
+        payload_types: Vec::new(),
+        match_spec: MatchSpec {
+            kind: MatchKind::Call,
+            callee: Some(RuleTarget {
+                regex: Some(
+                    r"^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForHTML$".to_string(),
+                ),
+                ..Default::default()
+            }),
+            target: None,
+            search_depth: 0,
+        },
+        taint_semantics: Some(TaintSemantics {
+            clean_output_overwrite: None,
+            source_output_args: Vec::new(),
+            source_callback_args: Vec::new(),
+            call_result_passthrough_args: vec![0],
+            call_result_passthrough_receiver: false,
+            output_arg_flows: Vec::new(),
+            taint_receiver_from_args: false,
+        }),
+        returns_type: None,
+        constraints: RuleConstraint::default(),
+        match_examples: Vec::new(),
+        description: "test ESAPI sanitizer in helper return".to_string(),
+        kind: RuleKind::Sanitizer,
+        language: "java".to_string(),
+        source_path: String::new(),
+    });
+
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    let finding = &report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.java_local_html_escape_helper_return"),
+        "expected helper-return ESAPI sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+}
+
+#[test]
 fn sanitized_flows_are_hidden_by_default_and_visible_on_request() {
     let ws = workspace(&[(
         "/app/App.java",

@@ -411,7 +411,7 @@
           .header("Content-Disposition", filename);
       }
     expect_match_text:
-    - "h.response(Buffer.from(\"data\")) .type(\"application/octet-stream\").header"
+    - "h.response(Buffer.from(\"data\")).type(\"application/octet-stream\").header"
   - name: literal hapi response content disposition negative
     code: |
       const _u = require("@hapi/hapi");

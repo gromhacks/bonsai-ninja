@@ -3632,6 +3632,7 @@ fn workspace_has_callable_named_in_context(
 
 struct CallEvidence {
     chain_funcs: Vec<FuncId>,
+    sanitizer_candidate_funcs: Vec<FuncId>,
     chain_names: Vec<String>,
     chain_precision: Precision,
     taint_path: Vec<TaintPropagationStep>,
@@ -3655,7 +3656,10 @@ fn build_call_evidence<'a>(
     if graph_saturated {
         return None;
     }
-    let mut records = lineage_records_for_call_indexed(trace_index, call)?;
+    let original_records = lineage_records_for_call_indexed(trace_index, call)?;
+    let sanitizer_candidate_funcs =
+        sanitizer_candidate_funcs_for_lineage(&original_records, source_func, call.caller);
+    let mut records = original_records;
     let primary = chain_funcs_for_lineage(&records, source_func, call.caller)?;
     // Chain-quality upgrade: when the lineage walk anchored on
     // `parent_trace_id` goes through synthetic edges (Phase 3c field-flow
@@ -3695,11 +3699,33 @@ fn build_call_evidence<'a>(
     }
     Some(CallEvidence {
         chain_funcs,
+        sanitizer_candidate_funcs,
         chain_names,
         chain_precision,
         taint_path,
         sink_tainted_args,
     })
+}
+
+fn sanitizer_candidate_funcs_for_lineage(
+    records: &[&TaintedCallEdge],
+    source_func: FuncId,
+    terminal_func: FuncId,
+) -> Vec<FuncId> {
+    let mut funcs = Vec::with_capacity(records.len().saturating_mul(2).saturating_add(2));
+    push_unique_func(&mut funcs, source_func);
+    for record in records {
+        push_unique_func(&mut funcs, record.caller);
+        push_unique_func(&mut funcs, record.callee);
+    }
+    push_unique_func(&mut funcs, terminal_func);
+    funcs
+}
+
+fn push_unique_func(funcs: &mut Vec<FuncId>, func: FuncId) {
+    if !funcs.contains(&func) {
+        funcs.push(func);
+    }
 }
 
 #[cfg(test)]
@@ -6341,7 +6367,7 @@ where
                             flow_id: Some(flow_id),
                             source_func: src_func_id,
                             sink_func: call.caller,
-                            chain_funcs: &evidence.chain_funcs,
+                            sanitizer_candidate_funcs: &evidence.sanitizer_candidate_funcs,
                             chain_names: evidence.chain_names.clone(),
                             san_by_func: &san_by_func,
                             ws,
@@ -9313,15 +9339,15 @@ fn sanitizer_is_nested_in_tainted_sink_arg(
     if text.is_empty() {
         return false;
     }
-    // Carrier = base identifier of the source expression (`Input`,
-    // `req` for `req.query`). Without a carrier we cannot prove the
-    // tainted value is the one wrapped, so fail closed (no credit).
-    let Some(carrier) = source_expr_base_identifier(&src.match_text) else {
-        return false;
-    };
-    sink_tainted_args
-        .iter()
-        .any(|arg| sanitizer_call_wraps_carrier(&arg.value_text, text, carrier))
+    let carrier_wrapped = source_expr_base_identifier(&src.match_text).is_some_and(|carrier| {
+        sink_tainted_args
+            .iter()
+            .any(|arg| sanitizer_call_wraps_carrier(&arg.value_text, text, carrier))
+    });
+    carrier_wrapped
+        || sink_tainted_args
+            .iter()
+            .any(|arg| sanitizer_call_wraps_only_dynamic_part(&arg.value_text, text))
 }
 
 fn xxe_factory_hardening_sanitizes_sink(
@@ -9388,9 +9414,30 @@ fn builder_created_from_factory_before_sink(
 /// longer identifier such as `myEscapeHtml` never matches) and that
 /// call's balanced argument list mentions `carrier` as a whole token.
 fn sanitizer_call_wraps_carrier(value_text: &str, callee: &str, carrier: &str) -> bool {
+    sanitizer_call_invocations(value_text, callee)
+        .into_iter()
+        .any(|(_, _, args)| text_mentions_token(args, carrier))
+}
+
+/// Conservative fallback for renamed flows: when the tainted sink arg is a
+/// literal wrapper around a sanitizer call, the original source token may no
+/// longer appear in the sink text (`input = source(); sink(escape(input))`).
+/// Credit only when the sanitizer call wraps an identifier-bearing expression
+/// and no value identifiers remain outside that sanitizer invocation.
+fn sanitizer_call_wraps_only_dynamic_part(value_text: &str, callee: &str) -> bool {
+    sanitizer_call_invocations(value_text, callee)
+        .into_iter()
+        .any(|(start, end, args)| {
+            sanitizer_args_contain_value_identifier(args)
+                && text_outside_range_has_no_value_identifiers(value_text, start, end)
+        })
+}
+
+fn sanitizer_call_invocations<'a>(value_text: &'a str, callee: &str) -> Vec<(usize, usize, &'a str)> {
     if callee.is_empty() {
-        return false;
+        return Vec::new();
     }
+    let mut out = Vec::new();
     let bytes = value_text.as_bytes();
     let mut search_from = 0;
     while let Some(rel) = value_text[search_from..].find(callee) {
@@ -9408,24 +9455,20 @@ fn sanitizer_call_wraps_carrier(value_text: &str, callee: &str, carrier: &str) -
         }
         // Require the call form `callee(`, tolerating spaces.
         let mut idx = after;
-        while idx < bytes.len() && bytes[idx] == b' ' {
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
             idx += 1;
         }
         if idx >= bytes.len() || bytes[idx] != b'(' {
             continue;
         }
-        if let Some(args) = balanced_paren_slice(value_text, idx) {
-            if text_mentions_token(args, carrier) {
-                return true;
-            }
+        if let Some((end, args)) = balanced_paren_extent(value_text, idx) {
+            out.push((start, end, args));
         }
     }
-    false
+    out
 }
 
-/// Slice between the `(` at `open_idx` and its matching `)`, tracking
-/// nesting. `None` when the parens are unbalanced.
-fn balanced_paren_slice(text: &str, open_idx: usize) -> Option<&str> {
+fn balanced_paren_extent(text: &str, open_idx: usize) -> Option<(usize, &str)> {
     let bytes = text.as_bytes();
     if open_idx >= bytes.len() || bytes[open_idx] != b'(' {
         return None;
@@ -9438,7 +9481,7 @@ fn balanced_paren_slice(text: &str, open_idx: usize) -> Option<&str> {
             b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(&text[open_idx + 1..idx]);
+                    return Some((idx + 1, &text[open_idx + 1..idx]));
                 }
             }
             _ => {}
@@ -9446,6 +9489,48 @@ fn balanced_paren_slice(text: &str, open_idx: usize) -> Option<&str> {
         idx += 1;
     }
     None
+}
+
+fn sanitizer_args_contain_value_identifier(args: &str) -> bool {
+    identifier_tokens_outside_strings(args)
+        .iter()
+        .any(|token| !non_value_expression_token(token))
+}
+
+fn text_outside_range_has_no_value_identifiers(text: &str, start: usize, end: usize) -> bool {
+    let before = text.get(..start).unwrap_or_default();
+    let after = text.get(end..).unwrap_or_default();
+    let mut outside = String::with_capacity(before.len() + after.len() + 1);
+    outside.push_str(before);
+    outside.push(' ');
+    outside.push_str(after);
+    identifier_tokens_outside_strings(&outside)
+        .iter()
+        .all(|token| non_value_expression_token(token))
+}
+
+fn non_value_expression_token(token: &str) -> bool {
+    matches!(
+        token,
+        "await"
+            | "false"
+            | "nil"
+            | "None"
+            | "null"
+            | "return"
+            | "self"
+            | "this"
+            | "true"
+            | "undefined"
+            | "new"
+            | "String"
+            | "Integer"
+            | "Long"
+            | "Boolean"
+            | "Byte"
+            | "Bytes"
+            | "Object"
+    )
 }
 
 /// True when `token` appears in `text` as a whole identifier (not as a
@@ -10422,7 +10507,7 @@ struct FindingBuildContext<'a> {
     flow_id: Option<String>,
     source_func: FuncId,
     sink_func: FuncId,
-    chain_funcs: &'a [FuncId],
+    sanitizer_candidate_funcs: &'a [FuncId],
     chain_names: Vec<String>,
     san_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
     ws: &'a Workspace,
@@ -10471,11 +10556,15 @@ fn make_finding(
 
     let mut sanitizers_seen: Vec<FindingMatch> = Vec::new();
     let mut seen_keys: AHashSet<(String, u32, u32)> = AHashSet::new();
-    // Walk the actual `FuncId`s on this chain (not their names) so
+    // Walk the actual `FuncId`s from the taint lineage (not their names) so
     // sanitizers in unrelated same-named functions can't cross-
-    // bridge. Combined with the data-flow tainted-call-span gate
-    // below, this keeps credit semantically precise.
-    for &hop_func in context.chain_funcs {
+    // bridge. This intentionally uses the pre-display-rewrite
+    // lineage candidates: the rendered chain may collapse helper
+    // return frames, but sanitizer attribution still needs to see
+    // helper functions that transformed the tainted value. Combined
+    // with the data-flow tainted-call-span gate below, this keeps
+    // credit semantically precise.
+    for &hop_func in context.sanitizer_candidate_funcs {
         let Some(sanitizer_hits) = context.san_by_func.get(&hop_func) else {
             continue;
         };
@@ -10608,6 +10697,18 @@ fn make_finding(
     if let Some(html_helper) =
         js_ts_local_html_escape_helper_sanitizer(context.ws, snk, skr, &context.sink_tainted_args)
     {
+        let dedup_key = (html_helper.file.clone(), html_helper.line, html_helper.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(html_helper);
+        }
+    }
+    if let Some(html_helper) = java_local_html_escape_helper_return_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
         let dedup_key = (html_helper.file.clone(), html_helper.line, html_helper.column);
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(html_helper);
@@ -11559,6 +11660,222 @@ fn js_ts_local_html_escape_helper_sanitizer(
         tainted_args: Vec::new(),
         sanitised_arg_indices: Vec::new(),
     })
+}
+
+fn java_local_html_escape_helper_return_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if snk.language != "java" || sink_rule.tag.as_deref() != Some("xss") {
+        return None;
+    }
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
+    let targets: Vec<String> = sink_tainted_args
+        .iter()
+        .filter_map(|arg| clean_overwrite_target_key(&arg.value_text))
+        .filter(|target| !target.is_empty())
+        .collect();
+    for target in targets {
+        let Some(helper) = java_helper_assigned_to_target_before_sink(&lines, func_start, sink_idx, &target)
+        else {
+            continue;
+        };
+        let Some((helper_idx, params, body_lines)) = java_local_method_body(&lines, &helper) else {
+            continue;
+        };
+        let Some((san_line_idx, san_text)) = java_html_sanitizer_return_line(&body_lines, &params) else {
+            continue;
+        };
+        let line_idx = helper_idx.saturating_add(san_line_idx);
+        let line = *lines.get(line_idx)?;
+        return Some(FindingMatch {
+            rule_id: "engine.sanitizer.java_local_html_escape_helper_return".to_string(),
+            file: snk.file.clone(),
+            line: u32::try_from(line_idx + 1).ok()?,
+            column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+            text: san_text,
+            enclosing_fn: Some(helper),
+            tag: Some("html-encode".to_string()),
+            severity: None,
+            category: Some("local-html-escape-helper".to_string()),
+            trust: None,
+            payload_types: Vec::new(),
+            tainted_args: Vec::new(),
+            sanitised_arg_indices: Vec::new(),
+        });
+    }
+    None
+}
+
+fn java_helper_assigned_to_target_before_sink(
+    lines: &[&str],
+    func_start: usize,
+    sink_idx: usize,
+    target: &str,
+) -> Option<String> {
+    for line in lines
+        .iter()
+        .take(sink_idx)
+        .skip(func_start)
+        .filter_map(|line| line.split("//").next())
+    {
+        let Some(eq_idx) = line.find('=') else {
+            continue;
+        };
+        let left = &line[..eq_idx];
+        if last_identifier_token(left).as_deref() != Some(target) {
+            continue;
+        }
+        let right = line[eq_idx + 1..].trim().trim_end_matches(';').trim();
+        let helper = direct_helper_call_name(right)?;
+        return Some(helper);
+    }
+    None
+}
+
+fn direct_helper_call_name(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    if expr.starts_with("new ") {
+        return None;
+    }
+    let open = expr.find('(')?;
+    let callee = expr[..open].trim();
+    if callee.is_empty() || callee.contains(' ') {
+        return None;
+    }
+    let helper = callee.rsplit('.').next()?.trim();
+    if helper.is_empty()
+        || !helper
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    Some(helper.to_string())
+}
+
+fn java_local_method_body(lines: &[&str], helper: &str) -> Option<(usize, Vec<String>, Vec<String>)> {
+    let needle = format!("{helper}(");
+    for (idx, line) in lines.iter().enumerate() {
+        if !line.contains(&needle) || line.trim_end().ends_with(';') {
+            continue;
+        }
+        let mut signature = String::new();
+        let mut open_line = None;
+        for (offset, sig_line) in lines.iter().enumerate().skip(idx).take(6) {
+            signature.push_str(sig_line);
+            signature.push('\n');
+            if sig_line.contains('{') {
+                open_line = Some(offset);
+                break;
+            }
+        }
+        let open_line = open_line?;
+        let params = java_method_param_names(&signature);
+        if params.is_empty() {
+            continue;
+        }
+        let mut depth = 0isize;
+        let mut seen_open = false;
+        let mut body = Vec::new();
+        for line in lines.iter().skip(open_line) {
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        seen_open = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            body.push((*line).to_string());
+            if seen_open && depth == 0 {
+                break;
+            }
+        }
+        return Some((open_line, params, body));
+    }
+    None
+}
+
+fn java_method_param_names(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let Some((_, params_text)) = balanced_paren_extent(signature, open) else {
+        return Vec::new();
+    };
+    split_top_level_items(params_text)
+        .into_iter()
+        .filter_map(last_identifier_token)
+        .collect()
+}
+
+fn java_html_sanitizer_return_line(body_lines: &[String], params: &[String]) -> Option<(usize, String)> {
+    for (idx, line) in body_lines.iter().enumerate() {
+        if !java_html_sanitizer_line_wraps_param(line, params) {
+            continue;
+        }
+        let compact = compact_guard_text(line);
+        if compact.contains("return") {
+            return Some((idx, line.trim().to_string()));
+        }
+        if let Some(eq_idx) = line.find('=') {
+            let assigned = last_identifier_token(&line[..eq_idx])?;
+            let return_pattern = format!("return{assigned};");
+            if body_lines
+                .iter()
+                .skip(idx + 1)
+                .any(|later| compact_guard_text(later).contains(&return_pattern))
+            {
+                return Some((idx, line.trim().to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn java_html_sanitizer_line_wraps_param(line: &str, params: &[String]) -> bool {
+    const HTML_SANITIZER_SUFFIXES: &[&str] = &[
+        "encodeForHTML",
+        "encodeForHTMLAttribute",
+        "forHtml",
+        "forHtmlContent",
+        "forHtmlAttribute",
+        "escapeHtml",
+        "htmlEscape",
+    ];
+    let compact = compact_guard_text(line);
+    for suffix in HTML_SANITIZER_SUFFIXES {
+        let call = format!("{suffix}(");
+        let mut search_from = 0usize;
+        while let Some(rel) = compact[search_from..].find(&call) {
+            let open = search_from + rel + suffix.len();
+            search_from = open.saturating_add(1);
+            let Some((_, args)) = balanced_paren_extent(&compact, open) else {
+                continue;
+            };
+            if params.iter().any(|param| text_mentions_token(args, param)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn last_identifier_token(text: &str) -> Option<String> {
+    identifier_tokens_outside_strings(text).into_iter().last()
 }
 
 fn helper_wrapping_tainted_value(sink_text: &str, value_text: &str) -> Option<String> {
