@@ -589,12 +589,6 @@ pub struct WorkspaceOpenOptions {
     /// Compute the workspace-wide flow-id cache during open so every
     /// browse-row flow-id lookup is O(1).
     pub prewarm_flow_ids: bool,
-    /// Build every per-file declaration index during open. Explicit
-    /// index/prewarm commands keep this enabled. Query commands leave
-    /// it disabled so large workspaces can ingest file contents and
-    /// then build the global syntax graph by consuming each per-file
-    /// IR immediately instead of caching all local and global copies.
-    pub eager_decl_index: bool,
     /// Optional per-file tree-sitter parse timeout in milliseconds.
     /// `None` uses the parser default (`BONSAI_PARSE_TIMEOUT_MS` or
     /// 30 seconds); `Some(0)` disables the timeout guard.
@@ -622,7 +616,6 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: false,
             save_value_flow_sidecar: false,
             prewarm_flow_ids: false,
-            eager_decl_index: false,
             parse_timeout_ms: None,
         }
     }
@@ -640,7 +633,6 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: false,
             save_value_flow_sidecar: false,
             prewarm_flow_ids: false,
-            eager_decl_index: true,
             parse_timeout_ms: None,
         }
     }
@@ -661,7 +653,6 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: true,
             save_value_flow_sidecar: true,
             prewarm_flow_ids: true,
-            eager_decl_index: true,
             parse_timeout_ms: None,
         }
     }
@@ -1519,22 +1510,7 @@ impl Workspace {
         registry: Arc<LanguageRegistry>,
         literal: &str,
     ) -> Result<Self, WorkspaceError> {
-        Self::open_query_matching_literal_with_options(
-            root,
-            registry,
-            literal,
-            WorkspaceOpenOptions::parse_only(),
-        )
-    }
-
-    /// Same as [`Self::open_query_matching_literal`] with explicit
-    /// open options supplied by the SDK/CLI facade.
-    pub fn open_query_matching_literal_with_options(
-        root: &Path,
-        registry: Arc<LanguageRegistry>,
-        literal: &str,
-        options: WorkspaceOpenOptions,
-    ) -> Result<Self, WorkspaceError> {
+        let options = WorkspaceOpenOptions::parse_only();
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root);
         let canonical_root = canonical_workspace_root(root);
@@ -1553,66 +1529,10 @@ impl Workspace {
             let _ = id;
         }
         let files = ws.vfs().all_files();
-        index_workspace_files_with_bounded_parallelism(&ws, &files, &|_| {});
-        if skipped_minified > 0 {
-            tracing::info!(
-                skipped = skipped_minified,
-                "skipped minified / bundled files (set BONSAI_INCLUDE_MINIFIED=1 to include)"
-            );
-        }
-        Ok(ws)
-    }
-
-    /// Open only source files whose paths satisfy the supplied
-    /// include/exclude filters. This is the large-repo fast path for
-    /// security profiles and explicit path-scoped queries: if the
-    /// command has already declared a path scope, do not parse files
-    /// that will be discarded by that same scope.
-    pub fn open_query_filtered_paths(
-        root: &Path,
-        registry: Arc<LanguageRegistry>,
-        include_filters: &[String],
-        exclude_filters: &[String],
-    ) -> Result<Self, WorkspaceError> {
-        Self::open_query_filtered_paths_with_options(
-            root,
-            registry,
-            include_filters,
-            exclude_filters,
-            WorkspaceOpenOptions::query_only(),
-        )
-    }
-
-    /// Same as [`Self::open_query_filtered_paths`] with explicit open
-    /// options supplied by the SDK/CLI facade.
-    pub fn open_query_filtered_paths_with_options(
-        root: &Path,
-        registry: Arc<LanguageRegistry>,
-        include_filters: &[String],
-        exclude_filters: &[String],
-        options: WorkspaceOpenOptions,
-    ) -> Result<Self, WorkspaceError> {
-        let ws = Self::new_with_open_options(registry, options);
-        ws.set_idg_sidecar_root(root);
-        let canonical_root = canonical_workspace_root(root);
-        *ws.inner.root_label.lock() = root.display().to_string();
-        ws.inner.db.set_workspace_root(canonical_root.clone());
-        let (files, skipped_minified) = read_supported_source_files_filtered_paths(
-            &canonical_root,
-            &ws.inner.registry,
-            include_filters,
-            exclude_filters,
-        )?;
-        for source in files {
-            let path = &source.path;
-            let old_id = ws.inner.vfs.lookup(path);
-            let id = ws.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
-            if let Some(prev) = old_id {
-                ws.invalidate_after_file_change(prev);
-            }
-            *ws.inner.reparse_counter.lock() += 1;
-            let _ = id;
-        }
+        use rayon::prelude::*;
+        files.par_iter().for_each(|f| {
+            let _ = ws.db().decl_index(*f);
+        });
         if skipped_minified > 0 {
             tracing::info!(
                 skipped = skipped_minified,
@@ -1635,17 +1555,7 @@ impl Workspace {
         registry: Arc<LanguageRegistry>,
         path: &Path,
     ) -> Result<Self, WorkspaceError> {
-        Self::open_query_matching_path_with_options(root, registry, path, WorkspaceOpenOptions::parse_only())
-    }
-
-    /// Same as [`Self::open_query_matching_path`] with explicit open
-    /// options supplied by the SDK/CLI facade.
-    pub fn open_query_matching_path_with_options(
-        root: &Path,
-        registry: Arc<LanguageRegistry>,
-        path: &Path,
-        options: WorkspaceOpenOptions,
-    ) -> Result<Self, WorkspaceError> {
+        let options = WorkspaceOpenOptions::parse_only();
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root);
         let canonical_root = canonical_workspace_root(root);
@@ -1687,24 +1597,23 @@ impl Workspace {
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
+        use rayon::prelude::*;
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root);
         on_event(WorkspaceOpenEvent::IngestStarted);
         ws.ingest_dir(root)?;
         let files = ws.vfs().all_files();
         on_event(WorkspaceOpenEvent::IngestFinished { files: files.len() });
-        if options.eager_decl_index {
-            // Pass 1: per-file decl + import indexing. Large Java/JVM
-            // workspaces can have tens of thousands of files whose adapter
-            // lowering performs receiver-type enrichment; letting the global
-            // rayon pool fan that across every core can spike RSS before the
-            // first query phase begins. Keep the work parallel, but cap the
-            // parse workers for large workspaces so explicit index/prewarm
-            // commands stay bounded without changing which facts are indexed.
-            on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-            index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
-            on_event(WorkspaceOpenEvent::ParseFinished);
-        }
+        // Pass 1: per-file decl + import indexing in parallel.
+        // `AnalyzerDb` is `Sync`, so tree-sitter parsing + adapter
+        // `extract_declarations` run concurrently on the rayon pool
+        // while cache insertion serialises on the db's RwLock.
+        on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
+        files.par_iter().for_each(|f| {
+            let _ = ws.db().decl_index(*f);
+            on_event(WorkspaceOpenEvent::ParseFileIndexed);
+        });
+        on_event(WorkspaceOpenEvent::ParseFinished);
         // Optional sidecar load / explicit workspace-wide prewarm.
         // The default structural index path leaves all of these flags
         // off; query commands may load fresh sidecars as performance
@@ -2422,77 +2331,6 @@ impl Workspace {
     }
 }
 
-fn index_workspace_files_with_bounded_parallelism<F>(ws: &Workspace, files: &[FileId], on_event: &F)
-where
-    F: Fn(WorkspaceOpenEvent) + Sync,
-{
-    let workers = workspace_parse_worker_count(files.len());
-    if workers <= 1 || files.len() <= 1 {
-        for &file in files {
-            let _ = ws.db().decl_index(file);
-            on_event(WorkspaceOpenEvent::ParseFileIndexed);
-        }
-        return;
-    }
-
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .stack_size(workspace_parse_worker_stack_bytes())
-        .build()
-    {
-        Ok(pool) => {
-            pool.install(|| {
-                use rayon::prelude::*;
-                files.par_iter().for_each(|file| {
-                    let _ = ws.db().decl_index(*file);
-                    on_event(WorkspaceOpenEvent::ParseFileIndexed);
-                });
-            });
-        }
-        Err(_) => {
-            for &file in files {
-                let _ = ws.db().decl_index(file);
-                on_event(WorkspaceOpenEvent::ParseFileIndexed);
-            }
-        }
-    }
-}
-
-fn workspace_parse_worker_count(file_count: usize) -> usize {
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .max(1);
-    if let Some(requested) = std::env::var("BONSAI_PARSE_JOBS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.clamp(1, available);
-    }
-    if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.clamp(1, available);
-    }
-    let default = if file_count >= 20_000 {
-        4
-    } else if file_count >= 10_000 {
-        6
-    } else {
-        available
-    };
-    default.clamp(1, available)
-}
-
-fn workspace_parse_worker_stack_bytes() -> usize {
-    std::env::var("BONSAI_PARSE_STACK_BYTES")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|bytes| *bytes >= 1024 * 1024)
-        .unwrap_or(64 * 1024 * 1024)
-}
-
 fn trace_step_calls_symbol(step: &bonsai_trace::TraceStep, sink: &str) -> bool {
     if !matches!(
         step.kind,
@@ -2813,7 +2651,7 @@ fn read_supported_source_files(
     canonical_root: &Path,
     registry: &LanguageRegistry,
 ) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
-    read_supported_source_files_impl(canonical_root, registry, None, None)
+    read_supported_source_files_impl(canonical_root, registry, None)
 }
 
 fn read_supported_source_files_matching_literal(
@@ -2821,24 +2659,7 @@ fn read_supported_source_files_matching_literal(
     registry: &LanguageRegistry,
     literal: &str,
 ) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
-    read_supported_source_files_impl(canonical_root, registry, Some(literal), None)
-}
-
-fn read_supported_source_files_filtered_paths(
-    canonical_root: &Path,
-    registry: &LanguageRegistry,
-    include_filters: &[String],
-    exclude_filters: &[String],
-) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
-    read_supported_source_files_impl(
-        canonical_root,
-        registry,
-        None,
-        Some(PathFilterSpec {
-            include_filters,
-            exclude_filters,
-        }),
-    )
+    read_supported_source_files_impl(canonical_root, registry, Some(literal))
 }
 
 fn read_supported_source_file_at_path(
@@ -2887,7 +2708,6 @@ fn read_supported_source_files_impl(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     literal_filter: Option<&str>,
-    path_filter: Option<PathFilterSpec<'_>>,
 ) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
     let include_minified = include_minified();
     let mut skipped_minified = 0usize;
@@ -2943,9 +2763,6 @@ fn read_supported_source_files_impl(
                 skipped_counter.fetch_add(1, Ordering::Relaxed);
                 return ReadOutcome::Skip;
             }
-            if path_filter.is_some_and(|filter| !source_path_allowed(path, filter)) {
-                return ReadOutcome::Skip;
-            }
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
                 Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => {
@@ -2987,53 +2804,6 @@ fn read_supported_source_files_impl(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     skipped_minified += skipped_counter.load(Ordering::Relaxed);
     Ok((files, skipped_minified))
-}
-
-#[derive(Clone, Copy)]
-struct PathFilterSpec<'a> {
-    include_filters: &'a [String],
-    exclude_filters: &'a [String],
-}
-
-fn source_path_allowed(path: &Path, filter: PathFilterSpec<'_>) -> bool {
-    let path = normalize_path_for_filter(&path.to_string_lossy());
-    (filter.include_filters.is_empty()
-        || filter
-            .include_filters
-            .iter()
-            .any(|include| path_filter_matches(&path, include)))
-        && !filter
-            .exclude_filters
-            .iter()
-            .any(|exclude| path_filter_matches(&path, exclude))
-}
-
-fn path_filter_matches(path: &str, filter: &str) -> bool {
-    let filter = normalize_path_for_filter(filter);
-    if filter.is_empty() {
-        return false;
-    }
-    if filter.contains('/') {
-        return path_filter_with_separator_matches(path, &filter);
-    }
-    path.contains(filter.as_str())
-}
-
-fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
-    let trimmed = filter.trim_matches('/');
-    if trimmed.is_empty() {
-        return false;
-    }
-    if filter.starts_with('/') || filter.ends_with('/') {
-        return path == trimmed
-            || path.starts_with(&format!("{trimmed}/"))
-            || path.contains(&format!("/{trimmed}/"));
-    }
-    path.contains(filter)
-}
-
-fn normalize_path_for_filter(path: &str) -> String {
-    path.replace('\\', "/")
 }
 
 fn text_contains_literal_query(text: &str, literal: &str, literal_lower: &str) -> bool {

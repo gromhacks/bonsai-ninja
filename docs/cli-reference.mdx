@@ -5,7 +5,7 @@ description: "Command and flag reference for security analysis, flow inspection,
 
 # CLI Reference
 
-Global options accepted before the command include `--no-color`, `--theme`, `--no-cache`, `--no-progress`, `--contains`, `--not-contains`, `--parse-timeout`, `--help`, and `--version`.
+Global options accepted before the command include `--no-color`, `--theme`, `--no-cache`, `--no-progress`, `--parse-timeout`, `--help`, and `--version`.
 
 ## index
 
@@ -82,7 +82,6 @@ The taint command surface is `security <workspace> taint-analysis`.
 
 ```bash
 bonsai-ninja security ./src taint-analysis --trust remote --tag command-injection
-bonsai-ninja security ./src taint-analysis --profile production
 bonsai-ninja security ./src taint-analysis --summary --format json
 bonsai-ninja security ./src taint-analysis --format sarif --all --output-path findings.sarif.json
 ```
@@ -97,13 +96,6 @@ always runs at the semantic taint precision ceiling: exact and narrowed
 source-to-sink evidence is reported, while broad diagnostic precision is
 not a user-facing finding mode.
 
-On very large workspaces, an unscoped `taint-analysis` run fails fast
-instead of being killed by the OS or silently narrowing coverage. Add an
-explicit scope such as `--profile production`, `--file`, `--source`,
-`--sink`, `--trust`, `--severity`, or `--tag`. If you really want the
-exhaustive all-file audit, set `BONSAI_ALLOW_BROAD_TAINT=1`; that mode
-keeps full semantics but can require substantially more time and memory.
-
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
@@ -114,8 +106,8 @@ keeps full semantics but can require substantially more time and memory.
 | `--sink <REGEX>` | None | Sink rule ID regex. |
 | `--severity <LEVEL>` | None | Severity floor. |
 | `--tag <TAG>` | None | Sink tag filter. |
-| `--file <TEXT>` | None | Analyze only files whose path contains this text. Repeatable. |
-| `--exclude-file <TEXT>` | None | Exclude files whose path contains this text. Repeatable. |
+| `--file <TEXT>` | None | Include only findings whose sink path contains this text. Repeatable. |
+| `--exclude-file <TEXT>` | None | Exclude findings whose sink path contains this text. Repeatable. |
 | `--inferred-sources` | false | Add synthetic entry-point parameter sources. |
 | `--exclude-tests` | false | Drop findings whose source or sink is in a test path. |
 | `--show-sanitized` | Compatibility | Sanitized reachable paths are already included with sanitizer evidence. |
@@ -132,19 +124,10 @@ keeps full semantics but can require substantially more time and memory.
 
 ## inspect
 
-`inspect` queries facts and renders the rulepack-free taint paths that
-contain the query or filters. It does not load source, sink, or sanitizer
-YAML; use `security taint-analysis` for rulepack findings. For broad
-large-repo queries, the default taint preview is skipped with a warning
-unless `--taint-flow` is supplied. Use `--syntax-only` for pure indexed
-search and `--graph-flow` for explicit structural callgraph evidence with
-source bodies.
+`inspect` queries facts and renders flows that reach the match.
 
 ```bash
 bonsai-ninja inspect ./src --query os.system --kind call
-bonsai-ninja inspect ./src --query os.system --syntax-only
-bonsai-ninja inspect ./src --query os.system --taint-flow
-bonsai-ninja inspect ./src --query os.system --graph-flow
 bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 ```
 
@@ -169,39 +152,10 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--flow <F:ID>` | None | Re-render one stable flow. |
 | `--view <VIEW>` | trace | `trace`, `grouped`, or `auto`. |
 | `--group <G:ID>` | None | Re-render one stable flow group. |
-| `--graph-flow` | false | Render explicit structural callgraph flows with source bodies. |
-| `--taint-flow` | false | Force bounded raw taint-engine paths, including for broad queries or when `--syntax-only` is also present. |
-| `--syntax-only` | false | Omit the default rulepack-free taint paths and render only indexed syntax hits. |
 | `--context <BUDGET>` | 32k text | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
-
-## show
-
-`show` resolves a stable bonsai ID and re-opens the owning drilldown view.
-It delegates to `inspect`, `dump-edges`, `dump-ast`, `dump-resolve`, or
-`security taint-analysis` depending on the ID prefix.
-
-```bash
-bonsai-ninja show ./src F:0123456789abcdef
-bonsai-ninja show ./src S:0123456789abcdef --rules-dir security-patterns
-bonsai-ninja show ./src R:aabbccdd --query execute
-```
-
-| Flag | Default | Description |
-|---|---:|---|
-| `<WORKSPACE>` | Required | Workspace root. |
-| `<ID>` | Required | Stable `F:`, `G:`, `T:`, `E:`, `N:`, `S:`, or `R:` ID. |
-| `--query <QUERY>` | None | Resolver query required for `R:` candidate IDs. |
-| `--in-file <FILE>` | None | File context for `R:` resolver candidate IDs. |
-| `--compact` | false | Render compact delegated output when supported. |
-| `--context <BUDGET>` | 32k text | Token budget. |
-| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
-| `--all` | false | Lift delegated command caps where supported. |
-| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory for `S:` finding IDs. |
-| `--format <FORMAT>` | text | `text` or `json`. |
-| `--output-path <PATH>` | stdout | Write the delegated output to a file. |
 
 ## trace
 
@@ -330,7 +284,6 @@ bonsai-ninja search ./src "request.args"
 | Command | Purpose | Common filters |
 |---|---|---|
 | `defs` | Definitions: functions, methods, classes, structs, traits, interfaces, enums. | `--kind`, `--file`, `--name`, `--has-callee`, `--has-decorator`, `--has-param`, `--regex` |
-| `entrypoints` | Callable declarations with no resolved semantic in-workspace callers. | `--kind`, `--file`, `--name`, `--regex` |
 | `calls` | Call sites with caller, callee, location, and code. | `--callee`, `--file`, `--caller`, `--call-kind`, `--regex` |
 | `imports` | Imports, uses, includes, aliases, and wildcard imports. | `--file`, `--module`, `--alias`, `--wildcard`, `--regex` |
 | `vars` | Assignment targets and simple RHS source names. | `--name`, `--file`, `--in-fn`, `--source`, `--regex` |

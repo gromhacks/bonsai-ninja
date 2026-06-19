@@ -11129,6 +11129,7 @@ pub fn apply_call_receiver_types_with_super_tokens(
     };
 
     for decl in &mut idx.defs {
+        let aliases = decl.type_aliases.clone();
         let implicit_receiver_types = decl.parent.and_then(|parent| {
             class_facts.by_symbol.get(&parent).map(|(name, bases)| {
                 let mut types = Vec::with_capacity(1 + bases.len());
@@ -11141,7 +11142,7 @@ pub fn apply_call_receiver_types_with_super_tokens(
         });
         apply_call_receiver_types_to_events(
             &mut decl.flow_events,
-            &decl.type_aliases,
+            &aliases,
             implicit_receiver_types.as_deref(),
             &class_facts,
             super_receiver_tokens,

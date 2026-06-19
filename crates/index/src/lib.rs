@@ -79,16 +79,6 @@ impl GlobalIndex {
         bonsai_lang_api::apply_call_receiver_types(&mut index);
         bonsai_lang_api::apply_assign_value_kind(&mut index);
         bonsai_lang_api::apply_assign_call_result_types(&mut index);
-        self.insert_preprocessed(index);
-    }
-
-    /// Insert a per-file index that has already passed through the
-    /// adapter-normalization pipeline (`apply_call_receiver_types`,
-    /// assignment value-kind classification, and assignment call-result
-    /// typing). `AnalyzerDb::decl_index` uses this path so large
-    /// workspaces do not run those per-file enrichment passes twice
-    /// while building the global graph.
-    pub fn insert_preprocessed(&mut self, mut index: DeclIndex) {
         dedup_decl_index_defs(&mut index);
         let file = index.file;
         if self.by_file.contains_key(&file) {

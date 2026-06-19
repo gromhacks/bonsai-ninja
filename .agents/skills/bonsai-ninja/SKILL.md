@@ -39,7 +39,6 @@ Start with shape, then follow one concrete behavior.
 ./target/release/bonsai-ninja tree <workspace> --max-depth 3 --compact --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja imports <workspace> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja defs <workspace> --kind function --context 16k --no-color --no-progress
-./target/release/bonsai-ninja entrypoints <workspace> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja classes <workspace> --context 16k --no-color --no-progress
 ```
 
@@ -56,19 +55,10 @@ Understand behavior:
 
 ```shell
 ./target/release/bonsai-ninja inspect <workspace> --query <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --query <target> --syntax-only --context 16k --no-color --no-progress
-./target/release/bonsai-ninja inspect <workspace> --query <target> --taint-flow --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja inspect <workspace> --from <entry> --to <target> --context 16k --no-color --no-progress
-./target/release/bonsai-ninja show <workspace> F:<id> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja trace <workspace> <entry-function> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja read-file <workspace> <path> --lines A:B --context 16k --no-color --no-progress
 ```
-
-`inspect` is rulepack-free by default: targeted queries include bounded
-raw taint paths that contain the query. Use `--syntax-only` for pure
-indexed facts, `--taint-flow` to force raw taint paths on broad queries,
-and `--graph-flow` when structural callgraph evidence with source bodies
-is explicitly needed.
 
 Record understanding as:
 
@@ -124,13 +114,6 @@ harnesses, vendored deps, package caches, build outputs, generated code,
 docs, scripts, deploy files, migrations, and language-specific test
 layouts. Use `--exclude-tests` alone when you want only the narrower
 test-path filter.
-
-On very large workspaces, unscoped `security <workspace>
-taint-analysis` fails fast rather than being killed or silently reducing
-coverage. Add a real scope (`--profile production`, `--file`,
-`--source`, `--sink`, `--trust`, `--severity`, or `--tag`). Use
-`BONSAI_ALLOW_BROAD_TAINT=1` only when you intentionally want the
-exhaustive all-file audit and have the memory/time budget for it.
 
 Inventory when needed:
 

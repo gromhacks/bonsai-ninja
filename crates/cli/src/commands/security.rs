@@ -15,8 +15,8 @@
 
 use crate::args::{BrowseFormat, SecurityAction, SourceAnalysisFormat};
 use crate::commands::{
-    emit_json_paged_cached, open_project_index_filtered_paths, open_project_index_matching_literal,
-    open_project_index_only, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli, short_file,
+    emit_json_paged_cached, open_project_index_only, page_info_to_json, paged_json_incomplete_reasons,
+    paging_from_cli, short_file,
 };
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
@@ -135,27 +135,6 @@ fn open_security_project(
     rules_dir: &Path,
 ) -> Result<(bonsai_sdk::Project, crate::footer::WorkspaceFooter)> {
     let (project, footer) = open_project_index_only(workspace)?;
-    Ok((project.with_loaded_rulepack(rules_dir, pack.clone()), footer))
-}
-
-fn open_security_project_matching_literal(
-    workspace: &Path,
-    pack: &Rulepack,
-    rules_dir: &Path,
-    literal: &str,
-) -> Result<(bonsai_sdk::Project, crate::footer::WorkspaceFooter)> {
-    let (project, footer) = open_project_index_matching_literal(workspace, literal)?;
-    Ok((project.with_loaded_rulepack(rules_dir, pack.clone()), footer))
-}
-
-fn open_security_project_filtered_paths(
-    workspace: &Path,
-    pack: &Rulepack,
-    rules_dir: &Path,
-    include_filters: &[String],
-    exclude_filters: &[String],
-) -> Result<(bonsai_sdk::Project, crate::footer::WorkspaceFooter)> {
-    let (project, footer) = open_project_index_filtered_paths(workspace, include_filters, exclude_filters)?;
     Ok((project.with_loaded_rulepack(rules_dir, pack.clone()), footer))
 }
 
@@ -666,19 +645,7 @@ fn cmd_sources(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let literal_anchor = source_inventory_exact_rule_literal(
-        pack,
-        rule.as_deref(),
-        rule_regex.as_deref(),
-        trust.as_deref(),
-        category.as_deref(),
-        tag.as_deref(),
-    );
-    let (project, _footer) = if let Some(literal) = literal_anchor.as_deref() {
-        open_security_project_matching_literal(workspace, pack, rules_dir, literal)?
-    } else {
-        open_security_project(workspace, pack, rules_dir)?
-    };
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let options = SecurityInventoryOptions {
         rule: rule.clone(),
         rule_regex: rule_regex.clone(),
@@ -714,60 +681,6 @@ fn cmd_sources(
     )
 }
 
-fn source_inventory_exact_rule_literal(
-    pack: &Rulepack,
-    rule: Option<&str>,
-    rule_regex: Option<&str>,
-    trust: Option<&str>,
-    category: Option<&str>,
-    tag: Option<&str>,
-) -> Option<String> {
-    if rule_regex.is_some() {
-        return None;
-    }
-    let exact = rule?;
-    let mut selected = pack.all_rules().into_iter().filter(|candidate| {
-        candidate.kind == RuleKind::Source
-            && candidate.enabled
-            && (candidate.id == exact || candidate.aliases.iter().any(|alias| alias == exact))
-            && trust.is_none_or(|wanted| candidate.trust.is_some_and(|actual| actual.as_str() == wanted))
-            && category.is_none_or(|wanted| candidate.category.as_deref() == Some(wanted))
-            && tag.is_none_or(|wanted| candidate.tag.as_deref() == Some(wanted))
-    });
-    let source_rule = selected.next()?;
-    if selected.next().is_some() {
-        return None;
-    }
-    literal_anchor_for_rule_target(source_rule).map(str::to_string)
-}
-
-fn literal_anchor_for_rule_target(rule: &Rule) -> Option<&str> {
-    let target = rule
-        .match_spec
-        .target
-        .as_ref()
-        .or(rule.match_spec.callee.as_ref())?;
-    target
-        .annotation
-        .as_deref()
-        .or_else(|| target.name.as_deref())
-        .or_else(|| {
-            target
-                .attribute
-                .as_ref()
-                .and_then(|attribute| attribute.last().map(String::as_str))
-        })
-        .filter(|literal| safe_inventory_literal_anchor(literal))
-}
-
-fn safe_inventory_literal_anchor(literal: &str) -> bool {
-    let literal = literal.trim();
-    literal.len() >= 3
-        && literal
-            .bytes()
-            .all(|byte| byte == b'_' || byte == b'$' || byte == b'@' || byte.is_ascii_alphanumeric())
-}
-
 // ---- sinks ----
 fn cmd_sinks(
     workspace: &Path,
@@ -784,11 +697,7 @@ fn cmd_sinks(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
-        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
-    } else {
-        open_security_project(workspace, pack, rules_dir)?
-    };
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let matches = project.security().sinks_with_progress(
@@ -841,11 +750,7 @@ fn cmd_sanitizers(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
-        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
-    } else {
-        open_security_project(workspace, pack, rules_dir)?
-    };
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let matches = project.security().sanitizers_with_progress(
@@ -895,11 +800,7 @@ fn cmd_deps(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
-        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
-    } else {
-        open_security_project(workspace, pack, rules_dir)?
-    };
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let collect_progress = ScopedProgress::new("collecting dependency inventory");
     let inv = project.security().deps(DependencyInventoryOptions {
         framework: framework.clone(),
@@ -1016,19 +917,6 @@ fn cmd_flows(
     if finding.is_some() && explain {
         bail!("`security taint-analysis --finding` cannot be combined with --explain");
     }
-    guard_unscoped_large_taint_analysis(
-        workspace,
-        source.as_deref(),
-        finding.as_deref(),
-        trust.as_deref(),
-        category.as_deref(),
-        sink.as_deref(),
-        severity.as_deref(),
-        tag.as_deref(),
-        &files,
-        &exclude_files,
-        exclude_tests,
-    )?;
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
@@ -1093,11 +981,7 @@ fn cmd_flows(
         }
     }
 
-    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
-        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
-    } else {
-        open_security_project(workspace, pack, rules_dir)?
-    };
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let mut report = project.security().taint_analysis_with_phase_progress(
         TaintAnalysisOptions {
@@ -1308,69 +1192,6 @@ fn emit_cached_page(pages: &[page_cache::CachedPage], current_page: u64) -> Resu
     };
     page_cache::emit_cached_text(&page.text)?;
     Ok(())
-}
-
-fn guard_unscoped_large_taint_analysis(
-    workspace: &Path,
-    source: Option<&str>,
-    finding: Option<&str>,
-    trust: Option<&str>,
-    category: Option<&str>,
-    sink: Option<&str>,
-    severity: Option<&str>,
-    tag: Option<&str>,
-    files: &[String],
-    exclude_files: &[String],
-    exclude_tests: bool,
-) -> Result<()> {
-    if std::env::var("BONSAI_ALLOW_BROAD_TAINT").is_ok() {
-        return Ok(());
-    }
-    let scoped = source.is_some()
-        || finding.is_some()
-        || trust.is_some()
-        || category.is_some()
-        || sink.is_some()
-        || severity.is_some()
-        || tag.is_some()
-        || !files.is_empty()
-        || !exclude_files.is_empty()
-        || exclude_tests;
-    if scoped {
-        return Ok(());
-    }
-    let count = rough_workspace_file_count(workspace, 20_001);
-    if count > 20_000 {
-        bail!(
-            "unscoped taint-analysis over {count}+ files is disabled to avoid OOM. \
-             Add a scope such as `--profile production`, `--file`, `--source`, `--sink`, \
-             `--trust`, or set BONSAI_ALLOW_BROAD_TAINT=1 to force the exhaustive audit run."
-        );
-    }
-    Ok(())
-}
-
-fn rough_workspace_file_count(workspace: &Path, stop_after: usize) -> usize {
-    let mut count = 0usize;
-    let mut builder = ignore::WalkBuilder::new(workspace);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .parents(true)
-        .ignore(true)
-        .add_custom_ignore_filename(".bonsaiignore");
-    for entry in builder.build().filter_map(std::result::Result::ok) {
-        if entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-            count += 1;
-            if count >= stop_after {
-                return count;
-            }
-        }
-    }
-    count
 }
 
 fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &str) -> Result<()> {
@@ -2124,11 +1945,7 @@ fn cmd_source_analysis(
             "security source-analysis does not emit SARIF; use `security taint-analysis --format sarif` for SARIF 2.1.0 output"
         );
     }
-    let (project, _footer) = if !files.is_empty() || !exclude_files.is_empty() {
-        open_security_project_filtered_paths(workspace, pack, rules_dir, &files, &exclude_files)?
-    } else {
-        open_security_project(workspace, pack, rules_dir)?
-    };
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let ws = project.workspace();
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let report = project.security().source_analysis_with_phase_progress(
