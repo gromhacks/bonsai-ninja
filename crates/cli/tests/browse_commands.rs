@@ -5228,12 +5228,12 @@ fn grouped_json_has_both_flow_ids_and_group_ids() {
 }
 
 /// Updating the canonical-chain `inspect` matrix test to also assert
-/// that the rendered chain line carries a flow_id nearby. Pins flow_id
+/// that the rendered chain line carries a stable id nearby. Pins id
 /// visibility on the same output line users already read for the
-/// chain. If grouping later becomes the default, this test catches
-/// the missing flow_id — users must still be able to cite a flow.
+/// chain. Raw taint rows use `T:` ids, while structural graph rows use
+/// `F:` ids; either is citeable in the inspect UI.
 #[test]
-fn every_lang_micro_chain_line_has_flow_id_nearby() {
+fn every_lang_micro_chain_line_has_stable_id_nearby() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
         let Some(out) = run_inspect_graph(&ws, &["--query", c.sink]) else {
@@ -5257,9 +5257,10 @@ fn every_lang_micro_chain_line_has_flow_id_nearby() {
         let window_end = (chain_line_idx + 5).min(output_lines.len());
         let adjacent_window = output_lines[window_start..window_end].join("\n");
         let flow_ids_in_window = extract_flow_ids(&adjacent_window);
+        let taint_ids_in_window = extract_taint_ids(&adjacent_window);
         assert!(
-            !flow_ids_in_window.is_empty(),
-            "{}: chain line at `{}` has no flow_id within ±4 lines; window:\n{adjacent_window}",
+            !flow_ids_in_window.is_empty() || !taint_ids_in_window.is_empty(),
+            "{}: chain line at `{}` has no stable flow/taint id within ±4 lines; window:\n{adjacent_window}",
             c.lang,
             output_lines[chain_line_idx],
         );

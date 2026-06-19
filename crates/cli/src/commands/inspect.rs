@@ -3066,7 +3066,19 @@ fn render_inspect_report_text(
     let bytes_before_payload = out_count::bytes();
 
     if start_offset == 0 && !report.taint_flows.is_empty() {
-        render_taint_flows_table(u, &report.taint_flows);
+        // The taint overlay is rendered before the structural page units,
+        // so it must take its own slice of the page budget. Otherwise broad
+        // rulepack-free taint rows can consume the entire first page before
+        // the normal unit paginator has a chance to enforce --context.
+        const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
+        const TAINT_FLOW_TEXT_LIMIT: usize = 50;
+        let taint_flow_text_limit = budget_bytes
+            .map(|budget| {
+                let taint_budget = (budget * 35 / 100).max(TAINT_FLOW_ROW_AVG_BYTES);
+                ((taint_budget / TAINT_FLOW_ROW_AVG_BYTES) as usize).clamp(1, TAINT_FLOW_TEXT_LIMIT)
+            })
+            .unwrap_or(TAINT_FLOW_TEXT_LIMIT);
+        render_taint_flows_table(u, &report.taint_flows, taint_flow_text_limit);
     }
 
     // Determine which units will render on THIS page (simulate).
@@ -3461,8 +3473,7 @@ fn collect_folded_flow_order(hits: &[HitOut]) -> Vec<&InspectFlowRendered> {
     order
 }
 
-fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow]) {
-    const TAINT_FLOW_TEXT_LIMIT: usize = 50;
+fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow], text_limit: usize) {
     cli_println!();
     cli_println!("{}", u.heading("══ TAINT FLOWS"));
     cli_println!(
@@ -3470,7 +3481,7 @@ fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow]) {
         u.dim("rulepack-free taint-engine paths containing this inspect query / filters")
     );
     let mut table = u.table(&["taint", "entry", "terminal", "location", "args", "chain"]);
-    for flow in flows.iter().take(TAINT_FLOW_TEXT_LIMIT) {
+    for flow in flows.iter().take(text_limit) {
         table.add_row(vec![
             Cell::new(u.annotation(&flow.taint_id)),
             Cell::new(u.kind(&flow.entry)),
@@ -3481,12 +3492,12 @@ fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow]) {
         ]);
     }
     cli_println!("{table}");
-    if flows.len() > TAINT_FLOW_TEXT_LIMIT {
+    if flows.len() > text_limit {
         cli_println!(
             "{}",
             u.dim(&format!(
                 "[{} additional taint flow(s) omitted from the text summary — use --format json for the full set]",
-                flows.len() - TAINT_FLOW_TEXT_LIMIT,
+                flows.len() - text_limit,
             ))
         );
     }
