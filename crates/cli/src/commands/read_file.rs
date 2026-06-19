@@ -11,7 +11,9 @@ use anyhow::Result;
 use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters, ReadFileOut, Severity};
 use std::path::{Path, PathBuf};
 
-use super::{open_project_index_matching_path, open_project_index_only_with_rulepack};
+use super::{
+    open_project_index_matching_path, open_project_index_only, open_project_index_only_with_rulepack,
+};
 use crate::cli_println;
 use crate::footer::render_paging_footer;
 use crate::page_cache;
@@ -21,7 +23,8 @@ use crate::ui::extension_for;
 
 pub(crate) struct ReadFileArgs<'a> {
     pub(crate) workspace: &'a Path,
-    pub(crate) path: &'a str,
+    pub(crate) path: Option<&'a str>,
+    pub(crate) symbol: Option<&'a str>,
     pub(crate) lines: Option<&'a str>,
     pub(crate) from: Option<&'a str>,
     pub(crate) to: Option<&'a str>,
@@ -35,7 +38,7 @@ pub(crate) struct ReadFileArgs<'a> {
 }
 
 pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
-    let resolved_path = resolve_requested_path(args.workspace, args.path)?;
+    let resolved_path = resolve_read_file_target(args.workspace, args.path, args.symbol)?;
     let path = resolved_path.as_str();
     let needs_workspace_analysis = args.from.is_some()
         || args.to.is_some()
@@ -130,6 +133,80 @@ fn resolve_requested_path(workspace: &Path, requested: &str) -> Result<String> {
         workspace.display(),
         format_path_suggestions(suggestions.iter().map(String::as_str))
     );
+}
+
+fn resolve_read_file_target(workspace: &Path, path: Option<&str>, symbol: Option<&str>) -> Result<String> {
+    if let Some(path) = path {
+        return resolve_requested_path(workspace, path);
+    }
+    if let Some(symbol) = symbol {
+        return resolve_symbol_path(workspace, symbol);
+    }
+    anyhow::bail!("read-file needs a path or --symbol <name>");
+}
+
+fn resolve_symbol_path(workspace: &Path, symbol: &str) -> Result<String> {
+    let (project, _footer) = open_project_index_only(workspace)?;
+    let defs = project.browse().defs(bonsai_sdk::DefsFilters {
+        name: Some(symbol),
+        ..Default::default()
+    })?;
+    let exact: Vec<&bonsai_sdk::DefOut> = defs
+        .iter()
+        .filter(|def| def.name == symbol || def.qualified_name.as_deref() == Some(symbol))
+        .collect();
+    let candidates: Vec<&bonsai_sdk::DefOut> = if exact.is_empty() {
+        defs.iter().collect()
+    } else {
+        exact
+    };
+    match candidates.as_slice() {
+        [one] => Ok(one.file.clone()),
+        [] => {
+            let suggestions = nearest_symbol_suggestions(&project, symbol, 6)?;
+            if suggestions.is_empty() {
+                anyhow::bail!("read-file --symbol `{symbol}` did not match any definition");
+            }
+            anyhow::bail!(
+                "read-file --symbol `{symbol}` did not match any definition\nDid you mean:\n{}",
+                format_path_suggestions(suggestions.iter().map(String::as_str))
+            );
+        }
+        many => {
+            let preview = many
+                .iter()
+                .take(8)
+                .map(|def| format!("  {}:{}:{} {}", def.file, def.line, def.column, def.name))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::bail!(
+                "read-file --symbol `{symbol}` is ambiguous; pass a path or a more specific symbol:\n{preview}"
+            );
+        }
+    }
+}
+
+fn nearest_symbol_suggestions(
+    project: &bonsai_sdk::Project,
+    symbol: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let defs = project.browse().defs(Default::default())?;
+    let mut ranked: Vec<(usize, String)> = defs
+        .into_iter()
+        .map(|def| {
+            let qualified = def.qualified_name.unwrap_or_else(|| def.name.clone());
+            let score = edit_distance(&def.name.to_ascii_lowercase(), &symbol.to_ascii_lowercase()).min(
+                edit_distance(&qualified.to_ascii_lowercase(), &symbol.to_ascii_lowercase()),
+            );
+            (score, qualified)
+        })
+        .collect();
+    ranked.sort_by(|(score_a, name_a), (score_b, name_b)| {
+        score_a.cmp(score_b).then_with(|| name_a.cmp(name_b))
+    });
+    ranked.dedup_by(|(_, a), (_, b)| a == b);
+    Ok(ranked.into_iter().take(limit).map(|(_, name)| name).collect())
 }
 
 #[derive(Clone, Debug)]
@@ -392,7 +469,8 @@ fn read_file_filters_hash(args: &ReadFileArgs<'_>) -> u64 {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     paging::hash_filters(&[
-        ("path", args.path),
+        ("path", args.path.unwrap_or("")),
+        ("symbol", args.symbol.unwrap_or("")),
         ("lines", args.lines.unwrap_or("")),
         ("from", args.from.unwrap_or("")),
         ("to", args.to.unwrap_or("")),

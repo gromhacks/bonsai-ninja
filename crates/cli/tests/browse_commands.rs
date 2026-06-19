@@ -2363,6 +2363,35 @@ fn read_file_resolves_unique_nested_basename() {
 }
 
 #[test]
+fn read_file_symbol_opens_defining_file() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "read-file",
+        ws.to_str().unwrap(),
+        "--symbol",
+        "verify_token",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    let locator_file = parsed["locator"]["file"]
+        .as_str()
+        .expect("read-file locator.file");
+    assert!(
+        locator_file.ends_with("auth_service.py"),
+        "read-file --symbol should open the defining file; got locator {locator_file:?}\n{out}"
+    );
+    assert!(
+        parsed["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("def verify_token")),
+        "read-file --symbol should render the definition source:\n{out}"
+    );
+}
+
+#[test]
 fn read_file_rejects_ambiguous_basename_with_candidates() {
     let Some(bin) = bin_path() else {
         return;
@@ -4775,6 +4804,92 @@ fn json_tree_contains_id_field(value: &serde_json::Value, field_name: &str, expe
             .any(|child| json_tree_contains_id_field(child, field_name, expected_prefix)),
         _ => false,
     }
+}
+
+#[test]
+fn show_flow_id_reopens_inspect_drilldown() {
+    let ws = ws_path();
+    let Some(full) = run_inspect_graph(&ws, &["--query", "os.system"]) else {
+        return;
+    };
+    let ids = extract_flow_ids(&full);
+    let Some(target) = ids.first() else {
+        panic!("fixture should emit at least one F: id:\n{full}");
+    };
+    let Some(out) = run(&["show", ws.to_str().unwrap(), target, "--compact"]) else {
+        return;
+    };
+    assert!(
+        out.contains(target) && out.contains("FLOW"),
+        "show F: should delegate to inspect and render the target flow; got:\n{out}"
+    );
+}
+
+#[test]
+fn show_edge_id_reopens_dump_edges_drilldown() {
+    let ws = ws_path();
+    let Some(full) = run(&["dump-edges", ws.to_str().unwrap()]) else {
+        return;
+    };
+    let ids = extract_edge_ids(&full);
+    let Some(target) = ids.first() else {
+        panic!("fixture should emit at least one E: id:\n{full}");
+    };
+    let Some(out) = run(&["show", ws.to_str().unwrap(), target, "--compact"]) else {
+        return;
+    };
+    let got = extract_edge_ids(&out);
+    assert_eq!(
+        got,
+        vec![target.clone()],
+        "show E: should delegate to dump-edges --edge; got:\n{out}"
+    );
+}
+
+#[test]
+fn show_taint_id_reopens_inspect_taint_drilldown() {
+    let ws = ws_path();
+    let Some(full) = run(&["inspect", ws.to_str().unwrap(), "--query", "os.system"]) else {
+        return;
+    };
+    let ids = extract_taint_ids(&full);
+    let Some(target) = ids.first() else {
+        panic!("fixture should emit at least one T: id:\n{full}");
+    };
+    let Some(out) = run(&["show", ws.to_str().unwrap(), target]) else {
+        return;
+    };
+    assert!(
+        out.contains(target) && out.contains("TAINT FLOWS"),
+        "show T: should delegate to inspect taint drilldown; got:\n{out}"
+    );
+}
+
+#[test]
+fn show_resolver_id_requires_original_query() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws_path();
+    let out = Command::new(&bin)
+        .args(["show", ws.to_str().unwrap(), "R:00000000", "--no-color"])
+        .env("COLUMNS", "200")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "show R: without --query must fail; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        rendered.contains("--query"),
+        "show R: error should explain the missing resolver query; got:\n{rendered}"
+    );
 }
 
 /// Every language's canonical chain render must carry at least one

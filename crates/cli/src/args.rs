@@ -386,6 +386,72 @@ pub(crate) enum Cmd {
         #[command(flatten)]
         output: OutputPathArg,
     },
+
+    /// Resolve a stable bonsai id and open its owning drilldown view.
+    #[command(
+        display_order = 3,
+        long_about = themed_subcommand_long_about(
+            "Resolve a stable bonsai id and re-open the command view \
+             that owns it. Supports structural flow ids (`F:`), flow \
+             group ids (`G:`), raw inspect taint ids (`T:`), call-edge \
+             ids (`E:`), AST node ids (`N:`), security finding ids \
+             (`S:`), and resolver candidate ids (`R:`). `R:` ids are \
+             scoped to the resolver query that produced them, so pass \
+             `--query <name>` with `show R:...`.\n\
+             \n\
+             This is a navigation shortcut over existing commands: \
+             `F:` / `G:` / `T:` use `inspect`, `E:` uses `dump-edges`, \
+             `N:` uses `dump-ast`, `R:` uses `dump-resolve`, and `S:` \
+             uses `security taint-analysis --finding`."
+        ),
+        after_help = themed_subcommand_after_help(
+            "EXAMPLES\n\n  \
+             # Re-open one structural flow from a defs/search/inspect row\n  \
+             $ bonsai-ninja show ./src F:0123456789abcdef\n  \
+             \n  \
+             # Re-open one raw inspect taint path\n  \
+             $ bonsai-ninja show ./src T:aabbccdd\n  \
+             \n  \
+             # Re-open one security finding\n  \
+             $ bonsai-ninja show ./src S:0123456789abcdef --rules-dir security-patterns\n  \
+             \n  \
+             # Resolver candidates need the original resolver query\n  \
+             $ bonsai-ninja show ./src R:aabbccdd --query execute"
+        )
+    )]
+    Show {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Stable id to resolve (`F:`, `G:`, `T:`, `E:`, `N:`, `S:`, or `R:`).
+        id: String,
+        /// Query/name required when resolving an `R:` candidate id.
+        #[arg(long)]
+        query: Option<String>,
+        /// File context for `R:` resolver candidate ids.
+        #[arg(long = "in-file")]
+        in_file: Option<String>,
+        /// Render compact source/flow output when the delegated command supports it.
+        #[arg(long, default_value_t = false)]
+        compact: bool,
+        /// Token-budget ceiling for text output.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based number, `next`, or `P:` cursor.
+        #[arg(long)]
+        page: Option<String>,
+        /// Lift caps in the delegated command.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` or `json` where supported.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        /// Directory containing the rulepack tree for `S:` finding ids.
+        #[arg(long, value_name = "DIR", env = "BONSAI_RULES_DIR")]
+        rules_dir: Option<PathBuf>,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
     /// Workspace-wide diagnostics.
     #[command(
         display_order = 11,
@@ -2119,8 +2185,9 @@ pub(crate) enum Cmd {
         name = "read-file",
         long_about = themed_subcommand_long_about(
             "Cat-style view of a single file. Pass an exact path, \
-             unique workspace suffix, or unique basename. By default \
-             this opens and indexes only the resolved file, so it is \
+             unique workspace suffix, unique basename, or `--symbol` \
+             to open the defining file for a symbol. By default this \
+             opens and indexes only the resolved file, so it is \
              suitable for large workspaces after `search`, `defs`, \
              or syntax `inspect` finds an anchor. Semantic overlays are explicit: \
              `--rules-dir`, `--from`, `--to`, `--max-inlined-bodies`, \
@@ -2150,6 +2217,9 @@ pub(crate) enum Cmd {
              # Unique basename/suffix after search or defs finds an anchor\n  \
              $ bonsai-ninja read-file ./src verify_token.py\n  \
              \n  \
+             # Jump from a symbol to its defining file\n  \
+             $ bonsai-ninja read-file ./src --symbol verify_token\n  \
+             \n  \
              # Compact mark list for quick triage\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py --compact\n  \
              \n  \
@@ -2164,7 +2234,11 @@ pub(crate) enum Cmd {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// File path, unique workspace suffix, or unique basename.
-        path: String,
+        path: Option<String>,
+        /// Open the file defining this symbol. The positional path
+        /// takes precedence when both are provided.
+        #[arg(long)]
+        symbol: Option<String>,
         /// Restrict to a 1-based line range (`A:B`, inclusive).
         #[arg(long)]
         lines: Option<String>,
@@ -2612,6 +2686,9 @@ pub(crate) enum SecurityAction {
         /// Restrict to source rules whose id matches this regex.
         #[arg(long)]
         source: Option<String>,
+        /// Re-render only the finding with this stable `S:<hex>` id.
+        #[arg(long)]
+        finding: Option<String>,
         /// Source trust class narrower — `remote`, `local`, `service`,
         /// `ipc`, `database`, `library`, `config`, or `physical`.
         #[arg(long)]

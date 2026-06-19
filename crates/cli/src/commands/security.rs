@@ -301,6 +301,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             rules_dir: _,
             profile,
             source,
+            finding,
             mut trust,
             category,
             sink,
@@ -339,6 +340,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 &pack,
                 &rules_dir,
                 source,
+                finding,
                 trust,
                 category,
                 sink,
@@ -883,6 +885,7 @@ fn cmd_flows(
     pack: &Rulepack,
     rules_dir: &Path,
     source: Option<String>,
+    finding: Option<String>,
     trust: Option<String>,
     category: Option<String>,
     sink: Option<String>,
@@ -911,6 +914,9 @@ fn cmd_flows(
     if baseline.is_some() && matches!(format, BrowseFormat::Sarif) {
         bail!("`security taint-analysis --baseline` supports text or json output, not sarif");
     }
+    if finding.is_some() && explain {
+        bail!("`security taint-analysis --finding` cannot be combined with --explain");
+    }
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
@@ -929,6 +935,7 @@ fn cmd_flows(
     let filters_hash = filter_signature(&[
         ("kind", "taint-analysis"),
         ("source", source.as_deref().unwrap_or("")),
+        ("finding", finding.as_deref().unwrap_or("")),
         ("trust", trust.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),
         ("sink", sink.as_deref().unwrap_or("")),
@@ -976,7 +983,7 @@ fn cmd_flows(
 
     let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let mut analysis_progress = SecurityAnalysisProgress::new();
-    let report = project.security().taint_analysis_with_phase_progress(
+    let mut report = project.security().taint_analysis_with_phase_progress(
         TaintAnalysisOptions {
             source: source.clone(),
             trust: trust.clone(),
@@ -996,6 +1003,9 @@ fn cmd_flows(
         },
         |event| analysis_progress.handle(event),
     )?;
+    if let Some(finding_id) = finding.as_deref() {
+        filter_report_to_finding_id(&mut report, finding_id)?;
+    }
 
     if explain {
         return emit_taint_explain(
@@ -1181,6 +1191,24 @@ fn emit_cached_page(pages: &[page_cache::CachedPage], current_page: u64) -> Resu
         bail!("rendered taint page {current_page} missing from cache window");
     };
     page_cache::emit_cached_text(&page.text)?;
+    Ok(())
+}
+
+fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &str) -> Result<()> {
+    report.findings.retain(|combined| {
+        combined.finding.finding_id == finding_id
+            || combined
+                .member_finding_ids
+                .iter()
+                .any(|member_id| member_id == finding_id)
+    });
+    if report.findings.is_empty() {
+        bail!(
+            "no finding matching `{finding_id}` in this workspace + filter combination. \
+             Finding ids are printed as `S:<hex>` in `security taint-analysis` text output \
+             and as `finding.finding_id` in JSON output."
+        );
+    }
     Ok(())
 }
 

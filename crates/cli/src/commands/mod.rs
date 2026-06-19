@@ -23,6 +23,7 @@ pub(crate) mod export;
 pub(crate) mod inspect;
 pub(crate) mod read_file;
 pub(crate) mod security;
+pub(crate) mod show;
 pub(crate) mod trace;
 pub(crate) mod tree;
 
