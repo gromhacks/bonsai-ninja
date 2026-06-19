@@ -309,7 +309,7 @@
   tag: jndi-injection
   severity: critical
   packages: ["javax.naming"]
-  cwe: [CWE-074, CWE-502]
+  cwe: [CWE-074, CWE-94, CWE-502]
   match:
     kind: call
     callee:
@@ -345,7 +345,7 @@
   tag: jndi-injection
   severity: critical
   packages: ["javax.naming"]
-  cwe: [CWE-074, CWE-502]
+  cwe: [CWE-074, CWE-94, CWE-502]
   match:
     kind: call
     callee:
@@ -372,7 +372,7 @@
   tag: jndi-injection
   severity: critical
   packages: ["javax.naming"]
-  cwe: [CWE-074, CWE-502]
+  cwe: [CWE-074, CWE-94, CWE-502]
   match:
     kind: call
     callee:
@@ -418,7 +418,7 @@
   tag: jndi-injection
   severity: critical
   packages: ["javax.naming"]
-  cwe: [CWE-074, CWE-502]
+  cwe: [CWE-074, CWE-94, CWE-502]
   match:
     kind: call
     callee:

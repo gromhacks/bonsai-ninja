@@ -25,6 +25,15 @@
         }
       }
     expect_match_text: [ctx.search]
+  - name: JNDI InitialDirContext search fully qualified no import
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          javax.naming.directory.InitialDirContext ctx = new javax.naming.directory.InitialDirContext();
+          ctx.search("ou=users", input, null);
+        }
+      }
+    expect_match_text: [ctx.search]
   - name: JNDI DirContext search literal filter negative
     code: |
       import javax.naming.directory.*;

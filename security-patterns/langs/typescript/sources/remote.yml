@@ -28,8 +28,8 @@
   tag: http-input
   category: http-input
   payload_types: [query]
-  frameworks: [express, restify, hono]
-  packages: [express, restify, hono]
+  frameworks: [express, restify, hono, hapi]
+  packages: [express, restify, hono, "@hapi/hapi"]
   match:
     kind: read
     target:
@@ -41,7 +41,7 @@
       function demo(input, req, obj) {
         return req.query;
       }
-  description: "Express/restify/Hono req.query."
+  description: "Express/restify/Hono/Hapi req.query."
 
 - id: typescript.source.express_req_params
   enabled: true
@@ -71,8 +71,8 @@
   tag: http-input
   category: http-input
   payload_types: [header]
-  frameworks: [express, hapi]
-  packages: [express, "@hapi/hapi"]
+  frameworks: [express, hapi, fastify]
+  packages: [express, "@hapi/hapi", fastify]
   match:
     kind: read
     target:
@@ -84,7 +84,14 @@
       function demo(input, req, obj) {
         return req.headers;
       }
-  description: "Express/Hapi req.headers."
+  - name: fastify req headers
+    code: |
+      const _u = require("fastify");
+      function demo(req: any) {
+        return req.headers["user-agent"];
+      }
+    expect_match_text: [req.headers]
+  description: "Express/Hapi/Fastify req.headers."
 
 - id: typescript.source.express_req_cookies
   enabled: true
@@ -506,40 +513,97 @@
     expect_match_text: [payload]
   description: "NestJS @SubscribeMessage handler @MessageBody() parameter - websocket caller-controlled message payload."
 
+- id: typescript.source.nestjs_subscribe_message_payload_param
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: ws-input
+  payload_types: [event]
+  packages: ["@nestjs/websockets"]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*$"
+      param_index_in: [1]
+  constraints:
+  - enclosing_decorator_in: [SubscribeMessage]
+  match_examples:
+  - name: nestjs websocket raw payload parameter
+    code: |
+      import { SubscribeMessage, WebSocketGateway } from "@nestjs/websockets";
+      @WebSocketGateway()
+      class EventsGateway {
+        @SubscribeMessage("run")
+        handle(client: any, payload: { expr: string }) {
+          return payload.expr;
+        }
+      }
+    expect_match_text: [payload]
+  - name: nestjs websocket client parameter negative
+    code: |
+      import { SubscribeMessage, WebSocketGateway } from "@nestjs/websockets";
+      @WebSocketGateway()
+      class EventsGateway {
+        @SubscribeMessage("run")
+        handle(client: any) {
+          return client.id;
+        }
+      }
+    expect_no_match: true
+  description: "NestJS @SubscribeMessage handler second parameter - websocket caller-controlled message payload when @MessageBody() is omitted."
+
 - id: typescript.source.nestjs_query_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
   tag: http-input
   category: http-input
+  payload_types: [query]
   packages: ["@nestjs/common"]
   match:
     kind: param
     target:
-      name: Query
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
+      annotation: Query
+  match_examples:
+  - name: nestjs query parameter
+    code: |
+      import { Query, Get } from "@nestjs/common";
+      class DemoController {
+        @Get()
+        list(@Query("sort_by") sortBy: string) {
+          return sortBy;
+        }
+      }
+    expect_match_text: [sortBy]
+  description: "NestJS @Query() / @Query('field') parameter - URL query string value."
 
 - id: typescript.source.nestjs_param_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
   tag: http-input
   category: http-input
+  payload_types: [path]
   packages: ["@nestjs/common"]
   match:
     kind: param
     target:
-      name: Param
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
+      annotation: Param
+  match_examples:
+  - name: nestjs route param
+    code: |
+      import { Param, Get } from "@nestjs/common";
+      class DemoController {
+        @Get(":id")
+        show(@Param("id") id: string) {
+          return id;
+        }
+      }
+    expect_match_text: [id]
+  description: "NestJS @Param() / @Param('field') parameter - route path parameter."
 
 - id: typescript.source.nestjs_headers_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
   tag: http-input
@@ -549,13 +613,22 @@
   match:
     kind: param
     target:
-      name: Headers
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
+      annotation: Headers
+  match_examples:
+  - name: nestjs headers parameter
+    code: |
+      import { Headers, Get } from "@nestjs/common";
+      class DemoController {
+        @Get()
+        show(@Headers("x-user") user: string) {
+          return user;
+        }
+      }
+    expect_match_text: [user]
+  description: "NestJS @Headers() / @Headers('name') parameter - request header value or map."
 
 - id: typescript.source.nestjs_session_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
   tag: http-input
@@ -564,13 +637,22 @@
   match:
     kind: param
     target:
-      name: Session
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
+      annotation: Session
+  match_examples:
+  - name: nestjs session parameter
+    code: |
+      import { Session, Get } from "@nestjs/common";
+      class DemoController {
+        @Get()
+        show(@Session() session: any) {
+          return session.user;
+        }
+      }
+    expect_match_text: [session]
+  description: "NestJS @Session() parameter - caller-associated session object."
 
 - id: typescript.source.nestjs_req_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
   tag: http-input
@@ -579,23 +661,44 @@
   match:
     kind: param
     target:
-      name: Req
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
+      annotation: Req
+  match_examples:
+  - name: nestjs request parameter
+    code: |
+      import { Req, Get } from "@nestjs/common";
+      class DemoController {
+        @Get()
+        show(@Req() req: any) {
+          return req.query.q;
+        }
+      }
+    expect_match_text: [req]
+  description: "NestJS @Req() parameter - raw request object."
 
 - id: typescript.source.nestjs_ip_decorator
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
   tag: http-input
   category: http-input
+  payload_types: [ip]
   packages: ["@nestjs/common"]
   match:
     kind: param
     target:
-      name: Ip
-  description: "Disabled - matcher only sees parameter identifiers, not NestJS decorator names."
+      annotation: Ip
+  match_examples:
+  - name: nestjs ip parameter
+    code: |
+      import { Ip, Get } from "@nestjs/common";
+      class DemoController {
+        @Get()
+        show(@Ip() ip: string) {
+          return ip;
+        }
+      }
+    expect_match_text: [ip]
+  description: "NestJS @Ip() parameter - remote client IP as interpreted by the framework/proxy chain."
 
 - id: typescript.source.eventsource_message_data
   enabled: false
@@ -638,7 +741,7 @@
   tag: graphql-input
   category: graphql-input
   payload_types: [graphql]
-  packages: [graphql, "@nestjs/graphql", "type-graphql", "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
+  packages: [graphql, "@nestjs/graphql", "type-graphql", apollo-server-hapi, "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: param
     target:
@@ -703,6 +806,32 @@
       }
     expect_match_text: [req.payload]
   description: "Hapi req.payload - HTTP request body when the handler parameter is named `req`."
+
+- id: typescript.source.hapi_req_query
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.source.express_req_query
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [hapi]
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [req, query]
+  match_examples:
+  - name: hapi req query
+    code: |
+      const _u = require("@hapi/hapi");
+      function handler(req: any, h: any) {
+        return req.query.filename;
+      }
+    expect_match_text: [req.query]
+  description: "Disabled duplicate - Hapi `req.query` is the same `[req, query]` adapter fact as the Express-compatible `typescript.source.express_req_query` rule, which now carries the Hapi package metadata."
 
 - id: typescript.source.hapi_request_query
   enabled: false
@@ -1044,6 +1173,30 @@
       }
   description: "tRPC procedure ctx.input - attacker-supplied procedure argument."
 
+- id: typescript.source.trpc_callback_input
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: rpc-input
+  payload_types: [json]
+  packages: ["@trpc/server"]
+  match:
+    kind: read
+    target:
+      name: trpc.input
+  match_examples:
+  - name: trpc destructured callback input
+    code: |
+      import { initTRPC } from "@trpc/server";
+      const t = initTRPC.create();
+      export const appRouter = t.router({
+        list: t.procedure.input(z.object({ q: z.string() })).query(async ({ input }) => {
+          return sink(input.q);
+        }),
+      });
+    expect_match_text: [trpc.input]
+  description: "tRPC procedure callback destructured `input` parameter - attacker-supplied procedure argument."
+
 - id: typescript.source.trpc_resolver_input_property
   enabled: false
   disabled_reason:
@@ -1075,7 +1228,7 @@
   category: http-input
   payload_types: [form, json, query]
   frameworks: [adonisjs]
-  packages: ["@adonisjs/core", "@adonisjs/http-server"]
+  packages: ["@adonisjs/core", "@adonisjs/http-server", "@ioc:Adonis/Core/HttpContext"]
   match:
     kind: call
     callee:
@@ -1090,6 +1243,13 @@
         return request.input("q");
       }
     expect_match_text: [request.input]
+  - name: adonis ioc request input
+    code: |
+      import type { HttpContextContract } from "@ioc:Adonis/Core/HttpContext";
+      function show({ request }: HttpContextContract) {
+        return request.input("sort", "id");
+      }
+    expect_match_text: [request.input]
   description: "AdonisJS request.input(name) - merged body/query/route input value controlled by the HTTP client."
 
 - id: typescript.source.adonis_request_all
@@ -1100,7 +1260,7 @@
   category: http-input
   payload_types: [form, json, query]
   frameworks: [adonisjs]
-  packages: ["@adonisjs/core", "@adonisjs/http-server"]
+  packages: ["@adonisjs/core", "@adonisjs/http-server", "@ioc:Adonis/Core/HttpContext"]
   match:
     kind: call
     callee:
@@ -1590,7 +1750,7 @@
   trust: remote
   tag: graphql-input
   payload_types: [graphql]
-  packages: [graphql, "@nestjs/graphql", type-graphql, "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
+  packages: [graphql, "@nestjs/graphql", type-graphql, apollo-server-hapi, "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: read
     target:
@@ -1641,7 +1801,7 @@
   trust: remote
   tag: graphql-input
   payload_types: [graphql]
-  packages: [graphql, "@nestjs/graphql", type-graphql, "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
+  packages: [graphql, "@nestjs/graphql", type-graphql, apollo-server-hapi, "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: read
     target:
@@ -1679,11 +1839,11 @@
   category: http-input
   payload_types: [json, form, text]
   frameworks: [next, nextjs, bun, fetch]
-  packages: [next, bun]
+  packages: [next]
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(json|formData|text|arrayBuffer)$"
+      attribute: [request, json]
   match_examples:
   - name: next request json
     code: |
@@ -1692,6 +1852,22 @@
         return request.json();
       }
     expect_match_text: [request.json]
+  description: "Fetch Request json() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: typescript.source.next_request_form_data
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [next, nextjs, fetch]
+  packages: [next]
+  match:
+    kind: call
+    callee:
+      attribute: [request, formData]
+  match_examples:
   - name: next request formData
     code: |
       const _u = require("next");
@@ -1699,7 +1875,169 @@
         return request.formData();
       }
     expect_match_text: [request.formData]
-  description: "Fetch Request body readers used by Next.js App Router and Bun.serve - attacker-controlled request body payloads."
+  description: "Fetch Request formData() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: typescript.source.next_request_text
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [next, nextjs, fetch]
+  packages: [next]
+  match:
+    kind: call
+    callee:
+      attribute: [request, text]
+  match_examples:
+  - name: next request text
+    code: |
+      const _u = require("next");
+      export async function POST(request: Request) {
+        return request.text();
+      }
+    expect_match_text: [request.text]
+  description: "Fetch Request text() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: typescript.source.next_request_array_buffer
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [next, nextjs, fetch]
+  packages: [next]
+  match:
+    kind: call
+    callee:
+      attribute: [request, arrayBuffer]
+  match_examples:
+  - name: next request arrayBuffer
+    code: |
+      const _u = require("next");
+      export async function POST(request: Request) {
+        return request.arrayBuffer();
+      }
+    expect_match_text: [request.arrayBuffer]
+  description: "Fetch Request arrayBuffer() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: typescript.source.fetch_req_json
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, json]
+  match_examples:
+  - name: bun fetch request json
+    code: |
+      Bun.serve({
+        async fetch(req: Request) {
+          return req.json();
+        },
+      });
+    expect_match_text: [req.json]
+  description: "Fetch Request json() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: typescript.source.fetch_req_form_data
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, formData]
+  match_examples:
+  - name: bun fetch request formData
+    code: |
+      Bun.serve({
+        async fetch(req: Request) {
+          return req.formData();
+        },
+      });
+    expect_match_text: [req.formData]
+  description: "Fetch Request formData() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: typescript.source.fetch_req_text
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, text]
+  match_examples:
+  - name: bun fetch request text
+    code: |
+      Bun.serve({
+        async fetch(req: Request) {
+          return req.text();
+        },
+      });
+    expect_match_text: [req.text]
+  description: "Fetch Request text() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: typescript.source.fetch_req_array_buffer
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, arrayBuffer]
+  match_examples:
+  - name: bun fetch request arrayBuffer
+    code: |
+      Bun.serve({
+        async fetch(req: Request) {
+          return req.arrayBuffer();
+        },
+      });
+    expect_match_text: [req.arrayBuffer]
+  description: "Fetch Request arrayBuffer() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: typescript.source.fetch_req_url
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, query]
+  frameworks: [bun, fetch]
+  match:
+    kind: read
+    target:
+      attribute: [req, url]
+      in_method: [fetch]
+  match_examples:
+  - name: bun fetch request url
+    code: |
+      Bun.serve({
+        fetch(req: Request) {
+          return req.url;
+        },
+      });
+    expect_match_text: [req.url]
+  description: "Fetch Request req.url on a conventional Bun/Fetch handler parameter - attacker-controlled request URL."
 
 - id: typescript.source.next_request_url_headers
   enabled: true
@@ -1761,7 +2099,7 @@
   tag: http-input
   category: http-input
   payload_types: [multipart, file]
-  packages: [multer, formidable, busboy, express-fileupload]
+  packages: [multer, formidable, busboy, express-fileupload, "@nestjs/common", "@nestjs/platform-express"]
   match:
     kind: read
     target:
@@ -1772,6 +2110,15 @@
       const _u = require("multer");
       function demo(file: any) {
         return file.originalname;
+      }
+    expect_match_text: [file.originalname]
+  - name: nestjs uploaded file originalname
+    code: |
+      import { UploadedFile } from "@nestjs/common";
+      class UploadController {
+        upload(@UploadedFile() file: Express.Multer.File) {
+          return file.originalname;
+        }
       }
     expect_match_text: [file.originalname]
   - name: busboy info filename

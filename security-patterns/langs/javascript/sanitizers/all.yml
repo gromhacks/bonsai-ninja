@@ -1164,6 +1164,40 @@
     expect_no_match: true
   description: "String.replace(/[^allowlist]/g, \"\") - strips every character outside a small explicit allowlist."
 
+# -- Template mitigations -----------------------------------------------------
+- id: javascript.sanitizer.ejs_static_catalog_render
+  enabled: true
+  language: javascript
+  tag: ssti
+  packages: [ejs]
+  imports: [ejs]
+  match:
+    kind: call
+    callee:
+      attribute: [ejs, render]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "\\b(CATALOG|TEMPLATES|SAFE_TEMPLATES|ALLOWED_TEMPLATES)\\s*\\["
+  match_examples:
+  - name: ejs render from static catalog
+    code: |
+      const ejs = require("ejs");
+      const CATALOG = { default: "Hello <%= user.name %>" };
+      function preview(name, user) {
+        const tmpl = CATALOG[name] ?? CATALOG.default;
+        return ejs.render(tmpl, { user });
+      }
+    expect_match_text: [ejs.render]
+  - name: ejs render direct user template negative
+    code: |
+      const ejs = require("ejs");
+      function preview(tmpl, user) {
+        return ejs.render(tmpl, { user });
+      }
+    expect_no_match: true
+  description: "ejs.render with template source selected from a local static template catalog rather than attacker-provided template text."
+
 # -- Additional focused validation, containment, binding, and escaping --------
 - id: javascript.sanitizer.named_regex_match
   enabled: false
@@ -1743,3 +1777,22 @@
       }
     expect_match_text: [slowDown]
   description: "express-slow-down middleware - same enumeration as rateLimit."
+
+- id: javascript.passthrough.promise_catch
+  enabled: true
+  language: javascript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$.()$]*\\.catch$"
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: promise catch preserves resolved request body
+    code: |
+      async function handle(req) {
+        return req.json().catch(() => ({}));
+      }
+    expect_match_text: [req.json().catch]
+  description: "Promise.catch(onRejected) returns the original fulfilled value; taint from request-body promises must survive fallback error handling."

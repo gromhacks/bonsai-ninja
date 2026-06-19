@@ -107,6 +107,52 @@
       }
     expect_no_match: true
   description: "Logger.debug(... + tainted) - log-injection via concat."
+- id: java.log_injection.logger_info_instance_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  packages:
+  - org.slf4j
+  - org.apache.logging.log4j
+  imports:
+  - org.slf4j
+  - org.apache.logging.log4j
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])info$'
+      receiver_type_in:
+      - Logger
+      - org.slf4j.Logger
+      - org.apache.logging.log4j.Logger
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: slf4j instance logger info concat
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle(String input) {
+          log.info("actor=" + input);
+        }
+      }
+    expect_match_text: [log.info]
+  - name: instance logger info literal negative
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle(String input) {
+          log.info("actor=system");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.info tainted message on a typed SLF4J/Log4j receiver - log forging via CRLF/control characters."
 - id: java.log_injection.logger_warn_concat
   enabled: true
   language: java
@@ -135,6 +181,52 @@
       }
     expect_no_match: true
   description: "Logger.warn(... + tainted) - log-injection via concat."
+- id: java.log_injection.logger_warn_instance_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  packages:
+  - org.slf4j
+  - org.apache.logging.log4j
+  imports:
+  - org.slf4j
+  - org.apache.logging.log4j
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])warn$'
+      receiver_type_in:
+      - Logger
+      - org.slf4j.Logger
+      - org.apache.logging.log4j.Logger
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: slf4j instance logger warn concat
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle(String input) {
+          log.warn("actor=" + input);
+        }
+      }
+    expect_match_text: [log.warn]
+  - name: instance logger warn literal negative
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle(String input) {
+          log.warn("actor=system");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.warn tainted message on a typed SLF4J/Log4j receiver - log forging via CRLF/control characters."
 - id: java.log_injection.logger_trace_concat
   enabled: true
   language: java
@@ -191,6 +283,52 @@
       }
     expect_no_match: true
   description: "Logger.fatal(... + tainted) - log-injection via concat."
+- id: java.log_injection.logger_error_instance_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  packages:
+  - org.slf4j
+  - org.apache.logging.log4j
+  imports:
+  - org.slf4j
+  - org.apache.logging.log4j
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])error$'
+      receiver_type_in:
+      - Logger
+      - org.slf4j.Logger
+      - org.apache.logging.log4j.Logger
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: slf4j instance logger error concat
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle(String input) {
+          log.error("actor=" + input);
+        }
+      }
+    expect_match_text: [log.error]
+  - name: instance logger error literal negative
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle(String input) {
+          log.error("actor=system");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.error tainted message on a typed SLF4J/Log4j receiver - log forging via CRLF/control characters."
 - id: java.log_injection.mdc_put
   enabled: true
   language: java
@@ -246,3 +384,56 @@
   - java.nosql.basicdbobject_where_put
   - java.nosql.basicdbobjectbuilder_where
   - java.nosql.basicdbobject_operator_put
+- id: java.log_injection.mdc_context_logger_info
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: high
+  cwe:
+  - CWE-117
+  packages:
+  - org.slf4j
+  - org.apache.logging.log4j
+  imports:
+  - org.slf4j
+  - org.apache.logging.log4j
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])info$'
+  constraints:
+  - receiver_type_in:
+    - Logger
+    - org.slf4j.Logger
+    - org.apache.logging.log4j.Logger
+  - enclosing_decorator_in:
+    - RequestMapping
+    - GetMapping
+    - PostMapping
+    - PutMapping
+    - DeleteMapping
+    - PatchMapping
+  match_examples:
+  - name: slf4j mapped handler literal info
+    code: |
+      import org.slf4j.Logger;
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        private final Logger log = null;
+        @PostMapping("/audit")
+        void handle() {
+          log.info("audit event recorded");
+        }
+      }
+    expect_match_text: [log.info]
+  - name: non handler literal info negative
+    code: |
+      import org.slf4j.Logger;
+      class App {
+        private final Logger log = null;
+        void handle() {
+          log.info("audit event recorded");
+        }
+      }
+    expect_no_match: true
+  description: "Typed logger call in a Spring request handler that consumes thread-local MDC context; taint reachability is via a proven tainted MDC.put flow."

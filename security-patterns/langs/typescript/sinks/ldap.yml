@@ -63,6 +63,59 @@
       \ {\n  return ev.search(\"(uid=alice)\");\n}\n"
     expect_no_match: true
   description: "ldapjs ev.search(filter) - tainted LDAP filter expression."
+- id: typescript.ldap.ldapjs_search_options_filter
+  enabled: true
+  language: typescript
+  tag: ldap-injection
+  severity: high
+  packages:
+  - ldapjs
+  - ldapts
+  imports:
+  - ldapjs
+  - ldapts
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      regex: "^(?:this\\.)?[A-Za-z_$][A-Za-z0-9_$]*\\.search$"
+      base_name_in:
+      - this
+      - client
+      - _client
+      - ldap
+      - ldapClient
+      - dir
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ldapjs search options filter
+    code: |
+      const _u = require("ldapjs");
+      function demo(_client: any, filter: string) {
+        return _client.search("ou=people", { filter, scope: "sub" }, () => {});
+      }
+    expect_match_text: [_client.search]
+  - name: ldapjs this client search options filter
+    code: |
+      const _u = require("ldapjs");
+      class Directory {
+        client: any;
+        find(filter: string) {
+          return this.client.search("ou=people", { filter, scope: "sub" }, () => {});
+        }
+      }
+    expect_match_text: [this.client.search]
+  - name: ldapjs search options literal negative
+    code: |
+      const _u = require("ldapjs");
+      function demo(_client: any) {
+        return _client.search("ou=people", { filter: "(uid=alice)", scope: "sub" }, () => {});
+      }
+    expect_no_match: true
+  description: "ldapjs/ldapts client.search(base, {filter: tainted}) - tainted LDAP filter in the options object."
 - id: typescript.ldap.ldapjs_modify
   enabled: true
   language: typescript

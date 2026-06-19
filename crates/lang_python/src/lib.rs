@@ -2,9 +2,12 @@
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of, GENERIC_HANDLER},
-    AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    kit::{
+        collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace, parse_with, span_of,
+        GENERIC_HANDLER,
+    },
+    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -249,14 +252,22 @@ impl LanguageAdapter for PythonAdapter {
                     .filter(|pattern| python_match_pattern_owned_by_decl(pattern, decl.span, &callable_spans))
                     .cloned()
                     .collect();
+                let comprehension_iterable_calls =
+                    collect_python_comprehension_iterable_call_events(&tree, file, src, decl.span);
                 augment_python_match_pattern_flow_events(&mut decl.flow_events, &owned_match_patterns);
                 augment_python_comprehension_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                insert_python_flow_events_by_span(
+                    &mut decl.flow_events,
+                    decl.span,
+                    &comprehension_iterable_calls,
+                );
                 augment_python_dict_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
                 if let Some(property_aliases_for_decl) = property_aliases_by_decl.get(&decl.symbol) {
                     augment_python_property_flow_events(&mut decl.flow_events, property_aliases_for_decl);
                 }
                 rewrite_python_constant_reflection(&mut decl.flow_events);
                 rewrite_python_generator_send(&mut decl.flow_events);
+                augment_python_asyncio_to_thread_calls(&mut decl.flow_events);
             }
         }
         // Append `FlowEvent::Lifecycle` for recognised Python
@@ -729,6 +740,336 @@ fn augment_python_comprehension_flow_events(events: &mut [bonsai_lang_api::FlowE
             _ => {}
         }
     }
+}
+
+fn collect_python_comprehension_iterable_call_events(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    decl_span: Span,
+) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    for clause in collect_kinds(tree, &["for_in_clause"]) {
+        let clause_span = span_of(file, &clause);
+        if !python_span_contains(decl_span, clause_span) || !python_for_in_clause_is_comprehension(&clause) {
+            continue;
+        }
+        let Some(iterable) = clause.child_by_field_name("right") else {
+            continue;
+        };
+        collect_python_call_events_from_node(iterable, file, src, &mut out);
+    }
+    out.sort_by_key(|event| python_flow_event_span(event).start);
+    out.dedup_by(|left, right| python_flow_event_same_call(left, right));
+    out
+}
+
+fn python_for_in_clause_is_comprehension(clause: &Node<'_>) -> bool {
+    let mut parent = clause.parent();
+    while let Some(node) = parent {
+        if matches!(
+            node.kind(),
+            "list_comprehension"
+                | "dict_comprehension"
+                | "dictionary_comprehension"
+                | "set_comprehension"
+                | "generator_expression"
+        ) {
+            return true;
+        }
+        if matches!(
+            node.kind(),
+            "function_definition" | "lambda" | "for_statement" | "while_statement" | "if_statement" | "block"
+        ) {
+            return false;
+        }
+        parent = node.parent();
+    }
+    false
+}
+
+fn collect_python_call_events_from_node(node: Node<'_>, file: FileId, src: &[u8], out: &mut Vec<FlowEvent>) {
+    if node.kind() == "call" {
+        if let Some(event) = build_python_call_event(node, file, src) {
+            out.push(event);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_call_events_from_node(child, file, src, out);
+    }
+}
+
+fn build_python_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let callee_node = node.child_by_field_name("function")?;
+    let name = normalize_call_name_whitespace(node_text(&callee_node, src));
+    if name.is_empty() {
+        return None;
+    }
+    let receiver = python_call_receiver_from_name(&name);
+    let call_kind = if receiver.is_some() {
+        CallKind::Method
+    } else {
+        CallKind::Function
+    };
+    let mut args = Vec::new();
+    if let Some(arguments) = node.child_by_field_name("arguments") {
+        let mut cursor = arguments.walk();
+        for arg in arguments.named_children(&mut cursor) {
+            let (name, value_node) = if arg.kind() == "keyword_argument" {
+                let key = arg
+                    .child_by_field_name("name")
+                    .map(|node| node_text(&node, src).trim().to_string())
+                    .filter(|name| !name.is_empty());
+                let value = arg.child_by_field_name("value").unwrap_or(arg);
+                (key, value)
+            } else {
+                (None, arg)
+            };
+            let value_text = normalize_call_name_whitespace(node_text(&value_node, src));
+            if value_text.is_empty() {
+                continue;
+            }
+            args.push(CallArg {
+                span: span_of(file, &arg),
+                name,
+                place: python_argument_place_from_text(&value_text),
+                source_names: python_value_source_names(&value_text),
+                value_text,
+            });
+        }
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &callee_node),
+        name,
+        receiver,
+        receiver_types: Vec::new(),
+        call_kind,
+        args,
+    })
+}
+
+fn python_call_receiver_from_name(name: &str) -> Option<String> {
+    let (receiver, _) = name.rsplit_once('.')?;
+    let receiver = receiver.trim();
+    (!receiver.is_empty()).then(|| receiver.to_string())
+}
+
+fn python_argument_place_from_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut parts = text.split('.');
+    let Some(first) = parts.next() else {
+        return None;
+    };
+    if !python_is_identifier_like(first) {
+        return None;
+    }
+    parts.all(python_is_identifier_like).then(|| text.to_string())
+}
+
+fn python_is_identifier_like(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
+}
+
+fn augment_python_asyncio_to_thread_calls(events: &mut Vec<FlowEvent>) {
+    let mut i = 0;
+    while i < events.len() {
+        match &mut events[i] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_python_asyncio_to_thread_calls(then_events);
+                augment_python_asyncio_to_thread_calls(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_python_asyncio_to_thread_calls(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_python_asyncio_to_thread_calls(body);
+                augment_python_asyncio_to_thread_calls(catch_events);
+                augment_python_asyncio_to_thread_calls(finally_events);
+            }
+            _ => {}
+        }
+
+        let synthetic = match &events[i] {
+            FlowEvent::Call { span, name, args, .. } if python_is_asyncio_to_thread_name(name) => {
+                let Some((target, shifted_args)) = python_to_thread_target_and_args(args) else {
+                    i += 1;
+                    continue;
+                };
+                let receiver = python_call_receiver_from_name(&target);
+                let call_kind = if receiver.is_some() {
+                    CallKind::Method
+                } else {
+                    CallKind::Function
+                };
+                Some(FlowEvent::Call {
+                    span: *span,
+                    name: target,
+                    receiver,
+                    receiver_types: Vec::new(),
+                    call_kind,
+                    args: shifted_args,
+                })
+            }
+            _ => None,
+        };
+        if let Some(call) = synthetic {
+            events.insert(i + 1, call);
+            i += 1;
+        }
+        i += 1;
+    }
+}
+
+fn python_is_asyncio_to_thread_name(name: &str) -> bool {
+    matches!(name.trim(), "asyncio.to_thread" | "to_thread")
+}
+
+fn python_to_thread_target_and_args(args: &[CallArg]) -> Option<(String, Vec<CallArg>)> {
+    let target = args.first()?.value_text.trim();
+    if !python_is_qualified_identifier_like(target) {
+        return None;
+    }
+    Some((target.to_string(), args.iter().skip(1).cloned().collect()))
+}
+
+fn python_is_qualified_identifier_like(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text
+            .split('.')
+            .all(|part| !part.is_empty() && python_is_identifier_like(part))
+}
+
+fn insert_python_flow_events_by_span(events: &mut Vec<FlowEvent>, owner_span: Span, synthetic: &[FlowEvent]) {
+    for event in events.iter_mut() {
+        let event_span = python_flow_event_span(event);
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_python_flow_events_by_span(then_events, event_span, synthetic);
+                insert_python_flow_events_by_span(else_events, event_span, synthetic);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_python_flow_events_by_span(body, event_span, synthetic);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_python_flow_events_by_span(body, event_span, synthetic);
+                insert_python_flow_events_by_span(catch_events, event_span, synthetic);
+                insert_python_flow_events_by_span(finally_events, event_span, synthetic);
+            }
+            _ => {}
+        }
+    }
+
+    let mut pending: Vec<FlowEvent> = synthetic
+        .iter()
+        .filter(|event| {
+            let span = python_flow_event_span(event);
+            python_span_contains(owner_span, span)
+                && !python_event_tree_contains_call(events, event)
+                && !events.iter().any(|candidate| {
+                    python_flow_event_is_container(candidate)
+                        && python_span_contains(python_flow_event_span(candidate), span)
+                })
+        })
+        .cloned()
+        .collect();
+    pending.sort_by_key(|event| python_flow_event_span(event).start);
+    for event in pending {
+        let span = python_flow_event_span(&event);
+        let insert_at = events
+            .iter()
+            .position(|existing| python_flow_event_span(existing).start > span.start)
+            .unwrap_or(events.len());
+        events.insert(insert_at, event);
+    }
+}
+
+fn python_flow_event_is_container(event: &FlowEvent) -> bool {
+    matches!(
+        event,
+        FlowEvent::Branch { .. }
+            | FlowEvent::Loop { .. }
+            | FlowEvent::Try { .. }
+            | FlowEvent::Defer { .. }
+            | FlowEvent::Using { .. }
+    )
+}
+
+fn python_event_tree_contains_call(events: &[FlowEvent], needle: &FlowEvent) -> bool {
+    events.iter().any(|event| {
+        python_flow_event_same_call(event, needle)
+            || match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    python_event_tree_contains_call(then_events, needle)
+                        || python_event_tree_contains_call(else_events, needle)
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => python_event_tree_contains_call(body, needle),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    python_event_tree_contains_call(body, needle)
+                        || python_event_tree_contains_call(catch_events, needle)
+                        || python_event_tree_contains_call(finally_events, needle)
+                }
+                _ => false,
+            }
+    })
+}
+
+fn python_flow_event_same_call(left: &FlowEvent, right: &FlowEvent) -> bool {
+    matches!(
+        (left, right),
+        (
+            FlowEvent::Call {
+                span: left_span,
+                name: left_name,
+                ..
+            },
+            FlowEvent::Call {
+                span: right_span,
+                name: right_name,
+                ..
+            }
+        ) if left_span == right_span && left_name == right_name
+    )
 }
 
 fn python_assignment_rhs_text(source: &str, span: Span) -> Option<String> {

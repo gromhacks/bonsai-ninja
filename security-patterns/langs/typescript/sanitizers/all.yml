@@ -678,7 +678,7 @@
   match:
     kind: call
     callee:
-      regex: "^(path|pathname|next|returnTo|redirect|redirectTo|redirectUrl|url)\\.startsWith$"
+      regex: "^(path|pathname|next|returnTo|redirect|redirectTo|redirectUrl|url|ref|referer|location)\\.startsWith$"
   constraints:
   - arg_matches_regex:
       index: 0
@@ -699,6 +699,64 @@
     expect_no_match: true
   description: "startsWith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with
     a sibling `!startsWith(\"//\")` network-path guard."
+
+# -- SSRF mitigations ----------------------------------------------------------
+- id: typescript.sanitizer.allowed_hosts_set_has
+  enabled: true
+  language: typescript
+  tag: ssrf-sanitize
+  match:
+    kind: call
+    callee:
+      regex: "^(ALLOWED_HOSTS|allowedHosts|allowed_hosts|safeHosts|trustedHosts)\\.has$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: named host allowlist set
+    code: |
+      const ALLOWED_HOSTS = new Set(["api.example.com"]);
+      async function relay(host: string): Promise<void> {
+        if (!ALLOWED_HOSTS.has(host)) throw new Error("blocked");
+      }
+    expect_match_text: [ALLOWED_HOSTS.has]
+  - name: unrelated set has negative
+    code: |
+      const cache = new Set(["api.example.com"]);
+      async function relay(host: string): Promise<void> {
+        if (!cache.has(host)) throw new Error("blocked");
+      }
+    expect_no_match: true
+  description: "Explicit host allowlist Set.has guard before SSRF-sensitive outbound requests."
+
+# -- Deserialization mitigations ----------------------------------------------
+- id: typescript.sanitizer.js_yaml_json_schema
+  enabled: true
+  language: typescript
+  tag: deser-secure
+  packages: [js-yaml]
+  imports: [js-yaml]
+  match:
+    kind: call
+    callee:
+      attribute: [YAML, load]
+  constraints:
+  - any_arg_matches_regex: "schema\\s*:\\s*YAML\\.(JSON_SCHEMA|FAILSAFE_SCHEMA|CORE_SCHEMA)"
+  match_examples:
+  - name: js yaml load with safe schema
+    code: |
+      import * as YAML from "js-yaml";
+      function loadYaml(blob: string): unknown {
+        return YAML.load(blob, { schema: YAML.JSON_SCHEMA });
+      }
+    expect_match_text: [YAML.load]
+  - name: js yaml load default schema negative
+    code: |
+      import * as YAML from "js-yaml";
+      function loadYaml(blob: string): unknown {
+        return YAML.load(blob);
+      }
+    expect_no_match: true
+  description: "js-yaml YAML.load with JSON/CORE/FAILSAFE schema disables custom JavaScript object/function tags."
 
 # -- Focused allowlist / regex / SQL binding validators -----------------------
 - id: typescript.sanitizer.allowlist_set_has
@@ -1370,3 +1428,22 @@
     code: "function setCookie(res: any, token: string) {\n  return res.cookie();\n}\n"
     expect_no_match: true
   description: "res.cookie(name, val, {httpOnly: true, secure: true}) - TS via @types/express."
+
+- id: typescript.passthrough.promise_catch
+  enabled: true
+  language: typescript
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$.()$]*\\.catch$"
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: promise catch preserves resolved request body
+    code: |
+      async function handle(req: Request) {
+        return req.json().catch(() => ({}));
+      }
+    expect_match_text: [req.json().catch]
+  description: "Promise.catch(onRejected) returns the original fulfilled value; taint from request-body promises must survive fallback error handling."

@@ -89,6 +89,30 @@ pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project
     open_project_with_options(root, bonsai_sdk::OpenOptions::query_only())
 }
 
+pub(crate) fn open_project_index_matching_literal(
+    root: &std::path::Path,
+    literal: &str,
+) -> Result<(Project, WorkspaceFooter)> {
+    let project = bonsai_for_cli()
+        .open_query_matching_literal(root, literal)?
+        .with_auto_refresh(false);
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    let footer = WorkspaceFooter::new();
+    Ok((project, footer))
+}
+
+pub(crate) fn open_project_index_matching_path(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(Project, WorkspaceFooter)> {
+    let project = bonsai_for_cli()
+        .open_query_matching_path(root, path)?
+        .with_auto_refresh(false);
+    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
+    let footer = WorkspaceFooter::new();
+    Ok((project, footer))
+}
+
 pub(crate) fn open_project_parse_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
     open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())
 }

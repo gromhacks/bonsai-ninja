@@ -443,6 +443,50 @@ class Repository extends BaseRepository {
 }
 
 #[test]
+fn constructor_expression_arg_preserves_direct_operand_taint() {
+    let constructor_arg = EffectiveCallArg {
+        value_text: "new StringReader(xml)".to_string(),
+        name: None,
+        source_names: vec!["xml".to_string()],
+        place: None,
+    };
+    assert!(
+        constructor_expression_preserves_direct_operand_taint(&constructor_arg, &seed(&["xml"])),
+        "constructor wrappers such as new StringReader(xml) must keep direct operand taint"
+    );
+
+    let nested_constructor_arg = EffectiveCallArg {
+        value_text: "new InputSource(new ByteArrayInputStream(xml))".to_string(),
+        name: None,
+        source_names: vec!["xml".to_string()],
+        place: None,
+    };
+    assert!(
+        arg_text_is_tainted(&nested_constructor_arg.value_text, &seed(&["xml"])),
+        "identifier-token taint should see xml inside nested Java constructor expressions"
+    );
+    assert!(
+        effective_call_arg_has_direct_value_taint(&nested_constructor_arg, &seed(&["xml"])),
+        "direct arg taint should use adapter operands and expression tokens for nested Java constructors"
+    );
+    assert!(
+        constructor_expression_preserves_direct_operand_taint(&nested_constructor_arg, &seed(&["xml"])),
+        "nested constructor wrappers such as InputSource(ByteArrayInputStream(xml)) must keep direct operand taint"
+    );
+
+    let helper_arg = EffectiveCallArg {
+        value_text: "sanitize(xml)".to_string(),
+        name: None,
+        source_names: vec!["xml".to_string()],
+        place: None,
+    };
+    assert!(
+        !constructor_expression_preserves_direct_operand_taint(&helper_arg, &seed(&["xml"])),
+        "ordinary helper calls still go through semantic return analysis"
+    );
+}
+
+#[test]
 fn nested_php_receiver_call_return_is_semantically_tainted_in_interface_hierarchy() {
     let db = php_ws_multi(&[
         (
@@ -927,6 +971,62 @@ fn assignment_guard_still_rejects_sibling_field_promotion() {
     assert!(
         !arg_text_is_tainted("out", &state),
         "taint on data.value must not promote through sibling read data.other; state={state:?}"
+    );
+}
+
+#[test]
+fn configured_arg_passthrough_taints_assignment_result() {
+    let mut state = seed(&["raw"]);
+    let config = InterTaintConfig {
+        call_result_passthroughs: vec![CallResultPassthrough {
+            callee: "decode".to_string(),
+            input_arg_indices: vec![0],
+            input_receiver: false,
+        }],
+        ..Default::default()
+    };
+    let event = FlowEvent::Assign {
+        span: Span::new(FileId::INVALID, 1, 10),
+        target: "decoded".to_string(),
+        source_name: None,
+        source_call: Some("decode".to_string()),
+        source_call_args: vec!["raw".to_string()],
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    };
+    apply_event_transfer(&event, &mut state, &config, None, None);
+    assert!(
+        arg_text_is_tainted("decoded", &state),
+        "configured passthrough call result should taint assignment target; state={state:?}"
+    );
+}
+
+#[test]
+fn configured_receiver_passthrough_preserves_returned_member_taint() {
+    let mut state = seed(&["reader"]);
+    let config = InterTaintConfig {
+        call_result_passthroughs: vec![CallResultPassthrough {
+            callee: "regex:\\.Next$".to_string(),
+            input_arg_indices: Vec::new(),
+            input_receiver: true,
+        }],
+        ..Default::default()
+    };
+    let event = FlowEvent::Assign {
+        span: Span::new(FileId::INVALID, 1, 10),
+        target: "header".to_string(),
+        source_name: None,
+        source_call: Some("reader.Next".to_string()),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    };
+    apply_event_transfer(&event, &mut state, &config, None, None);
+    assert!(
+        arg_text_is_tainted("header.Name", &state),
+        "receiver passthrough returning structured metadata should keep member reads tainted; state={state:?}"
     );
 }
 

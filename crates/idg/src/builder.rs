@@ -403,6 +403,13 @@ pub trait CalleeResolver {
         Vec::new()
     }
 
+    /// Resolve a callable value passed as an argument at `caller`.
+    /// Rulepack-declared source-callback APIs use this to model
+    /// external/library calls that invoke a callback with source data.
+    fn callable_arg(&self, _caller: FuncId, _arg_text: &str) -> Vec<ResolvedCallee> {
+        Vec::new()
+    }
+
     /// Static receiver type that owns `func`, when known. The IDG
     /// uses this to project embedded receiver fields precisely:
     /// `repo.Run()` resolved to `Repository.Run` forwards
@@ -1427,11 +1434,78 @@ fn stitch_call_site(
             }
         }
     }
+    let source_callback_edges = stitch_source_callback_args(
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        resolver,
+        callee_endpoints,
+        ws,
+    );
+    if source_callback_edges > 0 {
+        if let Some(stats) = &mut stats {
+            stats.inter_edges = stats.inter_edges.saturating_add(source_callback_edges);
+        }
+    }
     // Ambiguous or unknown callees do not create IDG flow. Library
     // pass-through needs an explicit semantic summary/model; a
     // generic `CallArg -> CallRet` edge would invent dataflow.
     // Drop unused: candidates iterator is consumed.
     drop(candidates);
+}
+
+fn stitch_source_callback_args(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    caller_remap: &NodeRemap,
+    site: &CallSiteRef,
+    resolver: &dyn CalleeResolver,
+    callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    if site.source_callback_args.is_empty() {
+        return 0;
+    }
+    let caller_call_ret = caller_remap.get(site.call_ret_node);
+    if caller_call_ret.is_sentinel() {
+        return 0;
+    }
+    let mut emitted = 0usize;
+    for shape in &site.source_callback_args {
+        let Some(callback_text) = site.call_arg_places.get(shape.callback_arg_index) else {
+            continue;
+        };
+        let callback_text = callback_text.trim();
+        if callback_text.is_empty() {
+            continue;
+        }
+        for cand in resolver.callable_arg(caller, callback_text) {
+            let Some(endpoints) = callee_endpoints.get(&cand.func) else {
+                continue;
+            };
+            for &source_param_index in &shape.source_param_indices {
+                let callee_param_idx =
+                    explicit_arg_param_index(source_param_index, endpoints.receiver_param_index);
+                let Some(&callee_param_node) = endpoints.params.get(callee_param_idx) else {
+                    continue;
+                };
+                if callee_param_node.is_sentinel() {
+                    continue;
+                }
+                let edge = IdgEdge::inter_call_arg(
+                    caller_call_ret,
+                    callee_param_node,
+                    site.site.0,
+                    cand.precision,
+                    cand.edge_kind,
+                );
+                place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+                emitted = emitted.saturating_add(1);
+            }
+        }
+    }
+    emitted
 }
 
 fn stitch_higher_order_callback_inputs(

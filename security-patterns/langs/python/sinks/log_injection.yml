@@ -41,6 +41,44 @@
   - structlog
   imports:
   - structlog
+- id: python.log_injection.logging_info_constructed_message
+  enabled: true
+  language: python
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  packages:
+  - logging
+  imports:
+  - logging
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.info$"
+      base_name_in: [logger, log, logging, lgr, _logger, _log]
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: "\\+|\\.format\\(|^f[\"']"
+  match_examples:
+  - name: stdlib logger info constructed tainted message
+    code: |
+      import logging
+      logger = logging.getLogger("audit")
+      def record(user_input):
+          return logger.info("actor=" + user_input)
+    expect_match_text: [logger.info]
+  - name: stdlib logger info placeholder negative
+    code: |
+      import logging
+      logger = logging.getLogger("audit")
+      def record(user_input):
+          return logger.info("actor=%s", user_input)
+    expect_no_match: true
+  description: "logging logger.info(constructed tainted message) - concatenated or formatted CRLF-tainted text can forge log entries; parameterized placeholder logging remains safe."
 - id: python.log_injection.logger_debug_concat
   enabled: true
   language: python

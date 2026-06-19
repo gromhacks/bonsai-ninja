@@ -9,6 +9,7 @@
   cwe:
   - CWE-113
   - CWE-601
+  - CWE-444
   match:
     kind: call
     callee:
@@ -113,9 +114,11 @@
   language: typescript
   tag: header-injection
   severity: high
+  packages: [http, express, fastify, '@hapi/hapi', koa, '@nestjs/common']
   cwe:
   - CWE-113
   - CWE-601
+  - CWE-444
   match:
     kind: call
     callee:
@@ -148,8 +151,6 @@
   - typescript.open_redirect.node_setheader_location
   - typescript.header.node_content_disposition_setheader
   - typescript.header.nest_res_setheader
-  packages:
-  - '@nestjs/common'
 - id: typescript.header.express_res_cookie
   enabled: true
   language: typescript
@@ -382,7 +383,7 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.response\([^)]*\)\.header$|^[A-Za-z_$][A-Za-z0-9_$]*\.response\.header$
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.response\\([\\s\\S]*\\)(?:\\s*\\.[A-Za-z_$][A-Za-z0-9_$]*\\([\\s\\S]*\\))*\\s*\\.header$|^[A-Za-z_$][A-Za-z0-9_$]*\\.response\\.header$"
       base_name_in:
       - h
       - reply
@@ -400,6 +401,16 @@
       }
     expect_match_text:
     - h.response("ok").header
+  - name: hapi response fluent content disposition
+    code: |
+      const _u = require("@hapi/hapi");
+      function download(h: any, filename: string) {
+        return h.response(Buffer.from("data"))
+          .type("application/octet-stream")
+          .header("Content-Disposition", filename);
+      }
+    expect_match_text:
+    - "h.response(Buffer.from(\"data\")) .type(\"application/octet-stream\").header"
   - name: literal hapi response content disposition negative
     code: |
       const _u = require("@hapi/hapi");

@@ -1,4 +1,42 @@
-use super::{compute_flow_labels, sibling_suffix};
+use super::{compute_flow_labels, compute_taint_flow_id, sibling_suffix, TaintFlowIdentityStep};
+
+#[derive(Clone)]
+struct TestTaintStep {
+    caller: &'static str,
+    callee: &'static str,
+    file: &'static str,
+    line: u32,
+    column: u32,
+    args: Vec<(usize, &'static str, Option<&'static str>)>,
+}
+
+impl TaintFlowIdentityStep for TestTaintStep {
+    fn caller(&self) -> &str {
+        self.caller
+    }
+
+    fn callee(&self) -> &str {
+        self.callee
+    }
+
+    fn file(&self) -> &str {
+        self.file
+    }
+
+    fn line(&self) -> u32 {
+        self.line
+    }
+
+    fn column(&self) -> u32 {
+        self.column
+    }
+
+    fn for_each_tainted_arg(&self, visit: &mut dyn FnMut(usize, &str, Option<&str>)) {
+        for (index, value, param) in &self.args {
+            visit(*index, value, *param);
+        }
+    }
+}
 
 #[test]
 fn sibling_suffix_rolls_over_past_z() {
@@ -61,4 +99,51 @@ fn mix_of_split_and_lone() {
         chain(&["entry_b", "p2", "sink_y"]),
     ]);
     assert_eq!(labels, vec!["1", "2a", "2b"]);
+}
+
+#[test]
+fn taint_flow_id_is_deterministic_and_short() {
+    let steps = vec![TestTaintStep {
+        caller: "handle",
+        callee: "sink",
+        file: "app.py",
+        line: 10,
+        column: 4,
+        args: vec![(0, "cmd", Some("command"))],
+    }];
+
+    let a = compute_taint_flow_id("handle", "os.system", &steps);
+    let b = compute_taint_flow_id("handle", "os.system", &steps);
+
+    assert_eq!(a, b);
+    assert!(a.starts_with("T:"));
+    assert_eq!(a.len(), 10);
+    assert!(a[2..]
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+}
+
+#[test]
+fn taint_flow_id_includes_locations_and_arg_evidence() {
+    let base = vec![TestTaintStep {
+        caller: "handle",
+        callee: "sink",
+        file: "app.py",
+        line: 10,
+        column: 4,
+        args: vec![(0, "cmd", Some("command"))],
+    }];
+    let mut moved = base.clone();
+    moved[0].line = 11;
+    let mut changed_arg = base.clone();
+    changed_arg[0].args = vec![(0, "safe", Some("command"))];
+
+    assert_ne!(
+        compute_taint_flow_id("handle", "os.system", &base),
+        compute_taint_flow_id("handle", "os.system", &moved)
+    );
+    assert_ne!(
+        compute_taint_flow_id("handle", "os.system", &base),
+        compute_taint_flow_id("handle", "os.system", &changed_arg)
+    );
 }

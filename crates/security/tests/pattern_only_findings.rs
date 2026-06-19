@@ -456,6 +456,7 @@ class App {
     list_add.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: Vec::new(),
+        source_callback_args: Vec::new(),
         call_result_passthrough_args: Vec::new(),
         call_result_passthrough_receiver: false,
         output_arg_flows: Vec::new(),
@@ -476,6 +477,7 @@ class App {
     command.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: Vec::new(),
+        source_callback_args: Vec::new(),
         call_result_passthrough_args: Vec::new(),
         call_result_passthrough_receiver: false,
         output_arg_flows: Vec::new(),

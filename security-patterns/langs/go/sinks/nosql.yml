@@ -13,7 +13,7 @@
   match:
     kind: call
     callee:
-      regex: \.Find$
+      regex: \.(Find|FindOne)$
   constraints:
   - arg_tainted:
       index: 1
@@ -36,6 +36,15 @@
       }
     expect_match_text:
     - coll.Find
+  - name: mongo findone with caller controlled map filter
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver"
+      func lookup(ctx any, coll interface{ FindOne(any, any) any }, filter map[string]any) {
+        _ = coll.FindOne(ctx, filter)
+      }
+    expect_match_text:
+    - coll.FindOne
   - name: mongo find with operator object filter
     code: |
       package main

@@ -94,6 +94,85 @@
     callee:
       name: StringTemplateResolver
   description: "Disabled - Thymeleaf StringTemplateResolver is a resolver configuration object, not the tainted template source. Model the later TemplateEngine.process(template, context) call instead."
+- id: java.template.spring_spel_parse_expression
+  enabled: true
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - org.springframework.expression
+  imports:
+  - org.springframework.expression
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])parseExpression$'
+      receiver_type_in:
+      - ExpressionParser
+      - SpelExpressionParser
+      - org.springframework.expression.ExpressionParser
+      - org.springframework.expression.spel.standard.SpelExpressionParser
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spring spel parse tainted expression
+    code: |
+      import org.springframework.expression.ExpressionParser;
+      class App {
+        private final ExpressionParser parser = null;
+        Object handle(String input) {
+          return parser.parseExpression(input);
+        }
+      }
+    expect_match_text: [parser.parseExpression]
+  - name: spring spel parse literal negative
+    code: |
+      import org.springframework.expression.ExpressionParser;
+      class App {
+        private final ExpressionParser parser = null;
+        Object handle(String input) {
+          return parser.parseExpression("'safe'");
+        }
+      }
+    expect_no_match: true
+  description: "Spring SpEL ExpressionParser.parseExpression(tainted) - compiles attacker-controlled expression text."
+- id: java.template.thymeleaf_fragment_return
+  enabled: true
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - org.thymeleaf
+  - org.springframework
+  cwe:
+  - CWE-1336
+  match:
+    kind: return
+    target:
+      regex: '::|__\$\{'
+  match_examples:
+  - name: thymeleaf fragment view return
+    code: |
+      import org.springframework.stereotype.Controller;
+      class App {
+        String handle(String view) {
+          return "home::" + view;
+        }
+      }
+    expect_match_text: ['"home::" + view']
+  - name: normal view return negative
+    code: |
+      class App {
+        String handle(String view) {
+          return "home";
+        }
+      }
+    expect_no_match: true
+  description: "Tainted Spring MVC/Thymeleaf fragment view name return (template::fragment / SpEL preprocessing) can evaluate attacker-controlled template expressions; taint reachability is required for the returned expression."
 - id: java.template.freemarker_template_ctor
   enabled: true
   language: java

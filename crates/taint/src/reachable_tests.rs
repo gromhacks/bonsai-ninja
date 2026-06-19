@@ -191,14 +191,20 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
     };
     let mut segment = IdgSegment::new();
     let buf = segment.strings.intern("buf");
+    let value = segment.strings.intern("value");
     let ret_place = segment.intern_place(Place::CallRet {
         site: CallSiteId(anchor),
     });
     let source_write_place = segment.intern_place(Place::write(buf, anchor));
+    let projected_read_place = segment.intern_place(Place::Read {
+        name: buf,
+        path: vec![value].into(),
+    });
     let pre_write_place = segment.intern_place(Place::write(buf, pre_span));
     let post_write_place = segment.intern_place(Place::write(buf, post_span));
     segment.intern_node(func, ret_place);
     segment.intern_node(func, source_write_place);
+    segment.intern_node(func, projected_read_place);
     segment.intern_node(func, pre_write_place);
     segment.intern_node(func, post_write_place);
     segment.record_func(func);
@@ -245,6 +251,14 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
     assert!(
         nodes.contains(&source_output_ws),
         "the source call's output write remains a source seed"
+    );
+    assert!(
+        nodes.iter().any(|node| {
+            service
+                .resolve_point(*node)
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Read && point.name == "buf.value")
+        }),
+        "an anchored output-arg source must seed projected carrier reads"
     );
     assert!(
         output_nodes.iter().all(|node| {

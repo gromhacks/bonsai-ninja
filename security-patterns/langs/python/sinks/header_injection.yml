@@ -208,13 +208,14 @@
   - starlette
   - fastapi
   - aiohttp
+  - pyramid
   cwe:
   - CWE-113
   - CWE-444
   match:
     kind: write
     target:
-      regex: headers|Location
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.headers\\.Location$"
   constraints:
   - arg_tainted:
       index: 0
@@ -233,9 +234,51 @@
           location = "/home"
           return location
     expect_no_match: true
+  - name: non-location response header negative
+    code: |
+      import flask
+      def redirect(response, user_input):
+          response.headers["X-Share-Id"] = user_input
+    expect_no_match: true
   description: "response.headers['Location'] = tainted - manual redirect/header assignment can produce response splitting or tainted Location redirects. Merged collision aliases: python.smuggle.set_dual_cl_te_headers."
   aliases:
   - python.smuggle.set_dual_cl_te_headers
+- id: python.header.response_headers_content_disposition_write
+  enabled: true
+  language: python
+  tag: header-injection
+  severity: high
+  packages:
+  - flask
+  - starlette
+  - fastapi
+  - aiohttp
+  - pyramid
+  cwe:
+  - CWE-113
+  match:
+    kind: write
+    target:
+      regex: Content-Disposition
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: response content disposition assignment
+    code: |
+      from aiohttp import web
+      def set_download_header(response, user_input):
+          cd = f'attachment; filename="{user_input}"'
+          response.headers["Content-Disposition"] = cd
+    expect_match_text:
+    - response.headers.Content-Disposition
+  - name: literal content disposition negative
+    code: |
+      from aiohttp import web
+      def set_download_header(response):
+          response.headers["Content-Disposition"] = 'attachment; filename="report.txt"'
+    expect_no_match: true
+  description: "response.headers['Content-Disposition'] = tainted - CRLF in filenames or disposition parameters can split HTTP response headers."
 - id: python.header.response_headers_update
   enabled: true
   language: python

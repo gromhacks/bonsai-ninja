@@ -1,5 +1,8 @@
 - id: typescript.graphql.graphql_execute
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
+    reenable_when: "Can distinguish dynamically constructed GraphQL documents from normal client query execution; resolver-side SQL/NoSQL/template sinks carry the exploitable flow."
   language: typescript
   tag: graphql-injection
   severity: high
@@ -45,7 +48,10 @@
     expect_no_match: true
   description: "graphql.graphql(source: tainted) - dynamic GraphQL documents can drive resolver-side injection or schema probing."
 - id: typescript.graphql.graphql_sync_execute
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
+    reenable_when: "Can distinguish dynamically constructed GraphQL documents from normal client query execution; resolver-side SQL/NoSQL/template sinks carry the exploitable flow."
   language: typescript
   tag: graphql-injection
   severity: high

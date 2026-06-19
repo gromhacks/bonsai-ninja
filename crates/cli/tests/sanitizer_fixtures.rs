@@ -206,6 +206,7 @@ fn sanitized_paths_attach_sanitizer_evidence() {
             &w,
             "taint-analysis",
             "--inferred-sources",
+            "--show-sanitized",
             "--format",
             "json",
         ]) else {
@@ -231,9 +232,9 @@ fn sanitized_paths_attach_sanitizer_evidence() {
 }
 
 #[test]
-fn show_sanitized_is_compatibility_noop() {
+fn show_sanitized_includes_sanitizer_cleared_findings() {
     let Some(_) = bin_path() else { return };
-    let w = fixture_ws("python");
+    let w = fixture_ws("cpp");
     let Some((default_out, _, default_code)) = run(&[
         "security",
         &w,
@@ -244,7 +245,7 @@ fn show_sanitized_is_compatibility_noop() {
     ]) else {
         return;
     };
-    assert_eq!(default_code, 0, "python sanitizer_test default ec={default_code}");
+    assert_eq!(default_code, 0, "cpp sanitizer_test default ec={default_code}");
     let Some((shown_out, _, shown_code)) = run(&[
         "security",
         &w,
@@ -258,14 +259,22 @@ fn show_sanitized_is_compatibility_noop() {
     };
     assert_eq!(
         shown_code, 0,
-        "python sanitizer_test --show-sanitized ec={shown_code}"
+        "cpp sanitizer_test --show-sanitized ec={shown_code}"
     );
 
     let default_rows = rows_of(&serde_json::from_str(&default_out).unwrap());
     let shown_rows = rows_of(&serde_json::from_str(&shown_out).unwrap());
-    assert_eq!(
-        shown_rows, default_rows,
-        "--show-sanitized is a compatibility flag and should not change taint-analysis output"
+    assert!(
+        shown_rows.len() >= default_rows.len(),
+        "--show-sanitized should keep default findings and may add sanitizer-cleared findings"
+    );
+    assert!(
+        shown_rows.iter().any(|r| {
+            r.get("status")
+                .and_then(|s| s.as_str())
+                .is_some_and(|status| status == "sanitized")
+        }),
+        "--show-sanitized should expose at least one sanitizer-cleared finding"
     );
 }
 

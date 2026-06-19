@@ -129,3 +129,75 @@ func handle(r *http.Request) string {
         "field-chain receiver should inherit root *http.Request type, got {calls:?}"
     );
 }
+
+#[test]
+fn func_literal_parameter_types_drive_receiver_matching() {
+    let db = db_with(
+        r##"
+package main
+
+import "github.com/gin-gonic/gin"
+
+func Register(r *gin.RouterGroup) {
+    r.GET("/:name", func(c *gin.Context) {
+        _ = c.Param("name")
+    })
+}
+"##,
+    );
+    let global = db.global_index();
+    let mut calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == "Register" {
+                collect_calls(&decl.flow_events, &mut calls);
+            }
+        }
+    }
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name == "c.Param"
+                && receiver_types.iter().any(|ty| ty == "Context")
+                && receiver_types.iter().any(|ty| ty == "gin.Context")
+        }),
+        "func literal receiver c should carry *gin.Context aliases, got {calls:?}"
+    );
+}
+
+#[test]
+fn returned_func_literal_parameter_types_and_if_initializer_calls_are_preserved() {
+    let db = db_with(
+        r#"
+package main
+
+import "github.com/gin-gonic/gin"
+
+func Login() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        var body map[string]any
+        if err := c.BindJSON(&body); err != nil {
+            c.AbortWithStatus(400)
+            return
+        }
+    }
+}
+"#,
+    );
+    let global = db.global_index();
+    let mut calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name.starts_with("<lambda@") {
+                collect_calls(&decl.flow_events, &mut calls);
+            }
+        }
+    }
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name == "c.BindJSON"
+                && receiver_types.iter().any(|ty| ty == "Context")
+                && receiver_types.iter().any(|ty| ty == "gin.Context")
+        }),
+        "returned func literal should keep if-initializer calls and typed receiver aliases, got {calls:?}"
+    );
+}

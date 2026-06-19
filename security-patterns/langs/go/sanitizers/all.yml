@@ -979,6 +979,29 @@
   description: "regexp.MustCompile(\"^...$\").MatchString(input) - strict full-string regex validation through a chained compiled
     regexp."
 
+- id: go.sanitizer.uuid_regex_matchstring
+  enabled: true
+  language: go
+  tag: regex-validate
+  packages: [regexp]
+  match:
+    kind: call
+    callee:
+      attribute: [uuidRE, MatchString]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: uuid regexp match string
+    code: |
+      package main
+      import "regexp"
+      var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+      func ok(id string) bool {
+        return uuidRE.MatchString(id)
+      }
+    expect_match_text: [uuidRE.MatchString]
+  description: "uuidRE.MatchString(input) - strict UUID-shaped full-string allowlist used as an identifier/path segment guard."
+
 - id: go.sanitizer.url_scheme_equalfold
   enabled: true
   language: go
@@ -1303,6 +1326,196 @@
       }
     expect_match_text: [string]
   description: "string(b) - the []byte->string conversion changes representation but preserves attacker-controlled content (WS3 coercion passthrough; mirrors python str())."
+- id: go.passthrough.filepath_clean
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages: ["path/filepath"]
+  match:
+    kind: call
+    callee:
+      attribute: [filepath, Clean]
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: filepath clean preserves path taint
+    code: |
+      package main
+      import "path/filepath"
+      func example(path string) string {
+        return filepath.Clean(path)
+      }
+    expect_match_text: [filepath.Clean]
+  description: "filepath.Clean(path) normalizes separators/dot segments but does not prove containment; preserves path taint for later guards."
+- id: go.passthrough.filepath_abs
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages: ["path/filepath"]
+  match:
+    kind: call
+    callee:
+      attribute: [filepath, Abs]
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: filepath abs preserves path taint
+    code: |
+      package main
+      import "path/filepath"
+      func example(path string) (string, error) {
+        return filepath.Abs(path)
+      }
+    expect_match_text: [filepath.Abs]
+  description: "filepath.Abs(path) resolves a path against the working directory but does not prove containment; preserves path taint for later guards."
+- id: go.passthrough.filepath_join
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages: ["path/filepath"]
+  match:
+    kind: call
+    callee:
+      attribute: [filepath, Join]
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: filepath join preserves path segment taint
+    code: |
+      package main
+      import "path/filepath"
+      func example(root string, name string) string {
+        return filepath.Join(root, name)
+      }
+    expect_match_text: [filepath.Join]
+  description: "filepath.Join(base, parts...) joins path text but does not prove containment; the returned path preserves taint from any input segment."
+- id: go.passthrough.path_clean
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, Clean]
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: path clean preserves path taint
+    code: |
+      package main
+      import "path"
+      func example(p string) string {
+        return path.Clean(p)
+      }
+    expect_match_text: [path.Clean]
+  description: "path.Clean(path) normalizes lexical path segments but does not prove containment; preserves taint for later guards."
+- id: go.passthrough.path_join
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, Join]
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0, 1, 2, 3, 4, 5, 6, 7]
+  match_examples:
+  - name: path join preserves path segment taint
+    code: |
+      package main
+      import "path"
+      func example(root string, name string) string {
+        return path.Join(root, name)
+      }
+    expect_match_text: [path.Join]
+  description: "path.Join(base, parts...) joins slash path text but does not prove containment; the returned path preserves taint from any input segment."
+- id: go.passthrough.mongo_bson_document_conversion
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages:
+  - go.mongodb.org/mongo-driver/bson
+  match:
+    kind: call
+    callee:
+      regex: ^bson\.(M|D|A|E)$
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: bson map conversion preserves taint
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(body map[string]any) bson.M {
+        return bson.M(body)
+      }
+    expect_match_text: [bson.M]
+  description: "bson.M/D/A/E conversions and wrappers preserve the attacker-controlled document content; they do not sanitize Mongo selectors."
+- id: go.passthrough.tar_new_reader
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages:
+  - archive/tar
+  match:
+    kind: call
+    callee:
+      attribute: [tar, NewReader]
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: tar reader preserves archive stream taint
+    code: |
+      package main
+      import (
+        "archive/tar"
+        "io"
+      )
+      func example(src io.Reader) *tar.Reader {
+        return tar.NewReader(src)
+      }
+    expect_match_text: [tar.NewReader]
+  description: "tar.NewReader(src) wraps archive stream content; a reader created from attacker-controlled bytes preserves archive-entry taint."
+- id: go.passthrough.tar_reader_next
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  packages:
+  - archive/tar
+  match:
+    kind: call
+    callee:
+      regex: \.Next$
+  constraints:
+  - receiver_type_in: [Reader]
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: tainted tar reader next preserves header taint
+    code: |
+      package main
+      import "archive/tar"
+      func example(tr *tar.Reader) (*tar.Header, error) {
+        return tr.Next()
+      }
+    expect_match_text: [tr.Next]
+  description: "tar.Reader.Next() returns metadata parsed from the receiver's archive stream; receiver taint propagates into the returned header."
 - id: go.passthrough.base64_stdencoding_decodestring
   enabled: true
   language: go

@@ -53,6 +53,10 @@
     kind: write
     target:
       regex: ^[^\.\s]+\.CharsetReader$
+  constraints:
+  - arg_not_matches_regex:
+      index: 0
+      regex: "\\bif\\s+!\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\[\\s*charset\\s*\\]"
   match_examples:
   - name: xml decoder charset reader assignment
     code: |
@@ -65,6 +69,24 @@
         dec.CharsetReader = reader
       }
     expect_match_text: [dec.CharsetReader]
+  - name: allowlisted charset reader negative
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "errors"
+        "io"
+      )
+      var allowedCharsets = map[string]bool{"utf-8": true, "us-ascii": true}
+      func parse(dec *xml.Decoder) {
+        dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+          if !allowedCharsets[charset] {
+            return nil, errors.New("disallowed charset")
+          }
+          return input, nil
+        }
+      }
+    expect_no_match: true
   description: "xml.Decoder.CharsetReader assignment - custom charset readers are XML parser extension points; audit implementations that fetch external resources or expand attacker-controlled encodings."
 
 - id: go.xxe.xml_decoder_strict_false
@@ -79,6 +101,10 @@
     kind: write
     target:
       regex: ^[^\.\s]+\.Strict$
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "\\.Strict\\s*=\\s*false\\b"
   match_examples:
   - name: xml decoder strict disabled
     code: |
@@ -88,6 +114,14 @@
         dec.Strict = false
       }
     expect_match_text: [dec.Strict]
+  - name: xml decoder strict enabled negative
+    code: |
+      package main
+      import "encoding/xml"
+      func parse(dec *xml.Decoder) {
+        dec.Strict = true
+      }
+    expect_no_match: true
   description: "xml.Decoder.Strict = false - disables strict XML parsing; higher risk when paired with a custom CharsetReader or entity handling."
 
 - id: go.xxe.xml_decoder_entity_map

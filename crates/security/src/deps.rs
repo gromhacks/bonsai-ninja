@@ -181,10 +181,11 @@ fn build_workspace_dependency_package_context(root: &Path) -> WorkspaceDependenc
         let packages = dependency_manifest_package_tokens(&text);
         if !packages.is_empty() {
             for language in dependency_manifest_languages(path) {
+                let packages = dependency_manifest_packages_for_language(&packages, language);
                 by_language
                     .entry((*language).to_string())
                     .or_default()
-                    .extend(packages.iter().cloned());
+                    .extend(packages.into_iter());
             }
         }
         Ok(())
@@ -285,6 +286,57 @@ fn insert_dependency_package_token(out: &mut AHashSet<String>, token: &str) {
     out.insert(lower);
 }
 
+fn dependency_manifest_packages_for_language(
+    packages: &AHashSet<String>,
+    language: &str,
+) -> AHashSet<String> {
+    let mut out = packages.clone();
+    for package in packages {
+        insert_dependency_package_aliases(&mut out, language, package);
+    }
+    out
+}
+
+fn insert_dependency_package_aliases(out: &mut AHashSet<String>, language: &str, package: &str) {
+    match language {
+        "python" => {
+            if package.contains('-') {
+                insert_dependency_package_token(out, &package.replace('-', "_"));
+            }
+            if let Some(alias) = python_distribution_import_alias(package) {
+                insert_dependency_package_token(out, alias);
+            }
+        }
+        "rust" => {
+            if package.contains('-') {
+                insert_dependency_package_token(out, &package.replace('-', "_"));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn python_distribution_import_alias(package: &str) -> Option<&'static str> {
+    match package.to_ascii_lowercase().as_str() {
+        "argon2-cffi" => Some("argon2"),
+        "beautifulsoup4" => Some("bs4"),
+        "cx-oracle" => Some("cx_Oracle"),
+        "djangorestframework" => Some("rest_framework"),
+        "flask-limiter" => Some("flask_limiter"),
+        "google-cloud-storage" => Some("google.cloud.storage"),
+        "msgpack-python" => Some("msgpack"),
+        "mysql-connector-python" => Some("mysql.connector"),
+        "pillow" => Some("PIL"),
+        "psycopg2-binary" => Some("psycopg2"),
+        "pycryptodome" => Some("Crypto"),
+        "python-jose" => Some("jose"),
+        "python-ldap" => Some("ldap"),
+        "python3-saml" => Some("onelogin.saml2"),
+        "pyyaml" => Some("yaml"),
+        _ => None,
+    }
+}
+
 /// Collect every distinct signal key the rule advertises across the
 /// `frameworks` / `packages` / `modules` / `imports` fields. The
 /// dedup keeps the inventory's row keys stable when a rule mentions
@@ -368,7 +420,7 @@ fn rule_key_evidence(
             if !is_dependency_manifest_file(path) {
                 continue;
             }
-            if manifest_mentions_package(path, key) {
+            if manifest_mentions_package(path, key, &rule.language) {
                 signals.push(format!("packages:{key}"));
                 evidence.push(path.clone());
                 break;
@@ -380,7 +432,7 @@ fn rule_key_evidence(
             if !is_dependency_manifest_file(path) {
                 continue;
             }
-            if manifest_mentions_package(path, key) {
+            if manifest_mentions_package(path, key, &rule.language) {
                 signals.push(format!("frameworks:{key}"));
                 evidence.push(path.clone());
                 break;
@@ -445,7 +497,7 @@ fn is_dependency_manifest_basename(basename: &str) -> bool {
     )
 }
 
-fn manifest_mentions_package(path: &str, package: &str) -> bool {
+fn manifest_mentions_package(path: &str, package: &str, language: &str) -> bool {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -462,7 +514,12 @@ fn manifest_mentions_package(path: &str, package: &str) -> bool {
             return false;
         }
     };
-    package_name_appears_bounded(&text, package)
+    if package_name_appears_bounded(&text, package) {
+        return true;
+    }
+    let packages = dependency_manifest_package_tokens(&text);
+    let packages = dependency_manifest_packages_for_language(&packages, language);
+    packages.contains(package)
 }
 
 /// Substring `text.contains(package)` was matching `log4j` inside

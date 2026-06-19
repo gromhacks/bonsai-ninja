@@ -454,7 +454,13 @@ fn trace_handle_request_shows_sink_path() {
 
 #[test]
 fn inspect_verify_token_finds_decl_and_chains() {
-    let Some(out) = run(&["inspect", ws().to_str().unwrap(), "--query", "verify_token"]) else {
+    let Some(out) = run(&[
+        "inspect",
+        ws().to_str().unwrap(),
+        "--query",
+        "verify_token",
+        "--graph-flow",
+    ]) else {
         return;
     };
     assert_contains(&out, "decl hit(s)", "inspect verify_token");

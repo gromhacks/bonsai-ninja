@@ -18,7 +18,9 @@ use crate::matcher::{
     match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
     InterTaintView, RuleMatch,
 };
-use crate::rule::{ConstraintKind, MatchKind, Rule, RuleKind, RuleTarget, Severity};
+use crate::rule::{
+    ConstraintKind, MatchKind, Rule, RuleKind, RuleTarget, Severity, SourceCallbackArgSemantics,
+};
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
@@ -27,8 +29,8 @@ use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AssignValueKind, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{
     apply_configured_transfer_fixpoint, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph,
-    InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs,
-    TaintedCall, TaintedCallEdge, TokenSet, ValueFlowGraph,
+    InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs,
+    SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet, ValueFlowGraph,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -39,7 +41,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 type RankedCallPath = std::cmp::Reverse<(i64, u32, u32, Vec<FuncId>)>;
-type InventoryMatchIdentity = (String, String, u32, u32, String, String, Option<String>);
+type InventoryMatchIdentity = (String, String, u32, u32, String, Option<String>);
 type SourceMatchDedupeKey = (String, String, u64, u64, String);
 type SourceMatchDedupeValue<'a> = (usize, &'a RuleMatch, FuncId, u64);
 
@@ -89,9 +91,9 @@ pub struct TaintAnalysisOptions {
     /// source-to-sink taint report unless a caller explicitly requests
     /// mixed local-pattern inventory.
     pub include_pattern_only: bool,
-    /// Deprecated compatibility switch. Sanitizer rules are now evidence
-    /// attached to propagated paths, not propagation blockers, so sanitized
-    /// paths are always present when source-to-sink reachability exists.
+    /// Opt-in diagnostic switch. Sanitizer rules are evidence attached to
+    /// propagated paths; public reports suppress paths whose relevant sink
+    /// class has been sanitizer-cleared unless this is set.
     pub show_sanitized: bool,
     /// Optional interprocedural `(FuncId, seed)` chunk size. Defaults
     /// to the taint engine's standard chunk size when unset. This is
@@ -829,6 +831,7 @@ where
         &factory_returns,
         &mut on_progress,
     );
+    extend_java_mdc_context_logger_findings(&mut findings_raw, &sink_hits, pack, ws);
     on_progress(AnalysisProgress::PhaseStarted {
         label: "finalizing findings",
         total: 0,
@@ -884,6 +887,9 @@ where
         // side wasn't pruned earlier (e.g. prod source → test sink).
         findings.retain(|combined| !combined.finding.from_test);
     }
+    if !options.show_sanitized {
+        findings.retain(|combined| combined.finding.status != FindingStatus::Sanitized);
+    }
     drop_dominated_wrapper_findings(&mut findings);
     drop_dominated_receiver_projection_findings(&mut findings);
     // §C cleanup pass: when `--inferred-sources` synthesizes
@@ -902,6 +908,13 @@ where
         b.finding
             .severity
             .cmp(&a.finding.severity)
+            .then_with(|| a.finding.sink.rule_id.cmp(&b.finding.sink.rule_id))
+            .then_with(|| a.finding.sink.file.cmp(&b.finding.sink.file))
+            .then_with(|| a.finding.sink.line.cmp(&b.finding.sink.line))
+            .then_with(|| a.finding.sink.column.cmp(&b.finding.sink.column))
+            .then_with(|| {
+                source_reporting_rank(&a.finding.source).cmp(&source_reporting_rank(&b.finding.source))
+            })
             .then_with(|| a.finding.finding_id.cmp(&b.finding.finding_id))
     });
     on_progress(AnalysisProgress::PhaseFinished);
@@ -1063,6 +1076,7 @@ where
             &transfer_languages,
         ),
         source_output_args: source_output_args_from_rulepack_for_languages(pack, &transfer_languages),
+        source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &transfer_languages),
         call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -2067,9 +2081,15 @@ pub fn validate_pack(
             // context that keeps local receiver names from becoming
             // global API matches.
             if !example.expect_no_match && !signals.is_empty() {
-                let mut has_import_for_signal = false;
+                let mut has_package_signal = false;
                 for file_id in ws.db().global_index().all_files() {
                     let Some(import_index) = ws.db().import_index(file_id) else {
+                        if let Some(idx) = ws.db().decl_index(file_id) {
+                            if decl_index_has_java_like_fqn_package_signal(&rule.language, &idx, &signals) {
+                                has_package_signal = true;
+                                break;
+                            }
+                        }
                         continue;
                     };
                     for spec in &import_index.imports {
@@ -2080,18 +2100,24 @@ pub fn validate_pack(
                             .iter()
                             .any(|sig| crate::pkg::import_matches_package(&spec.module, sig))
                     }) {
-                        has_import_for_signal = true;
+                        has_package_signal = true;
                         break;
                     }
+                    if let Some(idx) = ws.db().decl_index(file_id) {
+                        if decl_index_has_java_like_fqn_package_signal(&rule.language, &idx, &signals) {
+                            has_package_signal = true;
+                            break;
+                        }
+                    }
                 }
-                if !has_import_for_signal {
+                if !has_package_signal {
                     push_validation_issue(
                         &mut issues,
                         "warning",
                         "match-example-missing-import",
                         Some(rule),
                         &format!(
-                            "example `{}` does not import any of {:?} — the rule's \
+                            "example `{}` does not import or fully qualify any of {:?} — the rule's \
                              receiver-agnostic regex package gate cannot fire on this example",
                             example.name.as_deref().unwrap_or("<unnamed>"),
                             signals
@@ -2296,6 +2322,7 @@ fn match_arg_tainted_example_owner_texts(pack: &Rulepack, rule: &Rule, ws: &Work
         TaintAnalysisOptions {
             sink: Some(format!("^{}$", regex::escape(&rule.id))),
             include_inferred_sources: true,
+            show_sanitized: true,
             ..TaintAnalysisOptions::default()
         },
     );
@@ -2439,6 +2466,26 @@ fn validate_regex_package_signals_match_example_imports(
             signals
         ),
     );
+}
+
+fn decl_index_has_java_like_fqn_package_signal(
+    language: &str,
+    idx: &bonsai_lang_api::DeclIndex,
+    signals: &[&str],
+) -> bool {
+    if !matches!(language, "java" | "kotlin" | "scala") {
+        return false;
+    }
+    idx.refs.iter().any(|reference| {
+        matches!(
+            reference.kind,
+            bonsai_lang_api::RefKind::Call | bonsai_lang_api::RefKind::Type
+        ) && crate::pkg::java_like_fully_qualified_package(&reference.name).is_some_and(|package| {
+            signals
+                .iter()
+                .any(|signal| crate::pkg::import_matches_package(package, signal))
+        })
+    })
 }
 
 fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -2647,6 +2694,26 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "taint_semantics.source_output_args is only valid on source rules",
         );
     }
+    if !semantics.source_callback_args.is_empty() && rule.kind != RuleKind::Source {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.source_callback_args is only valid on source rules",
+        );
+    }
+    for callback in &semantics.source_callback_args {
+        if callback.source_param_indices.is_empty() {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.source_callback_args entries require source_param_indices",
+            );
+        }
+    }
     if !semantics.call_result_passthrough_args.is_empty() && rule.kind != RuleKind::Sanitizer {
         push_validation_issue(
             issues,
@@ -2733,6 +2800,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 any_arg_matches_regex.as_str(),
             )),
             crate::rule::ConstraintKind::ReceiverTypeIn { .. }
+            | crate::rule::ConstraintKind::ReceiverTypeNotIn { .. }
             | crate::rule::ConstraintKind::SecondArgEquals { .. }
             | crate::rule::ConstraintKind::ArgEquals { .. }
             | crate::rule::ConstraintKind::KeywordArgEquals { .. }
@@ -2951,12 +3019,13 @@ fn package_signal_distro_smell(language: &str, signal: &str) -> Option<&'static 
                 return Some("PyPI distribution name (Python imports never contain `-`)");
             }
             const PYPI_NON_IMPORT_DISTROS: &[&str] = &[
-                "pyyaml",         // → yaml
-                "beautifulsoup4", // → bs4
-                "pillow",         // → PIL
-                "msgpack-python", // pre-2.0; → msgpack (also has `-`)
-                "python3-saml",   // → onelogin.saml2
-                "pycryptodome",   // → Crypto (top-level shim)
+                "pyyaml",              // → yaml
+                "beautifulsoup4",      // → bs4
+                "djangorestframework", // → rest_framework
+                "pillow",              // → PIL
+                "msgpack-python",      // pre-2.0; → msgpack (also has `-`)
+                "python3-saml",        // → onelogin.saml2
+                "pycryptodome",        // → Crypto (top-level shim)
             ];
             if PYPI_NON_IMPORT_DISTROS.contains(&signal) {
                 return Some("PyPI distribution name whose Python import differs (e.g. `pyyaml` → `yaml`)");
@@ -4358,33 +4427,39 @@ fn sort_matches(matches: &mut [RuleMatch]) {
     });
 }
 
-/// Drop matches whose user-visible identity is identical to a
+/// Drop matches whose surface site identity is identical to a
 /// preceding entry. The matcher pipeline can emit the same call
-/// site through more than one fact stream (e.g. an adapter that
-/// resolves the enclosing decl ambiguously and registers the call
-/// once under the function scope and once under the module scope).
-/// Two byte-identical entries in the surface inventory table are
-/// always a presentation bug. Identity here includes `match_text`
-/// and `enclosing_fn` so genuinely distinct variants at the same
-/// position (e.g. `response.headers` vs `response.headers.Location`
-/// at a chained assignment) remain visible.
+/// site through more than one fact stream (for example, a real
+/// nested receiver call plus a shortened call fact at the same
+/// span). For inventory output, one rule at one concrete location
+/// should render once; when duplicate streams disagree on text,
+/// keep the longer text because it carries the most receiver context.
 ///
 /// Only safe to call on inventory output — the taint-analysis
 /// pipeline consumes the broader match stream where multiple
 /// entries per call site carry distinct downstream context.
 fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
-    let mut seen: AHashSet<InventoryMatchIdentity> = AHashSet::new();
-    matches.retain(|m| {
-        seen.insert((
+    let mut seen: AHashMap<InventoryMatchIdentity, usize> = AHashMap::new();
+    let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
+    for m in matches.drain(..) {
+        let key = (
             m.language.clone(),
             m.file.clone(),
             m.line,
             m.column,
             m.rule_id.clone(),
-            m.match_text.clone(),
             m.enclosing_fn.clone(),
-        ))
-    });
+        );
+        if let Some(&idx) = seen.get(&key) {
+            if m.match_text.len() > deduped[idx].match_text.len() {
+                deduped[idx] = m;
+            }
+            continue;
+        }
+        seen.insert(key, deduped.len());
+        deduped.push(m);
+    }
+    *matches = deduped;
 }
 
 fn combine_source_analysis_candidates(
@@ -4733,6 +4808,26 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
     adjusted.clamp(0, 255) as u8
 }
 
+fn source_specificity_rank(source: &FindingMatch) -> u8 {
+    if source.rule_id.contains("request_json_field_get") {
+        return 0;
+    }
+    if source.rule_id.contains("request_get_json") || source.rule_id.ends_with(".request_json") {
+        return 5;
+    }
+    2
+}
+
+fn source_reporting_rank(source: &FindingMatch) -> u8 {
+    if source.rule_id == "java.source.bytes_blob_param" {
+        return 10;
+    }
+    if source.tag.as_deref() == Some("caller-input") && source.trust.as_deref() != Some("remote") {
+        return 5;
+    }
+    0
+}
+
 /// True when two sink-side `FindingMatch`es refer to the exact same
 /// call-site. Symmetric counterpart to [`same_source_site`].
 fn same_sink_site(a: &FindingMatch, b: &FindingMatch) -> bool {
@@ -4764,23 +4859,29 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
     // group's primary sink.
     findings.sort_by(|a, b| {
         // Sort bucket MUST match `combined_finding_key`'s grouping
-        // dimensions (language, group_id, sink site) — excluding
-        // `representative_flow_id` / chain — so the source-preference
-        // tiebreakers below decide the primary source WITHIN each merge
-        // group rather than being pre-split by flow id.
+        // dimensions (language, group_id, sink class + site) —
+        // excluding `representative_flow_id` / chain — so the
+        // source-preference tiebreakers below decide the primary source
+        // WITHIN each merge group rather than being pre-split by flow id.
+        let bucket_a_args = sink_tainted_args_group_key(&a.finding.sink);
+        let bucket_b_args = sink_tainted_args_group_key(&b.finding.sink);
         let bucket_a = (
             &a.finding.language,
             a.finding.group_id.as_deref().unwrap_or(""),
             &a.finding.sink.file,
             a.finding.sink.line,
-            &a.finding.sink.rule_id,
+            sink_group_class(&a.finding.sink),
+            a.finding.sink.text.as_str(),
+            bucket_a_args.as_str(),
         );
         let bucket_b = (
             &b.finding.language,
             b.finding.group_id.as_deref().unwrap_or(""),
             &b.finding.sink.file,
             b.finding.sink.line,
-            &b.finding.sink.rule_id,
+            sink_group_class(&b.finding.sink),
+            b.finding.sink.text.as_str(),
+            bucket_b_args.as_str(),
         );
         bucket_a
             .cmp(&bucket_b)
@@ -4788,6 +4889,9 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
                 source_preference_rank_for_sink(&a.finding.source, Some(&a.finding.sink)).cmp(
                     &source_preference_rank_for_sink(&b.finding.source, Some(&b.finding.sink)),
                 )
+            })
+            .then_with(|| {
+                source_specificity_rank(&a.finding.source).cmp(&source_specificity_rank(&b.finding.source))
             })
             .then_with(|| {
                 (
@@ -4852,11 +4956,20 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
 fn combined_finding_key(item: &FindingWithChain) -> String {
     let f = &item.finding;
     let group = f.group_id.as_deref().unwrap_or("");
-    // Key on (language, group_id, SINK SITE) — sink site = file + line +
-    // rule_id. The sink site is what distinguishes genuinely separate
-    // findings that happen to share a `group_id`: structurally identical
-    // flows in different files hash to the same group tokens, so
-    // group_id alone would wrongly collapse them into one row.
+    let sink_class = sink_group_class(&f.sink);
+    let tainted_args = sink_tainted_args_group_key(&f.sink);
+    // Key on (language, group_id, SINK CLASS + SITE). Sink site =
+    // file + line + sink text + tainted-arg evidence; sink class is
+    // the rule tag/category, falling back to rule id for unclassified
+    // rules. This keeps different vulnerability classes separate at
+    // the same line while collapsing alias rules that describe the
+    // same semantic edge (`cursor.execute`, abbreviated cursor, typed
+    // cursor) into one finding.
+    //
+    // The sink site is what distinguishes genuinely separate findings
+    // that happen to share a `group_id`: structurally identical flows
+    // in different files hash to the same group tokens, so group_id
+    // alone would wrongly collapse them into one row.
     //
     // Deliberately NOT keyed on `chain_display` or
     // `representative_flow_id`: the SAME logical finding can be reached
@@ -4870,23 +4983,175 @@ fn combined_finding_key(item: &FindingWithChain) -> String {
     // is "combine findings by source flow").
     if !group.is_empty() {
         format!(
-            "{}\0{}\0{}\0{}\0{}",
-            f.language, group, f.sink.file, f.sink.line, f.sink.rule_id
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            f.language, group, f.sink.file, f.sink.line, sink_class, f.sink.text, tainted_args
         )
     } else {
         // No group id to anchor on — fall back to the chain + flow id so
         // genuinely distinct flows don't collapse together.
         let chain = f.chain_display.join("\0");
         format!(
-            "{}\0\0{}\0{}\0{}\0{}\0{}",
+            "{}\0\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             f.language,
             chain,
             f.representative_flow_id.as_deref().unwrap_or(""),
             f.sink.file,
             f.sink.line,
-            f.sink.rule_id
+            sink_class,
+            f.sink.text,
+            tainted_args
         )
     }
+}
+
+fn extend_java_mdc_context_logger_findings(
+    findings: &mut Vec<FindingWithChain>,
+    sink_hits: &[RuleMatch],
+    pack: &Rulepack,
+    ws: &Workspace,
+) {
+    const MDC_PUT_RULE: &str = "java.log_injection.mdc_put";
+    const MDC_CONTEXT_LOGGER_RULE: &str = "java.log_injection.mdc_context_logger_info";
+
+    let Some(sink_rule) = pack.find_rule_by_id(MDC_CONTEXT_LOGGER_RULE) else {
+        return;
+    };
+    let logger_sinks: Vec<&RuleMatch> = sink_hits
+        .iter()
+        .filter(|hit| hit.rule_id == MDC_CONTEXT_LOGGER_RULE && hit.language == "java")
+        .collect();
+    if logger_sinks.is_empty() {
+        return;
+    }
+
+    let mdc_flows: Vec<FindingWithChain> = findings
+        .iter()
+        .filter(|item| {
+            item.finding.language == "java"
+                && item.finding.sink.rule_id == MDC_PUT_RULE
+                && item.finding.status == FindingStatus::Unsanitized
+        })
+        .cloned()
+        .collect();
+    if mdc_flows.is_empty() {
+        return;
+    }
+
+    let mut existing_ids: AHashSet<String> = findings
+        .iter()
+        .map(|item| item.finding.finding_id.clone())
+        .collect();
+    let mut consumed_mdc_finding_ids: AHashSet<String> = AHashSet::new();
+    for mdc_flow in mdc_flows {
+        let mut emitted_for_mdc_flow = false;
+        for logger_sink in &logger_sinks {
+            let mut sink_match = FindingMatch::from_rule_match(logger_sink, sink_rule);
+            sink_match.tainted_args.push(TaintedArgInfo {
+                index: usize::MAX,
+                value_text: "MDC context".to_string(),
+            });
+
+            let mut chain_display = mdc_flow.finding.chain_display.clone();
+            if let Some(sink_fn) = logger_sink.enclosing_fn.as_ref() {
+                if !chain_display.iter().any(|name| name == sink_fn) {
+                    chain_display.push(sink_fn.clone());
+                }
+            }
+
+            let mut chain_funcs = mdc_flow.chain_funcs.clone();
+            if let Some(sink_func) = func_id_for_match(ws, logger_sink) {
+                if !chain_funcs.contains(&sink_func) {
+                    chain_funcs.push(sink_func);
+                }
+            }
+
+            let mut taint_path = mdc_flow.finding.taint_path.clone();
+            taint_path.push(TaintPropagationStep {
+                caller: logger_sink
+                    .enclosing_fn
+                    .clone()
+                    .unwrap_or_else(|| "<logger>".to_string()),
+                callee: logger_sink.match_text.clone(),
+                file: logger_sink.file.clone(),
+                line: logger_sink.line,
+                column: logger_sink.column,
+                tainted_args: vec![TaintPropagationArg {
+                    index: usize::MAX,
+                    value_text: "MDC context".to_string(),
+                    param_name: "mdc".to_string(),
+                }],
+            });
+
+            let group_id = group_id_for_taint_path(&chain_display, &taint_path);
+            let flow_id = flow_id_for_taint_path(&chain_display, &taint_path);
+            let source_identity = finding_match_identity_token(&mdc_flow.finding.source);
+            let sink_identity = finding_match_identity_token(&sink_match);
+            let finding_id = compute_finding_id(
+                &source_identity,
+                &sink_identity,
+                &group_id,
+                &mdc_flow.finding.language,
+            );
+            if !existing_ids.insert(finding_id.clone()) {
+                continue;
+            }
+
+            let from_test = crate::finding::path_is_test_file(&mdc_flow.finding.source.file)
+                || crate::finding::path_is_test_file(&sink_match.file)
+                || taint_path
+                    .iter()
+                    .any(|step| crate::finding::path_is_test_file(&step.file));
+
+            findings.push(FindingWithChain {
+                finding: Finding {
+                    finding_id,
+                    language: mdc_flow.finding.language.clone(),
+                    source: mdc_flow.finding.source.clone(),
+                    sink: sink_match,
+                    sanitizers_seen: mdc_flow.finding.sanitizers_seen.clone(),
+                    group_id: Some(group_id),
+                    representative_flow_id: Some(flow_id),
+                    analysis_complete: mdc_flow.finding.analysis_complete,
+                    analysis_incomplete_reasons: mdc_flow.finding.analysis_incomplete_reasons.clone(),
+                    chain_display,
+                    taint_path,
+                    hops: Vec::new(),
+                    tag: sink_rule.tag.clone(),
+                    severity: sink_rule.severity,
+                    precision: precision_label(Precision::Narrowed).to_string(),
+                    cwe: sink_rule.cwe.clone(),
+                    owasp: sink_rule.owasp.clone(),
+                    status: FindingStatus::Unsanitized,
+                    from_test,
+                },
+                chain_funcs,
+            });
+            emitted_for_mdc_flow = true;
+        }
+        if emitted_for_mdc_flow {
+            consumed_mdc_finding_ids.insert(mdc_flow.finding.finding_id);
+        }
+    }
+    if !consumed_mdc_finding_ids.is_empty() {
+        findings.retain(|item| !consumed_mdc_finding_ids.contains(&item.finding.finding_id));
+    }
+}
+
+fn sink_group_class(sink: &FindingMatch) -> &str {
+    sink.tag
+        .as_deref()
+        .or(sink.category.as_deref())
+        .unwrap_or(sink.rule_id.as_str())
+}
+
+fn sink_tainted_args_group_key(sink: &FindingMatch) -> String {
+    let mut args = sink
+        .tainted_args
+        .iter()
+        .map(|arg| format!("{}={}", arg.index, arg.value_text.trim()))
+        .collect::<Vec<_>>();
+    args.sort();
+    args.join("|")
 }
 
 fn merge_finding_into_group(group: &mut CombinedFindingWithChain, incoming: Finding, member_id: String) {
@@ -4968,6 +5233,7 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
     sources.sort_by(|a, b| {
         source_preference_rank_for_sink(a, Some(&primary_sink))
             .cmp(&source_preference_rank_for_sink(b, Some(&primary_sink)))
+            .then_with(|| source_specificity_rank(a).cmp(&source_specificity_rank(b)))
             .then_with(|| (a.file.as_str(), a.line, a.column).cmp(&(b.file.as_str(), b.line, b.column)))
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
@@ -5406,6 +5672,7 @@ where
             &transfer_languages,
         ),
         source_output_args: source_output_args_from_rulepack_for_languages(pack, &transfer_languages),
+        source_callback_args: source_callback_args_from_rulepack_for_languages(pack, &transfer_languages),
         call_result_passthroughs: call_result_passthroughs_from_rulepack_for_languages(
             pack,
             &transfer_languages,
@@ -5417,14 +5684,27 @@ where
     };
     let mut source_func_ids: Vec<FuncId> = source_groups.keys().copied().collect();
     source_func_ids.sort_by_key(|func| func.raw());
+    let source_callback_targets =
+        configured_source_callback_targets_by_source(&source_work, pack, global.as_ref());
+    let mut source_func_ids_for_graph = source_func_ids.clone();
+    source_func_ids_for_graph.extend(
+        source_callback_targets
+            .values()
+            .flat_map(|targets| targets.iter().copied()),
+    );
+    source_func_ids_for_graph.sort_by_key(|func| func.raw());
+    source_func_ids_for_graph.dedup();
     let mut sink_func_ids: Vec<FuncId> = sink_by_func.keys().copied().collect();
     sink_func_ids.sort_by_key(|func| func.raw());
     on_progress(AnalysisProgress::PhaseStarted {
         label: "building source-reachable callgraph",
         total: 0,
     });
-    let reachable_call_graph =
-        ws.source_reachable_resolved_call_graph(&source_func_ids, &sink_func_ids, config.max_edge_precision);
+    let reachable_call_graph = ws.source_reachable_resolved_call_graph(
+        &source_func_ids_for_graph,
+        &sink_func_ids,
+        config.max_edge_precision,
+    );
     bonsai_diagnostics::debug_log!(
         "security-phase",
         "semantic graph scope source_funcs={} sink_funcs={} reached_sinks={} funcs={} files={}",
@@ -5488,6 +5768,15 @@ where
                 coarse_corridors_by_func.insert(*src_func_id, corridor);
             }
         }
+        let callback_scope_funcs = merge_configured_source_callback_corridors(
+            &mut coarse_corridors_by_func,
+            &source_callback_targets,
+            &sink_func_set,
+            global.as_ref(),
+            chain_call_graph.as_ref(),
+            config.max_edge_precision,
+        );
+        coarse_scope_funcs.extend(callback_scope_funcs);
     }
     let (semantic_files, semantic_funcs): (Vec<FileId>, Vec<FuncId>) = if coarse_scope_funcs.is_empty() {
         (
@@ -5530,7 +5819,7 @@ where
     );
     on_progress(AnalysisProgress::PhaseFinished);
     let sink_target_nodes = source_sink_prefilter_enabled
-        .then(|| sink_target_nodes_for_funcs(idg.as_ref(), &sink_by_func, &sink_func_set));
+        .then(|| sink_target_nodes_for_funcs(idg.as_ref(), pack, &sink_by_func, &sink_func_set));
     let sink_match_count: usize = sink_by_func.values().map(Vec::len).sum();
     let sink_target_nodes_for_schedule = sink_target_nodes.as_ref().and_then(|targets| {
         if sink_target_nodes_are_selective_for_schedule(targets, sink_match_count) {
@@ -5873,6 +6162,19 @@ where
                         continue;
                     }
                     if !source_can_precede_sink(ws, pack, src, src_func_id, snk, call.caller) {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_rejected_order source_rule={} sink_rule={} src_func={} sink_func={} caller={} call={} source_span={:?} sink_span={:?} call_span={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            src_func_id.raw(),
+                            func_id_for_match(ws, snk).map(|func| func.raw()).unwrap_or_default(),
+                            call.caller.raw(),
+                            call.name,
+                            src.span,
+                            snk.span,
+                            call.call_span
+                        );
                         continue;
                     }
                     if same_function_clean_overwrite_kills_sink_arg(
@@ -5884,6 +6186,37 @@ where
                         &call.tainted_args,
                         call.tainted_receiver.as_deref(),
                     ) {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_rejected_same_func_clean_overwrite source_rule={} sink_rule={} caller={} call={} span={:?} tainted_args={:?} receiver={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span,
+                            call.tainted_args,
+                            call.tainted_receiver
+                        );
+                        continue;
+                    }
+                    if interprocedural_clean_overwrite_kills_lineage_arg(
+                        ws,
+                        src_func_id,
+                        src.span,
+                        &trace_index,
+                        call,
+                    ) {
+                        bonsai_diagnostics::debug_log!(
+                            "security-taint",
+                            "sink_match_rejected_inter_clean_overwrite source_rule={} sink_rule={} caller={} call={} span={:?} tainted_args={:?} receiver={:?}",
+                            src.rule_id,
+                            snk.rule_id,
+                            call.caller.raw(),
+                            call.name,
+                            call.call_span,
+                            call.tainted_args,
+                            call.tainted_receiver
+                        );
                         continue;
                     }
                     sink_matches = sink_matches.saturating_add(1);
@@ -6011,6 +6344,7 @@ where
                             chain_funcs: &evidence.chain_funcs,
                             chain_names: evidence.chain_names.clone(),
                             san_by_func: &san_by_func,
+                            ws,
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
                             taint_path,
@@ -6259,6 +6593,235 @@ impl SourceSinkCorridor {
     }
 }
 
+struct SourceCallbackTargetIndex {
+    funcs_by_file: AHashMap<FileId, Vec<FuncId>>,
+    funcs_by_module: AHashMap<bonsai_lang_api::ModulePath, Vec<FuncId>>,
+}
+
+impl SourceCallbackTargetIndex {
+    fn build(global: &GlobalIndex) -> Self {
+        let mut funcs_by_file: AHashMap<FileId, Vec<FuncId>> = AHashMap::new();
+        let mut funcs_by_module: AHashMap<bonsai_lang_api::ModulePath, Vec<FuncId>> = AHashMap::new();
+        for file in global.all_files() {
+            for decl in global.functions_in(file) {
+                let func = FuncId::new(decl.symbol.raw());
+                funcs_by_file.entry(file).or_default().push(func);
+                if !decl.module_path.is_empty() {
+                    funcs_by_module
+                        .entry(decl.module_path.clone())
+                        .or_default()
+                        .push(func);
+                }
+            }
+        }
+        Self {
+            funcs_by_file,
+            funcs_by_module,
+        }
+    }
+
+    fn callback_targets_for_decl(
+        &self,
+        global: &GlobalIndex,
+        host_decl: &bonsai_lang_api::Decl,
+        callback_name: &str,
+    ) -> Vec<FuncId> {
+        let mut out = Vec::new();
+        let mut seen = AHashSet::default();
+        let host_file = global
+            .declaring_file(host_decl.symbol)
+            .unwrap_or(host_decl.span.file);
+        if let Some(funcs) = self.funcs_by_file.get(&host_file) {
+            extend_matching_callback_targets(global, funcs, callback_name, &mut out, &mut seen);
+        }
+        if !host_decl.module_path.is_empty() {
+            if let Some(funcs) = self.funcs_by_module.get(&host_decl.module_path) {
+                extend_matching_callback_targets(global, funcs, callback_name, &mut out, &mut seen);
+            }
+        }
+        out
+    }
+}
+
+fn extend_matching_callback_targets(
+    global: &GlobalIndex,
+    funcs: &[FuncId],
+    callback_name: &str,
+    out: &mut Vec<FuncId>,
+    seen: &mut AHashSet<FuncId>,
+) {
+    for func in funcs {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        if !callback_decl_name_matches(decl, callback_name) {
+            continue;
+        }
+        if seen.insert(*func) {
+            out.push(*func);
+        }
+    }
+}
+
+fn callback_decl_name_matches(decl: &bonsai_lang_api::Decl, callback_name: &str) -> bool {
+    callback_name_matches_tail(&decl.name, callback_name)
+        || decl
+            .qualified_name
+            .as_deref()
+            .is_some_and(|qualified| callback_name_matches_tail(qualified, callback_name))
+}
+
+fn callback_name_matches_tail(name: &str, callback_name: &str) -> bool {
+    if name == callback_name {
+        return true;
+    }
+    name.rsplit_once("::")
+        .is_some_and(|(_, tail)| tail == callback_name)
+        || name
+            .rsplit_once('.')
+            .is_some_and(|(_, tail)| tail == callback_name)
+}
+
+fn configured_source_callback_targets_by_source(
+    source_work: &[(&RuleMatch, FuncId, TokenSet)],
+    pack: &Rulepack,
+    global: &GlobalIndex,
+) -> AHashMap<FuncId, AHashSet<FuncId>> {
+    if source_work.is_empty() {
+        return AHashMap::new();
+    }
+    let index = SourceCallbackTargetIndex::build(global);
+    let mut out: AHashMap<FuncId, AHashSet<FuncId>> = AHashMap::new();
+    for (src, src_func_id, _) in source_work {
+        let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
+            continue;
+        };
+        let Some(rule) = pack.find_rule_by_id(&src.rule_id) else {
+            continue;
+        };
+        let Some(semantics) = rule.taint_semantics.as_ref() else {
+            continue;
+        };
+        if semantics.source_callback_args.is_empty() {
+            continue;
+        }
+        let Some(FlowEvent::Call { args, .. }) = find_call_event_at(&src_decl.flow_events, src.span) else {
+            continue;
+        };
+        for shape in &semantics.source_callback_args {
+            let Some(arg) = args.get(shape.callback_arg_index) else {
+                continue;
+            };
+            let callback_text = arg
+                .place
+                .as_deref()
+                .filter(|place| !place.trim().is_empty())
+                .unwrap_or(arg.value_text.as_str());
+            let callback_name = strip_source_callback_reference(callback_text);
+            if callback_name.is_empty() {
+                continue;
+            }
+            for target in index.callback_targets_for_decl(global, src_decl, callback_name) {
+                if target == *src_func_id {
+                    continue;
+                }
+                out.entry(*src_func_id).or_default().insert(target);
+            }
+        }
+    }
+    out
+}
+
+fn merge_configured_source_callback_corridors(
+    coarse_corridors_by_func: &mut AHashMap<FuncId, SourceSinkCorridor>,
+    source_callback_targets: &AHashMap<FuncId, AHashSet<FuncId>>,
+    sink_func_set: &AHashSet<FuncId>,
+    global: &GlobalIndex,
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    max_precision: Option<Precision>,
+) -> AHashSet<FuncId> {
+    let mut added_scope = AHashSet::default();
+    let mut sorted_sources: Vec<FuncId> = source_callback_targets.keys().copied().collect();
+    sorted_sources.sort_by_key(|func| func.raw());
+    for source_func in sorted_sources {
+        let Some(targets) = source_callback_targets.get(&source_func) else {
+            continue;
+        };
+        let mut sorted_targets: Vec<FuncId> = targets.iter().copied().collect();
+        sorted_targets.sort_by_key(|func| func.raw());
+        let mut source_corridor = SourceSinkCorridor::default();
+        for callback_func in sorted_targets {
+            let Some(mut callback_corridor) = callgraph_source_sink_corridor(
+                callback_func,
+                sink_func_set,
+                global,
+                call_graph,
+                max_precision,
+            ) else {
+                continue;
+            };
+            callback_corridor.lineage_funcs.insert(source_func);
+            callback_corridor.lineage_funcs.insert(callback_func);
+            source_corridor.extend(callback_corridor);
+        }
+        if source_corridor.terminal_sinks.is_empty() {
+            continue;
+        }
+        extend_corridor_with_summary_dependency_support(
+            &mut source_corridor,
+            global,
+            call_graph,
+            max_precision,
+        );
+        added_scope.extend(source_corridor.lineage_funcs.iter().copied());
+        coarse_corridors_by_func
+            .entry(source_func)
+            .or_default()
+            .extend(source_corridor);
+    }
+    added_scope
+}
+
+fn strip_source_callback_reference(text: &str) -> &str {
+    let mut s = text.trim();
+    if let Some(open) = s.find('(') {
+        if let Some(close) = s.rfind(')') {
+            if open < close {
+                let prefix = s[..open].trim();
+                if matches!(prefix, "method" | "partial" | "fun") {
+                    s = s[open + 1..close].trim();
+                }
+            }
+        }
+    }
+    if let Some(rest) = s.strip_prefix("fun ") {
+        s = rest.trim();
+    }
+    while let Some(rest) = s
+        .strip_prefix('\\')
+        .or_else(|| s.strip_prefix('&'))
+        .or_else(|| s.strip_prefix(':'))
+    {
+        s = rest;
+    }
+    if let Some(idx) = s.find('/') {
+        if s[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
+            s = &s[..idx];
+        }
+    }
+    if let Some((_, tail)) = s.rsplit_once("::") {
+        s = tail;
+    }
+    if let Some((_, tail)) = s.rsplit_once('.') {
+        s = tail;
+    }
+    s = s.trim_matches(|c: char| c == '"' || c == '\'').trim();
+    if s.is_empty() || !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return "";
+    }
+    s
+}
+
 fn extend_corridor_with_summary_dependency_support(
     corridor: &mut SourceSinkCorridor,
     global: &GlobalIndex,
@@ -6430,6 +6993,7 @@ struct SinkTargetNodes {
 
 fn sink_target_nodes_for_funcs(
     idg: &bonsai_idg::IdgQueryService,
+    pack: &Rulepack,
     sink_by_func: &AHashMap<FuncId, Vec<&RuleMatch>>,
     sink_funcs: &AHashSet<FuncId>,
 ) -> SinkTargetNodes {
@@ -6443,6 +7007,14 @@ fn sink_target_nodes_for_funcs(
         };
         for sink in sinks {
             let mut nodes = idg.nodes_at_span(sink_func, sink.span);
+            if pack
+                .find_rule_by_id(&sink.rule_id)
+                .is_some_and(|rule| rule.match_spec.kind == MatchKind::Return)
+            {
+                if let Some(return_node) = idg.return_node_of(sink_func) {
+                    nodes.push(return_node);
+                }
+            }
             if nodes.is_empty() {
                 complete = false;
             }
@@ -6800,6 +7372,11 @@ fn effective_source_seed_nodes(
                 continue;
             }
             seed_nodes.extend(idg.nodes_for_name_after_span(source_func, arg_name, span));
+            seed_nodes.extend(output_arg_read_seed_nodes(
+                source_func,
+                std::slice::from_ref(arg_name),
+                idg,
+            ));
         }
     }
     if seed_nodes.is_empty() {
@@ -6836,6 +7413,21 @@ fn effective_source_seed_nodes(
         seed_nodes.dedup();
     }
     seed_nodes
+}
+
+fn output_arg_read_seed_nodes(
+    func: FuncId,
+    output_arg_names: &[String],
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
+    idg.read_or_write_nodes_for_names(func, &output_seed_names)
+        .into_iter()
+        .filter(|node| {
+            idg.resolve_point(*node)
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Read)
+        })
+        .collect()
 }
 
 fn sorted_seed_key_with_anchor(
@@ -6999,7 +7591,179 @@ fn same_function_clean_overwrite_kills_sink_arg(
         sink_span,
         &targets,
         true,
-    )
+    ) || targets.iter().any(|target| {
+        clean_assignment_from_clean_inputs_between(
+            ws,
+            &decl.flow_events,
+            &decl.flow_events,
+            source_span,
+            sink_span,
+            target,
+        )
+    })
+}
+
+fn interprocedural_clean_overwrite_kills_lineage_arg(
+    ws: &Workspace,
+    src_func: FuncId,
+    source_span: Span,
+    trace_index: &AHashMap<u64, &TaintedCallEdge>,
+    terminal_call: &TaintedCall,
+) -> bool {
+    let Some(records) = lineage_records_for_call_indexed(trace_index, terminal_call) else {
+        return false;
+    };
+    records
+        .iter()
+        .any(|record| propagation_record_clean_overwrite_kills_edge(ws, src_func, source_span, record))
+}
+
+fn propagation_record_clean_overwrite_kills_edge(
+    ws: &Workspace,
+    src_func: FuncId,
+    source_span: Span,
+    record: &TaintedCallEdge,
+) -> bool {
+    if record.tainted_args.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(record.caller.raw())) else {
+        return false;
+    };
+    if record.caller == src_func && source_span.file != record.call_span.file {
+        return false;
+    }
+    let edge_source_span = if record.caller == src_func {
+        source_span
+    } else {
+        Span::empty(decl.span.file, decl.span.start)
+    };
+    if record.call_span.file != edge_source_span.file || record.call_span.start <= edge_source_span.start {
+        return false;
+    }
+    record.tainted_args.iter().any(|arg| {
+        let targets = clean_overwrite_targets_for_edge_arg(&decl.flow_events, record.call_span, arg);
+        if targets.is_empty() {
+            return false;
+        }
+        targets.iter().any(|target| {
+            let clean_overwrite = clean_overwrite_between(
+                ws,
+                &decl.flow_events,
+                &decl.flow_events,
+                edge_source_span,
+                record.call_span,
+                std::slice::from_ref(target),
+                true,
+            );
+            let clean_assignment = clean_assignment_from_clean_inputs_between(
+                ws,
+                &decl.flow_events,
+                &decl.flow_events,
+                edge_source_span,
+                record.call_span,
+                target,
+            );
+            if clean_overwrite || clean_assignment {
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "inter_clean_overwrite_edge caller={} callee={} call_span={:?} edge_source_span={:?} arg={:?} target={} clean_overwrite={} clean_assignment={}",
+                    record.caller.raw(),
+                    record.callee.raw(),
+                    record.call_span,
+                    edge_source_span,
+                    arg,
+                    target,
+                    clean_overwrite,
+                    clean_assignment
+                );
+            }
+            clean_overwrite || clean_assignment
+        })
+    })
+}
+
+fn clean_overwrite_targets_for_edge_arg(
+    events: &[bonsai_lang_api::FlowEvent],
+    call_span: Span,
+    tainted_arg: &bonsai_taint::TaintedArg,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    if let Some(arg) = find_call_arg_at(events, call_span, tainted_arg.index) {
+        for source_name in &arg.source_names {
+            targets.extend(clean_overwrite_target_keys(source_name));
+        }
+        if targets.is_empty() {
+            if let Some(place) = arg.place.as_deref() {
+                targets.extend(clean_overwrite_target_keys(place));
+            }
+        }
+    }
+    if targets.is_empty() {
+        targets.extend(clean_overwrite_target_keys(&tainted_arg.value_text));
+    }
+    targets.retain(|target| {
+        !clean_conditional_helper_identifier(target)
+            && !looks_like_clean_constant(target)
+            && target != "f"
+            && target != "r"
+            && target != "b"
+            && target != "u"
+    });
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn find_call_arg_at(
+    events: &[bonsai_lang_api::FlowEvent],
+    call_span: Span,
+    arg_index: usize,
+) -> Option<&bonsai_lang_api::CallArg> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } => {
+                if *span == call_span || spans_overlap(*span, call_span) {
+                    if let Some(arg) = args.get(arg_index) {
+                        return Some(arg);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(arg) = find_call_arg_at(then_events, call_span, arg_index)
+                    .or_else(|| find_call_arg_at(else_events, call_span, arg_index))
+                {
+                    return Some(arg);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(arg) = find_call_arg_at(body, call_span, arg_index) {
+                    return Some(arg);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(arg) = find_call_arg_at(body, call_span, arg_index)
+                    .or_else(|| find_call_arg_at(catch_events, call_span, arg_index))
+                    .or_else(|| find_call_arg_at(finally_events, call_span, arg_index))
+                {
+                    return Some(arg);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn clean_overwrite_between(
@@ -7056,6 +7820,7 @@ fn clean_overwrite_between(
             }
             FlowEvent::Branch {
                 span,
+                condition,
                 then_events,
                 else_events,
                 ..
@@ -7065,8 +7830,19 @@ fn clean_overwrite_between(
                     && span.end <= sink_span.start
                     && !else_events.is_empty()
                     && targets.iter().any(|target| {
-                        branch_arm_clean_overwrites_target(then_events, target)
-                            && branch_arm_clean_overwrites_target(else_events, target)
+                        if let Some(takes_then) = condition
+                            .as_deref()
+                            .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                        {
+                            if takes_then {
+                                branch_arm_clean_overwrites_target(ws, then_events, target)
+                            } else {
+                                branch_arm_clean_overwrites_target(ws, else_events, target)
+                            }
+                        } else {
+                            branch_arm_clean_overwrites_target(ws, then_events, target)
+                                && branch_arm_clean_overwrites_target(ws, else_events, target)
+                        }
                     })
                 {
                     return true;
@@ -7127,7 +7903,7 @@ fn clean_overwrite_between(
                     try_before_sink && span.start > source_span.start && span.end <= sink_span.start;
                 if try_after_source
                     && targets.iter().any(|target| {
-                        try_region_clean_overwrites_target(body, catch_events, finally_events, target)
+                        try_region_clean_overwrites_target(ws, body, catch_events, finally_events, target)
                     })
                 {
                     return true;
@@ -7155,9 +7931,9 @@ fn clean_overwrite_between(
                             &single_target,
                             allow_direct_assign,
                         );
-                        let body_always_clean = branch_arm_clean_overwrites_target(body, target);
+                        let body_always_clean = branch_arm_clean_overwrites_target(ws, body, target);
                         let catch_always_clean = catch_events.is_empty()
-                            || branch_arm_clean_overwrites_target(catch_events, target);
+                            || branch_arm_clean_overwrites_target(ws, catch_events, target);
                         if (body_cleans_after_source && catch_always_clean)
                             || (catch_cleans_after_source && body_always_clean)
                         {
@@ -7170,6 +7946,306 @@ fn clean_overwrite_between(
         }
     }
     false
+}
+
+fn clean_assignment_from_clean_inputs_between(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    func_events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    sink_span: Span,
+    target_key: &str,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                source_names,
+                source_call_args,
+                ..
+            } => {
+                if span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= sink_span.start
+                    && clean_overwrite_target_key(target).as_deref() == Some(target_key)
+                    && source_call.is_none()
+                    && source_call_args.is_empty()
+                    && !target_written_between(func_events, target_key, *span, sink_span)
+                    && assignment_source_names_are_clean_before(
+                        ws,
+                        func_events,
+                        source_span,
+                        *span,
+                        source_names,
+                    )
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if clean_assignment_from_clean_inputs_between(
+                    ws,
+                    then_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) || clean_assignment_from_clean_inputs_between(
+                    ws,
+                    else_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if clean_assignment_from_clean_inputs_between(
+                    ws,
+                    body,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if clean_assignment_from_clean_inputs_between(
+                    ws,
+                    body,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) || clean_assignment_from_clean_inputs_between(
+                    ws,
+                    catch_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) || clean_assignment_from_clean_inputs_between(
+                    ws,
+                    finally_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn assignment_source_names_are_clean_before(
+    ws: &Workspace,
+    func_events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    assign_span: Span,
+    source_names: &[String],
+) -> bool {
+    let mut source_keys: Vec<String> = source_names
+        .iter()
+        .filter_map(|name| clean_overwrite_target_key(name))
+        .filter(|name| !looks_like_clean_constant(name))
+        .collect();
+    source_keys.sort();
+    source_keys.dedup();
+    !source_keys.is_empty()
+        && source_keys.iter().all(|source_key| {
+            clean_overwrite_between(
+                ws,
+                func_events,
+                func_events,
+                source_span,
+                assign_span,
+                std::slice::from_ref(source_key),
+                true,
+            ) || target_only_has_clean_writes_between(ws, func_events, source_span, assign_span, source_key)
+        })
+}
+
+fn target_only_has_clean_writes_between(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    limit_span: Span,
+    target_key: &str,
+) -> bool {
+    let mut cleanliness = TargetWriteCleanliness::default();
+    collect_target_write_cleanliness(
+        ws,
+        events,
+        source_span,
+        limit_span,
+        target_key,
+        0,
+        &mut cleanliness,
+    );
+    cleanliness.saw_unconditional_clean && !cleanliness.saw_dirty
+}
+
+#[derive(Default)]
+struct TargetWriteCleanliness {
+    saw_clean: bool,
+    saw_unconditional_clean: bool,
+    saw_dirty: bool,
+}
+
+fn collect_target_write_cleanliness(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    limit_span: Span,
+    target_key: &str,
+    conditional_depth: usize,
+    out: &mut TargetWriteCleanliness,
+) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_names,
+                source_call_args,
+                value_kind,
+                ..
+            } => {
+                if span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= limit_span.start
+                    && clean_overwrite_target_key(target).as_deref() == Some(target_key)
+                {
+                    if assignment_cleanly_overwrites_target(
+                        ws,
+                        *span,
+                        source_name.as_deref(),
+                        source_call.as_deref(),
+                        source_names,
+                        source_call_args,
+                        *value_kind,
+                    ) {
+                        out.saw_clean = true;
+                        if conditional_depth == 0 {
+                            out.saw_unconditional_clean = true;
+                        }
+                    } else {
+                        out.saw_dirty = true;
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(takes_then) = condition
+                    .as_deref()
+                    .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                {
+                    collect_target_write_cleanliness(
+                        ws,
+                        if takes_then { then_events } else { else_events },
+                        source_span,
+                        limit_span,
+                        target_key,
+                        conditional_depth + 1,
+                        out,
+                    );
+                } else {
+                    collect_target_write_cleanliness(
+                        ws,
+                        then_events,
+                        source_span,
+                        limit_span,
+                        target_key,
+                        conditional_depth + 1,
+                        out,
+                    );
+                    collect_target_write_cleanliness(
+                        ws,
+                        else_events,
+                        source_span,
+                        limit_span,
+                        target_key,
+                        conditional_depth + 1,
+                        out,
+                    );
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_target_write_cleanliness(
+                    ws,
+                    body,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth + 1,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_target_write_cleanliness(
+                    ws,
+                    body,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth,
+                    out,
+                );
+                collect_target_write_cleanliness(
+                    ws,
+                    catch_events,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth + 1,
+                    out,
+                );
+                collect_target_write_cleanliness(
+                    ws,
+                    finally_events,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// True when `target_key` is assigned again at a span strictly after
@@ -7228,19 +8304,128 @@ fn assignment_cleanly_overwrites_target(
     source_call_args: &[String],
     value_kind: Option<AssignValueKind>,
 ) -> bool {
-    source_call.is_none()
+    (source_call.is_none()
         && source_call_args.is_empty()
         && (value_kind
             .as_ref()
             .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
             || clean_constant_assignment(source_name, source_names)
-            || assignment_rhs_is_clean_conditional(ws, span))
+            || assignment_rhs_is_clean_conditional(ws, span)))
+        || literal_list_get_assignment_is_clean(ws, span, source_call, source_call_args)
+        || local_call_returns_clean_value(ws, span, source_call)
 }
 
-fn branch_arm_clean_overwrites_target(events: &[bonsai_lang_api::FlowEvent], target: &str) -> bool {
+fn local_call_returns_clean_value(ws: &Workspace, call_span: Span, source_call: Option<&str>) -> bool {
+    let Some(source_call) = source_call else {
+        return false;
+    };
+    let callee_tail = clean_overwrite_callee_tail(source_call);
+    if callee_tail.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let candidates: Vec<_> = global
+        .decls_in(call_span.file)
+        .into_iter()
+        .filter(|decl| {
+            clean_overwrite_callee_tail(&decl.name) == callee_tail
+                && !(call_span.start >= decl.span.start && call_span.start < decl.span.end)
+        })
+        .collect();
+    if candidates.len() != 1 {
+        return false;
+    }
+    function_returns_clean_value(ws, candidates[0])
+}
+
+fn function_returns_clean_value(ws: &Workspace, decl: &bonsai_lang_api::Decl) -> bool {
+    let mut returns = Vec::new();
+    collect_return_values(&decl.flow_events, &mut returns);
+    !returns.is_empty()
+        && returns.iter().all(|(span, value_text, value_name)| {
+            return_value_is_clean(ws, decl, *span, value_text, value_name)
+        })
+}
+
+fn collect_return_values<'a>(
+    events: &'a [bonsai_lang_api::FlowEvent],
+    out: &mut Vec<(Span, Option<&'a str>, Option<&'a str>)>,
+) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_text,
+                value_name,
+                ..
+            } => out.push((*span, value_text.as_deref(), value_name.as_deref())),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_values(then_events, out);
+                collect_return_values(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_values(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_values(body, out);
+                collect_return_values(catch_events, out);
+                collect_return_values(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn return_value_is_clean(
+    ws: &Workspace,
+    decl: &bonsai_lang_api::Decl,
+    return_span: Span,
+    value_text: &Option<&str>,
+    value_name: &Option<&str>,
+) -> bool {
+    if value_text
+        .as_ref()
+        .is_some_and(|value| value_part_contains_only_clean_literals(value))
+    {
+        return true;
+    }
+    let Some(target) = value_name
+        .and_then(clean_overwrite_target_key)
+        .or_else(|| value_text.and_then(clean_overwrite_target_key))
+    else {
+        return false;
+    };
+    let entry_span = Span::empty(return_span.file, decl.span.start);
+    clean_overwrite_between(
+        ws,
+        &decl.flow_events,
+        &decl.flow_events,
+        entry_span,
+        return_span,
+        std::slice::from_ref(&target),
+        true,
+    ) || target_only_has_clean_writes_between(ws, &decl.flow_events, entry_span, return_span, &target)
+}
+
+fn branch_arm_clean_overwrites_target(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    target: &str,
+) -> bool {
     use bonsai_lang_api::FlowEvent;
     events.iter().any(|event| match event {
         FlowEvent::Assign {
+            span,
             target: assigned,
             source_name,
             source_call,
@@ -7250,45 +8435,62 @@ fn branch_arm_clean_overwrites_target(events: &[bonsai_lang_api::FlowEvent], tar
             ..
         } => {
             clean_overwrite_target_key(assigned).as_deref() == Some(target)
-                && source_call.is_none()
-                && source_call_args.is_empty()
-                && (value_kind
-                    .as_ref()
-                    .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
-                    || clean_constant_assignment(source_name.as_deref(), source_names))
+                && assignment_cleanly_overwrites_target(
+                    ws,
+                    *span,
+                    source_name.as_deref(),
+                    source_call.as_deref(),
+                    source_names,
+                    source_call_args,
+                    *value_kind,
+                )
         }
         FlowEvent::Branch {
+            span,
+            condition,
             then_events,
             else_events,
             ..
         } => {
-            !else_events.is_empty()
-                && branch_arm_clean_overwrites_target(then_events, target)
-                && branch_arm_clean_overwrites_target(else_events, target)
+            if let Some(takes_then) = condition
+                .as_deref()
+                .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+            {
+                if takes_then {
+                    branch_arm_clean_overwrites_target(ws, then_events, target)
+                } else {
+                    branch_arm_clean_overwrites_target(ws, else_events, target)
+                }
+            } else {
+                !else_events.is_empty()
+                    && branch_arm_clean_overwrites_target(ws, then_events, target)
+                    && branch_arm_clean_overwrites_target(ws, else_events, target)
+            }
         }
         FlowEvent::Call { name, args, .. } => clean_output_call_overwrites_target(name, args, target),
         FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-            branch_arm_clean_overwrites_target(body, target)
+            branch_arm_clean_overwrites_target(ws, body, target)
         }
         FlowEvent::Try {
             body,
             catch_events,
             finally_events,
             ..
-        } => try_region_clean_overwrites_target(body, catch_events, finally_events, target),
+        } => try_region_clean_overwrites_target(ws, body, catch_events, finally_events, target),
         _ => false,
     })
 }
 
 fn try_region_clean_overwrites_target(
+    ws: &Workspace,
     body: &[bonsai_lang_api::FlowEvent],
     catch_events: &[bonsai_lang_api::FlowEvent],
     finally_events: &[bonsai_lang_api::FlowEvent],
     target: &str,
 ) -> bool {
-    branch_arm_clean_overwrites_target(finally_events, target)
-        || (branch_arm_clean_overwrites_target(body, target)
-            && (catch_events.is_empty() || branch_arm_clean_overwrites_target(catch_events, target)))
+    branch_arm_clean_overwrites_target(ws, finally_events, target)
+        || (branch_arm_clean_overwrites_target(ws, body, target)
+            && (catch_events.is_empty() || branch_arm_clean_overwrites_target(ws, catch_events, target)))
 }
 
 fn clean_output_call_overwrites_target(name: &str, args: &[bonsai_lang_api::CallArg], target: &str) -> bool {
@@ -7360,7 +8562,21 @@ fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
     let Some(rhs) = assignment_rhs_text(ws, span) else {
         return false;
     };
-    clean_conditional_value_part(&rhs).is_some_and(value_part_contains_only_clean_literals)
+    if clean_conditional_value_part(&rhs).is_some_and(value_part_contains_only_clean_literals) {
+        return true;
+    }
+    if let Some((then_value, condition, else_value)) = split_python_conditional_parts(&rhs) {
+        return python_membership_allowlist_condition_cleans_value(condition, then_value)
+            && value_part_contains_only_clean_literals(else_value);
+    }
+    let Some((condition, then_value, else_value)) = split_ternary_parts(&rhs) else {
+        return false;
+    };
+    match static_numeric_condition_value(ws, span, condition) {
+        Some(true) => value_part_contains_only_clean_literals(then_value),
+        Some(false) => value_part_contains_only_clean_literals(else_value),
+        None => false,
+    }
 }
 
 fn assignment_rhs_text(ws: &Workspace, span: Span) -> Option<String> {
@@ -7368,6 +8584,397 @@ fn assignment_rhs_text(ws: &Workspace, span: Span) -> Option<String> {
     let raw = snapshot.text.get(span.start as usize..span.end as usize)?;
     let rhs = raw.split_once('=').map_or(raw, |(_, rhs)| rhs);
     Some(rhs.trim().trim_end_matches(';').trim().to_string())
+}
+
+fn literal_list_get_assignment_is_clean(
+    ws: &Workspace,
+    span: Span,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+) -> bool {
+    let Some(receiver) = source_call.and_then(|call| call.strip_suffix(".get")) else {
+        return false;
+    };
+    let Some(list_name) = clean_overwrite_target_key(receiver) else {
+        return false;
+    };
+    let Some(index) = source_call_args
+        .first()
+        .and_then(|arg| arg.trim().parse::<usize>().ok())
+    else {
+        return false;
+    };
+    let Some(values) = literal_list_state_before_span(ws, span, &list_name) else {
+        return false;
+    };
+    values
+        .get(index)
+        .is_some_and(|value| value_part_contains_only_clean_literals(value))
+}
+
+fn literal_list_state_before_span(ws: &Workspace, span: Span, list_name: &str) -> Option<Vec<String>> {
+    let snapshot = ws.vfs().snapshot(span.file).ok()?;
+    let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
+    let start = end.saturating_sub(4096);
+    let prefix = snapshot.text.get(start..end)?;
+    let mut values: Option<Vec<String>> = None;
+    let new_marker = format!("{list_name} = new ");
+    let add_marker = format!("{list_name}.add");
+    let remove_marker = format!("{list_name}.remove");
+    for line in prefix.lines() {
+        let statement = line.split("//").next().unwrap_or(line).trim();
+        if statement.contains(&new_marker) {
+            values = Some(Vec::new());
+            continue;
+        }
+        if statement.contains(&add_marker) {
+            let value = call_first_argument(statement)?;
+            values.as_mut()?.push(value.to_string());
+            continue;
+        }
+        if statement.contains(&remove_marker) {
+            let index = call_first_argument(statement)?.trim().parse::<usize>().ok()?;
+            let values = values.as_mut()?;
+            if index >= values.len() {
+                return None;
+            }
+            values.remove(index);
+        }
+    }
+    values
+}
+
+fn call_first_argument(statement: &str) -> Option<&str> {
+    let open = statement.find('(')?;
+    let close = statement[open + 1..].find(')')? + open + 1;
+    let args = &statement[open + 1..close];
+    let comma = find_top_level_char(args, ',').unwrap_or(args.len());
+    Some(args[..comma].trim())
+}
+
+fn split_ternary_parts(rhs: &str) -> Option<(&str, &str, &str)> {
+    let trimmed = rhs.trim();
+    let question = find_top_level_char(trimmed, '?')?;
+    let colon = find_top_level_char(&trimmed[question + 1..], ':')? + question + 1;
+    Some((
+        trimmed[..question].trim(),
+        trimmed[question + 1..colon].trim(),
+        trimmed[colon + 1..].trim(),
+    ))
+}
+
+fn split_python_conditional_parts(rhs: &str) -> Option<(&str, &str, &str)> {
+    let trimmed = rhs.trim();
+    let if_idx = find_top_level_keyword(trimmed, "if")?;
+    let else_idx = find_top_level_keyword(&trimmed[if_idx + 2..], "else")? + if_idx + 2;
+    let then_value = trimmed[..if_idx].trim();
+    let condition = trimmed[if_idx + 2..else_idx].trim();
+    let else_value = trimmed[else_idx + 4..].trim();
+    (!then_value.is_empty() && !condition.is_empty() && !else_value.is_empty())
+        .then_some((then_value, condition, else_value))
+}
+
+fn python_membership_allowlist_condition_cleans_value(condition: &str, then_value: &str) -> bool {
+    let Some(target) = clean_overwrite_target_key(then_value) else {
+        return false;
+    };
+    let condition = strip_balanced_outer_parens(condition);
+    if find_top_level_keyword(condition, "not").is_some() {
+        return false;
+    }
+    let Some(in_idx) = find_top_level_keyword(condition, "in") else {
+        return false;
+    };
+    let left = condition[..in_idx].trim();
+    let right = condition[in_idx + 2..].trim();
+    clean_overwrite_target_key(left).as_deref() == Some(target.as_str())
+        && value_part_contains_only_clean_literals(right)
+}
+
+fn find_top_level_keyword(text: &str, keyword: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < text.len() {
+        let ch = text[idx..].chars().next()?;
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            idx += ch.len_utf8();
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && text[idx..].starts_with(keyword) && keyword_has_boundary(text, idx, keyword.len()) {
+            return Some(idx);
+        }
+        idx += ch.len_utf8();
+    }
+    None
+}
+
+fn keyword_has_boundary(text: &str, start: usize, len: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[start + len..].chars().next();
+    !before.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !after.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn find_top_level_char(text: &str, needle: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == needle && depth == 0 => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn static_numeric_condition_value(ws: &Workspace, span: Span, condition: &str) -> Option<bool> {
+    let vars = numeric_constant_assignments_before_span(ws, span);
+    eval_numeric_condition(condition, &vars)
+}
+
+fn numeric_constant_assignments_before_span(ws: &Workspace, span: Span) -> AHashMap<String, i64> {
+    let mut out = AHashMap::new();
+    let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
+        return out;
+    };
+    let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
+    let start = end.saturating_sub(4096);
+    let Some(prefix) = snapshot.text.get(start..end) else {
+        return out;
+    };
+    for line in prefix.lines() {
+        let trimmed = line.trim().trim_end_matches(';').trim();
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let rhs = rhs.trim();
+        let Ok(value) = rhs.parse::<i64>() else {
+            continue;
+        };
+        let Some(name) = lhs
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .filter(|part| !part.is_empty())
+            .last()
+        else {
+            continue;
+        };
+        if name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        {
+            out.insert(name.to_string(), value);
+        }
+    }
+    out
+}
+
+fn eval_numeric_condition(condition: &str, vars: &AHashMap<String, i64>) -> Option<bool> {
+    let condition = strip_balanced_outer_parens(condition.trim());
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        if let Some(idx) = find_top_level_operator(condition, op) {
+            let left = eval_int_expr(&condition[..idx], vars)?;
+            let right = eval_int_expr(&condition[idx + op.len()..], vars)?;
+            return Some(match op {
+                ">=" => left >= right,
+                "<=" => left <= right,
+                "==" => left == right,
+                "!=" => left != right,
+                ">" => left > right,
+                "<" => left < right,
+                _ => return None,
+            });
+        }
+    }
+    None
+}
+
+fn find_top_level_operator(text: &str, op: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut depth = 0usize;
+    let mut idx = 0usize;
+    while idx + op_bytes.len() <= bytes.len() {
+        match bytes[idx] {
+            b'(' | b'[' | b'{' => depth = depth.saturating_add(1),
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && &bytes[idx..idx + op_bytes.len()] == op_bytes {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn eval_int_expr(expr: &str, vars: &AHashMap<String, i64>) -> Option<i64> {
+    let mut parser = IntExprParser::new(expr, vars);
+    let value = parser.parse_expr()?;
+    parser.skip_ws();
+    (parser.peek().is_none()).then_some(value)
+}
+
+struct IntExprParser<'a> {
+    input: &'a str,
+    pos: usize,
+    vars: &'a AHashMap<String, i64>,
+}
+
+impl<'a> IntExprParser<'a> {
+    fn new(input: &'a str, vars: &'a AHashMap<String, i64>) -> Self {
+        Self { input, pos: 0, vars }
+    }
+
+    fn parse_expr(&mut self) -> Option<i64> {
+        let mut value = self.parse_term()?;
+        loop {
+            self.skip_ws();
+            if self.consume('+') {
+                value = value.checked_add(self.parse_term()?)?;
+            } else if self.consume('-') {
+                value = value.checked_sub(self.parse_term()?)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn parse_term(&mut self) -> Option<i64> {
+        let mut value = self.parse_factor()?;
+        loop {
+            self.skip_ws();
+            if self.consume('*') {
+                value = value.checked_mul(self.parse_factor()?)?;
+            } else if self.consume('/') {
+                let divisor = self.parse_factor()?;
+                if divisor == 0 {
+                    return None;
+                }
+                value = value.checked_div(divisor)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn parse_factor(&mut self) -> Option<i64> {
+        self.skip_ws();
+        if self.consume('(') {
+            let value = self.parse_expr()?;
+            self.skip_ws();
+            return self.consume(')').then_some(value);
+        }
+        if self.consume('-') {
+            return self.parse_factor()?.checked_neg();
+        }
+        if self.peek()?.is_ascii_digit() {
+            return self.parse_number();
+        }
+        self.parse_identifier()
+            .and_then(|name| self.vars.get(name).copied())
+    }
+
+    fn parse_number(&mut self) -> Option<i64> {
+        let start = self.pos;
+        while self.peek().is_some_and(|ch| ch.is_ascii_digit() || ch == '_') {
+            self.pos += self.peek()?.len_utf8();
+        }
+        self.input[start..self.pos].replace('_', "").parse().ok()
+    }
+
+    fn parse_identifier(&mut self) -> Option<&'a str> {
+        let start = self.pos;
+        let first = self.peek()?;
+        if !(first == '_' || first.is_ascii_alphabetic()) {
+            return None;
+        }
+        self.pos += first.len_utf8();
+        while self
+            .peek()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            self.pos += self.peek()?.len_utf8();
+        }
+        Some(&self.input[start..self.pos])
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.pos += self.peek().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+
+    fn consume(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.pos += expected.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+}
+
+fn strip_balanced_outer_parens(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim();
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+            return trimmed;
+        }
+        let mut depth = 0isize;
+        let mut wraps = true;
+        for (idx, ch) in trimmed.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
+                        wraps = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if wraps {
+            text = &trimmed[1..trimmed.len() - 1];
+        } else {
+            return trimmed;
+        }
+    }
 }
 
 fn clean_conditional_value_part(rhs: &str) -> Option<&str> {
@@ -7451,8 +9058,81 @@ fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
             out.push(key);
         }
     }
+    for token in interpolation_identifier_tokens(text) {
+        if let Some(key) = clean_overwrite_target_key(&token) {
+            out.push(key);
+        }
+    }
     out.sort();
     out.dedup();
+    out
+}
+
+fn interpolation_identifier_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for interpolation in template_interpolations(text) {
+        tokens.extend(identifier_tokens_outside_strings(interpolation));
+    }
+    for interpolation in python_f_string_interpolations(text) {
+        tokens.extend(identifier_tokens_outside_strings(interpolation));
+    }
+    tokens
+}
+
+fn python_f_string_interpolations(text: &str) -> Vec<&str> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("f\"")
+        || lower.starts_with("f'")
+        || lower.starts_with("fr\"")
+        || lower.starts_with("fr'")
+        || lower.starts_with("rf\"")
+        || lower.starts_with("rf'"))
+    {
+        return Vec::new();
+    }
+    braced_interpolations(trimmed)
+}
+
+fn braced_interpolations(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1).copied() == Some(b'{') {
+            i += 2;
+            continue;
+        }
+        let start = i + 1;
+        let mut depth = 1usize;
+        let mut j = start;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'{' => depth += 1,
+                b'}' => {
+                    if bytes.get(j + 1).copied() == Some(b'}') && depth == 1 {
+                        j += 2;
+                        continue;
+                    }
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        out.push(&text[start..j]);
+                        i = j + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if j >= bytes.len() {
+            break;
+        }
+    }
     out
 }
 
@@ -7644,6 +9324,65 @@ fn sanitizer_is_nested_in_tainted_sink_arg(
         .any(|arg| sanitizer_call_wraps_carrier(&arg.value_text, text, carrier))
 }
 
+fn xxe_factory_hardening_sanitizes_sink(
+    ws: &Workspace,
+    sanitizer_rule: Option<&Rule>,
+    sink_rule: &Rule,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+) -> bool {
+    if sanitizer_rule.and_then(|rule| rule.tag.as_deref()) != Some("xxe-sanitizer")
+        || sink_rule.tag.as_deref() != Some("xxe")
+        || san.span.file != snk.span.file
+        || !match_precedes_or_same(san, snk)
+    {
+        return false;
+    }
+    let Some(factory_receiver) = receiver_text_from_match(&san.match_text) else {
+        return false;
+    };
+    let Some(sink_receiver) = receiver_text_from_match(&snk.match_text) else {
+        return false;
+    };
+    if factory_receiver == sink_receiver {
+        return true;
+    }
+    builder_created_from_factory_before_sink(ws, san.span, snk.span, sink_receiver, factory_receiver)
+}
+
+fn receiver_text_from_match(text: &str) -> Option<&str> {
+    let (receiver, _) = text.trim().rsplit_once('.')?;
+    let receiver = receiver.trim();
+    (!receiver.is_empty()).then_some(receiver)
+}
+
+fn builder_created_from_factory_before_sink(
+    ws: &Workspace,
+    san_span: Span,
+    sink_span: Span,
+    builder_receiver: &str,
+    factory_receiver: &str,
+) -> bool {
+    if san_span.file != sink_span.file || san_span.end > sink_span.start {
+        return false;
+    }
+    let Ok(snapshot) = ws.vfs().snapshot(sink_span.file) else {
+        return false;
+    };
+    let source = snapshot.text.as_ref();
+    let start = san_span.end as usize;
+    let end = sink_span.start as usize;
+    if start > end || end > source.len() {
+        return false;
+    }
+    let compact = source[start..end]
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let pattern = format!("{builder_receiver}={factory_receiver}.newDocumentBuilder(");
+    compact.contains(&pattern)
+}
+
 /// True when `value_text` invokes `callee` as a CALL (anchored on the
 /// `callee(` form, and `callee` not preceded by an identifier char so a
 /// longer identifier such as `myEscapeHtml` never matches) and that
@@ -7758,6 +9497,7 @@ fn sanitizer_can_attach(
     sink_func: FuncId,
     sink_tainted_args: &[TaintedArgInfo],
     dataflow_connected: bool,
+    post_sink_path_construction_containment: bool,
 ) -> bool {
     if sanitizer_func == source_func && !match_precedes_or_same(src, san) && !dataflow_connected {
         return false;
@@ -7765,10 +9505,30 @@ fn sanitizer_can_attach(
     if sanitizer_func == sink_func
         && !match_precedes_or_same(san, snk)
         && !sanitizer_is_nested_in_tainted_sink_arg(src, san, sink_tainted_args)
+        && !post_sink_path_construction_containment
     {
         return false;
     }
     true
+}
+
+fn post_sink_path_construction_containment_allowed(
+    sanitizer_rule: Option<&Rule>,
+    sink_rule: &Rule,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+) -> bool {
+    if sanitizer_rule.and_then(|rule| rule.tag.as_deref()) != Some("path-sanitize")
+        || sink_rule.tag.as_deref() != Some("path-traversal")
+        || san.span.file != snk.span.file
+        || match_precedes_or_same(san, snk)
+    {
+        return false;
+    }
+    matches!(
+        sink_rule.id.as_str(),
+        "go.path.filepath_join" | "go.path.path_join"
+    )
 }
 
 /// True when match `a` is at the same position as or before match
@@ -7813,6 +9573,13 @@ fn prototype_pollution_sink_is_guarded(ws: &Workspace, sink_rule: &Rule, sink: &
         .get(sink_start..sink_end.min(source.len()))
         .unwrap_or(sink.match_text.as_str());
     let mut key_vars = prototype_key_index_variables(sink_text);
+    if key_vars.is_empty() {
+        if let Some(line_text) = source_line_text(source, sink.line) {
+            key_vars.extend(prototype_key_index_variables(line_text));
+            key_vars.sort();
+            key_vars.dedup();
+        }
+    }
     if key_vars.is_empty() && sink.match_text.contains(".key") {
         key_vars.push("key".to_string());
     }
@@ -7834,9 +9601,24 @@ fn prototype_pollution_sink_is_guarded(ws: &Workspace, sink_rule: &Rule, sink: &
         return true;
     }
 
-    key_vars
+    if key_vars
         .iter()
         .any(|key| prototype_key_denylist_guard_present(&compact, key))
+    {
+        return true;
+    }
+
+    let wide_guard_start = sink_start.saturating_sub(1200);
+    if wide_guard_start < guard_start {
+        if let Some(prefix) = source.get(wide_guard_start..sink_start) {
+            let compact = compact_guard_text(prefix);
+            return compact.contains("Object.freeze(Object.prototype)")
+                || key_vars
+                    .iter()
+                    .any(|key| prototype_key_denylist_guard_present(&compact, key));
+        }
+    }
+    false
 }
 
 fn prototype_key_index_variables(text: &str) -> Vec<String> {
@@ -7854,6 +9636,13 @@ fn prototype_key_index_variables(text: &str) -> Vec<String> {
         rest = &rest[close + 1..];
     }
     vars
+}
+
+fn source_line_text(source: &str, one_based_line: u32) -> Option<&str> {
+    if one_based_line == 0 {
+        return None;
+    }
+    source.lines().nth(usize::try_from(one_based_line - 1).ok()?)
 }
 
 fn is_js_identifier(text: &str) -> bool {
@@ -7923,8 +9712,54 @@ fn rule_match_kind_is_param(pack: &Rulepack, rule_id: &str) -> bool {
 /// concrete carrier names at the source's call site. The IDG seeder
 /// then includes post-call reads/writes of those carriers so the
 /// side-effect taint flows into downstream consumers.
+fn find_call_event_at(events: &[FlowEvent], target: bonsai_common::Span) -> Option<&FlowEvent> {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, .. }
+                if *span == target || span_contains(*span, target) || spans_overlap(*span, target) =>
+            {
+                return Some(event);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(v) = find_call_event_at(then_events, target) {
+                    return Some(v);
+                }
+                if let Some(v) = find_call_event_at(else_events, target) {
+                    return Some(v);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(v) = find_call_event_at(body, target) {
+                    return Some(v);
+                }
+                if let Some(v) = find_call_event_at(catch_events, target) {
+                    return Some(v);
+                }
+                if let Some(v) = find_call_event_at(finally_events, target) {
+                    return Some(v);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(v) = find_call_event_at(body, target) {
+                    return Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn output_arg_names_for_match(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Decl) -> Vec<String> {
-    use bonsai_lang_api::FlowEvent;
     let Some(rule) = pack.find_rule_by_id(&src.rule_id) else {
         return Vec::new();
     };
@@ -7934,51 +9769,7 @@ fn output_arg_names_for_match(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_la
     if semantics.source_output_args.is_empty() {
         return Vec::new();
     }
-    fn find_call<'a>(events: &'a [FlowEvent], target: bonsai_common::Span) -> Option<&'a FlowEvent> {
-        for event in events {
-            match event {
-                FlowEvent::Call { span, .. } if *span == target => return Some(event),
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    if let Some(v) = find_call(then_events, target) {
-                        return Some(v);
-                    }
-                    if let Some(v) = find_call(else_events, target) {
-                        return Some(v);
-                    }
-                }
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    if let Some(v) = find_call(body, target) {
-                        return Some(v);
-                    }
-                    if let Some(v) = find_call(catch_events, target) {
-                        return Some(v);
-                    }
-                    if let Some(v) = find_call(finally_events, target) {
-                        return Some(v);
-                    }
-                }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => {
-                    if let Some(v) = find_call(body, target) {
-                        return Some(v);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-    let Some(FlowEvent::Call { args, .. }) = find_call(&decl.flow_events, src.span) else {
+    let Some(FlowEvent::Call { args, .. }) = find_call_event_at(&decl.flow_events, src.span) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -8014,6 +9805,10 @@ fn source_seed_set(
         .and_then(|rule| rule.taint_semantics.as_ref())
         .map(|semantics| semantics.source_output_args.as_slice())
         .unwrap_or(&[]);
+    let source_callback_args = rule
+        .and_then(|rule| rule.taint_semantics.as_ref())
+        .map(|semantics| semantics.source_callback_args.as_slice())
+        .unwrap_or(&[]);
     if let Some(graph) = value_flow {
         seed_source_nodes_from_value_flow(src, graph, &mut out);
     }
@@ -8021,7 +9816,13 @@ fn source_seed_set(
         insert_taint_aliases(&mut out, &src.match_text);
         insert_descendant_taint_aliases(&mut out, &src.match_text);
     }
-    collect_source_seed_targets(&decl.flow_events, src, source_output_args, &mut out);
+    collect_source_seed_targets(
+        &decl.flow_events,
+        src,
+        source_output_args,
+        source_callback_args,
+        &mut out,
+    );
     if out.is_empty() {
         insert_taint_aliases(&mut out, &src.match_text);
     }
@@ -8043,6 +9844,7 @@ fn collect_source_seed_targets(
     events: &[bonsai_lang_api::FlowEvent],
     src: &RuleMatch,
     source_output_args: &[usize],
+    source_callback_args: &[SourceCallbackArgSemantics],
     out: &mut TokenSet,
 ) {
     use bonsai_lang_api::FlowEvent;
@@ -8156,17 +9958,20 @@ fn collect_source_seed_targets(
                 if call_matches && !source_output_args.is_empty() {
                     seed_source_output_call_args(out, args, source_output_args);
                 }
+                if call_matches && !source_callback_args.is_empty() {
+                    seed_source_callback_call_args(out, args, source_callback_args);
+                }
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_source_seed_targets(then_events, src, source_output_args, out);
-                collect_source_seed_targets(else_events, src, source_output_args, out);
+                collect_source_seed_targets(then_events, src, source_output_args, source_callback_args, out);
+                collect_source_seed_targets(else_events, src, source_output_args, source_callback_args, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_source_seed_targets(body, src, source_output_args, out);
+                collect_source_seed_targets(body, src, source_output_args, source_callback_args, out);
             }
             FlowEvent::Try {
                 body,
@@ -8174,9 +9979,15 @@ fn collect_source_seed_targets(
                 finally_events,
                 ..
             } => {
-                collect_source_seed_targets(body, src, source_output_args, out);
-                collect_source_seed_targets(catch_events, src, source_output_args, out);
-                collect_source_seed_targets(finally_events, src, source_output_args, out);
+                collect_source_seed_targets(body, src, source_output_args, source_callback_args, out);
+                collect_source_seed_targets(catch_events, src, source_output_args, source_callback_args, out);
+                collect_source_seed_targets(
+                    finally_events,
+                    src,
+                    source_output_args,
+                    source_callback_args,
+                    out,
+                );
             }
             _ => {}
         }
@@ -8233,6 +10044,96 @@ fn seed_source_output_call_args(
     }
 }
 
+fn seed_source_callback_call_args(
+    out: &mut TokenSet,
+    args: &[bonsai_lang_api::CallArg],
+    source_callback_args: &[SourceCallbackArgSemantics],
+) {
+    for shape in source_callback_args {
+        let Some(callback_arg) = args.get(shape.callback_arg_index) else {
+            continue;
+        };
+        let params = callback_param_names_from_value_text(&callback_arg.value_text);
+        if params.is_empty() {
+            continue;
+        }
+        for &index in &shape.source_param_indices {
+            let Some(param) = params.get(index).map(String::as_str) else {
+                continue;
+            };
+            if param.is_empty() || source_seed_text_is_literal(param) {
+                continue;
+            }
+            insert_taint_aliases(out, param);
+            insert_descendant_taint_aliases(out, param);
+        }
+    }
+}
+
+fn callback_param_names_from_value_text(value: &str) -> Vec<String> {
+    let mut text = value.trim();
+    if let Some(rest) = text.strip_prefix("async ") {
+        text = rest.trim_start();
+    }
+    if let Some(arrow) = text.find("=>") {
+        return parse_callback_param_list(text[..arrow].trim());
+    }
+    if text.starts_with("function") || text.starts_with("async function") {
+        if let Some(open) = text.find('(') {
+            if let Some(close) = text[open + 1..].find(')') {
+                return split_callback_params(&text[open + 1..open + 1 + close]);
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn parse_callback_param_list(head: &str) -> Vec<String> {
+    let head = head.trim();
+    if let Some(inner) = head
+        .strip_prefix('(')
+        .and_then(|value| value.rsplit_once(')').map(|(inner, _)| inner))
+    {
+        return split_callback_params(inner);
+    }
+    split_callback_params(head)
+}
+
+fn split_callback_params(params: &str) -> Vec<String> {
+    params
+        .split(',')
+        .filter_map(callback_param_name)
+        .collect::<Vec<_>>()
+}
+
+fn callback_param_name(raw: &str) -> Option<String> {
+    let mut value = raw.trim().trim_start_matches("...").trim();
+    if value.starts_with('{') || value.starts_with('[') {
+        return None;
+    }
+    if let Some((name, _)) = value.split_once(':') {
+        value = name.trim();
+    }
+    if let Some((name, _)) = value.split_once('=') {
+        value = name.trim();
+    }
+    if value.is_empty() || !is_simple_callback_param_name(value) {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn is_simple_callback_param_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
 fn source_seed_text_is_literal(text: &str) -> bool {
     let text = text.trim();
     if text.len() < 2 {
@@ -8252,8 +10153,20 @@ fn seed_descendant_aliases_for_qualified_source_reads(
     source_names: &[String],
     source_text: &str,
 ) {
+    let source_normalised = security_normalise_qualified_text(source_text);
     for name in source_names {
         let normalised = security_normalise_qualified_text(name);
+        if !source_normalised.is_empty()
+            && source_normalised.contains('.')
+            && (normalised == source_normalised
+                || normalised
+                    .strip_prefix(source_normalised.as_str())
+                    .is_some_and(|rest| rest.starts_with('.')))
+        {
+            insert_descendant_taint_aliases(out, source_text);
+            insert_descendant_taint_aliases(out, &source_normalised);
+            continue;
+        }
         let Some((base, _)) = normalised.split_once('.') else {
             continue;
         };
@@ -8512,6 +10425,7 @@ struct FindingBuildContext<'a> {
     chain_funcs: &'a [FuncId],
     chain_names: Vec<String>,
     san_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
+    ws: &'a Workspace,
     /// Spans of every call site the engine recorded as carrying
     /// tainted argument flow on this source's graph. A sanitizer
     /// only credits the finding when its match span overlaps one
@@ -8566,6 +10480,7 @@ fn make_finding(
             continue;
         };
         for sanitizer_match in sanitizer_hits {
+            let sanitizer_rule = pack.find_rule_by_id(&sanitizer_match.rule_id);
             let dataflow_connected =
                 sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
                     || sanitizer_char_allowlist_guards_tainted_call(
@@ -8576,7 +10491,16 @@ fn make_finding(
                         src,
                         sanitizer_match,
                         &context.sink_tainted_args,
+                    )
+                    || xxe_factory_hardening_sanitizes_sink(
+                        context.ws,
+                        sanitizer_rule,
+                        skr,
+                        sanitizer_match,
+                        snk,
                     );
+            let post_sink_path_construction_containment = dataflow_connected
+                && post_sink_path_construction_containment_allowed(sanitizer_rule, skr, sanitizer_match, snk);
             if !sanitizer_can_attach(
                 src,
                 context.source_func,
@@ -8586,6 +10510,7 @@ fn make_finding(
                 context.sink_func,
                 &context.sink_tainted_args,
                 dataflow_connected,
+                post_sink_path_construction_containment,
             ) {
                 continue;
             }
@@ -8603,11 +10528,146 @@ fn make_finding(
                 sanitizer_match.column,
             );
             if seen_keys.insert(dedup_key) {
-                if let Some(rule) = pack.find_rule_by_id(&sanitizer_match.rule_id) {
+                if let Some(rule) = sanitizer_rule {
                     sanitizers_seen.push(FindingMatch::from_rule_match(sanitizer_match, rule));
                 }
             }
         }
+    }
+    if let Some(guard) = dev_only_environment_guard_sanitizer(context.ws, src)
+        .or_else(|| dev_only_environment_guard_sanitizer(context.ws, snk))
+    {
+        let dedup_key = (guard.file.clone(), guard.line, guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(guard);
+        }
+    }
+    if let Some(allowlist) =
+        finite_literal_map_lookup_allowlist_sanitizer(context.ws, snk, &context.sink_tainted_args)
+    {
+        let dedup_key = (allowlist.file.clone(), allowlist.line, allowlist.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(allowlist);
+        }
+    }
+    if let Some(allowlist) = guarded_char_append_allowlist_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr.tag.as_deref(),
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (allowlist.file.clone(), allowlist.line, allowlist.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(allowlist);
+        }
+    }
+    if let Some(path_guard) = python_realpath_containment_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (path_guard.file.clone(), path_guard.line, path_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(path_guard);
+        }
+    }
+    if let Some(regex_guard) = python_compiled_regex_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (regex_guard.file.clone(), regex_guard.line, regex_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(regex_guard);
+        }
+    }
+    if let Some(parser_guard) = python_lxml_parser_keyword_sanitizer(context.ws, context.sink_func, snk, skr)
+    {
+        let dedup_key = (parser_guard.file.clone(), parser_guard.line, parser_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(parser_guard);
+        }
+    }
+    if let Some(ssrf_guard) = java_url_ssrf_guard_sanitizer(context.ws, context.sink_func, snk, skr) {
+        let dedup_key = (ssrf_guard.file.clone(), ssrf_guard.line, ssrf_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(ssrf_guard);
+        }
+    }
+    if let Some(jwt_guard) = go_jwt_inline_keyfunc_algorithm_guard_sanitizer(context.ws, snk, skr) {
+        let dedup_key = (jwt_guard.file.clone(), jwt_guard.line, jwt_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(jwt_guard);
+        }
+    }
+    if let Some(html_helper) =
+        js_ts_local_html_escape_helper_sanitizer(context.ws, snk, skr, &context.sink_tainted_args)
+    {
+        let dedup_key = (html_helper.file.clone(), html_helper.line, html_helper.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(html_helper);
+        }
+    }
+    if let Some(xml_guard) = go_xml_decoder_hardening_sanitizer(context.ws, context.sink_func, snk, skr) {
+        let dedup_key = (xml_guard.file.clone(), xml_guard.line, xml_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(xml_guard);
+        }
+    }
+    if let Some(eq_guard) = nosql_eq_filter_wrapper_sanitizer(snk, skr, &context.sink_tainted_args) {
+        let dedup_key = (eq_guard.file.clone(), eq_guard.line, eq_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(eq_guard);
+        }
+    }
+    if let Some(ldap_guard) = local_ldap_escape_helper_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (ldap_guard.file.clone(), ldap_guard.line, ldap_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(ldap_guard);
+        }
+    }
+    if let Some(redirect_guard) = go_same_origin_redirect_helper_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (
+            redirect_guard.file.clone(),
+            redirect_guard.line,
+            redirect_guard.column,
+        );
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(redirect_guard);
+        }
+    }
+    if let Some(ssrf_guard) = python_url_ssrf_guard_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
+        let dedup_key = (ssrf_guard.file.clone(), ssrf_guard.line, ssrf_guard.column);
+        if seen_keys.insert(dedup_key) {
+            sanitizers_seen.push(ssrf_guard);
+        }
+    }
+
+    if source_sink_pair_is_low_signal(&src_match, skr) {
+        return None;
     }
 
     let status = compute_status(&sanitizers_seen, skr.tag.as_deref());
@@ -8660,6 +10720,2372 @@ fn make_finding(
         status,
         from_test,
     })
+}
+
+fn source_sink_pair_is_low_signal(source: &FindingMatch, sink_rule: &Rule) -> bool {
+    if sink_rule.tag.as_deref() != Some("log-injection") || source.trust.as_deref() != Some("local") {
+        return false;
+    }
+    let token = format!(
+        "{} {} {}",
+        source.rule_id,
+        source.text,
+        source.category.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    token.contains("getenv") || token.contains("environ")
+}
+
+fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> Option<FindingMatch> {
+    if matches!(hit.language.as_str(), "javascript" | "typescript") {
+        return js_dev_only_environment_guard_sanitizer(ws, hit);
+    }
+    if hit.language != "python" {
+        return None;
+    }
+    let snapshot = ws.vfs().snapshot(hit.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
+    let target_line = *lines.get(target_idx)?;
+    let target_indent = leading_ascii_whitespace(target_line);
+    let search_start = target_idx.saturating_sub(12);
+    for idx in search_start..target_idx {
+        let guard_line = lines[idx];
+        if !python_dev_only_env_guard_line(guard_line) {
+            continue;
+        }
+        let guard_indent = leading_ascii_whitespace(guard_line);
+        if guard_indent > target_indent {
+            continue;
+        }
+        if !python_guard_exits_before_target(&lines, idx, target_idx, guard_indent, target_indent) {
+            continue;
+        }
+        return Some(FindingMatch {
+            rule_id: "engine.sanitizer.dev_only_env_guard".to_string(),
+            file: hit.file.clone(),
+            line: u32::try_from(idx + 1).ok()?,
+            column: u32::try_from(guard_indent + 1).ok()?,
+            text: guard_line.trim().to_string(),
+            enclosing_fn: hit.enclosing_fn.clone(),
+            tag: Some("dev-only-guard".to_string()),
+            severity: None,
+            category: Some("reachability-guard".to_string()),
+            trust: None,
+            payload_types: Vec::new(),
+            tainted_args: Vec::new(),
+            sanitised_arg_indices: Vec::new(),
+        });
+    }
+    None
+}
+
+fn js_dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> Option<FindingMatch> {
+    let snapshot = ws.vfs().snapshot(hit.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
+    let target_indent = leading_ascii_whitespace(*lines.get(target_idx)?);
+    let search_start = target_idx.saturating_sub(12);
+    for idx in search_start..target_idx {
+        let guard_line = lines[idx];
+        if !js_dev_only_env_guard_line(guard_line) {
+            continue;
+        }
+        let guard_indent = leading_ascii_whitespace(guard_line);
+        if guard_indent > target_indent {
+            continue;
+        }
+        return Some(FindingMatch {
+            rule_id: "engine.sanitizer.dev_only_env_guard".to_string(),
+            file: hit.file.clone(),
+            line: u32::try_from(idx + 1).ok()?,
+            column: u32::try_from(guard_indent + 1).ok()?,
+            text: guard_line.trim().to_string(),
+            enclosing_fn: hit.enclosing_fn.clone(),
+            tag: Some("dev-only-guard".to_string()),
+            severity: None,
+            category: Some("reachability-guard".to_string()),
+            trust: None,
+            payload_types: Vec::new(),
+            tainted_args: Vec::new(),
+            sanitised_arg_indices: Vec::new(),
+        });
+    }
+    None
+}
+
+fn js_dev_only_env_guard_line(line: &str) -> bool {
+    let compact = compact_guard_text(line);
+    let lower = compact.to_ascii_lowercase();
+    let reads_node_env = lower.contains("process.env.node_env") || lower.contains("node_env");
+    if !reads_node_env || !(compact.contains("!==") || compact.contains("!=")) {
+        return false;
+    }
+    let mentions_dev_env = ["dev", "debug", "test", "local", "internal"]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    mentions_dev_env
+        && (lower.contains("return")
+            || lower.contains("throw")
+            || lower.contains("sendstatus(404")
+            || lower.contains("status(404"))
+}
+
+fn python_realpath_containment_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if snk.language != "python" || sink_rule.tag.as_deref() != Some("path-traversal") {
+        return None;
+    }
+    let (candidate, base) = python_realpath_join_target_and_base(ws, sink_func, snk.span)?;
+    if sink_tainted_args
+        .iter()
+        .any(|arg| clean_overwrite_target_key(&arg.value_text).as_deref() == Some(base.as_str()))
+    {
+        return None;
+    }
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let search_end = (sink_idx + 14).min(lines.len());
+    for idx in sink_idx.saturating_add(1)..search_end {
+        let line = lines[idx];
+        if !python_path_containment_guard_line(line, &candidate, &base) {
+            continue;
+        }
+        if !python_guard_body_exits(&lines, idx) {
+            continue;
+        }
+        return Some(FindingMatch {
+            rule_id: "engine.sanitizer.python_realpath_containment_guard".to_string(),
+            file: snk.file.clone(),
+            line: u32::try_from(idx + 1).ok()?,
+            column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+            text: line.trim().to_string(),
+            enclosing_fn: snk.enclosing_fn.clone(),
+            tag: Some("path-sanitize".to_string()),
+            severity: None,
+            category: Some("realpath-containment-guard".to_string()),
+            trust: None,
+            payload_types: Vec::new(),
+            tainted_args: Vec::new(),
+            sanitised_arg_indices: Vec::new(),
+        });
+    }
+    None
+}
+
+fn python_compiled_regex_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if snk.language != "python" || sink_rule.tag.as_deref() != Some("path-traversal") {
+        return None;
+    }
+    if !sanitizer_credits_sink_tag(Some("regex-validate"), sink_rule.tag.as_deref()) {
+        return None;
+    }
+    let mut targets: Vec<String> = sink_tainted_args
+        .iter()
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .filter(|target| !clean_conditional_helper_identifier(target) && !looks_like_clean_constant(target))
+        .collect();
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return None;
+    }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let target_line = *lines.get(sink_idx)?;
+    let target_indent = leading_ascii_whitespace(target_line);
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let func_start_line = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1))
+        .ok()
+        .unwrap_or_else(|| sink_idx.saturating_sub(60));
+    let search_start = func_start_line.max(sink_idx.saturating_sub(80));
+    for idx in search_start..sink_idx {
+        let line = lines[idx];
+        let guard_indent = leading_ascii_whitespace(line);
+        if guard_indent > target_indent {
+            continue;
+        }
+        let Some((regex_name, guarded_target)) = python_compiled_regex_guard_line(line, &targets) else {
+            continue;
+        };
+        if !python_compiled_regex_declared_safe_before(&lines, idx, &regex_name, sink_rule.tag.as_deref()) {
+            continue;
+        }
+        if !python_guard_exits_before_target(&lines, idx, sink_idx, guard_indent, target_indent) {
+            continue;
+        }
+        return Some(FindingMatch {
+            rule_id: "engine.sanitizer.python_compiled_regex_guard".to_string(),
+            file: snk.file.clone(),
+            line: u32::try_from(idx + 1).ok()?,
+            column: u32::try_from(guard_indent + 1).ok()?,
+            text: line.trim().to_string(),
+            enclosing_fn: snk.enclosing_fn.clone(),
+            tag: Some("regex-validate".to_string()),
+            severity: None,
+            category: Some(format!("compiled-regex-guard:{guarded_target}")),
+            trust: None,
+            payload_types: Vec::new(),
+            tainted_args: Vec::new(),
+            sanitised_arg_indices: Vec::new(),
+        });
+    }
+    None
+}
+
+fn python_compiled_regex_guard_line(line: &str, targets: &[String]) -> Option<(String, String)> {
+    let compact = compact_guard_text(line);
+    let condition = compact.strip_prefix("if")?.split_once(':')?.0;
+    let call_text = condition
+        .strip_prefix("not")
+        .or_else(|| condition.strip_suffix("isNone"))
+        .or_else(|| condition.strip_suffix("==None"))?;
+    let (regex_name, arg) = python_compiled_regex_call_parts(call_text)?;
+    let target = clean_overwrite_target_key(arg)?;
+    targets
+        .iter()
+        .any(|candidate| candidate == &target)
+        .then_some((regex_name, target))
+}
+
+fn python_compiled_regex_call_parts(call_text: &str) -> Option<(String, &str)> {
+    for marker in [".fullmatch(", ".match("] {
+        let Some(marker_idx) = call_text.find(marker) else {
+            continue;
+        };
+        let receiver = call_text[..marker_idx].trim();
+        if !python_identifier_path_like(receiver) {
+            continue;
+        }
+        let args_start = marker_idx + marker.len();
+        let args = call_text.get(args_start..call_text.rfind(')')?)?;
+        let first_arg = args.split(',').next()?.trim();
+        if first_arg.is_empty() {
+            continue;
+        }
+        return Some((receiver.to_string(), first_arg));
+    }
+    None
+}
+
+fn python_compiled_regex_declared_safe_before(
+    lines: &[&str],
+    guard_idx: usize,
+    regex_name: &str,
+    sink_tag: Option<&str>,
+) -> bool {
+    let search_start = guard_idx.saturating_sub(160);
+    for idx in (search_start..guard_idx).rev() {
+        let Some(pattern) = python_re_compile_assignment_pattern(lines[idx], regex_name) else {
+            continue;
+        };
+        return python_regex_pattern_safe_for_sink(&pattern, sink_tag);
+    }
+    false
+}
+
+fn python_re_compile_assignment_pattern(line: &str, regex_name: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let (lhs, rhs) = trimmed.split_once('=')?;
+    let lhs_name = lhs.split_once(':').map_or(lhs, |(name, _)| name).trim();
+    if lhs_name != regex_name {
+        return None;
+    }
+    let rhs = rhs.trim_start();
+    let args = rhs
+        .strip_prefix("re.compile(")
+        .or_else(|| rhs.strip_prefix("regex.compile("))?;
+    python_first_string_literal(args)
+}
+
+fn python_first_string_literal(args: &str) -> Option<String> {
+    let mut s = args.trim_start();
+    while let Some(first) = s.chars().next() {
+        match first {
+            'r' | 'R' | 'u' | 'U' | 'b' | 'B' => s = &s[first.len_utf8()..],
+            'f' | 'F' => return None,
+            _ => break,
+        }
+    }
+    let quote = s.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in s[quote.len_utf8()..].chars() {
+        if escaped {
+            out.push('\\');
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return Some(out);
+        }
+        out.push(ch);
+    }
+    None
+}
+
+fn python_regex_pattern_safe_for_sink(pattern: &str, sink_tag: Option<&str>) -> bool {
+    if sink_tag != Some("path-traversal") {
+        return false;
+    }
+    let p = pattern.trim();
+    if !p.starts_with('^') || !p.ends_with('$') {
+        return false;
+    }
+    if p.contains("[^")
+        || p.contains(".*")
+        || p.contains(".+")
+        || p.contains("(?")
+        || p.contains('/')
+        || p.contains("\\\\")
+    {
+        return false;
+    }
+    if python_regex_has_unescaped_wildcard_dot(p) {
+        return false;
+    }
+    p.contains('[')
+        && p.contains(']')
+        && (p.contains("A-Z") || p.contains("a-z") || p.contains("0-9") || p.contains("\\d"))
+}
+
+fn python_regex_has_unescaped_wildcard_dot(pattern: &str) -> bool {
+    let mut in_class = false;
+    let mut escaped = false;
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '.' if !in_class => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn python_realpath_join_target_and_base(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink_span: Span,
+) -> Option<(String, String)> {
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let target = containing_realpath_assignment_target(&decl.flow_events, sink_span)?;
+    let base = os_path_join_base_arg_at(&decl.flow_events, sink_span)?;
+    Some((target, base))
+}
+
+fn containing_realpath_assignment_target(
+    events: &[bonsai_lang_api::FlowEvent],
+    sink_span: Span,
+) -> Option<String> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                ..
+            } if span_contains(*span, sink_span)
+                && source_call
+                    .as_deref()
+                    .is_some_and(|call| clean_overwrite_callee_tail(call) == "realpath") =>
+            {
+                return clean_overwrite_target_key(target);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(target) = containing_realpath_assignment_target(then_events, sink_span)
+                    .or_else(|| containing_realpath_assignment_target(else_events, sink_span))
+                {
+                    return Some(target);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(target) = containing_realpath_assignment_target(body, sink_span) {
+                    return Some(target);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(target) = containing_realpath_assignment_target(body, sink_span)
+                    .or_else(|| containing_realpath_assignment_target(catch_events, sink_span))
+                    .or_else(|| containing_realpath_assignment_target(finally_events, sink_span))
+                {
+                    return Some(target);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn os_path_join_base_arg_at(events: &[bonsai_lang_api::FlowEvent], sink_span: Span) -> Option<String> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call { span, name, args, .. }
+                if (*span == sink_span || spans_overlap(*span, sink_span))
+                    && name.ends_with("os.path.join") =>
+            {
+                return args
+                    .first()
+                    .and_then(|arg| clean_overwrite_target_key(&arg.value_text));
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(base) = os_path_join_base_arg_at(then_events, sink_span)
+                    .or_else(|| os_path_join_base_arg_at(else_events, sink_span))
+                {
+                    return Some(base);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(base) = os_path_join_base_arg_at(body, sink_span) {
+                    return Some(base);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(base) = os_path_join_base_arg_at(body, sink_span)
+                    .or_else(|| os_path_join_base_arg_at(catch_events, sink_span))
+                    .or_else(|| os_path_join_base_arg_at(finally_events, sink_span))
+                {
+                    return Some(base);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn python_path_containment_guard_line(line: &str, candidate: &str, base: &str) -> bool {
+    let compact = compact_guard_text(line);
+    let startswith_sep = format!("ifnot{candidate}.startswith({base}+os.sep):");
+    let startswith_slash_single = format!("ifnot{candidate}.startswith({base}+'/'):");
+    let startswith_slash_double = format!("ifnot{candidate}.startswith({base}+\"/\"):");
+    compact.contains(&startswith_sep)
+        || compact.contains(&startswith_slash_single)
+        || compact.contains(&startswith_slash_double)
+}
+
+fn python_guard_body_exits(lines: &[&str], guard_idx: usize) -> bool {
+    let Some(guard_line) = lines.get(guard_idx) else {
+        return false;
+    };
+    let guard_indent = leading_ascii_whitespace(guard_line);
+    if let Some((_, inline_body)) = guard_line.split_once(':') {
+        if python_abrupt_exit_line(inline_body) {
+            return true;
+        }
+    }
+    for line in lines.iter().skip(guard_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = leading_ascii_whitespace(line);
+        if indent <= guard_indent {
+            return false;
+        }
+        return python_abrupt_exit_line(trimmed);
+    }
+    false
+}
+
+fn python_abrupt_exit_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let compact = compact_guard_text(trimmed);
+    trimmed.starts_with("raise ")
+        || trimmed == "raise"
+        || trimmed.starts_with("return ")
+        || trimmed == "return"
+        || trimmed.starts_with("abort(")
+        || trimmed.contains("FileNotFoundError(")
+        || compact.contains(";return")
+        || compact.contains(";raise")
+        || compact.contains(";abort(")
+}
+
+fn python_lxml_parser_keyword_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    if snk.language != "python" || sink_rule.tag.as_deref() != Some("xxe") {
+        return None;
+    }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let parser_arg = find_call_arg_named_at(&decl.flow_events, snk.span, "parser")?;
+    let parser_var = clean_overwrite_target_key(&parser_arg.value_text)?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let assign_idx = python_hardened_lxml_parser_assignment_line(&lines, sink_idx, &parser_var)?;
+    let line = lines.get(assign_idx)?;
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.python_lxml_hardened_parser_arg".to_string(),
+        file: snk.file.clone(),
+        line: u32::try_from(assign_idx + 1).ok()?,
+        column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+        text: line.trim().to_string(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("xxe-sanitizer".to_string()),
+        severity: None,
+        category: Some("hardened-parser-argument".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
+}
+
+fn python_hardened_lxml_parser_assignment_line(
+    lines: &[&str],
+    sink_idx: usize,
+    parser_var: &str,
+) -> Option<usize> {
+    let assignment_prefix = format!("{parser_var}=");
+    let search_start = sink_idx.saturating_sub(80);
+    for idx in (search_start..sink_idx).rev() {
+        let compact_line = compact_guard_text(lines.get(idx)?);
+        if !compact_line.starts_with(&assignment_prefix) || !compact_line.contains("etree.XMLParser(") {
+            continue;
+        }
+        let end = (idx + 10).min(sink_idx).min(lines.len());
+        let compact_block = compact_guard_text(&lines[idx..end].join("\n"));
+        if compact_block.contains("resolve_entities=False")
+            && !compact_block.contains("resolve_entities=True")
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn java_url_ssrf_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    if snk.language != "java" || sink_rule.tag.as_deref() != Some("ssrf") {
+        return None;
+    }
+    if !matches!(snk.rule_id.as_str(), "java.ssrf.url_ctor" | "java.ssrf.uri_ctor") {
+        return None;
+    }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let parsed_var = constructor_assignment_target_at(&decl.flow_events, snk.span).or_else(|| {
+        lines
+            .get(sink_idx)
+            .and_then(|line| java_constructor_assignment_target_from_line(line))
+    })?;
+    let end = (sink_idx + 48).min(lines.len());
+    if sink_idx + 1 >= end {
+        return None;
+    }
+    let tail = lines[sink_idx + 1..end].join("\n");
+    let compact = compact_guard_text(&tail);
+    let scheme_a = format!("!\"https\".equalsIgnoreCase({parsed_var}.getProtocol())");
+    let scheme_b = format!("!{parsed_var}.getProtocol().equalsIgnoreCase(\"https\")");
+    let scheme_c = format!("!\"https\".equals({parsed_var}.getProtocol())");
+    let has_scheme_guard =
+        compact.contains(&scheme_a) || compact.contains(&scheme_b) || compact.contains(&scheme_c);
+    let host_contains = format!(".contains({parsed_var}.getHost())");
+    let has_host_allowlist =
+        compact.contains(&host_contains) && (compact.contains("if(!") || compact.contains("if(false=="));
+    let dns_lookup = format!("InetAddress.getByName({parsed_var}.getHost())");
+    let has_dns_lookup = compact.contains(&dns_lookup) || compact.contains(&format!("java.net.{dns_lookup}"));
+    let private_ip_reject = [
+        "isLoopbackAddress()",
+        "isSiteLocalAddress()",
+        "isLinkLocalAddress()",
+        "isAnyLocalAddress()",
+        "isMulticastAddress()",
+    ]
+    .iter()
+    .filter(|needle| compact.contains(**needle))
+    .count()
+        >= 3;
+    if !(has_scheme_guard
+        && has_host_allowlist
+        && has_dns_lookup
+        && private_ip_reject
+        && compact.contains("thrownewSecurityException"))
+    {
+        return None;
+    }
+    let guard_idx = lines
+        .iter()
+        .enumerate()
+        .skip(sink_idx + 1)
+        .take(end.saturating_sub(sink_idx + 1))
+        .find_map(|(idx, line)| line.contains("getProtocol").then_some(idx))?;
+    let guard_line = *lines.get(guard_idx)?;
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.java_url_ssrf_guard".to_string(),
+        file: snk.file.clone(),
+        line: u32::try_from(guard_idx + 1).ok()?,
+        column: u32::try_from(leading_ascii_whitespace(guard_line) + 1).ok()?,
+        text: guard_line.trim().to_string(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("ssrf-sanitize".to_string()),
+        severity: None,
+        category: Some("url-scheme-host-private-ip-guard".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
+}
+
+fn java_constructor_assignment_target_from_line(line: &str) -> Option<String> {
+    let (lhs, rhs) = line.split_once('=')?;
+    if !(rhs.contains("new URL(")
+        || rhs.contains("new URI(")
+        || rhs.trim_start().starts_with("URL(")
+        || rhs.trim_start().starts_with("URI("))
+    {
+        return None;
+    }
+    let lhs = lhs.trim();
+    let target = lhs.split_whitespace().last()?;
+    clean_overwrite_target_key(target)
+}
+
+fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
+    ws: &Workspace,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    if snk.language != "go"
+        || snk.rule_id != "go.jwt.golang_jwt_parse_tainted_token"
+        || sink_rule.tag.as_deref() != Some("jwt")
+    {
+        return None;
+    }
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let end = (sink_idx + 32).min(lines.len());
+    let block = lines.get(sink_idx..end)?.join("\n");
+    let compact = compact_guard_text(&block);
+    let parse_idx = compact.find("Parse(")?;
+    let after_parse = &compact[parse_idx..];
+    if !after_parse.contains(",func(") {
+        return None;
+    }
+    if after_parse.contains("UnsafeAllowNoneSignatureType")
+        || after_parse.contains("SigningMethodNone")
+        || after_parse.contains("\"none\"")
+        || after_parse.contains("\"None\"")
+    {
+        return None;
+    }
+    if !go_jwt_inline_keyfunc_has_pinned_algorithm_reject(after_parse) {
+        return None;
+    }
+    let guard_idx = lines
+        .iter()
+        .enumerate()
+        .skip(sink_idx)
+        .take(end.saturating_sub(sink_idx))
+        .find_map(|(idx, line)| {
+            (line.contains("Method.Alg") || line.contains("SigningMethod")).then_some(idx)
+        })?;
+    let guard_line = *lines.get(guard_idx)?;
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.go_jwt_inline_keyfunc_algorithm_guard".to_string(),
+        file: snk.file.clone(),
+        line: u32::try_from(guard_idx + 1).ok()?,
+        column: u32::try_from(leading_ascii_whitespace(guard_line) + 1).ok()?,
+        text: guard_line.trim().to_string(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("jwt-verify".to_string()),
+        severity: None,
+        category: Some("jwt-algorithm-keyfunc-guard".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
+}
+
+fn go_jwt_inline_keyfunc_has_pinned_algorithm_reject(compact: &str) -> bool {
+    if !(compact.contains(".Method.Alg()!=")
+        || compact.contains("!=t.Method.Alg()")
+        || compact.contains("!=token.Method.Alg()"))
+    {
+        return false;
+    }
+    if !go_jwt_pinned_algorithm_mentioned(compact) {
+        return false;
+    }
+    let rejects_mismatch = compact.contains("returnnil,jwt.ErrSignatureInvalid")
+        || compact.contains("returnnil,errors.New(")
+        || compact.contains("returnnil,fmt.Errorf(");
+    let returns_key_on_success = compact.contains(",nil})") || compact.contains(",nil}");
+    rejects_mismatch && returns_key_on_success
+}
+
+fn go_jwt_pinned_algorithm_mentioned(compact: &str) -> bool {
+    const ALG_LITERALS: &[&str] = &[
+        "\"HS256\"",
+        "\"HS384\"",
+        "\"HS512\"",
+        "\"RS256\"",
+        "\"RS384\"",
+        "\"RS512\"",
+        "\"ES256\"",
+        "\"ES384\"",
+        "\"ES512\"",
+        "\"PS256\"",
+        "\"PS384\"",
+        "\"PS512\"",
+        "\"EdDSA\"",
+    ];
+    const ALG_CONSTANTS: &[&str] = &[
+        "SigningMethodHS256",
+        "SigningMethodHS384",
+        "SigningMethodHS512",
+        "SigningMethodRS256",
+        "SigningMethodRS384",
+        "SigningMethodRS512",
+        "SigningMethodES256",
+        "SigningMethodES384",
+        "SigningMethodES512",
+        "SigningMethodPS256",
+        "SigningMethodPS384",
+        "SigningMethodPS512",
+        "SigningMethodEdDSA",
+    ];
+    ALG_LITERALS.iter().any(|alg| compact.contains(alg))
+        || ALG_CONSTANTS.iter().any(|alg| compact.contains(alg))
+}
+
+fn js_ts_local_html_escape_helper_sanitizer(
+    ws: &Workspace,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if !matches!(snk.language.as_str(), "javascript" | "typescript")
+        || sink_rule.tag.as_deref() != Some("xss")
+    {
+        return None;
+    }
+    let helper = sink_tainted_args
+        .iter()
+        .filter_map(|arg| helper_wrapping_tainted_value(&snk.match_text, &arg.value_text))
+        .find(|helper| {
+            let lower = helper.to_ascii_lowercase();
+            lower.contains("escape") || lower.contains("encode") || lower.contains("sanitize")
+        })?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let (helper_idx, helper_body) = js_ts_local_function_body(&lines, &helper)?;
+    let full_compact = compact_guard_text(&snapshot.text);
+    if !js_ts_html_escape_helper_body_is_strong(&helper_body, &full_compact) {
+        return None;
+    }
+    let helper_line = *lines.get(helper_idx)?;
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.js_ts_local_html_escape_helper".to_string(),
+        file: snk.file.clone(),
+        line: u32::try_from(helper_idx + 1).ok()?,
+        column: u32::try_from(leading_ascii_whitespace(helper_line) + 1).ok()?,
+        text: helper_line.trim().to_string(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("html-encode".to_string()),
+        severity: None,
+        category: Some("local-html-escape-helper".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
+}
+
+fn helper_wrapping_tainted_value(sink_text: &str, value_text: &str) -> Option<String> {
+    if let Some(helper) = helper_wrapping_tainted_expression(value_text) {
+        return Some(helper);
+    }
+    let target = clean_overwrite_target_key(value_text)?;
+    if target.is_empty() {
+        return None;
+    }
+    for (idx, _) in sink_text.match_indices(&target) {
+        if idx > 0 {
+            let prev = sink_text.as_bytes().get(idx - 1).copied().unwrap_or_default() as char;
+            if prev == '_' || prev == '$' || prev.is_ascii_alphanumeric() {
+                continue;
+            }
+        }
+        if let Some(next) = sink_text.as_bytes().get(idx + target.len()).copied() {
+            let next = next as char;
+            if next == '_' || next == '$' || next.is_ascii_alphanumeric() {
+                continue;
+            }
+        }
+        let before = sink_text[..idx].trim_end();
+        let Some(prefix) = before.strip_suffix('(') else {
+            continue;
+        };
+        let helper = trailing_js_identifier(prefix)?;
+        if !matches!(helper.as_str(), "String" | "Number" | "Boolean" | "BigInt") {
+            return Some(helper);
+        }
+    }
+    None
+}
+
+fn helper_wrapping_tainted_expression(value_text: &str) -> Option<String> {
+    let interpolations = template_interpolations(value_text);
+    if !interpolations.is_empty() {
+        let mut helper: Option<String> = None;
+        for expression in interpolations {
+            let current = helper_wrapping_entire_expression(expression.trim())?;
+            if helper.as_deref().is_some_and(|existing| existing != current) {
+                return None;
+            }
+            helper = Some(current.to_string());
+        }
+        return helper;
+    }
+    helper_wrapping_entire_expression(value_text.trim()).map(str::to_string)
+}
+
+fn template_interpolations(value_text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = value_text.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            let start = i + 2;
+            let mut depth = 1usize;
+            let mut j = start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            out.push(&value_text[start..j]);
+                            i = j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+fn helper_wrapping_entire_expression(expression: &str) -> Option<&str> {
+    let open = expression.find('(')?;
+    let helper = expression[..open].trim();
+    if !is_js_identifier(helper) {
+        return None;
+    }
+    let lower = helper.to_ascii_lowercase();
+    if !(lower.contains("escape") || lower.contains("encode") || lower.contains("sanitize")) {
+        return None;
+    }
+    expression.trim_end().ends_with(')').then_some(helper)
+}
+
+fn trailing_js_identifier(text: &str) -> Option<String> {
+    let mut chars = Vec::new();
+    for ch in text.chars().rev() {
+        if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
+            chars.push(ch);
+        } else {
+            break;
+        }
+    }
+    if chars.is_empty() {
+        return None;
+    }
+    chars.reverse();
+    let ident: String = chars.into_iter().collect();
+    is_js_identifier(&ident).then_some(ident)
+}
+
+fn js_ts_local_function_body(lines: &[&str], helper: &str) -> Option<(usize, String)> {
+    let function_needle = format!("function{helper}(");
+    let const_needle = format!("const{helper}=");
+    let let_needle = format!("let{helper}=");
+    let var_needle = format!("var{helper}=");
+    for (idx, line) in lines.iter().enumerate() {
+        let compact = compact_guard_text(line);
+        if !(compact.contains(&function_needle)
+            || compact.starts_with(&const_needle)
+            || compact.starts_with(&let_needle)
+            || compact.starts_with(&var_needle)
+            || compact.contains(&format!(".{helper}(")))
+        {
+            continue;
+        }
+        let mut body = String::new();
+        let mut brace_depth = 0isize;
+        let mut saw_open = false;
+        for line in lines.iter().skip(idx).take(80) {
+            body.push_str(line);
+            body.push('\n');
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        saw_open = true;
+                        brace_depth += 1;
+                    }
+                    '}' if saw_open => {
+                        brace_depth -= 1;
+                        if brace_depth <= 0 {
+                            return Some((idx, body));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if saw_open {
+            return Some((idx, body));
+        }
+    }
+    None
+}
+
+fn js_ts_html_escape_helper_body_is_strong(body: &str, full_compact: &str) -> bool {
+    let body_compact = compact_guard_text(body);
+    let chained_replace = body_compact.contains(".replace(/&/g")
+        && body_compact.contains(".replace(/</g")
+        && body_compact.contains(".replace(/>/g");
+    let char_class_replace =
+        body_compact.contains(".replace(/[&<") && body_compact.contains("]/g") && body_compact.contains("=>");
+    if !(chained_replace || char_class_replace) {
+        return false;
+    }
+    let haystack = format!("{body_compact}{full_compact}");
+    haystack.contains("&amp;")
+        && haystack.contains("&lt;")
+        && haystack.contains("&gt;")
+        && (haystack.contains("&quot;") || haystack.contains("&#34;") || haystack.contains("&#x22;"))
+        && (haystack.contains("&#39;") || haystack.contains("&apos;") || haystack.contains("&#x27;"))
+}
+
+fn go_xml_decoder_hardening_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+) -> Option<FindingMatch> {
+    if snk.language != "go"
+        || snk.rule_id != "go.xxe.xml_newdecoder"
+        || sink_rule.tag.as_deref() != Some("xxe")
+    {
+        return None;
+    }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let decoder_var = assignment_target_for_source_call_at(&decl.flow_events, snk.span, "NewDecoder")
+        .or_else(|| {
+            lines
+                .get(sink_idx)
+                .and_then(|line| go_assignment_target_from_call_line(line, "NewDecoder"))
+        })?;
+    let end = (sink_idx + 48).min(lines.len());
+    if sink_idx + 1 >= end {
+        return None;
+    }
+    let tail = lines[sink_idx + 1..end].join("\n");
+    let compact = compact_guard_text(&tail);
+    let strict_true = compact.contains(&format!("{decoder_var}.Strict=true"));
+    let charset_assign = compact.contains(&format!("{decoder_var}.CharsetReader=func("));
+    let allowlist_reject = compact.contains("if!")
+        && compact.contains("[charset]")
+        && (compact.contains("returnnil,errors.New(") || compact.contains("returnnil,fmt.Errorf("));
+    let returns_input = compact.contains("returninput,nil");
+    if !(strict_true && charset_assign && allowlist_reject && returns_input) {
+        return None;
+    }
+    let guard_idx = lines
+        .iter()
+        .enumerate()
+        .skip(sink_idx + 1)
+        .take(end.saturating_sub(sink_idx + 1))
+        .find_map(|(idx, line)| line.contains(".CharsetReader").then_some(idx))
+        .or_else(|| {
+            lines
+                .iter()
+                .enumerate()
+                .skip(sink_idx + 1)
+                .take(end.saturating_sub(sink_idx + 1))
+                .find_map(|(idx, line)| line.contains(".Strict").then_some(idx))
+        })?;
+    let guard_line = *lines.get(guard_idx)?;
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.go_xml_decoder_hardening".to_string(),
+        file: snk.file.clone(),
+        line: u32::try_from(guard_idx + 1).ok()?,
+        column: u32::try_from(leading_ascii_whitespace(guard_line) + 1).ok()?,
+        text: guard_line.trim().to_string(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("xxe-sanitizer".to_string()),
+        severity: None,
+        category: Some("go-xml-decoder-hardening".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    })
+}
+
+fn nosql_eq_filter_wrapper_sanitizer(
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if sink_rule.tag.as_deref() != Some("nosql-injection")
+        || !matches!(snk.language.as_str(), "javascript" | "typescript" | "go")
+        || sink_tainted_args.is_empty()
+    {
+        return None;
+    }
+    let filter_args: Vec<&TaintedArgInfo> = sink_tainted_args
+        .iter()
+        .filter(|arg| arg.index != usize::MAX)
+        .collect();
+    if filter_args.is_empty()
+        || !filter_args
+            .iter()
+            .all(|arg| nosql_filter_arg_uses_only_eq_wrappers(&arg.value_text))
+    {
+        return None;
+    }
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.nosql_eq_filter_wrapper".to_string(),
+        file: snk.file.clone(),
+        line: snk.line,
+        column: snk.column,
+        text: snk.match_text.clone(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("nosql-parameter".to_string()),
+        severity: None,
+        category: Some("nosql-eq-wrapper".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: sink_tainted_args
+            .iter()
+            .filter_map(|arg| u32::try_from(arg.index).ok())
+            .collect(),
+    })
+}
+
+fn nosql_filter_arg_uses_only_eq_wrappers(raw: &str) -> bool {
+    let compact = compact_guard_text(raw);
+    if compact.is_empty()
+        || !compact.contains("$eq")
+        || compact.contains("...")
+        || nosql_filter_contains_banned_operator(&compact)
+    {
+        return false;
+    }
+    let Some(inner) = braced_object_inner(raw) else {
+        return false;
+    };
+    let fields = split_top_level_items(inner);
+    if fields.is_empty() {
+        return false;
+    }
+    fields.into_iter().all(|field| {
+        let Some((_, value)) = split_top_level_once(field, ':') else {
+            return false;
+        };
+        let value = value.trim().trim_end_matches(',');
+        nosql_literal_value(value) || nosql_value_is_eq_wrapper(value)
+    })
+}
+
+fn nosql_filter_contains_banned_operator(compact: &str) -> bool {
+    const BANNED: &[&str] = &[
+        "$ne",
+        "$gt",
+        "$gte",
+        "$lt",
+        "$lte",
+        "$in",
+        "$nin",
+        "$regex",
+        "$where",
+        "$expr",
+        "$or",
+        "$and",
+        "$nor",
+        "$not",
+        "$elemMatch",
+        "$function",
+        "$accumulator",
+    ];
+    BANNED.iter().any(|operator| compact.contains(operator))
+}
+
+fn nosql_literal_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    matches!(lower.as_str(), "true" | "false" | "null" | "nil" | "undefined")
+        || trimmed.starts_with('"')
+        || trimmed.starts_with('\'')
+        || trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+'))
+}
+
+fn nosql_value_is_eq_wrapper(value: &str) -> bool {
+    let Some(inner) = braced_object_inner(value) else {
+        return false;
+    };
+    let fields = split_top_level_items(inner);
+    if fields.len() != 1 {
+        return false;
+    }
+    let Some((key, wrapped)) = split_top_level_once(fields[0], ':') else {
+        return false;
+    };
+    let key = key.trim().trim_matches('"').trim_matches('\'').trim();
+    key == "$eq" && !wrapped.trim().is_empty()
+}
+
+fn braced_object_inner(text: &str) -> Option<&str> {
+    let trimmed = text.trim().trim_end_matches(';').trim_end_matches(',');
+    let open = trimmed.find('{')?;
+    let close = matching_closing_brace(trimmed, open)?;
+    if trimmed[close + 1..].trim().is_empty() {
+        Some(&trimmed[open + 1..close])
+    } else {
+        None
+    }
+}
+
+fn matching_closing_brace(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(open).copied() != Some(b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    for (idx, byte) in bytes.iter().enumerate().skip(open) {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if *byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if *byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match *byte {
+            b'\'' | b'"' | b'`' => quote = Some(*byte),
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_items(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0isize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let bytes = text.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if *byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if *byte == q {
+                quote = None;
+            }
+            continue;
+        }
+        match *byte {
+            b'\'' | b'"' | b'`' => quote = Some(*byte),
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth -= 1,
+            b',' if depth == 0 => {
+                let item = text[start..idx].trim();
+                if !item.is_empty() {
+                    out.push(item);
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let item = text[start..].trim();
+    if !item.is_empty() {
+        out.push(item);
+    }
+    out
+}
+
+fn split_top_level_once(text: &str, delimiter: char) -> Option<(&str, &str)> {
+    let mut depth = 0isize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth -= 1,
+            _ if ch == delimiter && depth == 0 => {
+                return Some((&text[..idx], &text[idx + ch.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn local_ldap_escape_helper_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if sink_rule.tag.as_deref() != Some("ldap-injection")
+        || !matches!(
+            snk.language.as_str(),
+            "python" | "javascript" | "typescript" | "go"
+        )
+    {
+        return None;
+    }
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
+    let targets = ldap_tainted_filter_targets(sink_tainted_args);
+    if targets.is_empty() {
+        return None;
+    }
+    for target in targets {
+        for idx in (func_start..sink_idx).rev() {
+            let line = lines.get(idx).copied().unwrap_or_default();
+            let Some(rhs) = assignment_rhs_for_target(line, &target, snk.language.as_str()) else {
+                continue;
+            };
+            if ldap_rhs_uses_verified_escape(&snapshot.text, rhs) {
+                return Some(FindingMatch {
+                    rule_id: "engine.sanitizer.local_ldap_escape_helper".to_string(),
+                    file: snk.file.clone(),
+                    line: u32::try_from(idx + 1).ok()?,
+                    column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+                    text: line.trim().to_string(),
+                    enclosing_fn: snk.enclosing_fn.clone(),
+                    tag: Some("ldap-escape".to_string()),
+                    severity: None,
+                    category: Some("local-rfc4515-escape-helper".to_string()),
+                    trust: None,
+                    payload_types: Vec::new(),
+                    tainted_args: Vec::new(),
+                    sanitised_arg_indices: sink_tainted_args
+                        .iter()
+                        .filter_map(|arg| u32::try_from(arg.index).ok())
+                        .collect(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn ldap_tainted_filter_targets(sink_tainted_args: &[TaintedArgInfo]) -> Vec<String> {
+    let mut targets = Vec::new();
+    for arg in sink_tainted_args {
+        for key in clean_overwrite_target_keys(&arg.value_text) {
+            if !matches!(
+                key.as_str(),
+                "scope"
+                    | "sub"
+                    | "err"
+                    | "ev"
+                    | "resolve"
+                    | "reject"
+                    | "out"
+                    | "dn"
+                    | "string"
+                    | "String"
+                    | "objectClass"
+                    | "person"
+            ) {
+                targets.push(key);
+            }
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn assignment_rhs_for_target<'a>(line: &'a str, target: &str, language: &str) -> Option<&'a str> {
+    let trimmed = line.trim().trim_end_matches(';');
+    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return None;
+    }
+    match language {
+        "python" => {
+            let (lhs, rhs) = trimmed.split_once('=')?;
+            let lhs = lhs.split_once(':').map_or(lhs, |(name, _)| name).trim();
+            (lhs == target).then_some(rhs.trim())
+        }
+        "javascript" | "typescript" => {
+            let (lhs, rhs) = trimmed.split_once('=')?;
+            let lhs = lhs
+                .trim()
+                .trim_start_matches("const ")
+                .trim_start_matches("let ")
+                .trim_start_matches("var ")
+                .trim();
+            (lhs == target).then_some(rhs.trim())
+        }
+        "go" => {
+            let (lhs, rhs) = trimmed.split_once(":=").or_else(|| trimmed.split_once('='))?;
+            let lhs = lhs.trim().split_whitespace().last().unwrap_or(lhs.trim());
+            (lhs == target).then_some(rhs.trim())
+        }
+        _ => None,
+    }
+}
+
+fn ldap_rhs_uses_verified_escape(full_text: &str, rhs: &str) -> bool {
+    if rhs.contains("escape_filter_chars(")
+        || rhs.contains("EscapeFilter(")
+        || rhs.contains("escapeFilter(")
+        || rhs.contains("ldapEscape.filter(")
+    {
+        return true;
+    }
+    if let Some((receiver, _)) = rhs.split_once(".Replace(") {
+        let receiver = receiver
+            .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .next()
+            .unwrap_or_default();
+        if !receiver.is_empty() && ldap_replacer_declared_safe(full_text, receiver) {
+            return true;
+        }
+    }
+    call_names_outside_strings(rhs)
+        .into_iter()
+        .any(|helper| local_ldap_helper_declared_safe(full_text, &helper))
+}
+
+fn call_names_outside_strings(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+                idx += 1;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                idx += 1;
+                continue;
+            }
+            if byte == q {
+                quote = None;
+            }
+            idx += 1;
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(byte);
+                idx += 1;
+            }
+            b'(' => {
+                let prefix = text[..idx].trim_end();
+                let name = prefix
+                    .rsplit(|ch: char| !(ch == '_' || ch == '$' || ch == '.' || ch.is_ascii_alphanumeric()))
+                    .next()
+                    .unwrap_or_default()
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or_default();
+                if !name.is_empty() && !matches!(name, "String" | "str" | "bytes" | "int" | "float" | "len") {
+                    out.push(name.to_string());
+                }
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn local_ldap_helper_declared_safe(full_text: &str, helper: &str) -> bool {
+    if !ldap_escape_table_literals_present(full_text) {
+        return false;
+    }
+    let compact = compact_guard_text(full_text);
+    let helper_defs = [
+        format!("def{helper}("),
+        format!("function{helper}("),
+        format!("func{helper}("),
+        format!("const{helper}="),
+        format!("let{helper}="),
+    ];
+    helper_defs.iter().any(|needle| compact.contains(needle))
+        && (compact.contains(".get(ch,ch)")
+            || compact.contains("ESCAPES[c]??c")
+            || compact.contains("_LDAP_ESCAPES.get(ch,ch)")
+            || compact.contains("map(c=>")
+            || compact.contains("join(\"\")")
+            || compact.contains("strings.NewReplacer("))
+}
+
+fn ldap_replacer_declared_safe(full_text: &str, receiver: &str) -> bool {
+    if !ldap_escape_table_literals_present(full_text) {
+        return false;
+    }
+    let compact = compact_guard_text(full_text);
+    compact.contains(&format!("{receiver}=strings.NewReplacer("))
+        || compact.contains(&format!("{receiver}:=strings.NewReplacer("))
+}
+
+fn ldap_escape_table_literals_present(text: &str) -> bool {
+    ["\\5c", "\\2a", "\\28", "\\29", "\\00"]
+        .iter()
+        .all(|needle| text.contains(needle))
+}
+
+fn go_same_origin_redirect_helper_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if snk.language != "go" || sink_rule.tag.as_deref() != Some("open-redirect") {
+        return None;
+    }
+    let mut targets: Vec<String> = sink_tainted_args
+        .iter()
+        .filter(|arg| arg.index != usize::MAX)
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .filter(|target| !looks_like_clean_constant(target))
+        .collect();
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return None;
+    }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let guard = find_go_same_origin_helper_guard(&decl.flow_events, snk.span, &targets)?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    if !go_same_origin_helper_declared(&snapshot.text, &guard.helper) {
+        return None;
+    }
+    let (file, line, column) = resolve_span_location(ws, guard.span);
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.go_same_origin_redirect_helper_guard".to_string(),
+        file,
+        line,
+        column,
+        text: guard.condition,
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("same-origin-path".to_string()),
+        severity: None,
+        category: Some("same-origin-helper-guard".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: sink_tainted_args
+            .iter()
+            .filter_map(|arg| u32::try_from(arg.index).ok())
+            .collect(),
+    })
+}
+
+struct GoSameOriginGuard {
+    span: Span,
+    condition: String,
+    helper: String,
+}
+
+fn find_go_same_origin_helper_guard(
+    events: &[FlowEvent],
+    sink_span: Span,
+    targets: &[String],
+) -> Option<GoSameOriginGuard> {
+    for event in events {
+        match event {
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+            } if span.file == sink_span.file && span.start < sink_span.start => {
+                if let Some(condition) = condition {
+                    if let Some((helper, target)) = negated_single_arg_helper_call(condition) {
+                        if targets.iter().any(|candidate| candidate == &target)
+                            && branch_assigns_literal_to_target(then_events, &target)
+                        {
+                            return Some(GoSameOriginGuard {
+                                span: *span,
+                                condition: condition.clone(),
+                                helper: helper.to_string(),
+                            });
+                        }
+                    }
+                }
+                if let Some(found) = find_go_same_origin_helper_guard(then_events, sink_span, targets)
+                    .or_else(|| find_go_same_origin_helper_guard(else_events, sink_span, targets))
+                {
+                    return Some(found);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(found) = find_go_same_origin_helper_guard(body, sink_span, targets) {
+                    return Some(found);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(found) = find_go_same_origin_helper_guard(body, sink_span, targets)
+                    .or_else(|| find_go_same_origin_helper_guard(catch_events, sink_span, targets))
+                    .or_else(|| find_go_same_origin_helper_guard(finally_events, sink_span, targets))
+                {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn negated_single_arg_helper_call(condition: &str) -> Option<(String, String)> {
+    let compact = compact_guard_text(condition);
+    let inner = compact.strip_prefix('!')?;
+    let open = inner.find('(')?;
+    let close = inner.rfind(')')?;
+    if close + 1 != inner.len() {
+        return None;
+    }
+    let helper = &inner[..open];
+    let target = &inner[open + 1..close];
+    if helper.is_empty()
+        || target.is_empty()
+        || !helper.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        || !target.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some((helper.to_string(), target.to_string()))
+}
+
+fn branch_assigns_literal_to_target(events: &[FlowEvent], target: &str) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Assign {
+            target: assigned,
+            value_kind,
+            ..
+        } => {
+            clean_overwrite_target_key(assigned).as_deref() == Some(target)
+                && matches!(value_kind, Some(AssignValueKind::Literal))
+        }
+        _ => false,
+    })
+}
+
+fn go_same_origin_helper_declared(full_text: &str, helper: &str) -> bool {
+    let compact = compact_guard_text(full_text);
+    compact.contains(&format!("func{helper}("))
+        && (compact.contains("s[0]=='/'") || compact.contains("s[0]==\"/\""))
+        && (compact.contains("s[1]!='/'") || compact.contains("s[1]!=\"/\""))
+}
+
+fn python_url_ssrf_guard_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if snk.language != "python" || sink_rule.tag.as_deref() != Some("ssrf") {
+        return None;
+    }
+    let target = sink_tainted_args
+        .iter()
+        .filter(|arg| arg.index != usize::MAX)
+        .find_map(|arg| clean_overwrite_target_key(&arg.value_text))?;
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
+    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
+    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let prior = lines.get(func_start..sink_idx)?.join("\n");
+    let compact = compact_guard_text(&prior);
+    let parsed_var = python_urlparse_assignment_var(&lines, func_start, sink_idx, &target)?;
+    let scheme_guard = compact.contains(&format!("{parsed_var}.scheme!=\"https\""))
+        || compact.contains(&format!("\"https\"!={parsed_var}.scheme"));
+    let host_allowlist = compact.contains(&format!("{parsed_var}.hostname"))
+        && (compact.contains("notinALLOWED")
+            || compact.contains("notinallowed")
+            || compact.contains("notinALLOWED_HOSTS")
+            || compact.contains("notinallowed_hosts"));
+    let dns_lookup = compact.contains(&format!("getaddrinfo({parsed_var}.hostname"));
+    let private_ip_reject = compact.contains("is_private")
+        && compact.contains("is_loopback")
+        && compact.contains("is_link_local");
+    let redirects_disabled = compact.contains("follow_redirects=False");
+    if !(scheme_guard && host_allowlist && dns_lookup && private_ip_reject && redirects_disabled) {
+        return None;
+    }
+    let guard_idx = lines
+        .iter()
+        .enumerate()
+        .skip(func_start)
+        .take(sink_idx.saturating_sub(func_start))
+        .find_map(|(idx, line)| (line.contains(".scheme") && line.contains("https")).then_some(idx))?;
+    let line = lines.get(guard_idx)?;
+    Some(FindingMatch {
+        rule_id: "engine.sanitizer.python_url_ssrf_guard".to_string(),
+        file: snk.file.clone(),
+        line: u32::try_from(guard_idx + 1).ok()?,
+        column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+        text: line.trim().to_string(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("ssrf-sanitize".to_string()),
+        severity: None,
+        category: Some("url-scheme-host-private-ip-guard".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: sink_tainted_args
+            .iter()
+            .filter_map(|arg| u32::try_from(arg.index).ok())
+            .collect(),
+    })
+}
+
+fn python_urlparse_assignment_var(lines: &[&str], start: usize, end: usize, target: &str) -> Option<String> {
+    for line in lines.iter().take(end).skip(start) {
+        let trimmed = line.trim();
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let lhs = lhs.trim();
+        let rhs_compact = compact_guard_text(rhs);
+        if rhs_compact == format!("urlparse({target})")
+            || rhs_compact == format!("urllib.parse.urlparse({target})")
+        {
+            return clean_overwrite_target_key(lhs);
+        }
+    }
+    None
+}
+
+fn assignment_target_for_source_call_at(
+    events: &[bonsai_lang_api::FlowEvent],
+    sink_span: Span,
+    call_tail: &str,
+) -> Option<String> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                ..
+            } if span_contains(*span, sink_span)
+                && source_call
+                    .as_deref()
+                    .is_some_and(|call| clean_overwrite_callee_tail(call).ends_with(call_tail)) =>
+            {
+                return clean_overwrite_target_key(target);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(target) = assignment_target_for_source_call_at(then_events, sink_span, call_tail)
+                    .or_else(|| assignment_target_for_source_call_at(else_events, sink_span, call_tail))
+                {
+                    return Some(target);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(target) = assignment_target_for_source_call_at(body, sink_span, call_tail) {
+                    return Some(target);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(target) = assignment_target_for_source_call_at(body, sink_span, call_tail)
+                    .or_else(|| assignment_target_for_source_call_at(catch_events, sink_span, call_tail))
+                    .or_else(|| assignment_target_for_source_call_at(finally_events, sink_span, call_tail))
+                {
+                    return Some(target);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn go_assignment_target_from_call_line(line: &str, call_tail: &str) -> Option<String> {
+    if !line.contains(call_tail) {
+        return None;
+    }
+    let (lhs, _) = line.split_once(":=").or_else(|| line.split_once('='))?;
+    clean_overwrite_target_key(lhs.trim())
+}
+
+fn constructor_assignment_target_at(
+    events: &[bonsai_lang_api::FlowEvent],
+    sink_span: Span,
+) -> Option<String> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                ..
+            } if span_contains(*span, sink_span)
+                && source_call.as_deref().is_some_and(|call| {
+                    matches!(clean_overwrite_callee_tail(call).as_str(), "URL" | "URI")
+                }) =>
+            {
+                return clean_overwrite_target_key(target);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(target) = constructor_assignment_target_at(then_events, sink_span)
+                    .or_else(|| constructor_assignment_target_at(else_events, sink_span))
+                {
+                    return Some(target);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(target) = constructor_assignment_target_at(body, sink_span) {
+                    return Some(target);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(target) = constructor_assignment_target_at(body, sink_span)
+                    .or_else(|| constructor_assignment_target_at(catch_events, sink_span))
+                    .or_else(|| constructor_assignment_target_at(finally_events, sink_span))
+                {
+                    return Some(target);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_call_arg_named_at<'a>(
+    events: &'a [bonsai_lang_api::FlowEvent],
+    call_span: Span,
+    arg_name: &str,
+) -> Option<&'a bonsai_lang_api::CallArg> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } => {
+                if *span == call_span || spans_overlap(*span, call_span) {
+                    if let Some(arg) = args.iter().find(|arg| arg.name.as_deref() == Some(arg_name)) {
+                        return Some(arg);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(arg) = find_call_arg_named_at(then_events, call_span, arg_name)
+                    .or_else(|| find_call_arg_named_at(else_events, call_span, arg_name))
+                {
+                    return Some(arg);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(arg) = find_call_arg_named_at(body, call_span, arg_name) {
+                    return Some(arg);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(arg) = find_call_arg_named_at(body, call_span, arg_name)
+                    .or_else(|| find_call_arg_named_at(catch_events, call_span, arg_name))
+                    .or_else(|| find_call_arg_named_at(finally_events, call_span, arg_name))
+                {
+                    return Some(arg);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn python_dev_only_env_guard_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("if ") || !trimmed.ends_with(':') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let reads_env = lower.contains("os.environ.get")
+        || lower.contains("os.getenv")
+        || lower.contains("environ.get")
+        || lower.contains("getenv(");
+    if !reads_env {
+        return false;
+    }
+    let negated = lower.contains("!=") || lower.contains(" not in ");
+    if !negated {
+        return false;
+    }
+    const DEV_LITERALS: &[&str] = &[
+        "\"dev\"",
+        "'dev'",
+        "\"development\"",
+        "'development'",
+        "\"dev-internal\"",
+        "'dev-internal'",
+        "\"debug\"",
+        "'debug'",
+        "\"local\"",
+        "'local'",
+        "\"test\"",
+        "'test'",
+    ];
+    DEV_LITERALS.iter().any(|literal| lower.contains(literal))
+}
+
+fn python_guard_exits_before_target(
+    lines: &[&str],
+    guard_idx: usize,
+    target_idx: usize,
+    guard_indent: usize,
+    target_indent: usize,
+) -> bool {
+    let mut saw_exit = false;
+    let mut saw_dedent_after_exit = false;
+    for line in lines.iter().take(target_idx).skip(guard_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = leading_ascii_whitespace(line);
+        if !saw_exit {
+            if indent <= guard_indent {
+                return false;
+            }
+            if python_line_exits_scope(trimmed) {
+                saw_exit = true;
+            }
+            continue;
+        }
+        if indent <= guard_indent {
+            saw_dedent_after_exit = true;
+            break;
+        }
+    }
+    saw_exit && (saw_dedent_after_exit || target_indent <= guard_indent)
+}
+
+fn python_line_exits_scope(trimmed: &str) -> bool {
+    let compact = compact_guard_text(trimmed);
+    trimmed.starts_with("return")
+        || trimmed.starts_with("raise")
+        || trimmed.starts_with("abort(")
+        || trimmed.starts_with("flask.abort(")
+        || compact.contains(";return")
+        || compact.contains(";raise")
+        || compact.contains(";abort(")
+        || compact.contains(";flask.abort(")
+}
+
+fn leading_ascii_whitespace(line: &str) -> usize {
+    line.as_bytes()
+        .iter()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count()
+}
+
+fn finite_literal_map_lookup_allowlist_sanitizer(
+    ws: &Workspace,
+    sink: &RuleMatch,
+    tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if sink.language != "python" {
+        return None;
+    }
+    let snapshot = ws.vfs().snapshot(sink.span.file).ok()?;
+    let lines: Vec<&str> = snapshot.text.lines().collect();
+    let target_idx = usize::try_from(sink.line.checked_sub(1)?).ok()?;
+    let target_line = *lines.get(target_idx)?;
+    let target_indent = leading_ascii_whitespace(target_line);
+    for arg in tainted_args {
+        let Some((map_name, key_name)) = python_index_lookup_parts(&arg.value_text) else {
+            continue;
+        };
+        if !python_literal_mapping_declared_before(&lines, target_idx, map_name) {
+            continue;
+        }
+        let search_start = target_idx.saturating_sub(30);
+        for idx in search_start..target_idx {
+            let line = lines[idx];
+            if leading_ascii_whitespace(line) > target_indent {
+                continue;
+            }
+            if !python_assignment_narrows_key_to_map(line, key_name, map_name) {
+                continue;
+            }
+            return Some(FindingMatch {
+                rule_id: "engine.sanitizer.literal_map_key_allowlist".to_string(),
+                file: sink.file.clone(),
+                line: u32::try_from(idx + 1).ok()?,
+                column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+                text: line.trim().to_string(),
+                enclosing_fn: sink.enclosing_fn.clone(),
+                tag: Some("allowlist-validate".to_string()),
+                severity: None,
+                category: Some("finite-map-allowlist".to_string()),
+                trust: None,
+                payload_types: Vec::new(),
+                tainted_args: Vec::new(),
+                sanitised_arg_indices: Vec::new(),
+            });
+        }
+    }
+    None
+}
+
+fn guarded_char_append_allowlist_sanitizer(
+    ws: &Workspace,
+    sink_func: FuncId,
+    sink: &RuleMatch,
+    sink_tag: Option<&str>,
+    tainted_args: &[TaintedArgInfo],
+) -> Option<FindingMatch> {
+    if sink.language != "go" || sink_tag != Some("header-injection") {
+        return None;
+    }
+    let mut targets: Vec<String> = tainted_args
+        .iter()
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .filter(|target| !clean_conditional_helper_identifier(target) && !looks_like_clean_constant(target))
+        .collect();
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return None;
+    }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    for target in targets {
+        let mut scan = GuardedCharAppendScan::default();
+        collect_guarded_char_append_writes(&decl.flow_events, sink.span, &target, None, &mut scan);
+        if scan.saw_dirty_write {
+            continue;
+        }
+        let Some(span) = scan.sanitizer_span else {
+            continue;
+        };
+        let (file, line, column) = resolve_span_location(ws, span);
+        return Some(FindingMatch {
+            rule_id: "engine.sanitizer.go_guarded_char_append_allowlist".to_string(),
+            file,
+            line,
+            column,
+            text: "guarded append character allowlist".to_string(),
+            enclosing_fn: sink.enclosing_fn.clone(),
+            tag: Some("char-allowlist".to_string()),
+            severity: None,
+            category: Some("guarded-char-allowlist".to_string()),
+            trust: None,
+            payload_types: Vec::new(),
+            tainted_args: Vec::new(),
+            sanitised_arg_indices: Vec::new(),
+        });
+    }
+    None
+}
+
+#[derive(Default)]
+struct GuardedCharAppendScan {
+    sanitizer_span: Option<Span>,
+    saw_dirty_write: bool,
+}
+
+fn collect_guarded_char_append_writes(
+    events: &[bonsai_lang_api::FlowEvent],
+    sink_span: Span,
+    target: &str,
+    guard_condition: Option<&str>,
+    out: &mut GuardedCharAppendScan,
+) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target: assign_target,
+                source_call,
+                source_names,
+                source_call_args,
+                value_kind,
+                ..
+            } => {
+                if span.file != sink_span.file || span.start >= sink_span.start {
+                    continue;
+                }
+                if clean_overwrite_target_key(assign_target).as_deref() != Some(target) {
+                    continue;
+                }
+                if guarded_append_assign_is_char_allowlist(
+                    source_call.as_deref(),
+                    source_call_args,
+                    target,
+                    guard_condition,
+                ) {
+                    out.sanitizer_span.get_or_insert(*span);
+                    continue;
+                }
+                if assignment_initializes_clean_buffer(
+                    source_call.as_deref(),
+                    source_names,
+                    source_call_args,
+                    *value_kind,
+                ) {
+                    continue;
+                }
+                out.saw_dirty_write = true;
+            }
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                if span.file != sink_span.file || span.start >= sink_span.start {
+                    continue;
+                }
+                collect_guarded_char_append_writes(
+                    then_events,
+                    sink_span,
+                    target,
+                    condition.as_deref().or(guard_condition),
+                    out,
+                );
+                collect_guarded_char_append_writes(else_events, sink_span, target, guard_condition, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_guarded_char_append_writes(body, sink_span, target, guard_condition, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_guarded_char_append_writes(body, sink_span, target, guard_condition, out);
+                collect_guarded_char_append_writes(catch_events, sink_span, target, guard_condition, out);
+                collect_guarded_char_append_writes(finally_events, sink_span, target, guard_condition, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn guarded_append_assign_is_char_allowlist(
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    target: &str,
+    guard_condition: Option<&str>,
+) -> bool {
+    if source_call.map(str::trim) != Some("append") || source_call_args.len() < 2 {
+        return false;
+    }
+    if clean_overwrite_target_key(&source_call_args[0]).as_deref() != Some(target) {
+        return false;
+    }
+    let appended = source_call_args[1].trim();
+    !appended.is_empty()
+        && guard_condition.is_some_and(|condition| header_char_allowlist_condition(condition, appended))
+}
+
+fn assignment_initializes_clean_buffer(
+    source_call: Option<&str>,
+    source_names: &[String],
+    source_call_args: &[String],
+    value_kind: Option<AssignValueKind>,
+) -> bool {
+    source_call.map(str::trim) == Some("make")
+        || (source_names.is_empty()
+            && source_call_args.is_empty()
+            && matches!(
+                value_kind,
+                Some(AssignValueKind::Literal | AssignValueKind::Unknown)
+            ))
+}
+
+fn header_char_allowlist_condition(condition: &str, variable: &str) -> bool {
+    let variable = variable.trim();
+    if variable.is_empty() || !text_mentions_token(condition, variable) {
+        return false;
+    }
+    let compact: String = condition.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let printable_floor = [
+        format!("{variable}>=0x20"),
+        format!("{variable}>0x1f"),
+        format!("{variable}>=32"),
+        format!("{variable}>31"),
+        format!("0x20<={variable}"),
+        format!("0x1f<{variable}"),
+        format!("32<={variable}"),
+        format!("31<{variable}"),
+    ]
+    .into_iter()
+    .any(|needle| compact.contains(&needle));
+    let crlf_excluded = printable_floor
+        || (char_guard_excludes(&compact, variable, "'\\r'")
+            && char_guard_excludes(&compact, variable, "'\\n'"))
+        || (char_guard_excludes(&compact, variable, "\"\\r\"")
+            && char_guard_excludes(&compact, variable, "\"\\n\""));
+    let del_excluded = [
+        format!("{variable}!=0x7f"),
+        format!("{variable}<0x7f"),
+        format!("{variable}<=0x7e"),
+        format!("0x7f!={variable}"),
+        format!("0x7f>{variable}"),
+        format!("0x7e>={variable}"),
+        format!("{variable}!=127"),
+        format!("{variable}<127"),
+        format!("{variable}<=126"),
+    ]
+    .into_iter()
+    .any(|needle| compact.contains(&needle));
+    crlf_excluded && (del_excluded || !printable_floor)
+}
+
+fn char_guard_excludes(compact_condition: &str, variable: &str, literal: &str) -> bool {
+    compact_condition.contains(&format!("{variable}!={literal}"))
+        || compact_condition.contains(&format!("{literal}!={variable}"))
+}
+
+fn python_index_lookup_parts(value: &str) -> Option<(&str, &str)> {
+    let trimmed = value.trim();
+    let open = trimmed.find('[')?;
+    if !trimmed.ends_with(']') {
+        return None;
+    }
+    let map_name = trimmed[..open].trim();
+    let key_name = trimmed[open + 1..trimmed.len().saturating_sub(1)].trim();
+    if python_identifier_path_like(map_name) && python_identifier_like(key_name) {
+        Some((map_name, key_name))
+    } else {
+        None
+    }
+}
+
+fn python_literal_mapping_declared_before(lines: &[&str], target_idx: usize, map_name: &str) -> bool {
+    let max_idx = target_idx.min(lines.len());
+    lines.iter().take(max_idx).any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with(map_name)
+            && trimmed.contains('=')
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(_, rhs)| rhs.trim_start().starts_with('{'))
+    })
+}
+
+fn python_assignment_narrows_key_to_map(line: &str, key_name: &str, map_name: &str) -> bool {
+    let trimmed = line.trim();
+    let Some((lhs, rhs)) = trimmed.split_once('=') else {
+        return false;
+    };
+    let lhs = lhs.trim();
+    let lhs_name = lhs.rsplit_once(':').map_or(lhs, |(name, _)| name).trim();
+    if lhs_name != key_name {
+        return false;
+    }
+    let rhs = rhs.trim();
+    if !(rhs.contains(" if ") && rhs.contains(" else ")) {
+        return false;
+    }
+    let membership = format!(" in {map_name}");
+    rhs.contains(&membership) && python_conditional_else_is_literal(rhs)
+}
+
+fn python_conditional_else_is_literal(rhs: &str) -> bool {
+    let Some((_, else_value)) = rhs.rsplit_once(" else ") else {
+        return false;
+    };
+    let else_value = else_value.trim();
+    quoted_literal(else_value) || numeric_literal(else_value)
+}
+
+fn python_identifier_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn python_identifier_path_like(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && python_identifier_like(part))
 }
 
 /// One-tier demotion. `Critical → High`, `High → Medium`,
@@ -8906,6 +13332,7 @@ fn clean_output_overwrites_from_rulepack_for_languages(
 fn idg_transfer_options_from_rulepack_shapes(
     overwrites: &[CleanOutputOverwrite],
     source_outputs: &[SourceOutputArgs],
+    source_callbacks: &[SourceCallbackArgs],
 ) -> bonsai_idg::TransferOptions {
     bonsai_idg::TransferOptions {
         clean_output_overwrites: overwrites
@@ -8921,6 +13348,14 @@ fn idg_transfer_options_from_rulepack_shapes(
             .map(|shape| bonsai_idg::SourceOutputArgSpec {
                 callee: shape.callee.clone(),
                 output_arg_indices: shape.output_arg_indices.clone(),
+            })
+            .collect(),
+        source_callback_args: source_callbacks
+            .iter()
+            .map(|shape| bonsai_idg::SourceCallbackArgSpec {
+                callee: shape.callee.clone(),
+                callback_arg_index: shape.callback_arg_index,
+                source_param_indices: shape.source_param_indices.clone(),
             })
             .collect(),
         include_diagnostic_field_flows: false,
@@ -8948,7 +13383,8 @@ pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bon
     let languages = workspace_languages(ws);
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, &languages);
-    let options = idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs);
+    let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, &languages);
+    let options = idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs, &source_callbacks);
     ws.build_and_seed_idg_service_with_transfer_options(&options)
 }
 
@@ -8962,7 +13398,9 @@ fn seed_idg_service_for_rulepack_for_files(
 ) -> Arc<bonsai_idg::IdgQueryService> {
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
-    let mut options = idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs);
+    let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, languages);
+    let mut options =
+        idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs, &source_callbacks);
     let large_java_scope = languages.contains("java") && included_funcs.len() > 1_000;
     options.include_receiver_method_propagation = !large_java_scope;
     if large_java_scope {
@@ -9015,6 +13453,39 @@ fn source_output_args_from_rulepack_for_languages(
         })
         .collect();
     sort_source_output_args(&mut out);
+    out
+}
+
+fn source_callback_args_from_rulepack_for_languages(
+    pack: &Rulepack,
+    languages: &AHashSet<String>,
+) -> Vec<SourceCallbackArgs> {
+    let mut out = Vec::new();
+    for rule in pack.all_rules() {
+        if !rule.enabled || rule.kind != RuleKind::Source || !languages.contains(rule.language.as_str()) {
+            continue;
+        }
+        let Some(semantics) = rule.taint_semantics.as_ref() else {
+            continue;
+        };
+        if semantics.source_callback_args.is_empty() {
+            continue;
+        }
+        let Some(callee) = rule.match_spec.callee.as_ref().and_then(semantic_transfer_callee) else {
+            continue;
+        };
+        for callback in &semantics.source_callback_args {
+            let mut source_param_indices = callback.source_param_indices.clone();
+            source_param_indices.sort_unstable();
+            source_param_indices.dedup();
+            out.push(SourceCallbackArgs {
+                callee: callee.clone(),
+                callback_arg_index: callback.callback_arg_index,
+                source_param_indices,
+            });
+        }
+    }
+    sort_source_callback_args(&mut out);
     out
 }
 
@@ -9174,6 +13645,17 @@ fn sort_source_output_args(items: &mut Vec<SourceOutputArgs>) {
     items.dedup();
 }
 
+fn sort_source_callback_args(items: &mut Vec<SourceCallbackArgs>) {
+    items.sort_by(|a, b| {
+        (&a.callee, a.callback_arg_index, &a.source_param_indices).cmp(&(
+            &b.callee,
+            b.callback_arg_index,
+            &b.source_param_indices,
+        ))
+    });
+    items.dedup();
+}
+
 fn sort_call_result_passthroughs(items: &mut Vec<CallResultPassthrough>) {
     items.sort_by(|a, b| {
         (&a.callee, &a.input_arg_indices, a.input_receiver).cmp(&(
@@ -9294,6 +13776,25 @@ mod finding_completeness_tests;
 #[cfg(test)]
 #[path = "taint_path_tests.rs"]
 mod taint_path_tests;
+
+#[cfg(test)]
+mod source_seed_tests {
+    use super::*;
+
+    #[test]
+    fn qualified_read_source_seeds_its_own_descendants_not_receiver() {
+        let mut seeds = TokenSet::default();
+        seed_descendant_aliases_for_qualified_source_reads(
+            &mut seeds,
+            &["req.query".to_string(), "req.query.theme".to_string()],
+            "req.query",
+        );
+
+        assert!(seeds.contains("req.query"));
+        assert!(seeds.contains("req.query.*"));
+        assert!(!seeds.contains("req.*"));
+    }
+}
 
 /// Path of `rule`'s source file relative to its
 /// `langs/<lang>/<kind>s/` bucket — `crypto.yml`, `subdir/foo.yml`,

@@ -3,8 +3,8 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, CallArg, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::Node;
 use tree_sitter::{Language, Tree};
@@ -59,6 +59,8 @@ const GO_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
 type GoRangeAssignments = Vec<FlowEvent>;
 type GoRangeLoopAssignments = Vec<(Span, GoRangeAssignments)>;
 type GoRangeAssignmentsByDecl = Vec<(Span, GoRangeLoopAssignments)>;
+type GoIfInitAssignments = Vec<FlowEvent>;
+type GoIfInitAssignmentsByDecl = Vec<(Span, Vec<(Span, GoIfInitAssignments)>)>;
 
 const HANDLER: GrammarHandler = GrammarHandler {
     fn_kinds: &["function_declaration", "method_declaration"],
@@ -148,6 +150,7 @@ impl LanguageAdapter for GoAdapter {
             let method_receivers_by_span = collect_go_method_receiver_types(&tree, file, src);
             let bases_by_span = collect_go_class_bases(&tree, file, src);
             let range_assignments_by_span = collect_go_range_assignments_by_decl(&tree, file, src);
+            let if_init_assignments_by_span = collect_go_if_init_assignments_by_decl(&tree, file, src);
             let class_symbols: Vec<(String, SymbolId)> = idx
                 .defs
                 .iter()
@@ -183,6 +186,16 @@ impl LanguageAdapter for GoAdapter {
                     .find_map(|(span, assignments)| (*span == decl.span).then_some(assignments.as_slice()))
                 {
                     augment_go_range_assignments(&mut decl.flow_events, range_assignments);
+                }
+                if let Some(if_init_assignments) = if_init_assignments_by_span
+                    .iter()
+                    .find_map(|(span, assignments)| (*span == decl.span).then_some(assignments.as_slice()))
+                {
+                    augment_go_if_init_assignments(
+                        &mut decl.flow_events,
+                        if_init_assignments,
+                        &decl.type_aliases,
+                    );
                 }
             }
         }
@@ -321,7 +334,10 @@ fn collect_go_method_type_aliases(
     src: &[u8],
 ) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
     let mut aliases_by_fn = Vec::new();
-    for fn_node in collect_kinds(tree, &["function_declaration", "method_declaration"]) {
+    for fn_node in collect_kinds(
+        tree,
+        &["function_declaration", "method_declaration", "func_literal"],
+    ) {
         let mut aliases: Vec<TypeAliasBinding> = Vec::new();
         // `method_declaration` has a `receiver` (parameter_list with
         // one entry); both function and method have `parameters`.
@@ -331,6 +347,7 @@ fn collect_go_method_type_aliases(
         if let Some(params) = fn_node.child_by_field_name("parameters") {
             collect_go_parameter_aliases(params, src, &mut aliases);
         }
+        collect_go_func_literal_parameter_aliases(fn_node, src, &mut aliases);
         collect_go_local_type_aliases(fn_node, src, &mut aliases);
         dedup_go_type_aliases(&mut aliases);
         if !aliases.is_empty() {
@@ -391,7 +408,10 @@ fn collect_go_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, V
 fn collect_go_range_assignments_by_decl(tree: &Tree, file: FileId, src: &[u8]) -> GoRangeAssignmentsByDecl {
     let channel_returns = collect_go_channel_return_functions(tree, src);
     let mut out = Vec::new();
-    for fn_node in collect_kinds(tree, &["function_declaration", "method_declaration"]) {
+    for fn_node in collect_kinds(
+        tree,
+        &["function_declaration", "method_declaration", "func_literal"],
+    ) {
         let mut loop_assignments = Vec::new();
         for for_stmt in collect_kinds_under(&fn_node, &["for_statement"]) {
             let Some(range_clause) = direct_go_range_clause(for_stmt) else {
@@ -404,6 +424,33 @@ fn collect_go_range_assignments_by_decl(tree: &Tree, file: FileId, src: &[u8]) -
         }
         if !loop_assignments.is_empty() {
             out.push((span_of(file, &fn_node), loop_assignments));
+        }
+    }
+    out
+}
+
+fn collect_go_if_init_assignments_by_decl(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> GoIfInitAssignmentsByDecl {
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(
+        tree,
+        &["function_declaration", "method_declaration", "func_literal"],
+    ) {
+        let mut init_assignments = Vec::new();
+        for if_stmt in collect_kinds_under(&fn_node, &["if_statement"]) {
+            let Some(init) = if_stmt.child_by_field_name("initializer") else {
+                continue;
+            };
+            let events = go_initializer_assignment_events(init, file, src);
+            if !events.is_empty() {
+                init_assignments.push((span_of(file, &if_stmt), events));
+            }
+        }
+        if !init_assignments.is_empty() {
+            out.push((span_of(file, &fn_node), init_assignments));
         }
     }
     out
@@ -560,6 +607,132 @@ fn go_call_expression_parts(node: Node<'_>, src: &[u8]) -> Option<(String, Vec<S
     Some((callee, args))
 }
 
+fn go_initializer_assignment_events(init: Node<'_>, file: FileId, src: &[u8]) -> Vec<FlowEvent> {
+    if !matches!(init.kind(), "short_var_declaration" | "assignment_statement") {
+        return Vec::new();
+    }
+    let Some(left) = init.child_by_field_name("left") else {
+        return Vec::new();
+    };
+    let Some(right) = init.child_by_field_name("right") else {
+        return Vec::new();
+    };
+    let targets = direct_go_range_targets(left, src);
+    let rhs_values = go_expression_list_values(right);
+    if targets.is_empty() || rhs_values.is_empty() {
+        return Vec::new();
+    }
+    let span = span_of(file, &init);
+    let mut out = Vec::new();
+    for (idx, target) in targets.iter().enumerate() {
+        if target == "_" {
+            continue;
+        }
+        let rhs = rhs_values
+            .get(idx)
+            .copied()
+            .or_else(|| rhs_values.first().copied());
+        let Some(rhs) = rhs else {
+            continue;
+        };
+        let call = go_call_expression_parts(rhs, src);
+        let (source_name, source_call, source_call_args, source_names, value_kind) =
+            if let Some((callee, args)) = call.clone() {
+                (
+                    None,
+                    Some(callee),
+                    args,
+                    Vec::new(),
+                    Some(bonsai_lang_api::AssignValueKind::CallResult),
+                )
+            } else {
+                let rhs_text = node_text(&rhs, src).trim();
+                let source_name = go_bare_value_name(rhs_text);
+                (
+                    source_name.clone(),
+                    None,
+                    Vec::new(),
+                    go_range_value_source_names(rhs_text, source_name.as_deref()),
+                    Some(bonsai_lang_api::AssignValueKind::Compound),
+                )
+            };
+        out.push(FlowEvent::Assign {
+            span,
+            target: target.to_string(),
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            declares_new_binding: init.kind() == "short_var_declaration",
+            value_kind,
+        });
+        if let Some((callee, args)) = call {
+            out.push(go_call_event_from_parts(span_of(file, &rhs), &callee, args, file));
+        }
+    }
+    out
+}
+
+fn go_expression_list_values(node: Node<'_>) -> Vec<Node<'_>> {
+    if node.kind() != "expression_list" {
+        return vec![node];
+    }
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        out.push(child);
+    }
+    out
+}
+
+fn go_call_event_from_parts(span: Span, callee: &str, args: Vec<String>, file: FileId) -> FlowEvent {
+    let receiver = callee.rsplit_once('.').map(|(recv, _)| recv.to_string());
+    let call_kind = if receiver.is_some() {
+        bonsai_lang_api::CallKind::Method
+    } else {
+        bonsai_lang_api::CallKind::Function
+    };
+    FlowEvent::Call {
+        span,
+        name: callee.to_string(),
+        receiver,
+        receiver_types: Vec::new(),
+        call_kind,
+        args: args
+            .into_iter()
+            .map(|value_text| {
+                let source_names = go_value_source_names(&value_text);
+                let place = go_argument_place(&value_text);
+                CallArg {
+                    span: Span::new(file, span.start, span.end),
+                    name: None,
+                    value_text,
+                    place,
+                    source_names,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn go_argument_place(value_text: &str) -> Option<String> {
+    let trimmed = value_text.trim();
+    let place = trimmed.strip_prefix('&').unwrap_or(trimmed).trim();
+    if place.is_empty() {
+        return None;
+    }
+    let mut chars = place.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric()) {
+        Some(place.to_string())
+    } else {
+        None
+    }
+}
+
 fn go_range_value_source_names(right_text: &str, source_name: Option<&str>) -> Vec<String> {
     let mut names = go_value_source_names(right_text);
     if let Some(source_name) = source_name {
@@ -622,6 +795,75 @@ fn augment_go_range_assignments(events: &mut Vec<FlowEvent>, range_assignments: 
         rewritten.push(event);
     }
     *events = rewritten;
+}
+
+fn augment_go_if_init_assignments(
+    events: &mut Vec<FlowEvent>,
+    if_init_assignments: &[(Span, Vec<FlowEvent>)],
+    aliases: &[TypeAliasBinding],
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_go_if_init_assignments(then_events, if_init_assignments, aliases);
+                augment_go_if_init_assignments(else_events, if_init_assignments, aliases);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_go_if_init_assignments(body, if_init_assignments, aliases);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_go_if_init_assignments(body, if_init_assignments, aliases);
+                augment_go_if_init_assignments(catch_events, if_init_assignments, aliases);
+                augment_go_if_init_assignments(finally_events, if_init_assignments, aliases);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        if let FlowEvent::Branch { span, .. } = &event {
+            if let Some(init_events) = if_init_assignments
+                .iter()
+                .find_map(|(if_span, init_events)| (if_span == span).then_some(init_events))
+            {
+                rewritten.extend(init_events.iter().cloned().map(|mut event| {
+                    enrich_go_synthetic_receiver_types(&mut event, aliases);
+                    event
+                }));
+            }
+        }
+        rewritten.push(event);
+    }
+    *events = rewritten;
+}
+
+fn enrich_go_synthetic_receiver_types(event: &mut FlowEvent, aliases: &[TypeAliasBinding]) {
+    let FlowEvent::Call {
+        receiver: Some(receiver),
+        receiver_types,
+        ..
+    } = event
+    else {
+        return;
+    };
+    if !receiver_types.is_empty() {
+        return;
+    }
+    for alias in aliases {
+        if alias.name == *receiver {
+            push_unique_string(receiver_types, alias.type_name.clone());
+        }
+    }
 }
 
 fn collect_go_embedded_type_names(node: Node<'_>, src: &[u8], bases: &mut Vec<String>) {
@@ -1210,6 +1452,18 @@ fn collect_go_parameter_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<Ty
         // normal parameter declaration.
         if child.kind() == "parameter_declaration" || child.kind() == "variadic_parameter_declaration" {
             go_parameter_decl_aliases(child, src, aliases);
+        }
+    }
+}
+
+fn collect_go_func_literal_parameter_aliases(
+    fn_node: Node<'_>,
+    src: &[u8],
+    aliases: &mut Vec<TypeAliasBinding>,
+) {
+    for literal in collect_kinds_under(&fn_node, &["func_literal"]) {
+        if let Some(params) = literal.child_by_field_name("parameters") {
+            collect_go_parameter_aliases(params, src, aliases);
         }
     }
 }

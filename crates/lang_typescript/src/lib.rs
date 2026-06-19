@@ -6,9 +6,9 @@ use bonsai_lang_api::{
         collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary,
-    Visibility,
+    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
 
@@ -137,6 +137,11 @@ impl LanguageAdapter for TypeScriptAdapter {
             // return-type paths don't see it), so capture it as a local type
             // alias so `c.method(...)` resolves `receiver_type_in` / `[Foo, m]`.
             let cast_aliases_by_span = collect_typescript_cast_aliases(&tree, file, src);
+            // TypeScript constructor parameter properties are both parameters
+            // and instance fields: `constructor(private svc: Service)`.
+            // The generic assignment walker sees no `this.svc = svc` write,
+            // so emit the equivalent precise field/type facts from the syntax.
+            let parameter_properties_by_span = collect_typescript_parameter_properties(&tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(vis) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = vis;
@@ -146,6 +151,16 @@ impl LanguageAdapter for TypeScriptAdapter {
                 }
                 if let Some(cast_aliases) = cast_aliases_by_span.get(&decl.span) {
                     decl.type_aliases.extend(cast_aliases.iter().cloned());
+                }
+                if let Some(parameter_properties) = parameter_properties_by_span.get(&decl.span) {
+                    for (alias, field_write) in parameter_properties {
+                        if !decl.type_aliases.contains(alias) {
+                            decl.type_aliases.push(alias.clone());
+                        }
+                        if !decl.receiver_field_writes.contains(field_write) {
+                            decl.receiver_field_writes.push(field_write.clone());
+                        }
+                    }
                 }
             }
             // ECMAScript `#name` private fields/methods are syntactically marked.
@@ -171,6 +186,7 @@ impl LanguageAdapter for TypeScriptAdapter {
                 }
             }
             apply_javascript_getter_property_sources(&mut decl_index, &tree, src, file);
+            inject_typescript_graphql_root_resolver_calls(&mut decl_index, &tree, src, file);
         }
         // Recognised TypeScript lifecycle transitions — same call
         // names as JavaScript since TS shares the JS runtime surface.
@@ -225,6 +241,396 @@ impl LanguageAdapter for TypeScriptAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+#[derive(Clone, Debug)]
+struct TsGraphqlRootResolver {
+    name: String,
+    arg_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct TsGraphqlResolverDispatch {
+    call_span: bonsai_common::Span,
+    arg_span: bonsai_common::Span,
+    variable_values: String,
+    resolvers: Vec<TsGraphqlRootResolver>,
+}
+
+fn inject_typescript_graphql_root_resolver_calls(
+    decl_index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let dispatches = collect_typescript_graphql_resolver_dispatches(tree, src, file);
+    if dispatches.is_empty() {
+        return;
+    }
+    for decl in &mut decl_index.defs {
+        let owner_span = decl.body_span.unwrap_or(decl.span);
+        let relevant = dispatches
+            .iter()
+            .filter(|dispatch| span_contains_or_equal(owner_span, dispatch.call_span))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !relevant.is_empty() {
+            insert_graphql_resolver_dispatches(&mut decl.flow_events, &relevant);
+        }
+    }
+}
+
+fn collect_typescript_graphql_resolver_dispatches(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<TsGraphqlResolverDispatch> {
+    let root_resolvers = collect_typescript_graphql_root_resolvers(tree, src);
+    if root_resolvers.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for call in collect_kinds(tree, &["call_expression"]) {
+        if !typescript_graphql_execute_call(&call, src) {
+            continue;
+        }
+        let Some(args) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        let Some(config) = first_named_child_of_kind(&args, "object") else {
+            continue;
+        };
+        let Some(root_value) = typescript_object_pair_value(config, src, "rootValue") else {
+            continue;
+        };
+        let root_name = node_text(&root_value, src).trim();
+        if root_name.is_empty()
+            || !root_name
+                .chars()
+                .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let Some(variable_values) = typescript_object_pair_value(config, src, "variableValues") else {
+            continue;
+        };
+        let variable_values_text = node_text(&variable_values, src).trim().to_string();
+        if variable_values_text.is_empty() {
+            continue;
+        }
+        let Some(resolvers) = root_resolvers.get(root_name) else {
+            continue;
+        };
+        if resolvers.is_empty() {
+            continue;
+        }
+        out.push(TsGraphqlResolverDispatch {
+            call_span: span_of(file, &call),
+            arg_span: span_of(file, &variable_values),
+            variable_values: variable_values_text,
+            resolvers: resolvers.clone(),
+        });
+    }
+    out
+}
+
+fn collect_typescript_graphql_root_resolvers(
+    tree: &Tree,
+    src: &[u8],
+) -> std::collections::HashMap<String, Vec<TsGraphqlRootResolver>> {
+    let mut out = std::collections::HashMap::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if name_node.kind() != "identifier" {
+            continue;
+        }
+        let Some(value_node) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        if value_node.kind() != "object" {
+            continue;
+        }
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let resolvers = typescript_object_resolvers(value_node, src);
+        if !resolvers.is_empty() {
+            out.insert(name, resolvers);
+        }
+    }
+    out
+}
+
+fn typescript_object_resolvers(object: Node<'_>, src: &[u8]) -> Vec<TsGraphqlRootResolver> {
+    let mut out = Vec::new();
+    let mut cursor = object.walk();
+    for child in object.named_children(&mut cursor) {
+        match child.kind() {
+            "pair" => {
+                let Some(key_node) = child.child_by_field_name("key") else {
+                    continue;
+                };
+                let Some(value_node) = child.child_by_field_name("value") else {
+                    continue;
+                };
+                if !matches!(
+                    value_node.kind(),
+                    "arrow_function" | "function" | "function_expression" | "generator_function"
+                ) {
+                    continue;
+                }
+                let Some(name) = typescript_object_field_key(key_node, src) else {
+                    continue;
+                };
+                out.push(TsGraphqlRootResolver {
+                    name,
+                    arg_fields: typescript_first_param_object_fields(value_node, src),
+                });
+            }
+            "method_definition" => {
+                let Some(name_node) = child.child_by_field_name("name") else {
+                    continue;
+                };
+                let Some(name) = typescript_object_field_key(name_node, src) else {
+                    continue;
+                };
+                out.push(TsGraphqlRootResolver {
+                    name,
+                    arg_fields: typescript_first_param_object_fields(child, src),
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn typescript_graphql_execute_call(call: &Node<'_>, src: &[u8]) -> bool {
+    let Some(callee) = call.child_by_field_name("function") else {
+        return false;
+    };
+    let callee_text = node_text(&callee, src).trim();
+    let tail = callee_text
+        .rsplit(['.', ':'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(callee_text)
+        .trim();
+    matches!(tail, "graphql" | "execute")
+}
+
+fn typescript_object_pair_value<'tree>(object: Node<'tree>, src: &[u8], key: &str) -> Option<Node<'tree>> {
+    let mut cursor = object.walk();
+    for child in object.named_children(&mut cursor) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let Some(key_node) = child.child_by_field_name("key") else {
+            continue;
+        };
+        if typescript_object_field_key(key_node, src).as_deref() != Some(key) {
+            continue;
+        }
+        return child.child_by_field_name("value");
+    }
+    None
+}
+
+fn typescript_object_field_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let key = raw
+        .strip_prefix('"')
+        .and_then(|part| part.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|part| part.strip_suffix('\'')))
+        .or_else(|| raw.strip_prefix('`').and_then(|part| part.strip_suffix('`')))
+        .unwrap_or(raw)
+        .trim();
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+fn typescript_first_param_object_fields(callable: Node<'_>, src: &[u8]) -> Vec<String> {
+    let Some(params) = callable
+        .child_by_field_name("parameters")
+        .or_else(|| first_named_child_of_kind(&callable, "formal_parameters"))
+    else {
+        return Vec::new();
+    };
+    let mut cursor = params.walk();
+    let Some(first_param) = params.named_children(&mut cursor).find(|child| {
+        matches!(
+            child.kind(),
+            "required_parameter" | "optional_parameter" | "identifier" | "object_pattern"
+        )
+    }) else {
+        return Vec::new();
+    };
+    let pattern = first_param.child_by_field_name("pattern").unwrap_or(first_param);
+    let object_pattern = if pattern.kind() == "object_pattern" {
+        Some(pattern)
+    } else {
+        first_named_child_of_kind(&pattern, "object_pattern")
+    };
+    let Some(object_pattern) = object_pattern else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_typescript_object_pattern_fields(object_pattern, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_typescript_object_pattern_fields(pattern: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    let mut cursor = pattern.walk();
+    for child in pattern.named_children(&mut cursor) {
+        match child.kind() {
+            "shorthand_property_identifier_pattern" => {
+                let field = node_text(&child, src).trim();
+                if !field.is_empty() {
+                    out.push(field.to_string());
+                }
+            }
+            "pair_pattern" => {
+                if let Some(key_node) = child.child_by_field_name("key") {
+                    if let Some(field) = typescript_object_field_key(key_node, src) {
+                        out.push(field);
+                    }
+                }
+            }
+            _ => collect_typescript_object_pattern_fields(child, src, out),
+        }
+    }
+}
+
+fn insert_graphql_resolver_dispatches(events: &mut Vec<FlowEvent>, dispatches: &[TsGraphqlResolverDispatch]) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_graphql_resolver_dispatches(then_events, dispatches);
+                insert_graphql_resolver_dispatches(else_events, dispatches);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_graphql_resolver_dispatches(body, dispatches);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_graphql_resolver_dispatches(body, dispatches);
+                insert_graphql_resolver_dispatches(catch_events, dispatches);
+                insert_graphql_resolver_dispatches(finally_events, dispatches);
+            }
+            _ => {}
+        }
+
+        let inserts = match &events[index] {
+            FlowEvent::Call { span, name, .. } if matches!(name.as_str(), "graphql" | "execute") => {
+                dispatches
+                    .iter()
+                    .filter(|dispatch| spans_overlap_or_contain(*span, dispatch.call_span))
+                    .flat_map(graphql_dispatch_call_events)
+                    .filter(|event| !graphql_dispatch_event_exists(events, event))
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        };
+        if inserts.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = inserts.len();
+        events.splice((index + 1)..(index + 1), inserts);
+        index += inserted + 1;
+    }
+}
+
+fn graphql_dispatch_call_events(dispatch: &TsGraphqlResolverDispatch) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    for resolver in &dispatch.resolvers {
+        let arg_text = if resolver.arg_fields.len() == 1 {
+            format!("{}.{}", dispatch.variable_values, resolver.arg_fields[0])
+        } else {
+            dispatch.variable_values.clone()
+        };
+        out.push(FlowEvent::Call {
+            span: dispatch.call_span,
+            receiver: None,
+            receiver_types: Vec::new(),
+            name: resolver.name.clone(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: dispatch.arg_span,
+                name: None,
+                place: Some(arg_text.clone()),
+                source_names: vec![dispatch.variable_values.clone(), arg_text.clone()],
+                value_text: arg_text,
+            }],
+        });
+    }
+    out
+}
+
+fn graphql_dispatch_event_exists(events: &[FlowEvent], candidate: &FlowEvent) -> bool {
+    let FlowEvent::Call {
+        span: wanted_span,
+        name: wanted_name,
+        ..
+    } = candidate
+    else {
+        return false;
+    };
+    events.iter().any(|event| match event {
+        FlowEvent::Call { span, name, .. } => span == wanted_span && name == wanted_name,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            graphql_dispatch_event_exists(then_events, candidate)
+                || graphql_dispatch_event_exists(else_events, candidate)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            graphql_dispatch_event_exists(body, candidate)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            graphql_dispatch_event_exists(body, candidate)
+                || graphql_dispatch_event_exists(catch_events, candidate)
+                || graphql_dispatch_event_exists(finally_events, candidate)
+        }
+        _ => false,
+    })
+}
+
+fn span_contains_or_equal(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && outer.end >= inner.end
+}
+
+fn spans_overlap_or_contain(left: bonsai_common::Span, right: bonsai_common::Span) -> bool {
+    left.file == right.file
+        && (span_contains_or_equal(left, right)
+            || span_contains_or_equal(right, left)
+            || (left.start < right.end && right.start < left.end))
 }
 
 /// Combine ES-module imports, CommonJS `require(...)` calls, and the
@@ -386,7 +792,13 @@ fn collect_typescript_cast_aliases(
         // Only PascalCase class-like types — `string`/`any`/`number` etc.
         // are useless for receiver-type matching and aliasing a local to
         // them would disturb clean-overwrite / callable-binding resolution.
-        aliases.retain(|alias| alias.type_name.chars().next().is_some_and(|c| c.is_ascii_uppercase()));
+        aliases.retain(|alias| {
+            alias
+                .type_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+        });
         if !aliases.is_empty() {
             out.insert(span_of(file, &fn_node), aliases);
         }
@@ -459,6 +871,158 @@ fn ts_cast_type_name(cast: Node<'_>, src: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// TypeScript parameter properties are the syntax-level equivalent of:
+///
+///   constructor(private readonly diag: DiagService) { this.diag = diag; }
+///
+/// Tree-sitter exposes this as a normal constructor parameter carrying
+/// an `accessibility_modifier` token rather than an assignment event. Emit
+/// the same `diag -> DiagService` and `this.diag` field-write facts that a
+/// handwritten assignment would have produced, but only for the syntactic
+/// parameter-property forms (`public` / `private` / `protected` / `readonly`).
+fn collect_typescript_parameter_properties(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, Vec<(TypeAliasBinding, FieldWrite)>> {
+    let mut out = std::collections::HashMap::new();
+    for ctor in collect_kinds(tree, &["method_definition"]) {
+        if !typescript_method_name_is(&ctor, src, "constructor") {
+            continue;
+        }
+        let Some(params_node) = ctor
+            .child_by_field_name("parameters")
+            .or_else(|| first_named_child_of_kind(&ctor, "formal_parameters"))
+        else {
+            continue;
+        };
+
+        let mut bindings: Vec<(TypeAliasBinding, FieldWrite)> = Vec::new();
+        let mut param_index = 0usize;
+        let mut cursor = params_node.walk();
+        for param in params_node.named_children(&mut cursor) {
+            if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
+                continue;
+            }
+            let current_index = param_index;
+            param_index += 1;
+
+            if !typescript_parameter_property_declares_field(&param, src) {
+                continue;
+            }
+            let Some(name) = typescript_parameter_property_name(&param, src) else {
+                continue;
+            };
+            let Some(type_name) = typescript_parameter_property_type(&param, src) else {
+                continue;
+            };
+            if name.is_empty() || name == type_name {
+                continue;
+            }
+            let alias = TypeAliasBinding {
+                name: name.clone(),
+                type_name,
+            };
+            let field_write = FieldWrite {
+                span: span_of(file, &param),
+                target: format!("this.{name}"),
+                source_param_indices: vec![current_index],
+            };
+            let entry = (alias, field_write);
+            if !bindings.contains(&entry) {
+                bindings.push(entry);
+            }
+        }
+        if !bindings.is_empty() {
+            out.insert(span_of(file, &ctor), bindings);
+        }
+    }
+    out
+}
+
+fn typescript_method_name_is(node: &Node<'_>, src: &[u8], expected: &str) -> bool {
+    node.child_by_field_name("name")
+        .map(|name| node_text(&name, src).trim() == expected)
+        .unwrap_or(false)
+}
+
+fn typescript_parameter_property_declares_field(param: &Node<'_>, src: &[u8]) -> bool {
+    let mut cursor = param.walk();
+    for child in param.named_children(&mut cursor) {
+        let kind = child.kind();
+        if matches!(kind, "accessibility_modifier" | "readonly_modifier") || kind.contains("readonly") {
+            return true;
+        }
+    }
+    let Some(pattern) = param.child_by_field_name("pattern") else {
+        return false;
+    };
+    if pattern.start_byte() <= param.start_byte() || pattern.start_byte() > src.len() {
+        return false;
+    }
+    let prefix = std::str::from_utf8(&src[param.start_byte()..pattern.start_byte()]).unwrap_or_default();
+    prefix
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .any(|token| matches!(token, "public" | "private" | "protected" | "readonly"))
+}
+
+fn typescript_parameter_property_name(param: &Node<'_>, src: &[u8]) -> Option<String> {
+    let pattern = param.child_by_field_name("pattern")?;
+    typescript_identifier_leaf(pattern, src)
+}
+
+fn typescript_parameter_property_type(param: &Node<'_>, src: &[u8]) -> Option<String> {
+    let type_node = param.child_by_field_name("type")?;
+    typescript_type_name_leaf(type_node, src)
+}
+
+fn typescript_identifier_leaf(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "identifier" | "shorthand_property_identifier_pattern" | "private_property_identifier"
+    ) {
+        let name = node_text(&node, src).trim().trim_start_matches('#').to_string();
+        return (!name.is_empty()).then_some(name);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(name) = typescript_identifier_leaf(child, src) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn typescript_type_name_leaf(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "identifier" | "predefined_type" | "nested_type_identifier" => {
+            return canonical_ts_type_name(node_text(&node, src));
+        }
+        "generic_type" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                return canonical_ts_type_name(node_text(&name, src));
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(type_name) = typescript_type_name_leaf(child, src) {
+            return Some(type_name);
+        }
+    }
+    None
+}
+
+fn canonical_ts_type_name(raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_start_matches(':').trim();
+    let name = canonical_ts_base_name(raw)?;
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        .then_some(name)
 }
 
 /// Walk TS class / interface / abstract-class declarations and

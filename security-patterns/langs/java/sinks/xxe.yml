@@ -97,6 +97,8 @@
     callee:
       regex: "\\.parse$"
   constraints:
+  - receiver_type_in:
+    - DocumentBuilder
   - arg_tainted:
       index: 0
   match_examples:
@@ -118,13 +120,27 @@
         }
       }
     expect_no_match: true
+  - name: non document builder receiver negative
+    code: |
+      import javax.xml.parsers.*;
+      class FeedParser {
+        void parse(String body) {}
+      }
+      class App {
+        void handle(FeedParser parser, String body) {
+          parser.parse(body);
+        }
+      }
+    expect_no_match: true
   description: "DocumentBuilder local receiver parse(...) - import-gated XML parse of tainted input while receiver-type facts are still adapter-dependent."
 
   imports:
   - javax.xml.parsers
 
 - id: java.xxe.documentbuilderfactory_newinstance
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   tag: xxe
   category: source-independent
@@ -142,7 +158,7 @@
           DocumentBuilderFactory.newInstance(input);
         }
       }
-  description: "DocumentBuilderFactory.newInstance - flag without disallow-doctype-decl."
+  description: "Disabled - source-independent DocumentBuilderFactory.newInstance cannot distinguish immediately hardened factories from vulnerable parsers. Tainted DocumentBuilder.parse / JAXB / SAX parse sinks carry the real XXE signal with sanitizer credit."
 
 - id: java.xxe.xmlinputfactory_createreader
   enabled: true

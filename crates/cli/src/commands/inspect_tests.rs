@@ -1,4 +1,7 @@
-use super::{walk_flow_hits, HitOut, InspectFilters, Matcher};
+use super::{
+    taint_flow_contains_needle, taint_flow_matches_query, walk_flow_hits, HitOut, InspectFilters,
+    InspectTaintFlow, InspectTaintStep, InspectTaintedArg, Matcher,
+};
 use crate::args::FactKindFilter;
 use bonsai_common::{FileId, FuncId, Span};
 use bonsai_lang_api::FlowEvent;
@@ -120,4 +123,63 @@ fn inspect_cli_filters_map_one_to_one_to_sdk_filters() {
     for (cli_kind, sdk_kind) in all_kinds {
         assert_eq!(cli_kind.to_sdk(), sdk_kind);
     }
+}
+
+fn sample_taint_flow() -> InspectTaintFlow {
+    InspectTaintFlow {
+        taint_id: "T:1234".to_string(),
+        entry: "handle".to_string(),
+        terminal: "os.system".to_string(),
+        terminal_kind: "call".to_string(),
+        precision: "narrowed".to_string(),
+        chain_display: vec!["handle".to_string(), "sink".to_string()],
+        steps: vec![InspectTaintStep {
+            caller: "sink".to_string(),
+            callee: "os.system".to_string(),
+            file: "/tmp/call/narrowed.py".to_string(),
+            line: 4,
+            column: 5,
+            kind: "call".to_string(),
+            precision: "narrowed".to_string(),
+            tainted_args: vec![InspectTaintedArg {
+                index: 0,
+                value_text: "cmd".to_string(),
+                param_name: Some("command".to_string()),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn taint_query_matching_ignores_metadata_labels() {
+    let flow = sample_taint_flow();
+    for query in ["call", "narrowed", "/tmp/call"] {
+        let matcher = Matcher::build(Some(query), false).expect("matcher");
+        assert!(
+            !taint_flow_matches_query(&flow, &matcher),
+            "query `{query}` matched taint metadata instead of path content"
+        );
+    }
+}
+
+#[test]
+fn taint_query_matching_keeps_real_path_content() {
+    let flow = sample_taint_flow();
+    for query in ["handle", "sink", "os.system", "cmd", "command", "T:1234"] {
+        let matcher = Matcher::build(Some(query), false).expect("matcher");
+        assert!(
+            taint_flow_matches_query(&flow, &matcher),
+            "query `{query}` should match actual taint path content"
+        );
+    }
+}
+
+#[test]
+fn taint_from_to_needles_ignore_file_paths() {
+    let flow = sample_taint_flow();
+    assert!(
+        !taint_flow_contains_needle(&flow, "/tmp/call"),
+        "from/to needle matched a file path instead of taint path content"
+    );
+    assert!(taint_flow_contains_needle(&flow, "cmd"));
 }

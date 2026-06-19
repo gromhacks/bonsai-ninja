@@ -5,8 +5,10 @@
   severity: high
   packages:
   - mongodb
+  - mongoose
   imports:
   - mongodb
+  - mongoose
   cwe:
   - CWE-943
   match:

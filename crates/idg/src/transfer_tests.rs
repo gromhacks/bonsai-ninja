@@ -1298,6 +1298,7 @@ fn configured_clean_output_overwrite_commits_fresh_output_writer() {
             value_start_arg_index: 1,
         }],
         source_output_args: Vec::new(),
+        source_callback_args: Vec::new(),
         include_diagnostic_field_flows: true,
         include_receiver_method_propagation: true,
         include_field_argument_forwarding: true,

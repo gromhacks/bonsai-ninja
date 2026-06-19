@@ -1496,6 +1496,81 @@ impl Workspace {
         Self::open_with_options(root, registry, WorkspaceOpenOptions::query_only())
     }
 
+    /// Open only source files whose raw text contains `literal`.
+    ///
+    /// This is a query fast path for very large workspaces. It keeps
+    /// syntax-search commands from reparsing tens of thousands of
+    /// files when a literal query can first narrow the candidate file
+    /// set. It deliberately performs parse/index only; callers that
+    /// need whole-workspace semantic graph evidence should use
+    /// [`Self::open_query`] or pass an explicit exhaustive flag at the
+    /// CLI layer.
+    pub fn open_query_matching_literal(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        literal: &str,
+    ) -> Result<Self, WorkspaceError> {
+        let options = WorkspaceOpenOptions::parse_only();
+        let ws = Self::new_with_open_options(registry, options);
+        ws.set_idg_sidecar_root(root);
+        let canonical_root = canonical_workspace_root(root);
+        *ws.inner.root_label.lock() = root.display().to_string();
+        ws.inner.db.set_workspace_root(canonical_root.clone());
+        let (files, skipped_minified) =
+            read_supported_source_files_matching_literal(&canonical_root, &ws.inner.registry, literal)?;
+        for source in files {
+            let path = &source.path;
+            let old_id = ws.inner.vfs.lookup(path);
+            let id = ws.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+            if let Some(prev) = old_id {
+                ws.invalidate_after_file_change(prev);
+            }
+            *ws.inner.reparse_counter.lock() += 1;
+            let _ = id;
+        }
+        let files = ws.vfs().all_files();
+        use rayon::prelude::*;
+        files.par_iter().for_each(|f| {
+            let _ = ws.db().decl_index(*f);
+        });
+        if skipped_minified > 0 {
+            tracing::info!(
+                skipped = skipped_minified,
+                "skipped minified / bundled files (set BONSAI_INCLUDE_MINIFIED=1 to include)"
+            );
+        }
+        Ok(ws)
+    }
+
+    /// Open one supported source file under `root`, parse it, and
+    /// index only its local syntax facts.
+    ///
+    /// This is the fast path for file-centric navigation commands.
+    /// It deliberately does not ingest the whole workspace or load
+    /// whole-workspace graph sidecars; callers that need cross-file
+    /// callers, findings, or taint overlays should use
+    /// [`Self::open_query`].
+    pub fn open_query_matching_path(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        path: &Path,
+    ) -> Result<Self, WorkspaceError> {
+        let options = WorkspaceOpenOptions::parse_only();
+        let ws = Self::new_with_open_options(registry, options);
+        ws.set_idg_sidecar_root(root);
+        let canonical_root = canonical_workspace_root(root);
+        *ws.inner.root_label.lock() = root.display().to_string();
+        ws.inner.db.set_workspace_root(canonical_root.clone());
+        let source = read_supported_source_file_at_path(&canonical_root, &ws.inner.registry, path)?;
+        let id = ws
+            .inner
+            .vfs
+            .write(source.path.clone(), Arc::<str>::from(source.text));
+        *ws.inner.reparse_counter.lock() += 1;
+        let _ = ws.db().decl_index(id);
+        Ok(ws)
+    }
+
     /// Build a workspace with explicit control over sidecar load,
     /// prewarm, and save behavior. This is the SDK-level primitive
     /// behind the CLI's "index once, query many" performance model.
@@ -2576,6 +2651,64 @@ fn read_supported_source_files(
     canonical_root: &Path,
     registry: &LanguageRegistry,
 ) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
+    read_supported_source_files_impl(canonical_root, registry, None)
+}
+
+fn read_supported_source_files_matching_literal(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    literal: &str,
+) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
+    read_supported_source_files_impl(canonical_root, registry, Some(literal))
+}
+
+fn read_supported_source_file_at_path(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    requested_path: &Path,
+) -> Result<SourceFileContent, WorkspaceError> {
+    let path = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        canonical_root.join(requested_path)
+    };
+    let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+        return Err(WorkspaceError::NoAdapter(path.display().to_string()));
+    };
+    if registry.adapter_for_extension(ext).is_none() {
+        return Err(WorkspaceError::NoAdapter(ext.to_string()));
+    }
+    if !include_minified() && path_looks_minified(&path) {
+        return Err(WorkspaceError::NoAdapter(format!(
+            "minified source skipped: {}",
+            path.display()
+        )));
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => return Err(WorkspaceError::Io(error)),
+    };
+    if !include_minified() && content_looks_minified(&text) {
+        return Err(WorkspaceError::NoAdapter(format!(
+            "minified source skipped: {}",
+            path.display()
+        )));
+    }
+    if content_has_extreme_structure_nesting(&text) {
+        return Err(WorkspaceError::NoAdapter(format!(
+            "extreme structure nesting skipped: {}",
+            path.display()
+        )));
+    }
+    let hash = fnv1a_bytes64(text.as_bytes());
+    Ok(SourceFileContent { path, text, hash })
+}
+
+fn read_supported_source_files_impl(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    literal_filter: Option<&str>,
+) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
     let include_minified = include_minified();
     let mut skipped_minified = 0usize;
     // The ignore walker follows .gitignore / .ignore / .bonsaiignore but
@@ -2611,6 +2744,7 @@ fn read_supported_source_files(
         Skip,
         Err(std::io::Error),
     }
+    let literal_lower = literal_filter.map(str::to_lowercase);
     let outcomes: Vec<ReadOutcome> = entries
         .into_par_iter()
         .map(|entry| {
@@ -2636,6 +2770,11 @@ fn read_supported_source_files(
                 }
                 Err(error) => return ReadOutcome::Err(error),
             };
+            if let Some(literal) = literal_filter {
+                if !text_contains_literal_query(&text, literal, literal_lower.as_deref().unwrap_or(literal)) {
+                    return ReadOutcome::Skip;
+                }
+            }
             if !include_minified && content_looks_minified(&text) {
                 tracing::debug!(path = %path.display(), "skipping minified file (content)");
                 skipped_counter.fetch_add(1, Ordering::Relaxed);
@@ -2665,6 +2804,10 @@ fn read_supported_source_files(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     skipped_minified += skipped_counter.load(Ordering::Relaxed);
     Ok((files, skipped_minified))
+}
+
+fn text_contains_literal_query(text: &str, literal: &str, literal_lower: &str) -> bool {
+    text.contains(literal) || text.to_lowercase().contains(literal_lower)
 }
 
 /// Precision-aware summary printed by the CLI `diagnostics` command.

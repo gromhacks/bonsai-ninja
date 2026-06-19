@@ -90,12 +90,50 @@ pub(crate) fn call_candidate_matches_package_tail(candidate: &str, needle: &str)
     // The candidate is the call's qualifier — either the bare binding
     // (`exec`) or the whole qualified callee (`exec.Command`). Compare its
     // leading segment (`exec`) to the package's last path segment.
-    let candidate_head = candidate
-        .split(['.', ':'])
-        .next()
-        .unwrap_or(candidate)
-        .trim();
+    let candidate_head = candidate.split(['.', ':']).next().unwrap_or(candidate).trim();
     !candidate_head.is_empty() && candidate_head == needle_tail
+}
+
+/// Extract the package prefix from a Java-like fully-qualified type or
+/// constructor/call reference. Examples:
+///
+/// - `javax.naming.directory.InitialDirContext` -> `javax.naming.directory`
+/// - `new javax.naming.directory.InitialDirContext` -> `javax.naming.directory`
+/// - `org.example.Factory.create` -> `org.example`
+///
+/// The heuristic is intentionally syntax-only: Java/Kotlin/Scala package
+/// segments conventionally begin lowercase, while type segments begin
+/// uppercase. If every segment is lowercase, there is no type boundary and
+/// the string is not accepted as FQN package evidence.
+pub(crate) fn java_like_fully_qualified_package(name: &str) -> Option<&str> {
+    let trimmed = name.trim().strip_prefix("new ").unwrap_or(name.trim());
+    if !trimmed.contains('.') {
+        return None;
+    }
+    let mut offset = 0usize;
+    let mut saw_lowercase_package_segment = false;
+    for segment in trimmed.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        let first = segment.chars().next()?;
+        if first.is_ascii_uppercase() {
+            return saw_lowercase_package_segment
+                .then_some(trimmed[..offset.saturating_sub(1)].trim_end_matches('.'));
+        }
+        if !segment
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+        {
+            return None;
+        }
+        if !first.is_ascii_lowercase() {
+            return None;
+        }
+        saw_lowercase_package_segment = true;
+        offset += segment.len() + 1;
+    }
+    None
 }
 
 #[cfg(test)]

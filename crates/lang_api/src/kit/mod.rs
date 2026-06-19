@@ -2245,6 +2245,14 @@ fn walk_into(
 
     if handler.is_call(kind) {
         let call_event = build_call_event(node, file, src, handler, class_names);
+        if let Some(lambda) = immediately_invoked_lambda_callee(&node, handler) {
+            walk_call_argument_expressions(node, file, src, handler, class_names, out);
+            if let Some(event) = call_event.as_ref() {
+                emit_invoked_lambda_param_bindings(lambda, file, src, event, out);
+            }
+            walk_lambda_body(lambda, file, src, handler, class_names, out);
+            return;
+        }
         if let Some(event) = call_event.clone() {
             out.push(event);
         }
@@ -2259,28 +2267,7 @@ fn walk_into(
         // closure as part of the caller's behavior, so their calls
         // are flow-relevant and shouldn't be lost to the usual
         // is_lambda short-circuit.
-        let arg_containers: Vec<Node<'_>> = {
-            let mut v: Vec<Node<'_>> = Vec::new();
-            if let Some(n) = node.child_by_field_name("arguments") {
-                v.push(n);
-            }
-            // Grammars that don't expose `arguments` as a field (Kotlin
-            // wraps it in `call_suffix`; Scala / Swift may place it
-            // inline): also collect direct children that look like
-            // argument lists or trailing-lambda wrappers.
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                match child.kind() {
-                    "arguments" | "argument_list" | "value_arguments" | "call_suffix" | "expr_args" => {
-                        v.push(child);
-                    }
-                    _ => {}
-                }
-            }
-            let mut seen = std::collections::HashSet::new();
-            v.retain(|n| seen.insert(n.id()));
-            v
-        };
+        let arg_containers = call_argument_containers(node);
         let mut walked_closures = std::collections::HashSet::new();
         for container in arg_containers {
             // `any(f(t) for t in xs)` / `list(g(t) for t in xs)`: python
@@ -2298,7 +2285,15 @@ fn walk_into(
             for arg in container.named_children(&mut cursor) {
                 if is_closure_arg(arg.kind(), handler) {
                     walked_closures.insert(arg.id());
-                    emit_inline_closure_param_bindings(arg, file, src, &closure_source_names, out);
+                    let extra_sources = inline_closure_param_extra_sources(call_event.as_ref(), arg, src);
+                    emit_inline_closure_param_bindings_with_extra_sources(
+                        arg,
+                        file,
+                        src,
+                        &closure_source_names,
+                        &extra_sources,
+                        out,
+                    );
                     // Inline the lambda body so its calls belong to
                     // the enclosing function. Walks via a helper that
                     // bypasses the is_lambda short-circuit.
@@ -2331,7 +2326,15 @@ fn walk_into(
                         out,
                     );
                 } else {
-                    emit_inline_closure_param_bindings(child, file, src, &closure_source_names, out);
+                    let extra_sources = inline_closure_param_extra_sources(call_event.as_ref(), child, src);
+                    emit_inline_closure_param_bindings_with_extra_sources(
+                        child,
+                        file,
+                        src,
+                        &closure_source_names,
+                        &extra_sources,
+                        out,
+                    );
                 }
                 walk_lambda_body(child, file, src, handler, class_names, out);
             }
@@ -2379,7 +2382,21 @@ fn walk_into(
         let body_node = node
             .child_by_field_name("body")
             .or_else(|| node.child_by_field_name("block"));
+        let body_id = body_node.map(|n| n.id());
+        let mut pre_body_child_ids = Vec::new();
         if let Some(b) = body_node {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.id() == b.id() {
+                    break;
+                }
+                let ck = child.kind();
+                if handler.is_catch(ck) || handler.is_finally(ck) || ck == "on_part" {
+                    continue;
+                }
+                walk_into(child, file, src, handler, class_names, &mut body, false);
+                pre_body_child_ids.push(child.id());
+            }
             walk_into(b, file, src, handler, class_names, &mut body, false);
         }
         let mut cursor = node.walk();
@@ -2392,8 +2409,11 @@ fn walk_into(
         // Track whether the previous named sibling was a catch/on marker
         // so the following block gets routed into catch_events.
         let mut prev_was_catch_marker = false;
-        let body_id = body_node.map(|n| n.id());
         for child in node.named_children(&mut cursor) {
+            if pre_body_child_ids.contains(&child.id()) {
+                prev_was_catch_marker = false;
+                continue;
+            }
             let ck = child.kind();
             if handler.is_catch(ck) || ck == "on_part" {
                 saw_catch_kind = true;
@@ -5015,6 +5035,12 @@ fn extra_assign_targets(raw: &str, primary: &str) -> Vec<String> {
         .split_once('=')
         .map_or(raw.trim(), |(lhs, _)| lhs)
         .trim();
+    let lhs_start = lhs_text.trim_start();
+    if !lhs_start.starts_with(['[', '{', '('])
+        && (lhs_text.contains('[') || lhs_text.contains('.') || lhs_text.contains("->"))
+    {
+        return Vec::new();
+    }
     let mut extra_targets = Vec::new();
     // Comma-delimited tuple — skip the first element (it's `primary`).
     for tuple_part in lhs_text.split(',').skip(1) {
@@ -5053,11 +5079,19 @@ fn extra_lhs_binding_targets(
     let Some(lhs) = lhs else {
         return Vec::new();
     };
+    let lhs_text = node_text(&lhs, src);
+    if qualified_assign_target(Some(lhs), src).is_some()
+        || lhs_text.contains('[')
+        || lhs_text.contains('.')
+        || lhs_text.contains("->")
+    {
+        return Vec::new();
+    }
     if target_node.is_some_and(|target| target.id() == lhs.id()) && !node_text(&lhs, src).contains(',') {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for target in binding_tokens_from_pattern(node_text(&lhs, src)) {
+    for target in binding_tokens_from_pattern(lhs_text) {
         let target = sanitize_assign_target(&target);
         if !target.is_empty() && target != primary && !out.iter().any(|t| t == &target) {
             out.push(target);
@@ -9281,6 +9315,91 @@ fn walk_named_children(
     }
 }
 
+fn call_argument_containers(node: Node<'_>) -> Vec<Node<'_>> {
+    let mut v: Vec<Node<'_>> = Vec::new();
+    if let Some(n) = node.child_by_field_name("arguments") {
+        v.push(n);
+    }
+    // Grammars that don't expose `arguments` as a field (Kotlin wraps it
+    // in `call_suffix`; Scala / Swift may place it inline): also collect
+    // direct children that look like argument lists or trailing-lambda
+    // wrappers.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "arguments" | "argument_list" | "value_arguments" | "call_suffix" | "expr_args" => {
+                v.push(child);
+            }
+            _ => {}
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|n| seen.insert(n.id()));
+    v
+}
+
+fn walk_call_argument_expressions(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) {
+    for container in call_argument_containers(node) {
+        if is_comprehension_kind(container.kind()) {
+            walk_into(container, file, src, handler, class_names, out, false);
+            continue;
+        }
+        let mut cursor = container.walk();
+        for arg in container.named_children(&mut cursor) {
+            if !is_closure_arg(arg.kind(), handler) {
+                walk_into(arg, file, src, handler, class_names, out, false);
+            }
+        }
+    }
+}
+
+fn immediately_invoked_lambda_callee<'tree>(
+    call: &Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    let callee = call
+        .child_by_field_name("function")
+        .or_else(|| call.child_by_field_name("callee"))?;
+    unwrap_invoked_lambda_callee(callee, handler)
+}
+
+fn unwrap_invoked_lambda_callee<'tree>(
+    mut node: Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    for _ in 0..6 {
+        if handler.is_lambda(node.kind()) {
+            return Some(node);
+        }
+        if !is_transparent_lambda_callee_wrapper(node.kind()) {
+            return None;
+        }
+        node = node
+            .child_by_field_name("expression")
+            .or_else(|| node.child_by_field_name("value"))
+            .or_else(|| first_named_child(&node))?;
+    }
+    None
+}
+
+fn is_transparent_lambda_callee_wrapper(kind: &str) -> bool {
+    matches!(
+        kind,
+        "parenthesized_expression"
+            | "primary_expression"
+            | "expression"
+            | "postfix_expression"
+            | "unary_expression"
+    )
+}
+
 fn non_closure_arg_source_names(node: &Node<'_>, src: &[u8], arg_container_kinds: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
@@ -9330,6 +9449,53 @@ fn is_closure_arg(kind: &str, handler: &GrammarHandler) -> bool {
     matches!(kind, "block" | "do_block")
 }
 
+fn emit_invoked_lambda_param_bindings(
+    lambda: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    call_event: &FlowEvent,
+    out: &mut Vec<FlowEvent>,
+) {
+    let FlowEvent::Call { args, .. } = call_event else {
+        return;
+    };
+    if args.is_empty() {
+        return;
+    }
+    for (idx, param) in extract_param_names(&lambda, src).into_iter().enumerate() {
+        if param.is_empty() {
+            continue;
+        }
+        let arg = args
+            .iter()
+            .find(|arg| arg.name.as_deref() == Some(param.as_str()))
+            .or_else(|| args.get(idx));
+        let Some(arg) = arg else {
+            continue;
+        };
+        let mut source_names = arg.source_names.clone();
+        if let Some(place) = arg.place.as_deref() {
+            push_value_text_source_name(&mut source_names, place);
+        }
+        push_value_text_source_name(&mut source_names, &arg.value_text);
+        source_names.sort();
+        source_names.dedup();
+        if source_names.is_empty() {
+            continue;
+        }
+        out.push(FlowEvent::Assign {
+            span: span_of(file, &lambda),
+            target: param,
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names,
+            declares_new_binding: false,
+            value_kind: None,
+        });
+    }
+}
+
 fn emit_inline_closure_param_bindings(
     lambda: Node<'_>,
     file: FileId,
@@ -9337,9 +9503,17 @@ fn emit_inline_closure_param_bindings(
     source_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    if source_names.is_empty() {
-        return;
-    }
+    emit_inline_closure_param_bindings_with_extra_sources(lambda, file, src, source_names, &[], out);
+}
+
+fn emit_inline_closure_param_bindings_with_extra_sources(
+    lambda: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    source_names: &[String],
+    extra_param_sources: &[(String, Vec<String>)],
+    out: &mut Vec<FlowEvent>,
+) {
     let params = extract_param_names(&lambda, src);
     // H11: a single-param Kotlin lambda omits the param list and refers to
     // the implicit `it`. Synthesize it so `xs.forEach { sink(it) }` and
@@ -9353,11 +9527,20 @@ fn emit_inline_closure_param_bindings(
     } else {
         params
     };
-    let mut sources = source_names.to_vec();
-    sources.sort();
-    sources.dedup();
     for param in params {
         if param.is_empty() {
+            continue;
+        }
+        let mut sources = source_names.to_vec();
+        if let Some((_, extra_sources)) = extra_param_sources
+            .iter()
+            .find(|(extra_param, _)| extra_param == &param)
+        {
+            sources.extend(extra_sources.iter().cloned());
+        }
+        sources.sort();
+        sources.dedup();
+        if sources.is_empty() {
             continue;
         }
         out.push(FlowEvent::Assign {
@@ -9371,6 +9554,31 @@ fn emit_inline_closure_param_bindings(
             value_kind: None,
         });
     }
+}
+
+fn inline_closure_param_extra_sources(
+    call_event: Option<&FlowEvent>,
+    lambda: Node<'_>,
+    src: &[u8],
+) -> Vec<(String, Vec<String>)> {
+    let Some(FlowEvent::Call { name, .. }) = call_event else {
+        return Vec::new();
+    };
+    if !call_is_trpc_procedure_handler(name) {
+        return Vec::new();
+    }
+    extract_param_names(&lambda, src)
+        .into_iter()
+        .filter(|param| param == "input")
+        .map(|param| (param, vec!["trpc.input".to_string()]))
+        .collect()
+}
+
+fn call_is_trpc_procedure_handler(name: &str) -> bool {
+    let compact: String = name.chars().filter(|ch| !ch.is_whitespace()).collect();
+    (compact.ends_with(".query") || compact.ends_with(".mutation") || compact.ends_with(".subscription"))
+        && compact.contains(".procedure")
+        && compact.contains(".input(")
 }
 
 fn emit_inline_closure_param_bindings_from_yield_call(
@@ -11205,16 +11413,41 @@ fn push_receiver_type_and_bases_inner(
     seen: &mut std::collections::BTreeSet<String>,
 ) {
     let canonical = canonical_simple_type_name(&ty);
-    if canonical.is_empty() || !seen.insert(canonical.clone()) {
+    if canonical.is_empty() {
         return;
     }
-    push_unique_receiver_type(out, canonical.clone());
+    let first_canonical_visit = seen.insert(canonical.clone());
+    if first_canonical_visit {
+        push_unique_receiver_type(out, canonical.clone());
+    }
+    if let Some(qualified) = qualified_receiver_type_evidence(&ty, &canonical) {
+        push_unique_receiver_type(out, qualified);
+    }
+    if !first_canonical_visit {
+        return;
+    }
     let Some((_, bases)) = class_facts.by_canonical_name.get(&canonical) else {
         return;
     };
     for base in bases {
         push_receiver_type_and_bases_inner(out, base.clone(), class_facts, seen);
     }
+}
+
+fn qualified_receiver_type_evidence(raw: &str, canonical: &str) -> Option<String> {
+    let qualified = raw
+        .trim()
+        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_end_matches("()")
+        .trim();
+    if qualified.is_empty() || qualified == canonical {
+        return None;
+    }
+    let has_qualifier = qualified.contains('.')
+        || qualified.contains("::")
+        || qualified.contains('\\')
+        || qualified.contains('/');
+    has_qualifier.then(|| qualified.to_string())
 }
 
 fn receiver_type_from_constructor_expr(receiver: &str) -> Option<String> {
@@ -11230,7 +11463,7 @@ fn receiver_type_from_constructor_expr(receiver: &str) -> Option<String> {
     if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
         return None;
     }
-    Some(bare.to_string())
+    Some(without_generics.trim().to_string())
 }
 
 fn normalize_receiver_type_expr(receiver: &str) -> String {

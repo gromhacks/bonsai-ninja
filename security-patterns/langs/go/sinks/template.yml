@@ -5,6 +5,7 @@
   severity: high
   packages:
   - text/template
+  - html/template
   - github.com/aymerick/raymond
   cwe:
   - CWE-1336
@@ -27,6 +28,16 @@
       }
     expect_match_text:
     - tmpl.Parse
+  - name: html template parse
+    code: |
+      import "html/template"
+      package main
+
+      func example(tmpl *template.Template, target string) {
+        tmpl.Parse(target)
+      }
+    expect_match_text:
+    - tmpl.Parse
   - name: literal template parse negative
     code: |
       import "text/template"
@@ -36,7 +47,7 @@
         tmpl.Parse("Hello {{ .Name }}")
       }
     expect_no_match: true
-  description: "text/template Template.Parse(tainted) - SSTI; template with .Funcs gives RCE. Merged collision aliases: go.template.raymond_parse."
+  description: "text/template/html/template Template.Parse(tainted) - SSTI; text/template with .Funcs can reach RCE, and html/template still parses attacker-controlled template source. Merged collision aliases: go.template.raymond_parse."
   aliases:
   - go.template.raymond_parse
 - id: go.template.text_template_parsefiles

@@ -22,6 +22,7 @@
 //! already matches against today — this crate is the named home for
 //! that logic.
 
+use crate::text::normalise_qualified_text;
 use ahash::AHashSet;
 use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
@@ -552,6 +553,52 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
     (facts, graph)
 }
 
+/// Build the rulepack-free inspect taint graph for one entry, cut to
+/// the functions that contain the user's query/filter hits. This uses
+/// the same broad entry seed shape as [`taint_facts_and_graph_for_entry`]
+/// but asks the IDG for a target cut instead of materialising every
+/// downstream terminal propagation reachable from the entry.
+#[must_use]
+pub fn inspect_entry_taint_graph_from_idg_with_target_funcs(
+    entry_func: FuncId,
+    target_funcs: Option<&AHashSet<FuncId>>,
+    db: &AnalyzerDb,
+    idg: &bonsai_idg::IdgQueryService,
+) -> EntryTaintGraph {
+    let global = db.global_index();
+    let entry_decl = global.decl_of(SymbolId::new(entry_func.raw()));
+    let mut graph_seed: TokenSet = entry_decl
+        .as_ref()
+        .map(|decl| {
+            decl.params
+                .iter()
+                .filter(|param| !param.is_empty())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(decl) = entry_decl.as_ref() {
+        collect_assign_targets(&decl.flow_events, &mut graph_seed, true);
+        collect_graph_seed_tokens(&decl.flow_events, &mut graph_seed);
+    }
+    if graph_seed.is_empty() {
+        return EntryTaintGraph::default();
+    }
+    entry_taint_graph_from_idg_with_target_funcs_and_max_precision(
+        entry_func,
+        &graph_seed,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        target_funcs,
+        Some(Precision::Narrowed),
+        db,
+        idg,
+    )
+}
+
 /// Walk the entry's flow events and collect every Assign target into
 /// `out`. Used as a fallback taint seed when the entry has no formal
 /// params — each local that the entry binds is a candidate taint
@@ -927,7 +974,10 @@ fn source_seed_nodes_from_idg(
         }
     }
     if !output_arg_names.is_empty() && source_anchor.is_none() {
-        seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, output_arg_names));
+        let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
+        seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &output_seed_names));
+    } else if !output_arg_names.is_empty() {
+        seed_nodes.extend(output_arg_read_seed_nodes(source_func, output_arg_names, idg));
     }
     if seed_nodes.is_empty() {
         if seed_names.is_empty() {
@@ -941,6 +991,21 @@ fn source_seed_nodes_from_idg(
     seed_nodes.sort();
     seed_nodes.dedup();
     seed_nodes
+}
+
+fn output_arg_read_seed_nodes(
+    func: FuncId,
+    output_arg_names: &[String],
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
+    idg.read_or_write_nodes_for_names(func, &output_seed_names)
+        .into_iter()
+        .filter(|node| {
+            idg.resolve_point(*node)
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Read)
+        })
+        .collect()
 }
 
 /// Semantic-only source-return reachability over the IDG.
@@ -1546,6 +1611,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         }
         by_site.entry((*caller, *call_span)).or_default().push(*arg_idx);
     }
+    promote_nested_tainted_call_args(&mut by_site, global.as_ref(), &mut call_summary_cache);
 
     let mut tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
     let compiled_call_result_passthroughs = compile_call_result_passthroughs(call_result_passthroughs);
@@ -2153,11 +2219,14 @@ fn apply_call_result_passthrough_fixpoint(
                 if !applied.insert(key) {
                     continue;
                 }
-                let Some(ret_node) = idg.call_ret_node_at_site(caller, call_span) else {
-                    continue;
-                };
-                if seeded.insert(ret_node) {
-                    seed_nodes.push(ret_node);
+                if seed_call_result_passthrough_outputs(
+                    seed_nodes,
+                    &mut seeded,
+                    idg,
+                    caller,
+                    call_span,
+                    arg_idx == u8::MAX && passthrough.input_receiver,
+                ) {
                     grew = true;
                     any_grew = true;
                 }
@@ -2180,12 +2249,16 @@ fn apply_call_result_passthrough_fixpoint(
                     {
                         let key = (*caller, *call_span, u8::MAX, passthrough.callee.clone());
                         if applied.insert(key) {
-                            if let Some(ret_node) = idg.call_ret_node_at_site(*caller, *call_span) {
-                                if seeded.insert(ret_node) {
-                                    seed_nodes.push(ret_node);
-                                    grew = true;
-                                    any_grew = true;
-                                }
+                            if seed_call_result_passthrough_outputs(
+                                seed_nodes,
+                                &mut seeded,
+                                idg,
+                                *caller,
+                                *call_span,
+                                true,
+                            ) {
+                                grew = true;
+                                any_grew = true;
                             }
                         }
                     }
@@ -2200,11 +2273,14 @@ fn apply_call_result_passthrough_fixpoint(
                         if !applied.insert(key) {
                             continue;
                         }
-                        let Some(ret_node) = idg.call_ret_node_at_site(*caller, *call_span) else {
-                            continue;
-                        };
-                        if seeded.insert(ret_node) {
-                            seed_nodes.push(ret_node);
+                        if seed_call_result_passthrough_outputs(
+                            seed_nodes,
+                            &mut seeded,
+                            idg,
+                            *caller,
+                            *call_span,
+                            true,
+                        ) {
                             grew = true;
                             any_grew = true;
                         }
@@ -2219,6 +2295,35 @@ fn apply_call_result_passthrough_fixpoint(
         seed_nodes.dedup();
     }
     any_grew
+}
+
+fn seed_call_result_passthrough_outputs(
+    seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
+    seeded: &mut ahash::AHashSet<bonsai_idg::WsNodeId>,
+    idg: &bonsai_idg::IdgQueryService,
+    caller: FuncId,
+    call_span: bonsai_common::Span,
+    seed_descendant_targets: bool,
+) -> bool {
+    let mut grew = false;
+    if let Some(ret_node) = idg.call_ret_node_at_site(caller, call_span) {
+        if seeded.insert(ret_node) {
+            seed_nodes.push(ret_node);
+            grew = true;
+        }
+    }
+    if seed_descendant_targets {
+        for target in idg.call_ret_assignment_targets_at_site(caller, call_span) {
+            let descendant_seed = format!("{}.*", target.name);
+            for node in idg.read_or_write_nodes_for_names(caller, &[descendant_seed]) {
+                if seeded.insert(node) {
+                    seed_nodes.push(node);
+                    grew = true;
+                }
+            }
+        }
+    }
+    grew
 }
 
 #[derive(Default)]
@@ -2497,7 +2602,11 @@ fn apply_output_arg_flow_fixpoint(
                 if !applied.insert(key) {
                     continue;
                 }
-                for node in idg.nodes_for_name_after_span(caller, &output, call_span) {
+                let mut output_nodes = idg.nodes_for_name_after_span(caller, &output, call_span);
+                output_nodes.extend(output_arg_read_seed_nodes(caller, &[output.clone()], idg));
+                output_nodes.sort();
+                output_nodes.dedup();
+                for node in output_nodes {
                     if seeded.insert(node) {
                         seed_nodes.push(node);
                         grew = true;
@@ -2525,7 +2634,11 @@ fn apply_output_arg_flow_fixpoint(
                 if !applied.insert(key) {
                     continue;
                 }
-                for node in idg.nodes_for_name_after_span(caller, &output, call_span) {
+                let mut output_nodes = idg.nodes_for_name_after_span(caller, &output, call_span);
+                output_nodes.extend(output_arg_read_seed_nodes(caller, &[output.clone()], idg));
+                output_nodes.sort();
+                output_nodes.dedup();
+                for node in output_nodes {
                     if seeded.insert(node) {
                         seed_nodes.push(node);
                         grew = true;
@@ -3132,14 +3245,30 @@ impl CallEventSummary {
         self.args_place
             .get(index)
             .and_then(|place| place.as_deref())
-            .map(str::trim)
+            .map(normalise_output_arg_target_text)
             .filter(|place| !place.is_empty())
-            .map(str::to_string)
             .or_else(|| {
-                let text = self.args_value_text.get(index)?.trim();
-                is_bare_identifier(text).then(|| text.to_string())
+                let text = normalise_output_arg_target_text(self.args_value_text.get(index)?);
+                is_addressable_arg_target(&text).then_some(text)
             })
     }
+}
+
+fn normalise_output_arg_target_text(text: &str) -> String {
+    normalise_qualified_text(text)
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim()
+        .to_string()
+}
+
+fn is_addressable_arg_target(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && !text.starts_with('.')
+        && !text.ends_with('.')
+        && text
+            .chars()
+            .all(|ch| ch == '.' || ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn tainted_args_for_cross_call_edge(
@@ -3148,6 +3277,21 @@ fn tainted_args_for_cross_call_edge(
     call_summary: Option<&CallEventSummary>,
 ) -> Vec<crate::inter::TaintedArg> {
     if edge.arg_idx == u8::MAX {
+        if edge.param_idx != u8::MAX {
+            let param_name = callee_decl
+                .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
+                .unwrap_or_default();
+            let value_text = if param_name.is_empty() {
+                format!("param#{}", edge.param_idx)
+            } else {
+                param_name.clone()
+            };
+            return vec![crate::inter::TaintedArg {
+                index: edge.param_idx as usize,
+                value_text,
+                param_name,
+            }];
+        }
         return call_summary
             .and_then(|summary| summary.receiver.as_ref())
             .map(String::as_str)
@@ -3179,6 +3323,80 @@ fn tainted_args_for_cross_call_edge(
     }]
 }
 
+fn promote_nested_tainted_call_args(
+    by_site: &mut ahash::AHashMap<(FuncId, bonsai_common::Span), Vec<u8>>,
+    global: &GlobalIndex,
+    call_summary_cache: &mut ahash::AHashMap<FuncId, ahash::AHashMap<bonsai_common::Span, CallEventSummary>>,
+) {
+    let seeds = by_site
+        .iter()
+        .map(|((caller, span), args)| (*caller, *span, args.clone()))
+        .collect::<Vec<_>>();
+    for (caller, nested_span, nested_arg_indices) in seeds {
+        let Some(nested_summary) =
+            cached_call_event_summary(caller, nested_span, global, call_summary_cache).cloned()
+        else {
+            continue;
+        };
+        let tainted_values = nested_arg_indices
+            .iter()
+            .filter_map(|idx| nested_summary.args_value_text.get(usize::from(*idx)))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if tainted_values.is_empty() {
+            continue;
+        }
+        let Some(summaries) =
+            cached_call_event_summaries_for_func(caller, global, call_summary_cache).cloned()
+        else {
+            continue;
+        };
+        for (outer_span, outer_summary) in summaries {
+            if outer_span == nested_span {
+                continue;
+            }
+            for (outer_idx, outer_arg_span) in outer_summary.args_span.iter().enumerate() {
+                if !span_contains_or_equals(*outer_arg_span, nested_span) {
+                    continue;
+                }
+                let Some(outer_value) = outer_summary.args_value_text.get(outer_idx) else {
+                    continue;
+                };
+                if !tainted_values
+                    .iter()
+                    .any(|tainted| expression_mentions_tainted_value(outer_value, tainted))
+                {
+                    continue;
+                }
+                let Ok(outer_idx) = u8::try_from(outer_idx) else {
+                    continue;
+                };
+                let promoted = by_site.entry((caller, outer_span)).or_default();
+                if !promoted.contains(&outer_idx) {
+                    promoted.push(outer_idx);
+                }
+            }
+        }
+    }
+}
+
+fn expression_mentions_tainted_value(expression: &str, tainted_value: &str) -> bool {
+    let expression = expression.trim();
+    let tainted_value = tainted_value.trim();
+    if expression.is_empty() || tainted_value.is_empty() {
+        return false;
+    }
+    if expression == tainted_value {
+        return true;
+    }
+    if is_bare_identifier(tainted_value) {
+        return tokenise_identifiers_outside_strings(expression)
+            .iter()
+            .any(|token| token == tainted_value);
+    }
+    expression.contains(tainted_value)
+}
+
 // Caller, arg, the two summaries, db/global, and two reuse caches — each is
 // load-bearing; a wrapper struct would only relocate the argument list.
 #[allow(clippy::too_many_arguments)]
@@ -3204,6 +3422,9 @@ fn tainted_arg_is_clean_nested_call_return(
     let Some((callee_text, nested_args)) = crate::inter::direct_call_expression_parts(value_text) else {
         return false;
     };
+    if value_text.trim().starts_with("new ") {
+        return false;
+    }
     if nested_call_return_matches_configured_passthrough(
         &callee_text,
         nested_args.len(),

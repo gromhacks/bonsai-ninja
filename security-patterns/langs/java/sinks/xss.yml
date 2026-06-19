@@ -220,6 +220,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;)'
   match_examples:
   - name: responseentity ok raw html
     code: |
@@ -237,6 +240,27 @@
       class App {
         void handle(String input) throws Exception {
           ResponseEntity.ok("safe");
+        }
+      }
+    expect_no_match: true
+  - name: responseentity ok object response negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        Object handle(String id, Service svc) {
+          return ResponseEntity.ok(svc.statusOf(id));
+        }
+      }
+      class Service {
+        Object statusOf(String id) { return new Object(); }
+      }
+    expect_no_match: true
+  - name: responseentity ok non-html string negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        Object handle(String input) {
+          return ResponseEntity.ok(input == null ? "null" : input.toString());
         }
       }
     expect_no_match: true
@@ -261,6 +285,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;)'
   match_examples:
   - name: responseentity raw html body
     code: |
@@ -366,6 +393,35 @@
   description: "JAX-RS Response.ok(body, TEXT_HTML) - raw HTML response body built from attacker-controlled text. Merged aliases: java.xss.jaxrs_response_ok_html_concat."
   aliases:
   - java.xss.jaxrs_response_ok_html_concat
+- id: java.xss.raw_html_return
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: return
+    target:
+      regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;'
+  match_examples:
+  - name: raw html return with tainted expression
+    code: |
+      class App {
+        String handle(String name) {
+          return "<!doctype html><body>" + name + "</body>";
+        }
+      }
+    expect_match_text: ['"<!doctype html><body>" + name + "</body>"']
+  - name: plain text return negative
+    code: |
+      class App {
+        String handle(String name) {
+          return "hello " + name;
+        }
+      }
+    expect_no_match: true
+  description: "Direct return of raw HTML markup; taint reachability is required for attacker-controlled content in the returned expression."
 - id: java.xss.play_results_ok_html_concat
   enabled: true
   language: java
@@ -489,7 +545,6 @@
   enabled: true
   language: java
   tag: xss
-  category: source-independent
   severity: high
   packages:
   - org.apache.wicket
@@ -502,36 +557,64 @@
       - Label
       - setEscapeModelStrings
   constraints:
+  - receiver_tainted: true
   - arg_equals:
       index: 0
       value: 'false'
   match_examples:
-  - name: wicket label escaping disabled
+  - name: wicket tainted label escaping disabled
     code: |
       import org.apache.wicket.*;
       class App {
-        void render(Label label) {
+        void render(String input) {
+          Label label = new Label("result", new Model<>(input));
           label.setEscapeModelStrings(false);
         }
       }
+      class Model<T> {
+        Model(Object... args) {}
+      }
       class Label {
+        Label(Object... args) {}
         void setEscapeModelStrings(Object... args) {}
       }
     expect_match_text:
     - label.setEscapeModelStrings
+  - name: wicket literal label escaping disabled negative
+    code: |
+      import org.apache.wicket.*;
+      class App {
+        void render() {
+          Label label = new Label("result", new Model<>("safe"));
+          label.setEscapeModelStrings(false);
+        }
+      }
+      class Model<T> {
+        Model(Object... args) {}
+      }
+      class Label {
+        Label(Object... args) {}
+        void setEscapeModelStrings(Object... args) {}
+      }
+    expect_no_match: true
   - name: wicket label escaping enabled negative
     code: |
       import org.apache.wicket.*;
       class App {
-        void render(Label label) {
+        void render(String input) {
+          Label label = new Label("result", new Model<>(input));
           label.setEscapeModelStrings(true);
         }
       }
+      class Model<T> {
+        Model(Object... args) {}
+      }
       class Label {
+        Label(Object... args) {}
         void setEscapeModelStrings(Object... args) {}
       }
     expect_no_match: true
-  description: "Wicket Label.setEscapeModelStrings(false) - disables HTML escaping for label model text."
+  description: "Wicket Label.setEscapeModelStrings(false) on a label whose model carries tainted text disables HTML escaping and renders that model verbatim."
 - id: java.xss.printwriter_write
   enabled: false
   disabled_reason:

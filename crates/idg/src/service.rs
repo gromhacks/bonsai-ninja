@@ -396,6 +396,8 @@ impl IdgQueryService {
         let mut bare_strids: ahash::AHashSet<bonsai_factstore::StrId> = AHashSet::new();
         let mut descendant_strids: ahash::AHashSet<bonsai_factstore::StrId> = AHashSet::new();
         let mut descendant_bases: AHashSet<String> = AHashSet::new();
+        let mut descendant_path_prefixes: Vec<(bonsai_factstore::StrId, Vec<bonsai_factstore::StrId>)> =
+            Vec::new();
         let mut exact_flat_paths: AHashSet<String> = AHashSet::new();
         let mut exact_paths: Vec<(bonsai_factstore::StrId, Vec<bonsai_factstore::StrId>)> = Vec::new();
         for seed in seed_names {
@@ -405,6 +407,17 @@ impl IdgQueryService {
             }
             if let Some(base) = seed.strip_suffix(".*") {
                 let base = base.trim();
+                if let Some((root, path)) = split_projected_seed(base) {
+                    if let Some(root_strid) = segment.strings.lookup(root) {
+                        if let Some(path_strids) = path
+                            .iter()
+                            .map(|part| segment.strings.lookup(part))
+                            .collect::<Option<Vec<_>>>()
+                        {
+                            descendant_path_prefixes.push((root_strid, path_strids));
+                        }
+                    }
+                }
                 if let Some(strid) = segment.strings.lookup(base) {
                     descendant_strids.insert(strid);
                 }
@@ -435,6 +448,7 @@ impl IdgQueryService {
         if bare_strids.is_empty()
             && descendant_strids.is_empty()
             && descendant_bases.is_empty()
+            && descendant_path_prefixes.is_empty()
             && exact_paths.is_empty()
             && exact_flat_paths.is_empty()
         {
@@ -460,6 +474,9 @@ impl IdgQueryService {
                 }
                 Place::Read { name, path } | Place::Write { name, path, .. } => {
                     (!path.is_empty() && descendant_strids.contains(name))
+                        || descendant_path_prefixes
+                            .iter()
+                            .any(|(base, prefix)| base == name && path.starts_with(prefix.as_slice()))
                         || exact_paths.iter().any(|(base, exact_path)| {
                             base == name && exact_path.as_slice() == path.as_slice()
                         })
@@ -1767,6 +1784,27 @@ fn lift_call_arg_edge(
                 precision: edge.meta.precision,
                 call_kind: edge.meta.call_kind,
             });
+        }
+    }
+    // Source-callback edge: an external source API's call result is
+    // modeled as flowing into a named callback parameter
+    // (`fs.readFile(..., onRead)` taints `onRead`'s `data`
+    // parameter). There is no caller-side positional argument that
+    // carries the taint, so keep `arg_idx` sentinel while preserving
+    // the destination `param_idx` for path rendering and attribution.
+    if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg {
+        if let Place::CallRet { .. } = from_place {
+            if let Place::Param { idx: param_idx } = to_place {
+                return Some(CrossCallEdge {
+                    caller: from_node.func,
+                    callee: to_node.func,
+                    call_span: edge.meta.via_span,
+                    arg_idx: u8::MAX,
+                    param_idx: *param_idx,
+                    precision: edge.meta.precision,
+                    call_kind: edge.meta.call_kind,
+                });
+            }
         }
     }
     // Field-argument edge: caller field writer → callee field read.

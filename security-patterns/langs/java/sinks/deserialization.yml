@@ -40,6 +40,45 @@
     expect_match_text: [ois.readObject]
   description: "ObjectInputStream.readObject() on a local stream variable - classic Java deserialization RCE."
 
+- id: java.deser.object_input_stream_tainted_receiver
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["java.io"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectInputStream, readObject]
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: object input stream from tainted bytes
+    code: |
+      import java.io.*;
+      class App {
+        Object handle(byte[] data) throws Exception {
+          try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(data))) {
+            return ois.readObject();
+          }
+        }
+      }
+    expect_match_text: [ois.readObject]
+  - name: object input stream clean receiver negative
+    code: |
+      import java.io.*;
+      class App {
+        Object handle(byte[] data) throws Exception {
+          byte[] safe = new byte[0];
+          try (ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(safe))) {
+            return ois.readObject();
+          }
+        }
+      }
+    expect_no_match: true
+  description: "ObjectInputStream.readObject() where the stream receiver was constructed from tainted bytes."
+
 - id: java.deser.xstream_fromxml
   enabled: true
   language: java
@@ -310,6 +349,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - arg_matches_regex:
+      index: 1
+      regex: "(^|\\b)(?:java\\.lang\\.)?Object\\s*(?:\\[\\s*\\])?\\.class|(^|\\b)(?:java\\.io\\.)?Serializable\\s*\\.class|TypeReference\\s*<\\s*(?:Object|\\?)"
   match_examples:
   - name: jackson object mapper read value
     code: |
@@ -323,6 +365,19 @@
         Object readValue(Object... args) { return null; }
       }
     expect_match_text: [mapper.readValue]
+  - name: jackson concrete map type negative
+    code: |
+      import com.fasterxml.jackson.databind.*;
+      import java.util.Map;
+      class App {
+        Object handle(ObjectMapper mapper, String json) throws Exception {
+          return mapper.readValue(json, Map.class);
+        }
+      }
+      class ObjectMapper {
+        Object readValue(Object... args) { return null; }
+      }
+    expect_no_match: true
   - name: arg tainted literal negative
     code: |
       import com.fasterxml.jackson.databind.*;

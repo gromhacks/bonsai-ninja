@@ -69,13 +69,23 @@ fn run(args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+fn run_json(args: &[&str]) -> serde_json::Value {
+    let out = run(args);
+    serde_json::from_str(&out).unwrap_or_else(|err| panic!("valid inspect JSON ({err}):\n{out}"))
+}
+
 #[test]
 fn inspect_uses_match_not_sink() {
     if require_binary_built().is_none() {
         return;
     }
     let ws = ws_path();
-    let out = run(&["inspect", ws.to_str().unwrap(), "run_admin_command"]);
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "run_admin_command",
+        "--graph-flow",
+    ]);
     assert!(!out.contains("SINK"), "output still contains SINK: {out}");
     assert!(out.contains("MATCH"), "output missing MATCH annotation: {out}");
 }
@@ -99,7 +109,7 @@ fn inspect_request_shows_downstream_chain() {
         return;
     }
     let ws = ws_path();
-    let out = run(&["inspect", ws.to_str().unwrap(), "request"]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "request", "--graph-flow"]);
     // The request match lives in handle_request, which is the root. Its
     // downstream should reach run_admin_command and os.system transitively.
     assert!(
@@ -118,12 +128,193 @@ fn inspect_qualified_call_name_preserved() {
         return;
     }
     let ws = ws_path();
-    let out = run(&["inspect", ws.to_str().unwrap(), "os.system"]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "os.system", "--graph-flow"]);
     assert!(out.contains("os.system"), "qualified call name missing: {out}");
     // Should have a flow from root -> update_user -> run_admin_command.
     assert!(
         out.contains("run_admin_command"),
         "flow chain missing in output: {out}"
+    );
+}
+
+#[test]
+fn inspect_default_includes_rulepack_free_taint_flows() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let out = run(&["inspect", ws.to_str().unwrap(), "--query", "os.system"]);
+    assert!(
+        out.contains("1 taint flow(s)") && out.contains("══ TAINT FLOWS") && out.contains("T:"),
+        "default inspect should include query-scoped rulepack-free taint paths: {out}"
+    );
+}
+
+#[test]
+fn inspect_syntax_only_omits_default_taint_flows() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--syntax-only",
+    ]);
+    assert!(
+        out.contains("os.system"),
+        "syntax-only should still show syntax hit: {out}"
+    );
+    assert!(
+        !out.contains("══ TAINT FLOWS") && !out.contains("taint flow(s)"),
+        "syntax-only should omit default taint path table: {out}"
+    );
+}
+
+#[test]
+fn inspect_explicit_taint_flow_overrides_syntax_only() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--syntax-only",
+        "--taint-flow",
+    ]);
+    assert!(
+        out.contains("1 taint flow(s)") && out.contains("══ TAINT FLOWS") && out.contains("T:"),
+        "explicit --taint-flow should still show raw taint paths when --syntax-only is present: {out}"
+    );
+}
+
+#[test]
+fn inspect_secondary_contains_filters_taint_rows() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let v = run_json(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--contains",
+        "notify-admin",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        v["taint_flows"].as_array().map(Vec::len),
+        Some(1),
+        "--contains must match taint row string leaves such as tainted argument values: {v:#}"
+    );
+    assert_eq!(
+        v["hits"].as_array().map(Vec::len),
+        Some(0),
+        "--contains should drop syntax rows that do not contain the tainted argument value: {v:#}"
+    );
+}
+
+#[test]
+fn inspect_secondary_not_contains_drops_only_matching_taint_rows() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let v = run_json(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--not-contains",
+        "notify-admin",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        v.get("taint_flows")
+            .and_then(|flows| flows.as_array())
+            .is_none_or(Vec::is_empty),
+        "--not-contains must remove taint rows whose values contain the needle: {v:#}"
+    );
+    assert_eq!(
+        v["hits"].as_array().map(Vec::len),
+        Some(1),
+        "--not-contains should keep syntax rows that do not contain the taint-only value: {v:#}"
+    );
+}
+
+#[test]
+fn inspect_taint_flow_id_rerenders_without_query() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let first = run_json(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--format",
+        "json",
+    ]);
+    let taint_id = first["taint_flows"]
+        .as_array()
+        .and_then(|flows| flows.first())
+        .and_then(|flow| flow["taint_id"].as_str())
+        .expect("initial inspect taint id")
+        .to_string();
+    let rerender = run_json(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--flow",
+        &taint_id,
+        "--format",
+        "json",
+    ]);
+    let flows = rerender["taint_flows"]
+        .as_array()
+        .expect("rerendered taint flows");
+    assert_eq!(
+        flows.len(),
+        1,
+        "--flow T:... should keep exactly one taint row: {rerender:#}"
+    );
+    assert_eq!(
+        flows[0]["taint_id"].as_str(),
+        Some(taint_id.as_str()),
+        "--flow T:... should match taint_id exactly: {rerender:#}"
+    );
+    assert!(
+        rerender["decl_hits"].as_array().is_none_or(Vec::is_empty)
+            && rerender["hits"].as_array().is_none_or(Vec::is_empty),
+        "--flow T:... should not leak unrelated structural rows: {rerender:#}"
+    );
+}
+
+#[test]
+fn inspect_from_to_filters_include_taint_flows_by_default() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--from",
+        "run_admin_command",
+        "--to",
+        "os.system",
+    ]);
+    assert!(
+        out.contains("taint flow(s)") && out.contains("run_admin_command") && out.contains("os.system"),
+        "filter-only inspect should include taint paths that satisfy --from/--to: {out}"
     );
 }
 
@@ -214,7 +405,7 @@ fn inspect_call_hit_surfaces_full_upstream_chain() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("examples/kotlin/micro");
-    let out = run(&["inspect", ws.to_str().unwrap(), "--query", "exec"]);
+    let out = run(&["inspect", ws.to_str().unwrap(), "--query", "exec", "--graph-flow"]);
     assert!(
         out.contains("handleRequest → updateUser → runAdminCommand"),
         "expected full cross-class chain for exec hit, got:\n{out}"
@@ -250,6 +441,7 @@ def helper(value):
         "external.helper",
         "--kind",
         "call",
+        "--graph-flow",
         "--format",
         "json",
         "--no-progress",
@@ -294,7 +486,14 @@ fn inspect_flow_bodies_show_class_owner_context() {
 }\n";
     std::fs::write(td.join("Gateway.java"), src).unwrap();
     let out = Command::new(bin)
-        .args(["inspect", td.to_str().unwrap(), "--query", "exec", "--no-color"])
+        .args([
+            "inspect",
+            td.to_str().unwrap(),
+            "--query",
+            "exec",
+            "--graph-flow",
+            "--no-color",
+        ])
         .output()
         .expect("run bonsai-ninja");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -327,7 +526,13 @@ def right(cmd):\n    sink(cmd)\n\
 def handle_request(cmd, path):\n    if path == '/l':\n        left(cmd)\n    else:\n        right(cmd)\n";
     std::fs::write(td.join("a.py"), src).unwrap();
     let out = Command::new(bin)
-        .args(["inspect", td.to_str().unwrap(), "sink", "--no-color"])
+        .args([
+            "inspect",
+            td.to_str().unwrap(),
+            "sink",
+            "--graph-flow",
+            "--no-color",
+        ])
         .output()
         .expect("run bonsai-ninja");
     let stdout = String::from_utf8_lossy(&out.stdout);

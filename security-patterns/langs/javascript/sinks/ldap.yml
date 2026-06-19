@@ -63,6 +63,54 @@
     expect_no_match: true
   description: "ldapjs ev.search(filter) - tainted LDAP filter expression."
 
+- id: javascript.ldap.ldapjs_search_options_filter
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: high
+  packages: [ldapjs, ldapts]
+  imports: [ldapjs, ldapts]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:this\\.)?[A-Za-z_$][A-Za-z0-9_$]*\\.search$"
+      base_name_in:
+      - this
+      - client
+      - _client
+      - ldap
+      - ldapClient
+      - dir
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ldapjs search options filter
+    code: |
+      const _u = require("ldapjs");
+      function demo(_client, filter) {
+        return _client.search("ou=people", { filter, scope: "sub" }, () => {});
+      }
+    expect_match_text: [_client.search]
+  - name: ldapjs this client search options filter
+    code: |
+      const _u = require("ldapjs");
+      class Directory {
+        find(filter) {
+          return this.client.search("ou=people", { filter, scope: "sub" }, () => {});
+        }
+      }
+    expect_match_text: [this.client.search]
+  - name: ldapjs search options literal negative
+    code: |
+      const _u = require("ldapjs");
+      function demo(_client) {
+        return _client.search("ou=people", { filter: "(uid=alice)", scope: "sub" }, () => {});
+      }
+    expect_no_match: true
+  description: "ldapjs/ldapts client.search(base, {filter: tainted}) - tainted LDAP filter in the options object."
+
 - id: javascript.ldap.ldapjs_modify
   enabled: true
   language: javascript

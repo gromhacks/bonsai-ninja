@@ -70,6 +70,54 @@
       }
     expect_no_match: true
   description: "log.Print - log-injection via concat / Sprintf."
+- id: go.log_injection.log_printf_tainted_value
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  packages:
+  - log
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - log
+      - Printf
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: '%[#0 +\-\.\d]*[vTtbcdoOqxXUeEfFgGsqp]'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: log printf constant format tainted value
+    code: |
+      package main
+      import "log"
+      func audit(ua string) {
+        log.Printf("audit ua=%s", ua)
+      }
+    expect_match_text: [log.Printf]
+  - name: log printf literal value negative
+    code: |
+      package main
+      import "log"
+      func audit() {
+        log.Printf("audit ua=%s", "safe")
+      }
+    expect_no_match: true
+  - name: log printf no value interpolation negative
+    code: |
+      package main
+      import "log"
+      func audit(ua string) {
+        log.Printf("audit event", ua)
+      }
+    expect_no_match: true
+  description: "log.Printf(constant format, tainted value) writes attacker-controlled text into logs; CRLF in the formatted value can forge entries."
 - id: go.log_injection.log_fatal_concat
   enabled: true
   language: go

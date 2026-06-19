@@ -54,15 +54,16 @@ pub use tree::{
 pub use bonsai_browse::{
     ArgOut, ArgsFilters, AstFileDump, AstFilters, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters,
     ClassOut, ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters,
-    FlowAnnotator, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, PrecisionClass,
-    RefOut, RefsFilters, ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, StringOut,
-    StringsFilters, TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
+    FlowAnnotator, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator,
+    PrecisionClass, RefOut, RefsFilters, ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters,
+    SearchHit, StringOut, StringsFilters, TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id,
-    find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func, func_display_name,
-    matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, CallPathTruncation, ChainCache,
-    FactKindFilter, InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
+    compute_taint_flow_id, find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func,
+    func_display_name, matching_decls, matching_func_ids, name_token_match, CallEdgeResolver,
+    CallPathTruncation, ChainCache, FactKindFilter, InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
+    TaintFlowIdentityStep,
 };
 pub use bonsai_security::{
     canonical_sink_audit_applies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages,
@@ -210,6 +211,33 @@ impl Bonsai {
         let root = root.as_ref();
         let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
         let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
+        Ok(self.project(root, ws, options))
+    }
+
+    /// Open only files whose raw text contains `literal`, then parse
+    /// and index that reduced candidate set. Intended for large
+    /// syntax-search/inspect queries where whole-workspace graph
+    /// evidence is explicitly not requested.
+    pub fn open_query_matching_literal(&self, root: impl AsRef<Path>, literal: &str) -> Result<Project> {
+        let root = root.as_ref();
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
+        let ws = Workspace::open_query_matching_literal(root, self.registry.clone(), literal)?;
+        Ok(self.project(root, ws, options))
+    }
+
+    /// Open and index exactly one supported source file under `root`.
+    ///
+    /// This is intended for navigation surfaces such as `read-file`
+    /// where a direct file view should not pay whole-workspace parse
+    /// or graph costs.
+    pub fn open_query_matching_path(
+        &self,
+        root: impl AsRef<Path>,
+        path: impl AsRef<Path>,
+    ) -> Result<Project> {
+        let root = root.as_ref();
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
+        let ws = Workspace::open_query_matching_path(root, self.registry.clone(), path.as_ref())?;
         Ok(self.project(root, ws, options))
     }
 

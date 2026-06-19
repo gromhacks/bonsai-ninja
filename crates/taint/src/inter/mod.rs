@@ -169,6 +169,10 @@ pub struct InterTaintConfig {
     /// output buffer is tainted by the source, but the fd/len operands
     /// are not.
     pub source_output_args: Vec<SourceOutputArgs>,
+    /// Declarative source calls whose callback parameters receive
+    /// untrusted data from the call. API names stay outside the engine;
+    /// security rulepacks provide exact callback positions.
+    pub source_callback_args: Vec<SourceCallbackArgs>,
     /// Declarative call-result passthroughs supplied by the rulepack.
     /// A configured call maps taint from selected call arguments or the
     /// method receiver to the call return without baking API names into
@@ -216,10 +220,38 @@ pub struct SourceOutputArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceCallbackArgs {
+    pub callee: String,
+    pub callback_arg_index: usize,
+    pub source_param_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallResultPassthrough {
     pub callee: String,
     pub input_arg_indices: Vec<usize>,
     pub input_receiver: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ConfiguredPassthroughResultTaint {
+    value: bool,
+    descendant: bool,
+}
+
+impl ConfiguredPassthroughResultTaint {
+    fn any(self) -> bool {
+        self.value || self.descendant
+    }
+
+    fn merge_input(&mut self, direct_value: bool, descendant: bool) {
+        if direct_value || descendant {
+            self.value = true;
+        }
+        if descendant {
+            self.descendant = true;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,6 +442,7 @@ impl Default for InterTaintConfig {
             source_bearing_functions: AHashSet::default(),
             clean_output_overwrites: Vec::new(),
             source_output_args: Vec::new(),
+            source_callback_args: Vec::new(),
             call_result_passthroughs: Vec::new(),
             output_arg_flows: Vec::new(),
             callback_invocation_methods: AHashSet::default(),
@@ -1023,6 +1056,14 @@ fn propagate_taint_through_events(
                         state,
                         ctx,
                     );
+                    record_tainted_assignment_call_event(
+                        source_call.as_deref(),
+                        source_call_args,
+                        &adjacent_source_call_args,
+                        *span,
+                        state,
+                        ctx,
+                    );
                     remember_deferred_callable_body_call(
                         target,
                         source_call.as_deref(),
@@ -1300,7 +1341,9 @@ fn adjacent_call_args_for_assignment(events: &[FlowEvent], event_index: usize) -
                     && !args.is_empty()
                     && (source_call_args.is_empty()
                         || args.len() > source_call_args.len()
-                        || args.iter().any(|arg| arg.name.is_some())) =>
+                        || args.iter().any(|arg| {
+                            arg.name.is_some() || arg.place.is_some() || !arg.source_names.is_empty()
+                        })) =>
             {
                 Some(args.iter().map(EffectiveCallArg::from_call_arg).collect())
             }
@@ -1878,6 +1921,55 @@ fn record_tainted_write_event(
     });
 }
 
+fn record_tainted_assignment_call_event(
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    adjacent_source_call_args: &[EffectiveCallArg],
+    span: Span,
+    state: &TokenSet,
+    ctx: &mut PropagationCtx<'_>,
+) {
+    let Some(source_call) = source_call.map(str::trim).filter(|call| !call.is_empty()) else {
+        return;
+    };
+    let fallback_args;
+    let effective_args = if adjacent_source_call_args.is_empty() {
+        fallback_args = source_call_args
+            .iter()
+            .cloned()
+            .map(EffectiveCallArg::positional)
+            .collect::<Vec<_>>();
+        fallback_args.as_slice()
+    } else {
+        adjacent_source_call_args
+    };
+    let mut tainted_args = Vec::new();
+    for (index, arg) in effective_args.iter().enumerate() {
+        let direct_tainted = effective_call_arg_has_direct_value_taint(arg, state);
+        let descendant_tainted = effective_call_arg_has_descendant_taint(arg, state);
+        if !direct_tainted && !descendant_tainted {
+            continue;
+        }
+        tainted_args.push(TaintedArgAtCall {
+            index,
+            value_text: mapped_descendant_display(&arg.value_text, state)
+                .unwrap_or_else(|| arg.value_text.clone()),
+        });
+    }
+    if tainted_args.is_empty() {
+        return;
+    }
+    ctx.tainted_calls.push(TaintedCall {
+        parent_trace_id: ctx.current_trace_id,
+        caller: ctx.caller,
+        name: source_call.to_string(),
+        call_span: span,
+        tainted_args,
+        tainted_receiver: None,
+        kind: TaintedCallKind::Call,
+    });
+}
+
 fn remember_deferred_callable_body_call(
     target: &str,
     source_call: Option<&str>,
@@ -2251,6 +2343,8 @@ fn propagate_call_event(
         apply_builtin_collection_receiver_mutation(call.name, call.receiver, call.args, state);
     let semantic_taint_added =
         apply_variadic_runtime_call_semantics(call.name, call.args, state) || collection_taint_added;
+    let source_callback_dispatched =
+        propagate_configured_source_callback_args(call.name, call.args, call.span, ctx);
     let implicit_receiver = implicit_receiver_from_call_name(
         call.name,
         call.call_kind,
@@ -2290,6 +2384,7 @@ fn propagate_call_event(
         && !callable_value_invocation
         && !deferred_callable_body_invoked
         && !semantic_taint_added
+        && !source_callback_dispatched
     {
         return;
     }
@@ -2812,6 +2907,94 @@ fn propagate_receiver_taint_to_callback_args(
     }
 }
 
+fn propagate_configured_source_callback_args(
+    name: &str,
+    args: &[bonsai_lang_api::CallArg],
+    span: Span,
+    ctx: &mut PropagationCtx<'_>,
+) -> bool {
+    let shapes = ctx.config.source_callback_args.clone();
+    let mut dispatched = false;
+    for shape in shapes {
+        if !configured_name_match(&shape.callee, name) {
+            continue;
+        }
+        let Some(callback_arg) = args.get(shape.callback_arg_index) else {
+            continue;
+        };
+        let mut callbacks = Vec::new();
+        for callback_name in callable_reference_variants(&callback_arg.value_text) {
+            let callback_name = callback_name.trim();
+            if callback_name.is_empty() {
+                continue;
+            }
+            callbacks = resolve_call_candidates_with_caller(
+                callback_name,
+                ctx.aliases,
+                ctx.alias_targets,
+                ctx.local_bindings,
+                ctx.db,
+                ctx.caller,
+                ctx.config,
+            );
+            if !callbacks.is_empty() {
+                break;
+            }
+        }
+        if callbacks.is_empty() {
+            continue;
+        }
+        let global = ctx.db.global_index();
+        for callback in callbacks {
+            let Some(callback_decl) = global.decl_of(SymbolId::new(callback.func.raw())) else {
+                continue;
+            };
+            let mut callee_seed = TokenSet::default();
+            let mut record_args = Vec::new();
+            for &param_index in &shape.source_param_indices {
+                let Some(param_name) = callback_decl.params.get(param_index).cloned() else {
+                    continue;
+                };
+                if param_name.is_empty() {
+                    continue;
+                }
+                callee_seed.insert(param_name.clone());
+                record_args.push(TaintedArg {
+                    index: param_index,
+                    value_text: name.to_string(),
+                    param_name,
+                });
+            }
+            if callee_seed.is_empty() {
+                continue;
+            }
+            let trace_id = push_call_propagation(
+                ctx,
+                callback.func,
+                span,
+                record_args,
+                EdgeKind::Indirect,
+                callback.precision,
+            );
+            if let Some(lineage_history) =
+                child_lineage_history(ctx, callback.func, &callee_seed, &AHashMap::new())
+            {
+                ctx.worklist.push(InterTaintWorkItem {
+                    func: callback.func,
+                    seed: callee_seed,
+                    dyn_bindings: AHashMap::new(),
+                    const_bindings: AHashMap::new(),
+                    lineage: Some(trace_id),
+                    lineage_history,
+                });
+            }
+            *ctx.precision = ctx.precision.meet(callback.precision);
+            dispatched = true;
+        }
+    }
+    dispatched
+}
+
 fn propagate_super_return_event(
     value_text: Option<&str>,
     value_name: Option<&str>,
@@ -2982,12 +3165,12 @@ fn apply_configured_source_output_args(
             let Some(arg) = args.get(index) else {
                 continue;
             };
-            let text = arg.place.as_deref().unwrap_or(arg.value_text.as_str()).trim();
-            if text.is_empty() || is_quoted_literal(text) {
+            let text = normalise_target_text(arg.place.as_deref().unwrap_or(arg.value_text.as_str()));
+            if text.is_empty() || is_quoted_literal(&text) {
                 continue;
             }
-            insert_value_target_taint(state, text);
-            insert_descendant_target_taint(state, text);
+            insert_value_target_taint(state, &text);
+            insert_descendant_target_taint(state, &text);
         }
     }
 }
@@ -3033,15 +3216,47 @@ fn output_arg_flow_inputs_tainted(
         .any(|index| args.get(index).is_some_and(|arg| call_arg_is_tainted(arg, state)))
 }
 
+fn configured_call_result_passthrough_taint(
+    callee_name: &str,
+    args: &[EffectiveCallArg],
+    state: &TokenSet,
+    config: &InterTaintConfig,
+) -> ConfiguredPassthroughResultTaint {
+    let mut taint = ConfiguredPassthroughResultTaint::default();
+    for shape in &config.call_result_passthroughs {
+        if !configured_name_match(&shape.callee, callee_name) {
+            continue;
+        }
+        if shape.input_receiver {
+            if let Some(receiver) = call_receiver_from_name(callee_name) {
+                let receiver_value_tainted = receiver_expr_is_tainted(&receiver, state);
+                taint.merge_input(
+                    receiver_value_tainted,
+                    actual_has_descendant_taint(&receiver, state) || receiver_value_tainted,
+                );
+            }
+        }
+        for &index in &shape.input_arg_indices {
+            let Some(arg) = args.get(index) else {
+                continue;
+            };
+            taint.merge_input(
+                effective_call_arg_has_direct_value_taint(arg, state),
+                effective_call_arg_has_descendant_taint(arg, state),
+            );
+        }
+    }
+    taint
+}
+
 fn call_output_arg_target(arg: &bonsai_lang_api::CallArg) -> Option<String> {
     arg.place
         .as_deref()
         .filter(|place| !place.trim().is_empty())
-        .map(str::trim)
-        .map(str::to_string)
+        .map(normalise_target_text)
         .or_else(|| {
-            let text = arg.value_text.trim();
-            is_bare_identifier_text(text).then(|| text.to_string())
+            let text = normalise_target_text(&arg.value_text);
+            (!text.is_empty() && is_addressable_access_text(&text)).then_some(text)
         })
 }
 
@@ -3946,6 +4161,8 @@ fn apply_return_taint(
         source_names,
         state,
     );
+    let configured_passthrough_taint =
+        configured_call_result_passthrough_taint(callee_name, effective_source_call_args, state, config);
     let requires_yield_summary = matches!(value_kind, Some(AssignValueKind::YieldResult));
     let source_names_tainted =
         assignment_source_names_any_tainted(source_names, *span, Some(db), Some(caller), state);
@@ -3959,7 +4176,8 @@ fn apply_return_taint(
         && (unresolved_call_return_is_tainted(callee_name, state)
             || source_call_rhs_tainted
             || source_names_tainted
-            || tainted_call_arg)
+            || tainted_call_arg
+            || configured_passthrough_taint.any())
     {
         if named_field_tainted && has_named_field_args {
             return true;
@@ -3968,7 +4186,8 @@ fn apply_return_taint(
             return true;
         }
         insert_value_target_taint(state, target);
-        if (source_names_tainted && rhs_has_descendant_shape(source_names))
+        if configured_passthrough_taint.descendant
+            || (source_names_tainted && rhs_has_descendant_shape(source_names))
             || (constructs_container && tainted_call_arg && !has_named_field_args)
         {
             insert_descendant_target_taint(state, target);
@@ -4039,6 +4258,7 @@ fn apply_return_taint(
             source_call_name_is_seeded(callee_name, state)
                 || independent_rhs_operand_tainted
                 || call_projection_tainted
+                || configured_passthrough_taint.value
                 || implicit_receiver_return_tainted
                 || implicit_receiver_param_return_tainted
                 || (summary.returns_taint_of.is_empty()
@@ -4163,20 +4383,21 @@ fn apply_return_taint(
                     .unwrap_or(false)
             })
         } else {
-            summary.returns_descendant_taint_of.iter().any(|&idx| {
-                effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
-                    .map(|arg_text| actual_has_descendant_taint(arg_text, state))
-                    .unwrap_or(false)
-                    || global
-                        .decl_of(SymbolId::new(candidate.func.raw()))
-                        .and_then(|decl| decl.receiver_param_index)
-                        .is_some_and(|receiver_idx| {
-                            receiver_idx == idx
-                                && call_receiver_from_name(callee_name)
-                                    .as_deref()
-                                    .is_some_and(|receiver| actual_has_descendant_taint(receiver, state))
-                        })
-            })
+            configured_passthrough_taint.descendant
+                || summary.returns_descendant_taint_of.iter().any(|&idx| {
+                    effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
+                        .map(|arg_text| actual_has_descendant_taint(arg_text, state))
+                        .unwrap_or(false)
+                        || global
+                            .decl_of(SymbolId::new(candidate.func.raw()))
+                            .and_then(|decl| decl.receiver_param_index)
+                            .is_some_and(|receiver_idx| {
+                                receiver_idx == idx
+                                    && call_receiver_from_name(callee_name)
+                                        .as_deref()
+                                        .is_some_and(|receiver| actual_has_descendant_taint(receiver, state))
+                            })
+                })
         };
         let container_tainted_transits = !requires_yield_summary
             && target_destructure_index.is_none()
@@ -6087,7 +6308,15 @@ fn effective_call_arg_has_semantic_direct_value_taint_with_depth(
     if depth >= MAX_NESTED_CALL_ARG_DEPTH {
         return None;
     }
+    if constructor_expression_preserves_direct_operand_taint(arg, state) {
+        return Some(true);
+    }
     direct_call_expression_return_taint(arg, state, scope, summary_cache, call_span, depth + 1)
+}
+
+fn constructor_expression_preserves_direct_operand_taint(arg: &EffectiveCallArg, state: &TokenSet) -> bool {
+    let trimmed = arg.value_text.trim();
+    trimmed.starts_with("new ") && effective_call_arg_has_direct_value_taint(arg, state)
 }
 
 fn direct_call_expression_return_taint(
@@ -6103,6 +6332,9 @@ fn direct_call_expression_return_taint(
         .into_iter()
         .map(EffectiveCallArg::positional)
         .collect::<Vec<_>>();
+    if configured_call_result_passthrough_taint(&callee_name, &nested_args, state, scope.config).value {
+        return Some(true);
+    }
     let global = scope.db.global_index();
     let mut candidates = resolve_call_candidates_with_caller_at(&callee_name, scope, &[], call_span);
     if candidates.is_empty() && call_span.is_some() {
@@ -8190,7 +8422,7 @@ pub(super) fn apply_event_transfer(
 fn apply_event_transfer_with_options(
     event: &FlowEvent,
     state: &mut TokenSet,
-    _config: &InterTaintConfig,
+    config: &InterTaintConfig,
     db: Option<&AnalyzerDb>,
     caller: Option<FuncId>,
     suppress_container_taint: bool,
@@ -8279,6 +8511,20 @@ fn apply_event_transfer_with_options(
             }
         }
         if let Some(callee) = source_call.as_deref() {
+            let source_call_arg_values: Vec<EffectiveCallArg> = source_call_args
+                .iter()
+                .cloned()
+                .map(EffectiveCallArg::positional)
+                .collect();
+            let configured_passthrough_taint =
+                configured_call_result_passthrough_taint(callee, &source_call_arg_values, state, config);
+            if configured_passthrough_taint.any() {
+                insert_value_target_taint(state, target);
+                if configured_passthrough_taint.descendant || rhs_has_descendant_shape(source_names) {
+                    insert_descendant_target_taint(state, target);
+                }
+                return;
+            }
             if source_call_rhs_is_tainted(callee, source_call_args, source_names, state) {
                 insert_value_target_taint(state, target);
                 if rhs_has_descendant_shape(source_names) {

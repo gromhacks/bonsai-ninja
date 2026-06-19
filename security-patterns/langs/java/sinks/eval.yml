@@ -465,6 +465,56 @@
   description: "Disabled broad duplicate - canonical java.template.spel_parseexpression classifies parser.parseExpression(template) as SSTI CWE-1336."
   imports:
   - org
+- id: java.eval.spel_expressionparser_parseexpression_tainted
+  enabled: true
+  language: java
+  tag: code-injection
+  severity: critical
+  packages:
+  - org.springframework.expression
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SpelExpressionParser
+      - parseExpression
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spel parser instance parse expression tainted
+    code: |
+      import org.springframework.expression.spel.standard.SpelExpressionParser;
+      class App {
+        Object handle(String input) {
+          SpelExpressionParser parser = new SpelExpressionParser();
+          return parser.parseExpression(input);
+        }
+      }
+      class SpelExpressionParser {
+        Object parseExpression(Object... args) { return null; }
+      }
+    expect_match_text:
+    - parser.parseExpression
+  - name: spel parser instance parse expression literal negative
+    code: |
+      import org.springframework.expression.spel.standard.SpelExpressionParser;
+      class App {
+        Object handle(String input) {
+          SpelExpressionParser parser = new SpelExpressionParser();
+          return parser.parseExpression("name");
+        }
+      }
+      class SpelExpressionParser {
+        Object parseExpression(Object... args) { return null; }
+      }
+    expect_no_match: true
+  description: "Spring SpEL SpelExpressionParser.parseExpression(tainted) compiles attacker-controlled expressions that execute on evaluation."
+  imports:
+  - org
 - id: java.eval.ognl_getvalue
   enabled: true
   language: java

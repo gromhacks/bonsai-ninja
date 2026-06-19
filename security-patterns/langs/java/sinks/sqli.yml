@@ -256,9 +256,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - JdbcTemplate
-      - query
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.query$'
   constraints:
   - arg_tainted:
       index: 0
@@ -283,9 +281,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - JdbcTemplate
-      - queryForList
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.queryForList$'
   constraints:
   - arg_tainted:
       index: 0
@@ -310,9 +306,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - JdbcTemplate
-      - queryForObject
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.queryForObject$'
   constraints:
   - arg_tainted:
       index: 0
@@ -326,6 +320,84 @@
       }\n"
     expect_no_match: true
   description: Spring JdbcTemplate.queryForObject(sql) raw form.
+- id: java.sqli.spring_jdbctemplate_queryformap
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.queryForMap$'
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbc template queryForMap raw sql
+    code: |
+      import org.springframework.jdbc.*;
+      class DatabaseHelper { static JdbcTemplate JDBCtemplate; }
+      class App {
+        void handle(String input) throws Exception {
+          DatabaseHelper.JDBCtemplate.queryForMap(input);
+        }
+      }
+    expect_match_text:
+    - DatabaseHelper.JDBCtemplate.queryForMap
+  - name: queryForMap literal negative
+    code: |
+      import org.springframework.jdbc.*;
+      class DatabaseHelper { static JdbcTemplate JDBCtemplate; }
+      class App {
+        void handle() throws Exception {
+          DatabaseHelper.JDBCtemplate.queryForMap("select 1");
+        }
+      }
+    expect_no_match: true
+  description: Spring JdbcTemplate.queryForMap(sql) raw form.
+- id: java.sqli.spring_jdbctemplate_queryforrowset
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.queryForRowSet$'
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbc template queryForRowSet raw sql
+    code: |
+      import org.springframework.jdbc.*;
+      class DatabaseHelper { static JdbcTemplate JDBCtemplate; }
+      class App {
+        void handle(String input) throws Exception {
+          DatabaseHelper.JDBCtemplate.queryForRowSet(input);
+        }
+      }
+    expect_match_text:
+    - DatabaseHelper.JDBCtemplate.queryForRowSet
+  - name: queryForRowSet literal negative
+    code: |
+      import org.springframework.jdbc.*;
+      class DatabaseHelper { static JdbcTemplate JDBCtemplate; }
+      class App {
+        void handle() throws Exception {
+          DatabaseHelper.JDBCtemplate.queryForRowSet("select 1");
+        }
+      }
+    expect_no_match: true
+  description: Spring JdbcTemplate.queryForRowSet(sql) raw form.
 - id: java.sqli.spring_jdbctemplate_update
   enabled: true
   language: java
@@ -338,9 +410,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - JdbcTemplate
-      - update
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.update$'
   constraints:
   - arg_tainted:
       index: 0
@@ -366,9 +436,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - JdbcTemplate
-      - execute
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.execute$'
   constraints:
   - arg_tainted:
       index: 0
@@ -603,9 +671,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - JdbcTemplate
-      - batchUpdate
+      regex: '(^|\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate|[A-Za-z_][A-Za-z0-9_]*\.[jJ][dD][bB][cC][tT]emplate)\.batchUpdate$'
   constraints:
   - arg_tainted:
       index: 0

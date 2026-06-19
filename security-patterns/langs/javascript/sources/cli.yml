@@ -232,3 +232,176 @@
         return program.opts(input);
       }
   description: "commander program.opts() - parsed CLI flags."
+
+- id: javascript.source.fs_readfile_sync
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [fs]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, readFileSync]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: fs readFileSync
+    code: |
+      const fs = require("fs");
+      function demo(path) {
+        return fs.readFileSync(path, "utf8");
+      }
+    expect_match_text: [fs.readFileSync]
+  - name: fs readFileSync no args negative
+    code: |
+      const fs = require("fs");
+      function demo() {
+        return fs.readFileSync();
+      }
+    expect_no_match: true
+  description: "fs.readFileSync(path[, options]) - materializes local file bytes/text into a value."
+
+- id: javascript.source.fs_promises_readfile
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [fs]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, promises, readFile]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: fs promises readFile
+    code: |
+      const fs = require("fs");
+      async function demo(path) {
+        return await fs.promises.readFile(path, "utf8");
+      }
+    expect_match_text: [fs.promises.readFile]
+  description: "fs.promises.readFile(path[, options]) - promise resolving to local file bytes/text."
+
+- id: javascript.source.fs_promises_alias_readfile
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [fs/promises]
+  match:
+    kind: call
+    callee:
+      attribute: [fsp, readFile]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: fs promises alias readFile
+    code: |
+      const fsp = require("fs/promises");
+      async function demo(path) {
+        return await fsp.readFile(path, "utf8");
+      }
+    expect_match_text: [fsp.readFile]
+  description: "fs/promises readFile imported as the conventional `fsp` alias - promise resolving to local file bytes/text."
+
+- id: javascript.source.fs_readfile_callback
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [fs]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, readFile]
+  constraints:
+  - min_args: 2
+  - max_args: 2
+  taint_semantics:
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [1]
+  match_examples:
+  - name: fs readFile callback without options
+    code: |
+      const fs = require("fs");
+      function demo(path) {
+        fs.readFile(path, (err, data) => {
+          return data;
+        });
+      }
+    expect_match_text: [fs.readFile]
+  description: "fs.readFile(path, callback) - callback data parameter receives local file bytes/text."
+
+- id: javascript.source.fs_readfile_options_callback
+  enabled: true
+  language: javascript
+  trust: local
+  tag: file-input
+  payload_types: [text, binary]
+  packages: [fs]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, readFile]
+  constraints:
+  - min_args: 3
+  - max_args: 3
+  taint_semantics:
+    source_callback_args:
+    - callback_arg_index: 2
+      source_param_indices: [1]
+  match_examples:
+  - name: fs readFile callback with options
+    code: |
+      const fs = require("fs");
+      function demo(path) {
+        fs.readFile(path, "utf8", function(err, data) {
+          return data;
+        });
+      }
+    expect_match_text: [fs.readFile]
+  description: "fs.readFile(path, options, callback) - callback data parameter receives local file bytes/text."
+
+- id: javascript.source.process_stdin_on_data
+  enabled: true
+  language: javascript
+  trust: local
+  tag: cli-input
+  payload_types: [text, binary]
+  match:
+    kind: call
+    callee:
+      attribute: [process, stdin, on]
+  constraints:
+  - min_args: 2
+  - max_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]data['\"]$"
+  taint_semantics:
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
+  match_examples:
+  - name: process stdin data callback
+    code: |
+      function demo() {
+        process.stdin.on("data", chunk => {
+          return chunk;
+        });
+      }
+    expect_match_text: [process.stdin.on]
+  - name: process stdin non-data event negative
+    code: |
+      function demo() {
+        process.stdin.on("close", () => {});
+      }
+    expect_no_match: true
+  description: "process.stdin.on('data', callback) - callback chunk parameter receives piped stdin bytes."

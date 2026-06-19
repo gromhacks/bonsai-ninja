@@ -10,9 +10,10 @@
 
 use anyhow::Result;
 use bonsai_sdk::{
-    CrossEdge, IndexedStatus, MostSevereFlowSummary, NodeKind, Severity, TreeFilters, TreeNode, TreeOut,
+    CrossEdge, IndexedStatus, Locator, MostSevereFlowSummary, NodeKind, Severity, SeverityHistogram,
+    TreeFilters, TreeNode, TreeOut, TreeSummary, TreeTruncation,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::open_project_index_only_with_rulepack;
 use crate::cli_println;
@@ -37,24 +38,29 @@ pub(crate) struct TreeArgs<'a> {
 }
 
 pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
-    let (project, _footer) = open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?;
-
     let severity = parse_severity(args.severity)?;
     let filters_hash = tree_filters_hash(&args);
-    let filters = TreeFilters {
-        max_depth: args.max_depth,
-        file: args.file,
-        exclude_files: args.exclude_file,
-        severity,
-        limit: if args.all { 0 } else { args.limit },
-        follow: 0,
-        max_finding_ids_per_file: args.all.then_some(0),
-        max_flow_ids_per_file: args.all.then_some(0),
-        max_cross_file_edges_per_file: args.all.then_some(0),
+    let fast_filesystem_tree = args.rules_dir.is_none() && severity.is_none() && !args.all;
+    let out = if fast_filesystem_tree {
+        build_fast_filesystem_tree(&args)?
+    } else {
+        let (project, _footer) = open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?;
+        let filters = TreeFilters {
+            max_depth: args.max_depth,
+            file: args.file,
+            exclude_files: args.exclude_file,
+            severity,
+            limit: if args.all { 0 } else { args.limit },
+            follow: 0,
+            max_finding_ids_per_file: args.all.then_some(0),
+            max_flow_ids_per_file: args.all.then_some(0),
+            max_cross_file_edges_per_file: args.all.then_some(0),
+        };
+        let spin = progress::spinner("building tree");
+        let out = project.browse().tree(filters)?;
+        spin.finish_and_clear();
+        out
     };
-    let spin = progress::spinner("building tree");
-    let out = project.browse().tree(filters)?;
-    spin.finish_and_clear();
 
     match args.format {
         "json" => {
@@ -71,6 +77,196 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
         )?,
     }
     Ok(())
+}
+
+struct FastTreeBuild {
+    max_depth: usize,
+    child_limit: usize,
+    file_filter: Option<String>,
+    exclude_files: Vec<String>,
+    files_scanned: usize,
+    files_rendered: usize,
+    dirs_rendered: usize,
+    depth_truncated: usize,
+    children_dropped: usize,
+}
+
+fn build_fast_filesystem_tree(args: &TreeArgs<'_>) -> Result<TreeOut> {
+    let root = args
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| args.workspace.to_path_buf());
+    let mut build = FastTreeBuild {
+        max_depth: if args.file.is_some() {
+            usize::MAX
+        } else {
+            args.max_depth.unwrap_or(usize::MAX)
+        },
+        child_limit: if args.limit == 0 { usize::MAX } else { args.limit },
+        file_filter: args.file.map(str::to_string),
+        exclude_files: args.exclude_file.to_vec(),
+        files_scanned: 0,
+        files_rendered: 0,
+        dirs_rendered: 0,
+        depth_truncated: 0,
+        children_dropped: 0,
+    };
+    let root_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| root.to_str().unwrap_or("."))
+        .to_string();
+    let root_node = build_fast_dir_node(&root, root_name, 0, &mut build)?;
+    let mut reasons = Vec::new();
+    if build.depth_truncated > 0 {
+        reasons.push(format!(
+            "tree-files-truncated:depth_limited_nodes={}",
+            build.depth_truncated
+        ));
+    }
+    if build.children_dropped > 0 {
+        reasons.push(format!(
+            "tree-children-truncated:children_dropped={}",
+            build.children_dropped
+        ));
+    }
+    let analysis_complete = reasons.is_empty();
+    Ok(TreeOut {
+        analysis_complete,
+        analysis_incomplete_reasons: reasons,
+        roots: vec![root_node],
+        summary: TreeSummary {
+            total_files: build.files_rendered,
+            total_files_scanned: build.files_scanned,
+            total_dirs: build.dirs_rendered,
+            total_findings: 0,
+            severity_counts: SeverityHistogram::default(),
+            indexed_complete: build.files_rendered,
+            indexed_stale: 0,
+            indexed_missing: 0,
+        },
+    })
+}
+
+fn build_fast_dir_node(
+    path: &Path,
+    name: String,
+    depth: usize,
+    build: &mut FastTreeBuild,
+) -> Result<TreeNode> {
+    build.dirs_rendered += 1;
+    let mut node = empty_tree_node(NodeKind::Dir, name, path, depth);
+    if depth >= build.max_depth {
+        let dropped = visible_child_count(path, build)?;
+        if dropped > 0 {
+            node.truncated.children_dropped = dropped;
+            build.depth_truncated += dropped;
+        }
+        return Ok(node);
+    }
+
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(path)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry_path| !fast_tree_should_skip(entry_path, build))
+        .collect();
+    entries.sort();
+    let mut children = Vec::new();
+    for entry_path in entries {
+        let Some(name) = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if entry_path.is_dir() {
+            if children.len() >= build.child_limit {
+                node.truncated.children_dropped += 1;
+                build.children_dropped += 1;
+                continue;
+            }
+            let child = build_fast_dir_node(&entry_path, name, depth + 1, build)?;
+            if build.file_filter.is_none() || !child.children.is_empty() {
+                children.push(child);
+            }
+        } else if entry_path.is_file() {
+            build.files_scanned += 1;
+            if !fast_tree_file_matches(&entry_path, build) {
+                continue;
+            }
+            if children.len() >= build.child_limit {
+                node.truncated.children_dropped += 1;
+                build.children_dropped += 1;
+                continue;
+            }
+            build.files_rendered += 1;
+            children.push(empty_tree_node(NodeKind::File, name, &entry_path, depth + 1));
+        }
+    }
+    node.children = children;
+    Ok(node)
+}
+
+fn empty_tree_node(kind: NodeKind, name: String, path: &Path, depth: usize) -> TreeNode {
+    TreeNode {
+        kind,
+        name,
+        locator: Locator {
+            file: path.display().to_string(),
+            line: 1,
+            column: 1,
+            ..Locator::default()
+        },
+        depth,
+        finding_ids: Vec::new(),
+        flow_ids: Vec::new(),
+        max_severity: None,
+        finding_severity_counts: SeverityHistogram::default(),
+        cross_file_callers_in: Vec::new(),
+        cross_file_callees_out: Vec::new(),
+        most_severe_flow: None,
+        indexed: IndexedStatus::Complete,
+        render_priority: 0,
+        children: Vec::new(),
+        truncated: TreeTruncation::default(),
+    }
+}
+
+fn visible_child_count(path: &Path, build: &FastTreeBuild) -> Result<usize> {
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(path)?.flatten() {
+        let entry_path = entry.path();
+        if fast_tree_should_skip(&entry_path, build) {
+            continue;
+        }
+        if entry_path.is_dir() || (entry_path.is_file() && fast_tree_file_matches(&entry_path, build)) {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn fast_tree_should_skip(path: &Path, build: &FastTreeBuild) -> bool {
+    let path_text = path.to_string_lossy();
+    if build
+        .exclude_files
+        .iter()
+        .any(|needle| path_text.contains(needle))
+    {
+        return true;
+    }
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some(".git" | ".bonsai" | "target" | "node_modules" | ".gradle" | "build" | "dist" | "out" | ".idea")
+    )
+}
+
+fn fast_tree_file_matches(path: &Path, build: &FastTreeBuild) -> bool {
+    build
+        .file_filter
+        .as_deref()
+        .is_none_or(|needle| path.to_string_lossy().contains(needle))
 }
 
 fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {

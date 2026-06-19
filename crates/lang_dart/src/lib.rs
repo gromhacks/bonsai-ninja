@@ -1054,10 +1054,7 @@ fn dart_cast_local_alias(def: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasB
         return;
     };
     let ty = node_text(&type_node, src).trim().to_string();
-    if name.is_empty()
-        || ty.is_empty()
-        || !ty.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-    {
+    if name.is_empty() || ty.is_empty() || !ty.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
         return;
     }
     let binding = TypeAliasBinding { name, type_name: ty };

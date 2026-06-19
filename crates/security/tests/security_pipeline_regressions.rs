@@ -153,11 +153,12 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // sink's tainted arg doesn't name the source's field. Then
         // (2026-05-29) the combiner's `group_id`-based dedup collapsed a
         // duplicate finding that reached `os_system@29` via a second
-        // entry chain but carried the same `finding_id`. Two distinct
-        // findings remain: the real flask `request.args.get` flow plus
-        // one grouped local inferred callable-object flow whose member
-        // ids retain the collapsed `decorator_handler.param_1` evidence.
-        "python" => 2,
+        // entry chain but carried the same `finding_id`. The stricter
+        // projection/binding extraction now also folds the remaining
+        // callable-object inferred evidence into the real Flask
+        // `request.args.get` finding's member ids instead of emitting a
+        // second user-visible row.
+        "python" => 1,
         "ruby" => 2,
         "rust" => 1,
         // HttpServletRequest.getParameter → Envelope (case class) →
@@ -516,6 +517,7 @@ fn c_recv_output_rulepack() -> Rulepack {
     source.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: vec![1],
+        source_callback_args: Vec::new(),
         call_result_passthrough_args: Vec::new(),
         call_result_passthrough_receiver: false,
         output_arg_flows: Vec::new(),
@@ -1430,6 +1432,107 @@ fn mega_flow_taint_output_does_not_surface_known_overclaims() {
 }
 
 #[test]
+fn python_package_gate_uses_workspace_imports_for_local_db_wrapper_sinks() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let ws = workspace(&[
+        (
+            "/app/api.py",
+            r#"
+from flask import request
+from raw import string_agg
+
+def aggregate():
+    body = request.get_json(force=True, silent=True) or {}
+    delimiter = body.get("delimiter", ",")
+    return string_agg(delimiter)
+"#,
+        ),
+        (
+            "/app/raw.py",
+            r#"
+def string_agg(delimiter):
+    sql = "SELECT STRING_AGG(name, '" + delimiter + "') FROM reports"
+    cur = engine.connect().cursor()
+    return cur.execute(sql)
+"#,
+        ),
+        (
+            "/app/engine.py",
+            r#"
+import psycopg2
+
+engine = psycopg2.connect("")
+"#,
+        ),
+    ]);
+
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.finding.sink.rule_id == "python.sqli.cursor_execute"),
+        "workspace-wide psycopg2 import evidence should gate the raw.py cursor.execute sink: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn typescript_dotted_local_model_import_carries_mongoose_package_evidence() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let ws = workspace(&[
+        (
+            "/src/auth/auth.controller.ts",
+            r#"
+import { Body, Controller, Post } from "@nestjs/common";
+import { AuthService } from "./auth.service";
+
+@Controller("auth")
+export class AuthController {
+  constructor(private readonly auth: AuthService) {}
+
+  @Post("login")
+  async login(@Body() body: any) {
+    return this.auth.findCreds(body);
+  }
+}
+"#,
+        ),
+        (
+            "/src/auth/auth.service.ts",
+            r#"
+import { UserModel } from "../user/user.model";
+
+export class AuthService {
+  async findCreds(body: any) {
+    return UserModel.findOne({ email: body.email, password: body.password });
+  }
+}
+"#,
+        ),
+        (
+            "/src/user/user.model.ts",
+            r#"
+import mongoose from "mongoose";
+
+const Schema = new mongoose.Schema({ email: String, password: String });
+export const UserModel = mongoose.model("User", Schema);
+"#,
+        ),
+    ]);
+
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.finding.sink.rule_id == "typescript.nosql.mongo_find"),
+        "relative import `../user/user.model` should resolve to user.model.ts and carry mongoose evidence: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn tainted_inline_return_is_a_sink() {
     let ws = workspace(&[(
         "/app/page.ts",
@@ -1562,7 +1665,15 @@ fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
         source_path: String::new(),
     });
 
-    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
     assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
     let finding = &report.findings[0].finding;
     assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
@@ -1573,6 +1684,960 @@ fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
             .any(|sanitizer| sanitizer.rule_id == "java.test.esapi_html"),
         "expected ESAPI sanitizer evidence, got {:#?}",
         finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn sanitized_flows_are_hidden_by_default_and_visible_on_request() {
+    let ws = workspace(&[(
+        "/app/App.java",
+        "import org.owasp.esapi.ESAPI;\n\n\
+         class App {\n  static String source() { return \"\"; }\n  static void sink(String value) {}\n\n\
+         void handle() {\n    String clean = ESAPI.encoder().encodeForHTML(source());\n    sink(clean);\n  }\n}\n",
+    )]);
+    let mut pack = rulepack("java", "source", "sink");
+    let java_pack = pack.packs.get_mut("java").expect("java pack");
+    java_pack.sinks[0].tag = Some("xss".to_string());
+    java_pack.sanitizers.push(Rule {
+        id: "java.test.esapi_html".to_string(),
+        aliases: Vec::new(),
+        enabled: true,
+        disabled_reason: None,
+        title: None,
+        tag: Some("html-encode".to_string()),
+        severity: None,
+        trust: None,
+        category: Some("test".to_string()),
+        cwe: Vec::new(),
+        owasp: Vec::new(),
+        frameworks: Vec::new(),
+        packages: Vec::new(),
+        imports: Vec::new(),
+        modules: Vec::new(),
+        manifests: Vec::new(),
+        lockfiles: Vec::new(),
+        payload_types: Vec::new(),
+        match_spec: MatchSpec {
+            kind: MatchKind::Call,
+            callee: Some(RuleTarget {
+                regex: Some(r"^(Encoder|ESAPI\.encoder\(\))\.encodeForHTML$".to_string()),
+                ..Default::default()
+            }),
+            target: None,
+            search_depth: 0,
+        },
+        taint_semantics: None,
+        returns_type: None,
+        constraints: RuleConstraint::default(),
+        match_examples: Vec::new(),
+        description: "test ESAPI sanitizer".to_string(),
+        kind: RuleKind::Sanitizer,
+        language: "java".to_string(),
+        source_path: String::new(),
+    });
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "sanitized findings should be suppressed unless requested: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    assert_eq!(
+        explicit_report.findings[0].finding.status,
+        FindingStatus::Sanitized,
+        "{:#?}",
+        explicit_report.findings
+    );
+}
+
+#[test]
+fn python_compiled_regex_guard_sanitizes_later_path_sink() {
+    let mut pack = rulepack("python", "source", "os.path.join");
+    let python_pack = pack.packs.get_mut("python").expect("python pack");
+    python_pack.sinks[0].tag = Some("path-traversal".to_string());
+    python_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
+
+    let ws = workspace(&[(
+        "/app/app.py",
+        r#"
+import os
+import re
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\.(mp4|mkv|webm)$")
+
+def source():
+    return "user"
+
+def handle():
+    name = source()
+    if not _NAME_RE.match(name):
+        return
+    return os.path.join("/srv/uploads", name)
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "safe compiled-regex guard should suppress sanitized path findings by default: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_compiled_regex_guard"),
+        "expected compiled regex guard evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+
+    let broad_ws = workspace(&[(
+        "/app/app.py",
+        r#"
+import os
+import re
+
+_NAME_RE = re.compile(r"^.*$")
+
+def source():
+    return "user"
+
+def handle():
+    name = source()
+    if not _NAME_RE.match(name):
+        return
+    return os.path.join("/srv/uploads", name)
+"#,
+    )]);
+    let broad_report =
+        run_taint_analysis(&broad_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        broad_report.findings.len(),
+        1,
+        "broad regex must not sanitize path traversal: {:#?}",
+        broad_report.findings
+    );
+    assert_eq!(
+        broad_report.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "{:#?}",
+        broad_report.findings
+    );
+}
+
+#[test]
+fn java_url_constructor_guarded_by_scheme_host_and_private_ip_is_sanitized() {
+    let mut pack = rulepack("java", "source", "URL");
+    let java_pack = pack.packs.get_mut("java").expect("java pack");
+    java_pack.sinks[0].id = "java.ssrf.url_ctor".to_string();
+    java_pack.sinks[0].tag = Some("ssrf".to_string());
+    java_pack.sinks[0].match_spec.kind = MatchKind::New;
+    java_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+
+    let ws = workspace(&[(
+        "/app/App.java",
+        r#"
+import java.net.*;
+import java.util.*;
+
+class App {
+  private static final Set<String> ALLOWED_HOSTS = Set.of("api.example.com");
+  static String source() { return ""; }
+
+  void guarded() throws Exception {
+    URL parsed = new URL(source());
+    if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new SecurityException("scheme");
+    if (!ALLOWED_HOSTS.contains(parsed.getHost())) throw new SecurityException("host");
+    InetAddress addr = InetAddress.getByName(parsed.getHost());
+    if (addr.isLoopbackAddress() || addr.isSiteLocalAddress() || addr.isLinkLocalAddress()
+        || addr.isAnyLocalAddress() || addr.isMulticastAddress()) {
+      throw new SecurityException("private-ip");
+    }
+    parsed.openConnection();
+  }
+}
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "guarded URL constructor should be hidden by default as sanitized: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.java_url_ssrf_guard"),
+        "expected Java URL guard evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+
+    let missing_host_ws = workspace(&[(
+        "/app/App.java",
+        r#"
+import java.net.*;
+
+class App {
+  static String source() { return ""; }
+
+  void unguardedHost() throws Exception {
+    URL parsed = new URL(source());
+    if (!"https".equalsIgnoreCase(parsed.getProtocol())) throw new SecurityException("scheme");
+    InetAddress addr = InetAddress.getByName(parsed.getHost());
+    if (addr.isLoopbackAddress() || addr.isSiteLocalAddress() || addr.isLinkLocalAddress()) {
+      throw new SecurityException("private-ip");
+    }
+    parsed.openConnection();
+  }
+}
+"#,
+    )]);
+    let missing_host_report =
+        run_taint_analysis(&missing_host_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        missing_host_report.findings.len(),
+        1,
+        "missing host allowlist must remain unsanitized: {:#?}",
+        missing_host_report.findings
+    );
+    assert_eq!(
+        missing_host_report.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "{:#?}",
+        missing_host_report.findings
+    );
+}
+
+#[test]
+fn javascript_mongo_eq_filter_wrapper_is_sanitized() {
+    let mut pack = constrained_call_sink_rulepack("javascript", "source", "Users.findOne");
+    let js_pack = pack.packs.get_mut("javascript").expect("javascript pack");
+    js_pack.sinks[0].id = "javascript.nosql.mongo_find".to_string();
+    js_pack.sinks[0].tag = Some("nosql-injection".to_string());
+
+    let ws = workspace(&[(
+        "/app/auth.js",
+        r#"
+function source() { return ""; }
+function login() {
+  const email = source();
+  return Users.findOne({ email: { $eq: email } });
+}
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "$eq-only Mongo filter should be hidden by default as sanitized: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.nosql_eq_filter_wrapper"),
+        "expected NoSQL $eq wrapper sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+
+    let unsafe_ws = workspace(&[(
+        "/app/auth.js",
+        r#"
+function source() { return ""; }
+function login() {
+  const email = source();
+  return Users.findOne({ email });
+}
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        unsafe_report.findings.len(),
+        1,
+        "shorthand Mongo filter must remain unsanitized: {:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
+fn python_f_string_allowlist_reassignment_cleans_sink_arg() {
+    let pack = constrained_call_sink_rulepack("python", "source", "engine.execute");
+
+    let ws = workspace(&[(
+        "/app/export.py",
+        r#"
+class Engine:
+    def execute(self, sql):
+        pass
+
+engine = Engine()
+
+def source():
+    return ""
+
+def render_template():
+    name = source()
+    name = name if name in {"default", "long", "short", "audit"} else "default"
+    return engine.execute(f"SELECT body FROM export_templates WHERE name = '{name}' LIMIT 1")
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        report.findings.is_empty(),
+        "allowlist reassignment should clean identifiers interpolated through Python f-strings: {:#?}",
+        report.findings
+    );
+
+    let unsafe_ws = workspace(&[(
+        "/app/export.py",
+        r#"
+class Engine:
+    def execute(self, sql):
+        pass
+
+engine = Engine()
+
+def source():
+    return ""
+
+def render_template():
+    name = source()
+    return engine.execute(f"SELECT body FROM export_templates WHERE name = '{name}' LIMIT 1")
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        unsafe_report.findings.len(),
+        1,
+        "unsafe f-string interpolation must remain reported: {:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
+fn local_environment_source_to_log_injection_is_low_signal() {
+    let mut pack = constrained_call_sink_rulepack("go", "os.Getenv", "log.Printf");
+    let go_pack = pack.packs.get_mut("go").expect("go pack");
+    go_pack.sources[0].id = "go.os.getenv".to_string();
+    go_pack.sources[0].trust = Some(TrustClass::Local);
+    go_pack.sources[0].category = Some("local-input".to_string());
+    go_pack.sinks[0].id = "go.log_injection.log_printf_tainted_value".to_string();
+    go_pack.sinks[0].tag = Some("log-injection".to_string());
+
+    let ws = workspace(&[(
+        "/app/main.go",
+        r#"
+package main
+
+import (
+  "log"
+  "os"
+)
+
+func main() {
+  port := os.Getenv("PORT")
+  log.Printf("listening on :%s", port)
+}
+"#,
+    )]);
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        report.findings.is_empty(),
+        "local environment/config values logged at startup should not be reported as log injection: {:#?}",
+        report.findings
+    );
+
+    let remote_pack = constrained_call_sink_rulepack("go", "remote", "log.Printf");
+    let remote_ws = workspace(&[(
+        "/app/main.go",
+        r#"
+package main
+
+import "log"
+
+func remote() string { return "" }
+
+func handler() {
+  ua := remote()
+  log.Printf(ua)
+}
+"#,
+    )]);
+    let remote_report = run_taint_analysis(&remote_ws, &remote_pack, TaintAnalysisOptions::default())
+        .expect("taint analysis");
+    assert_eq!(
+        remote_report.findings.len(),
+        1,
+        "remote request-like values must still report when logged: {:#?}",
+        remote_report.findings
+    );
+}
+
+#[test]
+fn python_local_ldap_escape_helper_is_sanitized() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "conn.search");
+    let py_pack = pack.packs.get_mut("python").expect("python pack");
+    py_pack.sinks[0].id = "python.ldap.ldap3_connection_search_method".to_string();
+    py_pack.sinks[0].tag = Some("ldap-injection".to_string());
+    py_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
+
+    let ws = workspace(&[(
+        "/app/directory.py",
+        r#"
+_LDAP_ESCAPES = {"\\": r"\5c", "*": r"\2a", "(": r"\28", ")": r"\29", "\x00": r"\00"}
+
+def _escape(value):
+    return "".join(_LDAP_ESCAPES.get(ch, ch) for ch in (value or ""))
+
+def source():
+    return ""
+
+def find(conn):
+    cn = source()
+    filt = "(&(objectClass=person)(cn=" + _escape(cn) + "))"
+    return conn.search("ou=people", filt)
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "local RFC4515 helper should hide LDAP finding by default: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.local_ldap_escape_helper"),
+        "expected local LDAP escape sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn go_same_origin_redirect_helper_guard_is_sanitized() {
+    let mut pack = constrained_call_sink_rulepack("go", "source", "c.Redirect");
+    let go_pack = pack.packs.get_mut("go").expect("go pack");
+    go_pack.sinks[0].id = "go.open_redirect.framework_redirect_status_url".to_string();
+    go_pack.sinks[0].tag = Some("open-redirect".to_string());
+    go_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
+
+    let ws = workspace(&[(
+        "/app/redirect.go",
+        r#"
+package main
+
+func source() string { return "" }
+
+func BounceTo(c interface{ Redirect(int, string) }) {
+	target := source()
+	if !startsWithSingleSlash(target) {
+		target = "/"
+	}
+	c.Redirect(302, target)
+}
+
+func startsWithSingleSlash(s string) bool {
+	return len(s) > 0 && s[0] == '/' && (len(s) == 1 || s[1] != '/')
+}
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "same-origin redirect helper should hide finding by default: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.go_same_origin_redirect_helper_guard"),
+        "expected Go same-origin helper sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn python_ssrf_url_guard_is_sanitized() {
+    let mut pack = constrained_call_sink_rulepack("python", "source", "c.get");
+    let py_pack = pack.packs.get_mut("python").expect("python pack");
+    py_pack.sinks[0].id = "python.ssrf.httpx_async_client_get".to_string();
+    py_pack.sinks[0].tag = Some("ssrf".to_string());
+
+    let ws = workspace(&[(
+        "/app/svc.py",
+        r#"
+import ipaddress
+import socket
+from urllib.parse import urlparse
+import httpx
+
+ALLOWED = {"api.example.com"}
+
+def source():
+    return ""
+
+async def probe():
+    url = source()
+    u = urlparse(url)
+    if u.scheme != "https" or (u.hostname or "") not in ALLOWED:
+        raise PermissionError("blocked: host")
+    for fam, *_, sa in socket.getaddrinfo(u.hostname, u.port or 443):
+        ip = ipaddress.ip_address(sa[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise PermissionError("blocked: ip")
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as c:
+        resp = await c.get(url)
+        return resp.text
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "scheme/host/private-IP SSRF guard should hide finding by default: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_url_ssrf_guard"),
+        "expected Python SSRF guard sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+}
+
+#[test]
+fn go_jwt_parse_inline_keyfunc_with_algorithm_pin_is_sanitized() {
+    let mut pack = constrained_call_sink_rulepack("go", "source", "jwt.Parse");
+    let go_pack = pack.packs.get_mut("go").expect("go pack");
+    go_pack.sinks[0].id = "go.jwt.golang_jwt_parse_tainted_token".to_string();
+    go_pack.sinks[0].tag = Some("jwt".to_string());
+
+    let ws = workspace(&[(
+        "/app/main.go",
+        r#"
+package main
+
+import (
+  "github.com/golang-jwt/jwt/v5"
+)
+
+func source() string { return "" }
+
+func verify(key []byte) (*jwt.Token, error) {
+  return jwt.Parse(source(), func(t *jwt.Token) (any, error) {
+    if t.Method.Alg() != "HS256" {
+      return nil, jwt.ErrSignatureInvalid
+    }
+    return key, nil
+  })
+}
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "algorithm-pinned keyfunc should hide the JWT finding by default: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.go_jwt_inline_keyfunc_algorithm_guard"),
+        "expected Go JWT keyfunc sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+
+    let unsafe_ws = workspace(&[(
+        "/app/main.go",
+        r#"
+package main
+
+import (
+  "github.com/golang-jwt/jwt/v5"
+)
+
+func source() string { return "" }
+
+func verify(key []byte) (*jwt.Token, error) {
+  return jwt.Parse(source(), func(t *jwt.Token) (any, error) {
+    return key, nil
+  })
+}
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        unsafe_report.findings.len(),
+        1,
+        "keyfunc without algorithm guard must remain unsanitized: {:#?}",
+        unsafe_report.findings
+    );
+    assert_eq!(
+        unsafe_report.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "{:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
+fn typescript_local_html_escape_helper_sanitizes_xss_sink() {
+    let mut pack = constrained_call_sink_rulepack("typescript", "source", "sink");
+    let ts_pack = pack.packs.get_mut("typescript").expect("typescript pack");
+    ts_pack.sinks[0].id = "typescript.xss.html_return".to_string();
+    ts_pack.sinks[0].tag = Some("xss".to_string());
+
+    let ws = workspace(&[(
+        "/app/render.ts",
+        r#"
+const HTML_ESCAPE: Record<string, string> = {
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+};
+function htmlEscape(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPE[c]);
+}
+function source(): string { return ""; }
+function render(): void {
+  const id = source();
+  sink(`<h1>${htmlEscape(id)}</h1>`);
+}
+function sink(html: string): void {}
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "local HTML escape helper should sanitize the XSS sink by default: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.js_ts_local_html_escape_helper"),
+        "expected local HTML helper sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+
+    let unsafe_ws = workspace(&[(
+        "/app/render.ts",
+        r#"
+function htmlEscape(s: string): string {
+  return s;
+}
+function source(): string { return ""; }
+function render(): void {
+  const id = source();
+  sink(`<h1>${htmlEscape(id)}</h1>`);
+}
+function sink(html: string): void {}
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        unsafe_report.findings.len(),
+        1,
+        "helper without entity escaping must remain unsanitized: {:#?}",
+        unsafe_report.findings
+    );
+    assert_eq!(
+        unsafe_report.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "{:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
+fn go_xml_decoder_with_strict_and_allowlisted_charset_reader_is_sanitized() {
+    let mut pack = constrained_call_sink_rulepack("go", "source", "xml.NewDecoder");
+    let go_pack = pack.packs.get_mut("go").expect("go pack");
+    go_pack.sinks[0].id = "go.xxe.xml_newdecoder".to_string();
+    go_pack.sinks[0].tag = Some("xxe".to_string());
+
+    let ws = workspace(&[(
+        "/app/parse.go",
+        r#"
+package main
+
+import (
+  "encoding/xml"
+  "errors"
+  "io"
+)
+
+var allowedCharsets = map[string]bool{"utf-8": true, "us-ascii": true}
+func source() io.Reader { return nil }
+
+func parse() error {
+  dec := xml.NewDecoder(source())
+  dec.Strict = true
+  dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+    if !allowedCharsets[charset] {
+      return nil, errors.New("disallowed charset")
+    }
+    return input, nil
+  }
+  var out any
+  return dec.Decode(&out)
+}
+"#,
+    )]);
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "strict decoder with allowlisted charset reader should be sanitized by default: {:#?}",
+        default_report.findings
+    );
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.go_xml_decoder_hardening"),
+        "expected Go XML decoder sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+
+    let unsafe_ws = workspace(&[(
+        "/app/parse.go",
+        r#"
+package main
+
+import (
+  "encoding/xml"
+  "io"
+)
+
+func source() io.Reader { return nil }
+
+func parse() error {
+  dec := xml.NewDecoder(source())
+  var out any
+  return dec.Decode(&out)
+}
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(
+        unsafe_report.findings.len(),
+        1,
+        "decoder without explicit hardening must remain unsanitized: {:#?}",
+        unsafe_report.findings
+    );
+    assert_eq!(
+        unsafe_report.findings[0].finding.status,
+        FindingStatus::Unsanitized,
+        "{:#?}",
+        unsafe_report.findings
     );
 }
 

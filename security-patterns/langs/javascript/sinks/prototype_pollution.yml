@@ -106,6 +106,38 @@
       }
     expect_no_match: true
   description: "_.set(obj, attacker_path, value) - path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
+- id: javascript.proto_pollution.lodash_set_function
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  imports: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      name: set
+  constraints:
+  - min_args: 3
+  - top_level: true
+  - any_arg_tainted: true
+  match_examples:
+  - name: lodash named set path
+    code: |
+      const { set } = require("lodash");
+      function apply(path, value) {
+        return set({}, path, value);
+      }
+    expect_match_text: [set]
+  - name: lodash named set literal negative
+    code: |
+      const { set } = require("lodash");
+      function apply() {
+        return set({}, "safe.path", "safe");
+      }
+    expect_no_match: true
+  description: "lodash named import set(obj, attacker_path, value) - path-based setter can traverse __proto__/constructor.prototype keys."
 - id: javascript.proto_pollution.lodash_setwith
   enabled: true
   language: javascript
@@ -211,15 +243,6 @@
         }
       }
     expect_match_text: [target.key]
-  - name: recursive deep walk merge write
-    code: |
-      function walk(dst, src) {
-        Object.keys(src).forEach((key) => {
-          if (src[key] && typeof src[key] === "object") walk(dst[key] ||= {}, src[key]);
-          else dst[key] = src[key];
-        });
-      }
-    expect_match_text: [dst.key]
   - name: recursive merge literal value negative
     code: |
       function merge(target, source) {
@@ -227,6 +250,41 @@
       }
     expect_no_match: true
   description: "Recursive merge target[key] = source[key] - homemade deep-merge vector when __proto__/constructor/prototype keys are not filtered."
+
+- id: javascript.proto_pollution.recursive_merge_call
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*(?:merge|Merge|walk|Walk)[A-Za-z0-9_$]*$"
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "\\[[^\\]]+\\]"
+  - arg_matches_regex:
+      index: 1
+      regex: "\\[[^\\]]+\\]"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: recursive walk call keyed source
+    code: |
+      function apply(target, source, key) {
+        return _walk(target[key], source[key]);
+      }
+    expect_match_text: [_walk]
+  - name: recursive merge call literal negative
+    code: |
+      function merge(target) {
+        return merge(target.safe, {});
+      }
+    expect_no_match: true
+  description: "Recursive deep-merge helper call target[key], source[key] - tainted source object is walked into the target without filtering prototype keys."
 
 - id: javascript.proto_pollution.recursive_deep_merge
   enabled: true

@@ -91,7 +91,7 @@
     code: |
       use std::ptr;
       unsafe fn example(src: *const u8, dst: *mut u8) {
-          ptr::copy_nonoverlapping(src, dst, 16);
+          safe_copy_nonoverlapping(src, dst, 16);
       }
     expect_no_match: true
   description: "ptr::copy_nonoverlapping(src, dst, count) - attacker-controlled pointer or count can cause out-of-bounds copy."
@@ -121,7 +121,7 @@
     code: |
       use std::ptr;
       unsafe fn example(src: *const u8, dst: *mut u8) {
-          ptr::copy(src, dst, 16);
+          safe_copy(src, dst, 16);
       }
     expect_no_match: true
   description: "ptr::copy(src, dst, count) - attacker-controlled pointer or count can cause out-of-bounds memmove."
@@ -151,7 +151,7 @@
     code: |
       use std::slice;
       unsafe fn example(data: *const u8) -> &'static [u8] {
-          slice::from_raw_parts(data, 16)
+          safe_from_raw_parts(data, 16)
       }
     expect_no_match: true
   description: "std::slice::from_raw_parts(data, len) - attacker-controlled raw pointer or length can create an out-of-bounds slice."
@@ -181,7 +181,7 @@
     code: |
       use std::slice;
       unsafe fn example(data: *mut u8) -> &'static mut [u8] {
-          slice::from_raw_parts_mut(data, 16)
+          safe_from_raw_parts_mut(data, 16)
       }
     expect_no_match: true
   description: "slice::from_raw_parts_mut(data, len) - attacker-controlled pointer or length can create an arbitrary mutable slice."

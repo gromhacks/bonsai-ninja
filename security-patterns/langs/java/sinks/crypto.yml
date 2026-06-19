@@ -154,7 +154,7 @@
   constraints:
   - arg_not_matches_regex:
       index: 0
-      regex: '(?i)^"(AES/GCM/NoPadding|ChaCha20-Poly1305)"$'
+      regex: '(?i)^"(AES/(GCM|CCM)/NoPadding|ChaCha20-Poly1305)"$'
   - arg_not_matches_regex:
       index: 0
       regex: '(?i)(^"(DES|DESede|TripleDES|3DES|RC4|ARCFOUR)(/.*)?"$|^"[^"]*/ECB/[^"]*"$)'
@@ -175,10 +175,20 @@
         }
       }
     expect_no_match: true
+  - name: AES CCM cipher negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          Cipher.getInstance("AES/CCM/NoPadding", java.security.Security.getProvider("BC"));
+        }
+      }
+    expect_no_match: true
   description: "Cipher.getInstance(dynamicAlgorithm) - algorithm is not a literal known-safe authenticated mode."
 
 - id: java.crypto.random_next
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
   language: java
   tag: weak-randomness
   category: source-independent
@@ -197,6 +207,8 @@
   constraints:
   - receiver_type_in:
     - Random
+  - receiver_type_not_in:
+    - SecureRandom
   match_examples:
   - name: java util Random nextInt
     code: |
@@ -207,6 +219,15 @@
         }
       }
     expect_match_text: [random.nextInt]
+  - name: SecureRandom receiver negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          java.security.SecureRandom random = java.security.SecureRandom.getInstance("SHA1PRNG");
+          random.nextInt();
+        }
+      }
+    expect_no_match: true
   description: "java.util.Random next* output - non-cryptographic PRNG used where unpredictable values are required."
 
 - id: java.crypto.random_ctor

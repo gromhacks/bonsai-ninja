@@ -102,6 +102,29 @@
       }
     expect_match_text: [fread]
   description: "fread(ptr, size, nmemb, stream) - libc binary read from a FILE* (stdin/file); the destination buffer becomes attacker-influenced. Unique libc name (no C++ stream collision)."
+- id: c.input.fscanf
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: fscanf
+  taint_semantics:
+    source_output_args: [2, 3, 4, 5]
+  match_examples:
+  - name: fscanf output buffers
+    code: |
+      #include <stdio.h>
+      void example(FILE *fp) {
+        char user[64];
+        char host[64];
+        fscanf(fp, "%63s %63s", user, host);
+      }
+    expect_match_text: [fscanf]
+  description: "fscanf(stream, format, ...) - reads formatted text from a FILE* into caller-supplied output arguments."
 - id: c.input.gets_unsafe
   enabled: true
   language: c
@@ -123,9 +146,7 @@
       }
   description: "gets - unbounded stdin read (also a memory sink)."
 - id: c.input.read
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: c
   trust: local
   tag: local-input
@@ -134,7 +155,82 @@
     kind: call
     callee:
       name: read
-  description: "Disabled - bare read(2) is ambiguous (matches C++ stream::read too); use recv/SSL_read for network."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: read output buffer
+    code: |
+      #include <unistd.h>
+      void example(int fd) {
+        char buf[256];
+        read(fd, buf, sizeof(buf));
+      }
+    expect_match_text: [read]
+  description: "POSIX read(fd, buf, count) - reads bytes from a file descriptor into the caller-supplied buffer. Trust is local because the descriptor may be a file, pipe, tty, or socket."
+- id: c.input.pread
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: pread
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: pread output buffer
+    code: |
+      #include <unistd.h>
+      void example(int fd) {
+        char buf[256];
+        pread(fd, buf, sizeof(buf), 0);
+      }
+    expect_match_text: [pread]
+  description: "POSIX pread(fd, buf, count, offset) - reads descriptor bytes into the caller-supplied buffer without changing file offset."
+- id: c.input.readv
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: readv
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: readv output iovec
+    code: |
+      #include <sys/uio.h>
+      void example(int fd, struct iovec *iov) {
+        readv(fd, iov, 2);
+      }
+    expect_match_text: [readv]
+  description: "POSIX readv(fd, iov, iovcnt) - scatter-read descriptor bytes into caller-supplied iovec buffers."
+- id: c.input.preadv
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: preadv
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: preadv output iovec
+    code: |
+      #include <sys/uio.h>
+      void example(int fd, struct iovec *iov) {
+        preadv(fd, iov, 2, 0);
+      }
+    expect_match_text: [preadv]
+  description: "POSIX preadv(fd, iov, iovcnt, offset) - positioned scatter-read into caller-supplied iovec buffers."
 - id: c.input.sscanf
   enabled: false
   disabled_reason:
@@ -288,6 +384,48 @@
         getline(&line, &len, stdin);
       }
   description: "POSIX getline(3) - reads a line from a stream into a heap buffer; stdin/file content is user-supplied."
+- id: c.input.getdelim
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getdelim
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: getdelim output line
+    code: |
+      #include <stdio.h>
+      void example(FILE *fp) {
+        char *line = 0;
+        unsigned long len = 0;
+        getdelim(&line, &len, '\n', fp);
+      }
+    expect_match_text: [getdelim]
+  description: "POSIX getdelim(lineptr, n, delim, stream) - reads delimited stream content into a heap buffer."
+- id: c.input.mmap
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: mmap
+  match_examples:
+  - name: mmap returned region
+    code: |
+      #include <sys/mman.h>
+      void *example(int fd) {
+        return mmap(0, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+      }
+    expect_match_text: [mmap]
+  description: "POSIX mmap(..., fd, offset) - maps descriptor-backed bytes into memory; the returned region derives from file/device input."
 - id: c.input.getpass
   enabled: true
   language: c

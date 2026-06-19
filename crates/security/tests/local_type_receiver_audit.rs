@@ -165,6 +165,113 @@ fn factory_typed_local_findings(lang: &str, ext: &str, method: &str, factory: &s
         .count()
 }
 
+fn java_scoped_factory_findings(src: &str, receiver: &str, returns_type: &str) -> usize {
+    let rules = TempTree::new("java-scoped-frules");
+    rules.write(
+        "langs/java/sinks/t.yml",
+        &format!(
+            r#"- id: java.test.typed_local_run
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.run$"
+  constraints:
+  - receiver_type_in: [Foo]
+  - arg_tainted:
+      index: 0
+  description: test
+- id: java.test.foo_factory
+  enabled: true
+  language: java
+  description: scoped factory typing rule
+  returns_type: {returns_type}
+  match:
+    kind: call
+    callee:
+      attribute: [{receiver}, make]
+"#,
+        ),
+    );
+    let ws = TempTree::new("java-scoped-fws");
+    ws.write("m.java", src);
+
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules.path).expect("rulepack");
+    let workspace = bonsai_workspace::Workspace::index(&ws.path, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(
+        &workspace,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("taint");
+    report
+        .findings
+        .iter()
+        .filter(|f| f.finding.sink.rule_id == "java.test.typed_local_run")
+        .count()
+}
+
+fn java_receiver_type_not_in_findings(src: &str) -> usize {
+    let rules = TempTree::new("java-rtype-not-rules");
+    rules.write(
+        "langs/java/sinks/t.yml",
+        r#"- id: java.test.random_run
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.run$"
+  constraints:
+  - receiver_type_in: [Random]
+  - receiver_type_not_in: [SecureRandom]
+  - arg_tainted:
+      index: 0
+  description: test
+- id: java.test.securerandom_factory
+  enabled: true
+  language: java
+  description: scoped SecureRandom factory typing rule
+  returns_type: SecureRandom
+  match:
+    kind: call
+    callee:
+      attribute: [SecureFactory, make]
+"#,
+    );
+    let ws = TempTree::new("java-rtype-not-ws");
+    ws.write("m.java", src);
+
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules.path).expect("rulepack");
+    let workspace = bonsai_workspace::Workspace::index(&ws.path, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(
+        &workspace,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("taint");
+    report
+        .findings
+        .iter()
+        .filter(|f| f.finding.sink.rule_id == "java.test.random_run")
+        .count()
+}
+
 #[test]
 fn factory_return_typing_resolves_receiver_type() {
     // Factory chain `c = builder().make()` — the constructor heuristic
@@ -190,6 +297,41 @@ fn factory_return_typing_resolves_receiver_type() {
     assert_eq!(
         untyped, 0,
         "a non-declared factory method must NOT type the local, got {untyped}"
+    );
+}
+
+#[test]
+fn scoped_factory_return_typing_requires_receiver_path() {
+    let matching = "class App { void h(String x){ Object c = acme.Factory.make(); c.run(x); } }\n";
+    let found = java_scoped_factory_findings(matching, "Factory", "Foo");
+    assert!(
+        found >= 1,
+        "attribute-scoped factory `Factory.make()` must type the local, got {found}"
+    );
+
+    let other = "class App { void h(String x){ Object c = acme.Other.make(); c.run(x); } }\n";
+    let not_found = java_scoped_factory_findings(other, "Factory", "Foo");
+    assert_eq!(
+        not_found, 0,
+        "attribute-scoped factory typing must not match another receiver, got {not_found}"
+    );
+}
+
+#[test]
+fn receiver_type_not_in_excludes_concrete_factory_type() {
+    let insecure =
+        "class App { void h(String x){ java.util.Random c = new java.util.Random(); c.run(x); } }\n";
+    let insecure_findings = java_receiver_type_not_in_findings(insecure);
+    assert!(
+        insecure_findings >= 1,
+        "Random receiver without excluded concrete type should match, got {insecure_findings}"
+    );
+
+    let secure = "class App { void h(String x){ java.util.Random c = SecureFactory.make(); c.run(x); } }\nclass SecureFactory { static java.security.SecureRandom make(){ return null; } }\n";
+    let secure_findings = java_receiver_type_not_in_findings(secure);
+    assert_eq!(
+        secure_findings, 0,
+        "receiver_type_not_in must suppress SecureRandom factory receivers, got {secure_findings}"
     );
 }
 
@@ -243,7 +385,10 @@ fn kotlin_as_cast_resolves_receiver_type() {
         "run",
         "import acme.Foo\nfun h(x: String){ val c = make() as Foo; c.run(x) }\nfun make(): Any = TODO()\n",
     );
-    assert!(n >= 1, "kotlin `val c = make() as Foo` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "kotlin `val c = make() as Foo` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -254,7 +399,10 @@ fn typescript_as_cast_resolves_receiver_type() {
         "run",
         "import {Foo} from 'acme';\nfunction make(): any { return null; }\nfunction h(x: string){ const c = make() as Foo; c.run(x); }\n",
     );
-    assert!(n >= 1, "typescript `const c = make() as Foo` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "typescript `const c = make() as Foo` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -265,7 +413,10 @@ fn typescript_angle_cast_resolves_receiver_type() {
         "run",
         "import {Foo} from 'acme';\nfunction make(): any { return null; }\nfunction h(x: string){ const c = <Foo>make(); c.run(x); }\n",
     );
-    assert!(n >= 1, "typescript `const c = <Foo>make()` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "typescript `const c = <Foo>make()` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -276,7 +427,10 @@ fn dart_as_cast_resolves_receiver_type() {
         "run",
         "import 'package:acme/acme.dart';\nvoid h(String x){ var c = make() as Foo; c.run(x); }\ndynamic make() => 0;\n",
     );
-    assert!(n >= 1, "dart `var c = make() as Foo` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "dart `var c = make() as Foo` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -287,7 +441,10 @@ fn go_type_assertion_resolves_receiver_type() {
         "Run",
         "package main\nimport \"acme\"\nfunc h(x string){ c := acme.Make().(Foo); c.Run(x) }\n",
     );
-    assert!(n >= 1, "go `c := acme.Make().(Foo)` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "go `c := acme.Make().(Foo)` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -298,7 +455,10 @@ fn scala_asinstanceof_resolves_receiver_type() {
         "run",
         "import acme.Foo\nclass A { def h(x: String): Unit = { val c = make().asInstanceOf[Foo]; c.run(x) }; def make(): Any = ??? }\n",
     );
-    assert!(n >= 1, "scala `val c = make().asInstanceOf[Foo]` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "scala `val c = make().asInstanceOf[Foo]` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -373,7 +533,10 @@ fn cpp_declared_value_local_resolves_receiver_type() {
         "run",
         "#include <acme>\nFoo make();\nvoid h(char* x) { Foo c = make(); c.run(x); }\n",
     );
-    assert!(n >= 1, "cpp `Foo c = make()` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "cpp `Foo c = make()` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -385,7 +548,10 @@ fn cpp_static_cast_resolves_receiver_type() {
         "run",
         "#include <acme>\nvoid h(char* x) { auto c = static_cast<Foo>(make()); c.run(x); }\n",
     );
-    assert!(n >= 1, "cpp `auto c = static_cast<Foo>(make())` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "cpp `auto c = static_cast<Foo>(make())` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -397,7 +563,10 @@ fn cpp_c_cast_auto_local_resolves_receiver_type() {
         "run",
         "#include <acme>\nvoid h(char* x) { auto c = (Foo) make(); c.run(x); }\n",
     );
-    assert!(n >= 1, "cpp `auto c = (Foo) make()` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "cpp `auto c = (Foo) make()` must resolve receiver_type_in, got {n}"
+    );
 }
 
 #[test]
@@ -410,7 +579,10 @@ fn rust_as_cast_resolves_receiver_type() {
         "run",
         "use acme::Foo;\nfn make() -> Box<dyn std::any::Any> { todo!() }\nfn h(x: String) { let c = make() as Foo; c.run(x); }\n",
     );
-    assert!(n >= 1, "rust `let c = make() as Foo` must resolve receiver_type_in, got {n}");
+    assert!(
+        n >= 1,
+        "rust `let c = make() as Foo` must resolve receiver_type_in, got {n}"
+    );
 }
 
 /// Like [`typed_local_findings`] but the synthetic sink uses the
@@ -463,14 +635,24 @@ fn objc_id_cast_resolves_receiver_type() {
     // ObjC `id f = (Foo *) make()` — the dynamic `id` LHS carries no class, so
     // the receiver type lives only on the C-style cast. The declared form
     // `Foo *f = (Foo *) make()` already worked; this is the cast-into-id form.
-    let declared =
-        objc_typed_local_findings("Foo* make(void);\nvoid h(char *x) { Foo *f = (Foo *)make(); [f run:x]; }\n");
-    assert!(declared >= 1, "objc declared `Foo *f = (Foo *)make()` must resolve, got {declared}");
+    let declared = objc_typed_local_findings(
+        "Foo* make(void);\nvoid h(char *x) { Foo *f = (Foo *)make(); [f run:x]; }\n",
+    );
+    assert!(
+        declared >= 1,
+        "objc declared `Foo *f = (Foo *)make()` must resolve, got {declared}"
+    );
     let cast =
         objc_typed_local_findings("id make(void);\nvoid h(char *x) { id f = (Foo *)make(); [f run:x]; }\n");
-    assert!(cast >= 1, "objc `id f = (Foo *)make()` must resolve receiver_type_in, got {cast}");
+    assert!(
+        cast >= 1,
+        "objc `id f = (Foo *)make()` must resolve receiver_type_in, got {cast}"
+    );
     // Wrong-type cast must NOT fire (no false positive).
     let wrong =
         objc_typed_local_findings("id make(void);\nvoid h(char *x) { id f = (Bar *)make(); [f run:x]; }\n");
-    assert_eq!(wrong, 0, "objc `id f = (Bar *)make()` must not mistype as Foo, got {wrong}");
+    assert_eq!(
+        wrong, 0,
+        "objc `id f = (Bar *)make()` must not mistype as Foo, got {wrong}"
+    );
 }

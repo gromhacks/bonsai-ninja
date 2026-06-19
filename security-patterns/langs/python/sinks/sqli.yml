@@ -588,9 +588,7 @@
   description: "aiopg.sa SAConnection.execute(string) - raw SQL execution; bind parameters instead of string construction."
 
 - id: python.sqli.aiopg_cursor_execute_variable
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: python
   tag: sql-injection
   severity: critical
@@ -601,6 +599,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
+      base_name_in: [cur, cursor]
   constraints:
   - arg_tainted:
       index: 0
@@ -617,7 +616,7 @@
       async def example(cur):
           return await cur.execute('select 1')
     expect_no_match: true
-  description: "Disabled until Python can prove this variable receiver came from an aiopg cursor without relying on local receiver names. Typed Cursor receivers are covered by python.sqli.psycopg2_cursor_execute."
+  description: "aiopg cursor execute on conventional cursor receivers (`cur`, `cursor`) - raw SQL execution; kept package-gated to aiopg until async context-manager receiver typing is available."
 
 - id: python.sqli.sqlalchemy_text
   enabled: true
@@ -1149,3 +1148,41 @@
           return Database.execute('safe')
     expect_no_match: true
   description: "databases.Database.execute (Encode async DB driver)."
+
+- id: python.sqli.graphene_resolver_db_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [graphene, ariadne]
+  imports: [graphene, ariadne]
+  cwe: [CWE-943, CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
+      base_name_in: [engine, engine_mod, db, database, conn, connection]
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)\\b(select|insert|update|delete|from|where)\\b"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "(\\?|%s|:[A-Za-z_][A-Za-z0-9_]*|\\$[0-9]+)"
+  match_examples:
+  - name: graphene resolver tainted sql execute
+    code: |
+      import graphene
+      def example(engine_mod, user_input):
+          sql = "SELECT id FROM products WHERE name = '" + user_input + "'"
+          return engine_mod.execute(sql)
+    expect_match_text: [engine_mod.execute]
+  - name: graphene resolver parameterized execute negative
+    code: |
+      import graphene
+      def example(engine_mod, user_input):
+          return engine_mod.execute("SELECT id FROM products WHERE name = %s", (user_input,))
+    expect_no_match: true
+  description: "Graphene/Ariadne resolver-tainted SQL passed to a project DB execute wrapper without bind placeholders."

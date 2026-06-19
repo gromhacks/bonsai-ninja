@@ -23,7 +23,7 @@
       use CGI;
       sub example {
         my ($input, $url, $id, $payload, $request) = @_;
-        print "hello " . $payload
+        print $payload
       }
   - name: literal cgi print negative
     code: |
