@@ -13,6 +13,10 @@
       name: question
   constraints:
   - min_args: 1
+  taint_semantics:
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
   - name: readline question
     code: |
@@ -20,6 +24,15 @@
       function demo(input, req, obj) {
         return question(input);
       }
+  - name: readline question callback
+    code: |
+      const _u = require("readline");
+      function demo(rl) {
+        rl.question("name?", answer => {
+          return answer;
+        });
+      }
+    expect_match_text: [rl.question]
   - name: readline question no args negative
     code: |
       const _u = require("readline");
@@ -27,7 +40,7 @@
         return question();
       }
     expect_no_match: true
-  description: "readline.Interface.question(query, callback) - interactive stdin prompt; the callback receives attacker-controlled input. Package-gated and requires at least the query argument so zero-arg same-name decoys stay quiet."
+  description: "readline.Interface.question(query, callback) and readline-sync question(query) - interactive stdin prompt. Callback answer parameters and synchronous return values are attacker-controlled."
 
 - id: javascript.source.process_argv
   enabled: true

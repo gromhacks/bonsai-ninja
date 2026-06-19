@@ -64,29 +64,35 @@
     expect_no_match: true
   description: file_get_contents('php://stdin').
 - id: php.source.getenv
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   tag: env-input
   trust: local
+  payload_types: [text]
   match:
     kind: call
     callee:
       name: getenv
-  description: Disabled - env vars only matter when crossing trust boundary.
+  match_examples:
+  - name: getenv source
+    code: "<?php\nfunction example() {\n  return getenv('HOME');\n}\n"
+    expect_match_text: [getenv]
+  description: getenv(name) - process environment value; local trust but attacker-controlled through shells, service managers, CI, and container configuration.
 - id: php.source.env_super
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: php
   tag: env-input
   trust: local
+  payload_types: [text]
   match:
     kind: read
     target:
       name: _ENV
-  description: Disabled - $_ENV is local trust.
+  match_examples:
+  - name: env superglobal
+    code: "<?php\nfunction example() {\n  return $_ENV;\n}\n"
+    expect_match_text: [_ENV]
+  description: $_ENV - environment superglobal; local trust but attacker-controlled through the process environment.
 - id: php.source.readline
   enabled: true
   language: php

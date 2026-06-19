@@ -338,6 +338,7 @@
   language: cpp
   trust: remote
   tag: http-input
+  payload_types: [binary]
   packages: [boost.beast]
   match:
     kind: call

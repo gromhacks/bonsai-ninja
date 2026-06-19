@@ -290,6 +290,7 @@
   - fastapi
   - aiohttp
   - django
+  - pyramid
   cwe:
   - CWE-113
   match:
@@ -306,6 +307,13 @@
   - name: response headers update
     code: |
       import flask
+      def set_header(response, user_input):
+          return response.headers.update({"X-Name": user_input})
+    expect_match_text:
+    - response.headers.update
+  - name: pyramid response headers update
+    code: |
+      import pyramid
       def set_header(response, user_input):
           return response.headers.update({"X-Name": user_input})
     expect_match_text:
@@ -329,6 +337,7 @@
   - starlette
   - fastapi
   - aiohttp
+  - pyramid
   cwe:
   - CWE-113
   match:
@@ -358,6 +367,13 @@
           return resp.headers.set("X-Name", user_input)
     expect_match_text:
     - resp.headers.set
+  - name: pyramid response headers add
+    code: |
+      import pyramid
+      def set_header(response, user_input):
+          return response.headers.add("X-Name", user_input)
+    expect_match_text:
+    - response.headers.add
   - name: response headers add literal negative
     code: |
       import flask

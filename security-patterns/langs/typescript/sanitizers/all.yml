@@ -221,6 +221,61 @@
     expect_no_match: true
   description: "validator.whitelist(input, chars) - removes every character outside the explicit allowlist; min_args 2 requires the allowlist argument."
 
+# -- URL encoding -------------------------------------------------------------
+- id: typescript.sanitizer.encodeuricomponent
+  enabled: true
+  language: typescript
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      name: encodeURIComponent
+  match_examples:
+  - name: encode uri component
+    code: |
+      function clean(input: string) {
+        return encodeURIComponent(input);
+      }
+    expect_match_text: [encodeURIComponent]
+  description: "encodeURIComponent - percent-encodes a URL component, safe for query-string values."
+
+- id: typescript.sanitizer.encodeuri
+  enabled: true
+  language: typescript
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      name: encodeURI
+  match_examples:
+  - name: encode uri
+    code: |
+      function clean(input: string) {
+        return encodeURI(input);
+      }
+    expect_match_text: [encodeURI]
+  description: "encodeURI - percent-encodes a URL while preserving reserved separators."
+
+- id: typescript.sanitizer.querystring_escape
+  enabled: true
+  language: typescript
+  tag: url-encode
+  packages: [querystring]
+  imports: [querystring]
+  match:
+    kind: call
+    callee:
+      regex: "^querystring\\.escape$"
+  match_examples:
+  - name: querystring escape
+    code: |
+      import * as querystring from "querystring";
+      function clean(input: string) {
+        return querystring.escape(input);
+      }
+    expect_match_text: [querystring.escape]
+  description: "querystring.escape - Node built-in percent-encoder for query-string component values."
+
 # -- SQL ---------------------------------------------------------------------
 - id: typescript.sanitizer.sqlstring_escape
   enabled: true

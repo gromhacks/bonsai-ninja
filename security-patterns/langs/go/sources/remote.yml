@@ -449,6 +449,46 @@
     expect_no_match: true
   description: "io.ReadAll over request Body - returned bytes are attacker-controlled request body content."
 
+- id: go.net.conn_read
+  enabled: true
+  language: go
+  trust: remote
+  tag: network-input
+  category: network-input
+  payload_types: [binary]
+  packages: ["net"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Read$"
+  constraints:
+  - receiver_type_in: [Conn, TCPConn, UDPConn]
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: net conn read output buffer
+    code: |
+      package main
+      import "net"
+      func handle(conn net.Conn) {
+        buf := make([]byte, 1024)
+        _, _ = conn.Read(buf)
+      }
+    expect_match_text: [conn.Read]
+  - name: unrelated read receiver negative
+    code: |
+      package main
+      import "net"
+      type localReader struct{}
+      func (r localReader) Read(buf []byte) (int, error) { return 0, nil }
+      func handle(r localReader) {
+        buf := make([]byte, 1024)
+        _, _ = r.Read(buf)
+      }
+    expect_no_match: true
+  description: "net.Conn.Read(buf) / TCPConn.Read / UDPConn.Read - network peer bytes taint the caller-supplied buffer; receiver-type gate avoids treating every .Read method as remote input."
+
 # --- mux / chi --------------------------------------------------------
 - id: go.gorilla.mux_vars
   enabled: true

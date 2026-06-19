@@ -85,41 +85,264 @@
   language: cpp
   trust: local
   tag: local-input
+  payload_types: [text]
   match:
     kind: call
     callee:
-      name: getline
+      regex: "^getline$"
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
-  - name: generated direct match
+  - name: posix getline output line
     code: |
-      void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        getline(arg);
+      void example(void *fp) {
+        char *line = 0;
+        unsigned long len = 0;
+        getline(&line, &len, fp);
       }
-  description: "getline - stdin / file line."
+    expect_match_text: [getline]
+  description: "POSIX getline(lineptr, n, stream) - reads a line from stdin/file into the caller-supplied output pointer."
 - id: cpp.input.fgets
   enabled: true
   language: cpp
   trust: local
   tag: local-input
+  payload_types: [text]
   match:
     kind: call
     callee:
       name: fgets
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
-  - name: generated direct match
+  - name: fgets output buffer
+    code: |
+      void example(void *fp) {
+        char buf[256];
+        fgets(buf, sizeof(buf), fp);
+      }
+    expect_match_text: [fgets]
+  description: "fgets(buf, n, stream) - reads a line from stdin/file into the destination buffer."
+- id: cpp.input.fread
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: fread
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: fread output buffer
+    code: |
+      void example(void *fp) {
+        char buf[256];
+        fread(buf, 1, sizeof(buf), fp);
+      }
+    expect_match_text: [fread]
+  description: "fread(ptr, size, nmemb, stream) - reads file/stdin bytes into the destination buffer."
+- id: cpp.input.fscanf
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: fscanf
+  taint_semantics:
+    source_output_args: [2, 3, 4, 5]
+  match_examples:
+  - name: fscanf output buffers
+    code: |
+      void example(void *fp) {
+        char user[64];
+        char host[64];
+        fscanf(fp, "%63s %63s", user, host);
+      }
+    expect_match_text: [fscanf]
+  description: "fscanf(stream, format, ...) - reads formatted text from a FILE* into caller-supplied output arguments."
+- id: cpp.input.read
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      regex: "^read$"
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: posix read output buffer
+    code: |
+      void example(int fd) {
+        char buf[256];
+        read(fd, buf, sizeof(buf));
+      }
+    expect_match_text: [read]
+  - name: method read is not posix read
+    code: |
+      void example(std::istream &stream) {
+        char buf[256];
+        stream.read(buf, sizeof(buf));
+      }
+    expect_no_match: true
+  description: "POSIX read(fd, buf, count) - reads descriptor bytes into the destination buffer. Anchored to the unqualified function so C++ stream/container .read() methods are not treated as this source."
+- id: cpp.input.pread
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      regex: "^pread$"
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: posix pread output buffer
+    code: |
+      void example(int fd) {
+        char buf[256];
+        pread(fd, buf, sizeof(buf), 0);
+      }
+    expect_match_text: [pread]
+  description: "POSIX pread(fd, buf, count, offset) - reads descriptor bytes into the destination buffer without changing file offset."
+- id: cpp.input.readv
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      regex: "^readv$"
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: posix readv output iovec
+    code: |
+      struct iovec;
+      void example(int fd, struct iovec *iov) {
+        readv(fd, iov, 2);
+      }
+    expect_match_text: [readv]
+  description: "POSIX readv(fd, iov, iovcnt) - scatter-read descriptor bytes into caller-supplied iovec buffers."
+- id: cpp.input.preadv
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      regex: "^preadv$"
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: posix preadv output iovec
+    code: |
+      struct iovec;
+      void example(int fd, struct iovec *iov) {
+        preadv(fd, iov, 2, 0);
+      }
+    expect_match_text: [preadv]
+  description: "POSIX preadv(fd, iov, iovcnt, offset) - positioned scatter-read into caller-supplied iovec buffers."
+- id: cpp.input.getdelim
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^getdelim$"
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: getdelim output line
+    code: |
+      void example(void *fp) {
+        char *line = 0;
+        unsigned long len = 0;
+        getdelim(&line, &len, '\n', fp);
+      }
+    expect_match_text: [getdelim]
+  description: "POSIX getdelim(lineptr, n, delim, stream) - reads delimited stream content into a heap buffer."
+- id: cpp.input.mmap
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      regex: "^mmap$"
+  match_examples:
+  - name: mmap returned region
+    code: |
+      void *example(int fd) {
+        return mmap(0, 4096, 1, 2, fd, 0);
+      }
+    expect_match_text: [mmap]
+  description: "POSIX mmap(..., fd, offset) - maps descriptor-backed bytes into memory; the returned region derives from file/device input."
+- id: cpp.input.std_getline
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [std, getline]
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: std getline output string
     code: |
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        fgets(arg);
+        std::string line;
+        std::getline(std::cin, line);
       }
-  description: "fgets - stdin / file line."
-- id: cpp.input.sscanf
+    expect_match_text: ["std::getline"]
+  description: "std::getline(stream, line) - reads stdin/file stream text into the output string."
+- id: cpp.input.std_cin_read
   enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      attribute: [std, cin, read]
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: std cin read output buffer
+    code: |
+      void example() {
+        char buf[256];
+        std::cin.read(buf, sizeof(buf));
+      }
+    expect_match_text: ["std::cin.read"]
+  description: "std::cin.read(buf, n) - reads raw stdin bytes into the destination buffer."
+- id: cpp.input.sscanf
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: cpp
   trust: local
   tag: local-input
@@ -137,7 +360,7 @@
         const char *query = arg;
         sscanf(arg);
       }
-  description: "sscanf - parses external string into variables."
+  description: "Disabled - sscanf parses an in-memory buffer; taint comes from the buffer, not sscanf itself. cpp.passthrough.sscanf_outputs preserves real input-buffer-to-output flows."
 - id: cpp.input.scanf
   enabled: true
   language: cpp
