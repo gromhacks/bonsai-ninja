@@ -59,6 +59,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("inspect", "Find every cross-module flow that reaches a match"),
             ("trace", "Expand a function's call tree end-to-end"),
+            ("show", "Open the owning drilldown view for a stable F:/T:/E:/S: id"),
         ],
     ),
     (

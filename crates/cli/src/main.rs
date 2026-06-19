@@ -373,6 +373,30 @@ fn main() -> Result<()> {
             };
             cmd_trace(&workspace, fn_arg, from, to, paging, format, trace_opts)
         }
+        Cmd::Show {
+            workspace,
+            id,
+            query,
+            in_file,
+            compact,
+            context,
+            page,
+            all,
+            format,
+            rules_dir,
+            output: _,
+        } => commands::show::cmd_show(commands::show::ShowArgs {
+            workspace: &workspace,
+            id: &id,
+            query: query.as_deref(),
+            in_file: in_file.as_deref(),
+            compact,
+            context: context.as_deref(),
+            page: page.as_deref(),
+            all,
+            format,
+            rules_dir: rules_dir.as_deref(),
+        }),
         Cmd::Diagnostics { workspace } => cmd_diagnostics(&workspace),
         Cmd::DumpHir {
             workspace,
@@ -954,6 +978,7 @@ fn main() -> Result<()> {
         Cmd::ReadFile {
             workspace,
             path,
+            symbol,
             lines,
             from,
             to,
@@ -967,7 +992,8 @@ fn main() -> Result<()> {
             output: _,
         } => commands::read_file::cmd_read_file(commands::read_file::ReadFileArgs {
             workspace: &workspace,
-            path: &path,
+            path: path.as_deref(),
+            symbol: symbol.as_deref(),
             lines: lines.as_deref(),
             from: from.as_deref(),
             to: to.as_deref(),
@@ -1005,6 +1031,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
         Cmd::Index { workspace, .. }
         | Cmd::Trace { workspace, .. }
+        | Cmd::Show { workspace, .. }
         | Cmd::Diagnostics { workspace }
         | Cmd::DumpHir { workspace, .. }
         | Cmd::DumpCfg { workspace, .. }
@@ -1035,6 +1062,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
 fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
         Cmd::Trace { output, .. }
+        | Cmd::Show { output, .. }
         | Cmd::DumpCallgraph { output, .. }
         | Cmd::DumpEdges { output, .. }
         | Cmd::DumpAst { output, .. }
