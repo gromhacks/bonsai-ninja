@@ -102,19 +102,6 @@ pub(crate) fn open_project_index_matching_literal(
     Ok((project, footer))
 }
 
-pub(crate) fn open_project_index_filtered_paths(
-    root: &std::path::Path,
-    include_filters: &[String],
-    exclude_filters: &[String],
-) -> Result<(Project, WorkspaceFooter)> {
-    let project = bonsai_for_cli()
-        .open_query_filtered_paths(root, include_filters, exclude_filters)?
-        .with_auto_refresh(false);
-    crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
-    let footer = WorkspaceFooter::new();
-    Ok((project, footer))
-}
-
 pub(crate) fn open_project_index_matching_path(
     root: &std::path::Path,
     path: &std::path::Path,

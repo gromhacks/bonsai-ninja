@@ -222,33 +222,7 @@ impl Bonsai {
     pub fn open_query_matching_literal(&self, root: impl AsRef<Path>, literal: &str) -> Result<Project> {
         let root = root.as_ref();
         let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
-        let ws = Workspace::open_query_matching_literal_with_options(
-            root,
-            self.registry.clone(),
-            literal,
-            options,
-        )?;
-        Ok(self.project(root, ws, options))
-    }
-
-    /// Open only files whose paths match the supplied include/exclude
-    /// filters. Intended for large security/profile queries where the
-    /// path scope is known before semantic analysis starts.
-    pub fn open_query_filtered_paths(
-        &self,
-        root: impl AsRef<Path>,
-        include_filters: &[String],
-        exclude_filters: &[String],
-    ) -> Result<Project> {
-        let root = root.as_ref();
-        let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
-        let ws = Workspace::open_query_filtered_paths_with_options(
-            root,
-            self.registry.clone(),
-            include_filters,
-            exclude_filters,
-            options,
-        )?;
+        let ws = Workspace::open_query_matching_literal(root, self.registry.clone(), literal)?;
         Ok(self.project(root, ws, options))
     }
 
@@ -264,12 +238,7 @@ impl Bonsai {
     ) -> Result<Project> {
         let root = root.as_ref();
         let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
-        let ws = Workspace::open_query_matching_path_with_options(
-            root,
-            self.registry.clone(),
-            path.as_ref(),
-            options,
-        )?;
+        let ws = Workspace::open_query_matching_path(root, self.registry.clone(), path.as_ref())?;
         Ok(self.project(root, ws, options))
     }
 

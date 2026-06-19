@@ -55,25 +55,6 @@ Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST
   Before editing, run `git status` and inspect any existing WIP diff. There may be partial indexing/dataflow changes already present from prior work; preserve useful parts,
   revise anything that conflicts with this goal, and do not discard unrelated user changes.
 
-## Current Deployment Readiness - 2026-06-19
-
-### STATUS: local release/build checks are green; benchmark quality has one known gap
-
-The current local checkout is on `main` and the 2026-06-19 release build
-passed. Rulepack validation with taint replay, rulepack audit, and the
-focused conformance suites used for the latest rulepack pass were green.
-The latest CVE-Bench tier-4 run (`bonsai-ninja-2026-06-19-122157-dev`)
-reported 99.57% detection recall, 75.91% bug recall, 79.24% precision,
-30.43% fix-validation, and 1.63 FP/KLOC. OWASP Benchmark v1.2 direct
-category-aware scoring reported 54.54 overall, 65.87% TPR, 11.32% FPR,
-LDAP 66.67% TPR / 0.00% FPR, XPath 66.67% TPR / 10.00% FPR, and SQLi
-63.24% TPR / 2.16% FPR.
-
-The known remaining security-quality gap is fixed-snapshot validation:
-sanitizer and validator credit still needs more path-ordered rulepack
-coverage. See [Release Readiness](RELEASE_READINESS.md) for the compact
-deployment snapshot and benchmark artifact paths.
-
 ## Current Deployment Readiness - 2026-06-07
 
 ### STATUS: deployment checks are GREEN for all 21 supported languages

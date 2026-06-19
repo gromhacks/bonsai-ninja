@@ -451,8 +451,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
 ) -> bool {
     let file = expected.span.file;
     let global = ws.db().global_index();
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
+    let file_packages = file_package_set(ws, file);
     let bundle = decl_match_facts_for(ws, file, factory);
     let constructor_names = if prepared.rule.match_spec.kind == MatchKind::New {
         collect_constructor_names(global.as_ref())
@@ -536,8 +535,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
     let file = expected.span.file;
     let global = ws.db().global_index();
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
+    let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
 
     for decl in global.decls_in(file) {
@@ -587,7 +585,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
         }
     }
 
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = ws.db().decl_index(file) else {
         return false;
     };
     for r in &idx.refs {
@@ -790,6 +788,7 @@ fn match_rules_against_facts_with_progress_and_mode<F>(
 where
     F: FnMut(),
 {
+    use rayon::prelude::*;
     let db = ws.db();
     let global = db.global_index();
     let files: Vec<_> = scan_files
@@ -816,124 +815,47 @@ where
     // join. Match collection order is non-deterministic across
     // runs, but downstream callers already invoke `sort_matches` on
     // the returned Vec before emission to keep finding ids stable.
-    let workers = matcher_worker_count(files.len());
-    if workers <= 1 || files.len() <= 1 {
-        return files
-            .iter()
-            .flat_map(|&file| {
-                let mut file_out: Vec<RuleMatch> = Vec::new();
-                if let Some(adapter) = ws.db().adapter_for(file) {
-                    let language = adapter.language_id();
-                    if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
-                        scan_file_rules(
-                            ws,
-                            file,
-                            file_rules,
-                            &constructor_names,
-                            mode,
-                            taint_view,
-                            &mut file_out,
-                        );
+    let (tick_tx, tick_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            files
+                .par_iter()
+                .flat_map_iter(|&file| {
+                    let mut file_out: Vec<RuleMatch> = Vec::new();
+                    if let Some(adapter) = ws.db().adapter_for(file) {
+                        let language = adapter.language_id();
+                        if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
+                            scan_file_rules(
+                                ws,
+                                file,
+                                file_rules,
+                                &constructor_names,
+                                mode,
+                                taint_view,
+                                &mut file_out,
+                            );
+                        }
                     }
+                    let _ = tick_tx.send(());
+                    file_out
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut completed = 0usize;
+        while completed < total {
+            match tick_rx.recv() {
+                Ok(()) => {
+                    completed += 1;
+                    on_file_done();
                 }
-                on_file_done();
-                file_out
-            })
-            .collect();
-    }
-    let run_parallel_scan = |pool: Option<&rayon::ThreadPool>| {
-        let (tick_tx, tick_rx) = mpsc::channel();
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(move || {
-                let scan = || {
-                    use rayon::prelude::*;
-                    files
-                        .par_iter()
-                        .flat_map_iter(|&file| {
-                            let mut file_out: Vec<RuleMatch> = Vec::new();
-                            if let Some(adapter) = ws.db().adapter_for(file) {
-                                let language = adapter.language_id();
-                                if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
-                                    scan_file_rules(
-                                        ws,
-                                        file,
-                                        file_rules,
-                                        &constructor_names,
-                                        mode,
-                                        taint_view,
-                                        &mut file_out,
-                                    );
-                                }
-                            }
-                            let _ = tick_tx.send(());
-                            file_out
-                        })
-                        .collect::<Vec<_>>()
-                };
-                match pool {
-                    Some(pool) => pool.install(scan),
-                    None => scan(),
-                }
-            });
-            let mut completed = 0usize;
-            while completed < total {
-                match tick_rx.recv() {
-                    Ok(()) => {
-                        completed += 1;
-                        on_file_done();
-                    }
-                    Err(_) => break,
-                }
+                Err(_) => break,
             }
-            match worker.join() {
-                Ok(out) => out,
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
-        })
-    };
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .stack_size(matcher_worker_stack_bytes())
-        .build()
-    {
-        Ok(pool) => run_parallel_scan(Some(&pool)),
-        Err(_) => run_parallel_scan(None),
-    }
-}
-
-fn matcher_worker_count(file_count: usize) -> usize {
-    let available = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-        .max(1);
-    if let Some(requested) = std::env::var("BONSAI_SECURITY_JOBS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.clamp(1, available);
-    }
-    if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-    {
-        return requested.clamp(1, available);
-    }
-    let default = if file_count >= 20_000 {
-        4
-    } else if file_count >= 10_000 {
-        6
-    } else {
-        available
-    };
-    default.clamp(1, available)
-}
-
-fn matcher_worker_stack_bytes() -> usize {
-    std::env::var("BONSAI_SECURITY_STACK_BYTES")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .filter(|bytes| *bytes >= 1024 * 1024)
-        .unwrap_or(64 * 1024 * 1024)
+        }
+        match worker.join() {
+            Ok(out) => out,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1287,10 +1209,6 @@ impl<'a> PreparedRule<'a> {
     fn workspace_level_package_evidence_allowed(&self) -> bool {
         matches!(self.rule.kind, crate::rule::RuleKind::Sink) && self.file_level_package_evidence_allowed()
     }
-
-    fn needs_workspace_package_context(&self) -> bool {
-        self.requires_call_package_signal && self.workspace_level_package_evidence_allowed()
-    }
 }
 
 fn is_lifecycle_audit_pair_sink(rule: &Rule) -> bool {
@@ -1400,7 +1318,6 @@ struct PreparedRuleBatch<'p, 'rule> {
     /// Rulepack factory-return map for this run (shared across batches;
     /// empty/0-fingerprint unless the pack ships `returns_type` rules).
     factory: Arc<FactoryReturns>,
-    include_workspace_package_context: bool,
 }
 
 impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
@@ -1415,9 +1332,6 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             return_rules: Vec::new(),
             missing_rules: Vec::new(),
             factory,
-            include_workspace_package_context: rules
-                .iter()
-                .any(|rule| rule.needs_workspace_package_context()),
         };
         for &rule in rules {
             match rule.rule.match_spec.kind {
@@ -1491,64 +1405,21 @@ fn scan_file_rules(
         scan_calls_batch(ws, file, rules, constructor_names, mode, taint_view, out);
     }
     if !rules.read_rules.is_empty() {
-        scan_refs_batch(
-            ws,
-            file,
-            &rules.read_rules,
-            RefKind::Read,
-            rules.include_workspace_package_context,
-            out,
-        );
-        scan_flow_reads_batch(
-            ws,
-            file,
-            &rules.read_rules,
-            rules.include_workspace_package_context,
-            out,
-        );
+        scan_refs_batch(ws, file, &rules.read_rules, RefKind::Read, out);
+        scan_flow_reads_batch(ws, file, &rules.read_rules, out);
     }
     if !rules.write_rules.is_empty() {
-        scan_writes_batch(
-            ws,
-            file,
-            &rules.write_rules,
-            rules.include_workspace_package_context,
-            mode,
-            taint_view,
-            out,
-        );
-        scan_ref_writes_batch(
-            ws,
-            file,
-            &rules.write_rules,
-            rules.include_workspace_package_context,
-            mode,
-            taint_view,
-            out,
-        );
+        scan_writes_batch(ws, file, &rules.write_rules, mode, taint_view, out);
+        scan_ref_writes_batch(ws, file, &rules.write_rules, mode, taint_view, out);
     }
     if !rules.param_rules.is_empty() {
-        scan_params_batch(
-            ws,
-            file,
-            &rules.param_rules,
-            rules.include_workspace_package_context,
-            out,
-        );
+        scan_params_batch(ws, file, &rules.param_rules, out);
     }
     if !rules.return_rules.is_empty() {
         scan_returns_batch(ws, file, &rules.return_rules, out);
     }
     if !rules.missing_rules.is_empty() {
-        scan_missing_batch(
-            ws,
-            file,
-            &rules.missing_rules,
-            rules.include_workspace_package_context,
-            mode,
-            taint_view,
-            out,
-        );
+        scan_missing_batch(ws, file, &rules.missing_rules, mode, taint_view, out);
     }
 }
 
@@ -1616,15 +1487,9 @@ fn return_rule_match(
     None
 }
 
-fn scan_params_batch(
-    ws: &Workspace,
-    file: FileId,
-    rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
-    out: &mut Vec<RuleMatch>,
-) {
+fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], out: &mut Vec<RuleMatch>) {
     let global = ws.db().global_index();
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let decl_decorators = collect_decl_decorator_names(ws, file, decl.name_span);
@@ -1813,8 +1678,7 @@ fn first_param_read_site(
     decl: &bonsai_lang_api::Decl,
     param: &str,
 ) -> Option<(String, u32, u32, Span)> {
-    let global = ws.db().global_index();
-    let idx = global.file_index(file)?;
+    let idx = ws.db().decl_index(file)?;
     let body = decl.body_span.unwrap_or(decl.span);
     let min_start = body.start.max(decl.name_span.end);
     let read = idx
@@ -1929,8 +1793,7 @@ fn scan_calls_batch(
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, rules.include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     let decls = global.decls_in(file);
     let bundle = decl_match_facts_for(ws, file, &rules.factory);
@@ -2026,7 +1889,7 @@ fn scan_calls_batch(
         }
     }
 
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = ws.db().decl_index(file) else {
         return;
     };
     // Build a span-sorted index over the file's decls so the
@@ -2219,13 +2082,12 @@ fn scan_missing_batch(
     ws: &Workspace,
     file: FileId,
     rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     // Missing-call rules don't use factory-return typing.
     let bundle = decl_match_facts_for(ws, file, &empty_factory_returns());
@@ -2383,11 +2245,7 @@ fn missing_target_in_reachable_callees(
             // collapses Missing-rule BFS cost to one cache hit
             // per (file, decl) pair across the whole search.
             let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
-            let callee_file_packages = file_package_set_with_workspace_context(
-                ws,
-                callee_file,
-                prepared.needs_workspace_package_context(),
-            );
+            let callee_file_packages = file_package_set(ws, callee_file);
             let callee_bundle = decl_match_facts_for(ws, callee_file, &empty_factory_returns());
             // Bundle covers every decl in the file; index by
             // span. Fallback: if the cache layer didn't
@@ -2463,8 +2321,7 @@ fn matching_call_has_arg_index(
     wanted_index: usize,
 ) -> bool {
     let global = ws.db().global_index();
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
+    let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let mut alias_map = import_aliases.clone();
@@ -2534,7 +2391,7 @@ fn file_alias_map(ws: &Workspace, file: FileId) -> std::collections::HashMap<Str
 // byte-identical file in two workspaces returns the same package
 // set (which is correct — the package set is purely a function of
 // the file's import declarations).
-type FilePackageSetMap = AHashMap<(FileId, u64, u64, u64, bool), Arc<AHashSet<String>>>;
+type FilePackageSetMap = AHashMap<(FileId, u64, u64, u64), Arc<AHashSet<String>>>;
 static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<parking_lot::RwLock<FilePackageSetMap>> =
     std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
@@ -2554,29 +2411,20 @@ struct WorkspaceImportPackageContext {
 /// against the rule's signal needles (exact, `.h`-stripped, and
 /// progressive `/`, `.`, `:`, `\`-separated prefixes) so the
 /// match-time gate can do `set.contains(rule_signal)` in O(1).
-fn file_package_set_with_workspace_context(
-    ws: &Workspace,
-    file: FileId,
-    include_workspace_context: bool,
-) -> Arc<AHashSet<String>> {
-    let workspace_imports = if include_workspace_context {
-        workspace_import_package_context(ws, file)
+fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
+    let workspace_imports = workspace_import_package_context(ws, file);
+    let workspace_packages = if workspace_manifest_package_context_allowed(ws, file) {
+        ws.db().workspace_root().map(|root| {
+            let language = ws
+                .db()
+                .adapter_for(file)
+                .map(|adapter| adapter.language_id().as_str())
+                .unwrap_or("");
+            crate::deps::workspace_dependency_packages_for_language(&root, language)
+        })
     } else {
-        Arc::new(WorkspaceImportPackageContext::default())
+        None
     };
-    let workspace_packages =
-        if include_workspace_context && workspace_manifest_package_context_allowed(ws, file) {
-            ws.db().workspace_root().map(|root| {
-                let language = ws
-                    .db()
-                    .adapter_for(file)
-                    .map(|adapter| adapter.language_id().as_str())
-                    .unwrap_or("");
-                crate::deps::workspace_dependency_packages_for_language(&root, language)
-            })
-        } else {
-            None
-        };
     let manifest_fingerprint = workspace_packages
         .as_ref()
         .map(|packages| packages.fingerprint)
@@ -2588,13 +2436,7 @@ fn file_package_set_with_workspace_context(
             package_cache_content_hash(snapshot.text.as_bytes()),
         )
     });
-    let key = (
-        file,
-        version,
-        text_hash,
-        workspace_package_fingerprint,
-        include_workspace_context,
-    );
+    let key = (file, version, text_hash, workspace_package_fingerprint);
     // Drop the read guard at the `;` before any potential write
     // upgrade — parking_lot RwLocks are non-reentrant.
     let cached = FILE_PACKAGE_SET_CACHE.read().get(&key).cloned();
@@ -2659,14 +2501,6 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
     if let Some(hit) = cached {
         return hit;
     }
-    // Single-flight the expensive workspace-wide scan. Source/sink
-    // matching runs files in parallel; without this second check under
-    // the write lock, every worker that misses the read cache can scan
-    // the whole language corpus independently on large repos.
-    let mut write = WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE.write();
-    if let Some(hit) = write.get(&key).cloned() {
-        return hit;
-    }
     let global = ws.db().global_index();
     let mut context = WorkspaceImportPackageContext::default();
     for candidate_file in global.all_files() {
@@ -2686,11 +2520,11 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
                 .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
         }
         let Some(imports) = ws.db().import_index(candidate_file) else {
-            if let Some(idx) = global.file_index(candidate_file) {
+            if let Some(idx) = ws.db().decl_index(candidate_file) {
                 insert_fully_qualified_reference_package_prefixes(
                     &mut context.packages,
                     language.as_str(),
-                    idx,
+                    &idx,
                 );
             }
             continue;
@@ -2709,11 +2543,12 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
                 insert_import_target_prefixes(&mut context.packages, stripped);
             }
         }
-        if let Some(idx) = global.file_index(candidate_file) {
-            insert_fully_qualified_reference_package_prefixes(&mut context.packages, language.as_str(), idx);
+        if let Some(idx) = ws.db().decl_index(candidate_file) {
+            insert_fully_qualified_reference_package_prefixes(&mut context.packages, language.as_str(), &idx);
         }
     }
     let context = Arc::new(context);
+    let mut write = WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE.write();
     if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
         write.clear();
     }
@@ -3381,15 +3216,14 @@ fn scan_refs_batch(
     file: FileId,
     rules: &[&PreparedRule<'_>],
     want_kind: RefKind,
-    include_workspace_package_context: bool,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = ws.db().decl_index(file) else {
         return;
     };
+    let global = ws.db().global_index();
     let decls = global.decls_in(file);
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for r in &idx.refs {
         if r.kind != want_kind {
@@ -3451,11 +3285,10 @@ fn scan_flow_reads_batch(
     ws: &Workspace,
     file: FileId,
     rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let mut reads = Vec::new();
@@ -4044,14 +3877,13 @@ fn scan_writes_batch(
     ws: &Workspace,
     file: FileId,
     rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let writes = collect_writes(&decl.flow_events);
@@ -4128,18 +3960,17 @@ fn scan_ref_writes_batch(
     ws: &Workspace,
     file: FileId,
     rules: &[&PreparedRule<'_>],
-    include_workspace_package_context: bool,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = ws.db().decl_index(file) else {
         return;
     };
+    let global = ws.db().global_index();
     let decls = global.decls_in(file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
+    let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for r in &idx.refs {
         if r.kind != RefKind::Write {
@@ -4230,7 +4061,7 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
         }
     }
 
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = ws.db().decl_index(file) else {
         return false;
     };
     for r in &idx.refs {
@@ -4254,8 +4085,7 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
 /// stable tail (`route`, `post`) regardless of receiver spelling.
 fn collect_decl_decorator_names(ws: &Workspace, file: FileId, decl_span: Span) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let global = ws.db().global_index();
-    let Some(idx) = global.file_index(file) else {
+    let Some(idx) = ws.db().decl_index(file) else {
         return out;
     };
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
@@ -6460,8 +6290,7 @@ fn detect_framework_decorator(
     file: FileId,
     decl_span: Span,
 ) -> Option<EntryKind> {
-    let global = ws.db().global_index();
-    let idx = global.file_index(file)?;
+    let idx = ws.db().decl_index(file)?;
     for r in &idx.refs {
         if r.kind != RefKind::Decorator {
             continue;
