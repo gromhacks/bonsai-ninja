@@ -1024,9 +1024,76 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
+    /// Browse likely entry points: callable declarations with no
+    /// semantic in-workspace callers.
+    #[command(
+        name = "entrypoints",
+        display_order = 21,
+        long_about = themed_subcommand_long_about("List callable declarations that have no resolved semantic \
+                      in-workspace callers. This is a rulepack-free code \
+                      navigation view over the indexed syntax + resolved \
+                      callgraph: useful for finding service handlers, CLI \
+                      commands, tests, and other roots before tracing behavior.\n\
+                      \n\
+                      Columns: name, kind, location, signature, callees \
+                      (deduplicated outgoing call names), and reason. Filters \
+                      mirror `defs`: kind, file-path substring, name substring \
+                      or regex. The command does not build IDG / taint state."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # List likely roots\n  \
+                      $ bonsai-ninja entrypoints ./src\n  \
+                      \n  \
+                      # Find entry methods in one package or file\n  \
+                      $ bonsai-ninja entrypoints ./src --kind method --file handlers\n  \
+                      \n  \
+                      # Regex over short or qualified names\n  \
+                      $ bonsai-ninja entrypoints ./src --regex --name '^(handle|serve)_'\n  \
+                      \n  \
+                      # JSON for tooling\n  \
+                      $ bonsai-ninja entrypoints ./src --format json")
+    )]
+    EntryPoints {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Substring match on the decl kind (`function`, `method`, `constructor`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Substring match on the file path.
+        #[arg(long)]
+        file: Option<String>,
+        /// Substring match on the decl's short or qualified name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Interpret `--name` as a regex.
+        #[arg(long, default_value_t = false)]
+        regex: bool,
+        /// Max rows in the text table (`0` = uncapped). JSON is
+        /// always uncapped so scripts keep the full result set.
+        #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
+        limit: usize,
+        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
+        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
+        /// uncapped unless explicitly set.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based number (`--page 3`), stable
+        /// cursor (`--page P:xxxxxxxx`), or `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit every row, no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
     /// Browse indexed call sites by callee / file / line.
     #[command(
-        display_order = 21,
+        display_order = 22,
         long_about = themed_subcommand_long_about("Every call site in the workspace, with the caller function, \
                       location, and a syntax-highlighted source-line \
                       snippet. The `flows` column (on by default) \

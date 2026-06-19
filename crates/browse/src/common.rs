@@ -248,11 +248,22 @@ pub(crate) fn truncate_at_char_boundary(s: &str, max_bytes: usize, ellipsis: &st
 /// (including the qualified form like `authService.runAdminCommand`).
 /// Recurses through every structural variant (`Branch`, `Loop`,
 /// `Try`, `Defer`, `Using`).
+#[must_use]
+pub fn collect_callee_names(events: &[bonsai_lang_api::FlowEvent]) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_callees(events, &mut out);
+    out
+}
+
 pub(crate) fn collect_callees(events: &[bonsai_lang_api::FlowEvent], out: &mut Vec<String>) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
             FlowEvent::Call { name, .. } => out.push(name.clone()),
+            FlowEvent::Assign {
+                source_call: Some(name),
+                ..
+            } => out.push(name.clone()),
             FlowEvent::Branch {
                 then_events,
                 else_events,

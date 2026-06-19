@@ -1,6 +1,6 @@
-//! Browse commands: `defs`, `calls`, `imports`, `vars`, `strings`,
-//! `comments`, `args`, `classes`, `refs`, `search`. Each reads from the shared
-//! `GlobalIndex` and emits a uniform `{header row, rows, footer}`
+//! Browse commands: `defs`, `entrypoints`, `calls`, `imports`, `vars`,
+//! `strings`, `comments`, `args`, `classes`, `refs`, `search`. Each reads
+//! from the shared `GlobalIndex` and emits a uniform `{header row, rows, footer}`
 //! shape. JSON output is a bare array by default; `--context` /
 //! `--page` opts into `{rows, page}` wrapping.
 
@@ -81,8 +81,8 @@ fn open_browse_project(
 // struct field-by-field — and library consumers get the exact same
 // types.
 pub(crate) use bonsai_sdk::{
-    ArgsFilters, CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, ImportsFilters, RefsFilters,
-    SearchFilters, StringsFilters, VarsFilters,
+    ArgsFilters, CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters,
+    ImportsFilters, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -180,6 +180,90 @@ pub(crate) fn cmd_defs(
                     render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja defs <workspace>");
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_entrypoints(
+    root: &std::path::Path,
+    f: EntryPointsFilters<'_>,
+    limit: usize,
+    paging_cfg: paging::PagingConfig,
+    format: BrowseFormat,
+) -> Result<()> {
+    let (project, _footer) = open_project(root)?;
+    let out = project
+        .browse()
+        .entrypoints(f)
+        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let filters_hash = paging::hash_filters(&[
+        ("kind", f.kind.unwrap_or("")),
+        ("file", f.file.unwrap_or("")),
+        ("name", f.name.unwrap_or("")),
+        ("regex", if f.regex { "1" } else { "0" }),
+    ]);
+    let cost = |e: &bonsai_sdk::EntryPointOut| {
+        let loc_len = short_file(&e.file).len() + 24;
+        let params_len = e.params.iter().map(|p| p.len() + 2).sum::<usize>();
+        let callees_len = e.callees.iter().map(|c| c.len() + 3).sum::<usize>();
+        browse_table_row_cost(&[
+            e.name.len(),
+            e.kind.len(),
+            loc_len,
+            params_len,
+            callees_len,
+            e.reason.len(),
+        ])
+    };
+    match format {
+        BrowseFormat::Json | BrowseFormat::Sarif => {
+            emit_json_paged_cached(root, &out, &paging_cfg, "entrypoints", filters_hash, cost)?;
+        }
+        BrowseFormat::Text => {
+            page_cache::emit_paged_text(
+                root,
+                &out,
+                &paging_cfg,
+                "entrypoints",
+                filters_hash,
+                cost,
+                |paged, info, cfg| {
+                    let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
+                    let u = ui();
+                    let mut t = u.table(&["name", "kind", "location", "signature", "callees", "reason"]);
+                    for e in &rows {
+                        let display_params = dedup_sigil_params(&e.params);
+                        let signature = if display_params.is_empty() {
+                            format!("{}()", e.name)
+                        } else {
+                            format!("{}({})", e.name, display_params.join(", "))
+                        };
+                        let loc = format!("{}:{}:{}", short_file(&e.file), e.line, e.column);
+                        let shown: Vec<&str> = e.callees.iter().take(4).map(String::as_str).collect();
+                        let callees = if shown.is_empty() {
+                            String::new()
+                        } else if e.callees.len() > shown.len() {
+                            format!("{} (+{})", shown.join(" → "), e.callees.len() - shown.len())
+                        } else {
+                            shown.join(" → ")
+                        };
+                        t.add_row(vec![
+                            Cell::new(u.name(&e.name)),
+                            Cell::new(u.kind(&e.kind)),
+                            Cell::new(u.path(&loc)),
+                            Cell::new(u.snippet(&signature, extension_for(&e.file))),
+                            Cell::new(u.dim(&callees)),
+                            Cell::new(u.dim(&e.reason)),
+                        ]);
+                    }
+                    cli_println!("{t}");
+                    cli_println!("{}", u.dim(&format!("({} entry points)", out.len())));
+                    render_truncation_notice(rows.len(), truncated);
+                    render_paging_footer(info, "bonsai-ninja entrypoints <workspace>");
                     Ok(())
                 },
             )?;
@@ -1732,38 +1816,7 @@ pub(crate) fn cmd_search(
 }
 
 pub(crate) fn collect_callees(events: &[FlowEvent], out: &mut Vec<String>) {
-    for e in events {
-        match e {
-            FlowEvent::Call { name, .. } => out.push(name.clone()),
-            FlowEvent::Assign {
-                source_call: Some(name),
-                ..
-            } => out.push(name.clone()),
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_callees(then_events, out);
-                collect_callees(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } => collect_callees(body, out),
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_callees(body, out);
-                collect_callees(catch_events, out);
-                collect_callees(finally_events, out);
-            }
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_callees(body, out);
-            }
-            _ => {}
-        }
-    }
+    out.extend(bonsai_sdk::collect_callee_names(events));
 }
 
 #[cfg(test)]

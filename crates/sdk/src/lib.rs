@@ -52,11 +52,12 @@ pub use tree::{
 };
 
 pub use bonsai_browse::{
-    ArgOut, ArgsFilters, AstFileDump, AstFilters, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters,
-    ClassOut, ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters,
-    FlowAnnotator, GraphExportFormat, GraphProjection, HirDump, ImportOut, ImportsFilters, Locator,
-    PrecisionClass, RefOut, RefsFilters, ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters,
-    SearchHit, StringOut, StringsFilters, TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
+    collect_callee_names, ArgOut, ArgsFilters, AstFileDump, AstFilters, AstNode, AstOutcome, CallOut,
+    CallgraphRow, CallsFilters, ClassOut, ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters,
+    EdgeRecord, EdgesFilters, EntryPointOut, EntryPointsFilters, FlowAnnotator, GraphExportFormat,
+    GraphProjection, HirDump, ImportOut, ImportsFilters, Locator, PrecisionClass, RefOut, RefsFilters,
+    ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, StringOut, StringsFilters,
+    TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
 };
 pub use bonsai_inspect::{
     chain_matches_filters, chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id,
@@ -1282,6 +1283,14 @@ impl Browse<'_> {
     pub fn defs(&self, filters: DefsFilters<'_>) -> Result<Vec<bonsai_browse::DefOut>, regex::Error> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::defs(&self.project.workspace, &filters)
+    }
+
+    pub fn entrypoints(
+        &self,
+        filters: EntryPointsFilters<'_>,
+    ) -> Result<Vec<bonsai_browse::EntryPointOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::entrypoints(&self.project.workspace, &filters)
     }
 
     pub fn calls(&self, filters: CallsFilters<'_>) -> Result<Vec<bonsai_browse::CallOut>, regex::Error> {
