@@ -84,8 +84,15 @@ fn run_taint_for(lang: &str) -> Result<bonsai_security::TaintAnalysisReport, Str
     let pack = bonsai_security::load_rulepack(&rules_root()).map_err(|e| format!("rulepack load: {e}"))?;
     let ws = bonsai_workspace::Workspace::index(&ws_root, registry)
         .map_err(|e| format!("index workspace: {e}"))?;
-    bonsai_security::run_taint_analysis(&ws, &pack, Default::default())
-        .map_err(|e| format!("taint_analysis: {e}"))
+    bonsai_security::run_taint_analysis(
+        &ws,
+        &pack,
+        bonsai_security::TaintAnalysisOptions {
+            show_sanitized: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("taint_analysis: {e}"))
 }
 
 #[derive(Debug)]

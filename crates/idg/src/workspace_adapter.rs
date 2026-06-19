@@ -503,6 +503,28 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         self.callback_bindings_indexed(host, param_idx)
     }
 
+    fn callable_arg(&self, caller: FuncId, arg_text: &str) -> Vec<ResolvedCallee> {
+        let bound_name = strip_callback_syntax(arg_text);
+        if bound_name.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut seen = ahash::AHashSet::new();
+        for candidate_func in self.callback_candidate_funcs_for_bound_name(bound_name, caller, caller) {
+            if !self.funcs_share_language(caller, candidate_func) {
+                continue;
+            }
+            if seen.insert(candidate_func) {
+                out.push(ResolvedCallee {
+                    func: candidate_func,
+                    edge_kind: bonsai_callgraph::EdgeKind::Indirect,
+                    precision: bonsai_common::Precision::Narrowed,
+                });
+            }
+        }
+        out
+    }
+
     fn receiver_type_for(&self, func: FuncId) -> Option<String> {
         let decl = self.global.decl_of(bonsai_common::SymbolId::new(func.raw()))?;
         let parent = decl.parent?;

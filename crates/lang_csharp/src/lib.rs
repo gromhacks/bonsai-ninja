@@ -1304,12 +1304,7 @@ fn extend_aliases_from_var_cast(
             continue;
         };
         let canonical = canonical_simple_type_name(&type_name);
-        if canonical.is_empty()
-            || !canonical
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_uppercase())
-        {
+        if canonical.is_empty() || !canonical.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             continue;
         }
         // Replace any non-useful `var`-typed binding the field extractor

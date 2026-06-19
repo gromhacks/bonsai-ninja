@@ -170,6 +170,8 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
     // entry-chain rows, including local inferred callable-object
     // evidence); erlang 2→1 and solidity 3→2 once equivalent
     // inferred/member paths are grouped into one real report row.
+    // Python is now likewise one grouped row with two member finding ids:
+    // the concrete Flask source and the equivalent inferred entry chain.
     match lang {
         "c" => 1,
         "cpp" => 1,
@@ -185,7 +187,7 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "objc" => 1,
         "perl" => 1,
         "php" => 2,
-        "python" => 2,
+        "python" => 1,
         "ruby" => 2,
         "rust" => 1,
         "scala" => 1,
@@ -1966,6 +1968,13 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                             == Some("run_pipeline")
                 }),
                 "python: undecorated run_pipeline must not inherit handle_request decorators:\n{out}"
+            );
+            assert!(
+                rows.iter().any(|row| row
+                    .get("member_finding_ids")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|ids| ids.len() >= 2)),
+                "python: grouped mega_flow row must retain concrete and inferred member finding ids:\n{out}"
             );
         }
         assert!(

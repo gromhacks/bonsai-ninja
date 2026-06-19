@@ -35,6 +35,38 @@
     expect_match_text: [request.get_json]
   description: "Flask / Google Cloud Functions request.get_json() - JSON request body parsed from a remote client. Signature `get_json(force=False, silent=False, cache=True)`; `max_args: 3` rejects unrelated overloads."
 
+- id: python.flask.request_json_field_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [flask]
+  packages: [flask]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get$"
+      base_name_in: [body, payload, data, json_body, json_data, request_json]
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: flask parsed json body field get
+    code: |
+      import flask
+      def login():
+          body = request.get_json(force=True) or {}
+          return body.get("email")
+    expect_match_text: [body.get]
+  - name: unrelated receiver get negative
+    code: |
+      import flask
+      def lookup(cache):
+          return cache.get("email")
+    expect_no_match: true
+  description: "Parsed Flask JSON body field extraction, e.g. `body = request.get_json(...)`; `body.get(name)` is remote JSON input at the field-read line."
+
 - id: python.flask.request_get_data
   enabled: true
   language: python
@@ -124,6 +156,37 @@
           return request.files.get(name)
     expect_match_text: [request.files.get]
   description: "Flask/Sanic request.files.get(name) - multipart upload part controlled by the client."
+
+- id: python.flask.route_path_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [flask]
+  packages: [flask, werkzeug]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+  constraints:
+  - enclosing_decorator_in: [route, get, post, put, patch, delete]
+  match_examples:
+  - name: flask blueprint route path param
+    code: |
+      import flask
+      bp = flask.Blueprint("files", __name__)
+      @bp.get("/<name>")
+      def fetch(name):
+          return name
+    expect_match_text: [name]
+  - name: flask helper param negative
+    code: |
+      import flask
+      def helper(name):
+          return name
+    expect_no_match: true
+  description: "Flask route handler parameters on decorated routes are URL path variables supplied by the remote client."
 
 # ---------------------------------------------------------------------------
 # aiohttp
@@ -515,8 +578,8 @@
   category: http-input
   tag: http-input
   payload_types: [binary]
-  frameworks: [pyramid, bottle]
-  packages: [pyramid, bottle]
+  frameworks: [pyramid, bottle, sanic]
+  packages: [pyramid, bottle, sanic]
   match:
     kind: read
     target:
@@ -529,7 +592,45 @@
           value = request.body
           return value
     expect_match_text: [request.body]
-  description: "Django/Pyramid/Bottle request.body - raw request body bytes. Same adapter fact is canonicalized here to avoid duplicate body-read sources."
+  - name: sanic request body
+    code: |
+      import sanic
+      def example(request):
+          value = request.body
+          return value
+    expect_match_text: [request.body]
+  - name: sanic upload file body
+    code: |
+      import sanic
+      def example(upload):
+          value = upload.body
+          return value
+    expect_match_text: [upload.body]
+  description: "Django/Pyramid/Bottle/Sanic request.body and Sanic upload body - raw bytes supplied by the remote client."
+
+- id: python.pyramid.request_params_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query, form]
+  frameworks: [pyramid]
+  packages: [pyramid]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.params\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: pyramid request params get
+    code: |
+      import pyramid
+      def example(request):
+          return request.params.get("filename", "")
+    expect_match_text: [request.params.get]
+  description: "Pyramid request.params.get(name) - keyed query/form parameter value supplied by the remote client."
 
 # ---------------------------------------------------------------------------
 # Falcon
@@ -799,7 +900,7 @@
   match:
     kind: call
     callee:
-      attribute: [websocket, receive_text]
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.receive_text$"
   constraints:
   - max_args: 0
   match_examples:
@@ -809,6 +910,12 @@
       async def example(websocket):
           return await websocket.receive_text()
     expect_match_text: [websocket.receive_text]
+  - name: starlette websocket receive text alias
+    code: |
+      import fastapi
+      async def example(ws):
+          return await ws.receive_text()
+    expect_match_text: [ws.receive_text]
   description: "FastAPI/Starlette WebSocket.receive_text() - text frame received from a remote peer."
 
 - id: python.starlette.websocket_receive_json

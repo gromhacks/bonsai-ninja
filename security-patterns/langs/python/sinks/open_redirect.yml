@@ -272,6 +272,35 @@
     expect_no_match: true
   description: "aiohttp web.HTTPFound(tainted)."
 
+- id: python.open_redirect.aiohttp_httpfound_location_kw
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [aiohttp]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [web, HTTPFound]
+  constraints:
+  - arg_tainted:
+      kw: location
+  match_examples:
+  - name: aiohttp httpfound keyword location
+    code: |
+      import aiohttp
+      def example(user_input):
+          return web.HTTPFound(location=user_input)
+    expect_match_text: [web.HTTPFound]
+  - name: aiohttp httpfound keyword literal negative
+    code: |
+      import aiohttp
+      def example(user_input):
+          return web.HTTPFound(location="/home")
+    expect_no_match: true
+  description: "aiohttp web.HTTPFound(location=tainted) - keyword form of redirect target."
+
 - id: python.open_redirect.response_redirect
   enabled: true
   language: python

@@ -147,10 +147,7 @@ impl Rulepack {
                     );
                 }
                 for (idx, rule) in pack.typing.iter().enumerate() {
-                    map.insert(
-                        rule.id.clone(),
-                        (language.clone(), RuleKindBucket::Typing, idx),
-                    );
+                    map.insert(rule.id.clone(), (language.clone(), RuleKindBucket::Typing, idx));
                 }
             }
             map

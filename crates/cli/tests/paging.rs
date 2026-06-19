@@ -889,11 +889,13 @@ fn inspect_truncation_hints_resume_next_page() {
     };
     // At least one of the truncation lines must appear — 1k is so
     // tight that something has to be cut.
-    let has_hint = out.contains("not shown — context budget reached");
+    let has_hint = out.contains("not shown — context budget reached")
+        || out.contains("more on page")
+        || out.contains("next     bonsai-ninja inspect");
     assert!(
         has_hint,
         "inspect --context 1024 on a large query must emit a truncation hint, got:\n{}",
-        &out[..out.len().min(500)]
+        out.chars().take(500).collect::<String>()
     );
     // And the hint must name a follow-on action (`--page N` or
     // `--all` — both acceptable), not just a dead-end.
@@ -1031,7 +1033,9 @@ fn copy_workspace_tree(src: &std::path::Path, dst: &std::path::Path) {
         }
         let src_path = entry.path();
         let dst_path = dst.join(&name);
-        let metadata = entry.metadata().expect("source metadata");
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
         if metadata.is_dir() {
             std::fs::create_dir_all(&dst_path).expect("create nested workspace dir");
             copy_workspace_tree(&src_path, &dst_path);
@@ -1507,6 +1511,7 @@ fn inspect_occurrence_hits_table_renders_above_flow_blocks() {
         complex_ws().to_str().unwrap(),
         "--query",
         "request",
+        "--graph-flow",
         "--context",
         "8192",
     ]) else {

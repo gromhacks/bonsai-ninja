@@ -61,11 +61,15 @@ fn write_file(root: &Path, rel: &str, text: &str) {
 }
 
 fn run_taint_json(ws: &Path, source: &str, sink: &str) -> Vec<Value> {
+    run_taint_json_with_flags(ws, source, sink, &[])
+}
+
+fn run_taint_json_with_flags(ws: &Path, source: &str, sink: &str, flags: &[&str]) -> Vec<Value> {
     let Some(bin) = bin_path() else {
         return Vec::new();
     };
-    let out = Command::new(bin)
-        .args(["--no-cache", "--no-progress", "security"])
+    let mut cmd = Command::new(bin);
+    cmd.args(["--no-cache", "--no-progress", "security"])
         .arg(ws)
         .args([
             "taint-analysis",
@@ -80,10 +84,10 @@ fn run_taint_json(ws: &Path, source: &str, sink: &str) -> Vec<Value> {
             "--all",
             "--no-color",
         ])
+        .args(flags)
         .env("NO_COLOR", "1")
-        .env("COLUMNS", "200")
-        .output()
-        .expect("run bonsai-ninja");
+        .env("COLUMNS", "200");
+    let out = cmd.output().expect("run bonsai-ninja");
 
     assert!(
         out.status.success(),
@@ -2080,10 +2084,11 @@ class FeedController {
 "#,
     );
 
-    let rows = run_taint_json(
+    let rows = run_taint_json_with_flags(
         &ws,
         "^java\\.source\\.spring_request_param$",
         "^java\\.xss\\.spring_responseentity_ok_html_concat$",
+        &["--show-sanitized"],
     );
     assert_has_finding(
         &rows,

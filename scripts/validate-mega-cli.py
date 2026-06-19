@@ -57,9 +57,11 @@ EXPECTED_FINDINGS = {
     # python 5→3 and dart→1 after the combiner's group_id+sink-site
     # dedup collapsed duplicate entry-chain rows; python 3→2 after
     # local inferred callable-object paths grouped into one combined
-    # row while the concrete Flask source row stayed intact; erlang
-    # 2→1 and solidity 3→2 after equivalent inferred/member paths are
-    # grouped into one real report row.
+    # row while the concrete Flask source row stayed intact; python
+    # 2→1 once the concrete Flask source and equivalent inferred entry
+    # chain became member ids on one grouped row; erlang 2→1 and
+    # solidity 3→2 after equivalent inferred/member paths are grouped
+    # into one real report row.
     "c": 1,
     "cpp": 1,
     "csharp": 1,
@@ -77,7 +79,7 @@ EXPECTED_FINDINGS = {
     "objc": 1,
     "perl": 1,
     "php": 2,
-    "python": 2,
+    "python": 1,
     "ruby": 2,
     "rust": 1,
     "scala": 1,

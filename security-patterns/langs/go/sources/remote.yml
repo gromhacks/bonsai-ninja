@@ -722,13 +722,15 @@
   category: http-input
   payload_types: [json, form, xml, text]
   frameworks: [gin]
-  packages: ["github.com/gin-gonic/gin"]
+  packages: ["github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/labstack/echo/v4", "github.com/gobuffalo/buffalo"]
   match:
     kind: call
     callee:
       regex: "\\.(Bind|BindHeader|BindQuery|BindUri|ShouldBind|ShouldBindBodyWith|ShouldBindHeader|ShouldBindQuery|ShouldBindUri|ShouldBindXML|ShouldBindYAML|ShouldBindWith)$"
   constraints:
   - receiver_type_in: [Context, Ctx]
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: gin generic body bind
     code: |
@@ -840,6 +842,8 @@
       regex: "\\.BindJSON$"
   constraints:
   - receiver_type_in: [Context, Ctx]
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: gin bind json
     code: |
@@ -865,6 +869,8 @@
       regex: "\\.ShouldBindJSON$"
   constraints:
   - receiver_type_in: [Context, Ctx]
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: gin should bind json
     code: |
@@ -1148,9 +1154,7 @@
     expect_match_text: ["ctx.Request.Header.Get"]
   description: "Framework context request header accessors - client-controlled request headers reached through wrapped net/http requests."
 - id: go.echo.context_request_body
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: go
   trust: remote
   tag: http-input
@@ -1179,7 +1183,7 @@
         _ = ctx.Request().Body
       }
     expect_match_text: ["ctx.Request().Body"]
-  description: "Disabled - Request().Body reads expose the wrapped stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
+  description: "Echo/Iris Request().Body stream - attacker-controlled request body reader. Complements io.ReadAll rules for sinks that consume the stream directly."
 
 # --- iris -------------------------------------------------------------
 - id: go.iris.context_urlparam

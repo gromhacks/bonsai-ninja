@@ -46,6 +46,17 @@ fn java_ws_files(files: &[(&str, &str)]) -> Workspace {
     ws
 }
 
+fn typescript_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.ts".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 fn csharp_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
@@ -342,6 +353,45 @@ def handler(payload):
     );
 }
 
+#[test]
+fn java_ldapi_package_gate_accepts_imported_and_fully_qualified_jndi_contexts() {
+    let mut rule = call_name_rule("java.test.ldapi_search", "search");
+    rule.language = "java".to_string();
+    rule.packages = vec!["javax.naming.directory".to_string()];
+
+    let imported = java_ws(
+        r#"
+import javax.naming.directory.*;
+class App {
+    void handle(DirContext ctx, String filter) throws Exception {
+        ctx.search("ou=users", filter, null);
+    }
+}
+"#,
+    );
+    let imported_matches = match_rule_against_facts(&imported, &rule);
+    assert!(
+        imported_matches.iter().any(|m| m.match_text == "ctx.search"),
+        "wildcard javax.naming.directory import should satisfy the LDAP package gate: {imported_matches:?}"
+    );
+
+    let fully_qualified = java_ws(
+        r#"
+class App {
+    void handle(String filter) throws Exception {
+        javax.naming.directory.InitialDirContext ctx = new javax.naming.directory.InitialDirContext();
+        ctx.search("ou=users", filter, null);
+    }
+}
+"#,
+    );
+    let fqn_matches = match_rule_against_facts(&fully_qualified, &rule);
+    assert!(
+        fqn_matches.iter().any(|m| m.match_text == "ctx.search"),
+        "fully-qualified javax.naming.directory.InitialDirContext with no import should satisfy the LDAP package gate: {fqn_matches:?}"
+    );
+}
+
 fn target_name_rule(id: &str, kind: MatchKind, name: &str) -> Rule {
     let mut rule = base_rule(id, RuleKind::Source, kind);
     rule.match_spec.target = Some(RuleTarget {
@@ -358,6 +408,40 @@ fn target_attr_rule(id: &str, kind: MatchKind, attr: &[&str]) -> Rule {
         ..Default::default()
     });
     rule
+}
+
+#[test]
+fn nested_read_match_uses_innermost_enclosing_function() {
+    let ws = typescript_ws(
+        r#"
+import Hapi from "@hapi/hapi";
+
+export const init = async () => {
+  const server = Hapi.server({ port: 8080 });
+  server.route({
+    method: "POST",
+    path: "/eval",
+    handler: async (req) => {
+      const body = req.payload || {};
+      return body.script;
+    },
+  });
+};
+"#,
+    );
+    let mut rule = target_attr_rule(
+        "typescript.test.hapi_req_payload",
+        MatchKind::Read,
+        &["req", "payload"],
+    );
+    rule.language = "typescript".to_string();
+
+    let hits = match_rules_against_facts(&ws, &[&rule]);
+    assert!(
+        hits.iter()
+            .any(|hit| { hit.match_text == "req.payload" && hit.enclosing_fn.as_deref() == Some("handler") }),
+        "read source inside inline route handler must attach to innermost handler decl: {hits:?}"
+    );
 }
 
 #[test]
@@ -482,6 +566,44 @@ def resolve_bad(args, other):
         1,
         "only the GraphQL-style third resolver arg should match: {hits:?}"
     );
+    assert_eq!(hits[0].enclosing_fn.as_deref(), Some("resolve_products"));
+}
+
+#[test]
+fn param_rule_base_name_not_in_excludes_dedicated_param_shapes() {
+    let ws = python_ws(
+        r#"
+import graphene
+
+def resolve_products(obj, info, name):
+    return name
+
+def resolve_with_args(obj, info, args):
+    return args
+"#,
+    );
+    let mut rule = base_rule(
+        "python.test.graphql_field_arg_without_args",
+        RuleKind::Source,
+        MatchKind::Param,
+    );
+    rule.language = "python".to_string();
+    rule.packages = vec!["graphene".to_string()];
+    rule.match_spec.target = Some(RuleTarget {
+        regex: Some("^[A-Za-z_][A-Za-z0-9_]*$".to_string()),
+        in_method_prefix: vec!["resolve_".to_string()],
+        param_index_in: vec![2],
+        base_name_not_in: vec!["args".to_string()],
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        hits.len(),
+        1,
+        "`args` should be excluded while named resolver field args still match: {hits:?}"
+    );
+    assert_eq!(hits[0].match_text, "name");
     assert_eq!(hits[0].enclosing_fn.as_deref(), Some("resolve_products"));
 }
 

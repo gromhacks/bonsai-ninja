@@ -334,10 +334,10 @@
       - Execute
   constraints:
   - arg_tainted:
-      index: 2
+      index: 3
   match_examples:
   - name: anko execute script
-    code: "package main\nimport \"github.com/mattn/anko/vm\"\nfunc run(src string) {\n  _, _ = vm.Execute(nil, nil, src)\n}\n"
+    code: "package main\nimport \"github.com/mattn/anko/vm\"\nfunc run(src string) {\n  _, _ = vm.Execute(nil, nil, nil, src)\n}\n"
     expect_match_text:
     - vm.Execute
   - name: literal anko script negative
@@ -346,10 +346,10 @@
       import "github.com/mattn/anko/vm"
 
       func run() {
-        _, _ = vm.Execute(nil, nil, "println(1)")
+        _, _ = vm.Execute(nil, nil, nil, "println(1)")
       }
     expect_no_match: true
-  description: "anko vm.Execute(env, stmts, taintedSource) - executes attacker-controlled Anko script text. Merged collision aliases: go.template.text_template_execute_html."
+  description: "anko vm.Execute(ctx, env, stmts, taintedSource) - executes attacker-controlled Anko script text. Merged collision aliases: go.template.text_template_execute_html."
   aliases:
   - go.template.text_template_execute_html
 - id: go.eval.plugin_open

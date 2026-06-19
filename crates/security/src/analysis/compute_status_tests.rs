@@ -133,20 +133,21 @@ fn clean_output_call_overwrites_only_with_clean_values() {
 
 #[test]
 fn try_region_clean_overwrite_requires_all_continuing_paths() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
     let target = "t";
     let clean_t = clean_assign_event(target, 10, 20);
     let clean_finally = clean_assign_event(target, 30, 40);
 
     assert!(
-        !try_region_clean_overwrites_target(&[], &[clean_t.clone()], &[], target),
+        !try_region_clean_overwrites_target(&ws, &[], &[clean_t.clone()], &[], target),
         "a clean catch arm alone is only one exceptional path, not a definite overwrite"
     );
     assert!(
-        try_region_clean_overwrites_target(&[clean_t.clone()], &[clean_t.clone()], &[], target),
+        try_region_clean_overwrites_target(&ws, &[clean_t.clone()], &[clean_t.clone()], &[], target),
         "normal and caught paths both overwrite the target"
     );
     assert!(
-        try_region_clean_overwrites_target(&[], &[], &[clean_finally], target),
+        try_region_clean_overwrites_target(&ws, &[], &[], &[clean_finally], target),
         "finally/ensure cleanup is path-unconditional for continuing paths"
     );
 }
@@ -288,6 +289,56 @@ description: VelocityEngine.evaluate(tainted template) reaches server-side templ
             .iter()
             .any(|issue| issue.code == "package-signal-not-adapter-visible"),
         "adapter-visible package should not warn: {:#?}",
+        report.issues
+    );
+}
+
+#[test]
+fn validator_accepts_java_fully_qualified_package_signal() {
+    let rule = validation_rule_from_yaml(
+        r"
+id: java.ldapi.dir_context_search
+enabled: true
+language: java
+tag: ldapi
+severity: high
+packages: [javax.naming.directory]
+imports: [javax.naming.directory]
+cwe: [CWE-90]
+match:
+  kind: call
+  callee:
+    regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.search$'
+match_examples:
+  - name: fqn initial dir context
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          javax.naming.directory.InitialDirContext ctx = new javax.naming.directory.InitialDirContext();
+          ctx.search(input, input, null);
+        }
+      }
+    expect_match_text: [ctx.search]
+description: InitialDirContext.search with attacker-controlled LDAP filter reaches LDAP injection.
+",
+    );
+    let pack = single_rule_pack(rule);
+    let report = validate_pack(
+        &pack,
+        &PackInventoryOptions::default(),
+        bonsai_adapters::all_languages_registry(),
+    );
+    assert_eq!(
+        report.errors, 0,
+        "unexpected validator errors: {:#?}",
+        report.issues
+    );
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "match-example-missing-import"),
+        "FQN package evidence should satisfy the missing-import check: {:#?}",
         report.issues
     );
 }
@@ -750,6 +801,71 @@ fn nested_sanitizer_inside_sink_arg_can_attach_after_sink_callee_token() {
         &snk,
         func,
         &sink_tainted_args,
+        true,
+        false
+    ));
+}
+
+#[test]
+fn dataflow_connected_sanitizer_after_sink_does_not_attach_by_default() {
+    let src = rule_match_with_text_and_span("Input", 0, 5);
+    let snk = RuleMatch {
+        match_text: "exec".to_string(),
+        line: 3,
+        column: 5,
+        span: Span::new(bonsai_common::FileId::new(1), 100, 106),
+        ..rule_match_with_text_and_span("exec", 100, 106)
+    };
+    let san = RuleMatch {
+        match_text: "escape".to_string(),
+        line: 4,
+        column: 5,
+        span: Span::new(bonsai_common::FileId::new(1), 150, 156),
+        ..rule_match_with_text_and_span("escape", 150, 156)
+    };
+    let func = FuncId::new(1);
+
+    assert!(!sanitizer_can_attach(
+        &src,
+        func,
+        &san,
+        func,
+        &snk,
+        func,
+        &[],
+        true,
+        false
+    ));
+}
+
+#[test]
+fn path_construction_containment_can_attach_after_join_sink() {
+    let src = rule_match_with_text_and_span("name", 0, 4);
+    let snk = RuleMatch {
+        match_text: "filepath.Join".to_string(),
+        line: 3,
+        column: 18,
+        span: Span::new(bonsai_common::FileId::new(1), 100, 113),
+        ..rule_match_with_text_and_span("filepath.Join", 100, 113)
+    };
+    let san = RuleMatch {
+        match_text: "filepath.Rel".to_string(),
+        line: 4,
+        column: 17,
+        span: Span::new(bonsai_common::FileId::new(1), 150, 162),
+        ..rule_match_with_text_and_span("filepath.Rel", 150, 162)
+    };
+    let func = FuncId::new(1);
+
+    assert!(sanitizer_can_attach(
+        &src,
+        func,
+        &san,
+        func,
+        &snk,
+        func,
+        &[],
+        true,
         true
     ));
 }
@@ -838,6 +954,19 @@ fn allowlist_and_shape_sanitizers_credit_targeted_sink_families() {
         compute_status(&chars_chain, Some("header-injection")),
         FindingStatus::Sanitized
     );
+}
+
+#[test]
+fn go_header_char_allowlist_condition_recognizes_printable_guard() {
+    assert!(header_char_allowlist_condition(
+        "ch >= 0x20 && ch != 0x7f && ch != '\"' && ch != '\\\\'",
+        "ch"
+    ));
+    assert!(!header_char_allowlist_condition("ch != '\\r'", "ch"));
+    assert!(!header_char_allowlist_condition(
+        "other >= 0x20 && other != 0x7f",
+        "ch"
+    ));
 }
 
 #[test]

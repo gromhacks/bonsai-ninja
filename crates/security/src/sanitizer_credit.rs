@@ -95,6 +95,7 @@ const MAPPING: &[(&str, &[&str])] = &[
             "sql-injection",
             "ssrf",
             "xpath-injection",
+            "ssti",
         ],
     ),
     (
@@ -196,6 +197,13 @@ pub fn sanitizer_credits_sink_tag(san_tag: Option<&str>, sink_tag: Option<&str>)
     let (Some(s), Some(k)) = (san_tag, sink_tag) else {
         return false;
     };
+    // Engine-synthesized reachability guard: code past a reviewed
+    // dev-only environment gate is not production-reachable for any sink
+    // family. This is intentionally not a rulepack tag so authored
+    // sanitizers cannot accidentally claim wildcard credit.
+    if s == "dev-only-guard" {
+        return true;
+    }
     if s == k {
         return true;
     }

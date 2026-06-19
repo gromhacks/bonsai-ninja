@@ -10,14 +10,70 @@ use bonsai_sdk::Workspace;
 use comfy_table::Cell;
 
 use crate::args::{BrowseFormat, OutputFormat};
-use crate::footer::{render_paging_footer, render_truncation_notice};
+use crate::footer::{render_paging_footer, render_truncation_notice, WorkspaceFooter};
 use crate::page_cache;
 use crate::paging;
 use crate::progress;
 use crate::ui::{extension_for, Ui};
 use crate::{cli_println, ui};
 
-use super::open_project_index_only as open_project;
+use super::{open_project_index_matching_literal, open_project_index_only as open_project};
+
+const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
+
+fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if matches!(
+                name,
+                ".git" | ".bonsai" | "target" | "node_modules" | ".gradle" | "build" | "dist" | "out"
+            ) {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() {
+                seen += 1;
+                if seen > limit {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn browse_literal_prefilter_enabled(root: &std::path::Path, literal: Option<&str>, regex: bool) -> bool {
+    literal.is_some_and(|literal| {
+        !regex
+            && literal.len() >= 3
+            && workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
+    })
+}
+
+fn open_browse_project(
+    root: &std::path::Path,
+    literal: Option<&str>,
+    regex: bool,
+) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)> {
+    let use_literal_prefilter = browse_literal_prefilter_enabled(root, literal, regex);
+    let (project, footer) = if use_literal_prefilter {
+        open_project_index_matching_literal(root, literal.expect("checked above"))?
+    } else {
+        open_project(root)?
+    };
+    Ok((project, footer, use_literal_prefilter))
+}
 
 // Filter + output types are re-exports of the SDK definitions in
 // `bonsai_browse`. Keeping them aliased here means existing call
@@ -38,7 +94,9 @@ pub(crate) fn cmd_defs(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.name.or(f.has_callee).or(f.has_param).or(f.has_decorator);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -527,7 +585,9 @@ pub(crate) fn cmd_calls(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.callee.or(f.caller);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -796,7 +856,9 @@ pub(crate) fn cmd_imports(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.module.or(f.alias);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     f.resolve_workspace_bindings = flows && matches!(format, BrowseFormat::Text);
     let out = project
@@ -921,7 +983,9 @@ pub(crate) fn cmd_vars(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.name.or(f.source).or(f.in_fn);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -1030,7 +1094,9 @@ pub(crate) fn cmd_strings(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.contains.or(f.in_fn);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -1151,7 +1217,8 @@ pub(crate) fn cmd_comments(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.contains.or(f.in_fn);
+    let (project, _footer, _partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -1219,7 +1286,9 @@ pub(crate) fn cmd_args(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.callee.or(f.value).or(f.in_fn).or(f.keyword);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -1351,7 +1420,9 @@ pub(crate) fn cmd_classes(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let prefilter_literal = f.name.or(f.has_method);
+    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -1473,7 +1544,8 @@ pub(crate) fn cmd_refs(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let (project, _footer, partial_workspace) = open_browse_project(root, Some(symbol), f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let out = project
         .browse()
@@ -1564,7 +1636,8 @@ pub(crate) fn cmd_search(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let (project, _footer, partial_workspace) = open_browse_project(root, Some(query), f.regex)?;
+    let flows = flows && !partial_workspace;
     let ws = project.workspace();
     let hits = project
         .browse()

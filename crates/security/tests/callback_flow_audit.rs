@@ -193,6 +193,85 @@ fn object_config_route_handler_body_is_analyzed() {
     );
 }
 
+#[test]
+fn fastify_object_route_handler_body_is_analyzed() {
+    let dir = std::env::temp_dir().join("bonsai_fastify_objcfg_handler_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("m.js"),
+        "const cp = require('child_process');\n\
+         const fastify = require('fastify')();\n\
+         fastify.route({ method: 'GET', url: '/x', handler: async (request, reply) => {\n\
+           cp.exec(request.query.q);\n\
+         } });\n",
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let n = report.findings.len();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        n >= 1,
+        "Fastify object-config route handler body must be analyzed (request.query -> cp.exec), got {n} findings"
+    );
+}
+
+/// WS3 source-callback semantics. Some source APIs deliver tainted data
+/// through a callback parameter rather than a return value or ordinary
+/// call argument (`fs.readFile(path, cb)` taints `cb`'s `data`
+/// parameter). The source-to-sink scheduler must include the named
+/// callback in its exact graph scope; otherwise the IDG has the correct
+/// callback edge model but the callback function is pruned before the
+/// graph is built.
+#[test]
+fn node_source_callback_named_function_reaches_sink() {
+    let dir = std::env::temp_dir().join("bonsai_node_source_callback_audit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("m.js"),
+        "const fs = require('fs');\n\
+         function named(path) {\n\
+           fs.readFile(path, 'utf8', onRead);\n\
+         }\n\
+         function onRead(err, data) {\n\
+           eval(data);\n\
+         }\n",
+    )
+    .expect("write");
+    let registry = bonsai_adapters::all_languages_registry();
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack");
+    let ws = bonsai_workspace::Workspace::index(&dir, registry).expect("index");
+    let report = bonsai_security::run_taint_analysis(&ws, &pack, Default::default()).expect("taint");
+    let matching = report.findings.iter().find(|finding| {
+        finding.finding.source.rule_id == "javascript.source.fs_readfile_options_callback"
+            && finding.finding.sink.rule_id == "javascript.eval.builtin_eval"
+            && finding
+                .finding
+                .chain_display
+                .iter()
+                .map(String::as_str)
+                .eq(["named", "onRead"])
+            && finding.finding.taint_path.iter().any(|step| {
+                step.caller == "named"
+                    && step.callee == "onRead"
+                    && step
+                        .tainted_args
+                        .iter()
+                        .any(|arg| arg.value_text == "data" && arg.param_name == "data")
+            })
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        matching.is_some(),
+        "fs.readFile named callback data parameter must reach eval with a named->onRead path; findings={:#?}",
+        report.findings
+    );
+}
+
 /// WS3 coercion passthrough (Go). A Go type conversion `string(b)` /
 /// `string([]byte(input))` changes representation but preserves
 /// attacker-controlled content — the analogue of Python `str()`/`bytes()`
@@ -245,7 +324,11 @@ fn go_string_conversion_preserves_taint() {
 #[test]
 fn lua_tostring_preserves_taint() {
     assert!(
-        coercion_findings("lua", "lua", "function h(input) os.execute(tostring(input)) end\n") >= 1,
+        coercion_findings(
+            "lua",
+            "lua",
+            "function h(input) os.execute(tostring(input)) end\n"
+        ) >= 1,
         "Lua tostring(input) must preserve taint into os.execute"
     );
 }
@@ -384,11 +467,19 @@ fn coercion_findings(tag: &str, ext: &str, src: &str) -> usize {
 #[test]
 fn erlang_binary_to_list_preserves_taint() {
     assert!(
-        coercion_findings("erlang_b2l", "erl", "h(Input) -> os:cmd(binary_to_list(Input)).\n") >= 1,
+        coercion_findings(
+            "erlang_b2l",
+            "erl",
+            "h(Input) -> os:cmd(binary_to_list(Input)).\n"
+        ) >= 1,
         "Erlang binary_to_list(Input) must preserve taint into os:cmd"
     );
     assert!(
-        coercion_findings("erlang_c2l", "erl", "h(Input) -> os:cmd(unicode:characters_to_list(Input)).\n") >= 1,
+        coercion_findings(
+            "erlang_c2l",
+            "erl",
+            "h(Input) -> os:cmd(unicode:characters_to_list(Input)).\n"
+        ) >= 1,
         "Erlang unicode:characters_to_list(Input) must preserve taint into os:cmd"
     );
 }
@@ -402,19 +493,35 @@ fn erlang_binary_to_list_preserves_taint() {
 #[test]
 fn base64_decode_preserves_taint_across_langs() {
     assert!(
-        coercion_findings("php_b64", "php", "<?php\nfunction h($input){ system(base64_decode($input)); }\n") >= 1,
+        coercion_findings(
+            "php_b64",
+            "php",
+            "<?php\nfunction h($input){ system(base64_decode($input)); }\n"
+        ) >= 1,
         "PHP base64_decode must preserve taint"
     );
     assert!(
-        coercion_findings("ruby_b64", "rb", "require 'base64'\ndef h(input)\n  system(Base64.decode64(input))\nend\n") >= 1,
+        coercion_findings(
+            "ruby_b64",
+            "rb",
+            "require 'base64'\ndef h(input)\n  system(Base64.decode64(input))\nend\n"
+        ) >= 1,
         "Ruby Base64.decode64 must preserve taint"
     );
     assert!(
-        coercion_findings("js_atob", "js", "const cp=require('child_process')\nfunction h(input){ cp.exec(atob(input)) }\n") >= 1,
+        coercion_findings(
+            "js_atob",
+            "js",
+            "const cp=require('child_process')\nfunction h(input){ cp.exec(atob(input)) }\n"
+        ) >= 1,
         "JS atob must preserve taint"
     );
     assert!(
-        coercion_findings("ts_atob", "ts", "const cp=require('child_process')\nfunction h(input: string){ cp.exec(atob(input)) }\n") >= 1,
+        coercion_findings(
+            "ts_atob",
+            "ts",
+            "const cp=require('child_process')\nfunction h(input: string){ cp.exec(atob(input)) }\n"
+        ) >= 1,
         "TS atob must preserve taint"
     );
 }
@@ -427,19 +534,35 @@ fn base64_decode_preserves_taint_across_langs() {
 #[test]
 fn json_parse_preserves_taint_across_langs() {
     assert!(
-        coercion_findings("php_json", "php", "<?php\nfunction h($input){ system(json_decode($input)); }\n") >= 1,
+        coercion_findings(
+            "php_json",
+            "php",
+            "<?php\nfunction h($input){ system(json_decode($input)); }\n"
+        ) >= 1,
         "PHP json_decode must preserve taint"
     );
     assert!(
-        coercion_findings("ruby_json", "rb", "require 'json'\ndef h(input)\n  system(JSON.parse(input))\nend\n") >= 1,
+        coercion_findings(
+            "ruby_json",
+            "rb",
+            "require 'json'\ndef h(input)\n  system(JSON.parse(input))\nend\n"
+        ) >= 1,
         "Ruby JSON.parse must preserve taint"
     );
     assert!(
-        coercion_findings("js_json", "js", "const cp=require('child_process')\nfunction h(input){ cp.exec(JSON.parse(input)) }\n") >= 1,
+        coercion_findings(
+            "js_json",
+            "js",
+            "const cp=require('child_process')\nfunction h(input){ cp.exec(JSON.parse(input)) }\n"
+        ) >= 1,
         "JS JSON.parse must preserve taint"
     );
     assert!(
-        coercion_findings("ts_json", "ts", "const cp=require('child_process')\nfunction h(input: string){ cp.exec(JSON.parse(input)) }\n") >= 1,
+        coercion_findings(
+            "ts_json",
+            "ts",
+            "const cp=require('child_process')\nfunction h(input: string){ cp.exec(JSON.parse(input)) }\n"
+        ) >= 1,
         "TS JSON.parse must preserve taint"
     );
 }
@@ -457,20 +580,36 @@ fn json_parse_preserves_taint_across_langs() {
 #[test]
 fn comprehension_and_generator_sinks_are_analyzed() {
     assert!(
-        coercion_findings("py_genexpr_call", "py", "import os\ndef h(items):\n    any(os.system(t) for t in items)\n") >= 1,
+        coercion_findings(
+            "py_genexpr_call",
+            "py",
+            "import os\ndef h(items):\n    any(os.system(t) for t in items)\n"
+        ) >= 1,
         "generator expr as call arg must taint the sink"
     );
     assert!(
-        coercion_findings("py_genexpr_list", "py", "import os\ndef h(items):\n    list(os.system(t) for t in items)\n") >= 1,
+        coercion_findings(
+            "py_genexpr_list",
+            "py",
+            "import os\ndef h(items):\n    list(os.system(t) for t in items)\n"
+        ) >= 1,
         "generator expr in list() must taint the sink"
     );
     assert!(
-        coercion_findings("py_nested_comp", "py", "import os\ndef h(rows):\n    [os.system(t) for row in rows for t in row]\n") >= 1,
+        coercion_findings(
+            "py_nested_comp",
+            "py",
+            "import os\ndef h(rows):\n    [os.system(t) for row in rows for t in row]\n"
+        ) >= 1,
         "nested comprehension must chain rows -> row -> t into the sink"
     );
     // regression: the basic single-clause list comp still fires.
     assert!(
-        coercion_findings("py_list_comp", "py", "import os\ndef h(items):\n    [os.system(t) for t in items]\n") >= 1,
+        coercion_findings(
+            "py_list_comp",
+            "py",
+            "import os\ndef h(items):\n    [os.system(t) for t in items]\n"
+        ) >= 1,
         "single-clause list comprehension must still taint the sink"
     );
 }
@@ -483,15 +622,27 @@ fn comprehension_and_generator_sinks_are_analyzed() {
 #[test]
 fn hex_decode_preserves_taint_across_langs() {
     assert!(
-        coercion_findings("py_unhex", "py", "import os, binascii\ndef h(input):\n    os.system(binascii.unhexlify(input))\n") >= 1,
+        coercion_findings(
+            "py_unhex",
+            "py",
+            "import os, binascii\ndef h(input):\n    os.system(binascii.unhexlify(input))\n"
+        ) >= 1,
         "python binascii.unhexlify must preserve taint"
     );
     assert!(
-        coercion_findings("py_fromhex", "py", "import os\ndef h(input):\n    os.system(bytes.fromhex(input))\n") >= 1,
+        coercion_findings(
+            "py_fromhex",
+            "py",
+            "import os\ndef h(input):\n    os.system(bytes.fromhex(input))\n"
+        ) >= 1,
         "python bytes.fromhex must preserve taint"
     );
     assert!(
-        coercion_findings("php_hex2bin", "php", "<?php\nfunction h($input){ system(hex2bin($input)); }\n") >= 1,
+        coercion_findings(
+            "php_hex2bin",
+            "php",
+            "<?php\nfunction h($input){ system(hex2bin($input)); }\n"
+        ) >= 1,
         "php hex2bin must preserve taint"
     );
 }
@@ -505,11 +656,19 @@ fn hex_decode_preserves_taint_across_langs() {
 #[test]
 fn yaml_safe_load_preserves_taint() {
     assert!(
-        coercion_findings("py_yaml", "py", "import os, yaml\ndef h(input):\n    os.system(yaml.safe_load(input))\n") >= 1,
+        coercion_findings(
+            "py_yaml",
+            "py",
+            "import os, yaml\ndef h(input):\n    os.system(yaml.safe_load(input))\n"
+        ) >= 1,
         "python yaml.safe_load must preserve taint"
     );
     assert!(
-        coercion_findings("ruby_yaml", "rb", "require 'yaml'\ndef h(input)\n  system(YAML.safe_load(input))\nend\n") >= 1,
+        coercion_findings(
+            "ruby_yaml",
+            "rb",
+            "require 'yaml'\ndef h(input)\n  system(YAML.safe_load(input))\nend\n"
+        ) >= 1,
         "ruby YAML.safe_load must preserve taint"
     );
 }

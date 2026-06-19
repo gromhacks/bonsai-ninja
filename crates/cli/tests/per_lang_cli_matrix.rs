@@ -305,7 +305,10 @@ pub const LANGS: &[LangExp] = &[
         // floor of 8 counted duplicate/fan-out rows the engine no longer
         // emits (one resolved chain per distinct path).
         min_source_flows_micro: 4,
-        min_deps_micro: 4,
+        // Three grounded package rows: java.sql plus servlet/http input.
+        // The previous floor counted an ungrounded framework/package
+        // alias that the package gate now intentionally drops.
+        min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -318,7 +321,11 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "execSync",
         sqli_sink: "db.query",
         min_findings_micro: 0,
-        min_findings_complex: 50,
+        // 43 after sanitizer-aware taint scheduling and dedup: command
+        // injection, NoSQL, upload/path, eval, prototype pollution,
+        // redirect and SSRF remain represented without duplicated
+        // inferred-entry rows.
+        min_findings_complex: 43,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
@@ -448,8 +455,10 @@ pub const LANGS: &[LangExp] = &[
         // deep_flow_sink's os_system, collapsing four inferred
         // `decorator_handler.param_*` overclaims on that sink into one
         // concrete finding (plus one new decorator chain in
-        // advanced_patterns).
-        min_findings_complex: 59,
+        // advanced_patterns). 59 -> 54 after the same dedup pass removed
+        // additional inferred-entry fanout while keeping the represented
+        // sink families unchanged.
+        min_findings_complex: 54,
         min_complex_decls: 200,
         refs_populated: true,
         has_classes: false,
@@ -572,7 +581,10 @@ pub const LANGS: &[LangExp] = &[
         cmdi_sink: "execSync",
         sqli_sink: "db.query",
         min_findings_micro: 1,
-        min_findings_complex: 50,
+        // 43 after precision/dedup cleanup: command injection, upload/path,
+        // eval, SSRF, prototype pollution and template sinks remain covered
+        // without duplicated inferred-entry rows.
+        min_findings_complex: 43,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
@@ -677,7 +689,7 @@ fn check_calls_include(ws: &str, lang: &str, callee_needle: &str) {
 
 /// Assert `inspect --query` emits a FLOW block for the target.
 fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
-    let Some((out, _, code)) = run(&["inspect", ws, "--query", query]) else {
+    let Some((out, _, code)) = run(&["inspect", ws, "--query", query, "--graph-flow"]) else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] inspect --query {query} ec={code}");
@@ -694,7 +706,15 @@ fn check_inspect_reaches(ws: &str, lang: &str, query: &str) {
 /// Assert `inspect --flow F:id` round-trips correctly for a flow
 /// surfaced from the initial query.
 fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
-    let Some((out, _, _)) = run(&["inspect", ws, "--query", query, "--format", "json"]) else {
+    let Some((out, _, _)) = run(&[
+        "inspect",
+        ws,
+        "--query",
+        query,
+        "--graph-flow",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     let parsed: serde_json::Value = match serde_json::from_str(&out) {
@@ -718,7 +738,8 @@ fn check_flow_id_roundtrip(ws: &str, lang: &str, query: &str) {
         }
     }
     let Some(fid) = flow_id else { return };
-    let Some((round, _, code)) = run(&["inspect", ws, "--query", query, "--flow", &fid]) else {
+    let Some((round, _, code)) = run(&["inspect", ws, "--query", query, "--graph-flow", "--flow", &fid])
+    else {
         return;
     };
     assert_eq!(code, 0, "[{lang}] --flow {fid} ec={code}");
@@ -2063,7 +2084,7 @@ lang_matrix_tests! {
 /// Utility: run `inspect --query` against mega_flow and return stdout.
 fn mega_flow_inspect(query: &str) -> Option<String> {
     let w = ws("python", "mega_flow");
-    run(&["inspect", &w, "--query", query]).map(|(o, _, _)| o)
+    run(&["inspect", &w, "--query", query, "--graph-flow"]).map(|(o, _, _)| o)
 }
 
 /// Utility: run `dump-taint` seeded from the source and return stdout.
@@ -2625,10 +2646,11 @@ fn mega_flow_dump_taint_threads_every_cross_function_hop() {
 fn mega_flow_inspect_compact_surface_is_smaller_than_full() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
-    let Some((full, _, _)) = run(&["inspect", &w, "--query", "execute"]) else {
+    let Some((full, _, _)) = run(&["inspect", &w, "--query", "execute", "--graph-flow"]) else {
         return;
     };
-    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "execute", "--compact"]) else {
+    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "execute", "--graph-flow", "--compact"])
+    else {
         return;
     };
     // Compact mode must drop body lines but keep FLOW / GROUP headers.
@@ -3212,10 +3234,17 @@ fn pagination_cursor_advances_correctly() {
 fn inspect_compact_keeps_headers_drops_bodies() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "micro");
-    let Some((compact, _, _)) = run(&["inspect", &w, "--query", "handle_request", "--compact"]) else {
+    let Some((compact, _, _)) = run(&[
+        "inspect",
+        &w,
+        "--query",
+        "handle_request",
+        "--graph-flow",
+        "--compact",
+    ]) else {
         return;
     };
-    let Some((full, _, _)) = run(&["inspect", &w, "--query", "handle_request"]) else {
+    let Some((full, _, _)) = run(&["inspect", &w, "--query", "handle_request", "--graph-flow"]) else {
         return;
     };
     assert!(compact.contains("FLOW 1"), "compact mode dropped FLOW header");
@@ -3241,6 +3270,7 @@ fn inspect_grouped_view_emits_group_blocks() {
         "--query",
         ".+",
         "--regex",
+        "--graph-flow",
         "--view",
         "grouped",
         "--max-flows",

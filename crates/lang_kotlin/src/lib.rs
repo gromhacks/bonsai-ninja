@@ -1219,10 +1219,7 @@ fn kotlin_property_cast_type(node: Node<'_>, src: &[u8]) -> Option<String> {
             // field).
             let mut inner = child.walk();
             for operand in child.named_children(&mut inner) {
-                if matches!(
-                    operand.kind(),
-                    "user_type" | "type_identifier" | "nullable_type"
-                ) {
+                if matches!(operand.kind(), "user_type" | "type_identifier" | "nullable_type") {
                     return canonical_short_type(node_text(&operand, src));
                 }
             }

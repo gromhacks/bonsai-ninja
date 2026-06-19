@@ -210,6 +210,12 @@ pub struct RuleTarget {
     /// `db.execute(...)` without hardcoding the receiver in the regex.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_name_in: Vec<String>,
+    /// Optional inverse receiver/base identifier filter. Useful for
+    /// receiver-shaped method rules that should not match module
+    /// functions with the same tail (`raw.decode(...)` yes,
+    /// `jsonpickle.decode(...)` no).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_name_not_in: Vec<String>,
     /// Match a parameter by an annotation/decorator name attached to it
     /// (Java `@RequestParam`, Python `@requires_admin`-style param
     /// decorators when the adapter surfaces them, C# `[FromBody]`).
@@ -278,6 +284,7 @@ impl RuleTarget {
             && self.regex.is_none()
             && self.annotation.is_none()
             && self.base_name_in.is_empty()
+            && self.base_name_not_in.is_empty()
             && self.in_class.is_empty()
             && self.in_method.is_empty()
             && self.in_method_prefix.is_empty()
@@ -325,6 +332,13 @@ pub struct TaintSemantics {
     /// becomes tainted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_output_args: Vec<usize>,
+    /// Source rules only: callback argument shapes whose callback
+    /// parameters receive attacker-controlled data from the source call.
+    /// This covers Node-style APIs such as
+    /// `fs.readFile(path, (err, data) => ...)` and
+    /// `process.stdin.on("data", chunk => ...)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_callback_args: Vec<SourceCallbackArgSemantics>,
     /// Sanitizer/passthrough rules only: argument indices whose value
     /// flows unchanged to the call result. This covers decode/unescape
     /// APIs that preserve attacker control while changing representation.
@@ -353,6 +367,13 @@ pub struct TaintSemantics {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SourceCallbackArgSemantics {
+    pub callback_arg_index: usize,
+    pub source_param_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CleanOutputOverwriteSemantics {
     pub output_arg_index: usize,
     pub value_start_arg_index: usize,
@@ -376,6 +397,9 @@ pub struct OutputArgFlowSemantics {
 pub enum ConstraintKind {
     ReceiverTypeIn {
         receiver_type_in: Vec<String>,
+    },
+    ReceiverTypeNotIn {
+        receiver_type_not_in: Vec<String>,
     },
     SecondArgEquals {
         second_arg_equals: String,
@@ -476,6 +500,7 @@ impl ConstraintKind {
     pub fn name(&self) -> &'static str {
         match self {
             Self::ReceiverTypeIn { .. } => "receiver_type_in",
+            Self::ReceiverTypeNotIn { .. } => "receiver_type_not_in",
             Self::SecondArgEquals { .. } => "second_arg_equals",
             Self::ArgEquals { .. } => "arg_equals",
             Self::KeywordArgEquals { .. } => "keyword_arg_equals",

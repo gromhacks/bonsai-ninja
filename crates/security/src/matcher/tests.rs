@@ -280,6 +280,30 @@ description: Lifecycle audit-pair transition.
 }
 
 #[test]
+fn base_name_not_in_blocks_module_decoder_bases() {
+    let rule = rule_from_yaml(
+        r#"
+id: python.passthrough.bytes_decode_receiver
+enabled: true
+language: python
+tag: passthrough-decode
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$\\.]*\\.decode$"
+    base_name_not_in: [jsonpickle]
+description: Receiver decode passthrough.
+"#,
+        crate::rule::RuleKind::Sanitizer,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+
+    assert!(prepared.base_name_allows("raw.decode"));
+    assert!(prepared.base_name_allows("self.raw.decode"));
+    assert!(!prepared.base_name_allows("jsonpickle.decode"));
+}
+
+#[test]
 fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
     let mut reads = Vec::new();
     collect_flow_read_sites(

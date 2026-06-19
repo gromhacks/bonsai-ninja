@@ -828,6 +828,9 @@ fn main() -> Result<()> {
             flow,
             view,
             group,
+            graph_flow,
+            taint_flow,
+            syntax_only,
             context,
             page,
             format,
@@ -858,10 +861,12 @@ fn main() -> Result<()> {
                 && kind.is_empty()
                 && flow.is_none()
                 && group.is_none()
+                && !taint_flow
             {
                 anyhow::bail!(
                     "inspect needs a query, a filter (--from / --to / --file / \
-                     --in-fn / --kind), --flow <flow_id>, or --group <group_id>"
+                     --in-fn / --kind), --flow <flow_id>, --group <group_id>, \
+                     or --taint-flow"
                 );
             }
             // `--all` lifts every cap. The chain enumerator uses
@@ -884,6 +889,8 @@ fn main() -> Result<()> {
                 group_id_filter: group,
             };
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            let taint_flow_explicit = taint_flow;
+            let taint_flow = taint_flow || !syntax_only;
             cmd_inspect(
                 &workspace,
                 q.as_deref(),
@@ -894,6 +901,9 @@ fn main() -> Result<()> {
                 mp,
                 mh,
                 render,
+                graph_flow,
+                taint_flow,
+                taint_flow_explicit,
                 paging,
                 format,
             )

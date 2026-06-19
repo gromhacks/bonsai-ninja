@@ -254,6 +254,137 @@
       - ResponseEntity
       - status
   description: "Disabled - flag only when 30x + Location header is tainted."
+- id: java.open_redirect.spring_httpheaders_setlocation
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.http
+  imports:
+  - org.springframework.http
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute: [HttpHeaders, setLocation]
+  constraints:
+  - arg_tainted:
+      index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: spring headers setLocation tainted URI
+    code: |
+      import org.springframework.http.*;
+      import java.net.URI;
+      class App {
+        void handle(String next) {
+          HttpHeaders headers = new HttpHeaders();
+          headers.setLocation(URI.create(next));
+        }
+      }
+    expect_match_text: [headers.setLocation]
+  - name: spring headers setLocation literal negative
+    code: |
+      import org.springframework.http.*;
+      import java.net.URI;
+      class App {
+        void handle(String next) {
+          HttpHeaders headers = new HttpHeaders();
+          headers.setLocation(URI.create("/home"));
+        }
+      }
+    expect_no_match: true
+  description: "Spring HttpHeaders.setLocation(tainted URI) - attacker-controlled redirect target stored in response headers."
+- id: java.open_redirect.spring_responseentity_redirect_headers
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.http
+  imports:
+  - org.springframework.http
+  cwe:
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      regex: '^ResponseEntity(?:<.*>)?$'
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)(FOUND|MOVED|SEE_OTHER|TEMPORARY_REDIRECT|PERMANENT_REDIRECT|MULTIPLE_CHOICES|3[0-9][0-9])'
+  match_examples:
+  - name: spring response entity tainted redirect headers
+    code: |
+      import org.springframework.http.*;
+      import java.net.URI;
+      class App {
+        Object handle(String next) {
+          HttpHeaders headers = new HttpHeaders();
+          headers.setLocation(URI.create(next));
+          return new ResponseEntity<>(headers, HttpStatus.FOUND);
+        }
+      }
+    expect_match_text: [ResponseEntity<>]
+  - name: spring response entity non redirect negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        Object handle(HttpHeaders headers) {
+          return new ResponseEntity<>(headers, HttpStatus.OK);
+        }
+      }
+    expect_no_match: true
+  description: "Spring ResponseEntity(headers, 30x) with tainted Location-bearing headers - open redirect."
+- id: java.open_redirect.webflux_serverresponse_location_header
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  imports:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: '^ServerResponse\.status\(.*\)\.header$'
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(LOCATION|Location|^"Location"$)'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: webflux server response location header redirect
+    code: |
+      import org.springframework.web.reactive.function.server.*;
+      import org.springframework.http.*;
+      class App {
+        Object handle(String next) {
+          return ServerResponse.status(HttpStatus.FOUND).header(HttpHeaders.LOCATION, next).build();
+        }
+      }
+    expect_match_text: [ServerResponse.status(HttpStatus.FOUND).header]
+  - name: webflux server response safe location negative
+    code: |
+      import org.springframework.web.reactive.function.server.*;
+      import org.springframework.http.*;
+      class App {
+        Object handle(String next) {
+          return ServerResponse.status(HttpStatus.FOUND).header(HttpHeaders.LOCATION, "/").build();
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.status(30x).header(Location, tainted) - open redirect."
 - id: java.open_redirect.quarkus_response_seeother
   enabled: true
   language: java
@@ -294,6 +425,56 @@
       }
     expect_no_match: true
   description: "Quarkus RestResponse.seeOther(tainted URI) - open redirect."
+
+- id: java.open_redirect.webflux_serverresponse_header_location
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  - org.springframework.http
+  imports:
+  - org.springframework.web.reactive
+  - org.springframework.http
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: '^ServerResponse\.status\([^)]*(FOUND|MOVED|SEE_OTHER|TEMPORARY_REDIRECT|PERMANENT_REDIRECT|3[0-9][0-9])[^)]*\)\.header$'
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(LOCATION|^"Location"$)'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: webflux server response location redirect
+    code: |
+      import org.springframework.http.*;
+      import org.springframework.web.reactive.function.server.*;
+      class App {
+        Object handle(String next) {
+          return ServerResponse.status(HttpStatus.FOUND)
+              .header(HttpHeaders.LOCATION, next)
+              .build();
+        }
+      }
+    expect_match_text: [ServerResponse.status(HttpStatus.FOUND).header]
+  - name: webflux server response non redirect negative
+    code: |
+      import org.springframework.http.*;
+      import org.springframework.web.reactive.function.server.*;
+      class App {
+        Object handle(String next) {
+          return ServerResponse.status(HttpStatus.OK)
+              .header(HttpHeaders.LOCATION, next)
+              .build();
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.status(30x).header(Location, tainted) - open redirect."
 
 - id: java.open_redirect.spring_oauth_redirect_uri_tainted
   enabled: true

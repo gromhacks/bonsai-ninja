@@ -238,6 +238,46 @@
       }
     expect_no_match: true
   description: "template.Srcset(tainted) - cast marks the string as a safe img srcset attribute value, bypassing URL-context escaping; tainted values enable srcset/URL-based injection."
+- id: go.xss.raw_html_return
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - net/http
+  - github.com/gin-gonic/gin
+  - github.com/labstack/echo
+  - github.com/labstack/echo/v4
+  - github.com/kataras/iris/v12
+  - github.com/gofiber/fiber
+  - github.com/gofiber/fiber/v2
+  - github.com/gobuffalo/buffalo
+  cwe:
+  - CWE-79
+  match:
+    kind: return
+    target:
+      regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;'
+  match_examples:
+  - name: raw html helper return with tainted expression
+    code: |
+      package main
+      import "net/http"
+      func page(q string) string {
+        _ = http.StatusOK
+        return "<!doctype html><html><body><h1>" + q + "</h1></body></html>"
+      }
+    expect_match_text: ['"<!doctype html><html><body><h1>" + q + "</h1></body></html>"']
+  - name: plain text helper return negative
+    code: |
+      package main
+      import "net/http"
+      func page(q string) string {
+        _ = http.StatusOK
+        return "Results for: " + q
+      }
+    expect_no_match: true
+  description: "Return of a raw HTML response/helper body in a web package. Taint reachability is required for attacker-controlled content in the returned expression; package gating keeps ordinary string helpers out."
 - id: go.xss.fmt_fprintf_w
   enabled: false
   disabled_reason:
@@ -321,6 +361,9 @@
   constraints:
   - arg_tainted:
       index: 2
+  - arg_matches_regex:
+      index: 1
+      regex: "\"(?i:(text/html|application/xhtml\\+xml|application/xml|text/xml|text/javascript|application/javascript|image/svg\\+xml))"
   match_examples:
   - name: gin raw html data
     code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc handler(c *gin.Context, body []byte) {\n  c.Data(200, \"text/html; charset=utf-8\", body)\n}\n"
@@ -338,7 +381,50 @@
         c.Data(200, "text/html; charset=utf-8", []byte("<h1>safe</h1>"))
       }
     expect_no_match: true
+  - name: gin binary download negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context, blob []byte) {
+        c.Data(200, "application/octet-stream", blob)
+      }
+    expect_no_match: true
   description: "gin Context.Data(status, \"text/html...\", tainted) - writes raw HTML bytes, including concatenated response fragments, without auto-escape."
+- id: go.xss.iris_context_html
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - github.com/kataras/iris/v12
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: \.HTML$
+  constraints:
+  - receiver_type_in: [Context]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: iris raw html response
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context, body string) {
+        ctx.HTML(body)
+      }
+    expect_match_text: [ctx.HTML]
+  - name: iris raw html literal negative
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        ctx.HTML("<h1>safe</h1>")
+      }
+    expect_no_match: true
+  description: "iris Context.HTML(tainted) writes caller-controlled raw HTML without template escaping."
 - id: go.xss.fiber_send_string
   enabled: false
   disabled_reason:

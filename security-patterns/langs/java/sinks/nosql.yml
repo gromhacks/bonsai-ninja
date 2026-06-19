@@ -5,6 +5,7 @@
   severity: high
   packages:
   - org.mongodb
+  - com.mongodb.client
   - org.springframework.data.mongodb
   - org.springframework.ldap
   cwe:
@@ -40,8 +41,52 @@
   description: "MongoCollection.find - flag tainted Bson filter. Merged collision aliases: java.nosql.mongo_find_local_document, java.nosql.spring_mongo_template_find, java.ldap.spring_ldap_template_find."
   aliases:
   - java.nosql.mongo_find_local_document
-  - java.nosql.spring_mongo_template_find
   - java.ldap.spring_ldap_template_find
+- id: java.nosql.spring_mongo_template_find
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.springframework.data.mongodb
+  imports:
+  - org.springframework.data.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])find$'
+      receiver_type_in:
+      - MongoTemplate
+      - org.springframework.data.mongodb.core.MongoTemplate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spring mongo template find tainted query
+    code: |
+      import org.springframework.data.mongodb.core.MongoTemplate;
+      import org.springframework.data.mongodb.core.query.Query;
+      class App {
+        private final MongoTemplate mt = null;
+        Object handle(Query q) {
+          return mt.find(q, Object.class, "users");
+        }
+      }
+    expect_match_text: [mt.find]
+  - name: spring mongo template find literal negative
+    code: |
+      import org.springframework.data.mongodb.core.MongoTemplate;
+      import org.springframework.data.mongodb.core.query.Query;
+      class App {
+        private final MongoTemplate mt = null;
+        Object handle() {
+          return mt.find(new Query(), Object.class, "users");
+        }
+      }
+    expect_no_match: true
+  description: "Spring Data MongoTemplate.find(tainted Query, ...) - caller-controlled criteria can carry operator objects such as $ne/$gt."
 - id: java.nosql.dbcollection_findone_local_object
   enabled: true
   language: java

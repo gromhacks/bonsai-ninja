@@ -94,7 +94,7 @@ pub use service::{
 pub use transfer::{
     transfer_for_many, transfer_for_many_with_options, transfer_function_for,
     transfer_function_for_with_options, CallSiteRef, CleanOutputOverwriteSpec, NameInterner,
-    SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
+    SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
 };
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 

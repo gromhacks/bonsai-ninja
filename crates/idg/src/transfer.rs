@@ -97,6 +97,9 @@ pub struct TransferOptions {
     pub clean_output_overwrites: Vec<CleanOutputOverwriteSpec>,
     /// Configured source calls that write untrusted data into output arguments.
     pub source_output_args: Vec<SourceOutputArgSpec>,
+    /// Configured source calls that deliver untrusted data to callback
+    /// parameters.
+    pub source_callback_args: Vec<SourceCallbackArgSpec>,
     /// Whether to add diagnostic, over-approximate receiver-field
     /// propagation. Security/default semantic queries cap precision at
     /// `Narrowed`, so they can skip this expensive graph expansion.
@@ -117,6 +120,7 @@ impl Default for TransferOptions {
         Self {
             clean_output_overwrites: Vec::new(),
             source_output_args: Vec::new(),
+            source_callback_args: Vec::new(),
             include_diagnostic_field_flows: true,
             include_receiver_method_propagation: true,
             include_field_argument_forwarding: true,
@@ -130,6 +134,7 @@ impl TransferOptions {
     pub fn is_empty(&self) -> bool {
         self.clean_output_overwrites.is_empty()
             && self.source_output_args.is_empty()
+            && self.source_callback_args.is_empty()
             && self.include_diagnostic_field_flows
             && self.include_receiver_method_propagation
             && self.include_field_argument_forwarding
@@ -157,6 +162,18 @@ impl TransferOptions {
         self.source_output_args
             .sort_by(|a, b| (&a.callee, &a.output_arg_indices).cmp(&(&b.callee, &b.output_arg_indices)));
         self.source_output_args.dedup();
+        for spec in &mut self.source_callback_args {
+            spec.source_param_indices.sort_unstable();
+            spec.source_param_indices.dedup();
+        }
+        self.source_callback_args.sort_by(|a, b| {
+            (&a.callee, a.callback_arg_index, &a.source_param_indices).cmp(&(
+                &b.callee,
+                b.callback_arg_index,
+                &b.source_param_indices,
+            ))
+        });
+        self.source_callback_args.dedup();
         self
     }
 }
@@ -182,6 +199,17 @@ pub struct SourceOutputArgSpec {
     pub callee: String,
     /// Positional argument indices written by the source call.
     pub output_arg_indices: Vec<usize>,
+}
+
+/// Declarative source call shape whose callback receives untrusted data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceCallbackArgSpec {
+    /// Callee name or `regex:`-prefixed matcher.
+    pub callee: String,
+    /// Positional argument index containing the callback function.
+    pub callback_arg_index: usize,
+    /// Callback parameter indices that receive source data.
+    pub source_param_indices: Vec<usize>,
 }
 
 /// One call site recorded by the transfer pass for the Phase 3
@@ -234,6 +262,8 @@ pub struct CallSiteRef {
     /// Phase 3 uses these to stitch named arguments to the matching
     /// callee parameter instead of relying only on positional order.
     pub call_arg_names: SmallVec<[Option<String>; 4]>,
+    /// Source-callback transfer specs matching this call site.
+    pub source_callback_args: Vec<SourceCallbackArgSpec>,
     /// True when this call site arose from `target = callee(args)`
     /// (a `FlowEvent::Assign` with `source_call`). Resolution still
     /// needs an explicit semantic callee or summary before any
@@ -2091,6 +2121,19 @@ fn bridge_value_expr_to_node(
         via_span: span,
     };
     let mut bridged: ahash::AHashSet<StrId> = ahash::AHashSet::default();
+    bridge_value_expr_fragment_to_node(value, target, meta, ctx, &mut bridged);
+    for expression in template_interpolation_expressions(value) {
+        bridge_value_expr_fragment_to_node(&expression, target, meta, ctx, &mut bridged);
+    }
+}
+
+fn bridge_value_expr_fragment_to_node(
+    value: &str,
+    target: NodeId,
+    meta: crate::edge::EdgeMeta,
+    ctx: &mut TransferCtx<'_>,
+    bridged: &mut ahash::AHashSet<StrId>,
+) {
     let qualified_accesses = extract_qualified_accesses_outside_strings(value);
     for (access, start, end) in &qualified_accesses {
         let sid = ctx.intern_name(access);
@@ -2130,6 +2173,100 @@ fn bridge_value_expr_to_node(
             ctx.bridge_read(&token, target, meta);
         }
     }
+}
+
+fn template_interpolation_expressions(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if b == b'\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if q == b'`' && b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                if let Some((expression, end)) = parse_template_interpolation(text, i + 2) {
+                    out.push(expression);
+                    i = end;
+                    continue;
+                }
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(b, b'\'' | b'"' | b'`') {
+            quote = Some(b);
+            escaped = false;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn parse_template_interpolation(text: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = text.as_bytes();
+    let mut i = start;
+    let mut depth = 1usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if b == b'\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if q == b'`' && b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                depth = depth.saturating_add(1);
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(b);
+                escaped = false;
+                i += 1;
+            }
+            b'{' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((text[start..i].to_string(), i + 1));
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 fn immediate_qualified_parent(access: &str) -> Option<&str> {
@@ -2688,6 +2825,7 @@ fn walk_assign(
                     call_arg_spans: arg_spans,
                     call_arg_places: arg_places,
                     call_arg_names: arg_names,
+                    source_callback_args: Vec::new(),
                     is_assign_rhs: true,
                 });
             }
@@ -3102,6 +3240,7 @@ fn walk_call(
         call_arg_spans: arg_spans,
         call_arg_places: arg_places,
         call_arg_names: arg_names,
+        source_callback_args: source_callback_args_for_call(name, ctx),
         is_assign_rhs: false,
     });
     apply_source_output_arg_writes(span, name, args, ctx);
@@ -3230,6 +3369,15 @@ fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx:
         let (write_node, _) = build_target_node(output, span, ctx);
         ctx.commit_writer(output, write_node);
     }
+}
+
+fn source_callback_args_for_call(name: &str, ctx: &TransferCtx<'_>) -> Vec<SourceCallbackArgSpec> {
+    ctx.options
+        .source_callback_args
+        .iter()
+        .filter(|shape| configured_name_match(&shape.callee, name))
+        .cloned()
+        .collect()
 }
 
 fn apply_clean_output_overwrite_call(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {

@@ -155,6 +155,30 @@ fn forward_closure_from_param_reaches_return() {
 }
 
 #[test]
+fn template_interpolation_param_reaches_return() {
+    let mut decl = empty_decl(1, 0, "f");
+    decl.params = vec!["bio".to_string()];
+    decl.flow_events = vec![FlowEvent::Return {
+        span: span(0, 20, 80),
+        value_name: None,
+        value_text: Some("`<div class=\"bio\">${bio}</div>`".to_string()),
+    }];
+    let (idx, ws) = build(vec![decl]);
+    let svc = IdgQueryService::new(ws, idx.clone());
+    let f = func_id(&idx, "f");
+    let params = svc.param_nodes_for_names(f, &["bio".to_string()], idx.as_ref());
+    assert_eq!(params.len(), 1);
+    let ret = svc
+        .return_node_of(f)
+        .expect("Return node should exist for callable");
+    let closure = svc.forward_closure(&params);
+    assert!(
+        closure.contains(&ret),
+        "template interpolation Param→Return closure missing Return"
+    );
+}
+
+#[test]
 fn forward_closure_with_max_precision_prunes_worse_edges() {
     let func = FuncId::new(7);
     let mut seg = crate::segment::IdgSegment::new();
@@ -420,6 +444,50 @@ fn read_or_write_nodes_for_names_maps_wildcard_seed_to_projected_read_only() {
     assert!(
         sibling_nodes.is_empty(),
         "wildcard seed must not match sibling containers"
+    );
+}
+
+#[test]
+fn read_or_write_nodes_for_names_maps_dotted_wildcard_seed_to_projected_read() {
+    let mut f = empty_decl(1, 0, "f");
+    f.params = vec!["req".to_string()];
+    f.flow_events = vec![FlowEvent::Call {
+        span: span(0, 20, 60),
+        name: "setHeader".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![
+            bonsai_lang_api::CallArg {
+                span: span(0, 30, 45),
+                name: None,
+                value_text: "req.query.theme".to_string(),
+                place: Some("req.query.theme".to_string()),
+                source_names: vec!["req.query.theme".to_string(), "req.query".to_string()],
+            },
+            bonsai_lang_api::CallArg {
+                span: span(0, 46, 55),
+                name: None,
+                value_text: "req.body.theme".to_string(),
+                place: Some("req.body.theme".to_string()),
+                source_names: vec!["req.body.theme".to_string(), "req.body".to_string()],
+            },
+        ],
+    }];
+    let (idx, ws) = build(vec![f]);
+    let f_id = func_id(&idx, "f");
+    let svc = IdgQueryService::new(ws, idx);
+
+    let wildcard_nodes = svc.read_or_write_nodes_for_names(f_id, &["req.query.*".to_string()]);
+    assert!(
+        !wildcard_nodes.is_empty(),
+        "dotted wildcard seed should locate projected `req.query.theme` reads"
+    );
+
+    let sibling_nodes = svc.read_or_write_nodes_for_names(f_id, &["req.session.*".to_string()]);
+    assert!(
+        sibling_nodes.is_empty(),
+        "dotted wildcard seed must not match sibling request containers"
     );
 }
 

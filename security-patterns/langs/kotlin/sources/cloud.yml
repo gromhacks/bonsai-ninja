@@ -58,3 +58,43 @@
       }
     expect_no_match: true
   description: "Azure Functions @HttpTrigger annotated parameter - HTTP request envelope supplied by the remote caller."
+
+- id: kotlin.source.azure_http_request_getbody
+  enabled: true
+  language: kotlin
+  trust: service
+  tag: cloud-event
+  category: http-input
+  payload_types: [json, text]
+  packages: ["com.microsoft.azure.functions"]
+  match:
+    kind: call
+    callee:
+      name: getBody
+  constraints:
+  - receiver_type_in:
+    - Request
+    - HttpRequestMessage
+    - com.microsoft.azure.functions.HttpRequestMessage
+  match_examples:
+  - name: azure http trigger request body
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App {
+        fun run(@HttpTrigger(name = "req") req: Request) {
+          req.getBody()
+        }
+      }
+      class Request { fun getBody(): String = "" }
+    expect_match_text: [req.getBody]
+  - name: unrelated getbody negative
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App {
+        fun run(req: Widget) {
+          req.getBody()
+        }
+      }
+      class Widget { fun getBody(): String = "" }
+    expect_no_match: true
+  description: "Azure Functions request getBody() - HTTP request body supplied by the remote caller."

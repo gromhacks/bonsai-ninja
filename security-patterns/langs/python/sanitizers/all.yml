@@ -114,6 +114,32 @@
     expect_match_text: [nh3.clean]
   description: nh3.clean - Rust ammonia-backed HTML sanitizer (recommended bleach replacement); strips or allow-lists tags/attributes into an XSS-safe fragment.
 
+- id: python.sanitizer.jinja2_sandboxed_from_string
+  enabled: true
+  language: python
+  tag: ssti
+  packages: [jinja2]
+  imports: [jinja2]
+  match:
+    kind: call
+    callee:
+      attribute: [SandboxedEnvironment, from_string]
+  match_examples:
+  - name: jinja2 sandboxed environment from string
+    code: |
+      import jinja2
+      from jinja2.sandbox import SandboxedEnvironment
+      def render(user_input):
+          return SandboxedEnvironment.from_string(user_input)
+    expect_match_text: [SandboxedEnvironment.from_string]
+  - name: jinja2 ordinary environment negative
+    code: |
+      import jinja2
+      def render(Environment, user_input):
+          return Environment.from_string(user_input)
+    expect_no_match: true
+  description: "jinja2.sandbox.SandboxedEnvironment.from_string - sandboxed template execution; credits SSTI findings as sanitizer evidence for patched flows."
+
 - id: python.sanitizer.markupsafe_escape_silent
   enabled: true
   language: python
@@ -853,6 +879,36 @@
     expect_match_text: [msgspec.convert]
   description: "msgspec.convert - strict struct-typed validation."
 
+- id: python.sanitizer.isinstance_str_nosql_operator_guard
+  enabled: true
+  language: python
+  tag: nosql-sanitize
+  match:
+    kind: call
+    callee:
+      name: isinstance
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 1
+      regex: "^str$"
+  match_examples:
+  - name: string type guard blocks NoSQL operator object smuggling
+    code: |
+      def authenticate(email, password):
+          if not isinstance(email, str) or not isinstance(password, str):
+              return None
+          return users.find_one({"email": {"$eq": email}, "password": {"$eq": password}})
+    expect_match_text: [isinstance]
+  - name: non-string type guard negative
+    code: |
+      def authenticate(email):
+          if not isinstance(email, int):
+              return None
+          return users.find_one({"email": email})
+    expect_no_match: true
+  description: "isinstance(value, str) guard - rejects Mongo operator objects before user data is embedded into equality filters."
+
 - id: python.sanitizer.jsonschema_validate
   enabled: true
   language: python
@@ -1023,6 +1079,32 @@
 
   disabled_reason:
     code: over-broad
+- id: python.sanitizer.local_is_safe_url_guard
+  enabled: true
+  language: python
+  tag: ssrf-sanitize
+  match:
+    kind: call
+    callee:
+      regex: "^_?is_safe_url$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: local is safe url guard
+    code: |
+      def _is_safe_url(url):
+          return url.startswith("https://files.example.com/")
+      def fetch(url):
+          if not _is_safe_url(url):
+              raise ValueError("blocked")
+          return requests.get(url, allow_redirects=False)
+    expect_match_text: [_is_safe_url]
+  - name: unrelated safe value helper negative
+    code: |
+      def is_safe_value(value):
+          return value in {"a", "b"}
+    expect_no_match: true
+  description: "Project-local is_safe_url(url) guard - credits explicit URL safety checks before outbound requests."
 - id: python.sanitizer.werkzeug_url_join
   enabled: false
   disabled_reason:
@@ -1345,6 +1427,34 @@
     expect_no_match: true
   description: "re.sub(r\"[^allowlist]\", \"\", value) - strips every character outside a small explicit allowlist."
 
+- id: python.sanitizer.char_allowlist_join_filter
+  enabled: true
+  language: python
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      regex: "^(\"\"|'')\\.join$"
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: "^for\\s+[A-Za-z_][A-Za-z0-9_]*\\s+in\\s+"
+  - arg_matches_regex:
+      index: 2
+      regex: "^if\\s+[A-Za-z_][A-Za-z0-9_]*\\.(?:isalnum|isalpha|isascii|isdecimal|isdigit|isnumeric)\\(\\)(?:\\s+or\\s+[A-Za-z_][A-Za-z0-9_]*\\s*==\\s*['\"][A-Za-z0-9_ .:@/-]?['\"])*$"
+  match_examples:
+  - name: generator join alnum allowlist
+    code: |
+      def clean(q):
+          return "".join(ch for ch in q if ch.isalnum() or ch == " ")
+    expect_match_text: ["\"\".join"]
+  - name: generator join predicate negative
+    code: |
+      def clean(q, ok):
+          return "".join(ch for ch in q if ch.isalnum() or ok)
+    expect_no_match: true
+  description: "''.join(ch for ch in value if ch.isalnum() ...) - constructs a string from an explicit character allowlist, optionally preserving named literal separators."
+
 # -- SAML / SSO assertion verifiers (auth sanitization) -------------
 - id: python.sanitizer.python3_saml_is_valid
   enabled: true
@@ -1513,6 +1623,65 @@
           return repr(value)
     expect_match_text: [repr]
   description: "repr(value) - debug-string coercion; the rendered text still embeds attacker content, so it preserves taint."
+- id: python.passthrough.io_bytesio
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  packages: [io]
+  imports: [io]
+  match:
+    kind: call
+    callee:
+      attribute: [io, BytesIO]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: io bytesio preserves taint
+    code: |
+      import io
+      def example(blob):
+          return io.BytesIO(blob)
+    expect_match_text: [io.BytesIO]
+  description: "io.BytesIO(data) - wraps attacker-controlled bytes in a file-like object; preserves taint from the byte buffer."
+- id: python.passthrough.zipfile_zipfile
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  packages: [zipfile]
+  imports: [zipfile]
+  match:
+    kind: call
+    callee:
+      attribute: [zipfile, ZipFile]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: zipfile constructor preserves tainted archive
+    code: |
+      import io
+      import zipfile
+      def example(blob):
+          return zipfile.ZipFile(io.BytesIO(blob))
+    expect_match_text: [zipfile.ZipFile]
+  description: "zipfile.ZipFile(file) - archive object contents derive from the supplied file/bytes; preserve taint from the archive input."
+- id: python.passthrough.zipfile_namelist
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.namelist$"
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: zipfile namelist preserves archive taint
+    code: |
+      import zipfile
+      def example(z):
+          return z.namelist()
+    expect_match_text: [z.namelist]
+  description: "ZipFile.namelist() - member names come from the archive metadata; if the archive is attacker-controlled, the entry names remain tainted."
 - id: python.passthrough.json_loads
   enabled: true
   language: python
@@ -1743,6 +1912,30 @@
           return value.strip()
     expect_match_text: [value.strip]
   description: "str.strip(...) - trims characters but preserves taint from the receiver string."
+- id: python.passthrough.bytes_decode_receiver
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$\\.]*\\.decode$"
+      base_name_not_in: [base64, binascii, cbor2, codecs, json, jsonpickle, jwt, msgpack, pickle, pyjwt, urllib, yaml]
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: bytes decode preserves receiver taint
+    code: |
+      def example(raw):
+          return raw.decode("utf-8", "replace")
+    expect_match_text: [raw.decode]
+  - name: module decode is not a receiver transform
+    code: |
+      import jsonpickle
+      def example(raw):
+          return jsonpickle.decode(raw)
+    expect_no_match: true
+  description: "bytes.decode(...) - decodes bytes to text; representation changes but attacker content is preserved."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an

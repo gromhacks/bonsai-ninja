@@ -163,6 +163,42 @@
       }
     expect_no_match: true
   description: "fast-xml-parser constructed with processEntities/htmlEntities enabled - audit parser use for entity expansion and unsafe downstream XML interpretation. The options regex requires the entity flag set true so the safe default parser stays quiet."
+- id: typescript.xxe.fast_xml_parser_parse
+  enabled: true
+  language: typescript
+  tag: xxe
+  severity: high
+  packages:
+  - fast-xml-parser
+  imports:
+  - fast-xml-parser
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.parse$"
+  constraints:
+  - receiver_type_in: [XMLParser]
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: fast xml parser parse tainted
+    code: |
+      import { XMLParser } from "fast-xml-parser";
+      function parseFeed(xml: string) {
+        const parser = new XMLParser({ processEntities: true });
+        return parser.parse(xml);
+      }
+    expect_match_text: [parser.parse]
+  - name: fast xml parser parse literal negative
+    code: |
+      import { XMLParser } from "fast-xml-parser";
+      function parseFeed() {
+        const parser = new XMLParser({ processEntities: true });
+        return parser.parse("<rss/>");
+      }
+    expect_no_match: true
+  description: "fast-xml-parser XMLParser.parse(tainted XML) - parse attacker XML on XMLParser receiver; constructor hardening is handled by sanitizer/config rules."
 - id: typescript.xxe.parse_xml_resolve_entities
   enabled: true
   language: typescript

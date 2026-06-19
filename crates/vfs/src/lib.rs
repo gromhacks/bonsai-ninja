@@ -16,9 +16,14 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use thiserror::Error;
+
+static VFS_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// A text edit applied between two snapshots of the same file. Byte offsets
 /// refer to the *old* snapshot.
@@ -50,9 +55,19 @@ pub enum VfsError {
 }
 
 /// Interned file registry with versioned snapshots.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Vfs {
+    instance_id: u64,
     inner: RwLock<Inner>,
+}
+
+impl Default for Vfs {
+    fn default() -> Self {
+        Self {
+            instance_id: VFS_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed),
+            inner: RwLock::new(Inner::default()),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -60,12 +75,21 @@ struct Inner {
     by_path: AHashMap<PathBuf, FileId>,
     files: Vec<Option<FileSnapshot>>,
     edits_since: Vec<Vec<TextEdit>>,
+    revision: u64,
 }
 
 impl Vfs {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stable identity for this VFS instance. Distinct from the
+    /// content revision so global caches can avoid pointer-reuse
+    /// collisions between dropped and recreated workspaces.
+    #[must_use]
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     /// Intern a path and set or replace its contents. Returns the existing
@@ -86,6 +110,7 @@ impl Vfs {
             let old = inner.files[id.raw() as usize]
                 .clone()
                 .expect("path table pointed at removed file");
+            inner.revision = inner.revision.wrapping_add(1);
             inner.files[id.raw() as usize] = Some(FileSnapshot {
                 file_id: id,
                 path: old.path,
@@ -112,6 +137,7 @@ impl Vfs {
         inner.files.push(Some(snapshot));
         inner.edits_since.push(Vec::new());
         inner.by_path.insert(lookup_key, id);
+        inner.revision = inner.revision.wrapping_add(1);
         id
     }
 
@@ -129,6 +155,7 @@ impl Vfs {
         if let Some(edits) = inner.edits_since.get_mut(idx) {
             edits.clear();
         }
+        inner.revision = inner.revision.wrapping_add(1);
         Some(id)
     }
 
@@ -168,6 +195,7 @@ impl Vfs {
             version: prev.version + 1,
         });
         inner.edits_since[idx].extend(edits);
+        inner.revision = inner.revision.wrapping_add(1);
         Ok(file_id)
     }
 
@@ -214,6 +242,16 @@ impl Vfs {
             .iter()
             .filter_map(|snap| snap.as_ref().map(|snap| snap.file_id))
             .collect()
+    }
+
+    /// Monotonic workspace-wide content/edit revision. Increments on
+    /// file add, update, edit application, and removal. Consumers use
+    /// this as a cheap invalidation key for derived workspace-wide
+    /// summaries that would otherwise need to rescan every file before
+    /// checking a cache.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.inner.read().revision
     }
 
     /// Number of interned files.

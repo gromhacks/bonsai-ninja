@@ -53,6 +53,13 @@ fn package_rule(package: &str) -> Rule {
     }
 }
 
+fn python_package_rule(package: &str) -> Rule {
+    let mut rule = package_rule(package);
+    rule.id = "python.test.package_gate".to_string();
+    rule.language = "python".to_string();
+    rule
+}
+
 #[test]
 fn dependency_inventory_treats_manifest_package_name_as_evidence() {
     let root = temp_root("bonsai-deps-package");
@@ -121,6 +128,85 @@ fn dependency_inventory_does_not_project_one_package_signal_onto_siblings() {
     assert!(
         inventory.rows.iter().all(|row| row.key != "commons-io"),
         "did not expect commons-io evidence from a log4j-core manifest, got {:?}",
+        inventory.rows
+    );
+}
+
+#[test]
+fn workspace_dependency_packages_alias_python_distribution_names_to_imports() {
+    let root = temp_root("bonsai-deps-python-aliases");
+    std::fs::write(
+        root.join("requirements.txt"),
+        "psycopg2-binary==2.9.9\ndjangorestframework==3.15.1\nmysql-connector-python==9.1.0\n",
+    )
+    .expect("requirements");
+
+    let packages = workspace_dependency_packages_for_language(&root, "python").packages;
+    assert!(
+        packages.contains("psycopg2"),
+        "expected psycopg2 alias from psycopg2-binary, got {:?}",
+        packages
+    );
+    assert!(
+        packages.contains("rest_framework"),
+        "expected rest_framework alias from djangorestframework, got {:?}",
+        packages
+    );
+    assert!(
+        packages.contains("mysql.connector"),
+        "expected mysql.connector alias from mysql-connector-python, got {:?}",
+        packages
+    );
+}
+
+#[test]
+fn workspace_dependency_packages_alias_rust_hyphenated_crates_to_imports() {
+    let root = temp_root("bonsai-deps-rust-aliases");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[dependencies]
+percent-encoding = "2"
+"#,
+    )
+    .expect("cargo");
+
+    let packages = workspace_dependency_packages_for_language(&root, "rust").packages;
+    assert!(
+        packages.contains("percent_encoding"),
+        "expected percent_encoding alias from percent-encoding, got {:?}",
+        packages
+    );
+}
+
+#[test]
+fn dependency_inventory_reports_python_distribution_alias_as_package_evidence() {
+    let root = temp_root("bonsai-deps-python-inventory-alias");
+    std::fs::write(root.join("requirements.txt"), "psycopg2-binary==2.9.9\n").expect("requirements");
+    let ws = Workspace::new(std::sync::Arc::new(bonsai_lang_api::LanguageRegistry::new()));
+
+    let mut pack = Rulepack::default();
+    pack.packs.insert(
+        "python".to_string(),
+        LanguagePack {
+            language: "python".to_string(),
+            sources: Vec::new(),
+            sinks: vec![python_package_rule("psycopg2")],
+            sanitizers: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
+
+    let inventory = build_inventory(&pack, &ws, &root);
+    assert!(
+        inventory.rows.iter().any(|row| {
+            row.key == "psycopg2"
+                && row.signals.iter().any(|signal| signal == "packages:psycopg2")
+                && row
+                    .evidence_files
+                    .iter()
+                    .any(|file| file.ends_with("requirements.txt"))
+        }),
+        "expected psycopg2 evidence from psycopg2-binary, got {:?}",
         inventory.rows
     );
 }

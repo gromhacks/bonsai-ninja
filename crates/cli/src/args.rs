@@ -1652,46 +1652,58 @@ pub(crate) enum Cmd {
                       (functions, methods, classes, structs), calls, imports, \
                       vars (assignments), strings, args, refs, decorators.\n\
                       \n\
-                      For decl hits, emits every upstream cross-module flow \
-                      from every entry point that reaches the match, with the \
-                      source lines inlined and annotated (SOURCE → ... → \
-                      MATCH). For non-decl hits (a specific call, string, \
-                      assignment, decorator), surfaces the occurrence in its \
-                      enclosing function with the chain(s) that reach it.\n\
+                      By default inspect surfaces matching declarations / \
+                      occurrences and the indexed rulepack-free taint paths \
+                      that contain the query or filters. It does not load \
+                      source / sink / sanitizer YAML. Pass `--graph-flow` \
+                      when you explicitly want structural callgraph evidence \
+                      with source-body rendering for those hits; pass \
+                      `--syntax-only` for a pure index search. Taint previews \
+                      are capped; very large broad queries skip the default \
+                      taint preview with an explicit warning unless \
+                      `--taint-flow` is supplied.\n\
                       \n\
-                      Chains that share the same entry + sink but take \
+                      Graph-flow chains that share the same entry + sink but take \
                       different intermediate paths get letter-suffixed labels \
                       (FLOW 2a / FLOW 2b) so branch splits are visible.\n\
                       \n\
-                      Every flow carries a stable `F:<16-hex>` id printed \
+                      Every explicit graph flow carries a stable `F:<16-hex>` id printed \
                       next to its header; use `--flow F:id` to re-render \
                       just that chain across runs. `--group G:id` pins a \
                       cluster of chains that share a tail. Architecturally \
                       `inspect` is the pattern-less query layer over the \
                       indexed taint graph `export` ships; `security taint-analysis` \
                       applies rulepack source / sink / sanitizer matches with \
-                      exact source seeds."),
+                      exact source seeds. `--taint-flow` forces the bounded raw \
+                      taint preview for broad queries and when `--syntax-only` \
+                      is also present."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Every flow that reaches os.system\n  \
+                      # Syntax hits plus rulepack-free taint paths for os.system\n  \
                       $ bonsai-ninja inspect ./src --query os.system\n  \
                       \n  \
-                      # Regex query — every flow that reaches any exec call\n  \
+                      # Pure indexed syntax hits only\n  \
+                      $ bonsai-ninja inspect ./src --query os.system --syntax-only\n  \
+                      \n  \
+                      # Explicit structural graph-flow evidence with source bodies\n  \
+                      $ bonsai-ninja inspect ./src --query os.system --graph-flow\n  \
+                      \n  \
+                      # Regex query — syntax hits for exec-like calls\n  \
                       $ bonsai-ninja inspect ./src --query '^(exec|system|popen)$' --regex\n  \
                       \n  \
-                      # Inspect a specific decl (shows every entry → decl flow)\n  \
+                      # Inspect a specific decl syntax hit\n  \
                       $ bonsai-ninja inspect ./src handle_request\n  \
                       \n  \
                       # Restrict to call-kind hits only\n  \
                       $ bonsai-ninja inspect ./src --query exec --kind call\n  \
                       \n  \
-                      # Pin one flow by its stable id across runs\n  \
+                      # Pin one explicit graph flow by its stable id across runs\n  \
                       $ bonsai-ninja inspect ./src --query handle_request --flow F:0123456789abcdef\n  \
                       \n  \
-                      # --from/--to window on any chain in the workspace\n  \
+                      # --from/--to syntax window\n  \
                       $ bonsai-ninja inspect ./src --from handle_request --to os.system\n  \
                       \n  \
-                      # Grouped view bubbles shared tails into GROUP blocks\n  \
-                      $ bonsai-ninja inspect ./src --query exec --view grouped\n  \
+                      # Grouped view for explicit graph-flow output\n  \
+                      $ bonsai-ninja inspect ./src --query exec --graph-flow --view grouped\n  \
                       \n  \
                       # JSON output for CI / tooling\n  \
                       $ bonsai-ninja inspect ./src --query os.system --format json\n\n\
@@ -1699,22 +1711,10 @@ pub(crate) enum Cmd {
                       inspect `os.system` — 0 decl hit(s), 1 other hit(s)\n  \
                       by kind: call=1\n  \
                       \n  \
-                      ▸ hit call os.system (python/micro/auth_service.py:19:9)\n  \
-                      \n  \
-                      ══════════════════════════════════════════════════════════════════════\n  \
-                      FLOW 1 os.system\n  \
-                      handle_request → update_user → run_admin_command\n  \
-                      ══════════════════════════════════════════════════════════════════════\n  \
-                      \n  \
-                      [module] python/micro/gateway.py\n  \
-                      └─ [def] handle_request() :10\n  \
-                          1  def handle_request():  # [FLOW 1 SOURCE: entry handle_request]\n  \
-                                 token = request.args.get(\"token\")  # source: user input\n  \
-                          2      result = update_user(token, action)  # [FLOW 1 -> update_user]\n  \
-                      ...\n  \
-                      [module] python/micro/auth_service.py\n  \
-                      └─ [def] run_admin_command(user_id, cmd) :17\n  \
-                          4      os.system(\"notify-admin \" + cmd)  # [FLOW 1 MATCH: call os.system]")
+                      ══ OCCURRENCE HITS\n  \
+                        flow   kind   location                                  in                  text\n  \
+                      ─────────────────────────────────────────────────────────────────────────────────────\n  \
+                        -      call   python/micro/auth_service.py:19:9        run_admin_command   os.system")
     )]
     Inspect {
         /// Workspace root to analyze.
@@ -1784,14 +1784,13 @@ pub(crate) enum Cmd {
         /// banner surfacing the rest.
         #[arg(long, default_value_t = 200)]
         max_hits: usize,
-        /// Show every flow / hit unconditionally — equivalent to
+        /// Show every syntax hit unconditionally; when paired with
+        /// `--graph-flow`, also lifts graph-flow caps. Equivalent to
         /// `--max-flows usize::MAX --max-entry-probes usize::MAX
-        /// --max-hits usize::MAX`. Use when you need certainty that
-        /// no path is dropped (slow on dense call graphs like
-        /// kotlinx.coroutines).
+        /// --max-hits usize::MAX`.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Render flows without inlined source bodies. The chain
+        /// Render explicit graph flows without inlined source bodies. The chain
         /// display line, `FLOW N` header (with `flow_id` + precision
         /// tag), and a compact step list stay — the multi-line
         /// function blocks are dropped. Useful for surveying large
@@ -1821,6 +1820,24 @@ pub(crate) enum Cmd {
         /// pins a cluster of chains that share a tail.
         #[arg(long)]
         group: Option<String>,
+        /// Explicitly render structural call-graph flows with source
+        /// bodies for inspect hits. Default inspect already includes
+        /// query-scoped rulepack-free taint paths; graph-flow rendering
+        /// is opt-in because it can require workspace-scale callgraph
+        /// traversal on large repositories.
+        #[arg(long = "graph-flow", default_value_t = false)]
+        graph_flow: bool,
+        /// Explicit flag for raw taint-engine paths. Query/filter-scoped
+        /// taint paths are shown by default unless `--syntax-only` is
+        /// set, but very large broad queries skip the default preview
+        /// for latency; this flag forces the bounded raw preview.
+        #[arg(long = "taint-flow", default_value_t = false)]
+        taint_flow: bool,
+        /// Pure indexed syntax search: omit the default rulepack-free
+        /// taint paths. Useful for very broad exploratory searches
+        /// where flow context is not needed.
+        #[arg(long = "syntax-only", default_value_t = false)]
+        syntax_only: bool,
         /// Token-budget ceiling for text output. Paging unit is
         /// one FLOW block (never mid-flow). Shorthand `4k`, `32k`,
         /// `128k`, `1m`; `0` / `all` / `uncapped` disables.
@@ -2099,16 +2116,19 @@ pub(crate) enum Cmd {
         rules_dir: Option<PathBuf>,
     },
 
-    /// Single-file view with cross-file caller/callee bodies inlined.
+    /// Fast single-file source view with optional semantic overlays.
     #[command(
         display_order = 24,
         name = "read-file",
         long_about = themed_subcommand_long_about(
-            "Cat-style view of a single file overlaid with the \
-             analysis facts that touch its lines: line marks for \
-             every finding (source / sink / sanitizer), the flow's \
-             entry / exit pair, and cross-file caller / callee bodies \
-             inlined right below the primary source when available.\n\
+            "Cat-style view of a single file. By default this opens \
+             and indexes only the requested file, so it is suitable \
+             for large workspaces after `search` or syntax `inspect` \
+             finds an anchor. Semantic overlays are explicit: \
+             `--rules-dir`, `--from`, `--to`, `--max-inlined-bodies`, \
+             or `--all` use the workspace-analysis path for finding \
+             marks, flow entry/exit pairs, and cross-file caller / \
+             callee bodies.\n\
              \n\
              Compact mode is a step list of marks (one line per \
              marked location, with finding id, rule, severity, and \
@@ -2671,10 +2691,9 @@ pub(crate) enum SecurityAction {
         /// paths.
         #[arg(long = "exclude-tests", default_value_t = false)]
         exclude_tests: bool,
-        /// Compatibility flag. Sanitizer rules are evidence over
-        /// propagated paths, not propagation blockers, so sanitized
-        /// paths are included whenever source-to-sink reachability
-        /// exists.
+        /// Include sanitizer-cleared source-to-sink paths for audit and
+        /// rulepack debugging. Hidden by default so public reports focus
+        /// on unsanitized findings.
         #[arg(long = "show-sanitized", default_value_t = false)]
         show_sanitized: bool,
         /// Override the interprocedural `(function, seed)` chunk size

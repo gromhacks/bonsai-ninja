@@ -11,7 +11,7 @@ use anyhow::Result;
 use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters, ReadFileOut, Severity};
 use std::path::Path;
 
-use super::open_project_index_only_with_rulepack;
+use super::{open_project_index_matching_path, open_project_index_only_with_rulepack};
 use crate::cli_println;
 use crate::footer::render_paging_footer;
 use crate::page_cache;
@@ -35,7 +35,16 @@ pub(crate) struct ReadFileArgs<'a> {
 }
 
 pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
-    let (project, _footer) = open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?;
+    let needs_workspace_analysis = args.from.is_some()
+        || args.to.is_some()
+        || args.rules_dir.is_some()
+        || args.max_inlined_bodies.is_some()
+        || args.all;
+    let (project, _footer) = if needs_workspace_analysis {
+        open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?
+    } else {
+        open_project_index_matching_path(args.workspace, Path::new(args.path))?
+    };
     let line_range = parse_line_range(args.lines)?;
     let filters = ReadFileFilters {
         path: args.path,

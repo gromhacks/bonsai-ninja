@@ -57,7 +57,7 @@
     code: |
       #include <libgpiod.h>
       void example(struct gpiod_line *line) {
-        gpiod_line_set_value(line, 1);
+        safe_gpiod_line_set_value(line, 1);
       }
     expect_no_match: true
   description: "gpiod_line_set_value(line, value) - attacker-controlled GPIO value actuates hardware."
@@ -153,7 +153,7 @@
     code: |
       #include <linux/i2c-dev.h>
       void example(int fd) {
-        i2c_smbus_write_byte_data(fd, 0x10, 0xff);
+        safe_i2c_smbus_write_byte_data(fd, 0x10, 0xff);
       }
     expect_no_match: true
   description: "i2c_smbus_write_byte_data(fd, register, value) - attacker-controlled register/value mutates an attached device over I2C."
@@ -186,7 +186,7 @@
     code: |
       #include <linux/i2c-dev.h>
       void example(int fd) {
-        i2c_smbus_write_word_data(fd, 0x10, 0x0203);
+        safe_i2c_smbus_write_word_data(fd, 0x10, 0x0203);
       }
     expect_no_match: true
   description: "i2c_smbus_write_word_data(fd, register, value) - attacker-controlled 16-bit register write controls peripheral state."
@@ -313,7 +313,7 @@
       #include <libserialport.h>
       void example(struct sp_port *port) {
         char safe[] = "ok";
-        sp_blocking_write(port, safe, 2, 1000);
+        safe_sp_blocking_write(port, safe, 2, 1000);
       }
     expect_no_match: true
   description: "sp_blocking_write(port, buffer, count, timeout) - attacker-controlled bytes are transmitted to a serial-attached device."
@@ -375,7 +375,7 @@
     code: |
       #include <mraa.h>
       void example(mraa_gpio_context gpio) {
-        mraa_gpio_write(gpio, 1);
+        safe_mraa_gpio_write(gpio, 1);
       }
     expect_no_match: true
   description: "mraa_gpio_write(gpio, value) - attacker-controlled value drives a digital output."
@@ -405,7 +405,7 @@
     code: |
       #include <mraa.h>
       void example(mraa_pwm_context pwm) {
-        mraa_pwm_write(pwm, 0.5);
+        safe_mraa_pwm_write(pwm, 0.5);
       }
     expect_no_match: true
   description: "mraa_pwm_write(pwm, duty_cycle) - attacker-controlled duty cycle actuates PWM hardware."
@@ -436,7 +436,7 @@
       #include <mraa.h>
       void example(mraa_i2c_context i2c) {
         unsigned char safe[] = {0x01, 0x02};
-        mraa_i2c_write(i2c, safe, 2);
+        safe_mraa_i2c_write(i2c, safe, 2);
       }
     expect_no_match: true
   description: "mraa_i2c_write(i2c, data, length) - attacker-controlled bytes are written onto an I2C bus."

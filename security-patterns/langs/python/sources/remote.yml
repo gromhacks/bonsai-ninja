@@ -804,6 +804,50 @@
     expect_match_text: [kwargs]
   description: "Graphene/Ariadne resolver **kwargs - client-supplied GraphQL field arguments. This is the representable resolver-argument shape in v1 matching; the sink flow is the second gate."
 
+- id: python.graphql.graphene_resolver_field_arg
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  frameworks: [graphene, ariadne]
+  packages: [graphene, ariadne]
+  imports: [graphene, ariadne]
+  match:
+    kind: param
+    target:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*$"
+      in_method: [resolve, resolve_field, resolver]
+      in_method_prefix: [resolve_]
+      param_index_in: [2]
+      base_name_not_in: [args, kwargs]
+  match_examples:
+  - name: graphene resolver named field argument
+    code: |
+      import graphene
+      def resolve_products_by_name(root, info, name):
+          return name
+    expect_match_text: [name]
+  - name: ariadne resolver named field argument
+    code: |
+      import ariadne
+      def resolve_product(root, info, sku):
+          return sku
+    expect_match_text: [sku]
+  - name: resolver field argument wrong position negative
+    code: |
+      import graphene
+      def resolve_products_by_name(name, info):
+          return name
+    expect_no_match: true
+  - name: non resolver helper field argument negative
+    code: |
+      import graphene
+      def helper(root, info, name):
+          return name
+    expect_no_match: true
+  description: "Graphene/Ariadne resolver named field argument at position 2 - client-supplied GraphQL field arguments such as `def resolve_user(root, info, id)`. Excludes the dedicated `args`/`kwargs` resolver shapes so example replay attributes those to their narrower rules."
+
 - id: python.graphql.graphene_resolver_args
   enabled: true
   language: python

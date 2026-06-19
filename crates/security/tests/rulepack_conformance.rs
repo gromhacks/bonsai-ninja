@@ -139,6 +139,7 @@ fn documented_source_tags() -> BTreeSet<&'static str> {
         "deprecated-auth",
         "env-input",
         "event-input",
+        "file-input",
         "graphql-input",
         "http-input",
         "hw-input",
@@ -904,6 +905,7 @@ fn canonical_sanitizer_tags_stay_canonical() {
         "sql-parameter",
         "sql-parameterize",
         "ssrf-sanitize",
+        "ssti",
         "url-build",
         "url-decode",
         "url-encode",
@@ -1376,11 +1378,10 @@ fn declares_taint_reachability_or_non_taint_category(rule: &Rule) -> bool {
             rule.category.as_deref(),
             Some("source-independent" | "lifecycle-audit")
         )
-        || (rule.match_spec.kind == MatchKind::Return
-            && rule
-                .description
-                .to_ascii_lowercase()
-                .contains("taint reachability"))
+        || rule
+            .description
+            .to_ascii_lowercase()
+            .contains("taint reachability")
 }
 
 #[test]

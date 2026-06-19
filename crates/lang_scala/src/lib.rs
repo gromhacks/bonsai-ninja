@@ -874,10 +874,7 @@ fn collect_scala_local_cast_aliases(
                     {
                         let name = node_text(&pattern, src).trim().to_string();
                         if !name.is_empty() && !ty.is_empty() && name != ty {
-                            let binding = TypeAliasBinding {
-                                name,
-                                type_name: ty,
-                            };
+                            let binding = TypeAliasBinding { name, type_name: ty };
                             if !aliases.contains(&binding) {
                                 aliases.push(binding);
                             }

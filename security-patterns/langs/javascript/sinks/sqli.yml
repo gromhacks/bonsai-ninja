@@ -294,13 +294,14 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$
+      regex: ^(?:this\.)?[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$
       base_name_in:
       - prisma
       - db
       - client
       - tx
       - conn
+      - this
   constraints:
   - arg_tainted:
       index: 0
@@ -329,6 +330,17 @@
       }
     expect_match_text:
     - prisma.$queryRawUnsafe
+  - name: prisma receiver field queryRawUnsafe concat
+    code: |
+      const _u = require("@prisma/client");
+      class Service {
+        constructor(prisma) { this.prisma = prisma; }
+        byColumn(column) {
+          return this.prisma.$queryRawUnsafe("SELECT * FROM users ORDER BY " + column);
+        }
+      }
+    expect_match_text:
+    - this.prisma.$queryRawUnsafe
   - name: literal prisma instance queryRawUnsafe negative
     code: |
       const _u = require("@prisma/client");
@@ -351,13 +363,14 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$executeRawUnsafe$
+      regex: ^(?:this\.)?[A-Za-z_$][A-Za-z0-9_$]*\.\$executeRawUnsafe$
       base_name_in:
       - prisma
       - db
       - client
       - tx
       - conn
+      - this
   constraints:
   - arg_tainted:
       index: 0

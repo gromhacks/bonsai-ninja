@@ -150,8 +150,6 @@
   tag: path-traversal
   severity: high
   category: file-read
-  packages:
-  - builtins
   cwe:
   - CWE-22
   match:
@@ -230,14 +228,14 @@
     expect_no_match: true
   description: pathlib.PurePosixPath(base, tainted) - lexical path construction does not prevent `..` traversal before open/read.
 - id: python.path.pureposixpath_ctor
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: python
   tag: path-traversal
   severity: high
   category: file-read
   packages:
+  - pathlib
+  imports:
   - pathlib
   cwe:
   - CWE-22
@@ -245,12 +243,55 @@
     kind: call
     callee:
       regex: ^PurePosixPath$
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: imported pureposixpath from request segment
     code: "from pathlib import PurePosixPath\ndef read_file(user_input):\n    path = PurePosixPath(\"/srv/files\", user_input)\n    return path\n"
     expect_match_text:
     - PurePosixPath
-  description: "Disabled duplicate - current matching cannot distinguish imported `PurePosixPath(...)` from `pathlib.PurePosixPath(...)`; python.path.pathlib_pureposixpath covers both emitted shapes."
+  - name: imported pureposixpath literal segment negative
+    code: "from pathlib import PurePosixPath\n\ndef read_file():\n    path = PurePosixPath('/srv/files', 'report.txt')\n    return path\n"
+    expect_no_match: true
+  description: "Imported PurePosixPath(base, tainted) - lexical path construction does not prevent `..` traversal before open/read. Kept separate from pathlib.PurePosixPath so direct imports replay and score at the call site."
+- id: python.path.pureposixpath_join_str
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-read
+  packages:
+  - pathlib
+  imports:
+  - pathlib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: str
+  constraints:
+  - arg_tainted:
+      index: 0
+  - arg_matches_regex:
+      index: 0
+      regex: \bPurePosixPath\b
+  match_examples:
+  - name: pureposixpath slash join converted to string
+    code: |
+      from pathlib import PurePosixPath
+      def read_file(user_input):
+          return str(PurePosixPath("/srv/files") / user_input)
+    expect_match_text:
+    - str
+  - name: pureposixpath slash join literal segment negative
+    code: |
+      from pathlib import PurePosixPath
+      def read_file():
+          return str(PurePosixPath("/srv/files") / "report.txt")
+    expect_no_match: true
+  description: "str(PurePosixPath(base) / tainted) - pathlib's slash operator performs lexical joining and does not reject traversal segments before the resulting path is opened."
 - id: python.path.os_remove
   enabled: true
   language: python

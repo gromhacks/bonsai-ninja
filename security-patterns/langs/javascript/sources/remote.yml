@@ -1172,7 +1172,7 @@
   language: javascript
   trust: remote
   tag: graphql-input
-  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus]
+  packages: [graphql, apollo-server, apollo-server-hapi, "@apollo/server", type-graphql, nexus]
   match:
     kind: param
     target:
@@ -1201,7 +1201,7 @@
   trust: remote
   tag: graphql-input
   payload_types: [graphql]
-  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus, graphql-yoga, "@graphql-yoga/node", express-graphql]
+  packages: [graphql, apollo-server, apollo-server-hapi, "@apollo/server", type-graphql, nexus, graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: read
     target:
@@ -1252,7 +1252,7 @@
   trust: remote
   tag: graphql-input
   payload_types: [graphql]
-  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus, graphql-yoga, "@graphql-yoga/node", express-graphql]
+  packages: [graphql, apollo-server, apollo-server-hapi, "@apollo/server", type-graphql, nexus, graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: read
     target:
@@ -1431,11 +1431,11 @@
   category: http-input
   payload_types: [json, form, text]
   frameworks: [next, nextjs, bun, fetch]
-  packages: [next, bun]
+  packages: [next]
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(json|formData|text|arrayBuffer)$"
+      attribute: [request, json]
   match_examples:
   - name: next request json
     code: |
@@ -1444,6 +1444,22 @@
         return request.json();
       }
     expect_match_text: [request.json]
+  description: "Fetch Request json() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: javascript.source.next_request_form_data
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [next, nextjs, fetch]
+  packages: [next]
+  match:
+    kind: call
+    callee:
+      attribute: [request, formData]
+  match_examples:
   - name: next request formData
     code: |
       const _u = require("next");
@@ -1451,7 +1467,145 @@
         return request.formData();
       }
     expect_match_text: [request.formData]
-  description: "Fetch Request body readers used by Next.js App Router and Bun.serve - attacker-controlled request body payloads."
+  description: "Fetch Request formData() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: javascript.source.next_request_text
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [next, nextjs, fetch]
+  packages: [next]
+  match:
+    kind: call
+    callee:
+      attribute: [request, text]
+  match_examples:
+  - name: next request text
+    code: |
+      const _u = require("next");
+      export async function POST(request) {
+        return request.text();
+      }
+    expect_match_text: [request.text]
+  description: "Fetch Request text() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: javascript.source.next_request_array_buffer
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [next, nextjs, fetch]
+  packages: [next]
+  match:
+    kind: call
+    callee:
+      attribute: [request, arrayBuffer]
+  match_examples:
+  - name: next request arrayBuffer
+    code: |
+      const _u = require("next");
+      export async function POST(request) {
+        return request.arrayBuffer();
+      }
+    expect_match_text: [request.arrayBuffer]
+  description: "Fetch Request arrayBuffer() used by Next.js App Router - attacker-controlled request body payload."
+
+- id: javascript.source.fetch_req_json
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, json]
+  match_examples:
+  - name: bun fetch request json
+    code: |
+      Bun.serve({
+        async fetch(req) {
+          return req.json();
+        },
+      });
+    expect_match_text: [req.json]
+  description: "Fetch Request json() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: javascript.source.fetch_req_form_data
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, formData]
+  match_examples:
+  - name: bun fetch request formData
+    code: |
+      Bun.serve({
+        async fetch(req) {
+          return req.formData();
+        },
+      });
+    expect_match_text: [req.formData]
+  description: "Fetch Request formData() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: javascript.source.fetch_req_text
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, text]
+  match_examples:
+  - name: bun fetch request text
+    code: |
+      Bun.serve({
+        async fetch(req) {
+          return req.text();
+        },
+      });
+    expect_match_text: [req.text]
+  description: "Fetch Request text() on a conventional req handler parameter - attacker-controlled request body payload."
+
+- id: javascript.source.fetch_req_array_buffer
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [bun, fetch]
+  match:
+    kind: call
+    callee:
+      attribute: [req, arrayBuffer]
+  match_examples:
+  - name: bun fetch request arrayBuffer
+    code: |
+      Bun.serve({
+        async fetch(req) {
+          return req.arrayBuffer();
+        },
+      });
+    expect_match_text: [req.arrayBuffer]
+  description: "Fetch Request arrayBuffer() on a conventional req handler parameter - attacker-controlled request body payload."
 
 - id: javascript.source.next_request_url_headers
   enabled: true

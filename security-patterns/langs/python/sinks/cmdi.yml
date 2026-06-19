@@ -522,6 +522,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - keyword_arg_equals:
+      name: shell
+      value: "True"
   match_examples:
   - name: cmdi subprocess run shell
     code: "import subprocess\ndef example(user_input):\n    return subprocess.run(user_input,\
@@ -541,6 +544,12 @@
   - name: arg tainted literal negative
     code: "import subprocess\ndef example(user_input):\n    return subprocess.run(\"\
       safe\", shell=True)\n"
+    expect_no_match: true
+  - name: argv list without shell negative
+    code: |
+      import subprocess
+      def example(user_input):
+          return subprocess.run(["/bin/ping", "-c", "1", user_input])
     expect_no_match: true
   description: subprocess.run(shell=True) with tainted command, including f-string
     or concatenated command strings.
@@ -562,6 +571,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - keyword_arg_equals:
+      name: shell
+      value: "True"
   match_examples:
   - name: cmdi subprocess call shell
     code: "import subprocess\ndef example(user_input):\n    return subprocess.call(user_input,\
@@ -589,6 +601,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - keyword_arg_equals:
+      name: shell
+      value: "True"
   match_examples:
   - name: cmdi subprocess check call shell
     code: "import subprocess\ndef example(user_input):\n    return subprocess.check_call(user_input,\
@@ -616,6 +631,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - keyword_arg_equals:
+      name: shell
+      value: "True"
   match_examples:
   - name: cmdi subprocess check output shell
     code: "import subprocess\ndef example(user_input):\n    return subprocess.check_output(user_input,\
@@ -643,6 +661,9 @@
   constraints:
   - arg_tainted:
       index: 0
+  - keyword_arg_equals:
+      name: shell
+      value: "True"
   match_examples:
   - name: cmdi subprocess popen shell
     code: "import subprocess\nclass Popen:\n    pass\n\ndef example(user_input):\n\

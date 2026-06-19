@@ -10,6 +10,15 @@ fn same_tag_credits() {
 }
 
 #[test]
+fn dev_only_guard_credits_any_sink_family() {
+    assert!(sanitizer_credits_sink_tag(
+        Some("dev-only-guard"),
+        Some("sql-injection")
+    ));
+    assert!(sanitizer_credits_sink_tag(Some("dev-only-guard"), Some("xss")));
+}
+
+#[test]
 fn open_redirect_via_url_encode() {
     assert!(sanitizer_credits_sink_tag(
         Some("url-encode"),
@@ -18,6 +27,14 @@ fn open_redirect_via_url_encode() {
     assert!(sanitizer_credits_sink_tag(
         Some("open-redirect-sanitize"),
         Some("open-redirect")
+    ));
+}
+
+#[test]
+fn finite_allowlist_credits_ssti() {
+    assert!(sanitizer_credits_sink_tag(
+        Some("allowlist-validate"),
+        Some("ssti")
     ));
 }
 

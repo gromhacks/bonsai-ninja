@@ -41,8 +41,8 @@ pub use inter::{
     interprocedural_taint_to_completion_with_caches, interprocedural_taint_with_caches,
     resume_interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,
     FunctionSeed, FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintContinuation,
-    InterTaintResult, InterTaintWorkItem, OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs,
-    TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
+    InterTaintResult, InterTaintWorkItem, OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs,
+    SourceOutputArgs, TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
@@ -52,12 +52,12 @@ pub use reachable::{
     entry_taint_graph_from_idg_with_max_precision,
     entry_taint_graph_from_idg_with_target_filters_and_max_precision,
     entry_taint_graph_from_idg_with_target_funcs_and_max_precision,
-    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision, merge_into,
-    name_reachable_through_chain_kinded, name_reachable_through_file_kinded,
-    name_reachable_through_func_kinded, source_seed_reaches_return_from_idg,
-    source_seed_reaches_return_from_idg_with_max_precision, taint_facts_and_graph_for_entry,
-    taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry, EntryTaintGraph, FactKind,
-    KindedTokens, TaintedCallEdge, TokenSet,
+    entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision,
+    inspect_entry_taint_graph_from_idg_with_target_funcs, merge_into, name_reachable_through_chain_kinded,
+    name_reachable_through_file_kinded, name_reachable_through_func_kinded,
+    source_seed_reaches_return_from_idg, source_seed_reaches_return_from_idg_with_max_precision,
+    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
+    EntryTaintGraph, FactKind, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{
     value_flow_for_function, value_flow_for_function_with_caches, LatticeMode, ProvenanceMarker,

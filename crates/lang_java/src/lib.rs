@@ -140,7 +140,13 @@ impl LanguageAdapter for JavaAdapter {
             );
         }
         let field_aliases = collect_java_type_aliases(tree.root_node(), src, &["field_declaration"]);
-        let method_aliases = collect_java_method_type_aliases(&tree, file, src, &field_aliases);
+        let mut method_aliases = collect_java_method_type_aliases(&tree, file, src, &field_aliases);
+        method_aliases.extend(collect_java_graphql_datafetcher_lambda_aliases(
+            &tree,
+            file,
+            src,
+            &field_aliases,
+        ));
         for decl in &mut index.defs {
             if let Some(aliases) = method_aliases
                 .iter()
@@ -244,10 +250,203 @@ fn collect_java_method_type_aliases(
                 "resource",
             ],
         ));
+        method_aliases.extend(collect_java_vertx_route_handler_aliases(method_node, src));
+        method_aliases.extend(collect_java_webflux_route_handler_aliases(method_node, src));
+        method_aliases.extend(collect_java_graphql_datafetcher_aliases(method_node, src));
         dedup_type_aliases(&mut method_aliases);
         aliases_by_method.push((span_of(file, &method_node), method_aliases));
     }
     aliases_by_method
+}
+
+/// Vert.x route handlers commonly omit the lambda parameter type:
+/// `router.get("/").handler(ctx -> ctx.request().getParam("q"))`.
+/// The route API fixes that parameter to `RoutingContext`, so surface the
+/// semantic alias for receiver-typed source/sink rules without loosening them
+/// to every `.request().getParam(...)` chain in a Vert.x-importing file.
+fn collect_java_vertx_route_handler_aliases(root: Node<'_>, src: &[u8]) -> Vec<TypeAliasBinding> {
+    let mut aliases = Vec::new();
+    let mut work_stack = vec![root];
+    while let Some(node) = work_stack.pop() {
+        if node.kind() == "method_invocation" && java_is_vertx_route_handler_call(node, src) {
+            if let Some(lambda) = java_first_lambda_argument(node) {
+                if let Some(param) = java_first_lambda_param_name(lambda, src) {
+                    push_type_alias(&mut aliases, &param, "io.vertx.ext.web.RoutingContext");
+                    push_type_alias(&mut aliases, &param, "RoutingContext");
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            work_stack.push(child);
+        }
+    }
+    aliases
+}
+
+fn java_is_vertx_route_handler_call(node: Node<'_>, src: &[u8]) -> bool {
+    if node.child_by_field_name("name").map(|n| node_text(&n, src)) != Some("handler") {
+        return false;
+    }
+    let Some(receiver) = node.child_by_field_name("object") else {
+        return false;
+    };
+    if receiver.kind() != "method_invocation" {
+        return false;
+    }
+    let Some(route_method) = receiver.child_by_field_name("name").map(|n| node_text(&n, src)) else {
+        return false;
+    };
+    matches!(
+        route_method,
+        "route" | "get" | "post" | "put" | "delete" | "patch" | "options" | "head" | "connect" | "trace"
+    )
+}
+
+/// Spring WebFlux functional routes also omit the request lambda type:
+/// `route(GET("/"), req -> req.queryParam("q"))`. The handler parameter is a
+/// `ServerRequest`, so make receiver-typed source rules precise without
+/// matching arbitrary `.queryParam` helpers.
+fn collect_java_webflux_route_handler_aliases(root: Node<'_>, src: &[u8]) -> Vec<TypeAliasBinding> {
+    let mut aliases = Vec::new();
+    let mut work_stack = vec![root];
+    while let Some(node) = work_stack.pop() {
+        if node.kind() == "method_invocation"
+            && node.child_by_field_name("name").map(|n| node_text(&n, src)) == Some("route")
+        {
+            if let Some(lambda) = java_first_lambda_argument(node) {
+                if let Some(param) = java_first_lambda_param_name(lambda, src) {
+                    push_type_alias(
+                        &mut aliases,
+                        &param,
+                        "org.springframework.web.reactive.function.server.ServerRequest",
+                    );
+                    push_type_alias(&mut aliases, &param, "ServerRequest");
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            work_stack.push(child);
+        }
+    }
+    aliases
+}
+
+fn java_first_lambda_argument(node: Node<'_>) -> Option<Node<'_>> {
+    let args = node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let lambda = args
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "lambda_expression");
+    lambda
+}
+
+fn java_first_lambda_param_name(lambda: Node<'_>, src: &[u8]) -> Option<String> {
+    let params = lambda.child_by_field_name("parameters")?;
+    if params.kind() == "identifier" {
+        let name = node_text(&params, src).trim();
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+    let mut cursor = params.walk();
+    for child in params.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" => {
+                let name = node_text(&child, src).trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+            "formal_parameter" => {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    let name = node_text(&name_node, src).trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// graphql-java `DataFetcher<T>` lambdas receive a
+/// `DataFetchingEnvironment` parameter. The Java syntax often omits the
+/// lambda parameter type, so infer it from the local declaration:
+/// `DataFetcher<User> f = env -> env.getArgument("id")`.
+fn collect_java_graphql_datafetcher_aliases(root: Node<'_>, src: &[u8]) -> Vec<TypeAliasBinding> {
+    let mut aliases = Vec::new();
+    let mut work_stack = vec![root];
+    while let Some(node) = work_stack.pop() {
+        if node.kind() == "local_variable_declaration" {
+            let declared_type = node
+                .child_by_field_name("type")
+                .map(|type_node| node_text(&type_node, src))
+                .unwrap_or_default();
+            if canonical_java_type_name(declared_type).as_deref() == Some("DataFetcher") {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if child.kind() != "variable_declarator" {
+                        continue;
+                    }
+                    let Some(value) = child.child_by_field_name("value") else {
+                        continue;
+                    };
+                    if value.kind() == "lambda_expression" {
+                        if let Some(param) = java_first_lambda_param_name(value, src) {
+                            push_type_alias(&mut aliases, &param, "graphql.schema.DataFetchingEnvironment");
+                            push_type_alias(&mut aliases, &param, "DataFetchingEnvironment");
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            work_stack.push(child);
+        }
+    }
+    aliases
+}
+
+fn collect_java_graphql_datafetcher_lambda_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+    field_aliases: &[TypeAliasBinding],
+) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
+    let mut out = Vec::new();
+    for decl in collect_kinds(tree, &["local_variable_declaration"]) {
+        let declared_type = decl
+            .child_by_field_name("type")
+            .map(|type_node| node_text(&type_node, src))
+            .unwrap_or_default();
+        if canonical_java_type_name(declared_type).as_deref() != Some("DataFetcher") {
+            continue;
+        }
+        let mut cursor = decl.walk();
+        for child in decl.named_children(&mut cursor) {
+            if child.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(value) = child.child_by_field_name("value") else {
+                continue;
+            };
+            if value.kind() != "lambda_expression" {
+                continue;
+            }
+            let Some(param) = java_first_lambda_param_name(value, src) else {
+                continue;
+            };
+            let mut aliases = field_aliases.to_vec();
+            push_type_alias(&mut aliases, &param, "graphql.schema.DataFetchingEnvironment");
+            push_type_alias(&mut aliases, &param, "DataFetchingEnvironment");
+            dedup_type_aliases(&mut aliases);
+            out.push((span_of(file, &value), aliases));
+        }
+    }
+    out
 }
 
 /// Walk `root` collecting `(name, type)` aliases from every declaration
@@ -279,9 +478,15 @@ fn java_type_aliases_from_decl(node: Node<'_>, src: &[u8]) -> Vec<TypeAliasBindi
     let type_text = node_text(&type_node, src);
     let mut aliases = Vec::new();
     if let Some(canonical_type) = canonical_java_type_name(type_text) {
+        let qualified_type = qualified_java_type_name(type_text);
         // Single-name declarations (most parameter shapes).
         if let Some(name_node) = node.child_by_field_name("name") {
-            push_type_alias(&mut aliases, node_text(&name_node, src), &canonical_type);
+            push_java_type_alias(
+                &mut aliases,
+                node_text(&name_node, src),
+                &canonical_type,
+                qualified_type.as_deref(),
+            );
             return aliases;
         }
         // Multi-name `Foo a, b, c;` — one `variable_declarator` per name.
@@ -291,7 +496,18 @@ fn java_type_aliases_from_decl(node: Node<'_>, src: &[u8]) -> Vec<TypeAliasBindi
                 continue;
             }
             if let Some(name_node) = child.child_by_field_name("name") {
-                push_type_alias(&mut aliases, node_text(&name_node, src), &canonical_type);
+                let name = node_text(&name_node, src);
+                push_java_type_alias(&mut aliases, name, &canonical_type, qualified_type.as_deref());
+                if let Some(value) = child.child_by_field_name("value") {
+                    if java_secure_random_factory_init(value, src) {
+                        push_java_type_alias(
+                            &mut aliases,
+                            name,
+                            "SecureRandom",
+                            Some("java.security.SecureRandom"),
+                        );
+                    }
+                }
             }
         }
         return aliases;
@@ -314,7 +530,13 @@ fn java_type_aliases_from_decl(node: Node<'_>, src: &[u8]) -> Vec<TypeAliasBindi
             };
             if let Some(cast_raw) = java_cast_type_of_init(value, src) {
                 if let Some(canonical) = canonical_java_type_name(&cast_raw) {
-                    push_type_alias(&mut aliases, node_text(&name_node, src), &canonical);
+                    let qualified = qualified_java_type_name(&cast_raw);
+                    push_java_type_alias(
+                        &mut aliases,
+                        node_text(&name_node, src),
+                        &canonical,
+                        qualified.as_deref(),
+                    );
                 }
             }
         }
@@ -345,6 +567,11 @@ fn java_cast_type_of_init(init: Node<'_>, src: &[u8]) -> Option<String> {
     None
 }
 
+fn java_secure_random_factory_init(init: Node<'_>, src: &[u8]) -> bool {
+    let text = node_text(&init, src);
+    text.contains("SecureRandom.getInstance")
+}
+
 /// Canonicalize a Java type expression to its short, generics/array-free
 /// form: `List<String>` → `List`, `int[]` → `int`, `java.util.Map` →
 /// `Map`. Rejects names whose canonical form doesn't start with an
@@ -366,6 +593,45 @@ fn canonical_java_type_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(bare_type.to_string())
+}
+
+/// Preserve Java source-level fully-qualified class names as additional
+/// receiver evidence for package-gated rules (`javax.naming.Foo x; x.bar()`).
+/// Nested classes like `Outer.Inner` are intentionally ignored unless at least
+/// one qualifier segment looks package-like.
+fn qualified_java_type_name(raw: &str) -> Option<String> {
+    let without_generics = raw.split('<').next().unwrap_or(raw);
+    let without_arrays = without_generics.split('[').next().unwrap_or(without_generics);
+    let qualified = without_arrays.trim();
+    let mut parts = qualified.split('.').filter(|part| !part.is_empty()).peekable();
+    parts.peek()?;
+    let segments: Vec<&str> = parts.collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let tail = segments.last()?.trim();
+    if tail.is_empty() || !tail.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let has_package_segment = segments[..segments.len() - 1]
+        .iter()
+        .any(|segment| segment.chars().next().is_some_and(|c| c.is_ascii_lowercase()));
+    if !has_package_segment {
+        return None;
+    }
+    Some(qualified.to_string())
+}
+
+fn push_java_type_alias(
+    aliases: &mut Vec<TypeAliasBinding>,
+    name: &str,
+    canonical_type: &str,
+    qualified_type: Option<&str>,
+) {
+    if let Some(qualified_type) = qualified_type.filter(|qualified| *qualified != canonical_type) {
+        push_type_alias(aliases, name, qualified_type);
+    }
+    push_type_alias(aliases, name, canonical_type);
 }
 
 /// Append a type-alias binding to `aliases`, skipping empty names and

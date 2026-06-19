@@ -240,6 +240,7 @@
   severity: high
   packages:
   - org.apache.http
+  - org.apache.hc.client5
   cwe:
   - CWE-918
   match:
@@ -435,7 +436,8 @@
 - id: java.ssrf.resttemplate_exchange_local
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: java.ssrf.resttemplate_exchange
   language: java
   tag: ssrf
   severity: high
@@ -514,6 +516,96 @@
   description: "Spring WebClient.uri(tainted). Merged aliases: java.ssrf.webclient_uri_local."
   aliases:
   - java.ssrf.webclient_uri_local
+- id: java.ssrf.webclient_get_uri_fluent
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  imports:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.get\(\)\.uri$'
+  constraints:
+  - receiver_type_in:
+    - WebClient
+    - org.springframework.web.reactive.function.client.WebClient
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: webclient get uri fluent typed request spec
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(WebClient client, String input) {
+          return client.get().uri(input);
+        }
+      }
+      class WebClient {
+        Request get() { return new Request(); }
+      }
+      class Request {
+        Request uri(Object... args) { return this; }
+        Object retrieve() { return null; }
+      }
+    expect_match_text: [client.get().uri]
+  - name: webclient get uri fluent literal negative
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(WebClient client) {
+          return client.get().uri("https://example.test/");
+        }
+      }
+      class WebClient {
+        Request get() { return new Request(); }
+      }
+      class Request {
+        Request uri(Object... args) { return this; }
+        Object retrieve() { return null; }
+      }
+    expect_no_match: true
+  description: "Spring WebClient.get().uri(tainted) fluent request target - SSRF."
+- id: java.ssrf.webclient_get_uri_fluent_untyped
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  imports:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.get\(\)\.uri$'
+  match_examples:
+  - name: webclient get uri fluent literal negative
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(WebClient client) {
+          return client.get().uri("https://example.test/");
+        }
+      }
+      class WebClient {
+        Request get() { return new Request(); }
+      }
+      class Request {
+        Request uri(Object... args) { return this; }
+        Object retrieve() { return null; }
+      }
+    expect_no_match: true
+  description: "Spring WebClient.get().uri(tainted) fluent request target where the intermediate request-spec receiver is untyped."
 - id: java.ssrf.webclient_uri_local
   enabled: false
   disabled_reason:

@@ -23,6 +23,7 @@ use std::{
 };
 
 const LOCAL_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_local_import_pkg__";
+const WORKSPACE_IMPORT_PACKAGE_PREFIX: &str = "__bonsai_workspace_import_pkg__";
 const FILE_USES_REQ_FILES_MARKER: &str = "__bonsai_file_uses_req_files__";
 const MATCHER_FILE_FACT_CACHE_CAP: usize = 65_536;
 
@@ -296,6 +297,19 @@ fn expression_contains_identifier(expr: &str, needle: &str) -> bool {
 /// to coincide.
 fn spans_overlap(a: Span, b: Span) -> bool {
     a.file == b.file && a.start < b.end && b.start < a.end
+}
+
+fn innermost_decl_for_span(decls: &[Decl], span: Span) -> Option<&Decl> {
+    decls
+        .iter()
+        .filter(|decl| {
+            let body = decl.body_span.unwrap_or(decl.span);
+            span.start >= body.start && span.start < body.end
+        })
+        .min_by_key(|decl| {
+            let body = decl.body_span.unwrap_or(decl.span);
+            body.end.saturating_sub(body.start)
+        })
 }
 
 /// Scan every file for rule matches. Language-aware: a rule only runs
@@ -613,7 +627,9 @@ fn write_rule_match_passes_constraints_at_expected_hit(
 
 fn write_args_from_source_text(source_text: Option<&str>, span: Span) -> Vec<CallArg> {
     source_text
-        .and_then(|text| text.get(span.start as usize..span.end as usize))
+        .and_then(|text| {
+            write_statement_text(text, span).or_else(|| text.get(span.start as usize..span.end as usize))
+        })
         .map(|value_text| {
             vec![CallArg {
                 span,
@@ -624,6 +640,52 @@ fn write_args_from_source_text(source_text: Option<&str>, span: Span) -> Vec<Cal
             }]
         })
         .unwrap_or_default()
+}
+
+fn write_statement_text(source_text: &str, span: Span) -> Option<&str> {
+    let start = usize::try_from(span.start).ok()?;
+    if start >= source_text.len() {
+        return None;
+    }
+    let line_start = source_text[..start].rfind('\n').map_or(0, |idx| idx + 1);
+    let first_line_end = source_text[start..]
+        .find('\n')
+        .map_or(source_text.len(), |idx| start + idx);
+    let first_line = source_text.get(line_start..first_line_end)?;
+    if !first_line.contains('=') {
+        return source_text.get(line_start..first_line_end).map(str::trim);
+    }
+    let mut end = first_line_end;
+    let mut depth = 0isize;
+    let mut saw_open = false;
+    for (offset, ch) in source_text[line_start..].char_indices() {
+        match ch {
+            '{' | '(' | '[' => {
+                saw_open = true;
+                depth += 1;
+            }
+            '}' | ')' | ']' if saw_open => {
+                depth -= 1;
+            }
+            '\n' if !saw_open => {
+                end = line_start + offset;
+                break;
+            }
+            '\n' if depth <= 0 => {
+                end = line_start + offset;
+                break;
+            }
+            _ => {}
+        }
+        end = line_start + offset + ch.len_utf8();
+        if offset > 4096 {
+            break;
+        }
+    }
+    source_text
+        .get(line_start..end)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_index: u32) -> bool {
@@ -840,6 +902,7 @@ struct PreparedRule<'a> {
     attribute: Option<&'a Vec<String>>,
     regex: Option<Regex>,
     base_name_in: &'a [String],
+    base_name_not_in: &'a [String],
     requires_call_package_signal: bool,
     constraint_regexes: Vec<Option<Regex>>,
     /// The rule's `packages` ∪ `imports` ∪ `modules`, in the
@@ -897,6 +960,7 @@ impl<'a> PreparedRule<'a> {
             attribute: target.attribute.as_ref(),
             regex,
             base_name_in: target.base_name_in.as_slice(),
+            base_name_not_in: target.base_name_not_in.as_slice(),
             requires_call_package_signal,
             constraint_regexes,
             package_signals,
@@ -904,13 +968,16 @@ impl<'a> PreparedRule<'a> {
     }
 
     fn base_name_allows(&self, text: &str) -> bool {
-        if self.base_name_in.is_empty() {
+        if self.base_name_in.is_empty() && self.base_name_not_in.is_empty() {
             return true;
         }
         let Some(base) = match_base_name(text) else {
-            return false;
+            return self.base_name_in.is_empty();
         };
-        self.base_name_in.iter().any(|want| want == base)
+        if !self.base_name_in.is_empty() && !self.base_name_in.iter().any(|want| want == base) {
+            return false;
+        }
+        !self.base_name_not_in.iter().any(|blocked| blocked == base)
     }
 
     fn call_context_allows(
@@ -991,8 +1058,11 @@ impl<'a> PreparedRule<'a> {
             }
         }
         let file_level_package_evidence_allowed = self.file_level_package_evidence_allowed();
+        let workspace_level_package_evidence_allowed = self.workspace_level_package_evidence_allowed();
         let allowed = self.package_signals.iter().any(|signal| {
             (file_level_package_evidence_allowed && file_packages.contains(*signal))
+                || (workspace_level_package_evidence_allowed
+                    && file_packages.contains(&workspace_import_package_marker(signal)))
                 || candidates
                     .iter()
                     .any(|candidate| local_import_package_allows(file_packages, candidate, signal))
@@ -1135,6 +1205,10 @@ impl<'a> PreparedRule<'a> {
             }
         }
     }
+
+    fn workspace_level_package_evidence_allowed(&self) -> bool {
+        matches!(self.rule.kind, crate::rule::RuleKind::Sink) && self.file_level_package_evidence_allowed()
+    }
 }
 
 fn is_lifecycle_audit_pair_sink(rule: &Rule) -> bool {
@@ -1209,6 +1283,10 @@ fn push_unique_package_candidate(out: &mut Vec<String>, value: &str) {
 
 fn local_import_package_marker(module: &str, package: &str) -> String {
     format!("{LOCAL_IMPORT_PACKAGE_PREFIX}:{module}:{package}")
+}
+
+fn workspace_import_package_marker(package: &str) -> String {
+    format!("{WORKSPACE_IMPORT_PACKAGE_PREFIX}:{package}")
 }
 
 fn local_import_package_allows(file_packages: &AHashSet<String>, candidate: &str, signal: &str) -> bool {
@@ -1414,6 +1492,7 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
     let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
+        let decl_decorators = collect_decl_decorator_names(ws, file, decl.name_span);
         for (idx, param) in decl.params.iter().enumerate() {
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
@@ -1441,6 +1520,9 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                 if !matched {
                     continue;
                 }
+                if !prepared.base_name_allows(param) {
+                    continue;
+                }
                 // Package gate — same one calls/reads/writes use. A
                 // param rule with `packages: [django]` should only
                 // fire on files importing django, not on any file
@@ -1454,6 +1536,26 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                         let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
                         (file_path, line, col, decl.name_span)
                     });
+                if !constraints_pass(ConstraintEval {
+                    rule_id: &prepared.rule.id,
+                    callee: param,
+                    args: &[],
+                    receiver_types: &[],
+                    span,
+                    call_origin: None,
+                    constraints: &prepared.rule.constraints.0,
+                    constraint_regexes: &prepared.constraint_regexes,
+                    receiver_call_count: None,
+                    assignment_texts: None,
+                    mode: ConstraintMode::Strict,
+                    taint_view: None,
+                    enclosing_decorators: Some(decl_decorators.as_slice()),
+                    alias_chains: None,
+                    runtime_types: None,
+                    lifecycle_transitions: None,
+                }) {
+                    continue;
+                }
                 out.push(RuleMatch {
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
@@ -2293,12 +2395,24 @@ type FilePackageSetMap = AHashMap<(FileId, u64, u64, u64), Arc<AHashSet<String>>
 static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<parking_lot::RwLock<FilePackageSetMap>> =
     std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
+type WorkspaceImportPackageContextMap = AHashMap<(u64, String, u64), Arc<WorkspaceImportPackageContext>>;
+static WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE: std::sync::LazyLock<
+    parking_lot::RwLock<WorkspaceImportPackageContextMap>,
+> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+
+#[derive(Clone, Default)]
+struct WorkspaceImportPackageContext {
+    packages: AHashSet<String>,
+    fingerprint: u64,
+}
+
 /// Build the set of canonical package names imported by `file`.
 /// Pre-enumerates every prefix shape an import target could match
 /// against the rule's signal needles (exact, `.h`-stripped, and
 /// progressive `/`, `.`, `:`, `\`-separated prefixes) so the
 /// match-time gate can do `set.contains(rule_signal)` in O(1).
 fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
+    let workspace_imports = workspace_import_package_context(ws, file);
     let workspace_packages = if workspace_manifest_package_context_allowed(ws, file) {
         ws.db().workspace_root().map(|root| {
             let language = ws
@@ -2315,7 +2429,7 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
         .as_ref()
         .map(|packages| packages.fingerprint)
         .unwrap_or(0);
-    let workspace_package_fingerprint = manifest_fingerprint;
+    let workspace_package_fingerprint = manifest_fingerprint ^ workspace_imports.fingerprint;
     let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snapshot| {
         (
             snapshot.version,
@@ -2356,6 +2470,12 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
     {
         out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
     }
+    out.extend(
+        workspace_imports
+            .packages
+            .iter()
+            .map(|package| workspace_import_package_marker(package)),
+    );
     if let Some(workspace_packages) = workspace_packages {
         out.extend(workspace_packages.packages.iter().cloned());
     }
@@ -2365,6 +2485,95 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
         write.clear();
     }
     write.entry(key).or_insert_with(|| out.clone()).clone()
+}
+
+fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<WorkspaceImportPackageContext> {
+    let Some(adapter) = ws.db().adapter_for(file) else {
+        return Arc::new(WorkspaceImportPackageContext::default());
+    };
+    let language = adapter.language_id();
+    let key = (
+        ws.db().vfs().instance_id(),
+        language.as_str().to_string(),
+        ws.db().vfs().revision(),
+    );
+    let cached = WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE.read().get(&key).cloned();
+    if let Some(hit) = cached {
+        return hit;
+    }
+    let global = ws.db().global_index();
+    let mut context = WorkspaceImportPackageContext::default();
+    for candidate_file in global.all_files() {
+        if ws
+            .db()
+            .adapter_for(candidate_file)
+            .is_none_or(|candidate_adapter| candidate_adapter.language_id() != language)
+        {
+            continue;
+        }
+        if let Ok(snapshot) = ws.db().vfs().snapshot(candidate_file) {
+            context.fingerprint = context
+                .fingerprint
+                .wrapping_mul(16_777_619)
+                .wrapping_add(u64::from(candidate_file.raw()))
+                .wrapping_add(snapshot.version)
+                .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
+        }
+        let Some(imports) = ws.db().import_index(candidate_file) else {
+            if let Some(idx) = ws.db().decl_index(candidate_file) {
+                insert_fully_qualified_reference_package_prefixes(
+                    &mut context.packages,
+                    language.as_str(),
+                    &idx,
+                );
+            }
+            continue;
+        };
+        for spec in &imports.imports {
+            if spec.module.starts_with('.') {
+                continue;
+            }
+            insert_import_target_prefixes(&mut context.packages, &spec.module);
+            if let Some(stripped) = spec
+                .module
+                .strip_suffix(".h")
+                .or_else(|| spec.module.strip_suffix(".hpp"))
+                .or_else(|| spec.module.strip_suffix(".hxx"))
+            {
+                insert_import_target_prefixes(&mut context.packages, stripped);
+            }
+        }
+        if let Some(idx) = ws.db().decl_index(candidate_file) {
+            insert_fully_qualified_reference_package_prefixes(&mut context.packages, language.as_str(), &idx);
+        }
+    }
+    let context = Arc::new(context);
+    let mut write = WORKSPACE_IMPORT_PACKAGE_CONTEXT_CACHE.write();
+    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
+        write.clear();
+    }
+    write.entry(key).or_insert_with(|| context.clone()).clone()
+}
+
+fn insert_fully_qualified_reference_package_prefixes(
+    out: &mut AHashSet<String>,
+    language: &str,
+    idx: &bonsai_lang_api::DeclIndex,
+) {
+    if !matches!(language, "java" | "kotlin" | "scala") {
+        return;
+    }
+    for reference in &idx.refs {
+        if !matches!(
+            reference.kind,
+            bonsai_lang_api::RefKind::Call | bonsai_lang_api::RefKind::Type
+        ) {
+            continue;
+        }
+        if let Some(package) = crate::pkg::java_like_fully_qualified_package(&reference.name) {
+            insert_import_target_prefixes(out, package);
+        }
+    }
 }
 
 fn direct_package_imports_for_file(ws: &Workspace, file: FileId) -> AHashSet<String> {
@@ -2430,12 +2639,26 @@ fn relative_import_candidates(raw: &std::path::Path) -> Vec<std::path::PathBuf> 
     const EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
     let mut out = Vec::new();
     out.push(raw.to_path_buf());
-    if raw.extension().is_none() {
+
+    let raw_ext = raw.extension().and_then(|ext| ext.to_str());
+    let has_known_code_ext = raw_ext.is_some_and(|ext| EXTENSIONS.contains(&ext));
+    if raw_ext.is_none() {
         for ext in EXTENSIONS {
             out.push(raw.with_extension(ext));
         }
         for ext in EXTENSIONS {
             out.push(raw.join(format!("index.{ext}")));
+        }
+    } else if !has_known_code_ext {
+        // TypeScript projects often import dotted basenames without the
+        // final source extension, e.g. `../user/user.model` resolves to
+        // `../user/user.model.ts`. `Path::extension()` sees `.model`,
+        // so the extensionless branch above would otherwise never try
+        // the real file.
+        for ext in EXTENSIONS {
+            let mut appended = raw.as_os_str().to_os_string();
+            appended.push(format!(".{ext}"));
+            out.push(std::path::PathBuf::from(appended));
         }
     }
     out
@@ -2521,12 +2744,22 @@ struct FileDeclFactsBundle {
 /// `receiver_type_in: [Cursor]` sink on `c.execute(...)` resolves —
 /// without the engine owning any method-name list (the names come from
 /// the rulepack, mirroring `taint_receiver_from_args`).
+#[derive(Debug, Clone)]
+struct FactoryReturnSpec {
+    method: String,
+    receiver_path: Vec<String>,
+    type_name: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct FactoryReturns {
-    /// language → (factory method name → return type). Scoped by
-    /// language so a Python `cursor → Cursor` rule can never type a
-    /// `.cursor()` call in a JS/Ruby/etc. file.
-    by_language: AHashMap<String, AHashMap<String, String>>,
+    /// language → factory return specs. Scoped by language so a Python
+    /// `cursor → Cursor` rule can never type a `.cursor()` call in a
+    /// JS/Ruby/etc. file. Specs with an empty receiver path preserve the
+    /// original method-name-only behavior; specs from
+    /// `attribute: [Receiver, method]` require the assignment RHS callee
+    /// to end in that receiver path before typing the local.
+    by_language: AHashMap<String, Vec<FactoryReturnSpec>>,
     /// `0` when empty, so the decl-facts cache key is byte-identical to a
     /// no-factory run — the feature is dormant unless the pack ships
     /// `returns_type` rules.
@@ -2537,8 +2770,8 @@ impl FactoryReturns {
     fn is_empty(&self) -> bool {
         self.by_language.is_empty()
     }
-    fn methods_for(&self, language: &str) -> Option<&AHashMap<String, String>> {
-        self.by_language.get(language)
+    fn specs_for(&self, language: &str) -> Option<&[FactoryReturnSpec]> {
+        self.by_language.get(language).map(Vec::as_slice)
     }
 }
 
@@ -2557,7 +2790,7 @@ pub(crate) fn empty_factory_returns() -> Arc<FactoryReturns> {
 /// structured callee (`name`, or the last `attribute` segment);
 /// `regex`-only callees are skipped (no clean method name to key on).
 pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
-    let mut by_language: AHashMap<String, AHashMap<String, String>> = AHashMap::new();
+    let mut by_language: AHashMap<String, Vec<FactoryReturnSpec>> = AHashMap::new();
     for rule in rules {
         let Some(ty) = rule.returns_type.as_deref() else {
             continue;
@@ -2568,11 +2801,18 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
         let Some(target) = rule_primary_target(rule) else {
             continue;
         };
-        let method = target
-            .name
-            .as_deref()
-            .or_else(|| target.attribute.as_deref().and_then(|attr| attr.last().map(String::as_str)));
-        let Some(method) = method else {
+        let (method, receiver_path) = if let Some(name) = target.name.as_deref() {
+            (name, Vec::new())
+        } else if let Some(attr) = target.attribute.as_deref() {
+            let Some(method) = attr.last().map(String::as_str) else {
+                continue;
+            };
+            let receiver_path = attr[..attr.len().saturating_sub(1)]
+                .iter()
+                .flat_map(|part| factory_path_segments(part))
+                .collect();
+            (method, receiver_path)
+        } else {
             continue;
         };
         if method.is_empty() {
@@ -2581,12 +2821,16 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
         by_language
             .entry(rule.language.clone())
             .or_default()
-            .insert(method.to_string(), ty.to_string());
+            .push(FactoryReturnSpec {
+                method: method.to_string(),
+                receiver_path,
+                type_name: ty.to_string(),
+            });
     }
     if by_language.is_empty() {
         return empty_factory_returns();
     }
-    // Deterministic fingerprint over sorted (language, method, type)
+    // Deterministic fingerprint over sorted (language, receiver, method, type)
     // triples so the decl-facts cache never serves a bundle built for a
     // different pack.
     let mut langs: Vec<&String> = by_language.keys().collect();
@@ -2595,12 +2839,16 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
     for lang in langs {
         fingerprint_input.push_str(lang);
         fingerprint_input.push('\u{1}');
-        let mut pairs: Vec<(&String, &String)> = by_language[lang].iter().collect();
-        pairs.sort();
-        for (method, ty) in pairs {
-            fingerprint_input.push_str(method);
+        let mut specs: Vec<&FactoryReturnSpec> = by_language[lang].iter().collect();
+        specs.sort_by(|a, b| {
+            (&a.receiver_path, &a.method, &a.type_name).cmp(&(&b.receiver_path, &b.method, &b.type_name))
+        });
+        for spec in specs {
+            fingerprint_input.push_str(&spec.receiver_path.join("."));
             fingerprint_input.push('\0');
-            fingerprint_input.push_str(ty);
+            fingerprint_input.push_str(&spec.method);
+            fingerprint_input.push('\0');
+            fingerprint_input.push_str(&spec.type_name);
             fingerprint_input.push('\n');
         }
     }
@@ -2614,7 +2862,7 @@ pub(crate) fn build_factory_returns(rules: &[&Rule]) -> Arc<FactoryReturns> {
 /// Extract the method name of the OUTERMOST call in an assignment RHS:
 /// `engine.connect().cursor()` → `cursor`, `make_cursor()` →
 /// `make_cursor`. Returns `None` when the RHS is not a call expression.
-fn final_call_method(rhs: &str) -> Option<&str> {
+fn final_call_callee(rhs: &str) -> Option<&str> {
     let rhs = rhs.trim();
     if !rhs.ends_with(')') {
         return None;
@@ -2637,14 +2885,53 @@ fn final_call_method(rhs: &str) -> Option<&str> {
             _ => {}
         }
     }
-    let callee = rhs[..open?].trim_end();
+    Some(rhs[..open?].trim_end())
+}
+
+fn final_call_method(rhs: &str) -> Option<&str> {
+    let callee = final_call_callee(rhs)?;
     // The method is the last identifier segment after a `.` / `::` / `->`.
     let start = callee.rfind(['.', ':', '>']).map_or(0, |p| p + 1);
     let method = callee[start..].trim();
-    if method.is_empty() || !method.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+    if method.is_empty()
+        || !method
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    {
         return None;
     }
     Some(method)
+}
+
+fn factory_path_segments(text: &str) -> Vec<String> {
+    text.split(['.', ':', '>', '\\'])
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            (!trimmed.is_empty() && trimmed != "-").then(|| trimmed.to_string())
+        })
+        .collect()
+}
+
+fn factory_spec_matches_rhs(rhs: &str, spec: &FactoryReturnSpec) -> bool {
+    let Some(method) = final_call_method(rhs) else {
+        return false;
+    };
+    if method != spec.method {
+        return false;
+    }
+    if spec.receiver_path.is_empty() {
+        return true;
+    }
+    let Some(callee) = final_call_callee(rhs) else {
+        return false;
+    };
+    let segments = factory_path_segments(callee);
+    let needed = spec.receiver_path.len() + 1;
+    if segments.len() < needed {
+        return false;
+    }
+    let start = segments.len() - needed;
+    segments[start..segments.len() - 1] == spec.receiver_path
 }
 
 /// Synthesize `local → ReturnType` aliases for assignments whose RHS is
@@ -2655,18 +2942,18 @@ fn synth_factory_type_aliases(
     factory: &FactoryReturns,
     language: &str,
 ) -> Vec<TypeAliasBinding> {
-    let Some(methods) = factory.methods_for(language) else {
+    let Some(specs) = factory.specs_for(language) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for (name, rhs) in assignment_map {
-        let Some(method) = final_call_method(rhs) else {
-            continue;
-        };
-        if let Some(type_name) = methods.get(method) {
+        for spec in specs {
+            if !factory_spec_matches_rhs(rhs, spec) {
+                continue;
+            }
             out.push(TypeAliasBinding {
                 name: name.clone(),
-                type_name: type_name.clone(),
+                type_name: spec.type_name.clone(),
             });
         }
     }
@@ -2682,11 +2969,7 @@ static DECL_FACTS_CACHE: std::sync::LazyLock<parking_lot::RwLock<FileDeclFactsMa
 /// so source edits — and a change of factory-return map — naturally
 /// invalidate. `factory_fp` is 0 when the pack ships no `returns_type`
 /// rules, keeping the key (and behavior) identical to a no-factory run.
-fn decl_match_facts_for(
-    ws: &Workspace,
-    file: FileId,
-    factory: &FactoryReturns,
-) -> Arc<FileDeclFactsBundle> {
+fn decl_match_facts_for(ws: &Workspace, file: FileId, factory: &FactoryReturns) -> Arc<FileDeclFactsBundle> {
     let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snap| {
         (snap.version, package_cache_content_hash(snap.text.as_bytes()))
     });
@@ -2702,11 +2985,22 @@ fn decl_match_facts_for(
     // factory must not type `.cursor()` in a JS file). Skipped entirely
     // when the pack ships no `returns_type` rules.
     let file_language = (!factory.is_empty())
-        .then(|| ws.db().adapter_for(file).map(|a| a.language_id().as_str().to_string()))
+        .then(|| {
+            ws.db()
+                .adapter_for(file)
+                .map(|a| a.language_id().as_str().to_string())
+        })
         .flatten();
+    let module_type_aliases: Vec<TypeAliasBinding> = global
+        .decls_in(file)
+        .iter()
+        .filter(|decl| decl.name == "__module__")
+        .flat_map(|decl| decl.type_aliases.iter().cloned())
+        .collect();
     let mut by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>> = AHashMap::new();
     for decl in global.decls_in(file) {
         let mut alias_map = import_aliases.clone();
+        extend_alias_map_with_declared_types(&mut alias_map, &module_type_aliases);
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
         let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
@@ -2715,6 +3009,7 @@ fn decl_match_facts_for(
             .map(|lang| synth_factory_type_aliases(&assignment_map, factory, lang))
             .unwrap_or_default();
         let mut calls = collect_calls(&decl.flow_events);
+        enrich_call_fact_receiver_types(&mut calls, &module_type_aliases);
         enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
         if !factory_type_aliases.is_empty() {
             // Factory-typed locals participate in receiver-type matching
@@ -2723,7 +3018,7 @@ fn decl_match_facts_for(
             extend_alias_map_with_declared_types(&mut alias_map, &factory_type_aliases);
         }
         let receiver_counts = receiver_method_call_counts(&calls);
-        let decl_decorators = collect_decl_decorator_names(ws, file, decl.span);
+        let decl_decorators = collect_decl_decorator_names(ws, file, decl.name_span);
         let alias_chains = collect_must_alias_pairs(&decl.flow_events);
         let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
         let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
@@ -2934,10 +3229,7 @@ fn scan_refs_batch(
         if r.kind != want_kind {
             continue;
         }
-        let enclosing_decl = decls.iter().find(|d| {
-            let body = d.body_span.unwrap_or(d.span);
-            r.span.start >= body.start && r.span.start < body.end
-        });
+        let enclosing_decl = innermost_decl_for_span(decls, r.span);
         for prepared in rules {
             if !decl_target_context_allows(
                 global.as_ref(),
@@ -3739,13 +4031,7 @@ fn scan_ref_writes_batch(
                 continue;
             }
             let (file_path, line, col) = resolve_span(ws, file, r.span);
-            let enclosing_fn = decls
-                .iter()
-                .find(|d| {
-                    let body = d.body_span.unwrap_or(d.span);
-                    r.span.start >= body.start && r.span.start < body.end
-                })
-                .map(|d| d.name.clone());
+            let enclosing_fn = innermost_decl_for_span(decls, r.span).map(|d| d.name.clone());
             out.push(RuleMatch {
                 rule_id: prepared.rule.id.clone(),
                 language: prepared.rule.language.clone(),
@@ -4853,6 +5139,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
                 any_arg_matches_regex,
             )?),
             ConstraintKind::ReceiverTypeIn { .. }
+            | ConstraintKind::ReceiverTypeNotIn { .. }
             | ConstraintKind::SecondArgEquals { .. }
             | ConstraintKind::ArgEquals { .. }
             | ConstraintKind::KeywordArgEquals { .. }
@@ -4947,6 +5234,7 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 /// | Arm                          | Predicate                                          |
 /// |------------------------------|----------------------------------------------------|
 /// | `ReceiverTypeIn`             | callee's receiver type matches a semantic type     |
+/// | `ReceiverTypeNotIn`          | callee's receiver type does not match a safe type  |
 /// | `Namespace`                  | callee's qualified prefix matches the namespace    |
 /// | `FormatArgIndex`             | the format-string arg slot matches expected index  |
 /// | `TopLevel`                   | enclosing decl is at module top level              |
@@ -4970,6 +5258,11 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
         match c {
             ConstraintKind::ReceiverTypeIn { receiver_type_in } => {
                 if !receiver_type_matches_any(ctx.receiver_types, receiver_type_in) {
+                    return false;
+                }
+            }
+            ConstraintKind::ReceiverTypeNotIn { receiver_type_not_in } => {
+                if receiver_type_matches_any(ctx.receiver_types, receiver_type_not_in) {
                     return false;
                 }
             }
@@ -6029,6 +6322,9 @@ fn decorator_is_attached_to_decl(
         return true;
     };
     let text = snapshot.text.as_bytes();
+    if !decorator_line_has_marker(text, decorator_span) {
+        return false;
+    }
     let start = decorator_span.end as usize;
     let end = decl_span.start as usize;
     if start >= end || end > text.len() {
@@ -6038,6 +6334,26 @@ fn decorator_is_attached_to_decl(
     !gap.iter().any(|b| {
         matches!(*b, b'{' | b'}' | b';') || b.is_ascii_control() && *b != b'\n' && *b != b'\r' && *b != b'\t'
     })
+}
+
+fn decorator_line_has_marker(text: &[u8], decorator_span: Span) -> bool {
+    let start = decorator_span.start as usize;
+    if start >= text.len() {
+        return false;
+    }
+    let line_start = text[..start]
+        .iter()
+        .rposition(|b| matches!(*b, b'\n' | b'\r'))
+        .map_or(0, |idx| idx + 1);
+    let line_end = text[start..]
+        .iter()
+        .position(|b| matches!(*b, b'\n' | b'\r'))
+        .map_or(text.len(), |idx| start + idx);
+    let line = &text[line_start..line_end];
+    line.iter()
+        .copied()
+        .find(|b| !matches!(*b, b' ' | b'\t'))
+        .is_some_and(|b| matches!(b, b'@' | b'['))
 }
 
 /// Walk assignment-only callable references that do not necessarily

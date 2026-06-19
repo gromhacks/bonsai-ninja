@@ -1,5 +1,6 @@
 use super::call_candidate_matches_package_tail;
 use super::import_matches_package;
+use super::java_like_fully_qualified_package;
 
 #[test]
 fn exact_match() {
@@ -16,8 +17,14 @@ fn go_path_package_tail_credits_fqn_call_candidate() {
     assert!(call_candidate_matches_package_tail("exec.Command", "os/exec"));
     assert!(call_candidate_matches_package_tail("http.Get", "net/http"));
     assert!(call_candidate_matches_package_tail("http", "net/http"));
-    assert!(call_candidate_matches_package_tail("gin", "github.com/gin-gonic/gin"));
-    assert!(call_candidate_matches_package_tail("s3", "github.com/aws/aws-sdk-go/service/s3"));
+    assert!(call_candidate_matches_package_tail(
+        "gin",
+        "github.com/gin-gonic/gin"
+    ));
+    assert!(call_candidate_matches_package_tail(
+        "s3",
+        "github.com/aws/aws-sdk-go/service/s3"
+    ));
 }
 
 #[test]
@@ -61,6 +68,24 @@ fn dotted_prefix() {
         "org.apache.velocity.app.Velocity",
         "org.apache.velocity"
     ));
+}
+
+#[test]
+fn java_like_fqn_package_prefix() {
+    assert_eq!(
+        java_like_fully_qualified_package("javax.naming.directory.InitialDirContext"),
+        Some("javax.naming.directory")
+    );
+    assert_eq!(
+        java_like_fully_qualified_package("new javax.naming.directory.InitialDirContext"),
+        Some("javax.naming.directory")
+    );
+    assert_eq!(
+        java_like_fully_qualified_package("org.example.Factory.create"),
+        Some("org.example")
+    );
+    assert_eq!(java_like_fully_qualified_package("javax.naming.directory"), None);
+    assert_eq!(java_like_fully_qualified_package("InitialDirContext"), None);
 }
 
 #[test]

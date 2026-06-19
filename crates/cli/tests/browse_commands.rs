@@ -77,14 +77,14 @@ fn newest_mtime(dir: &Path, exts: &[&str]) -> Option<SystemTime> {
                 // Skip build output / VCS dirs.
                 if !matches!(
                     p.file_name().and_then(|n| n.to_str()),
-                    Some("target" | ".git" | ".bonsai")
+                    Some("target" | ".git" | ".bonsai" | "tests")
                 ) {
                     stack.push(p);
                 }
-            } else if p
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| exts.contains(&e))
+            } else if is_release_relevant_source(&p)
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| exts.contains(&e))
             {
                 if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
                     newest = Some(newest.map_or(mtime, |cur| cur.max(mtime)));
@@ -93,6 +93,13 @@ fn newest_mtime(dir: &Path, exts: &[&str]) -> Option<SystemTime> {
         }
     }
     newest
+}
+
+fn is_release_relevant_source(path: &Path) -> bool {
+    !path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| matches!(name, "test.rs" | "tests.rs") || name.ends_with("_tests.rs"))
 }
 
 /// Run `bonsai-ninja` with `args` and `--no-color`. Returns `None` if the
@@ -114,6 +121,16 @@ fn run(args: &[&str]) -> Option<String> {
         String::from_utf8_lossy(&out.stderr)
     );
     Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn run_inspect_graph(ws: &Path, args_after_ws: &[&str]) -> Option<String> {
+    let ws_str = ws.to_str().unwrap().to_string();
+    let mut args: Vec<&str> = Vec::with_capacity(args_after_ws.len() + 3);
+    args.push("inspect");
+    args.push(ws_str.as_str());
+    args.push("--graph-flow");
+    args.extend_from_slice(args_after_ws);
+    run(&args)
 }
 
 // -----------------------------------------------------------------------------
@@ -1225,18 +1242,19 @@ fn inspect_occurrence_hits_mark_capped_flow_evidence() {
     let tmp = tempdir_for_test("bonsai_inspect_occurrence_flow_completeness");
     write_fan_in_python_workspace(&tmp, 20);
 
-    let Some(out) = run(&[
-        "inspect",
-        tmp.to_str().unwrap(),
-        "--query",
-        "sink",
-        "--kind",
-        "call",
-        "--max-flows",
-        "1",
-        "--format",
-        "json",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &tmp,
+        &[
+            "--query",
+            "sink",
+            "--kind",
+            "call",
+            "--max-flows",
+            "1",
+            "--format",
+            "json",
+        ],
+    ) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
@@ -1277,14 +1295,7 @@ fn inspect_occurrence_hits_mark_capped_flow_evidence() {
 #[test]
 fn inspect_decl_sidebar_uses_semantic_callgraph_edges() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "verify_token",
-        "--format",
-        "json",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "verify_token", "--format", "json"]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
@@ -1474,16 +1485,10 @@ fn inspect_from_to_filter_is_fuzzy_over_full_flow() {
     // chain is `handle_request → update_user → run_admin_command` and
     // the hit text is `os.system`. `request` matches the first hop,
     // `os.system` matches the hit text. Both should keep the flow.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--from",
-        "request",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &["--query", "os.system", "--from", "request", "--to", "os.system"],
+    ) else {
         return;
     };
     assert!(out.contains("FLOW"), "from/to filter dropped the flow: {out}");
@@ -1494,14 +1499,7 @@ fn inspect_from_to_filter_is_fuzzy_over_full_flow() {
 
     // `--from update_user` — needle matches an INTERMEDIATE hop, not
     // the entry. Fuzzy-over-full-flow must still keep it.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--from",
-        "update_user",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "os.system", "--from", "update_user"]) else {
         return;
     };
     assert!(
@@ -1510,14 +1508,7 @@ fn inspect_from_to_filter_is_fuzzy_over_full_flow() {
     );
 
     // `--to <nonexistent>` drops every flow → hit is dropped entirely.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--to",
-        "totally_fake_fn",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "os.system", "--to", "totally_fake_fn"]) else {
         return;
     };
     assert!(
@@ -1537,14 +1528,7 @@ fn inspect_from_to_markers_land_on_matched_lines() {
     // scatter across unrelated body lines, regardless of how many hits
     // surface.
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "update",
-        "--to",
-        "system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "update", "--to", "system"]) else {
         return;
     };
 
@@ -1589,14 +1573,7 @@ fn inspect_from_marker_on_source_line_when_from_matches_entry() {
     // SOURCE line, and every FROM marker line legitimately mentions
     // `request` in either an annotation subject or the code itself.
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "os.system",
-        "--from",
-        "request",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "os.system", "--from", "request"]) else {
         return;
     };
     let from_lines: Vec<&str> = out.lines().filter(|l| l.contains("FROM: request")).collect();
@@ -1632,16 +1609,8 @@ fn inspect_from_to_markers_work_on_kotlin() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("examples/kotlin/micro");
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "exec",
-        "--from",
-        "updateUser",
-        "--to",
-        "exec",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "exec", "--from", "updateUser", "--to", "exec"])
+    else {
         return;
     };
     let from_lines: Vec<&str> = out.lines().filter(|l| l.contains("FROM: updateUser")).collect();
@@ -1666,16 +1635,10 @@ fn inspect_from_to_markers_work_on_javascript() {
     let ws = repo_root.join("examples/javascript/micro");
     // JS fixture: gateway.js calls updateUser which calls runAdminCommand
     // which calls execSync.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "execSync",
-        "--from",
-        "updateUser",
-        "--to",
-        "execSync",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &["--query", "execSync", "--from", "updateUser", "--to", "execSync"],
+    ) else {
         return;
     };
     assert!(
@@ -1697,14 +1660,7 @@ fn inspect_from_to_markers_work_on_java() {
         p.canonicalize().expect("repo root")
     };
     let ws = repo_root.join("examples/java/micro");
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "updateUser",
-        "--to",
-        "exec",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "updateUser", "--to", "exec"]) else {
         return;
     };
     assert!(
@@ -1732,7 +1688,7 @@ fn assert_from_to_markers(lang: &str, from: &str, to: &str) {
     if !ws.exists() {
         return; // some langs (perl) don't ship a micro fixture
     }
-    let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--from", from, "--to", to]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", from, "--to", to]) else {
         return;
     };
     let from_hits = out.lines().filter(|l| l.contains("FROM: ")).count();
@@ -1815,7 +1771,7 @@ fn inspect_from_to_filters_are_case_insensitive() {
     };
     let ws = repo_root.join("examples/java/micro");
 
-    let Some(lower) = run(&["inspect", ws.to_str().unwrap(), "--from", "user", "--to", "exec"]) else {
+    let Some(lower) = run_inspect_graph(&ws, &["--from", "user", "--to", "exec"]) else {
         return;
     };
     assert!(
@@ -1823,7 +1779,7 @@ fn inspect_from_to_filters_are_case_insensitive() {
         "case-insensitive --from/--to failed on Java: {lower}"
     );
 
-    let Some(upper) = run(&["inspect", ws.to_str().unwrap(), "--from", "USER", "--to", "EXEC"]) else {
+    let Some(upper) = run_inspect_graph(&ws, &["--from", "USER", "--to", "EXEC"]) else {
         return;
     };
     assert!(
@@ -1833,14 +1789,7 @@ fn inspect_from_to_filters_are_case_insensitive() {
 
     // Same check on Python with mixed case.
     let py_ws = repo_root.join("examples/python/micro");
-    let Some(py_out) = run(&[
-        "inspect",
-        py_ws.to_str().unwrap(),
-        "--from",
-        "USER",
-        "--to",
-        "SYSTEM",
-    ]) else {
+    let Some(py_out) = run_inspect_graph(&py_ws, &["--from", "USER", "--to", "SYSTEM"]) else {
         return;
     };
     assert!(
@@ -1855,14 +1804,7 @@ fn inspect_from_to_work_standalone_without_query() {
 
     // `--from request --to os.system` without a `--query` should still
     // surface the os.system hit — the filters alone pick it out.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "request",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "request", "--to", "os.system"]) else {
         return;
     };
     assert!(
@@ -1879,7 +1821,7 @@ fn inspect_from_to_work_standalone_without_query() {
     );
 
     // `--to os.system` alone should work too.
-    let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--to", "os.system"]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--to", "os.system"]) else {
         return;
     };
     assert!(out.contains("os.system"));
@@ -1974,8 +1916,8 @@ fn inspect_help_has_examples_and_sample_output() {
         "inspect help missing query example: {out}"
     );
     assert!(
-        out.contains("FLOW 1 MATCH") || out.contains("MATCH"),
-        "inspect sample output missing MATCH annotation: {out}"
+        out.contains("OCCURRENCE HITS") && out.contains("os.system"),
+        "inspect sample output should show syntax occurrence hits by default: {out}"
     );
 }
 
@@ -2336,6 +2278,46 @@ fn tree_compact_text_marks_depth_limited_view_incomplete() {
     assert!(
         out.contains("tree-files-truncated:"),
         "compact tree output must show the machine-readable reason:\n{out}"
+    );
+}
+
+#[test]
+fn read_file_plain_json_uses_fast_file_local_view() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "read-file",
+        ws.to_str().unwrap(),
+        "gateway.py",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(true),
+        "plain read-file should be a complete file-local view:\n{out}"
+    );
+    assert!(
+        parsed["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("handle_request")),
+        "plain read-file should include the requested source:\n{out}"
+    );
+    let missing_or_empty_array = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+    };
+    assert!(
+        missing_or_empty_array("findings_in_view"),
+        "plain read-file should not auto-run rulepack findings:\n{out}"
+    );
+    assert!(
+        missing_or_empty_array("callers_in") && missing_or_empty_array("callees_out"),
+        "plain read-file should stay file-local unless semantic body options are requested:\n{out}"
     );
 }
 
@@ -2789,7 +2771,7 @@ fn inspect_from_to_every_flow_shows_both_markers_across_langs() {
     let repo = repo_root();
     for (sub, from, to) in &cases {
         let ws = repo.join("examples").join(sub);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--from", from, "--to", to]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--from", from, "--to", to]) else {
             return;
         };
         // Skip langs whose micro fixture doesn't happen to have this
@@ -2849,7 +2831,7 @@ fn inspect_from_to_every_flow_shows_both_markers_across_langs() {
 #[test]
 fn inspect_from_to_narrow_no_unrelated_hits_python() {
     let ws = ws_path();
-    let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--from", "req", "--to", "os"]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "req", "--to", "os"]) else {
         return;
     };
     // Only the OCCURRENCE HITS table matters for this assertion — the
@@ -3055,14 +3037,7 @@ fn inspect_in_fn_filter_works_for_every_lang() {
 fn inspect_max_flows_caps_output_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            universal_query(),
-            "--max-flows",
-            "1",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", universal_query(), "--max-flows", "1"]) else {
             return;
         };
         if out.contains("no matches") {
@@ -3136,14 +3111,15 @@ fn inspect_format_json_valid_for_every_lang() {
 fn inspect_from_to_nonsense_needles_drop_all_for_every_lang() {
     for lang in LANG_MICROS {
         let ws = lang_ws(lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--from",
-            "zzzzz_not_a_real_token_zzzzz",
-            "--to",
-            "wwwww_also_nonsense_wwwww",
-        ]) else {
+        let Some(out) = run_inspect_graph(
+            &ws,
+            &[
+                "--from",
+                "zzzzz_not_a_real_token_zzzzz",
+                "--to",
+                "wwwww_also_nonsense_wwwww",
+            ],
+        ) else {
             return;
         };
         let flow_count = out.lines().filter(|l| l.starts_with("FLOW ")).count();
@@ -3397,6 +3373,11 @@ fn run_on(lang: &str, args_after_ws: &[&str]) -> Option<String> {
     run(&args)
 }
 
+fn run_on_inspect_graph(lang: &str, args_after_ws: &[&str]) -> Option<String> {
+    let ws = lang_ws(lang);
+    run_inspect_graph(&ws, args_after_ws)
+}
+
 fn assert_contains(lang: &str, cmd_desc: &str, out: &str, expect: &str) {
     assert!(
         out.contains(expect),
@@ -3509,7 +3490,7 @@ fn cli_trace_content_correct_for_every_lang() {
 #[test]
 fn cli_inspect_query_content_correct_for_every_lang() {
     for e in lang_expectations() {
-        let Some(out) = run_on(e.lang, &["inspect", "--query", e.sink]) else {
+        let Some(out) = run_on_inspect_graph(e.lang, &["--query", e.sink]) else {
             return;
         };
         assert_contains(e.lang, "inspect --query", &out, "MATCH");
@@ -3685,7 +3666,7 @@ fn inspect_both_sinks_reachable_for_every_lang() {
     for (lang, sql, cmd) in cases {
         let ws = lang_ws(lang);
         for (kind, query) in [("SQL", sql), ("CMD", cmd)] {
-            let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", query]) else {
+            let Some(out) = run_inspect_graph(&ws, &["--query", query]) else {
                 return;
             };
             assert!(
@@ -3744,7 +3725,7 @@ fn inspect_finds_module_level_calls() {
 fn inspect_finds_calls_nested_in_try_using_defer() {
     // Rust's `?` operator wraps the call in a Try event.
     let rust_ws = lang_ws("rust");
-    let Some(out) = run(&["inspect", rust_ws.to_str().unwrap(), "--query", "prepare"]) else {
+    let Some(out) = run_inspect_graph(&rust_ws, &["--query", "prepare"]) else {
         return;
     };
     assert!(
@@ -3754,7 +3735,7 @@ fn inspect_finds_calls_nested_in_try_using_defer() {
 
     // Python: `with open(...)` wraps content in a Using event.
     let py_ws = lang_ws("python");
-    let Some(out) = run(&["inspect", py_ws.to_str().unwrap(), "--query", "cursor.execute"]) else {
+    let Some(out) = run_inspect_graph(&py_ws, &["--query", "cursor.execute"]) else {
         return;
     };
     assert!(
@@ -3775,12 +3756,7 @@ fn inspect_finds_calls_nested_in_try_using_defer() {
 fn inspect_qualified_method_calls_preserved() {
     // Java: full path including the chained receiver call.
     let java_ws = lang_ws("java");
-    let Some(out) = run(&[
-        "inspect",
-        java_ws.to_str().unwrap(),
-        "--query",
-        "Runtime.getRuntime",
-    ]) else {
+    let Some(out) = run_inspect_graph(&java_ws, &["--query", "Runtime.getRuntime"]) else {
         return;
     };
     assert!(
@@ -3790,7 +3766,7 @@ fn inspect_qualified_method_calls_preserved() {
 
     // PHP: arrow-call qualified text `$conn->query`.
     let php_ws = lang_ws("php");
-    let Some(out) = run(&["inspect", php_ws.to_str().unwrap(), "--query", "$conn->query"]) else {
+    let Some(out) = run_inspect_graph(&php_ws, &["--query", "$conn->query"]) else {
         return;
     };
     assert!(
@@ -3994,13 +3970,7 @@ fn write_fan_in_python_workspace(root: &std::path::Path, callers: usize) {
 #[test]
 fn inspect_all_flag_runs() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "verify_token",
-        "--all",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "verify_token", "--all"]) else {
         return;
     };
     // `--all` must produce at least the same decl hit as default.
@@ -4013,14 +3983,7 @@ fn inspect_all_flag_runs() {
 #[test]
 fn inspect_max_entry_probes_flag_runs() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "verify_token",
-        "--max-entry-probes",
-        "10",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "verify_token", "--max-entry-probes", "10"]) else {
         return;
     };
     assert!(
@@ -4398,7 +4361,7 @@ fn every_lang_micro_has_canonical_sink_decl() {
 fn every_lang_micro_chain_reaches_entry_to_sink() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
         // Chain line shape: `entry → mid → sink` (arrow-connected,
@@ -4454,14 +4417,7 @@ fn py_ws() -> std::path::PathBuf {
 #[test]
 fn from_needle_matches_def_name() {
     let ws = py_ws();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "handle_request",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "handle_request", "--to", "os.system"]) else {
         return;
     };
     assert!(
@@ -4475,14 +4431,7 @@ fn from_needle_matches_def_name() {
 #[test]
 fn from_needle_matches_call_site() {
     let ws = py_ws();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "sqlite3.connect",
-        "--to",
-        "execute",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "sqlite3.connect", "--to", "execute"]) else {
         return;
     };
     assert!(
@@ -4501,14 +4450,7 @@ fn from_needle_matches_call_site() {
 #[test]
 fn from_needle_rejects_untainted_import_module() {
     let ws = py_ws();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "sqlite3",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "sqlite3", "--to", "os.system"]) else {
         return;
     };
     assert!(
@@ -4522,14 +4464,7 @@ fn from_needle_rejects_untainted_import_module() {
 fn from_needle_matches_var_target() {
     let ws = py_ws();
     // `user = get_user(token)` is an assignment in handle_request.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "user",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "user", "--to", "os.system"]) else {
         return;
     };
     assert!(
@@ -4543,14 +4478,7 @@ fn from_needle_matches_var_target() {
 #[test]
 fn from_needle_matches_parameter_name() {
     let ws = py_ws();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "token",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "token", "--to", "os.system"]) else {
         return;
     };
     assert!(
@@ -4565,14 +4493,7 @@ fn to_needle_matches_string_literal() {
     let ws = py_ws();
     // Python's auth_service.py has `"notify-admin "` as a string
     // concatenated into the shell command.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "handle_request",
-        "--to",
-        "notify-admin",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "handle_request", "--to", "notify-admin"]) else {
         return;
     };
     assert!(
@@ -4587,14 +4508,7 @@ fn to_needle_matches_call_arg_value() {
     let ws = py_ws();
     // `request.args.get("token")` passes `"token"` as an arg value;
     // user's --to may key on that string.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "handle_request",
-        "--to",
-        "action",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "handle_request", "--to", "action"]) else {
         return;
     };
     assert!(!out.contains("no matches"), "--to arg-value should match:\n{out}");
@@ -4609,14 +4523,7 @@ fn to_needle_matches_call_arg_value() {
 #[test]
 fn from_needle_rejects_bare_class_name() {
     let ws = lang_ws("java");
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "Gateway",
-        "--to",
-        "exec",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "Gateway", "--to", "exec"]) else {
         return;
     };
     assert!(
@@ -4631,14 +4538,7 @@ fn from_needle_rejects_bare_class_name() {
 fn from_needle_matches_ref_name() {
     let ws = py_ws();
     // `get_user` is referenced as a call inside handle_request.
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--from",
-        "get_user",
-        "--to",
-        "os.system",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--from", "get_user", "--to", "os.system"]) else {
         return;
     };
     assert!(
@@ -4685,7 +4585,7 @@ fn query_needle_matches_every_browse_fact_kind() {
 fn every_lang_micro_from_entry_to_sink_filter_matches() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--from", c.entry, "--to", c.sink]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--from", c.entry, "--to", c.sink]) else {
             return;
         };
         // `no matches` is a regression — the canonical flow must exist.
@@ -4801,7 +4701,7 @@ fn json_tree_contains_id_field(value: &serde_json::Value, field_name: &str, expe
 fn every_lang_micro_inspect_emits_flow_id() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
         let ids = extract_flow_ids(&out);
@@ -4824,10 +4724,10 @@ fn every_lang_micro_inspect_emits_flow_id() {
 fn every_lang_micro_flow_ids_stable_across_runs() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(first) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(first) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
-        let Some(second) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(second) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
         assert_eq!(
@@ -4845,10 +4745,10 @@ fn every_lang_micro_flow_ids_stable_across_runs() {
 fn every_lang_micro_flow_ids_survive_compact() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(full) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(full) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
-        let Some(compact) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink, "--compact"]) else {
+        let Some(compact) = run_inspect_graph(&ws, &["--query", c.sink, "--compact"]) else {
             return;
         };
         assert_eq!(
@@ -4867,10 +4767,10 @@ fn every_lang_micro_flow_ids_survive_compact() {
 fn every_lang_micro_compact_is_shorter_than_full() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(full) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(full) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
-        let Some(compact) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink, "--compact"]) else {
+        let Some(compact) = run_inspect_graph(&ws, &["--query", c.sink, "--compact"]) else {
             return;
         };
         assert!(
@@ -4891,7 +4791,7 @@ fn every_lang_micro_compact_is_shorter_than_full() {
 fn every_lang_micro_flow_filter_roundtrips() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(full) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(full) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
         let ids = extract_flow_ids(&full);
@@ -4899,14 +4799,7 @@ fn every_lang_micro_flow_filter_roundtrips() {
             continue;
         }
         let target = &ids[0];
-        let Some(filtered) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--flow",
-            target,
-        ]) else {
+        let Some(filtered) = run_inspect_graph(&ws, &["--query", c.sink, "--flow", target]) else {
             return;
         };
         let got = extract_flow_ids(&filtered);
@@ -4936,6 +4829,7 @@ fn inspect_flow_unknown_id_errors() {
         .args([
             "inspect",
             ws.to_str().unwrap(),
+            "--graph-flow",
             "--query",
             "run_admin_command",
             "--flow",
@@ -4965,14 +4859,7 @@ fn inspect_flow_unknown_id_errors() {
 fn every_lang_micro_inspect_json_carries_flow_id() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--format",
-            "json",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--format", "json"]) else {
             return;
         };
         let trimmed = out.trim();
@@ -5017,14 +4904,7 @@ fn extract_group_ids(rendered: &str) -> Vec<String> {
 fn every_lang_micro_grouped_view_emits_group_id() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped"]) else {
             return;
         };
         let ids = extract_group_ids(&out);
@@ -5051,24 +4931,10 @@ fn every_lang_micro_grouped_view_emits_group_id() {
 fn every_lang_micro_group_ids_stable_across_runs() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(first) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-        ]) else {
+        let Some(first) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped"]) else {
             return;
         };
-        let Some(second) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-        ]) else {
+        let Some(second) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped"]) else {
             return;
         };
         assert_eq!(
@@ -5088,14 +4954,7 @@ fn every_lang_micro_group_ids_stable_across_runs() {
 fn every_lang_micro_group_filter_roundtrips() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(full) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-        ]) else {
+        let Some(full) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped"]) else {
             return;
         };
         let ids = extract_group_ids(&full);
@@ -5103,16 +4962,9 @@ fn every_lang_micro_group_filter_roundtrips() {
             continue;
         }
         let target = &ids[0];
-        let Some(filtered) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-            "--group",
-            target,
-        ]) else {
+        let Some(filtered) =
+            run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped", "--group", target])
+        else {
             return;
         };
         let got = extract_group_ids(&filtered);
@@ -5142,6 +4994,7 @@ fn inspect_group_unknown_id_errors() {
         .args([
             "inspect",
             ws.to_str().unwrap(),
+            "--graph-flow",
             "--query",
             "run_admin_command",
             "--group",
@@ -5173,14 +5026,7 @@ fn inspect_group_unknown_id_errors() {
 fn every_lang_micro_auto_stays_in_trace_below_threshold() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "auto",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "auto"]) else {
             return;
         };
         assert!(
@@ -5203,16 +5049,8 @@ fn every_lang_micro_auto_stays_in_trace_below_threshold() {
 fn every_lang_micro_grouped_json_carries_group_id() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-            "--format",
-            "json",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped", "--format", "json"])
+        else {
             return;
         };
         let trimmed = out.trim();
@@ -5237,14 +5075,7 @@ fn every_lang_micro_grouped_json_carries_group_id() {
 fn every_lang_micro_group_and_flow_id_namespaces_are_distinct() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped"]) else {
             return;
         };
         let flow_ids = extract_flow_ids(&out);
@@ -5273,15 +5104,7 @@ fn every_lang_micro_group_and_flow_id_namespaces_are_distinct() {
 fn every_lang_micro_compact_plus_grouped_has_no_source_bodies() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&[
-            "inspect",
-            ws.to_str().unwrap(),
-            "--query",
-            c.sink,
-            "--view",
-            "grouped",
-            "--compact",
-        ]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--view", "grouped", "--compact"]) else {
             return;
         };
         // Grouped header is present.
@@ -5316,16 +5139,10 @@ fn every_lang_micro_compact_plus_grouped_has_no_source_bodies() {
 #[test]
 fn all_flag_preserves_flow_ids() {
     let ws = ws_path();
-    let Some(base) = run(&["inspect", ws.to_str().unwrap(), "--query", "run_admin_command"]) else {
+    let Some(base) = run_inspect_graph(&ws, &["--query", "run_admin_command"]) else {
         return;
     };
-    let Some(all) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--all",
-    ]) else {
+    let Some(all) = run_inspect_graph(&ws, &["--query", "run_admin_command", "--all"]) else {
         return;
     };
     let base_ids = extract_flow_ids(&base);
@@ -5347,14 +5164,7 @@ fn all_flag_preserves_flow_ids() {
 #[test]
 fn flow_and_group_filters_intersect() {
     let ws = ws_path();
-    let Some(grouped) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--view",
-        "grouped",
-    ]) else {
+    let Some(grouped) = run_inspect_graph(&ws, &["--query", "run_admin_command", "--view", "grouped"]) else {
         return;
     };
     let flow_ids = extract_flow_ids(&grouped);
@@ -5362,16 +5172,17 @@ fn flow_and_group_filters_intersect() {
     if flow_ids.is_empty() || group_ids.is_empty() {
         return;
     }
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--flow",
-        &flow_ids[0],
-        "--group",
-        &group_ids[0],
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &[
+            "--query",
+            "run_admin_command",
+            "--flow",
+            &flow_ids[0],
+            "--group",
+            &group_ids[0],
+        ],
+    ) else {
         return;
     };
     // Intersection of the first group with the first flow (which
@@ -5389,16 +5200,17 @@ fn flow_and_group_filters_intersect() {
 #[test]
 fn grouped_json_has_both_flow_ids_and_group_ids() {
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--view",
-        "grouped",
-        "--format",
-        "json",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &[
+            "--query",
+            "run_admin_command",
+            "--view",
+            "grouped",
+            "--format",
+            "json",
+        ],
+    ) else {
         return;
     };
     let parsed_json: serde_json::Value = serde_json::from_str(out.trim()).expect("grouped JSON must parse");
@@ -5424,7 +5236,7 @@ fn grouped_json_has_both_flow_ids_and_group_ids() {
 fn every_lang_micro_chain_line_has_flow_id_nearby() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink]) else {
             return;
         };
         // Find the chain line, then look for a flow_id within 4
@@ -5461,14 +5273,7 @@ fn every_lang_micro_chain_line_has_flow_id_nearby() {
 #[test]
 fn auto_view_flips_to_grouped_above_threshold() {
     let ws = repo_root().join("examples/python");
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "execute",
-        "--view",
-        "auto",
-    ]) else {
+    let Some(out) = run_inspect_graph(&ws, &["--query", "execute", "--view", "auto"]) else {
         return;
     };
     assert!(
@@ -5488,7 +5293,7 @@ fn auto_view_flips_to_grouped_above_threshold() {
 fn every_lang_micro_compact_preserves_chain_line() {
     for c in canonical_chains() {
         let ws = lang_ws(c.lang);
-        let Some(out) = run(&["inspect", ws.to_str().unwrap(), "--query", c.sink, "--compact"]) else {
+        let Some(out) = run_inspect_graph(&ws, &["--query", c.sink, "--compact"]) else {
             return;
         };
         let chain_line = out
@@ -6429,16 +6234,17 @@ fn inspect_from_kind_arg_matches_when_token_is_an_argument() {
     // verify_token on the python micro chain, so --from-kind arg
     // should keep the flow.
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--from",
-        "token",
-        "--from-kind",
-        "arg",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &[
+            "--query",
+            "run_admin_command",
+            "--from",
+            "token",
+            "--from-kind",
+            "arg",
+        ],
+    ) else {
         return;
     };
     assert!(
@@ -6454,16 +6260,17 @@ fn inspect_from_kind_read_rejects_arg_only_tokens() {
     // chain, NOT a Read — so `--from os.system --from-kind read` has
     // to return no matches.
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--from",
-        "os.system",
-        "--from-kind",
-        "read",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &[
+            "--query",
+            "run_admin_command",
+            "--from",
+            "os.system",
+            "--from-kind",
+            "read",
+        ],
+    ) else {
         return;
     };
     assert!(
@@ -6477,16 +6284,17 @@ fn inspect_to_kind_call_matches_on_call_kinds() {
     // The sink `os.system` appears as a call on the chain, so
     // --to-kind call should retain the flow.
     let ws = ws_path();
-    let Some(out) = run(&[
-        "inspect",
-        ws.to_str().unwrap(),
-        "--query",
-        "run_admin_command",
-        "--to",
-        "os.system",
-        "--to-kind",
-        "call",
-    ]) else {
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &[
+            "--query",
+            "run_admin_command",
+            "--to",
+            "os.system",
+            "--to-kind",
+            "call",
+        ],
+    ) else {
         return;
     };
     assert!(

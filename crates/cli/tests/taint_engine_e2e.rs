@@ -280,7 +280,15 @@ fn mega_flow_dump_taint_uses_rulepack_transfer_semantics() {
 fn mega_flow_inspect_execute_produces_backward_chain() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
-    let Some((out, _, code)) = run(&["inspect", &w, "--query", "execute", "--format", "json"]) else {
+    let Some((out, _, code)) = run(&[
+        "inspect",
+        &w,
+        "--query",
+        "execute",
+        "--graph-flow",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     assert_eq!(code, 0, "mega_flow inspect ec={code}");
@@ -319,7 +327,15 @@ fn mega_flow_inspect_execute_produces_backward_chain() {
     // Secondary check: inspect --query `persist` (which has real
     // callers in mega_flow — `orchestrate` calls it) produces a
     // multi-hop backward chain.
-    let Some((out2, _, _)) = run(&["inspect", &w, "--query", "persist", "--format", "json"]) else {
+    let Some((out2, _, _)) = run(&[
+        "inspect",
+        &w,
+        "--query",
+        "persist",
+        "--graph-flow",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     let p2: serde_json::Value = serde_json::from_str(&out2).unwrap();
@@ -833,7 +849,15 @@ fn flows_chain_matches_inspect_chain_on_complex() {
 
     // Inspect the sink name; at least one resulting flow must
     // share at least one non-sink hop with the finding's chain.
-    let Some((inspect_out, _, _)) = run(&["inspect", &w, "--query", sink_name, "--format", "json"]) else {
+    let Some((inspect_out, _, _)) = run(&[
+        "inspect",
+        &w,
+        "--query",
+        sink_name,
+        "--graph-flow",
+        "--format",
+        "json",
+    ]) else {
         return;
     };
     let inspect_parsed: serde_json::Value = serde_json::from_str(&inspect_out).unwrap();

@@ -142,16 +142,18 @@
   description: "OWASP ESAPI Encoder.encodeForSQL - codec-based SQL escaping (prefer PreparedStatement)."
 
 # URL / SSRF ---------------------------------------------------------
-- id: java.sanitizer.uri_create
+- id: java.passthrough.uri_create
   enabled: true
   language: java
-  tag: url-encode
+  tag: passthrough-transform
   match:
     kind: call
     callee:
       attribute: [URI, create]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
-  - name: generated shape example
+  - name: uri create preserves taint
     code: |
       class App {
         void handle(String input) throws Exception {
@@ -159,7 +161,7 @@
         }
       }
     expect_match_text: [URI.create]
-  description: "URI.create - parses and validates URI syntax; rejects malformed inputs."
+  description: "URI.create parses syntax but preserves the attacker-controlled URL/URI value; it is not an SSRF/open-redirect sanitizer."
 
 - id: java.sanitizer.url_encoder
   enabled: true
@@ -1457,6 +1459,27 @@
       }
     expect_match_text: [String.join]
   description: "String.join(delim, elems...) - the joined string derives from the joined elements; preserves taint."
+- id: java.passthrough.optional_orelse
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])orElse(?:Get)?$'
+  taint_semantics:
+    call_result_passthrough_receiver: true
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: optional orElse preserves receiver taint
+    code: |
+      class App {
+        String handle(java.util.Optional<String> value) {
+          return value.orElse("fallback");
+        }
+      }
+    expect_match_text: [value.orElse]
+  description: "Optional.orElse/orElseGet returns either the tainted Optional value or fallback; preserve taint from receiver and fallback."
 - id: java.passthrough.stringbuilder_append
   enabled: true
   language: java
@@ -1480,6 +1503,121 @@
       }
     expect_match_text: [sb.append]
   description: "StringBuilder.append(x) - returns the same builder carrying appended content; preserves taint from the receiver and the appended value."
+
+- id: java.passthrough.wicket_model_constructor
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  packages:
+  - org.apache.wicket
+  match:
+    kind: new
+    callee:
+      regex: '^Model(?:<.*>)?$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: wicket model constructor preserves taint
+    code: |
+      import org.apache.wicket.model.Model;
+      class App {
+        Object render(String input) {
+          Model<String> model = new Model<>(input);
+          return model;
+        }
+      }
+    expect_match_text: [Model<>]
+  description: "Wicket Model(value) wraps page data; the model object carries attacker-controlled text from its value argument."
+
+- id: java.passthrough.spring_mongo_query_constructor
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  packages:
+  - org.springframework.data.mongodb
+  imports:
+  - org.springframework.data.mongodb
+  match:
+    kind: new
+    callee:
+      regex: '(^|[.])Query(?:<.*>)?$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: spring mongo query wraps tainted criteria
+    code: |
+      import org.springframework.data.mongodb.core.query.Query;
+      class App {
+        Object handle(Object input) {
+          return new Query(input);
+        }
+      }
+    expect_match_text: [Query]
+  description: "Spring Data Mongo Query(criteria) wraps caller-controlled criteria; preserves taint into the query object."
+
+- id: java.passthrough.bson_document_constructor
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  packages:
+  - org.bson
+  - com.mongodb
+  imports:
+  - org.bson
+  - com.mongodb
+  match:
+    kind: new
+    callee:
+      regex: '(^|[.])Document(?:<.*>)?$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: bson document wraps tainted map
+    code: |
+      import org.bson.Document;
+      class App {
+        Object handle(java.util.Map<String,Object> body) {
+          return new Document(body);
+        }
+      }
+    expect_match_text: [Document]
+  description: "BSON Document(map/json) wraps caller-controlled selector content; preserves taint into Mongo filters."
+
+- id: java.passthrough.wicket_label_constructor_model
+  enabled: true
+  language: java
+  tag: passthrough-transform
+  packages:
+  - org.apache.wicket
+  match:
+    kind: new
+    callee:
+      name: Label
+  taint_semantics:
+    call_result_passthrough_args: [1]
+  match_examples:
+  - name: wicket label constructor preserves model taint
+    code: |
+      import org.apache.wicket.markup.html.basic.Label;
+      import org.apache.wicket.model.Model;
+      class App {
+        Object render(String input) {
+          Label label = new Label("result", new Model<>(input));
+          return label;
+        }
+      }
+    expect_match_text: [Label]
+  - name: wicket label id literal negative
+    code: |
+      import org.apache.wicket.markup.html.basic.Label;
+      class App {
+        Object render() {
+          Label label = new Label("result");
+          return label;
+        }
+      }
+    expect_match_text: [Label]
+  description: "Wicket Label(id, model) stores the supplied model; tainted model text must remain attached to the label object for later escape/rendering checks."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink

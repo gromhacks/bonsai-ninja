@@ -896,6 +896,45 @@
     expect_no_match: true
   description: "JAX-RS / Quarkus entity body parameter convention - unannotated String or Map body supplied by the HTTP request."
 
+- id: java.source.jaxrs_entity_body_param_decorated
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [xml, json, text]
+  packages: ["jakarta.ws.rs", "javax.ws.rs", "io.quarkus"]
+  match:
+    kind: param
+    target:
+      regex: "^(body|entity|json|payload|requestBody|xml)$"
+  constraints:
+  - enclosing_decorator_in: [POST, PUT, PATCH, Consumes]
+  match_examples:
+  - name: jax-rs xml entity parameter
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        @POST @Consumes(MediaType.APPLICATION_XML)
+        Object ingest(String xml) {
+          return xml;
+        }
+      }
+      class MediaType {
+        static String APPLICATION_XML = "application/xml";
+      }
+    expect_match_text: [xml]
+  - name: jax-rs entity body parameter without handler annotation negative
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        Object helper(String xml) {
+          return xml;
+        }
+      }
+    expect_no_match: true
+  description: "JAX-RS / Quarkus unannotated entity-body parameter on an HTTP method annotation such as @POST or @Consumes."
+
 - id: java.source.azure_http_trigger
   enabled: true
   language: java
@@ -927,6 +966,46 @@
       }
     expect_no_match: true
   description: "Azure Functions @HttpTrigger annotated parameter - HTTP request envelope supplied by the remote caller."
+
+- id: java.source.azure_http_request_getbody
+  enabled: true
+  language: java
+  trust: remote
+  tag: cloud-event
+  category: http-input
+  payload_types: [json, text]
+  packages: ["com.microsoft.azure.functions"]
+  match:
+    kind: call
+    callee:
+      name: getBody
+  constraints:
+  - receiver_type_in:
+    - Request
+    - HttpRequestMessage
+    - com.microsoft.azure.functions.HttpRequestMessage
+  match_examples:
+  - name: azure http trigger request body
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger;
+      class App {
+        void run(@HttpTrigger(name = "req") Request req) {
+          req.getBody();
+        }
+      }
+      class Request { String getBody() { return ""; } }
+    expect_match_text: [req.getBody]
+  - name: unrelated getbody negative
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger;
+      class App {
+        void run(Widget req) {
+          req.getBody();
+        }
+      }
+      class Widget { String getBody() { return ""; } }
+    expect_no_match: true
+  description: "Azure Functions request getBody() - HTTP request body supplied by the remote caller."
 
 - id: java.source.gcf_http_function_service
   enabled: false
@@ -1208,7 +1287,7 @@
 - id: java.source.bytes_blob_param
   enabled: true
   language: java
-  trust: remote
+  trust: service
   tag: caller-input
   payload_types: [binary]
   match:
@@ -1229,7 +1308,7 @@
         }
       }
     expect_no_match: true
-  description: "Generic `byte[] data | blob | payload | bytes | buf | buffer` parameter on deserialization-style entry points. Pairs with java.deser.* sinks (ObjectInputStream.readObject, Kryo, XMLDecoder, jackson-databind). Engine taint flow + sink shape are the second gate."
+  description: "Generic `byte[] data | blob | payload | bytes | buf | buffer` parameter on deserialization-style helper entry points. Pairs with java.deser.* sinks (ObjectInputStream.readObject, Kryo, XMLDecoder, jackson-databind). Engine taint flow + sink shape are the second gate; framework request sources outrank this service-level caller input when both reach the same sink."
 
 - id: java.source.graphql_datafetching_environment_getargument
   enabled: true
@@ -1589,6 +1668,48 @@
     expect_match_text: [req.getHeader]
   description: "Vert.x HttpServerRequest.getHeader(name) - client-supplied header."
 
+- id: java.source.vertx_routingcontext_request_getheader
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\(\\)\\.getHeader$"
+      receiver_type_in: [RoutingContext]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: vertx routing context request get header
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(RoutingContext ctx, String name) {
+          return ctx.request().getHeader(name);
+        }
+      }
+    expect_match_text: [ctx.request().getHeader]
+  - name: local request get header negative
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(LocalContext ctx, String name) {
+          return ctx.request().getHeader(name);
+        }
+      }
+      class LocalContext {
+        LocalRequest request() { return new LocalRequest(); }
+      }
+      class LocalRequest {
+        Object getHeader(Object... args) { return null; }
+      }
+    expect_no_match: true
+  description: "Vert.x RoutingContext.request().getHeader(name) - HTTP header from the current request."
+
 - id: java.source.vertx_routingcontext_getbodyasjson
   enabled: true
   language: java
@@ -1769,6 +1890,47 @@
     expect_match_text: [queryParams.first]
   description: "Helidon request queryParams().first(name) - query parameter supplied by the HTTP caller."
 
+- id: java.source.helidon_serverrequest_queryparams_first
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["io.helidon"]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.queryParams\\(\\)\\.first$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: helidon server request query params first
+    code: |
+      import io.helidon.webserver.ServerRequest;
+      class App {
+        Object handle(ServerRequest req, String name) {
+          return req.queryParams().first(name);
+        }
+      }
+      class ServerRequest {
+        Parameters queryParams() { return null; }
+      }
+      class Parameters {
+        Object first(Object... args) { return null; }
+      }
+    expect_match_text: [req.queryParams().first]
+  - name: helidon literal default negative
+    code: |
+      import io.helidon.webserver.ServerRequest;
+      class App {
+        Object handle(ServerRequest req) {
+          return req.queryParams().first();
+        }
+      }
+    expect_no_match: true
+  description: "Helidon ServerRequest.queryParams().first(name) chained call - query parameter supplied by the HTTP caller."
+
 - id: java.source.play_request_body_asjson
   enabled: true
   language: java
@@ -1826,6 +1988,46 @@
       }
     expect_match_text: [node.asText]
   description: "Play Framework req.body().asJson().path(...).asText() - JSON field text supplied by the HTTP caller."
+
+- id: java.source.play_jsonnode_path_astext
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["com.typesafe.play", "play.mvc", "com.fasterxml.jackson.databind"]
+  match:
+    kind: call
+    callee:
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.path\(.*\)\.asText$'
+      receiver_type_in: [JsonNode, com.fasterxml.jackson.databind.JsonNode]
+  match_examples:
+  - name: play json path as text default
+    code: |
+      import play.mvc.*;
+      import com.fasterxml.jackson.databind.JsonNode;
+      class App {
+        Object handle(Http.Request req) {
+          JsonNode body = req.body().asJson();
+          return body.path("url").asText("");
+        }
+      }
+    expect_match_text: [body.path("url").asText]
+  - name: local path astext negative
+    code: |
+      import play.mvc.*;
+      class App {
+        Object handle(LocalNode node) {
+          return node.path("url").asText("");
+        }
+      }
+      class LocalNode {
+        LocalNode path(Object... args) { return this; }
+        Object asText(Object... args) { return null; }
+      }
+    expect_no_match: true
+  description: "Play/Jackson JsonNode.path(...).asText(default) - JSON request-body field text supplied by the HTTP caller."
 
 - id: java.source.websocket_message_payload_text
   enabled: true
