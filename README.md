@@ -16,9 +16,9 @@ bonsai-ninja is a code intelligence engine. Security analysis is one mode
 it runs in, not the whole product. The same engine that traces taint from
 source to sink also answers the questions developers ask every day:
 
-- **Map a codebase** with `tree`, `defs`, `inspect`, and `search`. Drop
-  into an unfamiliar repo and get a real picture of structure, public
-  API, imports, entry points, and hot files quickly.
+- **Map a codebase** with `tree`, `defs`, `entrypoints`, `inspect`, and
+  `search`. Drop into an unfamiliar repo and get a real picture of
+  structure, public API, imports, callable roots, and hot files quickly.
 - **Debug across files** with `trace`, `calls`, `refs`, and `args`. Walk
   behavior through assignments, function calls, and cross-file
   boundaries without starting from raw grep.
@@ -137,6 +137,14 @@ surface syntax.
 bonsai-ninja is in beta. It has rough edges. Some rules over-fire, some
 under-fire, and some language frontends are sharper than others.
 
+The current local release snapshot is documented in
+[Release Readiness](docs/RELEASE_READINESS.md). The short version: the
+release binary builds, rulepack validation and focused conformance checks
+are green, and the latest local CVE-Bench run reports 99.57% detection
+recall, 75.91% bug recall, 79.24% precision, and 1.63 FP/KLOC. The
+known security-quality gap is fixed-snapshot validation at 30.43%, which
+means sanitizer/validator credit is still the next precision workstream.
+
 We are shipping anyway because the fastest way to make this useful is to
 put it in the hands of maintainers, security teams, researchers,
 integrators, and model builders who will run it on real code and tell us
@@ -199,11 +207,21 @@ source build path for that platform. See
 # Trace a function
 ./target/release/bonsai-ninja trace ./my-app handle_request
 
-# Every call chain reaching a target
+# Inspect syntax hits and rulepack-free taint paths for a target
 ./target/release/bonsai-ninja inspect ./my-app os.system
 
+# Syntax hits only, or force bounded raw taint paths for broad queries
+./target/release/bonsai-ninja inspect ./my-app --query os.system --syntax-only
+./target/release/bonsai-ninja inspect ./my-app --query os.system --taint-flow
+
+# Explicit structural callgraph evidence with source bodies
+./target/release/bonsai-ninja inspect ./my-app --query os.system --graph-flow
+
 # Run the security taint analysis
-./target/release/bonsai-ninja security ./my-app taint-analysis
+./target/release/bonsai-ninja security ./my-app taint-analysis --profile production
+
+# Exhaustive unscoped audits on very large repos require an explicit opt-in
+BONSAI_ALLOW_BROAD_TAINT=1 ./target/release/bonsai-ninja security ./my-app taint-analysis
 
 # SARIF for code scanning
 ./target/release/bonsai-ninja security ./my-app taint-analysis --format sarif --output-path findings.sarif.json
@@ -213,8 +231,9 @@ source build path for that platform. See
 
 | Family | Highlights |
 |---|---|
-| Flow | `index`, `trace`, `inspect` |
-| Browse | `defs`, `calls`, `imports`, `refs`, `vars`, `strings`, `args`, `classes`, `comments`, `search`, `read-file`, `tree` |
+| Workspace | `index`, `export`, `cache` |
+| Flow | `inspect`, `trace`, `show` |
+| Browse | `defs`, `entrypoints`, `calls`, `imports`, `refs`, `vars`, `strings`, `args`, `classes`, `comments`, `search`, `read-file`, `tree` |
 | Dump | `dump-hir`, `dump-cfg`, `dump-callgraph`, `dump-ast`, `dump-resolve`, `dump-edges`, `dump-taint` |
 | Export | `export` as JSON, NetworkX, GraphML, or Cypher |
 | Security | `security sources`, `sinks`, `sanitizers`, `deps`, `taint-analysis`, `source-analysis`, `pack` |
@@ -235,9 +254,13 @@ selected text, JSON, SARIF, DOT, or graph export payload directly to a
 file instead of stdout.
 
 Text output names the evidence type directly: `inspect` renders generic
-`FLOW` call paths, `security source-analysis` renders `SOURCE FLOW`, and
+`FLOW` call paths and rulepack-free `T:` taint paths for normal targeted
+queries, `security source-analysis` renders `SOURCE FLOW`, and
 `security taint-analysis` renders `TAINT FLOW` with source, argument
-propagation, and sink annotations.
+propagation, and sink annotations. Use `inspect --syntax-only` for pure
+indexed search, `inspect --taint-flow` to force bounded raw taint paths on
+broad queries, and `inspect --graph-flow` when you explicitly want
+structural callgraph evidence with source bodies.
 
 Most review commands page by default:
 

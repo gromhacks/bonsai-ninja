@@ -220,8 +220,33 @@ impl AnalyzerDb {
         if let Some(v) = cached {
             return Some(v);
         }
+        let value = Arc::new(self.build_decl_index_uncached(file)?);
+        let mut cache = self.inner.cache.write();
+        // Re-check inside the write lock — a concurrent caller may
+        // have inserted between our read and the upgrade. Use
+        // `Entry::Vacant` so we only nuke `global_index` when WE
+        // were the inserter; otherwise a racing peer that just
+        // finished building `global_index` over the cached set
+        // would have its result silently discarded.
+        let stored = cache
+            .decl_index
+            .entry(key)
+            .or_insert_with(|| value.clone())
+            .clone();
+        // Installing a per-file cache entry for the current VFS
+        // version is not a semantic change. `global_index()` may
+        // intentionally consume these local entries on large
+        // workspaces to reduce peak RSS; a later caller rebuilding
+        // one local `DeclIndex` for CFG/debug use must not invalidate
+        // the already-correct workspace-global index. Real edits flow
+        // through `invalidate_file`, which drops both local and global
+        // derived facts for the changed file.
+        Some(stored)
+    }
+
+    fn build_decl_index_uncached(&self, file: FileId) -> Option<DeclIndex> {
         let adapter = self.adapter_for(file)?;
-        let value = Arc::new(self.adapter_context_with(|ctx| {
+        Some(self.adapter_context_with(|ctx| {
             let mut index = adapter.extract_declarations(file, ctx);
             bonsai_lang_api::apply_call_receiver_types_with_super_tokens(
                 &mut index,
@@ -230,29 +255,7 @@ impl AnalyzerDb {
             bonsai_lang_api::apply_assign_value_kind(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);
             index
-        }));
-        let mut cache = self.inner.cache.write();
-        // Re-check inside the write lock — a concurrent caller may
-        // have inserted between our read and the upgrade. Use
-        // `Entry::Vacant` so we only nuke `global_index` when WE
-        // were the inserter; otherwise a racing peer that just
-        // finished building `global_index` over the cached set
-        // would have its result silently discarded.
-        let was_fresh_insert = !cache.decl_index.contains_key(&key);
-        let stored = cache
-            .decl_index
-            .entry(key)
-            .or_insert_with(|| value.clone())
-            .clone();
-        if was_fresh_insert {
-            // Only invalidate the global index when WE actually
-            // installed a new per-file entry. A racing peer that
-            // already cached the same `(file, version)` and
-            // possibly already rebuilt `global_index` should not
-            // have its work silently nuked.
-            cache.global_index = None;
-        }
-        Some(stored)
+        }))
     }
 
     /// Import index for `file`, computed once per `(file, version)`.
@@ -312,10 +315,16 @@ impl AnalyzerDb {
         if let Some(v) = cached {
             return v;
         }
+        let files = self.inner.vfs.all_files();
+        let consume_decl_index_cache = should_consume_decl_index_cache_for_global(files.len());
         let mut gi = GlobalIndex::new();
-        for file in self.inner.vfs.all_files() {
-            if let Some(idx) = self.decl_index(file) {
-                gi.insert((*idx).clone());
+        if consume_decl_index_cache {
+            self.populate_global_index_consuming(&mut gi, &files);
+        } else {
+            for file in files {
+                if let Some(idx) = self.decl_index(file) {
+                    gi.insert_preprocessed((*idx).clone());
+                }
             }
         }
         gi.finalize_semantic_facts();
@@ -328,6 +337,55 @@ impl AnalyzerDb {
         }
         cache.global_index = Some(arc.clone());
         arc
+    }
+
+    fn populate_global_index_consuming(&self, gi: &mut GlobalIndex, files: &[FileId]) {
+        let workers = global_index_worker_count(files.len());
+        if workers <= 1 || files.len() <= 1 {
+            for &file in files {
+                if let Some(idx) = self.take_decl_index_for_global(file) {
+                    gi.insert_preprocessed(idx);
+                }
+            }
+            return;
+        }
+        let chunk_size = (workers * 8).max(16);
+        match rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .stack_size(global_index_worker_stack_bytes())
+            .build()
+        {
+            Ok(pool) => {
+                for chunk in files.chunks(chunk_size) {
+                    let indexes = pool.install(|| {
+                        use rayon::prelude::*;
+                        chunk
+                            .par_iter()
+                            .map(|&file| self.take_decl_index_for_global(file))
+                            .collect::<Vec<_>>()
+                    });
+                    for idx in indexes.into_iter().flatten() {
+                        gi.insert_preprocessed(idx);
+                    }
+                }
+            }
+            Err(_) => {
+                for &file in files {
+                    if let Some(idx) = self.take_decl_index_for_global(file) {
+                        gi.insert_preprocessed(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    fn take_decl_index_for_global(&self, file: FileId) -> Option<DeclIndex> {
+        let snap = self.inner.vfs.snapshot(file).ok()?;
+        let key = (file, snap.version);
+        if let Some(cached) = self.inner.cache.write().decl_index.remove(&key) {
+            return Some(unwrap_or_clone_decl_index(cached));
+        }
+        self.build_decl_index_uncached(file)
     }
 
     /// Build the CFG of a function from its extracted flow events.
@@ -485,6 +543,63 @@ impl AnalyzerDb {
             cached_decl_indexes: cache.decl_index.len(),
             cached_cfgs: cache.cfgs.len(),
         }
+    }
+}
+
+fn should_consume_decl_index_cache_for_global(file_count: usize) -> bool {
+    if let Some(keep_cache) = std::env::var("BONSAI_KEEP_DECL_INDEX_CACHE")
+        .ok()
+        .and_then(|raw| parse_env_bool(&raw))
+    {
+        return !keep_cache;
+    }
+    file_count >= 10_000
+}
+
+fn global_index_worker_count(file_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .max(1);
+    if let Some(requested) = std::env::var("BONSAI_GLOBAL_INDEX_JOBS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+    {
+        return requested.clamp(1, available);
+    }
+    if let Some(requested) = std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+    {
+        return requested.clamp(1, available);
+    }
+    let default = if file_count >= 20_000 {
+        4
+    } else if file_count >= 10_000 {
+        6
+    } else {
+        available
+    };
+    default.clamp(1, available)
+}
+
+fn global_index_worker_stack_bytes() -> usize {
+    std::env::var("BONSAI_GLOBAL_INDEX_STACK_BYTES")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|bytes| *bytes >= 1024 * 1024)
+        .unwrap_or(64 * 1024 * 1024)
+}
+
+fn unwrap_or_clone_decl_index(index: Arc<DeclIndex>) -> DeclIndex {
+    Arc::try_unwrap(index).unwrap_or_else(|shared| (*shared).clone())
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 

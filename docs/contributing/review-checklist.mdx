@@ -84,6 +84,13 @@ class and verify each box.
 - [ ] **SDK parity intact.** `cargo test -p bonsai_cli --test
       sdk_cli_parity`.
 - [ ] **Pagination still works** for the affected command.
+- [ ] **Inspect mode contract holds.** Default targeted queries include
+      rulepack-free taint paths, `--syntax-only` disables them,
+      `--taint-flow` forces bounded raw taint paths, and `--graph-flow`
+      remains explicit structural callgraph rendering.
+- [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
+      `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
+      delegate to the expected owner command.
 
 ## Security analysis change (`crates/security`)
 
@@ -130,6 +137,9 @@ class and verify each box.
       signatures referenced in docs match the current code.
 - [ ] **Cross-links resolve.** Markdown links point at existing files
       and sections.
+- [ ] **Command surface checked against the binary.** Run
+      `./target/release/bonsai-ninja --help` and the affected
+      `<command> --help` output before updating CLI docs.
 
 ## Workspace-cache change (`crates/workspace/src/{dataflow,value_flow,flow_ids,taint_index,transitive_callers,class_index,enclosing_index,decl_name_index}.rs`)
 
