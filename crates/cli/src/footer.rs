@@ -350,7 +350,7 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     } else if cmd_line_hint.contains(" search ") {
         pluralize("match", "matches")
     } else if cmd_line_hint.contains(" inspect ") {
-        pluralize("flow/render unit", "flow/render units")
+        pluralize("inspect item", "inspect items")
     } else if cmd_line_hint.contains(" trace ") {
         pluralize("trace line", "trace lines")
     } else if cmd_line_hint.contains(" tree ") {

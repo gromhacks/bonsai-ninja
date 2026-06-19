@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters, ReadFileOut, Severity};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{open_project_index_matching_path, open_project_index_only_with_rulepack};
 use crate::cli_println;
@@ -35,6 +35,8 @@ pub(crate) struct ReadFileArgs<'a> {
 }
 
 pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
+    let resolved_path = resolve_requested_path(args.workspace, args.path)?;
+    let path = resolved_path.as_str();
     let needs_workspace_analysis = args.from.is_some()
         || args.to.is_some()
         || args.rules_dir.is_some()
@@ -43,11 +45,11 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
     let (project, _footer) = if needs_workspace_analysis {
         open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?
     } else {
-        open_project_index_matching_path(args.workspace, Path::new(args.path))?
+        open_project_index_matching_path(args.workspace, Path::new(path))?
     };
     let line_range = parse_line_range(args.lines)?;
     let filters = ReadFileFilters {
-        path: args.path,
+        path,
         line_range,
         from: args.from,
         to: args.to,
@@ -78,6 +80,275 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_requested_path(workspace: &Path, requested: &str) -> Result<String> {
+    let registry = bonsai_adapters::all_languages_registry();
+    let root = stable_root(workspace);
+    let requested_path = Path::new(requested);
+
+    if requested_path.is_absolute() {
+        if requested_path.is_file() {
+            ensure_supported_source(&registry, requested_path)?;
+            return Ok(display_path_relative_to(&root, requested_path));
+        }
+    } else {
+        let exact = root.join(requested_path);
+        if exact.is_file() {
+            ensure_supported_source(&registry, &exact)?;
+            return Ok(normalize_path(requested_path));
+        }
+    }
+
+    let candidates = collect_supported_source_paths(&root, &registry)?;
+    let query = normalize_query(requested);
+    let matches = ranked_path_matches(&candidates, &query);
+    if let Some((best_score, _)) = matches.first() {
+        let best: Vec<&ReadFilePathCandidate> = matches
+            .iter()
+            .take_while(|(score, _)| score == best_score)
+            .map(|(_, candidate)| *candidate)
+            .collect();
+        if best.len() == 1 {
+            return Ok(best[0].relative.clone());
+        }
+        anyhow::bail!(
+            "read-file path `{requested}` is ambiguous; use a longer workspace-relative path:\n{}",
+            format_path_suggestions(best.iter().map(|candidate| candidate.relative.as_str()))
+        );
+    }
+
+    let suggestions = nearest_path_suggestions(&candidates, &query, 6);
+    if suggestions.is_empty() {
+        anyhow::bail!(
+            "read-file path `{requested}` did not match any supported source file under {}",
+            workspace.display()
+        );
+    }
+    anyhow::bail!(
+        "read-file path `{requested}` did not match any supported source file under {}\nDid you mean:\n{}",
+        workspace.display(),
+        format_path_suggestions(suggestions.iter().map(String::as_str))
+    );
+}
+
+#[derive(Clone, Debug)]
+struct ReadFilePathCandidate {
+    relative: String,
+}
+
+fn collect_supported_source_paths(
+    root: &Path,
+    registry: &bonsai_lang_api::LanguageRegistry,
+) -> Result<Vec<ReadFilePathCandidate>> {
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .ignore(true)
+        .add_custom_ignore_filename(".bonsaiignore");
+    builder.filter_entry(|entry| include_minified_sources() || !path_looks_minified(entry.path()));
+
+    let mut candidates = Vec::new();
+    for entry in builder.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if ignore_error_is_missing_or_denied(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() || !is_supported_source_path(registry, entry.path()) {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map(normalize_path)
+            .unwrap_or_else(|_| normalize_path(entry.path()));
+        candidates.push(ReadFilePathCandidate { relative });
+    }
+    candidates.sort_by(|a, b| a.relative.cmp(&b.relative));
+    candidates.dedup_by(|a, b| a.relative == b.relative);
+    Ok(candidates)
+}
+
+fn ranked_path_matches<'a>(
+    candidates: &'a [ReadFilePathCandidate],
+    query: &str,
+) -> Vec<(u8, &'a ReadFilePathCandidate)> {
+    let query = query.to_ascii_lowercase();
+    let query_file = Path::new(&query)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(query.as_str());
+    let mut matches = Vec::new();
+    for candidate in candidates {
+        let rel = candidate.relative.to_ascii_lowercase();
+        let file = Path::new(&rel)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(rel.as_str());
+        let score = if rel == query {
+            Some(0)
+        } else if rel.ends_with(&format!("/{query}")) {
+            Some(1)
+        } else if file == query_file && !query_file.is_empty() {
+            Some(2)
+        } else if rel.contains(&query) {
+            Some(3)
+        } else {
+            None
+        };
+        if let Some(score) = score {
+            matches.push((score, candidate));
+        }
+    }
+    matches
+        .sort_by(|(score_a, a), (score_b, b)| score_a.cmp(score_b).then_with(|| a.relative.cmp(&b.relative)));
+    matches
+}
+
+fn nearest_path_suggestions(candidates: &[ReadFilePathCandidate], query: &str, limit: usize) -> Vec<String> {
+    let query = query.to_ascii_lowercase();
+    let query_file = Path::new(&query)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(query.as_str())
+        .to_string();
+    let mut ranked: Vec<(usize, &ReadFilePathCandidate)> = candidates
+        .iter()
+        .map(|candidate| {
+            let rel = candidate.relative.to_ascii_lowercase();
+            let file = Path::new(&rel)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(rel.as_str());
+            let score = edit_distance(&rel, &query).min(edit_distance(file, &query_file));
+            (score, candidate)
+        })
+        .collect();
+    ranked
+        .sort_by(|(score_a, a), (score_b, b)| score_a.cmp(score_b).then_with(|| a.relative.cmp(&b.relative)));
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, candidate)| candidate.relative.clone())
+        .collect()
+}
+
+fn ensure_supported_source(registry: &bonsai_lang_api::LanguageRegistry, path: &Path) -> Result<()> {
+    if is_supported_source_path(registry, path) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "read-file path `{}` is not a supported source file",
+        path.display()
+    );
+}
+
+fn is_supported_source_path(registry: &bonsai_lang_api::LanguageRegistry, path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    registry.adapter_for_extension(ext).is_some()
+        && (include_minified_sources() || !path_looks_minified(path))
+}
+
+fn display_path_relative_to(root: &Path, path: &Path) -> String {
+    let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    stable_path
+        .strip_prefix(root)
+        .map(normalize_path)
+        .unwrap_or_else(|_| normalize_path(&stable_path))
+}
+
+fn stable_root(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn normalize_query(raw: &str) -> String {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| raw.to_string())
+    } else {
+        normalize_path(path)
+    }
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => part.to_str().map(str::to_string),
+            std::path::Component::CurDir => None,
+            std::path::Component::ParentDir => Some("..".to_string()),
+            std::path::Component::RootDir => None,
+            std::path::Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().into_owned()),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn format_path_suggestions<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
+    paths
+        .into_iter()
+        .take(8)
+        .map(|path| format!("  {path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    if a.is_empty() {
+        return b.chars().count();
+    }
+    if b.is_empty() {
+        return a.chars().count();
+    }
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut cur = vec![0; b_chars.len() + 1];
+    for (i, ac) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, bc) in b_chars.iter().enumerate() {
+            let cost = usize::from(ac != *bc);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b_chars.len()]
+}
+
+fn include_minified_sources() -> bool {
+    std::env::var("BONSAI_INCLUDE_MINIFIED")
+        .ok()
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn path_looks_minified(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains(".min.") || lower.ends_with(".min.js") || lower.ends_with(".min.css")
+        })
+}
+
+fn ignore_error_is_missing_or_denied(error: &ignore::Error) -> bool {
+    error.io_error().is_some_and(|io_error| {
+        matches!(
+            io_error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        )
+    })
 }
 
 fn render_text_paged(

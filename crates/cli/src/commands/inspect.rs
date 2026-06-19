@@ -3376,11 +3376,30 @@ fn render_inspect_report_text(
         );
     }
 
-    // Patch paging metadata to reflect what actually rendered.
-    paging_info.shown_rows = rendered_units as u64;
-    paging_info.page_size = rendered_units as u64;
+    // Patch paging metadata to reflect what actually rendered. Some
+    // query-scoped inspect runs only render auxiliary tables (raw
+    // taint paths + occurrence hits) and have no structural flow
+    // blocks. Count those visible rows for the footer instead of
+    // claiming the page has zero results.
+    let auxiliary_rows = if total_units == 0 {
+        report.summary.total_taint_flows + page_hits.len()
+    } else {
+        0
+    };
+    let shown_rows = if rendered_units == 0 && auxiliary_rows > 0 {
+        auxiliary_rows
+    } else {
+        rendered_units
+    };
+    let total_rows = if total_units == 0 && auxiliary_rows > 0 {
+        auxiliary_rows
+    } else {
+        total_units
+    };
+    paging_info.shown_rows = shown_rows as u64;
+    paging_info.page_size = shown_rows as u64;
     paging_info.start_offset = start_offset as u64;
-    paging_info.total_rows = total_units as u64;
+    paging_info.total_rows = total_rows as u64;
     // Page cursors advance over render units (decl / flow blocks). The
     // occurrence table is an index for the current page, not its own
     // pageable result set; when only that table is capped, its inline

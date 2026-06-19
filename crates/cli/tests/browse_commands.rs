@@ -2322,6 +2322,88 @@ fn read_file_plain_json_uses_fast_file_local_view() {
 }
 
 #[test]
+fn read_file_resolves_unique_nested_basename() {
+    let root = tempdir_for_test("read-file-unique-basename");
+    let nested = root.join("src/pkg");
+    std::fs::create_dir_all(&nested).expect("create nested source dir");
+    std::fs::write(
+        nested.join("auth_service.py"),
+        "def verify_token(token):\n    return token.strip()\n",
+    )
+    .expect("write nested source");
+    std::fs::write(
+        root.join("main.py"),
+        "from src.pkg.auth_service import verify_token\n",
+    )
+    .expect("write sibling source");
+
+    let Some(out) = run(&[
+        "read-file",
+        root.to_str().unwrap(),
+        "auth_service.py",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    let locator_file = parsed["locator"]["file"]
+        .as_str()
+        .expect("read-file locator.file");
+    assert!(
+        locator_file.ends_with("src/pkg/auth_service.py"),
+        "read-file should resolve unique nested basename; got locator {locator_file:?}\n{out}"
+    );
+    assert!(
+        parsed["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("verify_token")),
+        "read-file should render the resolved nested source:\n{out}"
+    );
+}
+
+#[test]
+fn read_file_rejects_ambiguous_basename_with_candidates() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let root = tempdir_for_test("read-file-ambiguous-basename");
+    std::fs::create_dir_all(root.join("api")).expect("create api dir");
+    std::fs::create_dir_all(root.join("worker")).expect("create worker dir");
+    std::fs::write(root.join("api/config.py"), "VALUE = 'api'\n").expect("write api source");
+    std::fs::write(root.join("worker/config.py"), "VALUE = 'worker'\n").expect("write worker source");
+
+    let out = Command::new(&bin)
+        .args([
+            "read-file",
+            root.to_str().unwrap(),
+            "config.py",
+            "--format",
+            "json",
+            "--no-color",
+        ])
+        .env("COLUMNS", "200")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "ambiguous read-file basename must fail instead of picking one; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        rendered.contains("ambiguous")
+            && rendered.contains("api/config.py")
+            && rendered.contains("worker/config.py"),
+        "ambiguous read-file error must list candidate paths; got:\n{rendered}"
+    );
+}
+
+#[test]
 fn read_file_json_reports_complete_semantic_view_when_unbounded() {
     let ws = ws_path();
     let rules = repo_root().join("security-patterns");
