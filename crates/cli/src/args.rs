@@ -205,12 +205,9 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) no_color: bool,
 
-    /// Color theme preset. Defaults to `moss` (the bonsai-ninja house
-    /// theme — a dark-forest palette: pine-ink borders, misted-pine
-    /// headers, evergreen body, spruce-teal accent; deep greens and
-    /// slate, no warm bark tones). Can also be set via `BONSAI_THEME`.
-    /// Choices: `moss` (default, aliases: `bonsai`, `forest`),
-    /// `earthy-dark`, `dracula`, `retro-amber`.
+    /// Color theme preset. Defaults to `moss`; also respects
+    /// `BONSAI_THEME`. Choices: `moss` (aliases: `bonsai`,
+    /// `forest`), `earthy-dark`, `dracula`, `retro-amber`.
     #[arg(long, global = true)]
     pub(crate) theme: Option<String>,
 
@@ -2121,10 +2118,11 @@ pub(crate) enum Cmd {
         display_order = 24,
         name = "read-file",
         long_about = themed_subcommand_long_about(
-            "Cat-style view of a single file. By default this opens \
-             and indexes only the requested file, so it is suitable \
-             for large workspaces after `search` or syntax `inspect` \
-             finds an anchor. Semantic overlays are explicit: \
+            "Cat-style view of a single file. Pass an exact path, \
+             unique workspace suffix, or unique basename. By default \
+             this opens and indexes only the resolved file, so it is \
+             suitable for large workspaces after `search`, `defs`, \
+             or syntax `inspect` finds an anchor. Semantic overlays are explicit: \
              `--rules-dir`, `--from`, `--to`, `--max-inlined-bodies`, \
              or `--all` use the workspace-analysis path for finding \
              marks, flow entry/exit pairs, and cross-file caller / \
@@ -2149,6 +2147,9 @@ pub(crate) enum Cmd {
              # Sink-marked view of a known-bad file\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py\n  \
              \n  \
+             # Unique basename/suffix after search or defs finds an anchor\n  \
+             $ bonsai-ninja read-file ./src verify_token.py\n  \
+             \n  \
              # Compact mark list for quick triage\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py --compact\n  \
              \n  \
@@ -2162,7 +2163,7 @@ pub(crate) enum Cmd {
     ReadFile {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// File path (workspace-relative or absolute).
+        /// File path, unique workspace suffix, or unique basename.
         path: String,
         /// Restrict to a 1-based line range (`A:B`, inclusive).
         #[arg(long)]

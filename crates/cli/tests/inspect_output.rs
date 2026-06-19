@@ -151,6 +151,30 @@ fn inspect_default_includes_rulepack_free_taint_flows() {
 }
 
 #[test]
+fn inspect_footer_counts_taint_and_occurrence_only_results() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "os.system",
+        "--context",
+        "4k",
+    ]);
+    assert!(
+        out.contains("══ TAINT FLOWS") && out.contains("══ OCCURRENCE HITS"),
+        "fixture should render taint and occurrence tables: {out}"
+    );
+    assert!(
+        !out.contains("page 1 of 1 (0 rows)") && out.contains("inspect items"),
+        "inspect footer should count visible non-structural rows: {out}"
+    );
+}
+
+#[test]
 fn inspect_syntax_only_omits_default_taint_flows() {
     if require_binary_built().is_none() {
         return;
