@@ -94,6 +94,10 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Browse facts",
         &[
             ("defs", "Functions / methods / classes / structs"),
+            (
+                "entrypoints",
+                "Callable roots with no semantic in-workspace callers",
+            ),
             ("calls", "Call sites with caller, location, code"),
             ("imports", "import / use / include statements (alias, wildcard)"),
             ("vars", "Assignments captured from each function's flow"),
@@ -203,6 +207,10 @@ pub(crate) const HELP_EXAMPLES: &[(&str, &[&str])] = &[
     (
         "Browse every call site that invokes a specific callee:",
         &["bonsai-ninja calls ./src --callee os.system"],
+    ),
+    (
+        "Find likely entry points before tracing behavior:",
+        &["bonsai-ninja entrypoints ./src --kind function"],
     ),
     (
         "List every definition in a file, JSON output for tooling:",

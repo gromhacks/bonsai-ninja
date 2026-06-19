@@ -291,6 +291,44 @@ fn defs_json_output_parses_and_has_fields() {
     }
 }
 
+// -------- entrypoints --------
+
+#[test]
+fn entrypoints_lists_handle_request_root() {
+    let Some(out) = run(&["entrypoints", ws().to_str().unwrap()]) else {
+        return;
+    };
+    assert_contains(&out, "handle_request", "entrypoints");
+    assert_contains(&out, "no_semantic_callers", "entrypoints");
+    assert!(
+        !out.contains("verify_token"),
+        "verify_token has in-workspace semantic callers and should not be a root:\n{out}"
+    );
+}
+
+#[test]
+fn entrypoints_json_output_parses_and_has_fields() {
+    let Some(out) = run(&["entrypoints", ws().to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let v: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("entrypoints json invalid: {e}\n{out}"));
+    let arr = v.as_array().expect("entrypoints json is array");
+    assert!(
+        arr.iter()
+            .any(|item| item.get("name").and_then(|v| v.as_str()) == Some("handle_request")),
+        "expected handle_request entrypoint, got {arr:?}"
+    );
+    for item in arr {
+        for field in &["name", "kind", "file", "line", "column", "callees", "reason"] {
+            assert!(
+                item.get(field).is_some(),
+                "entrypoint row missing `{field}`: {item}"
+            );
+        }
+    }
+}
+
 // -------- calls --------
 
 #[test]

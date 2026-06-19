@@ -28,12 +28,12 @@ pub(crate) mod trace;
 pub(crate) mod tree;
 
 pub(crate) use bonsai_sdk::{
-    ArgsFilters, CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, ImportsFilters, RefsFilters,
-    SearchFilters, StringsFilters, VarsFilters,
+    ArgsFilters, CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters,
+    ImportsFilters, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 pub(crate) use browse::{
-    apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_imports, cmd_refs,
-    cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached, page_info_to_json,
+    apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_entrypoints, cmd_imports,
+    cmd_refs, cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached, page_info_to_json,
     paged_json_incomplete_reasons, paging_from_cli, paging_from_cli_output, short_file, truncate,
 };
 pub(crate) use cache::cmd_cache;

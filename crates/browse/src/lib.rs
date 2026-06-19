@@ -26,6 +26,7 @@ pub(crate) mod common;
 pub(crate) mod defs;
 pub(crate) mod dumps;
 pub(crate) mod edges;
+pub(crate) mod entrypoints;
 pub(crate) mod flows;
 pub(crate) mod graph_export;
 pub(crate) mod imports;
@@ -42,13 +43,14 @@ pub use ast::{compute_node_id, dump_ast, AstFileDump, AstFilters, AstNode, AstOu
 pub use calls::{calls, CallOut, CallsFilters};
 pub use classes::{classes, ClassOut, ClassesFilters};
 pub use comments::{comments, CommentOut, CommentsFilters};
-pub use common::{format_span, make_name_filter, Locator, NameFilter, Span};
+pub use common::{collect_callee_names, format_span, make_name_filter, Locator, NameFilter, Span};
 pub use defs::{defs, DefOut, DefsFilters};
 pub use dumps::{
     callgraph_summary, dump_callgraph, dump_cfg, dump_hir, CallgraphRow, DumpCallableCandidate,
     DumpLookupError, HirDump,
 };
 pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
+pub use entrypoints::{entrypoints, EntryPointOut, EntryPointsFilters};
 pub use flows::FlowAnnotator;
 pub use graph_export::{
     graph_projection, render_cypher, render_graph_export, render_graphml, render_networkx_json, GraphEdge,

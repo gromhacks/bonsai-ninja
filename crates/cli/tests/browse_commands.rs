@@ -202,6 +202,46 @@ fn defs_json_format_parses_and_has_expected_fields() {
 }
 
 // -----------------------------------------------------------------------------
+// entrypoints
+// -----------------------------------------------------------------------------
+
+#[test]
+fn entrypoints_lists_callable_roots() {
+    let ws = ws_path();
+    let Some(out) = run(&["entrypoints", ws.to_str().unwrap()]) else {
+        return;
+    };
+    for h in &["name", "kind", "location", "signature", "callees", "reason"] {
+        assert!(out.contains(h), "entrypoints header missing `{h}`: {out}");
+    }
+    assert!(
+        out.contains("handle_request"),
+        "entrypoints should include the externally-called handler root: {out}"
+    );
+    assert!(
+        out.contains("no_semantic_callers"),
+        "entrypoints should explain why rows are roots: {out}"
+    );
+}
+
+#[test]
+fn entrypoints_json_format_parses_and_has_expected_fields() {
+    let ws = ws_path();
+    let Some(out) = run(&["entrypoints", ws.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("entrypoints --format json: valid JSON");
+    let arr = v.as_array().expect("top-level array");
+    assert!(!arr.is_empty(), "expected at least one entrypoint in JSON");
+    let first = &arr[0];
+    for field in &[
+        "name", "kind", "file", "line", "column", "params", "callees", "reason",
+    ] {
+        assert!(first.get(field).is_some(), "JSON missing `{field}`: {first}");
+    }
+}
+
+// -----------------------------------------------------------------------------
 // calls
 // -----------------------------------------------------------------------------
 
@@ -1983,6 +2023,7 @@ fn top_level_help_groups_commands() {
         ("Flow analysis", "trace"),
         ("Workspace", "index"),
         ("Browse facts", "defs"),
+        ("Browse facts", "entrypoints"),
         ("Debug dumps", "dump-hir"),
     ] {
         let group_idx = out.find(group).expect("group present");

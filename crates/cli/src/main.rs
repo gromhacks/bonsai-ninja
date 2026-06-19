@@ -10,8 +10,9 @@
 //!
 //! - **Flow commands** (the headline): `trace`, `diagnostics`,
 //!   `dump-hir`, `dump-cfg`, `dump-callgraph`, `index`.
-//! - **Browse / inspect commands**: `defs`, `calls`, `imports`, `vars`,
-//!   `strings`, `args`, `classes`, `refs`, `search`, `inspect`, `export`.
+//! - **Browse / inspect commands**: `defs`, `entrypoints`, `calls`,
+//!   `imports`, `vars`, `strings`, `args`, `classes`, `refs`, `search`,
+//!   `inspect`, `export`.
 //!   All read from the same `GlobalIndex` + per-file `DeclIndex`, so
 //!   behavior is uniform across every supported language.
 
@@ -36,10 +37,10 @@ use args::{CacheAction, Cli, Cmd, SecurityAction};
 use commands::{
     cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_diagnostics, cmd_dump_ast,
     cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolve, cmd_dump_taint,
-    cmd_export, cmd_imports, cmd_index, cmd_inspect, cmd_refs, cmd_search, cmd_strings, cmd_trace, cmd_vars,
-    paging_from_cli, paging_from_cli_output, resolve_symbol_arg, ArgsFilters, CallsFilters, ClassesFilters,
-    CommentsFilters, DefsFilters, ImportsFilters, InspectFilters, InspectRenderOptions, RefsFilters,
-    SearchFilters, StringsFilters, VarsFilters,
+    cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect, cmd_refs, cmd_search, cmd_strings,
+    cmd_trace, cmd_vars, paging_from_cli, paging_from_cli_output, resolve_symbol_arg, ArgsFilters,
+    CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters,
+    InspectFilters, InspectRenderOptions, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 use help_theme::try_themed_help;
 
@@ -562,6 +563,30 @@ fn main() -> Result<()> {
             !no_flows,
             format,
         ),
+        Cmd::EntryPoints {
+            workspace,
+            kind,
+            file,
+            name,
+            regex,
+            limit,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => cmd_entrypoints(
+            &workspace,
+            EntryPointsFilters {
+                kind: kind.as_deref(),
+                file: file.as_deref(),
+                name: name.as_deref(),
+                regex,
+            },
+            limit,
+            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+            format,
+        ),
         Cmd::Calls {
             workspace,
             callee,
@@ -1041,6 +1066,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::DumpResolve { workspace, .. }
         | Cmd::DumpTaint { workspace, .. }
         | Cmd::Defs { workspace, .. }
+        | Cmd::EntryPoints { workspace, .. }
         | Cmd::Calls { workspace, .. }
         | Cmd::Imports { workspace, .. }
         | Cmd::Vars { workspace, .. }
@@ -1069,6 +1095,7 @@ fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::DumpResolve { output, .. }
         | Cmd::DumpTaint { output, .. }
         | Cmd::Defs { output, .. }
+        | Cmd::EntryPoints { output, .. }
         | Cmd::Calls { output, .. }
         | Cmd::Imports { output, .. }
         | Cmd::Vars { output, .. }
