@@ -124,6 +124,13 @@ python3 scripts/realworld-lang-benchmark.py \
   --continue-on-error
 ```
 
+For the current local release snapshot, see
+[Release Readiness](RELEASE_READINESS.md). The 2026-06-19 CVE-Bench run
+improved detection recall and precision substantially, but fixed-snapshot
+validation remains the known rulepack-quality gap. Treat sanitizer-credit
+changes as path-ordering changes: source -> sanitizer -> sink may suppress
+or mark the path, while source -> sink -> sanitizer must not.
+
 ## Large-Codebase Performance Checks
 
 For large Java or JVM-family repositories, validate both cold and warm runs.
