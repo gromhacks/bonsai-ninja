@@ -10,6 +10,12 @@
     kind: call
     callee:
       name: question
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    source_callback_args:
+    - callback_arg_index: 1
+      source_param_indices: [0]
   match_examples:
   - name: readline question
     code: |
@@ -17,7 +23,23 @@
       function demo(input, req, obj) {
         return question(input);
       }
-  description: "readline.Interface.question - interactive stdin prompt; callback arg is tainted."
+  - name: readline question callback
+    code: |
+      const _u = require("readline");
+      function demo(rl: any) {
+        rl.question("name?", (answer: string) => {
+          return answer;
+        });
+      }
+    expect_match_text: [rl.question]
+  - name: readline question no args negative
+    code: |
+      const _u = require("readline");
+      function demo(question: any) {
+        return question();
+      }
+    expect_no_match: true
+  description: "readline.Interface.question(query, callback) and readline-sync question(query) - interactive stdin prompt. Callback answer parameters and synchronous return values are attacker-controlled."
 
 - id: typescript.source.process_argv
   enabled: true

@@ -128,6 +128,93 @@
       }
     expect_no_match: true
   description: "std::io::Stdin::read_line(&mut buf) - interactive input fills the buffer arg. `min_args: 1` rejects zero-arg same-name decoys."
+- id: rust.cli.read_to_string
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: read_to_string
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: read to string output buffer
+    code: |
+      fn example(mut reader: impl std::io::Read) {
+          let mut data = String::new();
+          reader.read_to_string(&mut data);
+      }
+    expect_match_text: [reader.read_to_string]
+  - name: read to string no-arg negative
+    code: |
+      fn example(mut reader: impl std::io::Read) {
+          reader.read_to_string();
+      }
+    expect_no_match: true
+  description: "std::io::Read::read_to_string(&mut String) - fills the destination string from stdin/file/socket reader; local trust source unless narrowed by a remote framework rule."
+- id: rust.cli.read_to_end
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: read_to_end
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: read to end output buffer
+    code: |
+      fn example(mut reader: impl std::io::Read) {
+          let mut data = Vec::new();
+          reader.read_to_end(&mut data);
+      }
+    expect_match_text: [reader.read_to_end]
+  - name: read to end no-arg negative
+    code: |
+      fn example(mut reader: impl std::io::Read) {
+          reader.read_to_end();
+      }
+    expect_no_match: true
+  description: "std::io::Read::read_to_end(&mut Vec<u8>) - fills the destination buffer from stdin/file/socket reader; local trust source unless narrowed by a remote framework rule."
+- id: rust.cli.read_exact
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: read_exact
+  constraints:
+  - min_args: 1
+  taint_semantics:
+    source_output_args: [0]
+  match_examples:
+  - name: read exact output buffer
+    code: |
+      fn example(mut reader: impl std::io::Read) {
+          let mut data = [0u8; 32];
+          reader.read_exact(&mut data);
+      }
+    expect_match_text: [reader.read_exact]
+  - name: read exact no-arg negative
+    code: |
+      fn example(mut reader: impl std::io::Read) {
+          reader.read_exact();
+      }
+    expect_no_match: true
+  description: "std::io::Read::read_exact(&mut [u8]) - fills the destination buffer from stdin/file/socket reader."
 - id: rust.cli.env_var
   enabled: true
   language: rust

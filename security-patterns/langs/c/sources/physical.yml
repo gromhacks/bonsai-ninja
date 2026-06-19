@@ -205,6 +205,7 @@
   trust: physical
   tag: hw-input
   category: hardware-io
+  payload_types: [binary]
   packages: [libserialport]
   match:
     kind: call
@@ -228,6 +229,7 @@
   trust: physical
   tag: hw-input
   category: hardware-io
+  payload_types: [binary]
   packages: [wiringpi]
   match:
     kind: call

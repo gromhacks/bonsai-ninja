@@ -15,40 +15,58 @@
   description: "Console.ReadLine - local CLI input from stdin."
 
 - id: csharp.source.environment_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: cli-input
   trust: local
+  payload_types: [text]
   match:
     kind: call
     callee:
       attribute: [Environment, GetCommandLineArgs]
-  description: "Disabled - argv; flag only across a trust boundary."
+  match_examples:
+    - name: command line args
+      code: |
+        using System;
+        class App { string[] Args() { return Environment.GetCommandLineArgs(); } }
+      expect_match_text: [Environment.GetCommandLineArgs]
+  description: "Environment.GetCommandLineArgs() - process argv; local trust but attacker-controlled in CLI/batch invocations."
 
 - id: csharp.source.environment_getenv
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: env-input
   trust: local
+  payload_types: [text]
   match:
     kind: call
     callee:
       attribute: [Environment, GetEnvironmentVariable]
-  description: "Disabled - Environment.GetEnvironmentVariable; flag only across trust boundary."
+  match_examples:
+    - name: environment variable
+      code: |
+        using System;
+        class App { string Home() { return Environment.GetEnvironmentVariable("HOME"); } }
+      expect_match_text: [Environment.GetEnvironmentVariable]
+  description: "Environment.GetEnvironmentVariable(name) - process environment value; local trust but attacker-controlled through shells, service managers, CI, and container configuration."
 
 - id: csharp.source.main_args_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: cli-input
   trust: local
+  payload_types: [text]
   match:
     kind: param
     target:
       name: args
-  description: "Disabled - Main(string[] args); enable when CLI faces untrusted input."
+      in_method: [Main]
+  match_examples:
+    - name: main args parameter
+      code: |
+        class App { static void Main(string[] args) { } }
+    - name: helper args parameter negative
+      code: |
+        class App { void Helper(string[] args) { } }
+      expect_no_match: true
+  description: "Main(string[] args) - CLI arguments supplied by the process launcher; scoped to the entrypoint method so ordinary helper parameters named args stay quiet."
