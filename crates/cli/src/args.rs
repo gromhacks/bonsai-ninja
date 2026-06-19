@@ -2726,8 +2726,14 @@ pub(crate) enum SecurityAction {
                       # Remote HTTP / RPC entrypoints only\n  \
                       $ bonsai-ninja security ./src taint-analysis --trust remote --category http-input\n  \
                       \n  \
+                      # Large production repo review (scoped, bounded)\n  \
+                      $ bonsai-ninja security ./src taint-analysis --profile production\n  \
+                      \n  \
                       # Tag narrowing (CWE / OWASP family)\n  \
                       $ bonsai-ninja security ./src taint-analysis --tag command-injection\n  \
+                      \n  \
+                      # Force an exhaustive unscoped audit on very large repos\n  \
+                      $ BONSAI_ALLOW_BROAD_TAINT=1 bonsai-ninja security ./src taint-analysis\n  \
                       \n  \
                       # JSON for CI / tooling, no row cap\n  \
                       $ bonsai-ninja security ./src taint-analysis --format json --all")
@@ -2798,12 +2804,12 @@ pub(crate) enum SecurityAction {
         /// `web-llm`, `xss`, `xxe`, `zip-slip`.
         #[arg(long)]
         tag: Option<String>,
-        /// File-path include substring (repeatable). Keep only findings
-        /// whose sink site is in one of the given paths.
+        /// File-path include substring (repeatable). Analyze only
+        /// files whose path contains one of the given values.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable). Drop findings
-        /// whose sink site is in one of the given paths.
+        /// File-path exclude substring (repeatable). Exclude files
+        /// whose path contains one of the given values.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Opt in to inferred per-function entry-point sources. By

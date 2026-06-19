@@ -316,6 +316,7 @@ dependencies = [
  "bonsai_trace",
  "bonsai_vfs",
  "parking_lot",
+ "rayon",
  "tree-sitter",
 ]
 
