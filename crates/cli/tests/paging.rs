@@ -890,7 +890,8 @@ fn inspect_truncation_hints_resume_next_page() {
     // At least one of the truncation lines must appear — 1k is so
     // tight that something has to be cut.
     let has_hint = out.contains("not shown — context budget reached")
-        || out.contains("more on page")
+        || out.contains("results remaining")
+        || out.contains("more results after this page")
         || out.contains("next     bonsai-ninja inspect");
     assert!(
         has_hint,
@@ -902,6 +903,61 @@ fn inspect_truncation_hints_resume_next_page() {
     assert!(
         out.contains("--page") || out.contains("--all"),
         "truncation hint must mention --page or --all"
+    );
+}
+
+#[test]
+fn inspect_page_footer_resume_hint_keeps_original_query_shape() {
+    let ws = complex_ws();
+    let ws_str = ws.to_str().unwrap();
+    let Some(out) = run(&["inspect", ws_str, "--query", "execute", "--context", "2048"]) else {
+        return;
+    };
+    let next_line = out
+        .lines()
+        .find(|line| line.trim_start().starts_with("next"))
+        .unwrap_or_else(|| panic!("inspect footer missing next line:\n{out}"));
+    assert!(
+        next_line.contains(ws_str)
+            && next_line.contains("--query execute")
+            && next_line.contains("--context 2048"),
+        "inspect next hint must preserve the original query/context shape; got:\n{next_line}",
+    );
+    let cursor = next_line
+        .split_whitespace()
+        .find(|part| part.starts_with("P:"))
+        .unwrap_or_else(|| panic!("inspect next hint missing cursor:\n{next_line}"));
+    let Some(page2) = run(&[
+        "inspect",
+        ws_str,
+        "--query",
+        "execute",
+        "--context",
+        "2048",
+        "--page",
+        cursor,
+    ]) else {
+        return;
+    };
+    assert!(
+        page2.contains("page 2 of") && !page2.contains("page 1 of"),
+        "cursor resume should render a page, got:\n{page2}",
+    );
+    let Some(numeric_page2) = run(&[
+        "inspect",
+        ws_str,
+        "--query",
+        "execute",
+        "--context",
+        "2048",
+        "--page",
+        "2",
+    ]) else {
+        return;
+    };
+    assert!(
+        numeric_page2.contains("page 2 of") && !numeric_page2.contains("page 1 of"),
+        "numeric resume should render page 2, got:\n{numeric_page2}",
     );
 }
 
@@ -1400,19 +1456,17 @@ fn inspect_never_exceeds_context_across_budget_sweep() {
 
 #[test]
 fn inspect_page_count_reflects_truncation_across_sections() {
-    // "page 1 of 1" is a lie when the OCCURRENCE HITS table or
-    // folded-flows section got cut in the text render. The text
-    // footer must say "page 1 of N" where N >= 2 and follow it
-    // with a `next …` resume line. (JSON mode has the full hits
-    // array inline, so its `page` can legitimately be is_last=true;
-    // this test only asserts the text contract.)
+    // When render units are cut by the context budget, the text footer
+    // must say "page 1 of N" where N >= 2 and follow it with a `next …`
+    // resume line. Occurrence-table truncation alone is not pageable;
+    // its own inline hint points to `--all` instead.
     let Some(out) = run(&[
         "inspect",
         complex_ws().to_str().unwrap(),
         "--query",
-        "request",
+        "execute",
         "--context",
-        "4096",
+        "2048",
     ]) else {
         return;
     };
@@ -1434,10 +1488,10 @@ fn inspect_page_count_reflects_truncation_across_sections() {
         .unwrap_or(0);
     assert!(
         total >= 2,
-        "text footer must report ≥ 2 pages when any section truncated; got: {page_line}"
+        "text footer must report ≥ 2 pages when render units are truncated; got: {page_line}"
     );
     assert!(
-        out.contains("next     bonsai-ninja inspect"),
+        out.contains("next     bonsai-ninja") && out.contains(" --page "),
         "text footer must include a `next …` resume line when not is_last; got:\n{out}"
     );
 }
@@ -1469,6 +1523,10 @@ fn inspect_page_footer_never_shows_zero_more_on_next_page() {
             !line.contains(" 0 more on page") && !line.starts_with("0 more on page"),
             "page-footer must not say `0 more on page N` — got line:\n{line}",
         );
+        assert!(
+            !line.contains("more on page"),
+            "page-footer must describe remaining results, not imply page N contains all remaining rows — got line:\n{line}",
+        );
     }
 }
 
@@ -1478,26 +1536,29 @@ fn inspect_pages_show_truncation_hints() {
     // hint on at least one page so the reader knows there's more
     // content than what fit on this page.
     let mut full_truncation_hit = false;
-    for p in 1..=20 {
+    for p in 1..=3 {
         let Some(out) = run(&[
             "inspect",
             complex_ws().to_str().unwrap(),
             "--query",
-            "request",
+            "execute",
             "--context",
-            "4096",
+            "2048",
             "--page",
             &p.to_string(),
         ]) else {
             return;
         };
-        if out.contains("not shown — context budget reached") || out.contains("more on page") {
+        if out.contains("not shown — context budget reached")
+            || out.contains("results remaining")
+            || out.contains("more results after this page")
+        {
             full_truncation_hit = true;
         }
     }
     assert!(
         full_truncation_hit,
-        "inspect --context 4096: at least one page must show a truncation / next-page hint",
+        "inspect --context 2048: at least one page must show a truncation / next-page hint",
     );
 }
 

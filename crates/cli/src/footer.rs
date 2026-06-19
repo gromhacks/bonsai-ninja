@@ -157,10 +157,14 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
     // (fired later via `WorkspaceFooter`'s `Drop`) stays silent.
     PAGING_FOOTER_FIRED.store(true, Ordering::Relaxed);
     let u = ui();
-    let more_on_next = info
+    let cmd_line_hint = page_cache::current_command_without_page_hint(cmd_line_hint);
+    let remaining_after_page = info
         .next_cursor
         .as_ref()
-        .map(|_| info.total_rows.saturating_sub(info.shown_rows))
+        .map(|_| {
+            info.total_rows
+                .saturating_sub(info.start_offset.saturating_add(info.shown_rows))
+        })
         .unwrap_or(0);
     let page_line = if info.total_pages > 1 {
         if info.is_last {
@@ -168,27 +172,27 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
                 "page {} of {} ({} rows)",
                 info.page_number, info.total_pages, info.shown_rows
             )
-        } else if more_on_next > 0 {
-            // Accurate row count for the next page — show it inline.
+        } else if remaining_after_page > 0 {
+            // This is the count after the current page, not the size
+            // of the immediate next page. Say that directly so large
+            // workspaces with dozens of pages do not imply page 2
+            // contains every remaining result.
             format!(
-                "page {} of {} ({} rows)  —  {more_on_next} more on page {}",
+                "page {} of {} ({} rows)  —  {} results remaining",
                 info.page_number,
                 info.total_pages,
                 info.shown_rows,
-                info.page_number + 1,
+                format_count(remaining_after_page as usize),
             )
         } else {
             // `next_cursor` is set but the row counter doesn't
             // reflect what's left (e.g. inspect truncated its
             // OCCURRENCE or folded-flow sections, which don't
             // live in the `shown_rows` / `total_rows` accounting).
-            // Drop the misleading "0 more" suffix.
+            // Drop the misleading numeric suffix.
             format!(
-                "page {} of {} ({} rows)  —  more on page {}",
-                info.page_number,
-                info.total_pages,
-                info.shown_rows,
-                info.page_number + 1,
+                "page {} of {} ({} rows)  —  more results after this page",
+                info.page_number, info.total_pages, info.shown_rows,
             )
         }
     } else {
@@ -200,7 +204,7 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
         u.dim(&format!(
             "total   {} {}",
             format_count(info.total_rows as usize),
-            paging_total_label(cmd_line_hint, info.total_rows),
+            paging_total_label(&cmd_line_hint, info.total_rows),
         ))
     );
     // Footer reports ACTUAL rendered tokens, not the paginator's
@@ -311,21 +315,19 @@ pub(crate) fn render_paging_footer(info: &paging::PageInfo, cmd_line_hint: &str)
 fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     let singular = total == 1;
     let pluralize = |one: &'static str, many: &'static str| if singular { one } else { many };
-    if cmd_line_hint.contains(" security <workspace> taint-analysis") {
+    if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" taint-analysis") {
         pluralize("tainted flow", "tainted flows")
-    } else if cmd_line_hint.contains(" security <workspace> source-analysis") {
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" source-analysis") {
         pluralize("source flow", "source flows")
-    } else if cmd_line_hint.contains(" security <workspace> sources") {
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sources") {
         pluralize("taint source", "taint sources")
-    } else if cmd_line_hint.contains(" security <workspace> sinks") {
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sinks") {
         pluralize("sink", "sinks")
-    } else if cmd_line_hint.contains(" security <workspace> sanitizers") {
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" sanitizers") {
         pluralize("sanitizer", "sanitizers")
-    } else if cmd_line_hint.contains(" security <workspace> deps") {
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" deps") {
         pluralize("dependency finding", "dependency findings")
-    } else if cmd_line_hint.contains(" security <workspace> pack")
-        || cmd_line_hint.contains(" security <ws> pack")
-    {
+    } else if cmd_line_hint.contains(" security ") && cmd_line_hint.contains(" pack") {
         pluralize("rule", "rules")
     } else if cmd_line_hint.contains(" defs ") {
         pluralize("definition", "definitions")

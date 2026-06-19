@@ -16,6 +16,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 static PAGE_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static REMEMBERED_WORKSPACE_FINGERPRINT: OnceLock<
@@ -27,13 +28,19 @@ thread_local! {
 }
 
 const EAGER_PAGE_LIMIT: u64 = 4;
-const RENDER_CACHE_VERSION: u32 = 5;
+const RENDER_CACHE_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
     pub number: u64,
     pub cursor: String,
     pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct WorkspaceMetadataFingerprint {
+    files: usize,
+    digest: u64,
 }
 
 /// Hard ceiling on a cached command payload. The payload exists so a
@@ -49,6 +56,7 @@ struct PageCacheFile {
     binary_version: String,
     matcher_policy_fingerprint: u128,
     workspace_fingerprint: bonsai_sdk::WorkspaceContentFingerprint,
+    workspace_metadata_fingerprint: WorkspaceMetadataFingerprint,
     dependency_metadata_fingerprint: u64,
     rulepack_fingerprint: Option<u64>,
     normalized_argv_hash: u64,
@@ -297,6 +305,7 @@ fn save_pages_value(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Result<
             Some(fingerprint) => fingerprint,
             None => workspace_fingerprint(workspace)?,
         },
+        workspace_metadata_fingerprint: workspace_metadata_fingerprint(workspace)?,
         dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
         rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
         normalized_argv_hash: normalized_argv_hash(),
@@ -462,9 +471,11 @@ fn current_exe_is_newer_than_cache(cache_metadata: &std::fs::Metadata) -> bool {
 }
 
 fn cache_is_fresh(workspace: &Path, cache: &PageCacheFile) -> anyhow::Result<bool> {
-    Ok(cache.workspace_fingerprint == workspace_fingerprint(workspace)?
-        && cache.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
-        && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?)
+    Ok(
+        cache.workspace_metadata_fingerprint == workspace_metadata_fingerprint(workspace)?
+            && cache.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
+            && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?,
+    )
 }
 
 fn cache_dir(workspace: &Path) -> PathBuf {
@@ -507,12 +518,122 @@ fn normalized_argv_without_page() -> Vec<String> {
     out
 }
 
+pub(crate) fn current_command_without_page_hint(fallback: &str) -> String {
+    let args = normalized_argv_without_page();
+    if args.is_empty() {
+        return fallback.to_string();
+    }
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push("bonsai-ninja".to_string());
+    parts.extend(args.into_iter().map(shell_quote_arg));
+    parts.join(" ")
+}
+
+fn shell_quote_arg(arg: String) -> String {
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | ':' | '=' | ','))
+    {
+        arg
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 fn workspace_fingerprint(root: &Path) -> anyhow::Result<bonsai_sdk::WorkspaceContentFingerprint> {
     // Rendered CLI output is derived from indexed source files, dependency
     // metadata, rulepacks, and command args. Use the SDK's supported-source
     // fingerprint so first-page cache saves do not recursively re-read every
     // file in large workspaces after analysis has already completed.
     bonsai_sdk::workspace_source_fingerprint_from_disk(root)
+}
+
+fn workspace_metadata_fingerprint(root: &Path) -> anyhow::Result<WorkspaceMetadataFingerprint> {
+    let stable_root = stable_root_path(root);
+    let registry = bonsai_adapters::all_languages_registry();
+    let include_minified = include_minified_sources();
+    let mut builder = ignore::WalkBuilder::new(&stable_root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .ignore(true)
+        .add_custom_ignore_filename(".bonsaiignore");
+    builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
+
+    let mut entries = Vec::new();
+    for entry in builder.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if ignore_error_is_missing_or_denied(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let path = entry.path();
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+            continue;
+        };
+        if registry.adapter_for_extension(ext).is_none() {
+            continue;
+        }
+        if !include_minified_sources() && path_looks_minified(path) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if ignore_error_is_missing_or_denied(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let modified_ns = metadata_modified_nanos(&metadata);
+        let rel = stable_relative_path(&stable_root, path);
+        entries.push(format!("{rel}\0{:016x}\0{:032x}", metadata.len(), modified_ns));
+    }
+    let files = entries.len();
+    Ok(WorkspaceMetadataFingerprint {
+        files,
+        digest: fingerprint_entries(entries),
+    })
+}
+
+fn include_minified_sources() -> bool {
+    std::env::var("BONSAI_INCLUDE_MINIFIED")
+        .ok()
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn ignore_error_is_missing_or_denied(error: &ignore::Error) -> bool {
+    error.io_error().is_some_and(|io_error| {
+        matches!(
+            io_error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        )
+    })
+}
+
+fn path_looks_minified(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.contains(".min.") || lower.ends_with(".min.js") || lower.ends_with(".min.css")
+        })
+}
+
+fn metadata_modified_nanos(metadata: &std::fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 /// FNV-1a 64-bit, the same digest the dataflow sidecar uses
