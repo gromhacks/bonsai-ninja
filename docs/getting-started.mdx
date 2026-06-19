@@ -12,7 +12,7 @@ description: "Install bonsai-ninja, run a first security scan, and read the outp
 3. Keep `index --watch` running while you edit if you want save-time hot reloads.
 4. Run `security taint-analysis` against a source tree.
 5. Re-run with JSON or SARIF when you need machine-readable output.
-6. Use `inspect --flow F:...` to drill into a specific flow.
+6. Use `inspect` or `show F:...` to drill into a specific flow.
 
 </Steps>
 
@@ -85,12 +85,19 @@ For CI or scripts:
 
 ```bash
 ./target/release/bonsai-ninja security ./src taint-analysis \
+  --profile production \
   --rules-dir ./security-patterns \
   --format json \
   --all \
   --no-color \
   --no-progress
 ```
+
+On very large workspaces, unscoped taint analysis fails fast rather than
+being killed by the OS or silently narrowing coverage. Use a real scope
+such as `--profile production`, `--file`, `--source`, `--sink`,
+`--trust`, `--severity`, or `--tag`. Set `BONSAI_ALLOW_BROAD_TAINT=1`
+only for an intentional exhaustive all-file audit.
 
 ## Read A Finding
 
@@ -102,4 +109,11 @@ Use `--no-compact` when you want every function body rendered in the text report
 
 ```bash
 ./target/release/bonsai-ninja inspect ./src --query os.system --flow F:0123456789abcdef
+./target/release/bonsai-ninja show ./src F:0123456789abcdef
 ```
+
+For code-navigation queries, `inspect` is rulepack-free by default: it
+shows syntax hits plus bounded taint paths that contain the query. Add
+`--syntax-only` for pure indexed search, `--taint-flow` to force raw
+taint paths on broad queries, or `--graph-flow` for explicit structural
+callgraph evidence.
