@@ -5212,32 +5212,48 @@ fn push_pattern_binding(
 }
 
 /// Fold every run of ASCII whitespace (spaces, tabs, newlines) in
-/// `raw` into a single space and trim the result. Used to normalise
-/// callee text across multi-line method chains — a Rust /
-/// Swift / Kotlin expression spanning multiple source lines would
-/// otherwise keep its embedded newlines + indentation in the
-/// callee's displayed `name` field, cluttering the `calls` column
-/// and breaking downstream substring filters.
+/// `raw` into a single space, trim the result, and remove padding
+/// around dotted qualified-name separators. Used to normalise callee
+/// text across multi-line method chains — a Rust / Swift / Kotlin /
+/// Java expression spanning multiple source lines would otherwise
+/// keep its embedded newlines + indentation in the callee's displayed
+/// `name` field, cluttering the `calls` column and breaking
+/// downstream substring filters and sanitizer/sink matcher regexes.
 #[must_use]
 pub fn normalize_call_name_whitespace(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
+    let mut folded = String::with_capacity(raw.len());
     let mut in_ws = false;
     for c in raw.chars() {
         if c.is_whitespace() {
             if !in_ws {
-                if !out.is_empty() {
-                    out.push(' ');
+                if !folded.is_empty() {
+                    folded.push(' ');
                 }
                 in_ws = true;
             }
         } else {
-            out.push(c);
+            folded.push(c);
             in_ws = false;
         }
     }
     // `in_ws` at end means we pushed a trailing space; strip it.
-    if out.ends_with(' ') {
-        out.pop();
+    if folded.ends_with(' ') {
+        folded.pop();
+    }
+    let mut out = String::with_capacity(folded.len());
+    let mut chars = folded.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '.' {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('.');
+            while matches!(chars.peek(), Some(' ')) {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(c);
     }
     out
 }

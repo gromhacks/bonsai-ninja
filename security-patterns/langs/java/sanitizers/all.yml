@@ -117,7 +117,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForSQL$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForSQL$'
   taint_semantics:
     call_result_passthrough_args: [0, 1]
   match_examples:
@@ -211,7 +211,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForURL$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForURL$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -550,7 +550,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForHTML$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForHTML$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -572,6 +572,15 @@
         }
       }
     expect_match_text: [ESAPI.encoder().encodeForHTML]
+  - name: fully qualified esapi fluent encoder
+    code: |
+      import org.owasp.esapi.ESAPI;
+      class App {
+        void handle(String input) throws Exception {
+          org.owasp.esapi.ESAPI.encoder().encodeForHTML(input);
+        }
+      }
+    expect_match_text: [org.owasp.esapi.ESAPI.encoder().encodeForHTML]
   description: "OWASP ESAPI Encoder.encodeForHTML."
 
 - id: java.sanitizer.esapi_encode_for_js
@@ -582,7 +591,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForJavaScript$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForJavaScript$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -614,7 +623,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForLDAP$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForLDAP$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -646,7 +655,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForXML$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForXML$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -678,7 +687,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForHTMLAttribute$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForHTMLAttribute$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -710,7 +719,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForCSS$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForCSS$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -742,7 +751,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForXMLAttribute$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForXMLAttribute$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -774,7 +783,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForDN$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForDN$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -806,7 +815,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForXPath$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForXPath$'
   taint_semantics:
     call_result_passthrough_args: [0]
   match_examples:
@@ -838,7 +847,7 @@
   match:
     kind: call
     callee:
-      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForOS$'
+      regex: '^(?:org\.owasp\.esapi\.)?(?:Encoder|ESAPI\.encoder\(\))\.encodeForOS$'
   taint_semantics:
     call_result_passthrough_args: [0, 1]
   match_examples:

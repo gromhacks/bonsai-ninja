@@ -765,6 +765,22 @@ fn nested_sanitizer_inside_tainted_sink_arg_is_dataflow_connected() {
 }
 
 #[test]
+fn nested_sanitizer_with_renamed_dynamic_value_is_dataflow_connected() {
+    let src = rule_match_with_text_and_span("request.getHeaderNames", 0, 22);
+    let san = rule_match_with_text_and_span("org.owasp.esapi.ESAPI.encoder().encodeForHTML", 120, 166);
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "\"Sensitive value '\" + org.owasp.esapi.ESAPI.encoder().encodeForHTML(new String(input)) + \"' hashed and stored<br/>\"".to_string(),
+    }];
+
+    assert!(sanitizer_is_nested_in_tainted_sink_arg(
+        &src,
+        &san,
+        &sink_tainted_args
+    ));
+}
+
+#[test]
 fn nested_sanitizer_inside_sink_arg_can_attach_after_sink_callee_token() {
     let src = RuleMatch {
         match_text: "Input".to_string(),
@@ -1233,6 +1249,24 @@ fn sanitizer_on_static_literal_concatenated_with_taint_does_not_credit() {
     let sink_tainted_args = [TaintedArgInfo {
         index: 0,
         value_text: "escapeHtml(\"static\") + Input".to_string(),
+    }];
+
+    assert!(!sanitizer_is_nested_in_tainted_sink_arg(
+        &src,
+        &san,
+        &sink_tainted_args
+    ));
+}
+
+#[test]
+fn sanitizer_on_other_dynamic_value_concatenated_with_taint_does_not_credit() {
+    // The sanitizer wraps `other`, while the tainted carrier `Input`
+    // remains outside the sanitizer call.
+    let src = rule_match_with_text_and_span("Input", 0, 5);
+    let san = rule_match_with_text_and_span("escapeHtml", 120, 130);
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "escapeHtml(other) + Input".to_string(),
     }];
 
     assert!(!sanitizer_is_nested_in_tainted_sink_arg(

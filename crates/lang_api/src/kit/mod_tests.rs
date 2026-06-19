@@ -1,7 +1,7 @@
 use super::{
     apply_assign_call_result_types, apply_constructor_result_type_aliases, canonical_simple_type_name,
-    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
-    receiver_projected_alias_matches,
+    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
@@ -17,6 +17,20 @@ fn receiver_projected_alias_matches_tuple_field_chains_only() {
     assert!(!receiver_projected_alias_matches("r", "r"));
     assert!(!receiver_projected_alias_matches("other.r", "r"));
     assert!(!receiver_projected_alias_matches("r.Header()", "r"));
+}
+
+#[test]
+fn call_name_normalization_compacts_multiline_dotted_chains() {
+    assert_eq!(
+        normalize_call_name_whitespace(
+            "org.owasp\n        .esapi\n        .ESAPI\n        .encoder()\n        .encodeForHTML"
+        ),
+        "org.owasp.esapi.ESAPI.encoder().encodeForHTML"
+    );
+    assert_eq!(
+        normalize_call_name_whitespace("Command::new(\"sh\")\n    .arg(\"-c\")\n    .output"),
+        "Command::new(\"sh\").arg(\"-c\").output"
+    );
 }
 
 #[test]
