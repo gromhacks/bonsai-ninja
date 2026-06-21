@@ -2,9 +2,8 @@
 //! `dump-resolve`, `dump-taint`. Structural introspection views of
 //! the workspace — each picks one plane of the analysis (call graph,
 //! AST, symbol resolution, taint flows) and renders it verbatim.
-//! JSON output is uncapped by default; when a dump command accepts
-//! `--context` / `--page`, the explicit page wrapper carries
-//! completeness metadata. Text output honors `--context`.
+//! Row-shaped JSON and text output honor the token budget by default;
+//! `--all` / `--context uncapped` are the explicit exhaustive modes.
 
 use crate::args::{BrowseFormat, PrecisionFilter};
 use crate::footer::{render_paging_footer, render_truncation_notice};
@@ -17,8 +16,8 @@ use anyhow::Result;
 
 use super::browse::effective_limit;
 use super::{
-    apply_text_limit, emit_json_paged_cached, nearest_names, open_project_index_only as open_project,
-    open_project_index_only_with_rulepack, short_file,
+    apply_text_limit, emit_json_paged_cached, emit_json_value_paged_cached, nearest_names,
+    open_project_index_only as open_project, open_project_index_only_with_rulepack, short_file,
 };
 
 pub(crate) fn cmd_dump_callgraph(
@@ -654,6 +653,7 @@ pub(crate) fn cmd_dump_taint(
     intra_worklist_cap: Option<u32>,
     compact: bool,
     taint_id_filter: Option<&str>,
+    paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
     let (project, _footer) = open_project_index_only_with_rulepack(root, None)?;
@@ -673,6 +673,16 @@ pub(crate) fn cmd_dump_taint(
     let spin = progress::spinner("propagating taint");
     let outcome = project.dump().taint(filters);
     spin.finish_and_clear();
+    let filters_hash = dump_taint_filters_hash(
+        source_name,
+        seeds,
+        sanitizers,
+        sink_filter,
+        budget,
+        intra_worklist_cap,
+        compact,
+        taint_id_filter,
+    );
     match outcome {
         bonsai_sdk::TaintOutcome::SourceNotFound => anyhow::bail!(
             "dump-taint: no callable decl named `{source_name}` in the workspace. \
@@ -705,12 +715,71 @@ pub(crate) fn cmd_dump_taint(
         ),
         bonsai_sdk::TaintOutcome::Report(report) => match format {
             BrowseFormat::Json | BrowseFormat::Sarif => {
-                cli_println!("{}", serde_json::to_string_pretty(&report)?);
+                emit_json_value_paged_cached(root, &report, &paging_cfg, "dump-taint", filters_hash)?;
             }
-            BrowseFormat::Text => render_taint_report_text(&report, compact),
+            BrowseFormat::Text => {
+                render_taint_report_text_paged(root, &report, compact, &paging_cfg, filters_hash)?
+            }
         },
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dump_taint_filters_hash(
+    source_name: &str,
+    seeds: &[String],
+    sanitizers: &[String],
+    sink_filter: Option<&str>,
+    budget: Option<u32>,
+    intra_worklist_cap: Option<u32>,
+    compact: bool,
+    taint_id_filter: Option<&str>,
+) -> u64 {
+    let seeds_joined = seeds.join("\0");
+    let sanitizers_joined = sanitizers.join("\0");
+    let budget_text = budget.map(|b| b.to_string()).unwrap_or_default();
+    let intra_text = intra_worklist_cap.map(|b| b.to_string()).unwrap_or_default();
+    let compact_text = if compact { "1" } else { "0" };
+    paging::hash_filters(&[
+        ("source", source_name),
+        ("seeds", &seeds_joined),
+        ("sanitizers", &sanitizers_joined),
+        ("sink", sink_filter.unwrap_or("")),
+        ("budget", &budget_text),
+        ("intra_worklist_cap", &intra_text),
+        ("compact", compact_text),
+        ("taint", taint_id_filter.unwrap_or("")),
+    ])
+}
+
+fn render_taint_report_text_paged(
+    root: &std::path::Path,
+    report: &bonsai_sdk::TaintReport,
+    compact: bool,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
+) -> Result<()> {
+    let rendered = page_cache::capture(|| {
+        render_taint_report_text(report, compact);
+        Ok(())
+    })?;
+    let lines: Vec<String> = rendered.lines().map(str::to_string).collect();
+    page_cache::emit_paged_text(
+        root,
+        &lines,
+        paging_cfg,
+        "dump-taint",
+        filters_hash,
+        |line| line.len() as u64 + 128,
+        |paged, info, _cfg| {
+            for line in paged {
+                cli_println!("{line}");
+            }
+            render_paging_footer(info, "bonsai-ninja dump-taint <workspace>");
+            Ok(())
+        },
+    )
 }
 
 fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {

@@ -69,8 +69,8 @@ Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
 | `--severity <LEVEL>` | None | Severity floor where supported: `info`, `low`, `medium`, `high`, `critical`. |
 | `--file <TEXT>` | None | Include only paths containing this text. Repeatable. |
 | `--exclude-file <TEXT>` | None | Exclude paths containing this text. Repeatable. |
-| `--limit <N>` | 50 or 200 | Rendered row cap for text output. `0` is uncapped. |
-| `--context <BUDGET>` | 32k text | Token budget for text output. |
+| `--limit <N>` | 50 or 200 | Rendered row cap for text and row JSON output. `0` is uncapped. |
+| `--context <BUDGET>` | 32k | Token budget for text and JSON output. |
 | `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
 | `--all` | false | Emit all rows or findings without paging. |
 | `--format <FORMAT>` | text | `text`, `json`, or `sarif` where supported. |
@@ -115,7 +115,7 @@ not a user-facing finding mode.
 | `--taint-budget <N>` | 512 | Interprocedural function/seed chunk size; analysis resumes chunks to completion. |
 | `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
 | `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
-| `--context <BUDGET>` | 32k text | Token budget. |
+| `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
 | `--no-compact` | false | Expand every flow body. |
@@ -165,7 +165,7 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--graph-flow` | false | Render explicit structural callgraph flows with source bodies. |
 | `--taint-flow` | false | Force bounded raw taint-engine paths, including for broad queries or when `--syntax-only` is also present. |
 | `--syntax-only` | false | Omit the default rulepack-free taint paths and render only indexed syntax hits. |
-| `--context <BUDGET>` | 32k text | Token budget. |
+| `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--format <FORMAT>` | text | `text` or `json`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
@@ -189,7 +189,7 @@ bonsai-ninja show ./src R:aabbccdd --query execute
 | `--query <QUERY>` | None | Resolver query required for `R:` candidate IDs. |
 | `--in-file <FILE>` | None | File context for `R:` resolver candidate IDs. |
 | `--compact` | false | Render compact delegated output when supported. |
-| `--context <BUDGET>` | 32k text | Token budget. |
+| `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Lift delegated command caps where supported. |
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory for `S:` finding IDs. |
@@ -278,7 +278,7 @@ JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 | `--file <TEXT>` | None | Include only source paths containing this text. Repeatable. |
 | `--exclude-file <TEXT>` | None | Exclude source paths containing this text. Repeatable. |
 | `--inferred-sources` | false | Include synthetic entry-point parameter sources. |
-| `--context <BUDGET>` | 32k text | Token budget. |
+| `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every source flow. |
 | `--no-compact` | false | Expand every flow body. |
@@ -338,8 +338,8 @@ Common browse output flags:
 
 | Flag | Default | Description |
 |---|---:|---|
-| `--limit <N>` | 200 | Legacy row cap for text output. `0` is uncapped. |
-| `--context <BUDGET>` | 32k text | Token-budget paging, e.g. `4k`, `16k`, `128k`, `all`. |
+| `--limit <N>` | 200 | Legacy row cap for text and row JSON output. `0` is uncapped. |
+| `--context <BUDGET>` | 32k | Token-budget paging, e.g. `4k`, `16k`, `128k`, `all`. |
 | `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
 | `--all` | false | Emit all rows with no paging/context cap. |
 | `--no-flows` | false | Hide flow-id columns on commands that include them. |

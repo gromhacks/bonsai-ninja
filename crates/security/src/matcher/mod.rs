@@ -2292,8 +2292,9 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
         mode: ConstraintMode,
         retention: FactRetention,
     ) -> Option<Self> {
-        let include_workspace_package_context =
-            self.include_workspace_package_context && !matches!(mode, ConstraintMode::SinkInventory);
+        let include_workspace_package_context = self.include_workspace_package_context
+            && (!matches!(mode, ConstraintMode::SinkInventory)
+                || workspace_manifest_package_context_allowed(ws, file));
         let file_packages = self.has_package_text_anchors.then(|| {
             file_package_set_with_workspace_context_and_retention(
                 ws,

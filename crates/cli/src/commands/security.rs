@@ -15,8 +15,9 @@
 
 use crate::args::{BrowseFormat, SecurityAction, SourceAnalysisFormat};
 use crate::commands::{
-    emit_json_paged_cached, open_project_index_filtered_paths, open_project_index_matching_literal,
-    open_project_index_only, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli, short_file,
+    emit_json_paged_cached, emit_json_value_paged_cached, open_project_index_filtered_paths,
+    open_project_index_matching_literal, open_project_index_only, page_info_to_json,
+    paged_json_incomplete_reasons, paging_from_cli, short_file,
 };
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
@@ -3729,12 +3730,34 @@ fn cmd_pack(
         severity: sev_floor,
         taint_replay_examples: taint_replay,
     };
+    let base_filters_hash = filter_signature(&[
+        ("kind", "pack"),
+        ("lang", lang.as_deref().unwrap_or("")),
+        ("category", category.as_deref().unwrap_or("")),
+        ("rkind", kind.as_deref().unwrap_or("")),
+        ("severity", severity.as_deref().unwrap_or("")),
+        ("taint_replay", if taint_replay { "1" } else { "0" }),
+    ]);
 
     if audit {
-        return render_audit(pack, lang.as_deref(), format);
+        return render_audit(
+            workspace,
+            pack,
+            lang.as_deref(),
+            &paging_cfg,
+            base_filters_hash,
+            format,
+        );
     }
     if validate {
-        return render_pack_validation(pack, &pack_options, format);
+        return render_pack_validation(
+            workspace,
+            pack,
+            &pack_options,
+            &paging_cfg,
+            base_filters_hash,
+            format,
+        );
     }
     if tree {
         // Use the SDK's `select_pack_rules` to filter+sort once
@@ -3742,7 +3765,15 @@ fn cmd_pack(
         // Don't run `inventory()` first — the tree branch never
         // touches `rows`.
         let rules = pack_facade.select_rules(&pack_options);
-        return render_tree(pack, &rules, pack_options, format);
+        return render_tree(
+            workspace,
+            pack,
+            &rules,
+            pack_options,
+            &paging_cfg,
+            base_filters_hash,
+            format,
+        );
     }
     // Single source of truth for filter/sort on the non-tree
     // branch: the SDK's `inventory()` filters by
@@ -3752,13 +3783,7 @@ fn cmd_pack(
     // on filter semantics.
     let rows = pack_facade.inventory(pack_options.clone())?;
 
-    let filters_hash = filter_signature(&[
-        ("kind", "pack"),
-        ("lang", lang.as_deref().unwrap_or("")),
-        ("category", category.as_deref().unwrap_or("")),
-        ("rkind", kind.as_deref().unwrap_or("")),
-        ("severity", severity.as_deref().unwrap_or("")),
-    ]);
+    let filters_hash = base_filters_hash;
 
     let cost_row = |r: &PackRuleRow| {
         (r.rule_id.len() + r.language.len() + r.tag.as_deref().map_or(0, str::len) + r.description.len() + 32)
@@ -3848,14 +3873,23 @@ fn cmd_pack(
 }
 
 fn render_pack_validation(
+    workspace: &Path,
     pack: &Rulepack,
     options: &PackInventoryOptions,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
     format: BrowseFormat,
 ) -> Result<()> {
     let report = bonsai_sdk::SecurityPack::new(pack).validate(options.clone())?;
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
-            cli_println!("{}", serde_json::to_string_pretty(&report)?);
+            emit_json_value_paged_cached(
+                workspace,
+                &report,
+                paging_cfg,
+                "security/pack/validate",
+                filters_hash,
+            )?;
         }
         BrowseFormat::Text => {
             let u = ui();
@@ -3908,7 +3942,14 @@ fn render_pack_validation(
     }
 }
 
-fn render_audit(pack: &Rulepack, lang_filter: Option<&str>, format: BrowseFormat) -> Result<()> {
+fn render_audit(
+    workspace: &Path,
+    pack: &Rulepack,
+    lang_filter: Option<&str>,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
+    format: BrowseFormat,
+) -> Result<()> {
     // Single source of truth: the SDK's `pack_audit` builds the
     // per-(lang, family) matrix and applies the canonical
     // family-normalisation. CLI text rendering walks the same
@@ -3916,7 +3957,13 @@ fn render_audit(pack: &Rulepack, lang_filter: Option<&str>, format: BrowseFormat
     let report = bonsai_sdk::SecurityPack::new(pack).audit(lang_filter)?;
 
     if matches!(format, BrowseFormat::Json) {
-        cli_println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json_value_paged_cached(
+            workspace,
+            &report,
+            paging_cfg,
+            "security/pack/audit",
+            filters_hash,
+        )?;
         return Ok(());
     }
 
@@ -4079,9 +4126,12 @@ fn family_short_label(fam: &str) -> &'static str {
 /// file-level pack survey. Respects `--lang` / `--kind` /
 /// `--category` / `--severity` via the already-filtered `rules` slice.
 fn render_tree(
+    workspace: &Path,
     pack: &Rulepack,
     rules: &[&Rule],
     _options: PackInventoryOptions,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
     format: BrowseFormat,
 ) -> Result<()> {
     if matches!(format, BrowseFormat::Json) {
@@ -4091,7 +4141,7 @@ fn render_tree(
         // `PackInventoryOptions` would internally re-derive the
         // same `rules` slice — wasted work.
         let report = bonsai_sdk::SecurityPack::new(pack).tree_for_rules(rules)?;
-        cli_println!("{}", serde_json::to_string_pretty(&report)?);
+        emit_json_value_paged_cached(workspace, &report, paging_cfg, "security/pack/tree", filters_hash)?;
         return Ok(());
     }
 

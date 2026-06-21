@@ -28,7 +28,7 @@ thread_local! {
 }
 
 const EAGER_PAGE_LIMIT: u64 = 4;
-const RENDER_CACHE_VERSION: u32 = 6;
+const RENDER_CACHE_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {

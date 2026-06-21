@@ -134,7 +134,7 @@ pub(crate) fn render_truncation_notice(shown: usize, total_if_truncated: Option<
         cli_println!(
             "{}",
             u.dim(&format!(
-                "showing {shown} of {total} — pass --limit 0 or --format json for all",
+                "showing {shown} of {total} — pass --limit 0, --all, or --context uncapped for all",
             ))
         );
     }

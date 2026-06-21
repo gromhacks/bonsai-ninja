@@ -1,11 +1,11 @@
 //! Context-window aware pagination for row-based CLI commands.
 //!
 //! Two axes: `--context <budget>` (token ceiling, accepts shorthand
-//! `4k`..`1m`; default from `BONSAI_CONTEXT` or 32 k for text /
-//! uncapped for JSON / CSV / DOT) and `--page <cursor|N>` (resume by
-//! content-hash cursor or 1-based page number). Lossless: every row
-//! in the uncapped output is reachable by walking pages. `--all` /
-//! `--context 0` opts out. See SPEC §13.
+//! `4k`..`1m`; default from `BONSAI_CONTEXT` or 32 k for text and
+//! JSON-like row output) and `--page <cursor|N>` (resume by content-hash
+//! cursor or 1-based page number). Lossless: every row in the uncapped
+//! output is reachable by walking pages. `--all` / `--context 0` opts
+//! out. See SPEC §13.
 
 use ahash::AHashMap;
 use std::collections::BTreeMap;
@@ -66,15 +66,16 @@ pub(crate) fn parse_context(raw: &str) -> Result<Option<u64>, String> {
 }
 
 /// Output format for paging purposes — which formats paginate by
-/// default and which stay uncapped unless the user opts in.
+/// default and which are render-only artifacts.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FormatClass {
     /// Human-read text output. Paginates by default to the
     /// context budget.
     Text,
-    /// Programmatic output (JSON, CSV). Uncapped by default —
-    /// scripts consume the whole result set. Opts into paging
-    /// when `--context` or `--page` is explicitly set.
+    /// Programmatic row output (JSON, CSV). Paginates by default
+    /// just like text so CLI output does not exceed the tokenizer.
+    /// Scripts that need exhaustive JSON must pass `--all` or
+    /// `--context 0/all/uncapped`.
     Programmatic,
     /// Render-only output (DOT). Paging a partial graph is
     /// meaningless; these formats always return everything.
@@ -174,8 +175,8 @@ impl PagingConfig {
 
     /// Resolve the effective budget for this render. Text mode
     /// falls back to the 32 k default when no explicit value +
-    /// no env var; programmatic formats stay uncapped unless the
-    /// user opted in.
+    /// no env var. Programmatic row formats use the same default;
+    /// only render-only formats stay uncapped by default.
     pub(crate) fn effective_budget(&self) -> Option<u64> {
         if self.all {
             return None;
@@ -184,17 +185,19 @@ impl PagingConfig {
             return Some(b);
         }
         match self.format_class {
-            FormatClass::Text => Some(DEFAULT_CONTEXT_TEXT),
-            FormatClass::Programmatic | FormatClass::RenderOnly => None,
+            FormatClass::Text | FormatClass::Programmatic => Some(DEFAULT_CONTEXT_TEXT),
+            FormatClass::RenderOnly => None,
         }
     }
 
     /// Should we emit the `{rows, page}` wrapper instead of a
-    /// bare array for programmatic formats? Only when the user
-    /// explicitly opted into paging for this run.
+    /// bare array for programmatic formats? Default programmatic
+    /// output is budgeted, so it wraps. Explicitly uncapped output
+    /// (`--all`, `--context 0/all/uncapped`) keeps the historical
+    /// bare array shape.
     pub(crate) fn json_wrapped(&self) -> bool {
         matches!(self.format_class, FormatClass::Programmatic)
-            && (self.context.is_some() || !matches!(self.page, PageArg::First))
+            && (self.effective_budget().is_some() || !matches!(self.page, PageArg::First))
     }
 }
 

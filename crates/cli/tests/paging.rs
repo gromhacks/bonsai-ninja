@@ -13,11 +13,11 @@
 //! * **cursor / page-number equivalence** — `--page P:xxxxxxxx`
 //!   and `--page N` resolve to the byte-identical row set when
 //!   the cursor came from page N's footer;
-//! * **JSON back-compat** — `--format json` without `--context`
-//!   or `--page` returns a bare array (no wrapper object), so
-//!   pre-paging scripts keep working;
-//! * **JSON opt-in wrap** — `--context` or `--page` on JSON
-//!   wraps in `{rows, page}`;
+//! * **JSON tokenizer safety** — default `--format json` returns a
+//!   bare array only when the whole result fits the budget; otherwise
+//!   it wraps in `{rows, page}`;
+//! * **JSON explicit wrap** — `--context` or `--page` on JSON wraps
+//!   in `{rows, page}`;
 //! * **`--all` overrides** — enabled together with `--context`
 //!   still returns every row;
 //! * **context-budget cap** — `--context N` keeps the text
@@ -101,11 +101,11 @@ fn json_wrapped_value(args: &[&str]) -> Option<serde_json::Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Back-compat: JSON without paging flags is a bare array
+// Small JSON without paging flags may stay a bare array
 // ---------------------------------------------------------------------------
 
 #[test]
-fn json_default_returns_bare_array() {
+fn json_default_returns_bare_array_when_result_fits_budget() {
     let ws = ws();
     let Some(rows) = json_bare(&["calls", ws.to_str().unwrap(), "--format", "json"]) else {
         return;
@@ -583,10 +583,9 @@ fn malformed_context_exits_non_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// All-commands smoke matrix — every row-based command accepts the
-// same four paging flags, emits the same JSON wrap shape, and
-// honors `--all`. If any of the 11 wire-ups drifts, this test
-// lights up.
+// All-commands smoke matrix — every paged command accepts the same
+// paging flags, emits page metadata under an explicit budget, and
+// honors `--all`. If any wire-up drifts, this test lights up.
 // ---------------------------------------------------------------------------
 
 /// Commands that support paging + their required positional / extra args.
@@ -604,8 +603,11 @@ const ALL_PAGED_COMMANDS: &[(&str, &[&str])] = &[
     ("dump-callgraph", &[]),
     ("dump-edges", &[]),
     ("dump-ast", &["--file", "gateway.py"]),
+    ("dump-taint", &["--source", "handle_request"]),
     ("inspect", &["--query", "verify"]),
     ("trace", &["handle_request"]),
+    ("tree", &[]),
+    ("read-file", &["gateway.py"]),
 ];
 
 #[test]

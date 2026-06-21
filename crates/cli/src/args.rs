@@ -24,8 +24,9 @@ use crate::help_theme::{
 /// so the footer's `~estimated tokens` stays under the 10K-token
 /// shoulder of typical LLM context windows even on monster repos
 /// (`calls` on Redis produces ~300K rows / ~11M tokens uncapped).
-/// Users who want everything either pass `--limit 0` or pipe
-/// `--format json`, both of which skip the cap.
+/// Users who want everything either pass `--limit 0` for legacy
+/// text caps or `--all` / `--context uncapped` for token-budget
+/// paging.
 pub(crate) const BROWSE_TEXT_LIMIT_DEFAULT: usize = 200;
 
 /// Dump-AST-specific file cap. Much smaller than the general
@@ -355,7 +356,7 @@ pub(crate) enum Cmd {
         /// substring. Requires `--from`.
         #[arg(long, requires = "from")]
         to: Option<String>,
-        /// Token-budget ceiling for text output. Long traces page at
+        /// Token-budget ceiling for rendered output. Long traces page at
         /// rendered-line boundaries so large paths stay within budget.
         /// Shorthand `4k` / `32k`. `0` / `all` / `uncapped`
         /// disables. Default 32k.
@@ -433,7 +434,7 @@ pub(crate) enum Cmd {
         /// Render compact source/flow output when the delegated command supports it.
         #[arg(long, default_value_t = false)]
         compact: bool,
-        /// Token-budget ceiling for text output.
+        /// Token-budget ceiling for rendered output.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number, `next`, or `P:` cursor.
@@ -583,17 +584,17 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja dump-callgraph ./src\n  \
                       \n  \
                       # Top 10 hubs as JSON\n  \
-                      $ bonsai-ninja dump-callgraph ./src --format json | jq '.[0:10]'")
+                      $ bonsai-ninja dump-callgraph ./src --format json --all | jq '.[0:10]'")
     )]
     DumpCallgraph {
         /// Workspace root to analyze.
         workspace: PathBuf,
         /// Max rows in the text rendering (`0` = uncapped). JSON
-        /// output is always uncapped so scripts keep the full graph.
+        /// uses token-budget paging unless `--all` is set.
         /// Legacy cap — prefer `--context` for token-budget paging.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Token-budget ceiling for text output. Shorthand `4k` etc.
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
         /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
@@ -663,12 +664,12 @@ pub(crate) enum Cmd {
         #[arg(long)]
         edge: Option<String>,
         /// Max edges in the text rendering (`0` = uncapped). JSON
-        /// output is always uncapped. Redis emits ~300 k edges
+        /// uses token-budget paging unless `--all` is set. Redis emits ~300 k edges
         /// without a cap — keep the common interactive run
         /// readable. Legacy cap — prefer `--context`.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Token-budget ceiling for text output. Shorthand `4k` etc.
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
         /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
@@ -748,11 +749,11 @@ pub(crate) enum Cmd {
         /// thousands of AST nodes, so the default cap is
         /// deliberately small — dump-ast is a targeted debug tool
         /// (scope with `--file` / `--function` / `--node`), not a
-        /// bulk listing. JSON output is always uncapped. Legacy
+        /// bulk listing. Use `--all` for exhaustive JSON. Legacy
         /// cap — prefer `--context`.
         #[arg(long, default_value_t = DUMP_AST_FILE_LIMIT_DEFAULT)]
         limit: usize,
-        /// Token-budget ceiling for text output. Shorthand `4k` etc.
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
         /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
@@ -926,6 +927,16 @@ pub(crate) enum Cmd {
         /// id (`T:` + 8 hex).
         #[arg(long)]
         taint: Option<String>,
+        /// Token-budget ceiling for rendered output. Shorthand `4k`
+        /// etc. Defaults to `BONSAI_CONTEXT` or `32k`.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit the entire propagation report, no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
         /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
@@ -991,8 +1002,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped so scripts keep the full result set.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1004,10 +1015,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1067,14 +1077,13 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped so scripts keep the full result set.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1132,18 +1141,16 @@ pub(crate) enum Cmd {
         /// Interpret `--callee` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped. Legacy cap — prefer `--context` for
-        /// token-budget-aware paging.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set. Legacy cap —
+        /// prefer `--context` for token-budget-aware paging.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Token-budget ceiling for text output. Accepts integers
+        /// Token-budget ceiling for rendered output. Accepts integers
         /// (`32768`) or shorthand (`4k / 8k / 16k / 32k / 64k /
         /// 128k / 256k / 1m`). Overrides `--limit` when both are
         /// set. `0` / `all` / `uncapped` disable the cap. Defaults
-        /// to `BONSAI_CONTEXT` env or `32k` for text. Programmatic
-        /// formats (JSON) stay uncapped unless `--context` is
-        /// explicitly passed.
+        /// to `BONSAI_CONTEXT` env or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1233,8 +1240,8 @@ pub(crate) enum Cmd {
         /// Interpret `--module` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1246,10 +1253,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1307,8 +1313,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1320,10 +1326,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1374,8 +1379,8 @@ pub(crate) enum Cmd {
         /// Interpret `--contains` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1387,10 +1392,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1455,11 +1459,11 @@ pub(crate) enum Cmd {
         /// Interpret `--contains` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
         /// Defaults to `BONSAI_CONTEXT` or `32k`.
         #[arg(long)]
@@ -1524,8 +1528,8 @@ pub(crate) enum Cmd {
         /// Interpret `--callee` / `--value` as regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1537,10 +1541,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1596,8 +1599,8 @@ pub(crate) enum Cmd {
         /// Interpret `--name` as a regex.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1609,10 +1612,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1674,8 +1676,8 @@ pub(crate) enum Cmd {
         /// Interpret the symbol as a regex instead of an exact/substring match.
         #[arg(long, default_value_t = false)]
         regex: bool,
-        /// Max rows in the text table (`0` = uncapped). JSON is
-        /// always uncapped.
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
         limit: usize,
         /// Suppress the `flows` column. The column is ON by default
@@ -1687,10 +1689,9 @@ pub(crate) enum Cmd {
         /// want to pay.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand: `4k`
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
         /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
-        /// Defaults to `BONSAI_CONTEXT` or `32k`. JSON stays
-        /// uncapped unless explicitly set.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number (`--page 3`), stable
@@ -1759,7 +1760,7 @@ pub(crate) enum Cmd {
         /// down on a very large workspace.
         #[arg(long = "no-flows", default_value_t = false)]
         no_flows: bool,
-        /// Token-budget ceiling for text output. Shorthand `4k` etc.
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
         /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
@@ -1968,10 +1969,10 @@ pub(crate) enum Cmd {
         /// where flow context is not needed.
         #[arg(long = "syntax-only", default_value_t = false)]
         syntax_only: bool,
-        /// Token-budget ceiling for text output. Paging unit is
+        /// Token-budget ceiling for rendered output. Paging unit is
         /// one FLOW block (never mid-flow). Shorthand `4k`, `32k`,
         /// `128k`, `1m`; `0` / `all` / `uncapped` disables.
-        /// Default 32k for text; JSON stays uncapped unless set.
+        /// Default 32k for text and JSON.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number, `P:xxxxxxxx` cursor,
@@ -2221,7 +2222,7 @@ pub(crate) enum Cmd {
         /// Drop the inline annotation rows; emit a one-liner per file.
         #[arg(long, default_value_t = false)]
         compact: bool,
-        /// Token-budget ceiling for text output (e.g. `4k`, `32k`,
+        /// Token-budget ceiling for rendered output (e.g. `4k`, `32k`,
         /// `128k`, `1m`). Defaults to `BONSAI_CONTEXT` or `32k`.
         #[arg(long)]
         context: Option<String>,
@@ -2321,7 +2322,7 @@ pub(crate) enum Cmd {
         /// Drop the inlined-body section; emit a step-list of marks.
         #[arg(long, default_value_t = false)]
         compact: bool,
-        /// Token-budget ceiling for text output (e.g. `4k`, `32k`,
+        /// Token-budget ceiling for rendered output (e.g. `4k`, `32k`,
         /// `128k`, `1m`). Defaults to `BONSAI_CONTEXT` or `32k`.
         #[arg(long)]
         context: Option<String>,
@@ -2420,10 +2421,11 @@ pub(crate) enum SecurityAction {
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Cap on rendered rows (mirrors `search --limit`). `0` =
-        /// uncapped. JSON is always uncapped.
+        /// uncapped. JSON uses token-budget paging unless `--all`
+        /// is set.
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Token-budget ceiling for text output (`4k`, `32k`, `128k`,
+        /// Token-budget ceiling for rendered output (`4k`, `32k`, `128k`,
         /// `1m`; `0`/`all`/`uncapped` disables).
         #[arg(long)]
         context: Option<String>,
@@ -2527,7 +2529,7 @@ pub(crate) enum SecurityAction {
         /// Cap on rendered rows (`0` = uncapped).
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Token-budget ceiling for text output (`4k`, `32k`, `128k`,
+        /// Token-budget ceiling for rendered output (`4k`, `32k`, `128k`,
         /// `1m`; `0`/`all`/`uncapped` disables).
         #[arg(long)]
         context: Option<String>,
@@ -2606,7 +2608,7 @@ pub(crate) enum SecurityAction {
         /// Cap on rendered rows (`0` = uncapped).
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Token-budget ceiling for text output.
+        /// Token-budget ceiling for rendered output.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or
@@ -2674,7 +2676,7 @@ pub(crate) enum SecurityAction {
         /// Cap on rendered rows (`0` = uncapped).
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Token-budget ceiling for text output.
+        /// Token-budget ceiling for rendered output.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or
@@ -2853,7 +2855,7 @@ pub(crate) enum SecurityAction {
         /// function. Default derives from CFG size.
         #[arg(long = "intra-worklist-cap")]
         intra_worklist_cap: Option<u32>,
-        /// Token-budget ceiling for text output. Shorthand `4k` /
+        /// Token-budget ceiling for rendered output. Shorthand `4k` /
         /// `32k` / `128k` / `1m`; `0` / `all` / `uncapped` disables.
         #[arg(long)]
         context: Option<String>,
@@ -2995,7 +2997,7 @@ pub(crate) enum SecurityAction {
         /// synthetic set).
         #[arg(long = "inferred-sources", default_value_t = false)]
         inferred_sources: bool,
-        /// Token-budget ceiling for text output. Shorthand `4k` /
+        /// Token-budget ceiling for rendered output. Shorthand `4k` /
         /// `32k` / `128k` / `1m`; `0` / `all` / `uncapped` disables.
         #[arg(long)]
         context: Option<String>,
@@ -3102,7 +3104,7 @@ pub(crate) enum SecurityAction {
         /// example); intended for the deep CI gate.
         #[arg(long, default_value_t = false)]
         taint_replay: bool,
-        /// Token-budget ceiling for text output. Shorthand `4k` etc.
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
         #[arg(long)]
         context: Option<String>,
         /// Page to render — 1-based number, `P:xxxxxxxx` cursor, or
@@ -3112,7 +3114,8 @@ pub(crate) enum SecurityAction {
         /// Emit every row, no paging or context cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Cap on rendered rows (`0` = uncapped). JSON is always uncapped.
+        /// Cap on rendered rows (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
         #[arg(long, default_value_t = 200)]
         limit: usize,
         /// Output shape — `text` for the rule listing / audit matrix, `json` for machine-readable output.

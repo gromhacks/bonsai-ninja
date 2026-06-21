@@ -10,6 +10,13 @@ with `--output-path <PATH>`. This replaces shell redirection for JSON,
 SARIF, DOT, GraphML, Cypher, and text output; progress and diagnostics
 still use stderr.
 
+Text and row/object JSON commands are token-budgeted by default. Small
+JSON results keep their native shape; larger results return page metadata
+and the current rows or JSON lines. Use `--page next` or the printed
+`P:...` cursor to continue. Use `--all`, `--context all`, or
+`--context uncapped` only when you intentionally want an exhaustive
+artifact.
+
 ## Grouped
 
 Grouped view clusters flows that share a tail. Use it when a sink has many source paths but the same final call chain.
