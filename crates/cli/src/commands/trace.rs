@@ -72,11 +72,13 @@ pub(crate) fn cmd_trace(
     ]);
     match format {
         OutputFormat::Json => {
-            // Paging only kicks in when the user explicitly opted
-            // into it with `--context` or `--page`. The default
-            // shape stays a bare JSON `TraceResult` for back-
-            // compat with scripts that already consume it.
+            // Programmatic trace is token-budgeted by default. Keep
+            // the native TraceResult shape when the full result fits
+            // the first page; otherwise emit a page wrapper.
             if paging_cfg.json_wrapped() {
+                let force_wrapper = paging_cfg.context.is_some()
+                    || !matches!(paging_cfg.page, paging::PageArg::First)
+                    || crate::filter::active().is_active();
                 page_cache::emit_paged_text(
                     root,
                     &trace.paths,
@@ -85,6 +87,10 @@ pub(crate) fn cmd_trace(
                     filters_hash,
                     trace_path_cost,
                     |slice, info, _cfg| {
+                        if !force_wrapper && info.page_number == 1 && info.is_last {
+                            cli_println!("{}", project.trace().to_json(&trace)?);
+                            return Ok(());
+                        }
                         let mut analysis_incomplete_reasons =
                             trace.summary.analysis_incomplete_reasons.clone();
                         analysis_incomplete_reasons.extend(trace.summary.truncation_reasons.iter().cloned());

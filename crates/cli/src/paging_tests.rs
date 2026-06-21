@@ -234,22 +234,28 @@ fn effective_budget_respects_format_class() {
     let cfg_text = PagingConfig::new(None, PageArg::First, None, false, FormatClass::Text);
     assert_eq!(cfg_text.effective_budget(), Some(DEFAULT_CONTEXT_TEXT));
     let cfg_json = PagingConfig::new(None, PageArg::First, None, false, FormatClass::Programmatic);
-    assert_eq!(cfg_json.effective_budget(), None);
+    assert_eq!(cfg_json.effective_budget(), Some(DEFAULT_CONTEXT_TEXT));
     let cfg_dot = PagingConfig::new(None, PageArg::First, None, false, FormatClass::RenderOnly);
     assert_eq!(cfg_dot.effective_budget(), None);
+    let cfg_json_all = PagingConfig::new(None, PageArg::First, None, true, FormatClass::Programmatic);
+    assert_eq!(cfg_json_all.effective_budget(), None);
 }
 
 #[test]
-fn json_wrapped_only_when_paging_opted_in() {
-    // Default programmatic: bare array, no page metadata.
+fn json_wrapped_by_default_unless_explicitly_uncapped() {
+    // Default programmatic output is token-budgeted, so it includes
+    // page metadata and a rows array.
     let cfg = PagingConfig::new(None, PageArg::First, None, false, FormatClass::Programmatic);
-    assert!(!cfg.json_wrapped());
+    assert!(cfg.json_wrapped());
     // Explicit --context → wrap.
     let cfg_ctx = PagingConfig::new(Some(1024), PageArg::First, None, false, FormatClass::Programmatic);
     assert!(cfg_ctx.json_wrapped());
     // Explicit --page → wrap.
     let cfg_page = PagingConfig::new(None, PageArg::Number(2), None, false, FormatClass::Programmatic);
     assert!(cfg_page.json_wrapped());
+    // Explicit uncapped output keeps the historical bare array shape.
+    let cfg_all = PagingConfig::new(None, PageArg::First, None, true, FormatClass::Programmatic);
+    assert!(!cfg_all.json_wrapped());
     // Text mode never JSON-wraps.
     let cfg_text = PagingConfig::new(Some(1024), PageArg::Number(2), None, false, FormatClass::Text);
     assert!(!cfg_text.json_wrapped());

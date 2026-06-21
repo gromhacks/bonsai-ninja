@@ -1,8 +1,8 @@
 //! Browse commands: `defs`, `entrypoints`, `calls`, `imports`, `vars`,
 //! `strings`, `comments`, `args`, `classes`, `refs`, `search`. Each reads
 //! from the shared `GlobalIndex` and emits a uniform `{header row, rows, footer}`
-//! shape. JSON output is a bare array by default; `--context` /
-//! `--page` opts into `{rows, page}` wrapping.
+//! shape. JSON output keeps a bare array when the full result fits the
+//! token budget; larger or explicitly paged renders use `{rows, page}`.
 
 use anyhow::Result;
 use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
@@ -647,13 +647,20 @@ pub(crate) fn paging_from_cli(
         BrowseFormat::Text => paging::FormatClass::Text,
         BrowseFormat::Json | BrowseFormat::Sarif => paging::FormatClass::Programmatic,
     };
-    Ok(paging::PagingConfig::new(ctx, pg, None, all, format_class))
+    let explicit_uncapped = context.is_some() && ctx.is_none();
+    Ok(paging::PagingConfig::new(
+        ctx,
+        pg,
+        None,
+        all || explicit_uncapped,
+        format_class,
+    ))
 }
 
 /// Paging config for commands with the three-way `OutputFormat`
 /// (text / json / dot) — `trace` is the only caller today.
 /// Classifies `dot` as `RenderOnly` since a half-dot file is
-/// meaningless; text paginates, JSON opts in.
+/// meaningless; text paginates, default JSON is budgeted.
 pub(crate) fn paging_from_cli_output(
     context: Option<&str>,
     page: Option<&str>,
@@ -673,7 +680,14 @@ pub(crate) fn paging_from_cli_output(
         OutputFormat::Json => paging::FormatClass::Programmatic,
         OutputFormat::Dot => paging::FormatClass::RenderOnly,
     };
-    Ok(paging::PagingConfig::new(ctx, pg, None, all, format_class))
+    let explicit_uncapped = context.is_some() && ctx.is_none();
+    Ok(paging::PagingConfig::new(
+        ctx,
+        pg,
+        None,
+        all || explicit_uncapped,
+        format_class,
+    ))
 }
 
 /// Row-level code-cell folder. Browse commands frequently emit
@@ -967,10 +981,6 @@ pub(crate) fn cmd_calls(
     };
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
-            // JSON honors paging only when explicitly opted in
-            // (either `--context` or `--page` passed). Default
-            // stays the bare array shape for back-compat with
-            // every existing script.
             if paging_cfg.json_wrapped() {
                 emit_json_paged_cached(root, &out, &paging_cfg, "calls", filters_hash, cost_bytes)?;
             } else {
@@ -1053,6 +1063,7 @@ where
     F: Fn(&T) -> u64,
 {
     if cfg.json_wrapped() {
+        let force_wrapper = cfg.context.is_some() || !matches!(cfg.page, paging::PageArg::First);
         page_cache::emit_paged_text(
             workspace,
             rows,
@@ -1061,6 +1072,10 @@ where
             filters_hash,
             row_cost_bytes,
             |slice, info, _cfg| {
+                if !force_wrapper && page_covers_entire_result(info) {
+                    cli_println!("{}", serde_json::to_string_pretty(slice)?);
+                    return Ok(());
+                }
                 let analysis_incomplete_reasons = paged_json_incomplete_reasons(command, info);
                 let wrapped = serde_json::json!({
                     "analysis_complete": page_covers_entire_result(info),
@@ -1086,6 +1101,51 @@ where
         }
     }
     Ok(())
+}
+
+pub(crate) fn emit_json_value_paged_cached<T>(
+    workspace: &std::path::Path,
+    value: &T,
+    cfg: &paging::PagingConfig,
+    command: &str,
+    filters_hash: u64,
+) -> Result<()>
+where
+    T: serde::Serialize,
+{
+    let rendered = serde_json::to_string_pretty(value)?;
+    if !cfg.json_wrapped() {
+        cli_println!("{rendered}");
+        return Ok(());
+    }
+
+    let force_wrapper = cfg.context.is_some()
+        || !matches!(cfg.page, paging::PageArg::First)
+        || crate::filter::active().is_active();
+    let lines: Vec<String> = rendered.lines().map(str::to_string).collect();
+    page_cache::emit_paged_text(
+        workspace,
+        &lines,
+        cfg,
+        command,
+        filters_hash,
+        |line| line.len() as u64 + 8,
+        |slice, info, _cfg| {
+            if !force_wrapper && page_covers_entire_result(info) {
+                cli_println!("{}", slice.join("\n"));
+                return Ok(());
+            }
+            let analysis_incomplete_reasons = paged_json_incomplete_reasons(command, info);
+            let wrapped = serde_json::json!({
+                "analysis_complete": page_covers_entire_result(info),
+                "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                "json_lines": slice,
+                "page": page_info_to_json(info),
+            });
+            cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+            Ok(())
+        },
+    )
 }
 
 fn page_covers_entire_result(info: &paging::PageInfo) -> bool {

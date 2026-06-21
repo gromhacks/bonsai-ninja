@@ -12,7 +12,8 @@ use bonsai_sdk::{FlowEntryExit, InlinedDecl, LineMark, MarkKind, ReadFileFilters
 use std::path::{Path, PathBuf};
 
 use super::{
-    open_project_index_matching_path, open_project_index_only, open_project_index_only_with_rulepack,
+    emit_json_value_paged_cached, open_project_index_matching_path, open_project_index_only,
+    open_project_index_only_with_rulepack,
 };
 use crate::cli_println;
 use crate::footer::render_paging_footer;
@@ -66,8 +67,10 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
 
     match args.format {
         "json" => {
-            let s = serde_json::to_string_pretty(&out)?;
-            cli_println!("{s}");
+            let filters_hash = read_file_filters_hash(&args);
+            let cfg = paging::config_from_raw(args.context, args.page, args.all, FormatClass::Programmatic)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            emit_json_value_paged_cached(args.workspace, &out, &cfg, "read-file", filters_hash)?;
         }
         _ => {
             let filters_hash = read_file_filters_hash(&args);

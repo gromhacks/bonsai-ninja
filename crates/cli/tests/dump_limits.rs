@@ -10,8 +10,8 @@
 //!     prints the same "showing N of TOTAL" notice every
 //!     browse command uses;
 //!   * `--limit 0` is the explicit opt-out (uncapped);
-//!   * `--format json` is always uncapped — scripts keep the
-//!     full data.
+//!   * `--format json --all` is the explicit exhaustive script
+//!     mode; default JSON may page when a result exceeds context.
 //!
 //! Tests skip silently when the release binary hasn't been built.
 
@@ -79,7 +79,7 @@ fn dump_edges_limit_truncates_and_prints_notice() {
         "dump-edges --limit 2 missed the truncation notice:\n{out}"
     );
     assert!(
-        out.contains("--limit 0 or --format json for all"),
+        out.contains("--limit 0, --all, or --context uncapped for all"),
         "dump-edges truncation hint missing:\n{out}"
     );
 }
@@ -98,13 +98,14 @@ fn dump_edges_limit_zero_is_uncapped() {
 }
 
 #[test]
-fn dump_edges_json_is_always_uncapped() {
+fn dump_edges_json_all_is_uncapped() {
     let ws = ws();
     let Some(out) = run(&[
         "dump-edges",
         ws.to_str().unwrap(),
         "--format",
         "json",
+        "--all",
         "--limit",
         "1",
     ]) else {
@@ -139,13 +140,14 @@ fn dump_callgraph_limit_truncates_and_prints_notice() {
 }
 
 #[test]
-fn dump_callgraph_json_is_always_uncapped() {
+fn dump_callgraph_json_all_is_uncapped() {
     let ws = ws();
     let Some(out) = run(&[
         "dump-callgraph",
         ws.to_str().unwrap(),
         "--format",
         "json",
+        "--all",
         "--limit",
         "1",
     ]) else {
@@ -178,13 +180,14 @@ fn dump_ast_limit_truncates_and_prints_notice() {
 }
 
 #[test]
-fn dump_ast_json_is_always_uncapped() {
+fn dump_ast_json_all_is_uncapped() {
     let ws = ws();
     let Some(out) = run(&[
         "dump-ast",
         ws.to_str().unwrap(),
         "--format",
         "json",
+        "--all",
         "--limit",
         "1",
     ]) else {

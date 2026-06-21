@@ -12,8 +12,10 @@ Command truth comes from the binary:
 ```
 
 Prefer `./target/release/bonsai-ninja`; use debug only if release is
-missing. For scripts use `--format json --no-color --no-progress`. For
-LLM-readable text use `--no-color --no-progress --context 16k`.
+missing. For scripts use `--format json --no-color --no-progress`; add
+`--all` or `--context uncapped` only for intentional exhaustive
+artifacts. For LLM-readable text use `--no-color --no-progress
+--context 16k`.
 For save-time workflows, keep `index <workspace> --watch --no-progress`
 running; command and SDK facades refresh saved file changes before they
 render.

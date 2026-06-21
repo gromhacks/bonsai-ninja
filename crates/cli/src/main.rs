@@ -516,20 +516,27 @@ fn main() -> Result<()> {
             intra_worklist_cap,
             compact,
             taint,
+            context,
+            page,
+            all,
             format,
             output: _,
-        } => cmd_dump_taint(
-            &workspace,
-            &source,
-            &seeds,
-            &sanitizers,
-            sink.as_deref(),
-            budget,
-            intra_worklist_cap,
-            compact,
-            taint.as_deref(),
-            format,
-        ),
+        } => {
+            let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
+            cmd_dump_taint(
+                &workspace,
+                &source,
+                &seeds,
+                &sanitizers,
+                sink.as_deref(),
+                budget,
+                intra_worklist_cap,
+                compact,
+                taint.as_deref(),
+                paging,
+                format,
+            )
+        }
 
         Cmd::Defs {
             workspace,

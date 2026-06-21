@@ -159,6 +159,17 @@ struct InspectReport {
     summary: InspectReportSummary,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(tag = "section", content = "value")]
+enum InspectJsonPageUnit<'a> {
+    #[serde(rename = "decl_hits")]
+    DeclHit(&'a InspectOut),
+    #[serde(rename = "hits")]
+    Hit(&'a HitOut),
+    #[serde(rename = "taint_flows")]
+    TaintFlow(&'a InspectTaintFlow),
+}
+
 #[derive(Serialize)]
 struct InspectReportSummary {
     total_decl_hits: usize,
@@ -1736,35 +1747,52 @@ pub(crate) fn cmd_inspect(
 
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
-            // `--context` / `--page` on JSON emits a paged view
-            // of `decl_hits` (the structural boundary). The hits
-            // table stays whole — it's the index into the flow
-            // blocks, and indexes don't paginate meaningfully.
-            // Without explicit paging flags, emit the bare
-            // `InspectReport` shape for back-compat.
+            // Programmatic inspect is token-budgeted by default. When
+            // the full report fits the first page we keep the native
+            // InspectReport shape; otherwise we page across every
+            // scalable evidence section and emit only the current
+            // page's decl_hits / hits / taint_flows slices.
             if paging_cfg.json_wrapped() {
                 let filters_hash = inspect_filters_hash(pattern, is_regex);
+                let units = inspect_json_page_units(&report);
+                let force_wrapper = paging_cfg.context.is_some()
+                    || !matches!(paging_cfg.page, paging::PageArg::First)
+                    || crate::filter::active().is_active();
                 page_cache::emit_paged_text(
                     root,
-                    &report.decl_hits,
+                    &units,
                     &paging_cfg,
                     "inspect",
                     filters_hash,
-                    inspect_decl_cost,
+                    inspect_json_unit_cost,
                     |slice, info, _cfg| {
+                        if !force_wrapper && info.page_number == 1 && info.is_last {
+                            cli_println!("{}", serde_json::to_string_pretty(&report)?);
+                            return Ok(());
+                        }
                         let mut analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
                         analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("inspect", info));
                         analysis_incomplete_reasons.sort();
                         analysis_incomplete_reasons.dedup();
+                        let mut decl_hits: Vec<&InspectOut> = Vec::new();
+                        let mut hits: Vec<&HitOut> = Vec::new();
+                        let mut taint_flows: Vec<&InspectTaintFlow> = Vec::new();
+                        for unit in slice {
+                            match unit {
+                                InspectJsonPageUnit::DeclHit(hit) => decl_hits.push(*hit),
+                                InspectJsonPageUnit::Hit(hit) => hits.push(*hit),
+                                InspectJsonPageUnit::TaintFlow(flow) => taint_flows.push(*flow),
+                            }
+                        }
                         let wrapped = serde_json::json!({
                             "analysis_complete": analysis_incomplete_reasons.is_empty(),
                             "analysis_incomplete_reasons": analysis_incomplete_reasons,
                             "query": &report.query,
                             "regex": report.regex,
                             "kind_filter": &report.kind_filter,
-                            "decl_hits": slice,
-                            "hits": &report.hits,
-                            "taint_flows": &report.taint_flows,
+                            "decl_hits": decl_hits,
+                            "hits": hits,
+                            "taint_flows": taint_flows,
                             "summary": &report.summary,
                             "page": page_info_to_json(info),
                         });
@@ -2551,47 +2579,18 @@ fn occurrence_flow_truncation_summary(hits: &[HitOut]) -> (usize, Vec<String>) {
     (truncated_hits, reason_vec)
 }
 
-/// Byte-cost heuristic for one rendered `InspectFlowRendered`,
-/// used by the paging engine when `--context` is set on `inspect`.
-/// Counts the display-chain names plus one line per function in
-/// the chain plus the source lines that would be inlined. Rough
-/// but monotonic — sufficient for the pager to partition flows
-/// into budget-fitting pages.
-pub(crate) fn inspect_flow_cost(flow: &InspectFlowRendered) -> u64 {
-    // Per-flow fixed chrome: `══` top ruler + `FLOW N F:id <header>`
-    // line + chain-display line + `══` bottom ruler. ~300 bytes
-    // themed. Per-function: `[module] path` + `└─ [def] sig :line`
-    // + one line per source byte with `LINENO  text` prefix +
-    // `# [FLOW N SOURCE/->/MATCH: …]` annotations (~50 bytes each,
-    // one per annotated line) + a trailing blank line. Per-line
-    // overhead bumped from 8 → 32 to cover the line-number gutter,
-    // themed comment block, and ANSI escape burst.
-    let chain_bytes: usize = flow.chain.iter().map(|n| n.len() + 4).sum();
-    let body_bytes: usize = flow
-        .functions
-        .iter()
-        .map(|f| {
-            f.module_path.len()
-                + f.signature.len()
-                + f.owners
-                    .iter()
-                    .map(|owner| owner.kind.len() + owner.name.len() + 32)
-                    .sum::<usize>()
-                + 80 // `[module] / [def] / trailing newline` scaffolding
-                + f.lines
-                    .iter()
-                    .map(|l| l.text.len() + l.annotation.as_deref().map_or(0, str::len) + 32)
-                    .sum::<usize>()
-        })
-        .sum();
-    (chain_bytes + body_bytes + 320) as u64
+fn inspect_json_page_units(report: &InspectReport) -> Vec<InspectJsonPageUnit<'_>> {
+    let mut units = Vec::with_capacity(report.decl_hits.len() + report.hits.len() + report.taint_flows.len());
+    units.extend(report.decl_hits.iter().map(InspectJsonPageUnit::DeclHit));
+    units.extend(report.hits.iter().map(InspectJsonPageUnit::Hit));
+    units.extend(report.taint_flows.iter().map(InspectJsonPageUnit::TaintFlow));
+    units
 }
 
-/// Byte-cost heuristic for one `InspectOut` (decl hit) — header fields
-/// plus the rolled-up cost of every flow it hosts. Feeds the same pager
-/// as `inspect_flow_cost`.
-fn inspect_decl_cost(d: &InspectOut) -> u64 {
-    (d.symbol.len() as u64) + (d.file.len() as u64) + 32 + d.flows.iter().map(inspect_flow_cost).sum::<u64>()
+fn inspect_json_unit_cost(unit: &InspectJsonPageUnit<'_>) -> u64 {
+    serde_json::to_string(unit)
+        .map(|s| s.len() as u64 + 64)
+        .unwrap_or(512)
 }
 
 /// Filter-signature hash for `inspect`. Shared between the JSON
