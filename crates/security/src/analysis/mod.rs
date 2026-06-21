@@ -288,6 +288,7 @@ pub struct PackAuditReport {
 #[derive(Clone, Debug, Serialize)]
 pub struct PackAuditLanguage {
     pub language: String,
+    pub security_model: String,
     pub canonical_sink_families_applicable: bool,
     pub sinks: BTreeMap<String, PackAuditFamilyCount>,
     pub sources: PackAuditCount,
@@ -385,9 +386,17 @@ pub const CANONICAL_SINK_FAMILIES: &[&str] = &[
 ];
 
 /// Languages whose sink taxonomy is intentionally ecosystem-specific,
-/// so the canonical web-family audit matrix should render as not
+/// so the canonical app/web-family audit matrix should render as not
 /// applicable rather than as a wall of false coverage gaps.
 pub const ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS: &[&str] = &["solidity"];
+
+pub fn security_model_for_lang(lang: &str) -> &'static str {
+    if ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS.contains(&lang) {
+        "smart-contract"
+    } else {
+        "app-web-taint"
+    }
+}
 
 /// Specific `(language, family)` cells where the empty state is a
 /// deliberate design choice, not missing coverage.
@@ -1903,8 +1912,10 @@ pub fn pack_audit(pack: &Rulepack, lang_filter: Option<&str>) -> PackAuditReport
             let (source_enabled, source_disabled) = source_counts.get(&language).copied().unwrap_or((0, 0));
             let (sanitizer_enabled, sanitizer_disabled) =
                 sanitizer_counts.get(&language).copied().unwrap_or((0, 0));
+            let security_model = security_model_for_lang(&language).to_string();
             PackAuditLanguage {
                 language,
+                security_model,
                 canonical_sink_families_applicable,
                 sinks,
                 sources: PackAuditCount {

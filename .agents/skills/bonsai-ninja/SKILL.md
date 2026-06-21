@@ -146,6 +146,12 @@ Filter findings by rule class:
 For each issue, cite `S:` finding id, `F:` flow id, source line, sink
 line, sanitizer status, and the exact page/cursor coverage reviewed.
 
+Solidity is a smart-contract security pack, not an app/web taint parity
+language. Treat its findings as on-chain hazards such as reentrancy,
+delegatecall, selfdestruct, oracle/randomness misuse, token hazards, and
+access control. Do not expect or add fake SQLi/XSS/SSRF/path/cmdi
+coverage for Solidity.
+
 ## Rulepack Work
 
 Rules live under `security-patterns/langs/<lang>/{sources,sinks,sanitizers}`.

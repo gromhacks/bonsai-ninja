@@ -5,7 +5,7 @@ description: "Entry points for using, understanding, integrating, and extending 
 
 # bonsai-ninja Documentation
 
-bonsai-ninja indexes source code, resolves cross-file call paths, and runs rulepack-driven security analysis across 21 languages. These docs are plain MDX: readable on GitHub and enhanced by Mintlify where supported.
+bonsai-ninja indexes source code, resolves cross-file call paths, and runs rulepack-driven security analysis across 21 parser adapters. The security model is split deliberately: 20 general-purpose app/web languages use the canonical source/sink/sanitizer taint taxonomy, while Solidity uses a smart-contract taxonomy for on-chain hazards. These docs are plain MDX: readable on GitHub and enhanced by Mintlify where supported.
 
 - [Getting Started](getting-started.mdx) - install the CLI, run a first scan, and learn how to read the finding IDs and flow output.
 - [Platform And Architecture Support](platform-support.mdx) - understand release targets, source-build targets, and cross-target checks.
@@ -13,6 +13,7 @@ bonsai-ninja indexes source code, resolves cross-file call paths, and runs rulep
 - [CLI Reference](cli-reference.mdx) - find the command and flag surface for security scans, taint analysis, source analysis, inspect, trace, and export.
 - [Rule Authoring](rule-authoring-tutorial.mdx) - write and test workspace-local or shipped rules using the same schema as the bundled security-patterns pack.
 - [Release Readiness](RELEASE_READINESS.md) - current local validation status, benchmark snapshot, and the pre-release gate.
+- [Solidity Support](solidity-support.mdx) - explains why Solidity is a smart-contract security pack instead of an app/web taint-family parity language.
 
 Coverage references: [mega-flow fixtures](MEGA_FLOW_COVERAGE.md),
 [engine coverage baseline](COVERAGE_BASELINE.md), and

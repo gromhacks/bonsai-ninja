@@ -4,20 +4,22 @@ Current local deployment snapshot for `main`.
 
 ## Status
 
-The repository is deployment-ready from a build, validation, and command
-surface standpoint. The security benchmark profile is much stronger on
-recall and precision than the earlier baseline, but fixed-snapshot
-validation remains the main open quality gap.
+The repository is deployment-ready from a build, validation, command
+surface, and large-repo behavior standpoint. The security benchmark
+profile is much stronger on recall and precision than the earlier
+baseline. Aggregate fixed-snapshot validation remains low because many
+benchmark "fixed" snapshots are unchanged or metadata-only; actual
+code-changed fixed snapshots are clean in the latest local run.
 
 ## Latest local validation
 
-Validated on 2026-06-19 with the release binary:
+Validated on 2026-06-20 with the release binary:
 
 - `cargo build --release` passed.
 - `cargo fmt --all --check` passed.
 - `git diff --check` passed.
 - `./target/release/bonsai-ninja security . pack --validate --taint-replay --rules-dir security-patterns --format json --no-color --no-progress` passed with 0 warnings.
-- `./target/release/bonsai-ninja security . pack --audit --context 16k --no-color --no-progress` reported no sink-family gaps across all 21 languages.
+- `./target/release/bonsai-ninja security . pack --audit --context 16k --no-color --no-progress` reported no unexplained canonical sink-family gaps across the app/web taxonomy languages. Solidity is explicitly marked as a smart-contract taxonomy language, not an app/web parity row.
 - `cargo test -q -p bonsai_security --test rulepack_conformance` passed.
 - `cargo test -q -p bonsai_security --test sanitizer_credit_audit` passed.
 - `cargo test -q -p bonsai_security --test per_lang_gap_coverage` passed.
@@ -33,10 +35,10 @@ Focused engine/tool checks from the same pass were green:
 
 ## Large-repo behavior
 
-Elasticsearch spot checks on 2026-06-19 with the release binary:
+Elasticsearch spot checks on 2026-06-20 with the release binary:
 
-- `security ../elasticsearch taint-analysis --profile production --summary --format json`
-  completed in 56.40 seconds with 3.32 GB max RSS.
+- `security ../elasticsearch taint-analysis --profile production --format json`
+  completed in 39.52 seconds with 2.96 GB max RSS.
 - `security ../elasticsearch sources --rule java.source.spring_request_param --format json`
   completed in 3.06 seconds with 120.6 MB max RSS and complete pagination
   metadata.
@@ -51,15 +53,14 @@ Elasticsearch spot checks on 2026-06-19 with the release binary:
 
 Latest CVE-Bench tier-4 run:
 
-- Tag: `bonsai-ninja-2026-06-19-122157-dev`
-- Report: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-19-122157-dev/report.json`
-- Detection recall: 99.57%
-- Bug recall: 75.91% (`249/328`)
-- Precision: 79.24%
+- Tag: `bonsai-ninja-2026-06-20-precision-184418`
+- Report: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-20-precision-184418/report.json`
+- Detection recall: 99.13%
+- Bug recall: 75.61%
+- Precision: 80.57%
 - Fix-validation rate: 30.43%
-- False positives per KLOC: 1.63
-- Source, sink, and flow accuracy: 99.57%
-- Cross-file recall: 100%
+- False positives per KLOC: 1.60
+- Actual code-changed fixed snapshots: 70/70 clean.
 
 The CVE wrapper sanity checks were clean: 230 vulnerable SARIF files, 230
 fixed SARIF files, 0 malformed JSON files, 0 empty vulnerable-result
@@ -68,15 +69,12 @@ or empty-SARIF fallback text in `scan_all.log`.
 
 Latest OWASP Benchmark v1.2 Java run:
 
-- SARIF: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-19-122157-dev-owasp/owasp.sarif.json`
-- Direct category-aware score JSON: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-19-122157-dev-owasp/owasp_direct_score.json`
-- Overall score: 54.54
-- TPR: 65.87%
-- FPR: 11.32%
-- TP/FN/FP/TN: 932 / 483 / 150 / 1175
+- SARIF: `/home/builder/Documents/augment-projects/CVEBench-SAST/runs/bonsai-ninja-2026-06-20-precision-184708-owasp/owasp.sarif.json`
+- Scorecard: `/home/builder/Documents/augment-projects/owasp-benchmark/scorecard/Benchmark_v1.2_Scorecard_for_bonsai-ninja_vprecision184708.html`
+- Overall score: 54.04
 - LDAP TPR/FPR: 66.67% / 0.00%
 - XPath TPR/FPR: 66.67% / 10.00%
-- SQLi TPR/FPR: 63.24% / 2.16%
+- SQLi TPR/FPR: 44.12% / 2.16%
 
 The official Maven scorecard run completed, but the local `results/`
 directory contains multiple historical bonsai SARIF files with the same
@@ -87,11 +85,13 @@ results directory before producing a publication-grade HTML scorecard.
 
 ## Known gap
 
-Fixed-snapshot validation is below the target quality bar. Treat
-sanitizer and validator credit as the next security-quality workstream:
-sanitizers placed between source and sink must suppress or mark the path
-only when they are path-ordered before the sink, and never when the
-sanitizer appears after the sink or is unrelated to the tainted value.
+The remaining aggregate CVE fixed-snapshot gap is benchmark-data-shaped:
+160 "fixed" snapshots in the latest run are unchanged or metadata-only
+relative to their vulnerable version and still contain the vulnerable
+code shape. Do not suppress those just to raise aggregate
+fix-validation. Future sanitizer/rule precision work should stay
+evidence-driven: only credit a sanitizer when it is path-ordered before
+the sink and tied to the tainted value.
 
 ## Pre-release gate
 

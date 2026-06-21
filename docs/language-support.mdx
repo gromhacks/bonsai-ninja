@@ -7,6 +7,12 @@ description: "Supported languages and the security-analysis capabilities availab
 
 The table summarizes bundled rule coverage and analyzer precision. "Sources" and "sinks" indicate shipped rule families. "Lifecycle" means lifecycle/state-machine rules are supported when rules exist. "Cross-procedural depth" describes the practical call-chain support. "Known limitations" lists precision gaps that may affect false positives or false negatives.
 
+Security support is not one flat claim across every adapter. The
+canonical app/web source-sink-sanitizer taxonomy applies to the
+general-purpose languages. Solidity is supported as a parser/navigation
+adapter and as a smart-contract security pack; its rule taxonomy is
+on-chain-specific rather than web-family-specific.
+
 | Language | Sources | Sinks | Lifecycle | Cross-procedural depth | Known limitations |
 |---|---|---|---|---|---|
 | C | Yes | Yes | Limited | Multi-file C calls and function pointers | Macro-heavy code may need normalized examples |
@@ -27,6 +33,6 @@ The table summarizes bundled rule coverage and analyzer precision. "Sources" and
 | Ruby | Yes | Yes | Limited | Methods, blocks, common dispatch | Metaprogramming is approximate |
 | Rust | Yes | Yes | Yes | Modules, functions, methods, traits | Macro expansion and trait objects may need follow-up |
 | Scala | Yes | Yes | Limited | Objects, classes, methods | Implicits and symbolic DSLs are approximate |
-| Solidity | Yes | Yes | Yes | Contracts, modifiers, external calls | Some magic globals rely on current adapter shapes |
+| Solidity | Contract globals/params | Smart-contract taxonomy | Yes | Contracts, modifiers, external calls | Not part of the canonical app/web taint-family audit; rules target reentrancy, delegatecall, selfdestruct, oracle, randomness, token, access-control, and unchecked-call hazards |
 | Swift | Yes | Yes | Limited | Functions, classes, protocols | Dynamic Objective-C bridging is approximate |
 | TypeScript | Yes | Yes | Limited | ES modules, classes, async, callbacks | Complex type-level behavior is not executed |

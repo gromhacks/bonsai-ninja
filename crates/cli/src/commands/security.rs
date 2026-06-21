@@ -3890,9 +3890,13 @@ fn render_audit(pack: &Rulepack, lang_filter: Option<&str>, format: BrowseFormat
         cli_println!(
             "{}",
             u.dim(&format!(
-                "n/a = canonical web-family audit does not apply to ecosystem-specific languages ({})",
+                "n/a = canonical app/web sink-family audit does not apply to ecosystem-specific languages ({})",
                 ecosystem_specific.join(", ")
             ))
+        );
+        cli_println!(
+            "{}",
+            u.dim("ecosystem-specific languages use their own security taxonomy; Solidity is smart-contract analysis, not web/app taint parity.")
         );
     }
     if !FAMILY_NOT_APPLICABLE.is_empty() {
@@ -3911,7 +3915,7 @@ fn render_audit(pack: &Rulepack, lang_filter: Option<&str>, format: BrowseFormat
     cli_println!(
         "{}",
         u.dim(&format!(
-            "covered: {} language(s); canonical sink families tracked: {}",
+            "covered: {} language(s); canonical app/web sink families tracked: {}",
             report.languages.len(),
             CANONICAL_SINK_FAMILIES.len()
         ))

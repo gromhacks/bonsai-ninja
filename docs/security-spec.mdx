@@ -145,6 +145,15 @@ operand is left of the call operator, such as `cmd.!` or
 `target.delegatecall("")`. Use `any_arg_tainted: true` only when every
 argument is an equivalent payload surface.
 
+Solidity is intentionally outside the canonical app/web sink-family
+audit. Its adapter participates in parsing, navigation, flow facts, and
+rule matching, but the bundled Solidity security pack is a smart-contract
+taxonomy: reentrancy, delegatecall, selfdestruct, oracle manipulation,
+block randomness, signature replay, token hazards, access control, and
+unchecked low-level calls. Do not add placeholder web families such as
+SQL injection, XSS, SSRF, path traversal, or command injection for
+Solidity unless the rule models a real EVM/on-chain security boundary.
+
 Rules whose risk names a specific argument **must** constrain that
 argument:
 
