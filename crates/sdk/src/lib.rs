@@ -67,18 +67,20 @@ pub use bonsai_inspect::{
     TaintFlowIdentityStep,
 };
 pub use bonsai_security::{
-    canonical_sink_audit_applies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages,
-    load_rulepack, load_workspace_local_rules, normalise_family, parse_severity, rule_family,
-    security_match_rows, select_rules, source_rule_matches_filters, tree_file_rel, workspace_languages,
-    AnalysisProgress, CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventory,
-    DependencyInventoryOptions, DependencyRow, Finding, FindingMatch, FindingStatus, FindingWithChain,
-    PackAuditCount, PackAuditFamilyCount, PackAuditLanguage, PackAuditReport, PackInventoryOptions,
-    PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue,
-    PackValidationReport, Rule, RuleKind, RuleMatch, Rulepack, RuntimeDisabledRule, SecurityInventoryOptions,
-    SecurityMatchRow, SecurityReport, Severity, SourceAnalysisCandidate, SourceAnalysisOptions,
-    SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
-    TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
-    CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS, FAMILY_NOT_APPLICABLE,
+    build_flow_bodies, canonical_sink_audit_applies, drain_runtime_disabled_rules,
+    filter_rules_to_workspace_languages, load_rulepack, load_workspace_local_rules, normalise_family,
+    parse_severity, rule_family, security_match_rows, select_rules, source_rule_matches_filters,
+    tree_file_rel, workspace_languages, AnalysisProgress, CombinedFindingWithChain,
+    CombinedSourceAnalysisCandidate, DependencyInventory, DependencyInventoryOptions, DependencyRow, Finding,
+    FindingMatch, FindingStatus, FindingWithChain, FlowFunctionBody, FlowRole as SecurityFlowRole,
+    FlowSourceLine, PackAuditCount, PackAuditFamilyCount, PackAuditLanguage, PackAuditReport,
+    PackInventoryOptions, PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule,
+    PackValidationIssue, PackValidationReport, Rule, RuleKind, RuleMatch, Rulepack, RuntimeDisabledRule,
+    SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity, SourceAnalysisCandidate,
+    SourceAnalysisOptions, SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus,
+    SourceLineageSummary, TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg,
+    TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS,
+    FAMILY_NOT_APPLICABLE,
 };
 pub use bonsai_trace::{PathSummary, TraceResult, TraceStep, TraceStepKind};
 pub use bonsai_workspace::value_flow::{

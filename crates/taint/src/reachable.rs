@@ -1506,8 +1506,21 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         max_precision,
         lineage_funcs,
     );
-    let closure_nodes = if let Some(target_nodes) = target_nodes.filter(|nodes| !nodes.is_empty()) {
-        idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, max_precision)
+    let target_nodes = target_nodes.filter(|nodes| !nodes.is_empty());
+    let emission_target_funcs = if target_nodes.is_some() {
+        None
+    } else {
+        target_funcs
+    };
+    let closure_nodes = if let Some(target_nodes) = target_nodes {
+        let mut nodes =
+            idg.forward_target_nodes_cut_with_max_precision(&seed_nodes, target_nodes, max_precision);
+        if let Some(targets) = target_funcs.filter(|targets| !targets.is_empty()) {
+            nodes.extend(idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision));
+            nodes.sort();
+            nodes.dedup();
+        }
+        nodes
     } else if let Some(targets) = target_funcs {
         idg.forward_target_func_cut_with_max_precision(&seed_nodes, targets, max_precision)
     } else {
@@ -1603,10 +1616,10 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
 
     // Tainted call sites in closure → tainted_calls.
     let tainted_args_by_site =
-        idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure_nodes, target_funcs);
+        idg.tainted_call_args_in_reachable_nodes_for_funcs(&closure_nodes, emission_target_funcs);
     let mut by_site: ahash::AHashMap<(FuncId, bonsai_common::Span), Vec<u8>> = ahash::AHashMap::new();
     for (caller, call_span, arg_idx) in &tainted_args_by_site {
-        if target_funcs.is_some_and(|targets| !targets.contains(caller)) {
+        if emission_target_funcs.is_some_and(|targets| !targets.contains(caller)) {
             continue;
         }
         by_site.entry((*caller, *call_span)).or_default().push(*arg_idx);
@@ -1707,7 +1720,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     {
         let return_funcs: Vec<FuncId> = idg.funcs_with_return_nodes_in_reachable_nodes(&closure_nodes);
         for func in return_funcs {
-            if target_funcs.is_some_and(|targets| !targets.contains(&func)) {
+            if emission_target_funcs.is_some_and(|targets| !targets.contains(&func)) {
                 continue;
             }
             let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
@@ -1752,7 +1765,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         let mut sorted_funcs: Vec<FuncId> = funcs_in_closure.into_iter().collect();
         sorted_funcs.sort_by_key(|f| f.raw());
         for func in sorted_funcs {
-            if target_funcs.is_some_and(|targets| !targets.contains(&func)) {
+            if emission_target_funcs.is_some_and(|targets| !targets.contains(&func)) {
                 continue;
             }
             let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {

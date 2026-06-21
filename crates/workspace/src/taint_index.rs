@@ -309,6 +309,26 @@ impl TaintGraphIndex {
         self.inner.read().resident_cap
     }
 
+    /// Change the resident decoded-graph cap and evict immediately if
+    /// the current cache is larger than the new bound. This is useful
+    /// for one-shot broad CLI scans, where retaining decoded graphs
+    /// across source groups costs more memory than it saves time.
+    pub fn set_resident_capacity(&self, resident_cap: usize) {
+        let mut inner = self.inner.write();
+        inner.resident_cap = resident_cap;
+        if resident_cap == 0 {
+            inner.by_source_seed.clear();
+            inner.resident_order.clear();
+            return;
+        }
+        while inner.by_source_seed.len() > resident_cap {
+            let Some(oldest) = inner.resident_order.pop_front() else {
+                break;
+            };
+            inner.by_source_seed.remove(&oldest);
+        }
+    }
+
     /// Conventional sidecar path under `<workspace>/.bonsai/`.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
