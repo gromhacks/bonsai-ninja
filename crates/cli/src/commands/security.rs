@@ -65,7 +65,7 @@ fn source_analysis_json_incomplete_reasons(
     reasons
 }
 
-const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v4";
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v5";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisRenderReport {
@@ -1086,7 +1086,7 @@ fn cmd_flows(
 
     // `--explain` needs the project (to count source/sink match sites),
     // so it bypasses the rendered-report fast path.
-    if !explain && !matches!(format, BrowseFormat::Sarif) {
+    if !explain && !matches!(format, BrowseFormat::Sarif) && !paging_cfg.all && finding.is_none() {
         if let Some(cached_report) = page_cache::read_keyed_payload::<TaintAnalysisRenderReport>(
             workspace,
             filters_hash,
@@ -1133,11 +1133,16 @@ fn cmd_flows(
             intra_worklist_cap,
             max_precision,
             exclude_tests,
+            attach_flow_evidence: false,
+            taint_graph_resident_cache_entries: Some(0),
         },
         |event| analysis_progress.handle(event),
     )?;
     if let Some(finding_id) = finding.as_deref() {
         filter_report_to_finding_id(&mut report, finding_id)?;
+    }
+    if !summary_only && (matches!(format, BrowseFormat::Sarif) || paging_cfg.all || finding.is_some()) {
+        attach_flow_evidence_to_report(project.workspace(), &mut report);
     }
 
     if explain {
@@ -1345,10 +1350,25 @@ fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &st
     Ok(())
 }
 
+fn attach_flow_evidence_to_report(ws: &bonsai_sdk::Workspace, report: &mut TaintAnalysisReport) {
+    for combined in &mut report.findings {
+        if combined.finding.hops.is_empty() {
+            combined.finding.hops = bonsai_sdk::build_flow_bodies(
+                ws,
+                &combined.chain_funcs,
+                &combined.finding.source,
+                &combined.finding.taint_path,
+                bonsai_sdk::SecurityFlowRole::Sink,
+            );
+        }
+    }
+}
+
 fn build_taint_pages<C, R>(
     report: &TaintAnalysisRenderReport,
     paging_cfg: &paging::PagingConfig,
     filters_hash: u64,
+    eager_pages: bool,
     cost_finding: C,
     mut render_page: R,
 ) -> Result<(Vec<page_cache::CachedPage>, u64)>
@@ -1367,7 +1387,14 @@ where
     );
     let current_page = current_info.page_number;
     let mut pages = Vec::new();
-    for page_number in page_cache::eager_window(current_page, current_info.total_pages) {
+    let page_numbers: Vec<u64> = if eager_pages {
+        page_cache::eager_window(current_page, current_info.total_pages)
+            .into_iter()
+            .collect()
+    } else {
+        vec![current_page]
+    };
+    for page_number in page_numbers {
         let mut page_cfg = paging_cfg.clone();
         if page_number != current_page {
             page_cfg.page = paging::PageArg::Number(page_number);
@@ -1393,6 +1420,7 @@ fn build_taint_json_pages(
         report,
         paging_cfg,
         filters_hash,
+        false,
         taint_json_cost_bytes,
         |paged_idx, info, page_cfg| render_taint_json_page(report, paged_idx, info, page_cfg),
     )
@@ -1413,7 +1441,7 @@ fn render_taint_json_page(
         let wrapped = serde_json::json!({
             "analysis_complete": info.page_number == 1 && info.is_last,
             "analysis_incomplete_reasons": analysis_incomplete_reasons,
-            "summary": &report.summary,
+            "summary": compact_taint_summary(&report.summary),
             "rows": rows,
             "page": page_info_to_json(info),
         });
@@ -1435,6 +1463,7 @@ fn build_taint_text_pages(
         report,
         paging_cfg,
         filters_hash,
+        true,
         |finding| taint_text_cost_bytes(finding, pack) + paging::TABLE_ROW_CHROME_BYTES,
         |paged_idx, info, _page_cfg| {
             render_taint_analysis_text_page(pack, report, paged_idx, info, no_compact)
@@ -1896,8 +1925,48 @@ fn sorted_counts(counts: &BTreeMap<String, usize>) -> Vec<(&String, &usize)> {
     rows
 }
 
+fn top_counts_json(counts: &BTreeMap<String, usize>, limit: usize) -> serde_json::Value {
+    serde_json::Value::Array(
+        sorted_counts(counts)
+            .into_iter()
+            .take(limit)
+            .map(|(key, count)| {
+                serde_json::json!({
+                    "key": key,
+                    "count": count,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn compact_taint_summary(summary: &TaintAnalysisSummary) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "compact",
+        "total_findings": summary.total_findings,
+        "source_rule_count": summary.source_rule_count,
+        "sink_rule_count": summary.sink_rule_count,
+        "sanitizer_rule_count": summary.sanitizer_rule_count,
+        "severity_counts": summary.severity_counts,
+        "status_counts": summary.status_counts,
+        "precision_counts": summary.precision_counts,
+        "tag_counts": summary.tag_counts,
+        "language_counts": summary.language_counts,
+        "source_trust_counts": summary.source_trust_counts,
+        "source_category_counts": summary.source_category_counts,
+        "source_rule_distinct": summary.source_rule_counts.len(),
+        "sink_rule_distinct": summary.sink_rule_counts.len(),
+        "sink_file_distinct": summary.sink_file_counts.len(),
+        "top_source_rules": top_counts_json(&summary.source_rule_counts, 20),
+        "top_sink_rules": top_counts_json(&summary.sink_rule_counts, 20),
+        "top_sink_files": top_counts_json(&summary.sink_file_counts, 20),
+    })
+}
+
 fn taint_json_cost_bytes(item: &TaintAnalysisRenderFinding) -> u64 {
-    finding_shallow_cost_bytes(&item.finding)
+    serde_json::to_vec(item)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or_else(|_| taint_text_cost_bytes_without_pack(item))
 }
 
 fn taint_text_cost_bytes(item: &TaintAnalysisRenderFinding, pack: &Rulepack) -> u64 {
@@ -1910,6 +1979,40 @@ fn taint_text_cost_bytes(item: &TaintAnalysisRenderFinding, pack: &Rulepack) -> 
     // Cost the flow render from the finding's own hop bodies — the
     // lazily-built flow renders exactly these lines, so the estimate
     // stays render-accurate without materializing the flow here.
+    if !item.finding.finding.hops.is_empty() {
+        for hop in &item.finding.finding.hops {
+            bytes = bytes
+                .saturating_add(hop.file.len() as u64)
+                .saturating_add(hop.function.len() as u64)
+                .saturating_add(240);
+            for line in &hop.lines {
+                bytes = bytes.saturating_add(line.text.len() as u64).saturating_add(40);
+            }
+        }
+    } else {
+        bytes = bytes.saturating_add(
+            item.finding
+                .finding
+                .taint_path
+                .iter()
+                .map(|step| {
+                    step.caller.len()
+                        + step.callee.len()
+                        + step.file.len()
+                        + step
+                            .tainted_args
+                            .iter()
+                            .map(|arg| arg.value_text.len() + arg.param_name.len() + 16)
+                            .sum::<usize>()
+                })
+                .sum::<usize>() as u64,
+        );
+    }
+    bytes
+}
+
+fn taint_text_cost_bytes_without_pack(item: &TaintAnalysisRenderFinding) -> u64 {
+    let mut bytes = finding_shallow_cost_bytes(&item.finding).saturating_add(1800);
     if !item.finding.finding.hops.is_empty() {
         for hop in &item.finding.finding.hops {
             bytes = bytes

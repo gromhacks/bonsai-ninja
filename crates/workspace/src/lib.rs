@@ -1379,6 +1379,28 @@ impl Workspace {
         included_funcs: &[FuncId],
         call_graph: &bonsai_callgraph::ResolvedCallGraph,
     ) -> Arc<bonsai_idg::IdgQueryService> {
+        let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+            transfer_options,
+            included_files,
+            included_funcs,
+            call_graph,
+        );
+        self.inner.db.set_idg_service(service.clone());
+        service
+    }
+
+    /// Build a file/function-scoped workspace IDG using an already
+    /// resolved semantic call graph without installing it as the
+    /// workspace-global service. Large security scans use this for
+    /// short-lived source-corridor batches so peak RSS is bounded by
+    /// the active batch, not the whole source-reachable region.
+    pub fn build_idg_service_with_transfer_options_for_files_and_call_graph(
+        &self,
+        transfer_options: &bonsai_idg::TransferOptions,
+        included_files: &[FileId],
+        included_funcs: &[FuncId],
+        call_graph: &bonsai_callgraph::ResolvedCallGraph,
+    ) -> Arc<bonsai_idg::IdgQueryService> {
         let transfer_options = transfer_options.clone().canonicalized();
         let global = self.inner.db.global_index();
         let db = &self.inner.db;
@@ -1399,7 +1421,6 @@ impl Workspace {
                 included_funcs,
             );
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
-        self.inner.db.set_idg_service(service.clone());
         service
     }
 

@@ -114,6 +114,17 @@ pub struct TaintAnalysisOptions {
     /// conventional test path (`test/`, `tests/`, `*_test.go`, etc.).
     /// See `crate::finding::path_is_test_file` for the exact rule.
     pub exclude_tests: bool,
+    /// Attach full per-hop source bodies to every surviving finding.
+    /// SARIF/full exports need this. Broad paged CLI views leave it off
+    /// and render lightweight findings so large repositories do not
+    /// duplicate source bodies for every finding before pagination.
+    pub attach_flow_evidence: bool,
+    /// Override the workspace taint-graph resident cache for this
+    /// analysis. `None` preserves the workspace/SDK default. One-shot
+    /// broad CLI scans set this to `Some(0)` so every source group is
+    /// still analyzed, but decoded graphs are not retained across
+    /// groups and cannot accumulate into multi-GB resident state.
+    pub taint_graph_resident_cache_entries: Option<usize>,
 }
 
 impl Default for TaintAnalysisOptions {
@@ -134,6 +145,8 @@ impl Default for TaintAnalysisOptions {
             intra_worklist_cap: None,
             max_precision: Some(Precision::Narrowed),
             exclude_tests: false,
+            attach_flow_evidence: true,
+            taint_graph_resident_cache_entries: None,
         }
     }
 }
@@ -843,6 +856,7 @@ where
         options.interprocedural_budget,
         options.intra_worklist_cap,
         options.max_precision,
+        options.taint_graph_resident_cache_entries,
         &factory_returns,
         &mut on_progress,
     );
@@ -934,24 +948,32 @@ where
     });
     on_progress(AnalysisProgress::PhaseFinished);
 
-    // Embed per-hop source bodies so JSON/SARIF carry the same code the text
-    // view renders. Done last, on surviving findings only, so filtered-out
-    // findings never pay the VFS read.
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "attaching flow evidence",
-        total: findings.len() as u64,
-    });
-    let mut flow_body_cache = crate::flow_evidence::FlowBodyCache::new(ws);
-    for combined in &mut findings {
-        combined.finding.hops = flow_body_cache.build_flow_bodies(
-            &combined.chain_funcs,
-            &combined.finding.source,
-            &combined.finding.taint_path,
-            crate::flow_evidence::FlowRole::Sink,
-        );
-        on_progress(AnalysisProgress::PhaseTicked);
+    if options.attach_flow_evidence {
+        // Embed per-hop source bodies so JSON/SARIF carry the same code the text
+        // view renders. Done last, on surviving findings only, so filtered-out
+        // findings never pay the VFS read.
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "attaching flow evidence",
+            total: findings.len() as u64,
+        });
+        let mut flow_body_cache = crate::flow_evidence::FlowBodyCache::new(ws);
+        for combined in &mut findings {
+            combined.finding.hops = flow_body_cache.build_flow_bodies(
+                &combined.chain_funcs,
+                &combined.finding.source,
+                &combined.finding.taint_path,
+                crate::flow_evidence::FlowRole::Sink,
+            );
+            on_progress(AnalysisProgress::PhaseTicked);
+        }
+        on_progress(AnalysisProgress::PhaseFinished);
+    } else {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "skipping bulk flow evidence",
+            total: 0,
+        });
+        on_progress(AnalysisProgress::PhaseFinished);
     }
-    on_progress(AnalysisProgress::PhaseFinished);
 
     Ok(TaintAnalysisReport {
         findings,
@@ -5891,6 +5913,7 @@ fn build_findings_chain_aware<F>(
     interprocedural_budget: Option<u32>,
     intra_worklist_cap: Option<u32>,
     max_precision: Option<Precision>,
+    taint_graph_resident_cache_entries: Option<usize>,
     factory_returns: &crate::matcher::FactoryReturns,
     on_progress: &mut F,
 ) -> Vec<FindingWithChain>
@@ -6156,37 +6179,74 @@ where
         coarse_corridors_by_func.len()
     );
 
-    on_progress(AnalysisProgress::PhaseStarted {
-        label: "building scoped semantic graph",
-        total: 0,
-    });
-    let idg = seed_idg_service_for_rulepack_for_files(
-        ws,
-        pack,
-        &transfer_languages,
-        &semantic_files,
-        &semantic_funcs,
-        chain_call_graph.as_ref(),
-    );
-    on_progress(AnalysisProgress::PhaseFinished);
-    let sink_target_nodes = source_sink_prefilter_enabled
-        .then(|| sink_target_nodes_for_funcs(idg.as_ref(), pack, &sink_by_func, &sink_func_set));
-    let sink_match_count: usize = sink_by_func.values().map(Vec::len).sum();
+    let use_batched_scoped_idg = source_sink_prefilter_enabled && semantic_funcs.len() > 100_000;
+    let idg = if use_batched_scoped_idg {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "planning scoped semantic graph batches",
+            total: 0,
+        });
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "semantic graph batching enabled funcs={} files={} source_groups={}",
+            semantic_funcs.len(),
+            semantic_files.len(),
+            coarse_corridors_by_func.len()
+        );
+        on_progress(AnalysisProgress::PhaseFinished);
+        None
+    } else {
+        on_progress(AnalysisProgress::PhaseStarted {
+            label: "building scoped semantic graph",
+            total: 0,
+        });
+        let service = seed_idg_service_for_rulepack_for_files(
+            ws,
+            pack,
+            &transfer_languages,
+            &semantic_files,
+            &semantic_funcs,
+            chain_call_graph.as_ref(),
+        );
+        on_progress(AnalysisProgress::PhaseFinished);
+        Some(service)
+    };
+    let sink_target_nodes = if source_sink_prefilter_enabled {
+        let semantic_func_set: AHashSet<FuncId> = semantic_funcs.iter().copied().collect();
+        let semantic_sink_func_set: AHashSet<FuncId> =
+            sink_func_set.intersection(&semantic_func_set).copied().collect();
+        idg.as_ref().map(|service| {
+            sink_target_nodes_for_funcs(service.as_ref(), pack, &sink_by_func, &semantic_sink_func_set)
+        })
+    } else {
+        None
+    };
+    let sink_match_count: usize = if source_sink_prefilter_enabled {
+        let semantic_func_set: AHashSet<FuncId> = semantic_funcs.iter().copied().collect();
+        sink_func_set
+            .intersection(&semantic_func_set)
+            .filter_map(|func| sink_by_func.get(func))
+            .map(Vec::len)
+            .sum()
+    } else {
+        sink_by_func.values().map(Vec::len).sum()
+    };
     let sink_target_nodes_for_schedule = sink_target_nodes
         .as_ref()
         .filter(|targets| targets.complete && !targets.nodes.is_empty())
         .map(|targets| targets.nodes.as_slice());
-    let use_coarse_source_sink_schedule = transfer_languages.contains("java") && semantic_funcs.len() > 1_000;
+    let use_coarse_source_sink_schedule =
+        use_batched_scoped_idg || (transfer_languages.contains("java") && semantic_funcs.len() > 1_000);
     let target_node_graph_cut_enabled = sink_target_nodes
         .as_ref()
         .is_some_and(|targets| targets.complete && !targets.nodes.is_empty());
     if let Some(targets) = sink_target_nodes.as_ref() {
         bonsai_diagnostics::debug_log!(
             "security-phase",
-            "sink target nodes nodes={} sink_matches={} complete={} schedule_node_cut={} graph_node_cut={}",
+            "sink target nodes nodes={} sink_matches={} complete={} unresolved_funcs={} schedule_node_cut={} graph_node_cut={}",
             targets.nodes.len(),
             sink_match_count,
             targets.complete,
+            targets.unresolved_funcs.len(),
             sink_target_nodes_for_schedule.is_some(),
             target_node_graph_cut_enabled
         );
@@ -6204,6 +6264,9 @@ where
     // persistence is opt-in for the same reason as source-analysis:
     // exact graphs are correct but can be very large.
     let workspace_taint_index = ws.taint_index();
+    if let Some(resident_cap) = taint_graph_resident_cache_entries {
+        workspace_taint_index.set_resident_capacity(resident_cap);
+    }
     let taint_graph_fingerprint =
         taint_graph_config_fingerprint(pack, "taint-analysis", config.max_edge_precision);
     prepare_workspace_taint_graph_cache(ws, taint_graph_fingerprint);
@@ -6228,7 +6291,8 @@ where
         for idx in indices.iter().copied() {
             let corridor = if use_coarse_source_sink_schedule {
                 coarse_corridors_by_func.get(&src_func_id).cloned()
-            } else if let Some(target_nodes) = sink_target_nodes_for_schedule {
+            } else if let (Some(service), Some(target_nodes)) = (idg.as_ref(), sink_target_nodes_for_schedule)
+            {
                 let coarse_corridor = coarse_corridors_by_func.get(&src_func_id);
                 source_index_sink_corridor(
                     idx,
@@ -6236,7 +6300,7 @@ where
                     pack,
                     &config,
                     global.as_ref(),
-                    idg.as_ref(),
+                    service.as_ref(),
                     target_nodes,
                     sink_target_nodes.as_ref().is_none_or(|targets| targets.complete),
                     coarse_corridor,
@@ -6316,7 +6380,7 @@ where
         label: "building taint chains",
         total: total_groups as u64,
     });
-    let build_source_group = |group: &ScheduledSourceGroup| {
+    let build_source_group = |group: &ScheduledSourceGroup, idg: &bonsai_idg::IdgQueryService| {
         let src_func_id = group.src_func_id;
         let indices = &group.indices;
         let group_started = debug_taint_phase.then(Instant::now);
@@ -6331,14 +6395,40 @@ where
         let mut sink_matches = 0usize;
         let mut lineage_misses = 0usize;
         let mut group_out: Vec<FindingWithChain> = Vec::new();
-        let group_target_nodes = sink_target_nodes_for_graph.and_then(|global_targets| {
-            if !group.corridor.target_nodes.is_empty() {
-                Some(group.corridor.target_nodes.as_slice())
-            } else {
-                Some(global_targets)
-            }
+        let group_target_nodes_owned: Option<Vec<bonsai_idg::WsNodeId>> = sink_target_nodes_for_graph
+            .and_then(|global_targets| {
+                if !group.corridor.target_nodes.is_empty() {
+                    return Some(group.corridor.target_nodes.clone());
+                }
+                let mut nodes: Vec<bonsai_idg::WsNodeId> = global_targets
+                    .iter()
+                    .copied()
+                    .filter(|node| {
+                        idg.resolve_point(*node)
+                            .is_some_and(|point| group.corridor.terminal_sinks.contains(&point.func))
+                    })
+                    .collect();
+                nodes.sort();
+                nodes.dedup();
+                (!nodes.is_empty()).then_some(nodes)
+            });
+        let group_target_nodes = group_target_nodes_owned.as_deref();
+        let unresolved_sink_func_targets: Option<AHashSet<FuncId>> = group_target_nodes.and_then(|_| {
+            sink_target_nodes.as_ref().and_then(|targets| {
+                let unresolved: AHashSet<FuncId> = group
+                    .corridor
+                    .terminal_sinks
+                    .intersection(&targets.unresolved_funcs)
+                    .copied()
+                    .collect();
+                (!unresolved.is_empty()).then_some(unresolved)
+            })
         });
-        let group_sink_func_targets = Some(&group.corridor.lineage_funcs);
+        let group_sink_func_targets = if group_target_nodes.is_some() {
+            unresolved_sink_func_targets.as_ref()
+        } else {
+            Some(&group.corridor.terminal_sinks)
+        };
         let group_lineage_func_targets = Some(&group.corridor.lineage_funcs);
         if debug_taint_phase {
             let mut names: Vec<String> = group
@@ -6385,7 +6475,7 @@ where
                 anchor,
                 &output_arg_names,
                 global.as_ref(),
-                idg.as_ref(),
+                idg,
             );
             append_taint_target_key(&mut seed_key, "target_funcs", group_sink_func_targets);
             append_taint_target_key(&mut seed_key, "lineage_funcs", group_lineage_func_targets);
@@ -6399,28 +6489,39 @@ where
             let graph = if let Some(hit) = group_graphs.get(&graph_key.1) {
                 group_graph_hits = group_graph_hits.saturating_add(1);
                 hit.clone()
-            } else if let Some(hit) = workspace_taint_index.get(src_func_id, &graph_key.1) {
-                workspace_graph_hits = workspace_graph_hits.saturating_add(1);
-                group_graphs.insert(graph_key.1.clone(), hit.clone());
-                hit
             } else {
-                graph_builds = graph_builds.saturating_add(1);
-                let graph = Arc::new(exact_source_seed_graph(
-                    src_func_id,
-                    seeds,
-                    &config,
-                    ws.db(),
-                    taint_caches,
-                    ws,
-                    anchor,
-                    &output_arg_names,
-                    group_target_nodes,
-                    group_sink_func_targets,
-                    group_lineage_func_targets,
-                ));
-                let graph = workspace_taint_index.insert_if_absent(src_func_id, graph_key.1.clone(), graph);
-                group_graphs.insert(graph_key.1.clone(), graph.clone());
-                graph
+                let workspace_hit = if use_batched_scoped_idg {
+                    None
+                } else {
+                    workspace_taint_index.get(src_func_id, &graph_key.1)
+                };
+                if let Some(hit) = workspace_hit {
+                    workspace_graph_hits = workspace_graph_hits.saturating_add(1);
+                    group_graphs.insert(graph_key.1.clone(), hit.clone());
+                    hit
+                } else {
+                    graph_builds = graph_builds.saturating_add(1);
+                    let graph = Arc::new(exact_source_seed_graph(
+                        src_func_id,
+                        seeds,
+                        &config,
+                        ws.db(),
+                        taint_caches,
+                        idg,
+                        anchor,
+                        &output_arg_names,
+                        group_target_nodes,
+                        group_sink_func_targets,
+                        group_lineage_func_targets,
+                    ));
+                    let graph = if use_batched_scoped_idg {
+                        graph
+                    } else {
+                        workspace_taint_index.insert_if_absent(src_func_id, graph_key.1.clone(), graph)
+                    };
+                    group_graphs.insert(graph_key.1.clone(), graph.clone());
+                    graph
+                }
             };
             if let Some(started) = graph_started {
                 graph_nanos = graph_nanos.saturating_add(started.elapsed().as_nanos());
@@ -6762,19 +6863,27 @@ where
         group_out
     };
     let worker_count = security_taint_worker_count();
-    let parallel_groups: Vec<Vec<FindingWithChain>> = if worker_count > 1 && scheduled_source_groups.len() > 1
-    {
-        match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
-            Ok(pool) => {
+    let rayon_pool = if worker_count > 1 && scheduled_source_groups.len() > 1 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count)
+            .build()
+            .ok()
+    } else {
+        None
+    };
+    let mut run_group_indices =
+        |group_indices: &[usize], idg_service: &bonsai_idg::IdgQueryService| -> Vec<Vec<FindingWithChain>> {
+            if let Some(pool) = rayon_pool.as_ref().filter(|_| group_indices.len() > 1) {
+                let expected_groups = group_indices.len();
                 let (tx, rx) = mpsc::channel();
                 let mut groups = None;
                 std::thread::scope(|scope| {
                     let worker = scope.spawn(|| {
                         pool.install(|| {
-                            scheduled_source_groups
+                            group_indices
                                 .par_iter()
-                                .map(|group| {
-                                    let out = build_source_group(group);
+                                .map(|idx| {
+                                    let out = build_source_group(&scheduled_source_groups[*idx], idg_service);
                                     let _ = tx.send(());
                                     out
                                 })
@@ -6782,7 +6891,7 @@ where
                         })
                     });
                     let mut completed = 0usize;
-                    while completed < total_groups {
+                    while completed < expected_groups {
                         match rx.recv_timeout(Duration::from_millis(250)) {
                             Ok(()) => {
                                 completed += 1;
@@ -6797,29 +6906,94 @@ where
                         }
                     }
                     groups = Some(worker.join().unwrap_or_default());
-                    while completed < total_groups {
+                    while completed < expected_groups {
                         on_progress(AnalysisProgress::PhaseTicked);
                         completed += 1;
                     }
                 });
-                groups.unwrap_or_default()
+                return groups.unwrap_or_default();
             }
-            Err(_) => {
-                let mut groups = Vec::with_capacity(scheduled_source_groups.len());
-                for group in &scheduled_source_groups {
-                    groups.push(build_source_group(group));
-                    on_progress(AnalysisProgress::PhaseTicked);
-                }
-                groups
+            let mut groups = Vec::with_capacity(group_indices.len());
+            for idx in group_indices {
+                groups.push(build_source_group(&scheduled_source_groups[*idx], idg_service));
+                on_progress(AnalysisProgress::PhaseTicked);
             }
+            groups
+        };
+    let parallel_groups: Vec<Vec<FindingWithChain>> = if use_batched_scoped_idg {
+        let max_batch_funcs = 2_000usize;
+        let mut batch_indices: Vec<Vec<usize>> = Vec::new();
+        let mut current = Vec::new();
+        let mut current_funcs: AHashSet<FuncId> = AHashSet::new();
+        for (idx, group) in scheduled_source_groups.iter().enumerate() {
+            let additional = group
+                .corridor
+                .lineage_funcs
+                .iter()
+                .filter(|func| !current_funcs.contains(func))
+                .count();
+            if !current.is_empty() && current_funcs.len().saturating_add(additional) > max_batch_funcs {
+                batch_indices.push(std::mem::take(&mut current));
+                current_funcs.clear();
+            }
+            current.push(idx);
+            current_funcs.extend(group.corridor.lineage_funcs.iter().copied());
         }
-    } else {
+        if !current.is_empty() {
+            batch_indices.push(current);
+        }
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "semantic graph batches planned batches={} max_funcs_per_batch={}",
+            batch_indices.len(),
+            max_batch_funcs
+        );
         let mut groups = Vec::with_capacity(scheduled_source_groups.len());
-        for group in &scheduled_source_groups {
-            groups.push(build_source_group(group));
-            on_progress(AnalysisProgress::PhaseTicked);
+        for (batch_number, batch) in batch_indices.iter().enumerate() {
+            let mut batch_funcs: Vec<FuncId> = batch
+                .iter()
+                .flat_map(|idx| {
+                    scheduled_source_groups[*idx]
+                        .corridor
+                        .lineage_funcs
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            batch_funcs.sort_by_key(|func| func.raw());
+            batch_funcs.dedup();
+            let mut batch_files: Vec<FileId> = batch_funcs
+                .iter()
+                .filter_map(|func| global.declaring_file(SymbolId::new(func.raw())))
+                .collect();
+            batch_files.sort_by_key(|file| file.raw());
+            batch_files.dedup();
+            bonsai_diagnostics::debug_log!(
+                "security-phase",
+                "building scoped semantic graph batch {}/{} groups={} funcs={} files={}",
+                batch_number + 1,
+                batch_indices.len(),
+                batch.len(),
+                batch_funcs.len(),
+                batch_files.len()
+            );
+            let batch_idg = build_idg_service_for_rulepack_for_files(
+                ws,
+                pack,
+                &transfer_languages,
+                &batch_files,
+                &batch_funcs,
+                chain_call_graph.as_ref(),
+            );
+            groups.extend(run_group_indices(batch, batch_idg.as_ref()));
         }
         groups
+    } else {
+        let Some(global_idg) = idg.as_ref() else {
+            return out;
+        };
+        let all_indices: Vec<usize> = (0..scheduled_source_groups.len()).collect();
+        run_group_indices(&all_indices, global_idg.as_ref())
     };
     let parallel_out: Vec<FindingWithChain> = parallel_groups.into_iter().flatten().collect();
     out.extend(parallel_out);
@@ -7343,6 +7517,7 @@ fn summary_event_outputs(events: &[FlowEvent]) -> bool {
 struct SinkTargetNodes {
     nodes: Vec<bonsai_idg::WsNodeId>,
     complete: bool,
+    unresolved_funcs: AHashSet<FuncId>,
 }
 
 fn sink_target_nodes_for_funcs(
@@ -7355,6 +7530,9 @@ fn sink_target_nodes_for_funcs(
     sorted_sink_funcs.sort_by_key(|func| func.raw());
     let mut out = Vec::new();
     let mut complete = true;
+    let mut unresolved_funcs = AHashSet::new();
+    let mut unresolved_rules: AHashMap<String, usize> = AHashMap::new();
+    let mut unresolved_samples: Vec<String> = Vec::new();
     for sink_func in sorted_sink_funcs {
         let Some(sinks) = sink_by_func.get(&sink_func) else {
             continue;
@@ -7371,13 +7549,41 @@ fn sink_target_nodes_for_funcs(
             }
             if nodes.is_empty() {
                 complete = false;
+                unresolved_funcs.insert(sink_func);
+                *unresolved_rules.entry(sink.rule_id.clone()).or_default() += 1;
+                if unresolved_samples.len() < 12 {
+                    unresolved_samples.push(format!(
+                        "{} func={} {}:{}:{} text={}",
+                        sink.rule_id,
+                        sink_func.raw(),
+                        sink.file,
+                        sink.line,
+                        sink.column,
+                        sink.match_text
+                    ));
+                }
             }
             out.append(&mut nodes);
         }
     }
     out.sort();
     out.dedup();
-    SinkTargetNodes { nodes: out, complete }
+    if !unresolved_rules.is_empty() {
+        let mut top_rules: Vec<(String, usize)> = unresolved_rules.into_iter().collect();
+        top_rules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_rules.truncate(12);
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "sink target unresolved top_rules={:?} samples={:?}",
+            top_rules,
+            unresolved_samples
+        );
+    }
+    SinkTargetNodes {
+        nodes: out,
+        complete,
+        unresolved_funcs,
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
@@ -7801,7 +8007,7 @@ fn exact_source_seed_graph(
     config: &InterTaintConfig,
     db: &bonsai_db::AnalyzerDb,
     _caches: &InterTaintCaches,
-    ws: &Workspace,
+    idg: &bonsai_idg::IdgQueryService,
     source_anchor: Option<bonsai_common::Span>,
     output_arg_names: &[String],
     target_nodes: Option<&[bonsai_idg::WsNodeId]>,
@@ -7820,9 +8026,6 @@ fn exact_source_seed_graph(
     // a closure post-pass so receiver-state inheritance survives
     // the migration without hardcoding mutator method names in the
     // IDG transfer pass.
-    let idg = db
-        .idg_service()
-        .unwrap_or_else(|| ws.build_and_seed_idg_service());
     bonsai_taint::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
         source_func,
         seeds,
@@ -7836,7 +8039,7 @@ fn exact_source_seed_graph(
         lineage_funcs,
         config.max_edge_precision,
         db,
-        idg.as_ref(),
+        idg,
     )
 }
 
@@ -14604,6 +14807,41 @@ fn seed_idg_service_for_rulepack_for_files(
         options.include_field_argument_forwarding
     );
     ws.build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
+        &options,
+        included_files,
+        included_funcs,
+        call_graph,
+    )
+}
+
+fn build_idg_service_for_rulepack_for_files(
+    ws: &Workspace,
+    pack: &Rulepack,
+    languages: &AHashSet<String>,
+    included_files: &[FileId],
+    included_funcs: &[FuncId],
+    call_graph: &bonsai_callgraph::ResolvedCallGraph,
+) -> Arc<bonsai_idg::IdgQueryService> {
+    let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
+    let source_outputs = source_output_args_from_rulepack_for_languages(pack, languages);
+    let source_callbacks = source_callback_args_from_rulepack_for_languages(pack, languages);
+    let mut options =
+        idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs, &source_callbacks);
+    let large_java_scope = languages.contains("java") && included_funcs.len() > 1_000;
+    options.include_receiver_method_propagation = !large_java_scope;
+    if large_java_scope {
+        options.include_field_argument_forwarding = false;
+    }
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "semantic graph transfer options large_java_scope={} languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={}",
+        large_java_scope,
+        languages.len(),
+        included_funcs.len(),
+        options.include_receiver_method_propagation,
+        options.include_field_argument_forwarding
+    );
+    ws.build_idg_service_with_transfer_options_for_files_and_call_graph(
         &options,
         included_files,
         included_funcs,
