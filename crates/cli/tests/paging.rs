@@ -753,6 +753,63 @@ fn every_command_tokens_used_reported_under_budget() {
 }
 
 #[test]
+fn dump_ast_json_context_pages_large_single_file_by_lines() {
+    let tmp = empty_temp_ws("dump-ast-large-json");
+    let file = tmp.path().join("large.py");
+    let mut source = String::from("def generated(request):\n");
+    for idx in 0..2500 {
+        source.push_str(&format!("    value_{idx} = request\n"));
+    }
+    source.push_str("    return value_2499\n");
+    std::fs::write(&file, source).expect("write large AST fixture");
+
+    let Some(out) = run(&[
+        "dump-ast",
+        tmp.path().to_str().unwrap(),
+        "--file",
+        "large.py",
+        "--format",
+        "json",
+        "--context",
+        "1024",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value =
+        serde_json::from_str(&out).expect("dump-ast JSON must stay parseable under context cap");
+    let page = v
+        .get("page")
+        .and_then(serde_json::Value::as_object)
+        .expect("large dump-ast JSON should emit page metadata");
+    let used = page
+        .get("tokens_used")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let budget = page
+        .get("budget")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let ceiling = budget + budget / 20;
+    assert!(
+        used <= ceiling,
+        "dump-ast JSON tokens_used {used} exceeds budget {budget}: output head:\n{}",
+        &out[..out.len().min(800)]
+    );
+    assert!(
+        v.get("json_lines")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|lines| !lines.is_empty()),
+        "large dump-ast JSON should page by JSON lines, got:\n{}",
+        &out[..out.len().min(800)]
+    );
+    assert_eq!(
+        v.get("analysis_complete").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "large dump-ast JSON should report incomplete page without --all"
+    );
+}
+
+#[test]
 fn every_command_page_object_has_cursor_and_is_last() {
     // Every paged run must emit the full cursor protocol so agents
     // can walk pages without guessing: `cursor` (always), `is_last`
@@ -1075,6 +1132,26 @@ fn isolated_complex_ws(tag: &str) -> TempWorkspace {
                 copy_workspace_tree(&complex_ws(), &path);
                 return TempWorkspace { path };
             }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => panic!("create temp workspace {}: {err}", path.display()),
+        }
+    }
+    panic!("could not allocate temp workspace under {}", base.display());
+}
+
+fn empty_temp_ws(tag: &str) -> TempWorkspace {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let base = std::env::temp_dir();
+    for attempt in 0..100 {
+        let path = base.join(format!(
+            "bonsai-paging-{tag}-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return TempWorkspace { path },
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => panic!("create temp workspace {}: {err}", path.display()),
         }

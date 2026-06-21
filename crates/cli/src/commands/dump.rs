@@ -298,7 +298,11 @@ pub(crate) fn cmd_dump_ast(
     let cost = |d: &bonsai_sdk::AstFileDump| (d.path.len() + node_count(&d.root) * 180) as u64;
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
-            emit_json_paged_cached(root_dir, &file_dumps, &paging_cfg, "dump-ast", filters_hash, cost)?;
+            if paging_cfg.json_wrapped() {
+                emit_json_value_paged_cached(root_dir, &file_dumps, &paging_cfg, "dump-ast", filters_hash)?;
+            } else {
+                emit_json_paged_cached(root_dir, &file_dumps, &paging_cfg, "dump-ast", filters_hash, cost)?;
+            }
         }
         BrowseFormat::Text => {
             let (shown, truncated) = apply_text_limit(&file_dumps, effective_limit(limit, &paging_cfg));
