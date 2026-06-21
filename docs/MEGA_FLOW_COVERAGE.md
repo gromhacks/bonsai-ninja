@@ -27,7 +27,10 @@ imports/includes, call and string refs, per-language `FlowEvent`
 families, resolved call edges, reachable facts, argument/write refs,
 import/symbol alias maps where the fixture uses aliases, assignment
 chains, and intraprocedural taint. Dedicated cross-file and assignment
-audit tests pin the source-to-sink chains across all 21 languages. The
+audit tests pin source-to-sink chains across all 21 adapters. This is an
+engine/adapter correctness fixture, not a promise that every language
+shares the same security taxonomy: Solidity remains a smart-contract
+analysis pack rather than an app/web taint-family parity pack. The
 complete release-binary CLI/switch sweep lives in
 `scripts/validate-mega-cli.py`; it runs every command family, output mode,
 public switch, stable-id drilldown, and cache command against every

@@ -17,6 +17,10 @@ behavioural contract; cross-cutting details live in
 1. Parse 21 languages: C, C++, C#, Dart, Elixir, Erlang, Go, Java,
    JavaScript, Kotlin, Lua, Objective-C, Perl, PHP, Python, Ruby, Rust,
    Scala, Solidity, Swift, TypeScript.
+   Security rule coverage is intentionally split: the canonical app/web
+   taint taxonomy applies to the general-purpose languages, while
+   Solidity uses a smart-contract taxonomy and is not scored as a web
+   source/sink/sanitizer parity language.
 2. Produce a step-by-step trace that crosses files and modules.
 3. Make the primary output machine-consumable JSON with a stable schema;
    render text / DOT / SARIF on top.

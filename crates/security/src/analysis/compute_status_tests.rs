@@ -44,6 +44,14 @@ fn validation_rule_from_yaml(yaml: &str) -> Rule {
 }
 
 #[test]
+fn pack_audit_security_model_marks_solidity_as_smart_contract() {
+    assert_eq!(security_model_for_lang("solidity"), "smart-contract");
+    assert!(!canonical_sink_audit_applies("solidity"));
+    assert_eq!(security_model_for_lang("java"), "app-web-taint");
+    assert!(canonical_sink_audit_applies("java"));
+}
+
+#[test]
 fn strict_source_text_matching_does_not_seed_receivers_or_siblings() {
     assert!(security_text_matches_source_strict("os.getenv", "os.getenv"));
     assert!(security_text_matches_source_strict("getenv", "os.getenv"));

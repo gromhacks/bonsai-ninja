@@ -36,7 +36,7 @@ pub use analysis::{
     normalise_family, pack_audit, pack_inventory, pack_tree, pack_tree_for_rules, rule_family,
     run_source_analysis, run_source_analysis_with_phase_progress, run_source_analysis_with_progress,
     run_taint_analysis, run_taint_analysis_with_phase_progress, run_taint_analysis_with_progress,
-    sanitizer_inventory, sanitizer_inventory_with_progress, security_match_rows,
+    sanitizer_inventory, sanitizer_inventory_with_progress, security_match_rows, security_model_for_lang,
     seed_idg_service_for_rulepack, select_pack_rules, select_rules, sink_inventory,
     sink_inventory_with_progress, source_inventory, source_inventory_with_progress,
     source_rule_matches_filters, taint_transfers_from_rulepack, tree_file_rel, validate_pack,

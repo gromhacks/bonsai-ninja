@@ -6,9 +6,12 @@ A code intelligence engine for the whole development lifecycle. Map a
 codebase, debug across files, and run security analysis at scale from a
 single binary, with no cloud upload, no hosted backend, and no paywall.
 
-bonsai-ninja supports 21 languages out of the box: C, C++, C#, Dart,
-Elixir, Erlang, Go, Java, JavaScript, Kotlin, Lua, Objective-C, Perl,
-PHP, Python, Ruby, Rust, Scala, Solidity, Swift, and TypeScript.
+bonsai-ninja supports 21 parser/navigation adapters out of the box: C,
+C++, C#, Dart, Elixir, Erlang, Go, Java, JavaScript, Kotlin, Lua,
+Objective-C, Perl, PHP, Python, Ruby, Rust, Scala, Solidity, Swift, and
+TypeScript. Security analysis intentionally splits that surface into 20
+general-purpose app/web taint rulepacks plus a Solidity smart-contract
+rulepack with its own on-chain taxonomy.
 
 ## More Than A Security Tool
 
@@ -129,8 +132,12 @@ surface syntax.
 - **Standards-conformant SARIF 2.1.0.** `security taint-analysis
   --format sarif` emits code flows, taxa, regions, and stable metadata
   for SARIF consumers.
-- **21 languages on day one.** Python, JavaScript, TypeScript, Go, Java,
-  Kotlin, Rust, C, C++, C#, Ruby, PHP, Swift, Scala, Solidity, and more.
+- **21 parser adapters on day one.** Python, JavaScript, TypeScript, Go,
+  Java, Kotlin, Rust, C, C++, C#, Ruby, PHP, Swift, Scala, Solidity, and
+  more. The app/web taint taxonomy applies to the general-purpose
+  languages; Solidity uses smart-contract rules for reentrancy,
+  delegatecall, selfdestruct, oracle, randomness, token, and access
+  control hazards.
 
 ## Honest About Where We Are
 
@@ -322,6 +329,7 @@ Full API notes live in [docs/contributing/sdk.mdx](docs/contributing/sdk.mdx).
 - Rule authoring: [docs/rule-authoring-tutorial.mdx](docs/rule-authoring-tutorial.mdx)
 - Pattern guide: [docs/pattern-guide.mdx](docs/pattern-guide.mdx)
 - Security spec: [docs/security-spec.mdx](docs/security-spec.mdx)
+- Solidity support: [docs/solidity-support.mdx](docs/solidity-support.mdx)
 - Contributor docs: [docs/contributing/contributing.mdx](docs/contributing/contributing.mdx)
 - Coverage baselines: [docs/COVERAGE_BASELINE.md](docs/COVERAGE_BASELINE.md),
   [docs/TAINT_COVERAGE_MATRIX.md](docs/TAINT_COVERAGE_MATRIX.md), and

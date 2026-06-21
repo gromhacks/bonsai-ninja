@@ -2954,7 +2954,11 @@ fn pack_audit_marks_solidity_as_ecosystem_specific() {
     assert!(out.contains("\"language\": \"solidity\""), "got:\n{out}");
     assert!(
         out.contains("\"canonical_sink_families_applicable\": false"),
-        "solidity should be marked outside the canonical web-family audit:\n{out}"
+        "solidity should be marked outside the canonical app/web audit:\n{out}"
+    );
+    assert!(
+        out.contains("\"security_model\": \"smart-contract\""),
+        "solidity should report the smart-contract security model:\n{out}"
     );
 }
 
