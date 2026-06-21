@@ -2134,6 +2134,340 @@ class App {
 }
 
 #[test]
+fn java_htmlutils_assignment_output_sanitizes_responseentity_html_body() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let ws = workspace(&[(
+        "/app/SearchController.java",
+        r#"
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.util.HtmlUtils;
+
+@RestController
+class SearchController {
+  @GetMapping(value = "/search", produces = MediaType.TEXT_HTML_VALUE)
+  public ResponseEntity<String> search(@RequestParam("q") String q) {
+    String safe = HtmlUtils.htmlEscape(q == null ? "" : q);
+    String body = "<!doctype html><body><h1>Results for: " + safe + "</h1></body>";
+    return ResponseEntity.ok(body);
+  }
+}
+"#,
+    )]);
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "java.xss.spring_responseentity_ok_html_concat"),
+        "HTML-escaped ResponseEntity body should be hidden by default as sanitized: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let finding = explicit_report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "java.xss.spring_responseentity_ok_html_concat")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected sanitized XSS finding, got {:#?}",
+                explicit_report.findings
+            )
+        });
+    assert_eq!(finding.finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "java.sanitizer.spring_htmlutils"),
+        "expected HtmlUtils sanitizer evidence, got {:#?}",
+        finding.finding.sanitizers_seen
+    );
+
+    let unsafe_ws = workspace(&[(
+        "/app/SearchController.java",
+        r#"
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+class SearchController {
+  @GetMapping(value = "/search", produces = MediaType.TEXT_HTML_VALUE)
+  public ResponseEntity<String> search(@RequestParam("q") String q) {
+    String body = "<!doctype html><body><h1>Results for: " + q + "</h1></body>";
+    return ResponseEntity.ok(body);
+  }
+}
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        unsafe_report
+            .findings
+            .iter()
+            .any(
+                |finding| finding.finding.sink.rule_id == "java.xss.spring_responseentity_ok_html_concat"
+                    && finding.finding.status == FindingStatus::Unsanitized
+            ),
+        "raw ResponseEntity body must remain an unsanitized finding: {:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
+fn java_same_origin_path_guard_sanitizes_spring_redirect_headers() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let ws = workspace(&[(
+        "/app/RedirController.java",
+        r#"
+import java.net.URI;
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+class RedirController {
+  @GetMapping("/return")
+  public ResponseEntity<Void> bounce(@RequestParam("next") String next) {
+    if (next == null || !next.startsWith("/") || next.startsWith("//")) next = "/";
+    HttpHeaders h = new HttpHeaders();
+    h.setLocation(URI.create(next));
+    return new ResponseEntity<>(h, HttpStatus.FOUND);
+  }
+}
+"#,
+    )]);
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.iter().all(|finding| {
+            !matches!(
+                finding.finding.sink.rule_id.as_str(),
+                "java.open_redirect.spring_httpheaders_setlocation"
+                    | "java.open_redirect.spring_responseentity_redirect_headers"
+            )
+        }),
+        "same-origin redirect guard should hide sanitized redirect findings by default: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    for rule_id in [
+        "java.open_redirect.spring_httpheaders_setlocation",
+        "java.open_redirect.spring_responseentity_redirect_headers",
+    ] {
+        let finding = explicit_report
+            .findings
+            .iter()
+            .find(|finding| finding.finding.sink.rule_id == rule_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected sanitized {rule_id}, got {:#?}",
+                    explicit_report.findings
+                )
+            });
+        assert_eq!(finding.finding.status, FindingStatus::Sanitized, "{finding:#?}");
+        assert!(
+            finding
+                .finding
+                .sanitizers_seen
+                .iter()
+                .any(|sanitizer| { sanitizer.rule_id == "java.sanitizer.same_origin_path_startswith_slash" }),
+            "expected same-origin path guard evidence for {rule_id}, got {:#?}",
+            finding.finding.sanitizers_seen
+        );
+    }
+
+    let unsafe_ws = workspace(&[(
+        "/app/RedirController.java",
+        r#"
+import java.net.URI;
+import org.springframework.http.*;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+class RedirController {
+  @GetMapping("/return")
+  public ResponseEntity<Void> bounce(@RequestParam("next") String next) {
+    HttpHeaders h = new HttpHeaders();
+    h.setLocation(URI.create(next));
+    return new ResponseEntity<>(h, HttpStatus.FOUND);
+  }
+}
+"#,
+    )]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        unsafe_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "java.open_redirect.spring_httpheaders_setlocation"
+                && finding.finding.status == FindingStatus::Unsanitized
+        }),
+        "unguarded redirect target must remain unsanitized: {:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
+fn typescript_host_allowlist_private_ip_guard_sanitizes_fetch_ssrf() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+    let ws = workspace(&[
+        (
+            "/src/routes/webhook.ts",
+            r#"
+import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { relay } from "../services/relay";
+
+export default async function (app: FastifyInstance) {
+  app.post("/webhook", async (req: FastifyRequest, reply: FastifyReply) => {
+    const host = String(req.headers["x-callback-host"] ?? "");
+    const path = String((req.body as any)?.path ?? "/ingest");
+    const body = await relay(host, path, req.body);
+    return reply.send({ relayed: true, body });
+  });
+}
+"#,
+        ),
+        (
+            "/src/services/relay.ts",
+            r#"
+import fetch from "node-fetch";
+import { lookup } from "node:dns/promises";
+import net from "node:net";
+
+const ALLOWED_HOSTS = new Set(["ingest.partner-a.com", "ingest.partner-b.com"]);
+
+export async function relay(host: string, path: string, body: unknown): Promise<string> {
+  if (!ALLOWED_HOSTS.has(host)) throw new Error("blocked: host");
+  const { address } = await lookup(host);
+  if (!net.isIP(address) || isPrivateOrLoopback(address)) throw new Error("blocked: ip");
+  const url = `https://${host}${path}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+    redirect: "manual",
+  });
+  return await resp.text();
+}
+
+function isPrivateOrLoopback(ip: string): boolean {
+  if (ip === "127.0.0.1" || ip === "::1") return true;
+  if (ip.startsWith("10.") || ip.startsWith("192.168.") ||
+      ip.startsWith("169.254.") || ip.startsWith("fc") || ip.startsWith("fd")) return true;
+  if (ip.startsWith("172.")) {
+    const o = parseInt(ip.split(".")[1], 10);
+    return o >= 16 && o <= 31;
+  }
+  return false;
+}
+"#,
+        ),
+    ]);
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "typescript.ssrf.node_fetch"),
+        "host allowlist/private-IP guard should hide sanitized fetch SSRF findings by default: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    let fetch_findings: Vec<_> = explicit_report
+        .findings
+        .iter()
+        .filter(|finding| finding.finding.sink.rule_id == "typescript.ssrf.node_fetch")
+        .collect();
+    assert!(!fetch_findings.is_empty(), "{:#?}", explicit_report.findings);
+    for finding in fetch_findings {
+        assert_eq!(finding.finding.status, FindingStatus::Sanitized, "{finding:#?}");
+        assert!(
+            finding
+                .finding
+                .sanitizers_seen
+                .iter()
+                .any(|sanitizer| sanitizer.rule_id == "typescript.sanitizer.allowed_hosts_set_has"),
+            "expected host allowlist evidence, got {:#?}",
+            finding.finding.sanitizers_seen
+        );
+    }
+
+    let unsafe_ws = workspace(&[
+        (
+            "/src/routes/webhook.ts",
+            r#"
+import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { relay } from "../services/relay";
+
+export default async function (app: FastifyInstance) {
+  app.post("/webhook", async (req: FastifyRequest, reply: FastifyReply) => {
+    const host = String(req.headers["x-callback-host"] ?? "");
+    return relay(host, "/ingest", req.body);
+  });
+}
+"#,
+        ),
+        (
+            "/src/services/relay.ts",
+            r#"
+import fetch from "node-fetch";
+
+export async function relay(host: string, path: string, body: unknown): Promise<string> {
+  const url = `https://${host}${path}`;
+  const resp = await fetch(url, { method: "POST", body: JSON.stringify(body ?? {}) });
+  return await resp.text();
+}
+"#,
+        ),
+    ]);
+    let unsafe_report =
+        run_taint_analysis(&unsafe_ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        unsafe_report.findings.iter().any(|finding| {
+            finding.finding.sink.rule_id == "typescript.ssrf.node_fetch"
+                && finding.finding.status == FindingStatus::Unsanitized
+        }),
+        "unguarded fetch target must remain unsanitized: {:#?}",
+        unsafe_report.findings
+    );
+}
+
+#[test]
 fn javascript_mongo_eq_filter_wrapper_is_sanitized() {
     let mut pack = constrained_call_sink_rulepack("javascript", "source", "Users.findOne");
     let js_pack = pack.packs.get_mut("javascript").expect("javascript pack");
