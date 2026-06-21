@@ -291,6 +291,12 @@ impl GlobalIndex {
             .map_or(&[][..], |decl_index| decl_index.defs.as_slice())
     }
 
+    /// The finalized per-file declaration index, including semantic
+    /// receiver-type enrichment applied by [`Self::finalize_semantic_facts`].
+    pub fn decl_index_in(&self, file: FileId) -> Option<&DeclIndex> {
+        self.by_file.get(&file)
+    }
+
     /// Function-shaped decls (functions, methods, constructors) in
     /// `file`. Used by call-graph construction and the matcher's
     /// receiver-type filter.

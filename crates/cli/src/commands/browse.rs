@@ -5,7 +5,7 @@
 //! `--page` opts into `{rows, page}` wrapping.
 
 use anyhow::Result;
-use bonsai_lang_api::FlowEvent;
+use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
 use bonsai_sdk::Workspace;
 use comfy_table::Cell;
 
@@ -17,7 +17,10 @@ use crate::progress;
 use crate::ui::{extension_for, Ui};
 use crate::{cli_println, ui};
 
-use super::{open_project_index_matching_literal, open_project_index_only as open_project};
+use super::{
+    open_project_index_matching_literal, open_project_index_only as open_project,
+    open_workspace_syntax_filtered_paths, open_workspace_syntax_only,
+};
 
 const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
 
@@ -95,6 +98,22 @@ pub(crate) fn cmd_defs(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.name.or(f.has_callee).or(f.has_param).or(f.has_decorator);
+    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    if matches!(format, BrowseFormat::Text)
+        && !f.regex
+        && matches!(paging_cfg.page, paging::PageArg::First)
+        && !paging_cfg.all
+        && prefilter_literal.is_none()
+        && (!flows || large_workspace)
+    {
+        let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
+        let (ws, _footer) = if include_filters.is_empty() {
+            open_workspace_syntax_only(root)?
+        } else {
+            open_workspace_syntax_filtered_paths(root, &include_filters, &[])?
+        };
+        return render_defs_streaming_first_page(&ws, f, limit, &paging_cfg, flows && large_workspace);
+    }
     let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
@@ -188,6 +207,120 @@ pub(crate) fn cmd_defs(
     Ok(())
 }
 
+fn render_defs_streaming_first_page(
+    ws: &bonsai_sdk::Workspace,
+    f: DefsFilters<'_>,
+    limit: usize,
+    paging_cfg: &paging::PagingConfig,
+    flows_omitted: bool,
+) -> Result<()> {
+    let budget_tokens = paging_cfg
+        .effective_budget()
+        .unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
+    let max_rows = effective_limit(limit, paging_cfg);
+    let u = ui();
+    let mut table = u.table(&["name", "kind", "location", "signature", "callees"]);
+    let mut rows_rendered = 0usize;
+    let mut tokens_used = 0u64;
+    let mut stopped_for_budget = false;
+
+    'files: for file_id in ws.vfs().all_files() {
+        let path = path_for_file_id(ws, file_id);
+        if f.file.is_some_and(|needle| !path.contains(needle)) {
+            continue;
+        }
+        let Some(index) = ws.db().decl_index_uncached(file_id) else {
+            continue;
+        };
+        let decorators_on_file: Option<Vec<String>> = f.has_decorator.map(|_| {
+            index
+                .refs
+                .iter()
+                .filter(|reference| reference.kind == RefKind::Decorator)
+                .map(|reference| reference.name.clone())
+                .collect()
+        });
+        for decl in &index.defs {
+            let kind = decl_kind_string(decl.kind);
+            if f.kind
+                .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
+            {
+                continue;
+            }
+            if f.name.is_some_and(|needle| !decl.name.contains(needle)) {
+                continue;
+            }
+            if let Some(needle) = f.has_callee {
+                let mut callees = Vec::new();
+                collect_callees(&decl.flow_events, &mut callees);
+                if !callees.iter().any(|callee| callee.contains(needle)) {
+                    continue;
+                }
+            }
+            if let Some(needle) = f.has_decorator {
+                let decorators = decorators_on_file.as_deref().unwrap_or(&[]);
+                if !decorators.iter().any(|name| name.contains(needle)) {
+                    continue;
+                }
+            }
+            if let Some(needle) = f.has_param {
+                if !decl.params.iter().any(|param| param.contains(needle)) {
+                    continue;
+                }
+            }
+            let (line, column) = line_col_for_span(ws, decl.name_span);
+            let display_params = dedup_sigil_params(&decl.params);
+            let signature = if display_params.is_empty() {
+                format!("{}()", decl.name)
+            } else {
+                format!("{}({})", decl.name, display_params.join(", "))
+            };
+            let loc = format!("{}:{}:{}", short_file(&path), line, column);
+            let callees_cell = summarize_callees(decl, 3);
+            let row_cost = browse_table_row_cost(&[
+                decl.name.len(),
+                kind.len(),
+                loc.len(),
+                signature.len(),
+                callees_cell.len(),
+            ]);
+            let row_tokens = paging::bytes_to_tokens(row_cost);
+            if rows_rendered > 0
+                && (tokens_used.saturating_add(row_tokens) > budget_tokens
+                    || (max_rows != 0 && rows_rendered >= max_rows))
+            {
+                stopped_for_budget = true;
+                break 'files;
+            }
+            tokens_used = tokens_used.saturating_add(row_tokens);
+            table.add_row(vec![
+                Cell::new(u.name(&decl.name)),
+                Cell::new(u.kind(&kind)),
+                Cell::new(u.path(&loc)),
+                Cell::new(u.snippet(&signature, extension_for(&path))),
+                Cell::new(u.dim(&callees_cell)),
+            ]);
+            rows_rendered += 1;
+        }
+    }
+
+    cli_println!("{table}");
+    if stopped_for_budget {
+        cli_println!(
+            "{}",
+            u.dim(&format!(
+                "({rows_rendered} definitions shown; more matches exist, narrow with --file/--name/--kind or use --all/JSON for exhaustive output)"
+            ))
+        );
+    } else {
+        cli_println!("{}", u.dim(&format!("({rows_rendered} definitions)")));
+    }
+    if flows_omitted {
+        render_large_workspace_flows_omitted_notice(u);
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_entrypoints(
     root: &std::path::Path,
     f: EntryPointsFilters<'_>,
@@ -195,6 +328,19 @@ pub(crate) fn cmd_entrypoints(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    if matches!(format, BrowseFormat::Text)
+        && !f.regex
+        && matches!(paging_cfg.page, paging::PageArg::First)
+        && !paging_cfg.all
+        && large_workspace
+        && f.file.is_none()
+        && f.name.is_none()
+        && f.kind.is_none()
+    {
+        let (ws, _footer) = open_workspace_syntax_only(root)?;
+        return render_entrypoints_streaming_first_page(&ws, f, limit, &paging_cfg);
+    }
     let (project, _footer) = open_project(root)?;
     let out = project
         .browse()
@@ -270,6 +416,115 @@ pub(crate) fn cmd_entrypoints(
         }
     }
     Ok(())
+}
+
+fn render_entrypoints_streaming_first_page(
+    ws: &bonsai_sdk::Workspace,
+    f: EntryPointsFilters<'_>,
+    limit: usize,
+    paging_cfg: &paging::PagingConfig,
+) -> Result<()> {
+    let budget_tokens = paging_cfg
+        .effective_budget()
+        .unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
+    let max_rows = effective_limit(limit, paging_cfg);
+    let u = ui();
+    let mut table = u.table(&["name", "kind", "location", "signature", "callees", "reason"]);
+    let mut rows_rendered = 0usize;
+    let mut tokens_used = 0u64;
+    let mut stopped_for_budget = false;
+
+    'files: for file_id in ws.vfs().all_files() {
+        let path = path_for_file_id(ws, file_id);
+        if f.file.is_some_and(|needle| !path.contains(needle)) {
+            continue;
+        }
+        let Some(index) = ws.db().decl_index_uncached(file_id) else {
+            continue;
+        };
+        for decl in &index.defs {
+            if !is_callable_entry_candidate_kind(decl.kind) {
+                continue;
+            }
+            let kind = decl_kind_string(decl.kind);
+            if f.kind
+                .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
+            {
+                continue;
+            }
+            if f.name.is_some_and(|needle| {
+                !decl.name.contains(needle)
+                    && !decl
+                        .qualified_name
+                        .as_deref()
+                        .is_some_and(|qualified| qualified.contains(needle))
+            }) {
+                continue;
+            }
+            let (line, column) = line_col_for_span(ws, decl.name_span);
+            let display_params = dedup_sigil_params(&decl.params);
+            let signature = if display_params.is_empty() {
+                format!("{}()", decl.name)
+            } else {
+                format!("{}({})", decl.name, display_params.join(", "))
+            };
+            let loc = format!("{}:{}:{}", short_file(&path), line, column);
+            let callees = summarize_callees(decl, 4);
+            let reason = "semantic_callers_not_loaded";
+            let row_cost = browse_table_row_cost(&[
+                decl.name.len(),
+                kind.len(),
+                loc.len(),
+                signature.len(),
+                callees.len(),
+                reason.len(),
+            ]);
+            let row_tokens = paging::bytes_to_tokens(row_cost);
+            if rows_rendered > 0
+                && (tokens_used.saturating_add(row_tokens) > budget_tokens
+                    || (max_rows != 0 && rows_rendered >= max_rows))
+            {
+                stopped_for_budget = true;
+                break 'files;
+            }
+            tokens_used = tokens_used.saturating_add(row_tokens);
+            table.add_row(vec![
+                Cell::new(u.name(&decl.name)),
+                Cell::new(u.kind(&kind)),
+                Cell::new(u.path(&loc)),
+                Cell::new(u.snippet(&signature, extension_for(&path))),
+                Cell::new(u.dim(&callees)),
+                Cell::new(u.dim(reason)),
+            ]);
+            rows_rendered += 1;
+        }
+    }
+
+    cli_println!("{table}");
+    if stopped_for_budget {
+        cli_println!(
+            "{}",
+            u.dim(&format!(
+                "({rows_rendered} entrypoint candidates shown; more matches exist, narrow with --file/--name/--kind or use --all/JSON for exact semantic entrypoints)"
+            ))
+        );
+    } else {
+        cli_println!("{}", u.dim(&format!("({rows_rendered} entrypoint candidates)")));
+    }
+    cli_println!(
+        "{}",
+        u.dim(
+            "semantic caller exclusion omitted for this large-workspace first page; use --all/JSON or a narrower filter for exact entrypoints"
+        )
+    );
+    Ok(())
+}
+
+fn is_callable_entry_candidate_kind(kind: DeclKind) -> bool {
+    matches!(
+        kind,
+        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+    )
 }
 
 /// Build a name → `&Decl` lookup used by browse commands that want to
@@ -941,6 +1196,28 @@ pub(crate) fn cmd_imports(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.module.or(f.alias);
+    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    if matches!(format, BrowseFormat::Text)
+        && !f.regex
+        && matches!(paging_cfg.page, paging::PageArg::First)
+        && !paging_cfg.all
+        && (!flows || large_workspace)
+    {
+        let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
+        let (ws, _footer) = if include_filters.is_empty() {
+            open_workspace_syntax_only(root)?
+        } else {
+            open_workspace_syntax_filtered_paths(root, &include_filters, &[])?
+        };
+        return render_imports_streaming_first_page(
+            root,
+            &ws,
+            f,
+            limit,
+            &paging_cfg,
+            flows && large_workspace,
+        );
+    }
     let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
@@ -1056,6 +1333,168 @@ pub(crate) fn cmd_imports(
         }
     }
     Ok(())
+}
+
+fn render_imports_streaming_first_page(
+    _root: &std::path::Path,
+    ws: &bonsai_sdk::Workspace,
+    f: ImportsFilters<'_>,
+    limit: usize,
+    paging_cfg: &paging::PagingConfig,
+    flows_omitted: bool,
+) -> Result<()> {
+    let module_matches = |module: &str| -> bool { f.module.is_none_or(|needle| module.contains(needle)) };
+    let budget = paging_cfg.effective_budget();
+    let budget_tokens = budget.unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
+    let max_rows = effective_limit(limit, paging_cfg);
+    let u = ui();
+    let headers = ["module", "symbol", "alias", "kind", "location", "code"];
+    let mut table = u.table(&headers);
+    let mut rows_rendered = 0usize;
+    let mut rows_seen = 0usize;
+    let mut tokens_used = 0u64;
+    let mut stopped_for_budget = false;
+    let mut last_code: Option<String> = None;
+
+    'files: for file_id in ws.vfs().all_files() {
+        let path = path_for_file_id(ws, file_id);
+        if f.file.is_some_and(|needle| !path.contains(needle)) {
+            continue;
+        }
+        let Some(import_index) = ws.db().import_index_uncached(file_id) else {
+            continue;
+        };
+        for imp in import_index.imports {
+            if imp.scope.is_local() {
+                continue;
+            }
+            if !module_matches(&imp.module) {
+                continue;
+            }
+            if let Some(needle) = f.alias {
+                if !imp.alias.as_deref().is_some_and(|a| a.contains(needle)) {
+                    continue;
+                }
+            }
+            if f.wildcard && !imp.is_wildcard {
+                continue;
+            }
+            rows_seen += 1;
+            let line = line_for_span(ws, file_id, imp.span);
+            let alias = imp.alias.clone().unwrap_or_else(|| "-".to_string());
+            let symbol = imp.original_name.clone().unwrap_or_else(|| "-".to_string());
+            let kind = if imp.is_wildcard { "wildcard" } else { "named" };
+            let loc = format!("{}:{}", short_file(&path), line);
+            let line_text = read_line_by_file_id(ws, file_id, line);
+            let row_cost =
+                browse_table_row_cost(&[imp.module.len(), symbol.len(), alias.len(), kind.len(), loc.len()])
+                    .saturating_add(wrapped_table_cell_cost(line_text.len().min(4_000)));
+            let row_tokens = paging::bytes_to_tokens(row_cost);
+            if rows_rendered > 0
+                && (tokens_used.saturating_add(row_tokens) > budget_tokens
+                    || (max_rows != 0 && rows_rendered >= max_rows))
+            {
+                stopped_for_budget = true;
+                break 'files;
+            }
+            tokens_used = tokens_used.saturating_add(row_tokens);
+            let ext = extension_for(&path);
+            let code_render = fold_repeated_code(&line_text, &mut last_code);
+            let code_cell = if code_render == "↑ same" {
+                Cell::new(u.dim(&code_render))
+            } else {
+                Cell::new(u.snippet(&code_render, ext))
+            };
+            table.add_row(vec![
+                Cell::new(u.name(&imp.module)),
+                Cell::new(u.dim(&symbol)),
+                Cell::new(u.dim(&alias)),
+                Cell::new(u.kind(kind)),
+                Cell::new(u.path(&loc)),
+                code_cell,
+            ]);
+            rows_rendered += 1;
+        }
+    }
+
+    cli_println!("{table}");
+    if stopped_for_budget {
+        cli_println!(
+            "{}",
+            u.dim(&format!(
+                "({rows_rendered} imports shown; more matches exist, narrow with --file/--module/--alias or use --all/JSON for exhaustive output)"
+            ))
+        );
+    } else {
+        cli_println!("{}", u.dim(&format!("({rows_rendered} imports)")));
+    }
+    if rows_seen > rows_rendered && !stopped_for_budget {
+        render_truncation_notice(rows_rendered, Some(rows_seen - rows_rendered));
+    }
+    if flows_omitted {
+        render_large_workspace_flows_omitted_notice(u);
+    }
+    Ok(())
+}
+
+fn path_for_file_id(ws: &bonsai_sdk::Workspace, file_id: bonsai_common::FileId) -> String {
+    ws.vfs()
+        .path(file_id)
+        .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string())
+}
+
+fn line_col_for_span(ws: &bonsai_sdk::Workspace, span: bonsai_common::Span) -> (u32, u32) {
+    ws.vfs()
+        .snapshot(span.file)
+        .ok()
+        .map(|snapshot| {
+            let line_col = bonsai_common::SpanMap::new(snapshot.text.as_ref()).line_col(span.start);
+            (line_col.line, line_col.column)
+        })
+        .unwrap_or((0, 0))
+}
+
+fn decl_kind_string(kind: DeclKind) -> String {
+    format!("{kind:?}").to_lowercase()
+}
+
+fn render_large_workspace_flows_omitted_notice(u: &Ui) {
+    cli_println!(
+        "{}",
+        u.dim(
+            "flows column omitted for this large-workspace first page; use --all for exhaustive flow-annotated rows or inspect a narrower target"
+        )
+    );
+}
+
+fn read_line_by_file_id(ws: &bonsai_sdk::Workspace, file_id: bonsai_common::FileId, line: u32) -> String {
+    ws.vfs()
+        .snapshot(file_id)
+        .ok()
+        .and_then(|snapshot| {
+            snapshot
+                .text
+                .lines()
+                .nth(line.saturating_sub(1) as usize)
+                .map(|line| line.trim_end().to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn line_for_span(
+    ws: &bonsai_sdk::Workspace,
+    file_id: bonsai_common::FileId,
+    span: bonsai_common::Span,
+) -> u32 {
+    ws.vfs()
+        .snapshot(file_id)
+        .ok()
+        .map(|snapshot| {
+            bonsai_common::SpanMap::new(snapshot.text.as_ref())
+                .line_col(span.start)
+                .line
+        })
+        .unwrap_or(0)
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -1505,6 +1944,22 @@ pub(crate) fn cmd_classes(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.name.or(f.has_method);
+    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
+    if matches!(format, BrowseFormat::Text)
+        && !f.regex
+        && matches!(paging_cfg.page, paging::PageArg::First)
+        && !paging_cfg.all
+        && prefilter_literal.is_none()
+        && (!flows || large_workspace)
+    {
+        let include_filters: Vec<String> = f.file.into_iter().map(str::to_string).collect();
+        let (ws, _footer) = if include_filters.is_empty() {
+            open_workspace_syntax_only(root)?
+        } else {
+            open_workspace_syntax_filtered_paths(root, &include_filters, &[])?
+        };
+        return render_classes_streaming_first_page(&ws, f, limit, &paging_cfg, flows && large_workspace);
+    }
     let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
@@ -1614,6 +2069,121 @@ pub(crate) fn cmd_classes(
                 },
             )?;
         }
+    }
+    Ok(())
+}
+
+fn render_classes_streaming_first_page(
+    ws: &bonsai_sdk::Workspace,
+    f: ClassesFilters<'_>,
+    limit: usize,
+    paging_cfg: &paging::PagingConfig,
+    flows_omitted: bool,
+) -> Result<()> {
+    let budget_tokens = paging_cfg
+        .effective_budget()
+        .unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
+    let max_rows = effective_limit(limit, paging_cfg);
+    let u = ui();
+    let mut table = u.table(&["name", "kind", "location", "#", "methods"]);
+    let mut rows_rendered = 0usize;
+    let mut tokens_used = 0u64;
+    let mut stopped_for_budget = false;
+
+    'files: for file_id in ws.vfs().all_files() {
+        let path = path_for_file_id(ws, file_id);
+        if f.file.is_some_and(|needle| !path.contains(needle)) {
+            continue;
+        }
+        let Some(index) = ws.db().decl_index_uncached(file_id) else {
+            continue;
+        };
+        for class in &index.defs {
+            if !matches!(
+                class.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+            ) {
+                continue;
+            }
+            let kind = decl_kind_string(class.kind);
+            if f.kind
+                .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
+            {
+                continue;
+            }
+            if f.name.is_some_and(|needle| !class.name.contains(needle)) {
+                continue;
+            }
+            let methods: Vec<String> = index
+                .defs
+                .iter()
+                .filter(|member| {
+                    matches!(
+                        member.kind,
+                        DeclKind::Method | DeclKind::Constructor | DeclKind::Function
+                    )
+                })
+                .filter(|member| member.parent == Some(class.symbol))
+                .map(|member| member.name.clone())
+                .collect();
+            if let Some(needle) = f.has_method {
+                if !methods.iter().any(|method| method.contains(needle)) {
+                    continue;
+                }
+            }
+            if let Some(min_count) = f.min_methods {
+                if methods.len() < min_count {
+                    continue;
+                }
+            }
+            let (line, _) = line_col_for_span(ws, class.name_span);
+            let loc = format!("{}:{}", short_file(&path), line);
+            let methods_cell = if methods.is_empty() {
+                u.dim("—")
+            } else {
+                let shown: Vec<String> = methods.iter().take(8).cloned().collect();
+                let rest = methods.len().saturating_sub(shown.len());
+                let mut s = shown.join("\n");
+                if rest > 0 {
+                    s.push_str(&format!("\n… +{rest} more"));
+                }
+                s
+            };
+            let row_cost =
+                browse_table_row_cost(&[class.name.len(), kind.len(), loc.len(), methods_cell.len(), 4]);
+            let row_tokens = paging::bytes_to_tokens(row_cost);
+            if rows_rendered > 0
+                && (tokens_used.saturating_add(row_tokens) > budget_tokens
+                    || (max_rows != 0 && rows_rendered >= max_rows))
+            {
+                stopped_for_budget = true;
+                break 'files;
+            }
+            tokens_used = tokens_used.saturating_add(row_tokens);
+            table.add_row(vec![
+                Cell::new(u.name(&class.name)),
+                Cell::new(u.kind(&kind)),
+                Cell::new(u.path(&loc)),
+                Cell::new(u.dim(&methods.len().to_string())),
+                Cell::new(methods_cell),
+            ]);
+            rows_rendered += 1;
+        }
+    }
+
+    cli_println!("{table}");
+    if stopped_for_budget {
+        cli_println!(
+            "{}",
+            u.dim(&format!(
+                "({rows_rendered} types shown; more matches exist, narrow with --file/--name/--kind or use --all/JSON for exhaustive output)"
+            ))
+        );
+    } else {
+        cli_println!("{}", u.dim(&format!("({rows_rendered} types)")));
+    }
+    if flows_omitted {
+        render_large_workspace_flows_omitted_notice(u);
     }
     Ok(())
 }

@@ -57,6 +57,17 @@ fn typescript_ws(source: &str) -> Workspace {
     ws
 }
 
+fn javascript_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.js".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 fn csharp_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
@@ -73,6 +84,17 @@ fn kotlin_ws(source: &str) -> Workspace {
     let ws = Workspace::new(registry);
     ws.vfs()
         .write("Handlers.kt".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn objc_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("Example.m".to_string(), Arc::<str>::from(source));
     for file in ws.vfs().all_files() {
         let _ = ws.db().decl_index(file);
         let _ = ws.db().import_index(file);
@@ -269,6 +291,69 @@ fn call_name_rule(id: &str, name: &str) -> Rule {
         ..Default::default()
     });
     rule
+}
+
+fn call_regex_rule_for_language(id: &str, language: &str, regex: &str) -> Rule {
+    let mut rule = base_rule(id, RuleKind::Sink, MatchKind::Call);
+    rule.language = language.to_string();
+    rule.match_spec.callee = Some(RuleTarget {
+        regex: Some(regex.to_string()),
+        ..Default::default()
+    });
+    rule
+}
+
+#[test]
+fn objc_uppercase_c_function_regex_matches_call_facts() {
+    let ws = objc_ws(
+        r#"
+void test(const void *input, unsigned char *digest) {
+    CC_MD5(input, 1, digest);
+}
+"#,
+    );
+    let rule = call_regex_rule_for_language("objc.test.cc_md5", "objc", "^CC_MD5(_Init|_Update|_Final)?$");
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "CC_MD5"),
+        "expected ObjC C function regex to match CC_MD5 call, got {matches:?}"
+    );
+}
+
+#[test]
+fn javascript_prisma_scoped_package_regex_matches_local_client_call() {
+    let ws = javascript_ws(
+        r#"
+const _u = require("@prisma/client");
+async function byId(prisma, id) {
+    return prisma.$queryRawUnsafe("SELECT * FROM users WHERE id = " + id);
+}
+"#,
+    );
+    let mut ungated = call_regex_rule_for_language(
+        "javascript.test.prisma_query_raw_unsafe",
+        "javascript",
+        r"^(?:this\.)?[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$",
+    );
+    if let Some(target) = ungated.match_spec.callee.as_mut() {
+        target.base_name_in = vec!["prisma".to_string()];
+    }
+    let ungated_matches = match_rule_against_facts(&ws, &ungated);
+    assert!(
+        ungated_matches
+            .iter()
+            .any(|m| m.match_text == "prisma.$queryRawUnsafe"),
+        "expected ungated Prisma regex to match local client call, got {ungated_matches:?}"
+    );
+
+    let mut rule = ungated;
+    rule.packages = vec!["@prisma/client".to_string()];
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "prisma.$queryRawUnsafe"),
+        "expected scoped package evidence to gate local Prisma client call, got {matches:?}"
+    );
 }
 
 #[test]

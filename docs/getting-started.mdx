@@ -93,12 +93,6 @@ For CI or scripts:
   --no-progress
 ```
 
-On very large workspaces, unscoped taint analysis fails fast rather than
-being killed by the OS or silently narrowing coverage. Use a real scope
-such as `--profile production`, `--file`, `--source`, `--sink`,
-`--trust`, `--severity`, or `--tag`. Set `BONSAI_ALLOW_BROAD_TAINT=1`
-only for an intentional exhaustive all-file audit.
-
 ## Read A Finding
 
 Each finding has a stable `S:` ID, a source rule, a sink rule, a status, and a primary `F:` flow ID. The source and sink show exact file, line, function, and rule metadata. The flow block shows the call path and the tainted argument at each hop.

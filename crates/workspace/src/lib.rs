@@ -1913,17 +1913,18 @@ impl Workspace {
         let canonical_root = canonical_workspace_root(root);
         self.inner.db.set_workspace_root(canonical_root.clone());
         let mut ingested = Vec::new();
-        let (files, skipped_minified) = read_supported_source_files(&canonical_root, &self.inner.registry)?;
-        for source in files {
-            let path = &source.path;
-            let old_id = self.inner.vfs.lookup(path);
-            let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
-            if let Some(prev) = old_id {
-                self.invalidate_after_file_change(prev);
-            }
-            *self.inner.reparse_counter.lock() += 1;
-            ingested.push(id);
-        }
+        let skipped_minified =
+            stream_supported_source_files(&canonical_root, &self.inner.registry, |source| {
+                let path = &source.path;
+                let old_id = self.inner.vfs.lookup(path);
+                let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+                if let Some(prev) = old_id {
+                    self.invalidate_after_file_change(prev);
+                }
+                *self.inner.reparse_counter.lock() += 1;
+                ingested.push(id);
+                Ok(())
+            })?;
         if skipped_minified > 0 {
             tracing::info!(
                 skipped = skipped_minified,
@@ -2814,6 +2815,72 @@ fn read_supported_source_files(
     registry: &LanguageRegistry,
 ) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
     read_supported_source_files_impl(canonical_root, registry, None, None)
+}
+
+fn stream_supported_source_files<F>(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+    mut on_file: F,
+) -> Result<usize, WorkspaceError>
+where
+    F: FnMut(SourceFileContent) -> Result<(), WorkspaceError>,
+{
+    let include_minified = include_minified();
+    let mut skipped_minified = 0usize;
+    let mut builder = ignore::WalkBuilder::new(canonical_root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .ignore(true)
+        .add_custom_ignore_filename(".bonsaiignore");
+    builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
+    let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
+    entries.sort_by(|a, b| a.path().cmp(b.path()));
+
+    for entry in entries {
+        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if registry.adapter_for_extension(ext).is_none() {
+            continue;
+        }
+        if !include_minified && path_looks_minified(path) {
+            tracing::debug!(path = %path.display(), "skipping minified file (filename)");
+            skipped_minified += 1;
+            continue;
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => continue,
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        };
+        if !include_minified && content_looks_minified(&text) {
+            tracing::debug!(path = %path.display(), "skipping minified file (content)");
+            skipped_minified += 1;
+            continue;
+        }
+        if content_has_extreme_structure_nesting(&text) {
+            tracing::debug!(path = %path.display(), "skipping file with extreme structure nesting");
+            skipped_minified += 1;
+            continue;
+        }
+        let hash = fnv1a_bytes64(text.as_bytes());
+        on_file(SourceFileContent {
+            path: path.to_path_buf(),
+            text,
+            hash,
+        })?;
+    }
+
+    Ok(skipped_minified)
 }
 
 fn read_supported_source_files_matching_literal(

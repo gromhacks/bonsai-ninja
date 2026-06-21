@@ -2641,17 +2641,21 @@ fn default_index_path_stays_structural_without_eager_dataflow_prewarm() {
 
 /// Receiver type enrichment must run after each adapter has finished
 /// language-specific type_alias / base-class extraction. The DB cache
-/// is the single shared indexing chokepoint used by inspect, trace,
+/// helper is the single shared indexing chokepoint used by cached
+/// `decl_index`, large-repo uncached scans, inspect, trace,
 /// source-analysis, security-analysis, export, and browse.
 #[test]
 fn db_applies_receiver_type_enrichment_centrally() {
     let root = repo_root();
     let db_lib = read(&root.join("crates/db/src/lib.rs"));
-    let body = function_body(&db_lib, "decl_index");
+    let body = function_body(&db_lib, "build_decl_index_uncached");
     assert!(
         body.contains("adapter.extract_declarations(file, ctx)")
+            && body.contains("apply_constructor_result_type_aliases")
+            && body.contains("apply_assign_value_kind")
+            && body.contains("apply_assign_call_result_types")
             && body.contains("apply_call_receiver_types"),
-        "AnalyzerDb::decl_index must enrich FlowEvent::Call::receiver_types after adapter extraction"
+        "AnalyzerDb::build_decl_index_uncached must centrally enrich FlowEvent::Call::receiver_types after adapter extraction"
     );
 }
 

@@ -220,9 +220,6 @@ source build path for that platform. See
 # Run the security taint analysis
 ./target/release/bonsai-ninja security ./my-app taint-analysis --profile production
 
-# Exhaustive unscoped audits on very large repos require an explicit opt-in
-BONSAI_ALLOW_BROAD_TAINT=1 ./target/release/bonsai-ninja security ./my-app taint-analysis
-
 # SARIF for code scanning
 ./target/release/bonsai-ninja security ./my-app taint-analysis --format sarif --output-path findings.sarif.json
 ```

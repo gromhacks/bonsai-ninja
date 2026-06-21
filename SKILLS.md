@@ -120,13 +120,6 @@ docs, scripts, deploy files, migrations, and language-specific test
 layouts. Use `--exclude-tests` alone when you want only the narrower
 test-path filter.
 
-On very large workspaces, unscoped `security <workspace>
-taint-analysis` fails fast rather than being killed or silently reducing
-coverage. Add a real scope (`--profile production`, `--file`,
-`--source`, `--sink`, `--trust`, `--severity`, or `--tag`). Use
-`BONSAI_ALLOW_BROAD_TAINT=1` only when you intentionally want the
-exhaustive all-file audit and have the memory/time budget for it.
-
 Inventory when needed:
 
 ```shell

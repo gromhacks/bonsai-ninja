@@ -2124,8 +2124,8 @@
   - name: busboy info filename
     code: |
       const _u = require("multer");
-      function demo(info: any) {
-        return info.filename;
+      function demo(file: any) {
+        return file.filename;
       }
-    expect_match_text: [info.filename]
+    expect_match_text: [file.filename]
   description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload - client-controlled names."

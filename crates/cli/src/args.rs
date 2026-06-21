@@ -2732,9 +2732,6 @@ pub(crate) enum SecurityAction {
                       # Tag narrowing (CWE / OWASP family)\n  \
                       $ bonsai-ninja security ./src taint-analysis --tag command-injection\n  \
                       \n  \
-                      # Force an exhaustive unscoped audit on very large repos\n  \
-                      $ BONSAI_ALLOW_BROAD_TAINT=1 bonsai-ninja security ./src taint-analysis\n  \
-                      \n  \
                       # JSON for CI / tooling, no row cap\n  \
                       $ bonsai-ninja security ./src taint-analysis --format json --all")
     )]

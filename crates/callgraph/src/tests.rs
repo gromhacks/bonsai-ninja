@@ -1281,6 +1281,63 @@ fn super_receiver_resolves_base_method_from_override_context() {
 }
 
 #[test]
+fn projected_receiver_type_wins_over_root_assigned_type() {
+    let file = FileId::new(1);
+    let repo = 1;
+    let audited = 2;
+    let repo_run = 3;
+    let audited_run = 4;
+    let mut global = GlobalIndex::new();
+
+    let repo_class = decl_with(file, repo, "Repository", DeclKind::Class, None, Vec::new());
+    let mut audited_class = decl_with(
+        file,
+        audited,
+        "AuditedRepository",
+        DeclKind::Class,
+        None,
+        Vec::new(),
+    );
+    audited_class.bases = vec!["Repository".to_string()];
+    let base_method = decl_with(file, repo_run, "Run", DeclKind::Method, Some(repo), Vec::new());
+    let override_method = with_params_and_types(
+        decl_with(
+            file,
+            audited_run,
+            "Run",
+            DeclKind::Method,
+            Some(audited),
+            vec![method_call(
+                file,
+                "a.Repository.Run",
+                "a.Repository",
+                &["Repository"],
+            )],
+        ),
+        &[("a", "AuditedRepository")],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![repo_class, audited_class, base_method, override_method],
+    );
+    global.finalize_semantic_facts();
+
+    let cg = build_graph(&global, |_| Some("go"));
+    let from = func_id_by_name_and_parent(&global, "Run", "AuditedRepository");
+    let to = func_id_by_name_and_parent(&global, "Run", "Repository");
+    let edges = cg.callees_of(from).collect::<Vec<_>>();
+    assert!(
+        edges.iter().any(|edge| edge.to == to),
+        "a.Repository.Run must resolve to Repository.Run, not the AuditedRepository override; got {edges:?}"
+    );
+    assert!(
+        !edges.iter().any(|edge| edge.to == from),
+        "projected receiver dispatch must not create a self-edge; got {edges:?}"
+    );
+}
+
+#[test]
 fn bare_method_call_without_adapter_implicit_receiver_does_not_fan_out() {
     let caller_file = FileId::new(1);
     let other_file = FileId::new(2);

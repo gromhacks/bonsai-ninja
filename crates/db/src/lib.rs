@@ -248,14 +248,23 @@ impl AnalyzerDb {
         let adapter = self.adapter_for(file)?;
         Some(self.adapter_context_with(|ctx| {
             let mut index = adapter.extract_declarations(file, ctx);
+            bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
+            bonsai_lang_api::apply_assign_value_kind(&mut index);
+            bonsai_lang_api::apply_assign_call_result_types(&mut index);
             bonsai_lang_api::apply_call_receiver_types_with_super_tokens(
                 &mut index,
                 adapter.capabilities().effective_super_receiver_tokens(),
             );
-            bonsai_lang_api::apply_assign_value_kind(&mut index);
-            bonsai_lang_api::apply_assign_call_result_types(&mut index);
             index
         }))
+    }
+
+    /// Build a declaration index for `file` without storing it in the
+    /// process cache. Broad syntax/rule scans use this streaming path
+    /// when they only need file-local facts and would otherwise retain
+    /// one `DeclIndex` per workspace file.
+    pub fn decl_index_uncached(&self, file: FileId) -> Option<DeclIndex> {
+        self.build_decl_index_uncached(file)
     }
 
     /// Import index for `file`, computed once per `(file, version)`.
@@ -278,6 +287,18 @@ impl AnalyzerDb {
             .or_insert_with(|| value.clone())
             .clone();
         Some(stored)
+    }
+
+    fn build_import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
+        let adapter = self.adapter_for(file)?;
+        Some(self.adapter_context_with(|ctx| adapter.extract_imports(file, ctx)))
+    }
+
+    /// Build an import index for `file` without storing it in the
+    /// process cache. Broad rule scans use this streaming path when
+    /// import aliases are only needed while scanning the current file.
+    pub fn import_index_uncached(&self, file: FileId) -> Option<ImportIndex> {
+        self.build_import_index_uncached(file)
     }
 
     /// Single source of truth for "the imports of `file`". Reads the

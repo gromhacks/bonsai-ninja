@@ -738,34 +738,64 @@ fn source_inventory_exact_rule_literal(
     if selected.next().is_some() {
         return None;
     }
-    literal_anchor_for_rule_target(source_rule).map(str::to_string)
+    literal_anchor_for_rule_target(source_rule)
 }
 
-fn literal_anchor_for_rule_target(rule: &Rule) -> Option<&str> {
+fn literal_anchor_for_rule_target(rule: &Rule) -> Option<String> {
+    for signal in rule
+        .packages
+        .iter()
+        .chain(rule.imports.iter())
+        .chain(rule.modules.iter())
+    {
+        if safe_inventory_literal_anchor(signal) {
+            return Some(signal.clone());
+        }
+    }
     let target = rule
         .match_spec
         .target
         .as_ref()
         .or(rule.match_spec.callee.as_ref())?;
-    target
-        .annotation
-        .as_deref()
-        .or_else(|| target.name.as_deref())
-        .or_else(|| {
-            target
-                .attribute
-                .as_ref()
-                .and_then(|attribute| attribute.last().map(String::as_str))
-        })
-        .filter(|literal| safe_inventory_literal_anchor(literal))
+    if let Some(annotation) = target.annotation.as_deref() {
+        if safe_inventory_literal_anchor(annotation) {
+            return Some(annotation.to_string());
+        }
+    }
+    if let Some(name) = target.name.as_deref() {
+        if safe_inventory_literal_anchor(name) {
+            return Some(name.to_string());
+        }
+    }
+    if let Some(attribute) = target.attribute.as_ref() {
+        if attribute.first().is_some_and(|head| head == "System") && attribute.len() == 2 {
+            let joined = attribute.join(".");
+            if safe_inventory_literal_anchor(&joined) {
+                return Some(joined);
+            }
+        }
+        if let Some(head) = attribute.first() {
+            if safe_inventory_literal_anchor(head) {
+                return Some(head.clone());
+            }
+        }
+    }
+    None
 }
 
 fn safe_inventory_literal_anchor(literal: &str) -> bool {
     let literal = literal.trim();
     literal.len() >= 3
-        && literal
-            .bytes()
-            .all(|byte| byte == b'_' || byte == b'$' || byte == b'@' || byte.is_ascii_alphanumeric())
+        && literal.bytes().all(|byte| {
+            byte == b'_'
+                || byte == b'$'
+                || byte == b'@'
+                || byte == b'.'
+                || byte == b'/'
+                || byte == b':'
+                || byte == b'-'
+                || byte.is_ascii_alphanumeric()
+        })
 }
 
 // ---- sinks ----
@@ -1016,19 +1046,6 @@ fn cmd_flows(
     if finding.is_some() && explain {
         bail!("`security taint-analysis --finding` cannot be combined with --explain");
     }
-    guard_unscoped_large_taint_analysis(
-        workspace,
-        source.as_deref(),
-        finding.as_deref(),
-        trust.as_deref(),
-        category.as_deref(),
-        sink.as_deref(),
-        severity.as_deref(),
-        tag.as_deref(),
-        &files,
-        &exclude_files,
-        exclude_tests,
-    )?;
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
@@ -1308,69 +1325,6 @@ fn emit_cached_page(pages: &[page_cache::CachedPage], current_page: u64) -> Resu
     };
     page_cache::emit_cached_text(&page.text)?;
     Ok(())
-}
-
-fn guard_unscoped_large_taint_analysis(
-    workspace: &Path,
-    source: Option<&str>,
-    finding: Option<&str>,
-    trust: Option<&str>,
-    category: Option<&str>,
-    sink: Option<&str>,
-    severity: Option<&str>,
-    tag: Option<&str>,
-    files: &[String],
-    exclude_files: &[String],
-    exclude_tests: bool,
-) -> Result<()> {
-    if std::env::var("BONSAI_ALLOW_BROAD_TAINT").is_ok() {
-        return Ok(());
-    }
-    let scoped = source.is_some()
-        || finding.is_some()
-        || trust.is_some()
-        || category.is_some()
-        || sink.is_some()
-        || severity.is_some()
-        || tag.is_some()
-        || !files.is_empty()
-        || !exclude_files.is_empty()
-        || exclude_tests;
-    if scoped {
-        return Ok(());
-    }
-    let count = rough_workspace_file_count(workspace, 20_001);
-    if count > 20_000 {
-        bail!(
-            "unscoped taint-analysis over {count}+ files is disabled to avoid OOM. \
-             Add a scope such as `--profile production`, `--file`, `--source`, `--sink`, \
-             `--trust`, or set BONSAI_ALLOW_BROAD_TAINT=1 to force the exhaustive audit run."
-        );
-    }
-    Ok(())
-}
-
-fn rough_workspace_file_count(workspace: &Path, stop_after: usize) -> usize {
-    let mut count = 0usize;
-    let mut builder = ignore::WalkBuilder::new(workspace);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .parents(true)
-        .ignore(true)
-        .add_custom_ignore_filename(".bonsaiignore");
-    for entry in builder.build().filter_map(std::result::Result::ok) {
-        if entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-            count += 1;
-            if count >= stop_after {
-                return count;
-            }
-        }
-    }
-    count
 }
 
 fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &str) -> Result<()> {

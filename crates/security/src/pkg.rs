@@ -41,18 +41,30 @@ pub(crate) fn import_matches_package(imported: &str, needle: &str) -> bool {
         .unwrap_or(imported);
     imported == needle
         || header_stripped == needle
-        || imported.starts_with(&format!("{needle}/"))
-        || imported.starts_with(&format!("{needle}."))
-        || imported.starts_with(&format!("{needle}::"))
+        || starts_with_package_sep(imported, needle, b'/')
+        || starts_with_package_sep(imported, needle, b'.')
+        || starts_with_package_str_sep(imported, needle, "::")
         // PHP namespaces use backslash separators
         // (`Cake\Datasource`, `Symfony\Component\Console`).
-        || imported.starts_with(&format!("{needle}\\"))
+        || starts_with_package_sep(imported, needle, b'\\')
         // Perl method calls separate the package qualifier from the method
         // with `->` (`Net::HTTP->new`, `LWP::UserAgent->new`). The
         // qualifier before `->` IS the exact package, so a fully-qualified
         // call credits the gate even with no `use` — precise, no widening
         // beyond the named package.
-        || imported.starts_with(&format!("{needle}->"))
+        || starts_with_package_str_sep(imported, needle, "->")
+}
+
+fn starts_with_package_sep(imported: &str, needle: &str, sep: u8) -> bool {
+    let imported = imported.as_bytes();
+    let needle = needle.as_bytes();
+    imported.len() > needle.len() && imported.starts_with(needle) && imported.get(needle.len()) == Some(&sep)
+}
+
+fn starts_with_package_str_sep(imported: &str, needle: &str, sep: &str) -> bool {
+    imported.len() > needle.len() + sep.len()
+        && imported.starts_with(needle)
+        && imported[needle.len()..].starts_with(sep)
 }
 
 /// Go-style path packages (`os/exec`, `net/http`, `github.com/x/gin`) bind
