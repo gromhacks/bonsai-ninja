@@ -1285,7 +1285,9 @@
 # sinks (ObjectInputStream.readObject, Kryo, XMLDecoder,
 # jackson-databind default typing) are the second gate.
 - id: java.source.bytes_blob_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   trust: service
   tag: caller-input

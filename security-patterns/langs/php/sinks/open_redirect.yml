@@ -76,7 +76,8 @@
       use illuminate\routing;
       use illuminate\routing;
       function example($input, $url, $id, $payload, $request) {
-        Redirect::to($url);
+        $input = $_GET['next'];
+        Redirect::to($input);
       }
   - name: arg tainted literal negative
     code: |

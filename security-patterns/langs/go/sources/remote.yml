@@ -317,7 +317,7 @@
   match:
     kind: call
     callee:
-      regex: "\\.FormFile$|\\.MultipartReader$|\\.ParseMultipartForm$"
+      regex: "\\.(FormFile|MultipartReader|ParseMultipartForm)$"
   constraints:
   - receiver_type_in: [Request]
   match_examples:
@@ -326,7 +326,8 @@
       package main
       import "net/http"
       func upload(r *http.Request) {
-        _, _, _ = r.FormFile("file")
+        file, header, err := r.FormFile("file")
+        _, _, _ = file, header, err
       }
     expect_match_text: [r.FormFile]
   - name: net/http multipart reader
@@ -334,7 +335,8 @@
       package main
       import "net/http"
       func upload(req *http.Request) {
-        _, _ = req.MultipartReader()
+        reader, err := req.MultipartReader()
+        _, _ = reader, err
       }
     expect_match_text: [req.MultipartReader]
   description: "net/http multipart upload APIs - file parts, headers, and FileHeader.Filename are client-controlled."

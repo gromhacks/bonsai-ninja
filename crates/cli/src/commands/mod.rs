@@ -90,6 +90,31 @@ pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project
     open_project_with_options(root, bonsai_sdk::OpenOptions::query_only())
 }
 
+pub(crate) fn open_workspace_syntax_filtered_paths(
+    root: &std::path::Path,
+    include_filters: &[String],
+    exclude_filters: &[String],
+) -> Result<(Workspace, WorkspaceFooter)> {
+    let mut options = bonsai_sdk::OpenOptions::query_only();
+    options.load_dataflow_sidecar = false;
+    options.load_value_flow_sidecar = false;
+    options.eager_decl_index = false;
+    let ws = Workspace::open_query_filtered_paths_with_options(
+        root,
+        bonsai_adapters::all_languages_registry(),
+        include_filters,
+        exclude_filters,
+        options,
+    )
+    .map_err(|err| anyhow::anyhow!("opening workspace at {}: {err}", root.display()))?;
+    let footer = WorkspaceFooter::new();
+    Ok((ws, footer))
+}
+
+pub(crate) fn open_workspace_syntax_only(root: &std::path::Path) -> Result<(Workspace, WorkspaceFooter)> {
+    open_workspace_syntax_filtered_paths(root, &[], &[])
+}
+
 pub(crate) fn open_project_index_matching_literal(
     root: &std::path::Path,
     literal: &str,

@@ -3264,37 +3264,35 @@ fn collect_receiver_method_targets(
     let ctx = ResolveContext::new(caller_file, &caller_module)
         .with_alias_map(alias_targets)
         .with_file_path_lookup(path_for_file);
-    let assigned_type_names = assigned_receiver_type_names(
-        global,
-        caller_decl,
-        alias_targets,
-        receiver,
-        Some(call_span),
-        method_candidate_cache,
-    );
-    let mut receiver_type_names = if assigned_type_names.is_empty() {
-        receiver_types.to_vec()
-    } else {
-        assigned_type_names
-    };
-    for type_name in receiver_type_names_for_expr(caller_decl, alias_targets, receiver) {
-        push_unique_string(&mut receiver_type_names, type_name);
-    }
-    for type_name in receiver_class_type_names_for_expr(global, &ctx, receiver) {
-        push_unique_string(&mut receiver_type_names, type_name);
-    }
-    for type_name in receiver_call_return_type_names(
-        global,
-        caller_decl,
-        alias_targets,
-        receiver,
-        Some(call_span),
-        method_candidate_cache,
-    ) {
-        push_unique_string(&mut receiver_type_names, type_name);
-    }
-    for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, receiver) {
-        push_unique_string(&mut receiver_type_names, type_name);
+    let mut receiver_type_names = receiver_types.to_vec();
+    if receiver_type_names.is_empty() {
+        receiver_type_names = assigned_receiver_type_names(
+            global,
+            caller_decl,
+            alias_targets,
+            receiver,
+            Some(call_span),
+            method_candidate_cache,
+        );
+        for type_name in receiver_type_names_for_expr(caller_decl, alias_targets, receiver) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
+        for type_name in receiver_class_type_names_for_expr(global, &ctx, receiver) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
+        for type_name in receiver_call_return_type_names(
+            global,
+            caller_decl,
+            alias_targets,
+            receiver,
+            Some(call_span),
+            method_candidate_cache,
+        ) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
+        for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, receiver) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
     }
     if receiver_type_names.is_empty() {
         return Vec::new();

@@ -97,13 +97,6 @@ always runs at the semantic taint precision ceiling: exact and narrowed
 source-to-sink evidence is reported, while broad diagnostic precision is
 not a user-facing finding mode.
 
-On very large workspaces, an unscoped `taint-analysis` run fails fast
-instead of being killed by the OS or silently narrowing coverage. Add an
-explicit scope such as `--profile production`, `--file`, `--source`,
-`--sink`, `--trust`, `--severity`, or `--tag`. If you really want the
-exhaustive all-file audit, set `BONSAI_ALLOW_BROAD_TAINT=1`; that mode
-keeps full semantics but can require substantially more time and memory.
-
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |

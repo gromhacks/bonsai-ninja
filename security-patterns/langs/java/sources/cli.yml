@@ -121,7 +121,9 @@
   description: "Scanner.nextLine() on a scanner-named receiver - line supplied by a local input stream."
 
 - id: java.source.scanner_next
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   trust: local
   tag: cli-input

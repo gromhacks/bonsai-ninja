@@ -171,6 +171,58 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
 }
 
 #[test]
+fn text_prefilter_requires_package_and_context_anchors() {
+    let hibernate = rule_from_yaml(
+        r#"
+id: java.hibernate.session_get
+enabled: true
+language: java
+trust: database
+tag: db-input
+packages: ["org.hibernate"]
+match:
+  kind: call
+  callee:
+    attribute: [Session, get]
+description: Hibernate Session.get.
+"#,
+        crate::rule::RuleKind::Source,
+    );
+    let prepared = PreparedRule::new(&hibernate).expect("rule prepares");
+    assert!(
+        !prepared.text_possible_in("class App { Object get(Session s) { return s.get(id); } }", None),
+        "package-gated rules should not force parsing files with only receiver/tail text"
+    );
+    assert!(
+        prepared.text_possible_in(
+            "import org.hibernate.*; class App { Object get(Session s) { return s.get(id); } }",
+            None
+        ),
+        "package text plus structured target text should remain parseable"
+    );
+
+    let main_args = rule_from_yaml(
+        r#"
+id: java.source.main_args
+enabled: true
+language: java
+trust: local
+tag: cli-input
+match:
+  kind: param
+  target:
+    name: args
+    in_method: [main]
+description: Java main args.
+"#,
+        crate::rule::RuleKind::Source,
+    );
+    let prepared = PreparedRule::new(&main_args).expect("rule prepares");
+    assert!(!prepared.text_possible_in("void mainForTest(String args) {}", None));
+    assert!(prepared.text_possible_in("public static void main(String[] args) {}", None));
+}
+
+#[test]
 fn package_gated_regex_accepts_semantic_receiver_type_context() {
     let rule = rule_from_yaml(
         r#"
@@ -215,6 +267,32 @@ description: JDBC chained execute query.
             &file_packages,
         ),
         "sink rules need call-site receiver or alias evidence; file imports alone are too broad"
+    );
+    let direct_rule = rule_from_yaml(
+        r#"
+id: python.test.gql_execute
+enabled: true
+language: python
+tag: command-injection
+severity: high
+packages: [gql]
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
+description: gql execute.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let direct_prepared = PreparedRule::new(&direct_rule).expect("direct package rule prepares");
+    assert!(
+        direct_prepared.call_context_allows(
+            "gql.execute",
+            &[],
+            &std::collections::HashMap::new(),
+            &AHashSet::new(),
+        ),
+        "direct package-qualified calls must satisfy receiver-agnostic package gates"
     );
     let source_rule = rule_from_yaml(
         r#"
@@ -276,6 +354,250 @@ description: Lifecycle audit-pair transition.
             &AHashSet::new(),
         ),
         "without import, alias, or receiver-type evidence, package-gated regexes fail closed"
+    );
+}
+
+#[test]
+fn anchored_receiver_regexes_keep_terminal_call_keys_and_text_anchors() {
+    let rule = rule_from_yaml(
+        r#"
+id: python.test.gql_execute
+enabled: true
+language: python
+tag: command-injection
+severity: high
+packages: [gql]
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
+description: gql execute.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let source = r#"
+import gql
+
+def handler(payload):
+    return gql.execute(payload)
+"#;
+
+    assert_eq!(
+        regex_literal_anchor_tokens("^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"),
+        vec!["execute".to_string()],
+        "regex character classes must not become impossible text anchors"
+    );
+    assert!(
+        regex_literal_anchor_tokens("^CC_MD5(_Init|_Update|_Final)?$").is_empty(),
+        "optional regex suffixes must not become mandatory text anchors"
+    );
+    assert!(
+        regex_literal_anchor_tokens(r"^(ElementTree|ET)\.XML$").is_empty(),
+        "alternative regex branches must not become mandatory text anchors"
+    );
+    assert!(
+        regex_terminal_call_key("^(list|binary)_to_atom$").is_none(),
+        "prefix alternatives must not be keyed by a non-candidate suffix"
+    );
+    assert!(
+        regex_terminal_call_key("^_?is_safe_url$").is_none(),
+        "optional leading underscores must not be keyed without the underscore"
+    );
+    assert_eq!(
+        regex_terminal_call_key(r"^[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$"),
+        Some("queryRawUnsafe".to_string()),
+        "regex-derived call keys must use the same sigil-stripping as call candidates"
+    );
+    assert_eq!(
+        regex_prefix_literal_anchor_token("^ResponseEntity(?:<.*>)?$").as_deref(),
+        Some("ResponseEntity"),
+        "anchored constructor regexes should contribute their required prefix to text prefiltering"
+    );
+    assert_eq!(
+        regex_required_literal_anchor_tokens(r"::|__\$\{"),
+        vec!["::".to_string(), "__${".to_string()],
+        "literal return regex alternatives should contribute safe exact text anchors"
+    );
+    let file_packages = AHashSet::from_iter(["gql".to_string()]);
+    assert!(
+        prepared.text_possible_in(source, Some(&file_packages)),
+        "text prefilter must keep source files that contain the terminal call"
+    );
+    assert_eq!(
+        prepared_regex_call_keys(&prepared),
+        vec!["execute".to_string()],
+        "call-rule index should key anchored receiver regexes by the terminal method"
+    );
+    let alias_map = std::collections::HashMap::new();
+    let keys = call_candidate_keys("gql.execute", &alias_map);
+    assert!(
+        keys.iter().any(|key| key == "execute"),
+        "call candidate keys should include the terminal method: {keys:?}"
+    );
+    assert_eq!(
+        callee_or_alias_matches(
+            "gql.execute",
+            &[],
+            prepared.name,
+            prepared.attribute,
+            prepared.regex.as_ref(),
+            &alias_map,
+        )
+        .as_deref(),
+        Some("gql.execute"),
+        "callee matcher should evaluate anchored regexes against the emitted callee"
+    );
+    assert!(
+        prepared.call_context_allows("gql.execute", &[], &alias_map, &AHashSet::new()),
+        "direct package-qualified calls must satisfy package gates without file imports"
+    );
+}
+
+#[test]
+fn text_prefilter_uses_short_attribute_and_regex_terminal_anchors() {
+    let short_attr_rule = rule_from_yaml(
+        r#"
+id: java.test.response_ok
+enabled: true
+language: java
+tag: xss
+severity: high
+packages: [org.springframework.http]
+match:
+  kind: call
+  callee:
+    attribute: [ResponseEntity, ok]
+description: ResponseEntity ok.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&short_attr_rule).expect("rule prepares");
+    let workspace_package =
+        AHashSet::from_iter([workspace_import_package_marker("org.springframework.http")]);
+    assert!(
+        !prepared.text_possible_in("class A { void f() { run(value); } }", Some(&workspace_package)),
+        "workspace package evidence alone must not make a short-attribute rule parse every file"
+    );
+    assert!(
+        prepared.text_possible_in(
+            "class A { void f(String value) { ResponseEntity.ok(value); } }",
+            Some(&workspace_package),
+        ),
+        "short method attributes should keep files containing the actual call"
+    );
+    assert!(
+        prepared.text_possible_in(
+            "class A { void f(String value) { ResponseEntity::ok(value); } }",
+            Some(&workspace_package),
+        ),
+        "short method attributes should keep static separator call forms"
+    );
+
+    let regex_rule = rule_from_yaml(
+        r#"
+id: java.test.jdbc_query
+enabled: true
+language: java
+tag: sql-injection
+severity: high
+packages: [org.springframework.jdbc]
+match:
+  kind: call
+  callee:
+    regex: "(^|\\.)(JdbcTemplate|[jJ][dD][bB][cC][tT]emplate)\\.query$"
+description: JDBC query.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&regex_rule).expect("rule prepares");
+    let workspace_package =
+        AHashSet::from_iter([workspace_import_package_marker("org.springframework.jdbc")]);
+    assert!(
+        !prepared.text_possible_in(
+            "class A { void f() { execute(value); } }",
+            Some(&workspace_package)
+        ),
+        "terminal regex keys should keep package-gated regex rules from parsing unrelated files"
+    );
+    assert!(
+        prepared.text_possible_in(
+            "class A { void f(JdbcTemplate jdbcTemplate) { jdbcTemplate.query(sql); } }",
+            Some(&workspace_package),
+        ),
+        "terminal regex keys should keep real candidate call files"
+    );
+
+    let search_rule = rule_from_yaml(
+        r#"
+id: java.test.ldap_search
+enabled: true
+language: java
+tag: ldap-injection
+severity: high
+packages: [javax.naming.directory]
+match:
+  kind: call
+  callee:
+    name: search
+description: LDAP search.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&search_rule).expect("rule prepares");
+    let workspace_package = AHashSet::from_iter([workspace_import_package_marker("javax.naming.directory")]);
+    assert!(
+        !prepared.text_possible_in_mode(
+            "class ElasticsearchHandler { String name = \"Elasticsearch\"; }",
+            Some(&workspace_package),
+            ConstraintMode::SinkInventory,
+        ),
+        "plain words containing a call name must not satisfy broad call-name prefiltering"
+    );
+    assert!(
+        prepared.text_possible_in_mode(
+            "class App { void f(DirContext ctx, String q) { ctx.search(\"ou=users\", q, null); } }",
+            Some(&workspace_package),
+            ConstraintMode::SinkInventory,
+        ),
+        "real call syntax should satisfy broad call-name prefiltering"
+    );
+    assert!(
+        call_text_anchor_possible_in("x = cond ? STDIN.gets : \"safe\"", "gets", "ruby"),
+        "Ruby command/no-arg call syntax without parentheses must remain prefilter-possible"
+    );
+    assert!(
+        call_text_anchor_possible_in("include $tainted;", "include", "php"),
+        "PHP include/require constructs normalized as calls must remain prefilter-possible"
+    );
+    assert!(
+        !call_text_anchor_possible_in("class ElasticsearchHandler {}", "search", "java"),
+        "Java call prefilter should still reject identifiers embedded in larger words"
+    );
+
+    let raw_html_rule = rule_from_yaml(
+        r#"
+id: java.test.raw_html_return
+enabled: true
+language: java
+tag: xss
+severity: high
+match:
+  kind: return
+  target:
+    regex: '(?is)<\s*(?:!doctype|html|body|script|div|span|p|a|img|svg|iframe|h[1-6]|ul|ol|li|table|form|input|textarea|button|br|hr)\b|&lt;'
+description: Raw HTML return.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&raw_html_rule).expect("rule prepares");
+    assert!(
+        !prepared.text_possible_in("class Box<T> { List<String> values; }", None),
+        "Java generics must not satisfy the raw-HTML return prefilter"
+    );
+    assert!(
+        prepared.text_possible_in("class App { String f(String n) { return \"<div>\" + n; } }", None),
+        "real HTML tag literals should satisfy the raw-HTML return prefilter"
     );
 }
 

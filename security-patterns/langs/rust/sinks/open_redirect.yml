@@ -70,9 +70,11 @@
   match_examples:
   - name: tainted redirect to target
     code: |
+      use std::env;
       use axum::dummy;
-      fn example(target: String) {
-          Redirect::to(target);
+      fn example() {
+          let input = env::args();
+          Redirect::to(input);
       }
   - name: literal redirect to target negative
     code: |

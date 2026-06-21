@@ -10,7 +10,7 @@ use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
-    AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
+    AliasTarget, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ImportSpec, ModulePath, RefKind,
     TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
@@ -18,7 +18,10 @@ use bonsai_workspace::Workspace;
 use regex::Regex;
 use std::{
     cell::RefCell,
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    },
     time::Instant,
 };
 
@@ -346,6 +349,8 @@ where
         None,
         None,
         &empty_factory_returns(),
+        false,
+        FactRetention::Transient,
     )
 }
 
@@ -369,6 +374,52 @@ where
         None,
         Some(files),
         &empty_factory_returns(),
+        false,
+        FactRetention::Transient,
+    )
+}
+
+pub(crate) fn match_rules_against_facts_for_taint_support_with_progress_on_files<F>(
+    ws: &Workspace,
+    rules: &[&Rule],
+    files: &[FileId],
+    mut on_file_done: F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(),
+{
+    match_rules_against_facts_with_progress_and_mode(
+        ws,
+        rules,
+        &mut on_file_done,
+        ConstraintMode::Strict,
+        None,
+        Some(files),
+        &empty_factory_returns(),
+        false,
+        FactRetention::Cached,
+    )
+}
+
+pub(crate) fn match_rules_against_facts_for_inventory_with_progress_on_files<F>(
+    ws: &Workspace,
+    rules: &[&Rule],
+    files: &[FileId],
+    mut on_file_done: F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(),
+{
+    match_rules_against_facts_with_progress_and_mode(
+        ws,
+        rules,
+        &mut on_file_done,
+        ConstraintMode::Strict,
+        None,
+        Some(files),
+        &empty_factory_returns(),
+        true,
+        FactRetention::Transient,
     )
 }
 
@@ -390,6 +441,8 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
         Some(taint_view),
         None,
         &empty_factory_returns(),
+        false,
+        FactRetention::Transient,
     )
 }
 
@@ -454,6 +507,11 @@ fn call_rule_match_passes_constraints_at_expected_hit(
     let file_packages =
         file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
     let bundle = decl_match_facts_for(ws, file, factory);
+    let receiver_base_map = if prepared_rule_needs_receiver_base_map(prepared) {
+        workspace_receiver_base_map(ws, FactRetention::Cached)
+    } else {
+        AHashMap::new()
+    };
     let constructor_names = if prepared.rule.match_spec.kind == MatchKind::New {
         collect_constructor_names(global.as_ref())
     } else {
@@ -476,9 +534,10 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             .iter()
             .filter(|call| call.span == expected.span || spans_overlap(call.span, expected.span))
         {
+            let receiver_types = expanded_receiver_types(&call.receiver_types, &receiver_base_map);
             let Some(matched_callee) = callee_or_alias_matches(
                 &call.callee,
-                &call.receiver_types,
+                &receiver_types,
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
@@ -488,7 +547,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             };
             if !prepared.call_context_allows(
                 &call.callee,
-                &call.receiver_types,
+                &receiver_types,
                 &facts.alias_map,
                 file_packages.as_ref(),
             ) {
@@ -506,7 +565,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
                 rule_id: &prepared.rule.id,
                 callee: &matched_callee,
                 args: &call.args,
-                receiver_types: &call.receiver_types,
+                receiver_types: &receiver_types,
                 span: call.span,
                 call_origin: Some(call.origin),
                 constraints: &prepared.rule.constraints.0,
@@ -751,6 +810,8 @@ where
         None,
         Some(files),
         factory,
+        false,
+        FactRetention::Cached,
     )
 }
 
@@ -775,6 +836,8 @@ where
         None,
         Some(files),
         &empty_factory_returns(),
+        true,
+        FactRetention::Transient,
     )
 }
 
@@ -786,15 +849,16 @@ fn match_rules_against_facts_with_progress_and_mode<F>(
     taint_view: Option<&InterTaintView<'_>>,
     scan_files: Option<&[FileId]>,
     factory: &Arc<FactoryReturns>,
+    dedup_file_matches: bool,
+    retention: FactRetention,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(),
 {
     let db = ws.db();
-    let global = db.global_index();
     let files: Vec<_> = scan_files
         .map(|files| files.to_vec())
-        .unwrap_or_else(|| global.all_files().collect());
+        .unwrap_or_else(|| db.vfs().all_files());
     let total = files.len();
     let prepared: Vec<PreparedRule<'_>> = rules.iter().filter_map(|rule| PreparedRule::new(rule)).collect();
     if prepared.is_empty() {
@@ -804,11 +868,45 @@ where
         return Vec::new();
     }
     let prepared_by_language = build_prepared_rule_batches(&prepared, factory);
-    let constructor_names = if prepared.iter().any(|r| r.rule.match_spec.kind == MatchKind::New) {
-        collect_constructor_names(global.as_ref())
+    let receiver_base_map = workspace_receiver_base_map_if_needed(ws, &prepared, mode, retention);
+    let global_file_indexes = (!receiver_base_map.is_empty()).then(|| ws.db().global_index());
+    let debug_security_phase = bonsai_diagnostics::debug::is_enabled("security-phase");
+    let constructor_fallback_languages: AHashSet<&str> = prepared
+        .iter()
+        .filter(|r| {
+            r.rule.match_spec.kind == MatchKind::New
+                && language_needs_bare_constructor_fallback(&r.rule.language)
+        })
+        .map(|r| r.rule.language.as_str())
+        .collect();
+    let needs_constructor_names = !constructor_fallback_languages.is_empty();
+    let constructor_started = (debug_security_phase && needs_constructor_names).then(Instant::now);
+    let constructor_files = if needs_constructor_names {
+        files
+            .iter()
+            .copied()
+            .filter(|file| {
+                ws.db().adapter_for(*file).is_some_and(|adapter| {
+                    constructor_fallback_languages.contains(adapter.language_id().as_str())
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let constructor_names = if needs_constructor_names {
+        collect_constructor_names_for_files(ws, &constructor_files)
     } else {
         AHashSet::new()
     };
+    if let Some(started) = constructor_started {
+        eprintln!(
+            "[security-phase] matcher constructor prepass: {:.3}s files={} names={}",
+            started.elapsed().as_secs_f64(),
+            constructor_files.len(),
+            constructor_names.len()
+        );
+    }
     // Each `scan_file_rules` writes only to its own per-file Vec —
     // no shared state across files — so file-level work is
     // embarrassingly parallel. `par_iter` distributes files across
@@ -825,15 +923,67 @@ where
                 if let Some(adapter) = ws.db().adapter_for(file) {
                     let language = adapter.language_id();
                     if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
-                        scan_file_rules(
-                            ws,
-                            file,
-                            file_rules,
-                            &constructor_names,
-                            mode,
-                            taint_view,
-                            &mut file_out,
-                        );
+                        if let Ok(snapshot) = ws.db().vfs().snapshot(file) {
+                            let Some(file_rules) = file_rules.filtered_for_text(
+                                ws,
+                                file,
+                                snapshot.text.as_ref(),
+                                mode,
+                                retention,
+                            ) else {
+                                on_file_done();
+                                return file_out;
+                            };
+                            match retention {
+                                FactRetention::Cached => {
+                                    let Some(file_index) = ws.db().decl_index(file) else {
+                                        on_file_done();
+                                        return file_out;
+                                    };
+                                    scan_file_rules(
+                                        ws,
+                                        file,
+                                        file_index.as_ref(),
+                                        &file_rules,
+                                        &constructor_names,
+                                        mode,
+                                        taint_view,
+                                        retention,
+                                        &receiver_base_map,
+                                        &mut file_out,
+                                    );
+                                }
+                                FactRetention::Transient => {
+                                    let file_index = global_file_indexes
+                                        .as_ref()
+                                        .and_then(|global| global.decl_index_in(file))
+                                        .cloned()
+                                        .or_else(|| ws.db().decl_index_uncached(file));
+                                    let Some(file_index) = file_index else {
+                                        on_file_done();
+                                        return file_out;
+                                    };
+                                    scan_file_rules(
+                                        ws,
+                                        file,
+                                        &file_index,
+                                        &file_rules,
+                                        &constructor_names,
+                                        mode,
+                                        taint_view,
+                                        retention,
+                                        &receiver_base_map,
+                                        &mut file_out,
+                                    );
+                                }
+                            }
+                            if dedup_file_matches {
+                                dedup_inventory_matches_in_place(&mut file_out);
+                            }
+                        } else {
+                            on_file_done();
+                            return file_out;
+                        }
                     }
                 }
                 on_file_done();
@@ -843,6 +993,10 @@ where
     }
     let run_parallel_scan = |pool: Option<&rayon::ThreadPool>| {
         let (tick_tx, tick_rx) = mpsc::channel();
+        let parsed_files = Arc::new(AtomicUsize::new(0));
+        let text_skipped_files = Arc::new(AtomicUsize::new(0));
+        let parsed_files_worker = parsed_files.clone();
+        let text_skipped_files_worker = text_skipped_files.clone();
         std::thread::scope(|scope| {
             let worker = scope.spawn(move || {
                 let scan = || {
@@ -854,15 +1008,69 @@ where
                             if let Some(adapter) = ws.db().adapter_for(file) {
                                 let language = adapter.language_id();
                                 if let Some(file_rules) = prepared_by_language.get(language.as_str()) {
-                                    scan_file_rules(
-                                        ws,
-                                        file,
-                                        file_rules,
-                                        &constructor_names,
-                                        mode,
-                                        taint_view,
-                                        &mut file_out,
-                                    );
+                                    if let Ok(snapshot) = ws.db().vfs().snapshot(file) {
+                                        let Some(file_rules) = file_rules.filtered_for_text(
+                                            ws,
+                                            file,
+                                            snapshot.text.as_ref(),
+                                            mode,
+                                            retention,
+                                        ) else {
+                                            text_skipped_files_worker.fetch_add(1, Ordering::Relaxed);
+                                            let _ = tick_tx.send(());
+                                            return file_out;
+                                        };
+                                        parsed_files_worker.fetch_add(1, Ordering::Relaxed);
+                                        match retention {
+                                            FactRetention::Cached => {
+                                                let Some(file_index) = ws.db().decl_index(file) else {
+                                                    let _ = tick_tx.send(());
+                                                    return file_out;
+                                                };
+                                                scan_file_rules(
+                                                    ws,
+                                                    file,
+                                                    file_index.as_ref(),
+                                                    &file_rules,
+                                                    &constructor_names,
+                                                    mode,
+                                                    taint_view,
+                                                    retention,
+                                                    &receiver_base_map,
+                                                    &mut file_out,
+                                                );
+                                            }
+                                            FactRetention::Transient => {
+                                                let file_index = global_file_indexes
+                                                    .as_ref()
+                                                    .and_then(|global| global.decl_index_in(file))
+                                                    .cloned()
+                                                    .or_else(|| ws.db().decl_index_uncached(file));
+                                                let Some(file_index) = file_index else {
+                                                    let _ = tick_tx.send(());
+                                                    return file_out;
+                                                };
+                                                scan_file_rules(
+                                                    ws,
+                                                    file,
+                                                    &file_index,
+                                                    &file_rules,
+                                                    &constructor_names,
+                                                    mode,
+                                                    taint_view,
+                                                    retention,
+                                                    &receiver_base_map,
+                                                    &mut file_out,
+                                                );
+                                            }
+                                        }
+                                        if dedup_file_matches {
+                                            dedup_inventory_matches_in_place(&mut file_out);
+                                        }
+                                    } else {
+                                        let _ = tick_tx.send(());
+                                        return file_out;
+                                    }
                                 }
                             }
                             let _ = tick_tx.send(());
@@ -880,13 +1088,27 @@ where
                 match tick_rx.recv() {
                     Ok(()) => {
                         completed += 1;
+                        if debug_security_phase && completed % 5_000 == 0 {
+                            eprintln!("[security-phase] matcher scan progress: {completed}/{total}");
+                        }
                         on_file_done();
                     }
                     Err(_) => break,
                 }
             }
             match worker.join() {
-                Ok(out) => out,
+                Ok(out) => {
+                    if debug_security_phase {
+                        eprintln!(
+                            "[security-phase] matcher scan stats: files={} parsed={} text_skipped={} matches={}",
+                            total,
+                            parsed_files.load(Ordering::Relaxed),
+                            text_skipped_files.load(Ordering::Relaxed),
+                            out.len()
+                        );
+                    }
+                    out
+                }
                 Err(panic) => std::panic::resume_unwind(panic),
             }
         })
@@ -899,6 +1121,10 @@ where
         Ok(pool) => run_parallel_scan(Some(&pool)),
         Err(_) => run_parallel_scan(None),
     }
+}
+
+fn language_needs_bare_constructor_fallback(language: &str) -> bool {
+    !matches!(language, "java" | "c" | "csharp" | "go" | "rust")
 }
 
 fn matcher_worker_count(file_count: usize) -> usize {
@@ -918,14 +1144,32 @@ fn matcher_worker_count(file_count: usize) -> usize {
     {
         return requested.clamp(1, available);
     }
-    let default = if file_count >= 20_000 {
-        4
-    } else if file_count >= 10_000 {
-        6
-    } else {
-        available
-    };
+    let default = if file_count >= 1_000 { 4 } else { available };
     default.clamp(1, available)
+}
+
+fn dedup_inventory_matches_in_place(matches: &mut Vec<RuleMatch>) {
+    let mut seen: AHashMap<(String, String, u32, u32, String, Option<String>), usize> = AHashMap::new();
+    let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
+    for m in matches.drain(..) {
+        let key = (
+            m.language.clone(),
+            m.file.clone(),
+            m.line,
+            m.column,
+            m.rule_id.clone(),
+            m.enclosing_fn.clone(),
+        );
+        if let Some(&idx) = seen.get(&key) {
+            if m.match_text.len() > deduped[idx].match_text.len() {
+                deduped[idx] = m;
+            }
+            continue;
+        }
+        seen.insert(key, deduped.len());
+        deduped.push(m);
+    }
+    *matches = deduped;
 }
 
 fn matcher_worker_stack_bytes() -> usize {
@@ -933,7 +1177,7 @@ fn matcher_worker_stack_bytes() -> usize {
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|bytes| *bytes >= 1024 * 1024)
-        .unwrap_or(64 * 1024 * 1024)
+        .unwrap_or(16 * 1024 * 1024)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -941,6 +1185,12 @@ enum ConstraintMode {
     Strict,
     SinkInventory,
     TaintEndpoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FactRetention {
+    Cached,
+    Transient,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -962,6 +1212,66 @@ struct CallFact {
     origin: CallFactOrigin,
 }
 
+fn workspace_receiver_base_map_if_needed(
+    ws: &Workspace,
+    rules: &[PreparedRule<'_>],
+    mode: ConstraintMode,
+    retention: FactRetention,
+) -> AHashMap<String, Vec<String>> {
+    if matches!(mode, ConstraintMode::SinkInventory) {
+        return AHashMap::new();
+    }
+    if !rules.iter().any(prepared_rule_needs_receiver_base_map) {
+        return AHashMap::new();
+    }
+    workspace_receiver_base_map(ws, retention)
+}
+
+fn workspace_receiver_base_map(ws: &Workspace, _retention: FactRetention) -> AHashMap<String, Vec<String>> {
+    let mut out: AHashMap<String, Vec<String>> = AHashMap::new();
+    let global = ws.db().global_index();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface | DeclKind::Enum
+            ) || decl.bases.is_empty()
+            {
+                continue;
+            }
+            for key in receiver_base_keys(&decl.name, decl.qualified_name.as_deref()) {
+                let entry = out.entry(key).or_default();
+                for base in &decl.bases {
+                    push_unique_string(entry, normalize_type_name_for_match(base));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn prepared_rule_needs_receiver_base_map(rule: &PreparedRule<'_>) -> bool {
+    if matches!(rule.rule.kind, crate::rule::RuleKind::Source) {
+        return false;
+    }
+    rule.attribute.as_ref().is_some_and(|attr| attr.len() >= 2)
+        || rule.rule.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                ConstraintKind::ReceiverTypeIn { .. } | ConstraintKind::ReceiverTypeNotIn { .. }
+            )
+        })
+}
+
+fn receiver_base_keys(name: &str, qualified_name: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    push_unique_string(&mut out, normalize_type_name_for_match(name));
+    if let Some(qualified_name) = qualified_name {
+        push_unique_string(&mut out, normalize_type_name_for_match(qualified_name));
+    }
+    out
+}
+
 impl ConstraintMode {
     /// True when only `arg_tainted` constraints should be skipped.
     /// Sink-inventory and initial taint-endpoint matching preserve
@@ -979,6 +1289,9 @@ struct PreparedRule<'a> {
     name: Option<&'a str>,
     attribute: Option<&'a Vec<String>>,
     regex: Option<Regex>,
+    text_anchor_groups: Vec<Vec<String>>,
+    package_text_anchors: Vec<String>,
+    call_text_anchor: Option<String>,
     base_name_in: &'a [String],
     base_name_not_in: &'a [String],
     requires_call_package_signal: bool,
@@ -1032,11 +1345,17 @@ impl<'a> PreparedRule<'a> {
             None => None,
         };
         let constraint_regexes = compile_constraint_regexes(&rule.id, &rule.constraints.0)?;
+        let text_anchor_groups = text_anchor_groups_for_rule(rule, target);
+        let package_text_anchors = package_text_anchors_for_rule(rule, target, &package_signals);
+        let call_text_anchor = call_text_anchor_for_rule(rule, target);
         Some(Self {
             rule,
             name: target.name.as_deref(),
             attribute: target.attribute.as_ref(),
             regex,
+            text_anchor_groups,
+            package_text_anchors,
+            call_text_anchor,
             base_name_in: target.base_name_in.as_slice(),
             base_name_not_in: target.base_name_not_in.as_slice(),
             requires_call_package_signal,
@@ -1056,6 +1375,53 @@ impl<'a> PreparedRule<'a> {
             return false;
         }
         !self.base_name_not_in.iter().any(|blocked| blocked == base)
+    }
+
+    #[cfg(test)]
+    fn text_possible_in(&self, text: &str, file_packages: Option<&AHashSet<String>>) -> bool {
+        self.text_possible_in_mode(text, file_packages, ConstraintMode::Strict)
+    }
+
+    fn text_possible_in_mode(
+        &self,
+        text: &str,
+        file_packages: Option<&AHashSet<String>>,
+        mode: ConstraintMode,
+    ) -> bool {
+        if self.rule.id == "java.source.main_args" && !java_main_args_signature_possible(text) {
+            return false;
+        }
+        let target_possible = self
+            .text_anchor_groups
+            .iter()
+            .all(|group| group.is_empty() || group.iter().any(|anchor| text.contains(anchor)));
+        if !target_possible {
+            return false;
+        }
+        if !special_regex_text_possible(self.rule, text) {
+            return false;
+        }
+        if matches!(mode, ConstraintMode::SinkInventory) && self.rule.language == "java" {
+            if let Some(anchor) = self.call_text_anchor.as_deref() {
+                if !call_text_anchor_possible_in(text, anchor, &self.rule.language) {
+                    return false;
+                }
+            }
+        }
+        self.package_text_anchors.is_empty()
+            || self
+                .package_text_anchors
+                .iter()
+                .any(|anchor| text.contains(anchor))
+            || file_packages.is_some_and(|packages| self.package_evidence_allows_text_anchor_skip(packages))
+    }
+
+    fn package_evidence_allows_text_anchor_skip(&self, file_packages: &AHashSet<String>) -> bool {
+        self.package_signals.iter().any(|signal| {
+            file_packages.contains(*signal)
+                || file_packages.contains(&workspace_import_package_marker(signal))
+                || file_packages_have_local_import_package(file_packages, signal)
+        })
     }
 
     fn call_context_allows(
@@ -1293,6 +1659,480 @@ impl<'a> PreparedRule<'a> {
     }
 }
 
+fn text_anchor_groups_for_rule(rule: &Rule, target: &RuleTarget) -> Vec<Vec<String>> {
+    let mut groups = Vec::new();
+    groups.extend(text_anchor_groups_for_target(target, rule.match_spec.kind));
+    if rule.id == "java.source.main_args" {
+        groups.push(vec!["static".to_string()]);
+    }
+    let mut class_group = Vec::new();
+    for class_name in &target.in_class {
+        push_text_anchor(&mut class_group, class_name);
+    }
+    if !class_group.is_empty() {
+        groups.push(class_group);
+    }
+    let mut method_group = Vec::new();
+    for method_name in &target.in_method {
+        push_text_anchor(&mut method_group, method_name);
+    }
+    for method_prefix in &target.in_method_prefix {
+        push_text_anchor(&mut method_group, method_prefix);
+    }
+    if !method_group.is_empty() {
+        groups.push(method_group);
+    }
+    let mut decorator_group = Vec::new();
+    for constraint in &rule.constraints.0 {
+        if let ConstraintKind::EnclosingDecoratorIn {
+            enclosing_decorator_in,
+        } = constraint
+        {
+            for decorator in enclosing_decorator_in {
+                push_text_anchor(&mut decorator_group, annotation_tail(decorator));
+            }
+        }
+    }
+    if !decorator_group.is_empty() {
+        groups.push(decorator_group);
+    }
+    groups
+}
+
+fn package_text_anchors_for_rule(rule: &Rule, _target: &RuleTarget, package_signals: &[&str]) -> Vec<String> {
+    if package_signals.is_empty() || !rule_requires_call_package_signal(rule) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for signal in package_signals {
+        push_text_anchor(&mut out, signal);
+    }
+    out
+}
+
+fn call_text_anchor_for_rule(rule: &Rule, target: &RuleTarget) -> Option<String> {
+    if rule.match_spec.kind != MatchKind::Call {
+        return None;
+    }
+    if let Some(name) = target.name.as_deref() {
+        return call_text_anchor_token(name);
+    }
+    if let Some(attribute) = target.attribute.as_ref().and_then(|parts| parts.last()) {
+        return call_text_anchor_token(attribute);
+    }
+    target
+        .regex
+        .as_deref()
+        .and_then(regex_terminal_call_key)
+        .and_then(|key| call_text_anchor_token(&key))
+}
+
+fn call_text_anchor_token(value: &str) -> Option<String> {
+    let token = text_anchor_name_tail(value.trim().trim_start_matches('@'));
+    (token.len() >= 2
+        && token
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+    .then(|| token.to_string())
+}
+
+fn call_text_anchor_possible_in(text: &str, anchor: &str, language: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(relative) = text[search_from..].find(anchor) {
+        let start = search_from + relative;
+        let end = start + anchor.len();
+        let before_ok = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_call_identifier_char(ch));
+        if before_ok {
+            if call_anchor_followed_by_call_paren(text, end) {
+                return true;
+            }
+            if matches!(language, "ruby" | "php") && call_anchor_followed_by_command_style_call(text, end) {
+                return true;
+            }
+        }
+        search_from = end;
+        if search_from >= text.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn call_anchor_followed_by_call_paren(text: &str, mut pos: usize) -> bool {
+    pos = skip_ascii_whitespace(text, pos);
+    if text[pos..].starts_with('(') {
+        return true;
+    }
+    if !text[pos..].starts_with('<') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut seen_gt = false;
+    for (offset, ch) in text[pos..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    pos += offset + ch.len_utf8();
+                    seen_gt = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !seen_gt {
+        return false;
+    }
+    pos = skip_ascii_whitespace(text, pos);
+    text[pos..].starts_with('(')
+}
+
+fn call_anchor_followed_by_command_style_call(text: &str, mut pos: usize) -> bool {
+    let Some(next) = text[pos..].chars().next() else {
+        return true;
+    };
+    if matches!(next, '\n' | '\r' | ';' | ')' | ']' | '}' | ':' | '?' | '|') {
+        return true;
+    }
+    if !next.is_ascii_whitespace() {
+        return false;
+    }
+    pos = skip_ascii_whitespace(text, pos);
+    text[pos..]
+        .chars()
+        .next()
+        .is_some_and(|ch| !matches!(ch, '\n' | '\r' | ';') && !matches!(ch, ')' | ']' | '}'))
+}
+
+fn skip_ascii_whitespace(text: &str, mut pos: usize) -> usize {
+    while let Some(ch) = text[pos..].chars().next() {
+        if !ch.is_ascii_whitespace() {
+            break;
+        }
+        pos += ch.len_utf8();
+        if pos >= text.len() {
+            break;
+        }
+    }
+    pos
+}
+
+fn is_call_identifier_char(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()
+}
+
+fn text_anchor_groups_for_target(target: &RuleTarget, match_kind: MatchKind) -> Vec<Vec<String>> {
+    let mut groups = Vec::new();
+    if let Some(name) = target.name.as_deref() {
+        let mut out = Vec::new();
+        push_text_anchor(&mut out, text_anchor_name_tail(name));
+        if !out.is_empty() {
+            groups.push(out);
+        }
+    }
+    if let Some(attribute) = target.attribute.as_ref() {
+        if attribute.first().is_some_and(|head| head == "System") && attribute.len() == 2 {
+            let mut out = Vec::new();
+            push_text_anchor(&mut out, &attribute.join("."));
+            if !out.is_empty() {
+                groups.push(out);
+            }
+        } else {
+            for (idx, part) in attribute.iter().enumerate() {
+                if attribute.len() == 2 && idx == 0 && looks_like_type_anchor(part) {
+                    continue;
+                }
+                let mut out = Vec::new();
+                push_text_anchor(&mut out, part);
+                if idx > 0 && part.len() < 3 {
+                    push_exact_text_anchor(&mut out, &format!(".{part}"));
+                    push_exact_text_anchor(&mut out, &format!("::{part}"));
+                    push_exact_text_anchor(&mut out, &format!("->{part}"));
+                }
+                if !out.is_empty() {
+                    groups.push(out);
+                }
+            }
+        }
+    }
+    if let Some(annotation) = target.annotation.as_deref() {
+        let mut out = Vec::new();
+        push_text_anchor(&mut out, annotation_tail(annotation));
+        if !out.is_empty() {
+            groups.push(out);
+        }
+    }
+    if let Some(regex) = target.regex.as_deref() {
+        let mut out = Vec::new();
+        for token in regex_literal_anchor_tokens(regex) {
+            push_text_anchor(&mut out, &token);
+        }
+        if matches!(match_kind, MatchKind::Call | MatchKind::New) {
+            if let Some(key) = regex_terminal_call_key(regex) {
+                push_text_anchor(&mut out, &key);
+            }
+        }
+        if out.is_empty() {
+            if let Some(prefix) = regex_prefix_literal_anchor_token(regex) {
+                push_text_anchor(&mut out, &prefix);
+            }
+        }
+        for token in regex_required_literal_anchor_tokens(regex) {
+            push_exact_text_anchor(&mut out, &token);
+        }
+        if !out.is_empty() {
+            groups.push(out);
+        }
+    }
+    groups
+}
+
+fn push_text_anchor(out: &mut Vec<String>, value: &str) {
+    let value = value.trim().trim_start_matches('@');
+    if value.len() > 4 && value.starts_with("__") && value.ends_with("__") {
+        return;
+    }
+    if value.len() >= 3 && !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
+    }
+}
+
+fn push_exact_text_anchor(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
+    }
+}
+
+fn text_anchor_name_tail(value: &str) -> &str {
+    value
+        .rsplit(['.', ':', '/', '\\'])
+        .next()
+        .filter(|tail| !tail.is_empty())
+        .unwrap_or(value)
+}
+
+fn looks_like_type_anchor(value: &str) -> bool {
+    value
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+}
+
+fn regex_literal_anchor_tokens(pattern: &str) -> Vec<String> {
+    if pattern.contains(")?") || pattern.contains('|') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut token = String::new();
+    let mut escaped = false;
+    let mut char_class_depth = 0usize;
+    let chars: Vec<char> = pattern.chars().collect();
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        if escaped {
+            if char_class_depth > 0 {
+                escaped = false;
+                continue;
+            }
+            if ch == 'Q' {
+                token.clear();
+            } else if ch == 'E' {
+                flush_regex_anchor_token(&mut out, &mut token);
+            } else if ch == '.' || ch == '/' || ch == ':' || ch == '-' {
+                flush_regex_anchor_token(&mut out, &mut token);
+            } else if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
+                token.push(ch);
+            } else {
+                flush_regex_anchor_token(&mut out, &mut token);
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '[' {
+            flush_regex_anchor_token(&mut out, &mut token);
+            char_class_depth = char_class_depth.saturating_add(1);
+            continue;
+        }
+        if ch == ']' && char_class_depth > 0 {
+            char_class_depth -= 1;
+            continue;
+        }
+        if char_class_depth > 0 {
+            continue;
+        }
+        if ch == '$' {
+            let next_is_identifier = chars
+                .get(idx + 1)
+                .is_some_and(|next| *next == '_' || *next == '$' || next.is_ascii_alphanumeric());
+            if !next_is_identifier {
+                flush_regex_anchor_token(&mut out, &mut token);
+                continue;
+            }
+        }
+        if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else {
+            flush_regex_anchor_token(&mut out, &mut token);
+        }
+    }
+    flush_regex_anchor_token(&mut out, &mut token);
+    out
+}
+
+fn regex_prefix_literal_anchor_token(pattern: &str) -> Option<String> {
+    let mut rest = pattern.trim();
+    for prefix in ["(?i)", "(?-i)", "(?is)", "(?si)", "(?s)", "(?m)"] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped;
+            break;
+        }
+    }
+    rest = rest.strip_prefix('^').unwrap_or(rest);
+    let mut token = String::new();
+    let mut escaped = false;
+    for ch in rest.chars() {
+        if escaped {
+            if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
+                token.push(ch);
+                escaped = false;
+                continue;
+            }
+            break;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
+            token.push(ch);
+            continue;
+        }
+        break;
+    }
+    let token = token.trim_matches('_');
+    (token.len() >= 3).then(|| token.to_string())
+}
+
+fn regex_required_literal_anchor_tokens(pattern: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if pattern.contains(r"::|__\$\{") {
+        push_exact_text_anchor(&mut out, "::");
+        push_exact_text_anchor(&mut out, "__${");
+    }
+    out
+}
+
+fn special_regex_text_possible(rule: &Rule, text: &str) -> bool {
+    let Some(pattern) = rule_target_regex_text(rule) else {
+        return true;
+    };
+    if pattern.contains("!doctype|html|body|script")
+        && pattern.contains("textarea|button|br|hr")
+        && pattern.contains("&lt;")
+    {
+        return raw_html_literal_possible_in(text);
+    }
+    true
+}
+
+fn raw_html_literal_possible_in(text: &str) -> bool {
+    if contains_ascii_case_insensitive(text, "&lt;") {
+        return true;
+    }
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    while let Some(relative) = text[idx..].find('<') {
+        idx += relative + 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if html_tag_name_follows(&text[idx..]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn html_tag_name_follows(text: &str) -> bool {
+    const TAGS: &[&str] = &[
+        "!doctype", "html", "body", "script", "div", "span", "p", "a", "img", "svg", "iframe", "h1", "h2",
+        "h3", "h4", "h5", "h6", "ul", "ol", "li", "table", "form", "input", "textarea", "button", "br", "hr",
+    ];
+    TAGS.iter().any(|tag| {
+        let Some(rest) = strip_ascii_prefix_case_insensitive(text, tag) else {
+            return false;
+        };
+        rest.chars().next().is_none_or(|ch| !is_call_identifier_char(ch))
+    })
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn strip_ascii_prefix_case_insensitive<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &text[prefix.len()..])
+}
+
+fn flush_regex_anchor_token(out: &mut Vec<String>, token: &mut String) {
+    let value = token.trim_matches('_');
+    let looks_like_regex_noise = matches!(
+        value,
+        "A" | "Z" | "Za" | "az" | "d" | "s" | "w" | "b" | "i" | "m" | "u"
+    );
+    if value.len() >= 3
+        && !looks_like_regex_noise
+        && value.chars().any(|ch| ch.is_ascii_lowercase())
+        && !out.iter().any(|existing| existing == value)
+    {
+        out.push(value.to_string());
+    }
+    token.clear();
+}
+
+fn java_main_args_signature_possible(text: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(relative) = text[search_from..].find("main") {
+        let idx = search_from + relative;
+        let before_start = floor_char_boundary(text, idx.saturating_sub(512));
+        let after_end = floor_char_boundary(text, (idx + 512).min(text.len()));
+        let before = &text[before_start..idx];
+        let after = &text[idx..after_end];
+        if before.contains("static") && before.contains("void") && after.contains("args") {
+            return true;
+        }
+        search_from = idx.saturating_add("main".len());
+        if search_from >= text.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn floor_char_boundary(text: &str, mut idx: usize) -> usize {
+    idx = idx.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn is_lifecycle_audit_pair_sink(rule: &Rule) -> bool {
     if rule.kind != crate::rule::RuleKind::Sink {
         return false;
@@ -1377,6 +2217,13 @@ fn local_import_package_allows(file_packages: &AHashSet<String>, candidate: &str
             .is_some_and(|(head, _)| file_packages.contains(&local_import_package_marker(head, signal)))
 }
 
+fn file_packages_have_local_import_package(file_packages: &AHashSet<String>, signal: &str) -> bool {
+    let suffix = format!(":{signal}");
+    file_packages
+        .iter()
+        .any(|package| package.starts_with(LOCAL_IMPORT_PACKAGE_PREFIX) && package.ends_with(&suffix))
+}
+
 fn match_base_name(text: &str) -> Option<&str> {
     let text = text.trim();
     if text.is_empty() {
@@ -1401,6 +2248,7 @@ struct PreparedRuleBatch<'p, 'rule> {
     /// empty/0-fingerprint unless the pack ships `returns_type` rules).
     factory: Arc<FactoryReturns>,
     include_workspace_package_context: bool,
+    has_package_text_anchors: bool,
 }
 
 impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
@@ -1418,6 +2266,7 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             include_workspace_package_context: rules
                 .iter()
                 .any(|rule| rule.needs_workspace_package_context()),
+            has_package_text_anchors: rules.iter().any(|rule| !rule.package_text_anchors.is_empty()),
         };
         for &rule in rules {
             match rule.rule.match_spec.kind {
@@ -1433,6 +2282,46 @@ impl<'p, 'rule> PreparedRuleBatch<'p, 'rule> {
             }
         }
         out
+    }
+
+    fn filtered_for_text(
+        &self,
+        ws: &Workspace,
+        file: FileId,
+        text: &str,
+        mode: ConstraintMode,
+        retention: FactRetention,
+    ) -> Option<Self> {
+        let include_workspace_package_context =
+            self.include_workspace_package_context && !matches!(mode, ConstraintMode::SinkInventory);
+        let file_packages = self.has_package_text_anchors.then(|| {
+            file_package_set_with_workspace_context_and_retention(
+                ws,
+                file,
+                include_workspace_package_context,
+                retention,
+            )
+        });
+        let mut rules = Vec::new();
+        for &rule in self
+            .call_rules
+            .iter()
+            .chain(self.read_rules.iter())
+            .chain(self.write_rules.iter())
+            .chain(self.param_rules.iter())
+            .chain(self.return_rules.iter())
+        {
+            if rule.text_possible_in_mode(text, file_packages.as_deref(), mode) {
+                rules.push(rule);
+            }
+        }
+        // `kind: missing` rules look for an absent target, so the
+        // target's own text anchor is expected not to exist. Keep them
+        // in the exact syntax pass; package/context constraints still
+        // run inside the matcher. There are very few such rules, and
+        // none in the default Java taint path.
+        rules.extend(self.missing_rules.iter().copied());
+        (!rules.is_empty()).then(|| Self::new(&rules, self.factory.clone()))
     }
 }
 
@@ -1459,7 +2348,14 @@ fn insert_call_rule_index<'p, 'rule>(
     rule: &'p PreparedRule<'rule>,
 ) {
     if rule.regex.is_some() {
-        wildcard_rules.push(rule);
+        let keys = prepared_regex_call_keys(rule);
+        if keys.is_empty() {
+            wildcard_rules.push(rule);
+        } else {
+            for key in keys {
+                insert_call_rule_key(keyed_rules, &key, rule);
+            }
+        }
         return;
     }
     let mut inserted = false;
@@ -1478,32 +2374,115 @@ fn insert_call_rule_index<'p, 'rule>(
     }
 }
 
+fn prepared_regex_call_keys(rule: &PreparedRule<'_>) -> Vec<String> {
+    let Some(pattern) = rule_target_regex_text(rule.rule) else {
+        return Vec::new();
+    };
+    regex_terminal_call_key(pattern).into_iter().collect()
+}
+
+fn rule_target_regex_text(rule: &Rule) -> Option<&str> {
+    let target = match rule.match_spec.kind {
+        MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+            rule.match_spec.target.as_ref()
+        }
+    }?;
+    target.regex.as_deref()
+}
+
+fn regex_terminal_call_key(pattern: &str) -> Option<String> {
+    let trimmed = pattern.trim();
+    let trimmed = trimmed
+        .strip_prefix("(?i)")
+        .or_else(|| trimmed.strip_prefix("(?-i)"))
+        .unwrap_or(trimmed);
+    if trimmed.contains("_?") {
+        return None;
+    }
+    let trimmed = trimmed.strip_suffix('$').unwrap_or(trimmed);
+    let mut end = trimmed.len();
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bytes = trimmed.as_bytes();
+    while end > 0 {
+        let b = bytes[end - 1];
+        if b == b'_' || b == b'$' || b.is_ascii_alphanumeric() {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    let key = trimmed
+        .get(end..)?
+        .trim()
+        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS);
+    if key.len() < 3 {
+        return None;
+    }
+    if key.starts_with('_') {
+        return None;
+    }
+    if !key
+        .chars()
+        .all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    if matches!(
+        key,
+        "A" | "Z" | "Za" | "az" | "d" | "s" | "w" | "b" | "i" | "m" | "u"
+    ) {
+        return None;
+    }
+    Some(key.to_string())
+}
+
 fn scan_file_rules(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &PreparedRuleBatch<'_, '_>,
     constructor_names: &AHashSet<String>,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
+    retention: FactRetention,
+    receiver_base_map: &AHashMap<String, Vec<String>>,
     out: &mut Vec<RuleMatch>,
 ) {
     if !rules.call_rules.is_empty() {
-        scan_calls_batch(ws, file, rules, constructor_names, mode, taint_view, out);
+        scan_calls_batch(
+            ws,
+            file,
+            file_index,
+            rules,
+            constructor_names,
+            mode,
+            taint_view,
+            retention,
+            receiver_base_map,
+            out,
+        );
     }
     if !rules.read_rules.is_empty() {
         scan_refs_batch(
             ws,
             file,
+            file_index,
             &rules.read_rules,
             RefKind::Read,
             rules.include_workspace_package_context,
+            retention,
             out,
         );
         scan_flow_reads_batch(
             ws,
             file,
+            file_index,
             &rules.read_rules,
             rules.include_workspace_package_context,
+            retention,
             out,
         );
     }
@@ -1511,19 +2490,23 @@ fn scan_file_rules(
         scan_writes_batch(
             ws,
             file,
+            file_index,
             &rules.write_rules,
             rules.include_workspace_package_context,
             mode,
             taint_view,
+            retention,
             out,
         );
         scan_ref_writes_batch(
             ws,
             file,
+            file_index,
             &rules.write_rules,
             rules.include_workspace_package_context,
             mode,
             taint_view,
+            retention,
             out,
         );
     }
@@ -1531,31 +2514,40 @@ fn scan_file_rules(
         scan_params_batch(
             ws,
             file,
+            file_index,
             &rules.param_rules,
             rules.include_workspace_package_context,
+            retention,
             out,
         );
     }
     if !rules.return_rules.is_empty() {
-        scan_returns_batch(ws, file, &rules.return_rules, out);
+        scan_returns_batch(ws, file, file_index, &rules.return_rules, out);
     }
     if !rules.missing_rules.is_empty() {
         scan_missing_batch(
             ws,
             file,
+            file_index,
             &rules.missing_rules,
             rules.include_workspace_package_context,
             mode,
             taint_view,
+            retention,
             out,
         );
     }
 }
 
-fn scan_returns_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], out: &mut Vec<RuleMatch>) {
-    let global = ws.db().global_index();
+fn scan_returns_batch(
+    ws: &Workspace,
+    file: FileId,
+    file_index: &DeclIndex,
+    rules: &[&PreparedRule<'_>],
+    out: &mut Vec<RuleMatch>,
+) {
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    for decl in global.decls_in(file) {
+    for decl in &file_index.defs {
         let mut returns = Vec::new();
         collect_return_sites(&decl.flow_events, &mut returns);
         for (span, value_text, value_name) in returns {
@@ -1619,15 +2611,21 @@ fn return_rule_match(
 fn scan_params_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
+    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
-    let alias_map = file_alias_map(ws, file);
-    for decl in global.decls_in(file) {
-        let decl_decorators = collect_decl_decorator_names(ws, file, decl.name_span);
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_package_context,
+        retention,
+    );
+    let alias_map = file_alias_map_with_retention(ws, file, retention);
+    for decl in &file_index.defs {
+        let decl_decorators = collect_decl_decorator_names(ws, file, file_index, decl.name_span);
         for (idx, param) in decl.params.iter().enumerate() {
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
@@ -1639,7 +2637,7 @@ fn scan_params_batch(
                 // empty (no constraint applied); when populated,
                 // require an exact match.
                 let target = prepared.rule.match_spec.target.as_ref();
-                if !decl_target_context_allows(global.as_ref(), Some(decl), target, Some(idx)) {
+                if !decl_target_context_allows(file_index, Some(decl), target, Some(idx)) {
                     continue;
                 }
                 let want_annotation = target.and_then(|t| t.annotation.as_deref());
@@ -1666,7 +2664,7 @@ fn scan_params_batch(
                     continue;
                 }
                 let (file_path, line, col, span) = param_decl_site(ws, file, decl, param)
-                    .or_else(|| first_param_read_site(ws, file, decl, param))
+                    .or_else(|| first_param_read_site(ws, file, file_index, decl, param))
                     .unwrap_or_else(|| {
                         let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
                         (file_path, line, col, decl.name_span)
@@ -1698,7 +2696,7 @@ fn scan_params_batch(
                     line,
                     column: col,
                     span,
-                    match_text: param.clone(),
+                    match_text: param.to_string(),
                     enclosing_fn: Some(decl.name.clone()),
                 });
             }
@@ -1810,14 +2808,13 @@ fn identifier_boundary(text: &str, start: usize, end: usize) -> bool {
 fn first_param_read_site(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     decl: &bonsai_lang_api::Decl,
     param: &str,
 ) -> Option<(String, u32, u32, Span)> {
-    let global = ws.db().global_index();
-    let idx = global.file_index(file)?;
     let body = decl.body_span.unwrap_or(decl.span);
     let min_start = body.start.max(decl.name_span.end);
-    let read = idx
+    let read = file_index
         .refs
         .iter()
         .filter(|reference| reference.kind == RefKind::Read)
@@ -1859,7 +2856,7 @@ fn tokens_read_param(tokens: &[String], param: &str) -> bool {
 }
 
 fn decl_target_context_allows(
-    global: &bonsai_index::GlobalIndex,
+    file_index: &DeclIndex,
     decl: Option<&Decl>,
     target: Option<&RuleTarget>,
     param_index: Option<usize>,
@@ -1903,12 +2900,15 @@ fn decl_target_context_allows(
         return true;
     }
 
-    let enclosing_class = decl.parent.and_then(|sym| global.decl_of(sym)).filter(|p| {
-        matches!(
-            p.kind,
-            DeclKind::Class | DeclKind::Struct | DeclKind::Interface | DeclKind::Trait
-        )
-    });
+    let enclosing_class = decl
+        .parent
+        .and_then(|sym| local_decl_by_symbol(file_index, sym))
+        .filter(|p| {
+            matches!(
+                p.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Interface | DeclKind::Trait
+            )
+        });
     let Some(enclosing_class) = enclosing_class else {
         return false;
     };
@@ -1919,35 +2919,81 @@ fn decl_target_context_allows(
             .any(|base| target.in_class.iter().any(|want| want == base))
 }
 
+fn local_decl_by_symbol(file_index: &DeclIndex, symbol: SymbolId) -> Option<&Decl> {
+    file_index.defs.iter().find(|decl| decl.symbol == symbol)
+}
+
+#[derive(Clone)]
+struct LocalEnclosingEntry {
+    start: u64,
+    end: u64,
+    name: String,
+}
+
+fn local_enclosing_entries(file_index: &DeclIndex) -> Vec<LocalEnclosingEntry> {
+    let mut entries: Vec<LocalEnclosingEntry> = file_index
+        .defs
+        .iter()
+        .map(|decl| {
+            let body = decl.body_span.unwrap_or(decl.span);
+            LocalEnclosingEntry {
+                start: body.start,
+                end: body.end,
+                name: decl.name.clone(),
+            }
+        })
+        .collect();
+    entries.sort_unstable_by_key(|entry| entry.start);
+    entries
+}
+
+fn local_enclosing_name(entries: &[LocalEnclosingEntry], pos: u64) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let partition = entries.partition_point(|entry| entry.start <= pos);
+    if partition == 0 {
+        return None;
+    }
+    let entry = &entries[partition - 1];
+    (pos < entry.end).then(|| entry.name.clone())
+}
+
 fn scan_calls_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &PreparedRuleBatch<'_, '_>,
     constructor_names: &AHashSet<String>,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
+    retention: FactRetention,
+    receiver_base_map: &AHashMap<String, Vec<String>>,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let file_packages =
-        file_package_set_with_workspace_context(ws, file, rules.include_workspace_package_context);
-    let import_aliases = file_alias_map(ws, file);
-    let decls = global.decls_in(file);
-    let bundle = decl_match_facts_for(ws, file, &rules.factory);
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        rules.include_workspace_package_context,
+        retention,
+    );
+    let import_aliases = file_alias_map_with_retention(ws, file, retention);
+    let bundle = decl_match_facts_for_retention(ws, file, Some(file_index), &rules.factory, retention);
     let mut decl_call_keys: AHashSet<(String, u64)> = AHashSet::new();
 
-    for decl in decls {
+    for decl in &file_index.defs {
         let fn_name = decl.name.clone();
         let Some(facts) = bundle.by_decl_span.get(&decl.span).cloned() else {
             continue;
         };
         for call in &facts.calls {
             decl_call_keys.insert((call.callee.clone(), call.span.start));
+            let receiver_types = expanded_receiver_types(&call.receiver_types, receiver_base_map);
             let mut candidate_rules = Vec::new();
             push_call_candidate_rules(&mut candidate_rules, rules, &call.callee, &facts.alias_map);
             for prepared in candidate_rules {
                 if !decl_target_context_allows(
-                    global.as_ref(),
+                    file_index,
                     Some(decl),
                     prepared.rule.match_spec.callee.as_ref(),
                     None,
@@ -1956,7 +3002,7 @@ fn scan_calls_batch(
                 }
                 let Some(matched_callee) = callee_or_alias_matches(
                     &call.callee,
-                    &call.receiver_types,
+                    &receiver_types,
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
@@ -1977,7 +3023,7 @@ fn scan_calls_batch(
                 }
                 if !prepared.call_context_allows(
                     &call.callee,
-                    &call.receiver_types,
+                    &receiver_types,
                     &facts.alias_map,
                     file_packages.as_ref(),
                 ) {
@@ -1989,7 +3035,7 @@ fn scan_calls_batch(
                     rule_id: &prepared.rule.id,
                     callee: &matched_callee,
                     args: &call.args,
-                    receiver_types: &call.receiver_types,
+                    receiver_types: &receiver_types,
                     span: call.span,
                     call_origin: Some(call.origin),
                     constraints: &prepared.rule.constraints.0,
@@ -2026,47 +3072,12 @@ fn scan_calls_batch(
         }
     }
 
-    let Some(idx) = global.file_index(file) else {
-        return;
-    };
-    // Build a span-sorted index over the file's decls so the
-    // per-ref enclosing-fn lookup is O(log decls) instead of the
-    // previous O(refs × decls) linear scan. On large workspace
-    // files (Redis main.c, big TypeScript compilation units) the
-    // linear path dominated this batch; the binary search returns
-    // the same decl because function bodies don't overlap and the
-    // rightmost body whose start <= ref.span.start IS the
-    // innermost containing one.
-    // Workspace-cached binary-search index (built once per
-    // `(FileId, version)`), shared across the 4 matcher passes
-    // and across `cmd_security` subcommands. Replaces the prior
-    // per-batch local builder.
-    let enclosing_entries = ws.enclosing_index().entries_for(ws.db(), file);
-    for r in &idx.refs {
+    let enclosing_entries = local_enclosing_entries(file_index);
+    for r in &file_index.refs {
         if r.kind != RefKind::Call || decl_call_keys.contains(&(r.name.clone(), r.span.start)) {
             continue;
         }
-        let enclosing_fn = ws
-            .enclosing_index()
-            .enclosing_name(ws.db(), file, r.span.start)
-            .or_else(|| {
-                // Fast fallback when the entry is already built;
-                // partition_point preserves the prior matcher
-                // semantics (innermost match by binary search).
-                if enclosing_entries.is_empty() {
-                    return None;
-                }
-                let partition = enclosing_entries.partition_point(|e| e.start <= r.span.start);
-                if partition == 0 {
-                    return None;
-                }
-                let entry = &enclosing_entries[partition - 1];
-                if r.span.start < entry.end {
-                    Some(entry.name.clone())
-                } else {
-                    None
-                }
-            });
+        let enclosing_fn = local_enclosing_name(&enclosing_entries, r.span.start);
         let mut candidate_rules = Vec::new();
         push_call_candidate_rules(&mut candidate_rules, rules, &r.name, &import_aliases);
         for prepared in candidate_rules {
@@ -2218,19 +3229,27 @@ fn push_unique_call_key(out: &mut Vec<String>, key: &str) {
 fn scan_missing_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
+    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
-    let import_aliases = file_alias_map(ws, file);
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_package_context,
+        retention,
+    );
+    let import_aliases = file_alias_map_with_retention(ws, file, retention);
     // Missing-call rules don't use factory-return typing.
-    let bundle = decl_match_facts_for(ws, file, &empty_factory_returns());
+    let empty_factory = empty_factory_returns();
+    let bundle =
+        decl_match_facts_for_retention(ws, file, Some(file_index), empty_factory.as_ref(), retention);
 
-    for decl in global.decls_in(file) {
+    for decl in &file_index.defs {
         if !matches!(
             decl.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor
@@ -2276,24 +3295,30 @@ fn scan_missing_batch(
             // expected target callee? The intra-procedural check
             // Cross-proc BFS only runs when the rule opts in via
             // `match.search_depth > 0`.
-            let target_present =
-                facts.calls.iter().any(|call| {
-                    callee_or_alias_matches(
+            let target_present = facts.calls.iter().any(|call| {
+                callee_or_alias_matches(
+                    &call.callee,
+                    &call.receiver_types,
+                    prepared.name,
+                    prepared.attribute,
+                    prepared.regex.as_ref(),
+                    &facts.alias_map,
+                )
+                .is_some()
+                    && prepared.call_context_allows(
                         &call.callee,
                         &call.receiver_types,
-                        prepared.name,
-                        prepared.attribute,
-                        prepared.regex.as_ref(),
                         &facts.alias_map,
+                        file_packages.as_ref(),
                     )
-                    .is_some()
-                        && prepared.call_context_allows(
-                            &call.callee,
-                            &call.receiver_types,
-                            &facts.alias_map,
-                            file_packages.as_ref(),
-                        )
-                }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
+            }) || missing_target_in_reachable_callees(
+                ws,
+                file,
+                decl,
+                prepared,
+                &import_aliases,
+                retention,
+            );
             if target_present {
                 continue;
             }
@@ -2325,6 +3350,7 @@ fn missing_target_in_reachable_callees(
     entry: &bonsai_lang_api::Decl,
     prepared: &PreparedRule<'_>,
     import_aliases: &std::collections::HashMap<String, AliasTarget>,
+    retention: FactRetention,
 ) -> bool {
     if prepared.rule.match_spec.kind != MatchKind::Missing {
         return false;
@@ -2383,12 +3409,15 @@ fn missing_target_in_reachable_callees(
             // collapses Missing-rule BFS cost to one cache hit
             // per (file, decl) pair across the whole search.
             let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
-            let callee_file_packages = file_package_set_with_workspace_context(
+            let callee_file_packages = file_package_set_with_workspace_context_and_retention(
                 ws,
                 callee_file,
                 prepared.needs_workspace_package_context(),
+                retention,
             );
-            let callee_bundle = decl_match_facts_for(ws, callee_file, &empty_factory_returns());
+            let empty_factory = empty_factory_returns();
+            let callee_bundle =
+                decl_match_facts_for_retention(ws, callee_file, None, empty_factory.as_ref(), retention);
             // Bundle covers every decl in the file; index by
             // span. Fallback: if the cache layer didn't
             // materialise this decl (rare — adapters that emit
@@ -2403,7 +3432,7 @@ fn missing_target_in_reachable_callees(
                         Some(&facts.alias_map),
                     )
                 } else {
-                    let mut callee_alias = file_alias_map(ws, callee_file);
+                    let mut callee_alias = file_alias_map_with_retention(ws, callee_file, retention);
                     extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
                     bonsai_lang_api::extend_alias_map_with_flow_events(
                         &mut callee_alias,
@@ -2522,6 +3551,26 @@ fn file_alias_map(ws: &Workspace, file: FileId) -> std::collections::HashMap<Str
     bonsai_lang_api::kit::alias_map_from_imports(&imports)
 }
 
+fn file_alias_map_with_retention(
+    ws: &Workspace,
+    file: FileId,
+    retention: FactRetention,
+) -> std::collections::HashMap<String, AliasTarget> {
+    match retention {
+        FactRetention::Cached => file_alias_map(ws, file),
+        FactRetention::Transient => transient_import_index(ws, file)
+            .map(|imports| bonsai_lang_api::kit::alias_map_from_imports(&imports))
+            .unwrap_or_default(),
+    }
+}
+
+fn transient_import_index(ws: &Workspace, file: FileId) -> Option<bonsai_lang_api::ImportIndex> {
+    if let Some(index) = java_textual_import_index(ws, file) {
+        return Some(index);
+    }
+    ws.db().import_index_uncached(file)
+}
+
 // Process-level shared cache (parking_lot::RwLock) keyed on
 // `(FileId, version, content_hash)`. Earlier this was a
 // `thread_local!` which meant rayon work-stealing across the 4
@@ -2559,6 +3608,20 @@ fn file_package_set_with_workspace_context(
     file: FileId,
     include_workspace_context: bool,
 ) -> Arc<AHashSet<String>> {
+    file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_context,
+        FactRetention::Cached,
+    )
+}
+
+fn file_package_set_with_workspace_context_and_retention(
+    ws: &Workspace,
+    file: FileId,
+    include_workspace_context: bool,
+    retention: FactRetention,
+) -> Arc<AHashSet<String>> {
     let workspace_imports = if include_workspace_context {
         workspace_import_package_context(ws, file)
     } else {
@@ -2595,30 +3658,49 @@ fn file_package_set_with_workspace_context(
         workspace_package_fingerprint,
         include_workspace_context,
     );
+    if retention == FactRetention::Transient {
+        return build_file_package_set(
+            ws,
+            file,
+            workspace_imports.as_ref(),
+            workspace_packages,
+            retention,
+        );
+    }
     // Drop the read guard at the `;` before any potential write
     // upgrade — parking_lot RwLocks are non-reentrant.
     let cached = FILE_PACKAGE_SET_CACHE.read().get(&key).cloned();
     if let Some(hit) = cached {
         return hit;
     }
+    let out = build_file_package_set(
+        ws,
+        file,
+        workspace_imports.as_ref(),
+        workspace_packages,
+        retention,
+    );
+    let mut write = FILE_PACKAGE_SET_CACHE.write();
+    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
+        write.clear();
+    }
+    write.entry(key).or_insert_with(|| out.clone()).clone()
+}
+
+fn build_file_package_set(
+    ws: &Workspace,
+    file: FileId,
+    workspace_imports: &WorkspaceImportPackageContext,
+    workspace_packages: Option<crate::deps::WorkspaceDependencyPackages>,
+    retention: FactRetention,
+) -> Arc<AHashSet<String>> {
     let mut out: AHashSet<String> = AHashSet::new();
-    if let Some(imports) = ws.db().import_index(file) {
-        for spec in &imports.imports {
-            insert_import_target_prefixes(&mut out, &spec.module);
-            if let Some(stripped) = spec
-                .module
-                .strip_suffix(".h")
-                .or_else(|| spec.module.strip_suffix(".hpp"))
-                .or_else(|| spec.module.strip_suffix(".hxx"))
-            {
-                insert_import_target_prefixes(&mut out, stripped);
-            }
-            if let Some(imported_file) = resolve_relative_import_file(ws, file, &spec.module) {
-                for package in direct_package_imports_for_file(ws, imported_file) {
-                    insert_local_import_package_markers(&mut out, spec, &package);
-                }
-            }
-        }
+    let imports = match retention {
+        FactRetention::Cached => ws.db().import_index(file).map(|imports| (*imports).clone()),
+        FactRetention::Transient => transient_import_index(ws, file),
+    };
+    if let Some(imports) = imports {
+        insert_file_import_packages(ws, file, &imports, retention, &mut out);
     }
     if ws
         .db()
@@ -2637,12 +3719,7 @@ fn file_package_set_with_workspace_context(
     if let Some(workspace_packages) = workspace_packages {
         out.extend(workspace_packages.packages.iter().cloned());
     }
-    let out = Arc::new(out);
-    let mut write = FILE_PACKAGE_SET_CACHE.write();
-    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
-        write.clear();
-    }
-    write.entry(key).or_insert_with(|| out.clone()).clone()
+    Arc::new(out)
 }
 
 fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<WorkspaceImportPackageContext> {
@@ -2667,9 +3744,8 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
     if let Some(hit) = write.get(&key).cloned() {
         return hit;
     }
-    let global = ws.db().global_index();
     let mut context = WorkspaceImportPackageContext::default();
-    for candidate_file in global.all_files() {
+    for candidate_file in ws.db().vfs().all_files() {
         if ws
             .db()
             .adapter_for(candidate_file)
@@ -2684,33 +3760,11 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
                 .wrapping_add(u64::from(candidate_file.raw()))
                 .wrapping_add(snapshot.version)
                 .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
-        }
-        let Some(imports) = ws.db().import_index(candidate_file) else {
-            if let Some(idx) = global.file_index(candidate_file) {
-                insert_fully_qualified_reference_package_prefixes(
-                    &mut context.packages,
-                    language.as_str(),
-                    idx,
-                );
-            }
-            continue;
-        };
-        for spec in &imports.imports {
-            if spec.module.starts_with('.') {
-                continue;
-            }
-            insert_import_target_prefixes(&mut context.packages, &spec.module);
-            if let Some(stripped) = spec
-                .module
-                .strip_suffix(".h")
-                .or_else(|| spec.module.strip_suffix(".hpp"))
-                .or_else(|| spec.module.strip_suffix(".hxx"))
-            {
-                insert_import_target_prefixes(&mut context.packages, stripped);
-            }
-        }
-        if let Some(idx) = global.file_index(candidate_file) {
-            insert_fully_qualified_reference_package_prefixes(&mut context.packages, language.as_str(), idx);
+            insert_textual_workspace_import_prefixes(
+                &mut context.packages,
+                language.as_str(),
+                snapshot.text.as_ref(),
+            );
         }
     }
     let context = Arc::new(context);
@@ -2720,32 +3774,386 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
     write.entry(key).or_insert_with(|| context.clone()).clone()
 }
 
-fn insert_fully_qualified_reference_package_prefixes(
-    out: &mut AHashSet<String>,
-    language: &str,
-    idx: &bonsai_lang_api::DeclIndex,
-) {
-    if !matches!(language, "java" | "kotlin" | "scala") {
-        return;
+fn insert_textual_workspace_import_prefixes(out: &mut AHashSet<String>, language: &str, text: &str) {
+    match language {
+        "python" => insert_python_textual_imports(out, text),
+        "javascript" | "typescript" | "tsx" => insert_js_like_textual_imports(out, text),
+        "go" => insert_go_textual_imports(out, text),
+        "rust" => insert_rust_textual_imports(out, text),
+        "c" | "cpp" | "objective-c" | "objc" => insert_c_like_textual_includes(out, text),
+        "ruby" => insert_ruby_textual_imports(out, text),
+        "php" => insert_php_textual_imports(out, text),
+        "csharp" => insert_csharp_textual_imports(out, text),
+        "java" | "kotlin" | "scala" | "swift" | "dart" => insert_dotted_textual_imports(out, text),
+        _ => insert_generic_textual_imports(out, text),
     }
-    for reference in &idx.refs {
-        if !matches!(
-            reference.kind,
-            bonsai_lang_api::RefKind::Call | bonsai_lang_api::RefKind::Type
-        ) {
+}
+
+fn java_textual_import_index(ws: &Workspace, file: FileId) -> Option<bonsai_lang_api::ImportIndex> {
+    let adapter = ws.db().adapter_for(file)?;
+    if adapter.language_id().as_str() != "java" {
+        return None;
+    }
+    let snapshot = ws.db().vfs().snapshot(file).ok()?;
+    let mut imports = Vec::new();
+    let mut offset = 0u64;
+    for raw_line in snapshot.text.lines() {
+        let trimmed = raw_line.trim_start();
+        let leading_ws = raw_line.len().saturating_sub(trimmed.len()) as u64;
+        let line_start = offset.saturating_add(leading_ws);
+        offset = offset.saturating_add(raw_line.len() as u64).saturating_add(1);
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
             continue;
         }
-        if let Some(package) = crate::pkg::java_like_fully_qualified_package(&reference.name) {
-            insert_import_target_prefixes(out, package);
+        let Some(rest) = trimmed.strip_prefix("import ") else {
+            continue;
+        };
+        let mut rest = rest.trim();
+        let is_static = rest.starts_with("static ");
+        if is_static {
+            rest = rest.trim_start_matches("static ").trim_start();
+        }
+        let mut module = rest
+            .trim_end_matches(';')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if module.is_empty() {
+            continue;
+        }
+        let is_wildcard = module.ends_with(".*");
+        if is_wildcard {
+            module = module.trim_end_matches(".*");
+        }
+        let (module, original_name) = if is_static && !is_wildcard {
+            module
+                .rsplit_once('.')
+                .map(|(owner, member)| (owner, Some(member.to_string())))
+                .unwrap_or((module, None))
+        } else {
+            (module, None)
+        };
+        imports.push(ImportSpec {
+            span: Span::new(file, line_start, line_start.saturating_add(trimmed.len() as u64)),
+            module: module.to_string(),
+            alias: None,
+            is_wildcard,
+            original_name,
+            scope: bonsai_lang_api::ImportScope::Module,
+        });
+    }
+    Some(bonsai_lang_api::ImportIndex { file, imports })
+}
+
+fn insert_python_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with('#') {
+            continue;
+        }
+        let line = strip_inline_comment(line, '#').trim();
+        if let Some(rest) = line.strip_prefix("import ") {
+            for item in rest.split(',') {
+                let module = item.trim().split_whitespace().next().unwrap_or_default();
+                insert_workspace_import_module(out, module);
+            }
+        } else if let Some(rest) = line.strip_prefix("from ") {
+            let module = rest.split_whitespace().next().unwrap_or_default();
+            insert_workspace_import_module(out, module);
         }
     }
 }
 
-fn direct_package_imports_for_file(ws: &Workspace, file: FileId) -> AHashSet<String> {
+fn insert_js_like_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with("//") || line.starts_with('*') {
+            continue;
+        }
+        let relevant = line.contains("import")
+            || line.contains("from ")
+            || line.contains("require(")
+            || line.contains("require.resolve(")
+            || line.contains("export ");
+        if !relevant {
+            continue;
+        }
+        for module in quoted_segments(line) {
+            insert_workspace_import_module(out, module);
+        }
+    }
+}
+
+fn insert_go_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    let mut in_import_block = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with("import (") {
+            in_import_block = true;
+            continue;
+        }
+        if in_import_block && line.starts_with(')') {
+            in_import_block = false;
+            continue;
+        }
+        if in_import_block || line.starts_with("import ") {
+            for module in quoted_segments(line) {
+                insert_workspace_import_module(out, module);
+            }
+        }
+    }
+}
+
+fn insert_rust_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("use ") {
+            let module = rest
+                .trim()
+                .trim_end_matches(';')
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            insert_workspace_import_module(out, module);
+        } else if let Some(rest) = line.strip_prefix("extern crate ") {
+            let module = rest
+                .trim()
+                .trim_end_matches(';')
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            insert_workspace_import_module(out, module);
+        }
+    }
+}
+
+fn insert_c_like_textual_includes(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        let Some(rest) = line.strip_prefix("#include") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        if let Some(module) =
+            bracketed_segment(rest, '<', '>').or_else(|| quoted_segments(rest).into_iter().next())
+        {
+            insert_workspace_import_module(out, module);
+        }
+    }
+}
+
+fn insert_ruby_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with('#') || line.starts_with("require_relative") {
+            continue;
+        }
+        if line.starts_with("require ") || line.starts_with("load ") || line.starts_with("autoload ") {
+            for module in quoted_segments(line) {
+                insert_workspace_import_module(out, module);
+            }
+        }
+    }
+}
+
+fn insert_php_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with("//") || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("use ") {
+            let module = rest
+                .trim()
+                .trim_end_matches(';')
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            insert_workspace_import_module(out, module);
+        } else if line.starts_with("require")
+            || line.starts_with("include")
+            || line.starts_with("require_once")
+            || line.starts_with("include_once")
+        {
+            for module in quoted_segments(line) {
+                insert_workspace_import_module(out, module);
+            }
+        }
+    }
+}
+
+fn insert_csharp_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("using ") {
+            let module = rest
+                .trim()
+                .trim_end_matches(';')
+                .trim_start_matches("static ")
+                .split('=')
+                .next_back()
+                .unwrap_or_default()
+                .trim();
+            insert_workspace_import_module(out, module);
+        }
+    }
+}
+
+fn insert_dotted_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with("//") || line.starts_with('*') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let module = rest
+            .trim()
+            .trim_end_matches(';')
+            .trim_start_matches("static ")
+            .trim_end_matches(".*")
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        insert_workspace_import_module(out, module);
+    }
+}
+
+fn insert_generic_textual_imports(out: &mut AHashSet<String>, text: &str) {
+    for line in text.lines().map(str::trim_start) {
+        if line.starts_with('#') {
+            if line.starts_with("#include") {
+                insert_c_like_textual_includes(out, line);
+            }
+            continue;
+        }
+        if line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with("import ") {
+            insert_dotted_textual_imports(out, line);
+            insert_python_textual_imports(out, line);
+        } else if line.starts_with("from ") {
+            insert_python_textual_imports(out, line);
+        } else if line.starts_with("use ") {
+            insert_rust_textual_imports(out, line);
+        } else if line.contains("require(") || line.starts_with("require ") {
+            insert_js_like_textual_imports(out, line);
+            insert_ruby_textual_imports(out, line);
+        }
+    }
+}
+
+fn insert_workspace_import_module(out: &mut AHashSet<String>, module: &str) {
+    let mut module = module
+        .trim()
+        .trim_matches(|c| matches!(c, '\'' | '"' | '`' | '<' | '>' | '(' | ')' | ';' | ','));
+    if let Some(stripped) = module.strip_prefix("node:") {
+        module = stripped;
+    }
+    if module.is_empty()
+        || module.starts_with('.')
+        || module.starts_with('/')
+        || module.starts_with('@')
+        || module.contains("${")
+    {
+        return;
+    }
+    module = module
+        .trim_end_matches("::*")
+        .trim_end_matches(".*")
+        .trim_end_matches("::*")
+        .trim_end_matches("/*");
+    insert_import_target_prefixes(out, module);
+    if let Some(stripped) = module
+        .strip_suffix(".h")
+        .or_else(|| module.strip_suffix(".hpp"))
+        .or_else(|| module.strip_suffix(".hxx"))
+    {
+        insert_import_target_prefixes(out, stripped);
+    }
+}
+
+fn quoted_segments(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut start = 0usize;
+    let mut escape = false;
+    for (idx, ch) in line.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        match quote {
+            Some(open) if ch == open => {
+                if let Some(segment) = line.get(start..idx) {
+                    out.push(segment);
+                }
+                quote = None;
+            }
+            Some(_) => {}
+            None if matches!(ch, '\'' | '"' | '`') => {
+                quote = Some(ch);
+                start = idx + ch.len_utf8();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+fn bracketed_segment(line: &str, open: char, close: char) -> Option<&str> {
+    let start = line.find(open)? + open.len_utf8();
+    let end = line[start..].find(close)? + start;
+    line.get(start..end)
+}
+
+fn strip_inline_comment(line: &str, marker: char) -> &str {
+    line.find(marker).and_then(|idx| line.get(..idx)).unwrap_or(line)
+}
+
+fn insert_file_import_packages(
+    ws: &Workspace,
+    file: FileId,
+    imports: &bonsai_lang_api::ImportIndex,
+    retention: FactRetention,
+    out: &mut AHashSet<String>,
+) {
+    for spec in &imports.imports {
+        insert_import_target_prefixes(out, &spec.module);
+        if let Some(stripped) = spec
+            .module
+            .strip_suffix(".h")
+            .or_else(|| spec.module.strip_suffix(".hpp"))
+            .or_else(|| spec.module.strip_suffix(".hxx"))
+        {
+            insert_import_target_prefixes(out, stripped);
+        }
+        if let Some(imported_file) = resolve_relative_import_file(ws, file, &spec.module) {
+            for package in direct_package_imports_for_file(ws, imported_file, retention) {
+                insert_local_import_package_markers(out, spec, &package);
+            }
+        }
+    }
+}
+
+fn direct_package_imports_for_file(
+    ws: &Workspace,
+    file: FileId,
+    retention: FactRetention,
+) -> AHashSet<String> {
     let mut out = AHashSet::new();
-    let Some(imports) = ws.db().import_index(file) else {
-        return out;
+    let imports = match retention {
+        FactRetention::Cached => ws.db().import_index(file).map(|imports| (*imports).clone()),
+        FactRetention::Transient => transient_import_index(ws, file),
     };
+    let Some(imports) = imports else { return out };
     for spec in &imports.imports {
         if spec.module.starts_with('.') {
             continue;
@@ -2878,6 +4286,7 @@ struct DeclMatchFacts {
 
 /// Bundle of per-decl facts for one file, keyed by `decl.span` (the
 /// stable identifier for a decl within a file).
+#[derive(Default)]
 struct FileDeclFactsBundle {
     by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>>,
 }
@@ -3135,16 +4544,57 @@ static DECL_FACTS_CACHE: std::sync::LazyLock<parking_lot::RwLock<FileDeclFactsMa
 /// invalidate. `factory_fp` is 0 when the pack ships no `returns_type`
 /// rules, keeping the key (and behavior) identical to a no-factory run.
 fn decl_match_facts_for(ws: &Workspace, file: FileId, factory: &FactoryReturns) -> Arc<FileDeclFactsBundle> {
+    decl_match_facts_for_retention(ws, file, None, factory, FactRetention::Cached)
+}
+
+fn decl_match_facts_for_retention(
+    ws: &Workspace,
+    file: FileId,
+    file_index: Option<&DeclIndex>,
+    factory: &FactoryReturns,
+    retention: FactRetention,
+) -> Arc<FileDeclFactsBundle> {
     let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snap| {
         (snap.version, package_cache_content_hash(snap.text.as_bytes()))
     });
     let key = (file, version, text_hash, factory.fingerprint);
+    if retention == FactRetention::Transient {
+        return file_index
+            .map(|index| build_decl_match_facts_bundle(ws, file, index, factory, retention))
+            .unwrap_or_else(|| {
+                ws.db()
+                    .decl_index_uncached(file)
+                    .map(|index| build_decl_match_facts_bundle(ws, file, &index, factory, retention))
+                    .unwrap_or_default()
+            });
+    }
     let cached = DECL_FACTS_CACHE.read().get(&key).cloned();
     if let Some(hit) = cached {
         return hit;
     }
-    let global = ws.db().global_index();
-    let import_aliases = file_alias_map(ws, file);
+    let bundle = file_index
+        .map(|index| build_decl_match_facts_bundle(ws, file, index, factory, retention))
+        .or_else(|| {
+            ws.db()
+                .decl_index(file)
+                .map(|index| build_decl_match_facts_bundle(ws, file, index.as_ref(), factory, retention))
+        })
+        .unwrap_or_default();
+    let mut write = DECL_FACTS_CACHE.write();
+    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
+        write.clear();
+    }
+    write.entry(key).or_insert_with(|| bundle.clone()).clone()
+}
+
+fn build_decl_match_facts_bundle(
+    ws: &Workspace,
+    file: FileId,
+    file_index: &DeclIndex,
+    factory: &FactoryReturns,
+    retention: FactRetention,
+) -> Arc<FileDeclFactsBundle> {
+    let import_aliases = file_alias_map_with_retention(ws, file, retention);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     // File language scopes factory-return typing (a Python `cursor`
     // factory must not type `.cursor()` in a JS file). Skipped entirely
@@ -3156,14 +4606,14 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId, factory: &FactoryReturns) 
                 .map(|a| a.language_id().as_str().to_string())
         })
         .flatten();
-    let module_type_aliases: Vec<TypeAliasBinding> = global
-        .decls_in(file)
+    let module_type_aliases: Vec<TypeAliasBinding> = file_index
+        .defs
         .iter()
         .filter(|decl| decl.name == "__module__")
         .flat_map(|decl| decl.type_aliases.iter().cloned())
         .collect();
     let mut by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>> = AHashMap::new();
-    for decl in global.decls_in(file) {
+    for decl in &file_index.defs {
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &module_type_aliases);
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
@@ -3183,7 +4633,7 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId, factory: &FactoryReturns) 
             extend_alias_map_with_declared_types(&mut alias_map, &factory_type_aliases);
         }
         let receiver_counts = receiver_method_call_counts(&calls);
-        let decl_decorators = collect_decl_decorator_names(ws, file, decl.name_span);
+        let decl_decorators = collect_decl_decorator_names(ws, file, file_index, decl.name_span);
         let alias_chains = collect_must_alias_pairs(&decl.flow_events);
         let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
         let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
@@ -3202,12 +4652,7 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId, factory: &FactoryReturns) 
             }),
         );
     }
-    let bundle = Arc::new(FileDeclFactsBundle { by_decl_span });
-    let mut write = DECL_FACTS_CACHE.write();
-    if write.len() >= MATCHER_FILE_FACT_CACHE_CAP {
-        write.clear();
-    }
-    write.entry(key).or_insert_with(|| bundle.clone()).clone()
+    Arc::new(FileDeclFactsBundle { by_decl_span })
 }
 
 fn insert_import_target_prefixes(out: &mut AHashSet<String>, module: &str) {
@@ -3379,26 +4824,29 @@ fn callee_or_alias_matches(
 fn scan_refs_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &[&PreparedRule<'_>],
     want_kind: RefKind,
     include_workspace_package_context: bool,
+    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let Some(idx) = global.file_index(file) else {
-        return;
-    };
-    let decls = global.decls_in(file);
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
-    let alias_map = file_alias_map(ws, file);
-    for r in &idx.refs {
+    let decls = file_index.defs.as_slice();
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_package_context,
+        retention,
+    );
+    let alias_map = file_alias_map_with_retention(ws, file, retention);
+    for r in &file_index.refs {
         if r.kind != want_kind {
             continue;
         }
         let enclosing_decl = innermost_decl_for_span(decls, r.span);
         for prepared in rules {
             if !decl_target_context_allows(
-                global.as_ref(),
+                file_index,
                 enclosing_decl,
                 prepared.rule.match_spec.target.as_ref(),
                 None,
@@ -3450,20 +4898,26 @@ fn scan_refs_batch(
 fn scan_flow_reads_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
+    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
-    let alias_map = file_alias_map(ws, file);
-    for decl in global.decls_in(file) {
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_package_context,
+        retention,
+    );
+    let alias_map = file_alias_map_with_retention(ws, file, retention);
+    for decl in &file_index.defs {
         let mut reads = Vec::new();
         collect_flow_read_sites(&decl.flow_events, &mut reads);
         for (span, tokens) in reads {
             for prepared in rules {
                 if !decl_target_context_allows(
-                    global.as_ref(),
+                    file_index,
                     Some(decl),
                     prepared.rule.match_spec.target.as_ref(),
                     None,
@@ -4043,17 +5497,23 @@ fn extend_alias_map_with_declared_types(
 fn scan_writes_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
+    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
-    let alias_map = file_alias_map(ws, file);
-    for decl in global.decls_in(file) {
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_package_context,
+        retention,
+    );
+    let alias_map = file_alias_map_with_retention(ws, file, retention);
+    for decl in &file_index.defs {
         let writes = collect_writes(&decl.flow_events);
         for (target, span) in writes {
             let args = source_text
@@ -4127,28 +5587,31 @@ fn scan_writes_batch(
 fn scan_ref_writes_batch(
     ws: &Workspace,
     file: FileId,
+    file_index: &DeclIndex,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
     mode: ConstraintMode,
     taint_view: Option<&InterTaintView<'_>>,
+    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
-    let global = ws.db().global_index();
-    let Some(idx) = global.file_index(file) else {
-        return;
-    };
-    let decls = global.decls_in(file);
+    let decls = file_index.defs.as_slice();
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    let file_packages = file_package_set_with_workspace_context(ws, file, include_workspace_package_context);
-    let alias_map = file_alias_map(ws, file);
-    for r in &idx.refs {
+    let file_packages = file_package_set_with_workspace_context_and_retention(
+        ws,
+        file,
+        include_workspace_package_context,
+        retention,
+    );
+    let alias_map = file_alias_map_with_retention(ws, file, retention);
+    for r in &file_index.refs {
         if r.kind != RefKind::Write {
             continue;
         }
         let args = source_text
             .as_deref()
             .and_then(|text| text.get(r.span.start as usize..r.span.end as usize))
-            .map(|value_text| {
+            .map(|value_text: &str| {
                 vec![CallArg {
                     span: r.span,
                     name: None,
@@ -4252,14 +5715,15 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
 /// `EnclosingDecoratorIn` constraint and Missing walker scoping.
 /// Each dotted segment is emitted so rules can match the framework-
 /// stable tail (`route`, `post`) regardless of receiver spelling.
-fn collect_decl_decorator_names(ws: &Workspace, file: FileId, decl_span: Span) -> Vec<String> {
+fn collect_decl_decorator_names(
+    ws: &Workspace,
+    file: FileId,
+    file_index: &DeclIndex,
+    decl_span: Span,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let global = ws.db().global_index();
-    let Some(idx) = global.file_index(file) else {
-        return out;
-    };
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    for r in &idx.refs {
+    for r in &file_index.refs {
         if r.kind != RefKind::Decorator {
             continue;
         }
@@ -4665,6 +6129,39 @@ fn enrich_call_fact_receiver_types(calls: &mut [CallFact], aliases: &[TypeAliasB
             {
                 push_unique_string(&mut call.receiver_types, alias.type_name.clone());
             }
+        }
+    }
+}
+
+fn expanded_receiver_types(
+    receiver_types: &[String],
+    receiver_base_map: &AHashMap<String, Vec<String>>,
+) -> Vec<String> {
+    if receiver_types.is_empty() || receiver_base_map.is_empty() {
+        return receiver_types.to_vec();
+    }
+    let mut out = receiver_types.to_vec();
+    let mut seen = AHashSet::new();
+    for receiver_type in receiver_types {
+        push_receiver_type_bases(&mut out, receiver_type, receiver_base_map, &mut seen);
+    }
+    out
+}
+
+fn push_receiver_type_bases(
+    out: &mut Vec<String>,
+    receiver_type: &str,
+    receiver_base_map: &AHashMap<String, Vec<String>>,
+    seen: &mut AHashSet<String>,
+) {
+    let key = normalize_type_name_for_match(receiver_type);
+    if key.is_empty() || !seen.insert(key.clone()) {
+        return;
+    }
+    if let Some(bases) = receiver_base_map.get(&key) {
+        for base in bases {
+            push_unique_string(out, base.clone());
+            push_receiver_type_bases(out, base, receiver_base_map, seen);
         }
     }
 }
@@ -5926,6 +7423,44 @@ fn collect_constructor_names(global: &bonsai_index::GlobalIndex) -> AHashSet<Str
     names
 }
 
+fn collect_constructor_names_for_files(ws: &Workspace, files: &[FileId]) -> AHashSet<String> {
+    let collect_for_file = |file: FileId| -> Vec<String> {
+        let Some(index) = ws.db().decl_index_uncached(file) else {
+            return Vec::new();
+        };
+        index
+            .defs
+            .iter()
+            .filter(|decl| matches!(decl.kind, DeclKind::Constructor))
+            .map(|decl| decl.name.clone())
+            .collect()
+    };
+    let workers = matcher_worker_count(files.len());
+    if workers > 1 && files.len() > 1 {
+        let collect = || {
+            use rayon::prelude::*;
+            let names = files
+                .par_iter()
+                .flat_map_iter(|&file| collect_for_file(file))
+                .collect::<Vec<_>>();
+            names.into_iter().collect::<AHashSet<_>>()
+        };
+        if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .stack_size(matcher_worker_stack_bytes())
+            .build()
+        {
+            return pool.install(collect);
+        }
+        return collect();
+    }
+    let mut names = AHashSet::new();
+    for &file in files {
+        names.extend(collect_for_file(file));
+    }
+    names
+}
+
 /// True when the callee's tail (after `.` / `::` qualification)
 /// names a known constructor. Lets `kind: new` rules fire on the
 /// `MyClass(x)` form even though the AST didn't tag it as a
@@ -5942,8 +7477,8 @@ fn constructor_name_matches(callee: &str, constructor_names: &AHashSet<String>) 
 }
 
 /// Resolve a span to `(file_path, line, column)` for renderer output.
-/// Uses the cached span map so repeated lookups within one file are
-/// O(1) after the first lookup builds the line offset table.
+/// Security batch scans can touch tens of thousands of files once; do
+/// not retain those span maps in the shared browse cache.
 fn resolve_span(ws: &Workspace, file: FileId, span: Span) -> (String, u32, u32) {
     let path = ws
         .vfs()
@@ -5951,7 +7486,7 @@ fn resolve_span(ws: &Workspace, file: FileId, span: Span) -> (String, u32, u32) 
         .map(|file_path| file_path.to_string_lossy().into_owned())
         .unwrap_or_default();
     if let Ok(snapshot) = ws.vfs().snapshot(file) {
-        let span_map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
+        let span_map = bonsai_common::SpanMap::new(snapshot.text.as_ref());
         let line_col = span_map.line_col(span.start);
         return (path, line_col.line, line_col.column);
     }

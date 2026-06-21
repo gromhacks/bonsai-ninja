@@ -35,11 +35,6 @@ Focused engine/tool checks from the same pass were green:
 
 Elasticsearch spot checks on 2026-06-19 with the release binary:
 
-- Unscoped `security ../elasticsearch taint-analysis` now refuses in
-  under one second with an explicit diagnostic instead of running until
-  the OS kills it. The command does not silently reduce coverage; users
-  must add a scope or set `BONSAI_ALLOW_BROAD_TAINT=1` for the exhaustive
-  all-file audit.
 - `security ../elasticsearch taint-analysis --profile production --summary --format json`
   completed in 56.40 seconds with 3.32 GB max RSS.
 - `security ../elasticsearch sources --rule java.source.spring_request_param --format json`

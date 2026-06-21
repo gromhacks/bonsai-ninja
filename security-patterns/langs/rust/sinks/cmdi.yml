@@ -141,10 +141,12 @@
   match_examples:
   - name: generated direct match
     code: |
+      use std::env;
       use duct::dummy;
-      fn example(target: &str) {
+      fn example() {
           let query = "user";
-          duct::sh(target);
+          let input = env::args();
+          duct::sh(input);
       }
   - name: literal arg 0 negative
     code: |

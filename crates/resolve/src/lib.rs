@@ -1637,6 +1637,9 @@ fn decl_belongs_to_class(
     if decl.parent == Some(class_sym) {
         return true;
     }
+    if matches!(decl.kind, DeclKind::Method | DeclKind::Constructor) && decl.parent.is_some() {
+        return false;
+    }
     let class_span = class_decl.body_span.unwrap_or(class_decl.span);
     decl.name_span.file == class_span.file
         && decl.name_span.start >= class_span.start

@@ -1,7 +1,7 @@
 //! Java language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    decl_index_with_handler, extract_imports_via,
+    decl_index_with_handler,
     kit::{
         collect_kinds, language_from_pack, node_text, package_module_segments_with_workspace_prefix,
         parse_with, span_of, with_fn_kinds_and_implicit_receivers,
@@ -219,7 +219,16 @@ impl LanguageAdapter for JavaAdapter {
         index
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
-        extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+        let Ok(snapshot) = ctx.vfs.snapshot(file) else {
+            return ImportIndex {
+                file,
+                ..Default::default()
+            };
+        };
+        ImportIndex {
+            file,
+            imports: parse_imports_text(snapshot.text.as_ref(), file),
+        }
     }
 }
 
@@ -681,44 +690,111 @@ fn dedup_type_aliases(aliases: &mut Vec<TypeAliasBinding>) {
     *aliases = deduped;
 }
 
-/// Parse Java import declarations into `ImportSpec` records.
-///
-/// Java import shapes:
-///   `import java.sql.Connection;`      → scoped_identifier path
-///   `import static java.lang.Math.PI;` → leading `static` keyword
-///   `import java.util.*;`              → trailing `.*` wildcard
-fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
+fn parse_imports_text(src: &str, file: FileId) -> Vec<ImportSpec> {
     let mut imports = Vec::new();
-    for import_node in collect_kinds(tree, &["import_declaration"]) {
-        // Strip the keyword chrome and the trailing semicolon. Tree-sitter
-        // gives us the raw text, but the `import_declaration` doesn't
-        // expose a clean module path field, so textual stripping is the
-        // simplest route.
-        let module_path_text = node_text(&import_node, src)
-            .trim_start_matches("import ")
-            .trim_start_matches("static ")
-            .trim_end_matches(';')
-            .trim();
-        if module_path_text.is_empty() {
+    let mut in_block_comment = false;
+    let mut stmt = String::new();
+    let mut stmt_start = 0usize;
+    let mut offset = 0usize;
+
+    for raw_line in src.split_inclusive('\n') {
+        let cleaned = strip_java_comments_preserving_width(raw_line, &mut in_block_comment);
+        let line_start = offset;
+        offset += raw_line.len();
+
+        if stmt.is_empty() {
+            let trimmed = cleaned.trim_start();
+            if !trimmed.starts_with("import ") {
+                continue;
+            }
+            let leading = cleaned.len().saturating_sub(trimmed.len());
+            stmt_start = line_start + leading;
+            stmt.push_str(trimmed);
+        } else {
+            stmt.push(' ');
+            stmt.push_str(cleaned.trim());
+        }
+
+        let Some(semi) = stmt.find(';') else {
+            continue;
+        };
+        let statement = stmt[..=semi].trim();
+        let stmt_end = line_start + cleaned.find(';').map_or(raw_line.len(), |idx| idx + 1);
+        if let Some(import) = import_spec_from_java_statement(statement, file, stmt_start, stmt_end) {
+            imports.push(import);
+        }
+        stmt.clear();
+    }
+
+    imports
+}
+
+fn strip_java_comments_preserving_width(line: &str, in_block_comment: &mut bool) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if *in_block_comment {
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+                *in_block_comment = false;
+            } else {
+                out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                i += 1;
+            }
             continue;
         }
-        let is_wildcard = module_path_text.ends_with(".*");
-        let module_path = module_path_text.trim_end_matches(".*").to_string();
-        let alias = if is_wildcard {
-            None
-        } else {
-            import_tail_binding(&module_path)
-        };
-        imports.push(ImportSpec {
-            span: span_of(file, &import_node),
-            module: module_path,
-            alias,
-            is_wildcard,
-            original_name: None,
-            scope: ImportScope::Module,
-        });
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() {
+                out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            break;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            *in_block_comment = true;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
     }
-    imports
+    out
+}
+
+fn import_spec_from_java_statement(
+    statement: &str,
+    file: FileId,
+    start: usize,
+    end: usize,
+) -> Option<ImportSpec> {
+    let module_path_text = statement
+        .trim_start_matches("import ")
+        .trim_start_matches("static ")
+        .trim_end_matches(';')
+        .trim();
+    if module_path_text.is_empty() {
+        return None;
+    }
+    let is_wildcard = module_path_text.ends_with(".*");
+    let module_path = module_path_text.trim_end_matches(".*").to_string();
+    let alias = if is_wildcard {
+        None
+    } else {
+        import_tail_binding(&module_path)
+    };
+    Some(ImportSpec {
+        span: Span::new(file, start as u64, end as u64),
+        module: module_path,
+        alias,
+        is_wildcard,
+        original_name: None,
+        scope: ImportScope::Module,
+    })
 }
 
 fn import_tail_binding(module: &str) -> Option<String> {

@@ -13,7 +13,9 @@ use crate::finding::{
 use crate::loader::Rulepack;
 use crate::matcher::{
     infer_entry_point_sources_for_files_with_progress,
+    match_rules_against_facts_for_inventory_with_progress_on_files,
     match_rules_against_facts_for_sink_inventory_with_progress_on_files,
+    match_rules_against_facts_for_taint_support_with_progress_on_files,
     match_rules_against_facts_for_taint_with_progress_on_files,
     match_rules_against_facts_with_progress_on_files, rule_match_passes_constraints_with_taint_view,
     InterTaintView, RuleMatch,
@@ -676,7 +678,7 @@ where
 
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, options.exclude_tests);
     let total_files = scan_files.len() as u64;
-    let mut source_hits = gather_matches_phased(
+    let mut source_hits = gather_taint_support_matches_phased(
         ws,
         &sources,
         "matching source rules",
@@ -751,9 +753,13 @@ where
     });
     sanitizers.retain(|rule| source_languages.contains(rule.language.as_str()));
 
+    let endpoint_scan_files =
+        endpoint_scan_files_for_taint(ws, &source_hits, &scan_files, options.max_precision);
+    let endpoint_total_files = endpoint_scan_files.len() as u64;
+
     on_progress(AnalysisProgress::PhaseStarted {
         label: "matching sink rules",
-        total: total_files,
+        total: endpoint_total_files,
     });
     // Rulepack-declared factory-method return types (`returns_type`).
     // Empty (and dormant) unless the pack ships such rules; threaded
@@ -763,19 +769,19 @@ where
     let mut sink_hits = match_rules_against_facts_for_taint_with_progress_on_files(
         ws,
         &sinks,
-        &scan_files,
+        &endpoint_scan_files,
         &factory_returns,
         || {
             on_progress(AnalysisProgress::PhaseTicked);
         },
     );
     on_progress(AnalysisProgress::PhaseFinished);
-    let mut sanitizer_hits = gather_matches_phased(
+    let mut sanitizer_hits = gather_taint_support_matches_phased(
         ws,
         &sanitizers,
         "matching sanitizer rules",
-        &scan_files,
-        total_files,
+        &endpoint_scan_files,
+        endpoint_total_files,
         &mut on_progress,
     );
     filter_by_path(&mut sink_hits, &options.files, &options.exclude_files);
@@ -788,8 +794,8 @@ where
             ws,
             &pattern_sinks,
             "matching pattern sink rules",
-            &scan_files,
-            total_files,
+            &endpoint_scan_files,
+            endpoint_total_files,
             &mut on_progress,
         )
     };
@@ -944,6 +950,50 @@ where
         sink_rule_count: selected_sink_rule_count,
         sanitizer_rule_count: sanitizers.len(),
     })
+}
+
+const LARGE_TAINT_ENDPOINT_PREFILTER_FILE_THRESHOLD: usize = 10_000;
+
+fn endpoint_scan_files_for_taint(
+    ws: &Workspace,
+    source_hits: &[RuleMatch],
+    scan_files: &[FileId],
+    max_precision: Option<Precision>,
+) -> Vec<FileId> {
+    if scan_files.len() < LARGE_TAINT_ENDPOINT_PREFILTER_FILE_THRESHOLD || source_hits.is_empty() {
+        return scan_files.to_vec();
+    }
+    let mut source_funcs: Vec<FuncId> = source_hits
+        .iter()
+        .filter_map(|source| func_id_for_match(ws, source))
+        .collect();
+    source_funcs.sort_by_key(|func| func.raw());
+    source_funcs.dedup();
+    if source_funcs.is_empty() {
+        return scan_files.to_vec();
+    }
+
+    let reachable = ws.source_reachable_resolved_call_graph(&source_funcs, &[], max_precision);
+    let allowed_files: AHashSet<FileId> = scan_files.iter().copied().collect();
+    let mut endpoint_files: Vec<FileId> = reachable
+        .files
+        .into_iter()
+        .filter(|file| allowed_files.contains(file))
+        .collect();
+    endpoint_files.sort_by_key(|file| file.raw());
+    endpoint_files.dedup();
+    if endpoint_files.is_empty() {
+        return scan_files.to_vec();
+    }
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "large taint endpoint scan reduced files={} -> {} source_funcs={} reachable_funcs={}",
+        scan_files.len(),
+        endpoint_files.len(),
+        source_funcs.len(),
+        reachable.funcs.len()
+    );
+    endpoint_files
 }
 
 /// Top-level source-only enumeration. Returns every source rule match
@@ -1501,7 +1551,7 @@ pub fn filter_rules_to_workspace_languages<'a>(ws: &Workspace, rules: &mut Vec<&
 /// cache the result.
 pub fn workspace_languages(ws: &Workspace) -> AHashSet<String> {
     let mut languages = AHashSet::new();
-    for file in ws.db().global_index().all_files() {
+    for file in ws.db().vfs().all_files() {
         if let Some(adapter) = ws.db().adapter_for(file) {
             languages.insert(adapter.language_id().as_str().to_string());
         }
@@ -1545,7 +1595,7 @@ where
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
     let total_files = scan_files.len() as u64;
-    let mut matches = gather_matches_phased(
+    let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
         "matching source rules",
@@ -1671,7 +1721,7 @@ where
     filter_rules_to_workspace_languages(ws, &mut selected);
     let scan_files = security_scan_files(ws, &options.files, &options.exclude_files, false);
     let total_files = scan_files.len() as u64;
-    let mut matches = gather_matches_phased(
+    let mut matches = gather_inventory_matches_phased(
         ws,
         &selected,
         "matching sanitizer rules",
@@ -3309,6 +3359,52 @@ where
     matches
 }
 
+fn gather_taint_support_matches_phased<F>(
+    ws: &Workspace,
+    rules: &[&Rule],
+    label: &'static str,
+    scan_files: &[FileId],
+    total_files: u64,
+    on_progress: &mut F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(AnalysisProgress),
+{
+    on_progress(AnalysisProgress::PhaseStarted {
+        label,
+        total: total_files,
+    });
+    let matches =
+        match_rules_against_facts_for_taint_support_with_progress_on_files(ws, rules, scan_files, || {
+            on_progress(AnalysisProgress::PhaseTicked);
+        });
+    on_progress(AnalysisProgress::PhaseFinished);
+    matches
+}
+
+fn gather_inventory_matches_phased<F>(
+    ws: &Workspace,
+    rules: &[&Rule],
+    label: &'static str,
+    scan_files: &[FileId],
+    total_files: u64,
+    on_progress: &mut F,
+) -> Vec<RuleMatch>
+where
+    F: FnMut(AnalysisProgress),
+{
+    on_progress(AnalysisProgress::PhaseStarted {
+        label,
+        total: total_files,
+    });
+    let matches =
+        match_rules_against_facts_for_inventory_with_progress_on_files(ws, rules, scan_files, || {
+            on_progress(AnalysisProgress::PhaseTicked);
+        });
+    on_progress(AnalysisProgress::PhaseFinished);
+    matches
+}
+
 pub fn source_rule_matches_filters(
     rule: &Rule,
     trust: Option<&str>,
@@ -3543,6 +3639,34 @@ fn chain_precision_for_records(records: &[&TaintedCallEdge]) -> Precision {
     })
 }
 
+fn semantic_chain_precision(edges: &[&bonsai_callgraph::CallEdge]) -> Precision {
+    edges
+        .iter()
+        .fold(Precision::Exact, |precision, edge| precision.meet(edge.precision))
+}
+
+fn chain_funcs_for_semantic_edges(
+    source_func: FuncId,
+    edges: &[&bonsai_callgraph::CallEdge],
+) -> Option<Vec<FuncId>> {
+    if edges.is_empty() {
+        return Some(vec![source_func]);
+    }
+    let first = edges.first()?;
+    if first.from != source_func {
+        return None;
+    }
+    let mut funcs = Vec::with_capacity(edges.len() + 1);
+    funcs.push(source_func);
+    for edge in edges {
+        if funcs.last().copied() != Some(edge.from) {
+            return None;
+        }
+        funcs.push(edge.to);
+    }
+    Some(funcs)
+}
+
 #[derive(Clone, Debug)]
 struct UnresolvedWorkspaceCallSite {
     span: Span,
@@ -3656,32 +3780,58 @@ fn build_call_evidence<'a>(
     if graph_saturated {
         return None;
     }
-    let original_records = lineage_records_for_call_indexed(trace_index, call)?;
-    let sanitizer_candidate_funcs =
-        sanitizer_candidate_funcs_for_lineage(&original_records, source_func, call.caller);
-    let mut records = original_records;
-    let primary = chain_funcs_for_lineage(&records, source_func, call.caller)?;
-    // Chain-quality upgrade: when the lineage walk anchored on
-    // `parent_trace_id` goes through synthetic edges (Phase 3c field-flow
-    // stitches, Phase 3d receiver-method propagation, or Return back-edges),
-    // prefer an equivalent canonical call sequence with fewer synthetic hops.
-    let mut chain_funcs =
-        rewrite_chain_with_canonical_path(primary.clone(), canonical_chain_index, source_func, call.caller);
-    // The chain and the taint_path must describe the SAME route: rebuild
-    // the step records along the rewritten chain from the recorded edges
-    // it was found through. If any hop lacks a recorded edge, the rewrite
-    // cannot be evidenced — keep the original lineage route instead.
-    if chain_funcs != primary {
-        match canonical_chain_index.records_along_chain(&chain_funcs) {
-            Some(rewritten) => records = rewritten,
-            None => chain_funcs = primary,
-        }
-    }
-    let chain_precision = chain_precision_for_records(&records);
+    let original_records = lineage_records_for_call_indexed(trace_index, call).unwrap_or_default();
+    let (chain_funcs, sanitizer_candidate_funcs, chain_precision, taint_path) =
+        if let Some(primary) = chain_funcs_for_lineage(&original_records, source_func, call.caller) {
+            let mut records = original_records;
+            let sanitizer_candidate_funcs =
+                sanitizer_candidate_funcs_for_lineage(&records, source_func, call.caller);
+            // Chain-quality upgrade: when the lineage walk anchored on
+            // `parent_trace_id` goes through synthetic edges (Phase 3c field-flow
+            // stitches, Phase 3d receiver-method propagation, or Return back-edges),
+            // prefer an equivalent canonical call sequence with fewer synthetic hops.
+            let mut chain_funcs = rewrite_chain_with_canonical_path(
+                primary.clone(),
+                canonical_chain_index,
+                source_func,
+                call.caller,
+            );
+            // The chain and the taint_path must describe the SAME route: rebuild
+            // the step records along the rewritten chain from the recorded edges
+            // it was found through. If any hop lacks a recorded edge, the rewrite
+            // cannot be evidenced — keep the original lineage route instead.
+            if chain_funcs != primary {
+                match canonical_chain_index.records_along_chain(&chain_funcs) {
+                    Some(rewritten) => records = rewritten,
+                    None => chain_funcs = primary,
+                }
+            }
+            let chain_precision = chain_precision_for_records(&records);
+            let taint_path = taint_path_for_lineage(ws, &records, Some(call));
+            (
+                chain_funcs,
+                sanitizer_candidate_funcs,
+                chain_precision,
+                taint_path,
+            )
+        } else {
+            let semantic_edges =
+                canonical_chain_index.semantic_edges_along_best_path(source_func, call.caller)?;
+            let chain_funcs = chain_funcs_for_semantic_edges(source_func, &semantic_edges)?;
+            let chain_precision = semantic_chain_precision(&semantic_edges)
+                .meet(chain_precision_for_records(&original_records));
+            let sanitizer_candidate_funcs = sanitizer_candidate_funcs_for_chain(&chain_funcs);
+            let taint_path = taint_path_for_semantic_edges(ws, source_func, &semantic_edges, Some(call));
+            (
+                chain_funcs,
+                sanitizer_candidate_funcs,
+                chain_precision,
+                taint_path,
+            )
+        };
     if !chain_precision.is_semantic() {
         return None;
     }
-    let taint_path = taint_path_for_lineage(ws, &records, Some(call));
     let chain_names = chain_names_for_path(ws, &chain_funcs)?;
     let mut sink_tainted_args: Vec<TaintedArgInfo> = call
         .tainted_args
@@ -3719,6 +3869,14 @@ fn sanitizer_candidate_funcs_for_lineage(
         push_unique_func(&mut funcs, record.callee);
     }
     push_unique_func(&mut funcs, terminal_func);
+    funcs
+}
+
+fn sanitizer_candidate_funcs_for_chain(chain_funcs: &[FuncId]) -> Vec<FuncId> {
+    let mut funcs = Vec::with_capacity(chain_funcs.len());
+    for func in chain_funcs {
+        push_unique_func(&mut funcs, *func);
+    }
     funcs
 }
 
@@ -3790,10 +3948,12 @@ struct CanonicalChainIndex<'a> {
     /// any exists. Lets a canonically rewritten chain rebuild its
     /// taint_path from the actual recorded propagation on each hop.
     edge_record: AHashMap<(FuncId, FuncId), &'a TaintedCallEdge>,
+    semantic_adjacency: AHashMap<FuncId, Vec<&'a bonsai_callgraph::CallEdge>>,
+    semantic_edge: AHashMap<(FuncId, FuncId), &'a bonsai_callgraph::CallEdge>,
 }
 
 impl<'a> CanonicalChainIndex<'a> {
-    fn new(records: &'a [TaintedCallEdge], call_graph: &bonsai_callgraph::ResolvedCallGraph) -> Self {
+    fn new(records: &'a [TaintedCallEdge], call_graph: &'a bonsai_callgraph::ResolvedCallGraph) -> Self {
         let mut edge_synthetic: AHashMap<(FuncId, FuncId), bool> = AHashMap::default();
         let mut edge_has_any = AHashSet::default();
         let mut edge_has_real = AHashSet::default();
@@ -3828,11 +3988,48 @@ impl<'a> CanonicalChainIndex<'a> {
         for neighbors in adjacency.values_mut() {
             neighbors.sort_by_key(|(callee, is_synthetic)| (callee.raw(), *is_synthetic));
         }
+        let mut semantic_adjacency: AHashMap<FuncId, Vec<&'a bonsai_callgraph::CallEdge>> =
+            AHashMap::default();
+        let mut semantic_edge: AHashMap<(FuncId, FuncId), &'a bonsai_callgraph::CallEdge> =
+            AHashMap::default();
+        for edge in call_graph
+            .inner()
+            .edges
+            .iter()
+            .filter(|edge| edge.precision.is_semantic())
+        {
+            semantic_adjacency.entry(edge.from).or_default().push(edge);
+            semantic_edge
+                .entry((edge.from, edge.to))
+                .and_modify(|existing| {
+                    if edge.precision < existing.precision
+                        || (edge.precision == existing.precision
+                            && (edge.span.file.raw(), edge.span.start, edge.span.end)
+                                < (existing.span.file.raw(), existing.span.start, existing.span.end))
+                    {
+                        *existing = edge;
+                    }
+                })
+                .or_insert(edge);
+        }
+        for edges in semantic_adjacency.values_mut() {
+            edges.sort_by_key(|edge| {
+                (
+                    edge.to.raw(),
+                    edge.precision.rank(),
+                    edge.span.file.raw(),
+                    edge.span.start,
+                    edge.span.end,
+                )
+            });
+        }
         Self {
             adjacency,
             edge_has_any,
             edge_has_real,
             edge_record,
+            semantic_adjacency,
+            semantic_edge,
         }
     }
 
@@ -3848,6 +4045,56 @@ impl<'a> CanonicalChainIndex<'a> {
             .windows(2)
             .map(|pair| self.edge_record.get(&(pair[0], pair[1])).copied())
             .collect()
+    }
+
+    fn semantic_edges_along_best_path(
+        &self,
+        source_func: FuncId,
+        terminal_func: FuncId,
+    ) -> Option<Vec<&'a bonsai_callgraph::CallEdge>> {
+        if source_func == terminal_func {
+            return Some(Vec::new());
+        }
+        const MAX_HOPS: usize = 16;
+        use std::collections::BinaryHeap;
+        let mut heap: BinaryHeap<std::cmp::Reverse<(u32, u8, u8, Vec<FuncId>)>> = BinaryHeap::new();
+        heap.push(std::cmp::Reverse((0, 0, 0, vec![source_func])));
+        let mut best_score: AHashMap<FuncId, u32> = AHashMap::default();
+        best_score.insert(source_func, 0);
+        while let Some(std::cmp::Reverse((score, worst_rank, hops, path))) = heap.pop() {
+            let current = *path.last()?;
+            if current == terminal_func && path.len() > 1 {
+                return path
+                    .windows(2)
+                    .map(|pair| self.semantic_edge.get(&(pair[0], pair[1])).copied())
+                    .collect();
+            }
+            if path.len() > MAX_HOPS {
+                continue;
+            }
+            if best_score.get(&current).copied().unwrap_or(u32::MAX) < score {
+                continue;
+            }
+            let Some(edges) = self.semantic_adjacency.get(&current) else {
+                continue;
+            };
+            for edge in edges {
+                if path.contains(&edge.to) {
+                    continue;
+                }
+                let next_rank = worst_rank.max(edge.precision.rank());
+                let next_hops = hops.saturating_add(1);
+                let next_score = u32::from(next_rank) * 100 + u32::from(next_hops);
+                if best_score.get(&edge.to).copied().unwrap_or(u32::MAX) <= next_score {
+                    continue;
+                }
+                best_score.insert(edge.to, next_score);
+                let mut next_path = path.clone();
+                next_path.push(edge.to);
+                heap.push(std::cmp::Reverse((next_score, next_rank, next_hops, next_path)));
+            }
+        }
+        None
     }
 }
 
@@ -4114,6 +4361,49 @@ fn taint_path_for_lineage(
     normalize_taint_path(path)
 }
 
+fn taint_path_for_semantic_edges(
+    ws: &Workspace,
+    source_func: FuncId,
+    edges: &[&bonsai_callgraph::CallEdge],
+    terminal_call: Option<&TaintedCall>,
+) -> Vec<TaintPropagationStep> {
+    let mut funcs = Vec::with_capacity(edges.len() + 2);
+    funcs.push(source_func);
+    for edge in edges {
+        funcs.push(edge.to);
+    }
+    if let Some(call) = terminal_call {
+        funcs.push(call.caller);
+    }
+    funcs.sort_unstable();
+    funcs.dedup();
+    let names = path_display_names_for_funcs(ws, &funcs);
+    let mut path: Vec<TaintPropagationStep> = edges
+        .iter()
+        .map(|edge| propagation_step_for_semantic_edge(ws, edge, &names))
+        .collect();
+    if let Some(call) = terminal_call {
+        path.push(propagation_step_for_terminal_call(ws, call, &names));
+    }
+    normalize_taint_path(path)
+}
+
+fn propagation_step_for_semantic_edge(
+    ws: &Workspace,
+    edge: &bonsai_callgraph::CallEdge,
+    names: &AHashMap<FuncId, String>,
+) -> TaintPropagationStep {
+    let (file, line, column) = resolve_span_location(ws, edge.span);
+    TaintPropagationStep {
+        caller: path_display_name(ws, names, edge.from),
+        callee: path_display_name(ws, names, edge.to),
+        file,
+        line,
+        column,
+        tainted_args: Vec::new(),
+    }
+}
+
 /// Display names for every function on a taint path. A bare name that
 /// covers more than one distinct function anywhere on the path is
 /// qualified with `@file:line` on EVERY step — the same policy
@@ -4139,6 +4429,29 @@ fn path_display_names(
     funcs.dedup();
     let mut by_name: BTreeMap<String, Vec<FuncId>> = BTreeMap::new();
     for func in &funcs {
+        by_name
+            .entry(func_display_name(ws, *func))
+            .or_default()
+            .push(*func);
+    }
+    let mut names = AHashMap::with_capacity(funcs.len());
+    for (name, ids) in by_name {
+        let ambiguous = ids.len() > 1;
+        for func in ids {
+            let display = if ambiguous {
+                func_display_name_with_site(ws, func)
+            } else {
+                name.clone()
+            };
+            names.insert(func, display);
+        }
+    }
+    names
+}
+
+fn path_display_names_for_funcs(ws: &Workspace, funcs: &[FuncId]) -> AHashMap<FuncId, String> {
+    let mut by_name: BTreeMap<String, Vec<FuncId>> = BTreeMap::new();
+    for func in funcs {
         by_name
             .entry(func_display_name(ws, *func))
             .or_default()
@@ -4324,8 +4637,9 @@ fn security_scan_files(
     exclude_tests: bool,
 ) -> Vec<FileId> {
     ws.db()
-        .global_index()
+        .vfs()
         .all_files()
+        .into_iter()
         .filter(|&file| {
             let path = ws
                 .vfs()
@@ -5847,15 +6161,14 @@ where
     let sink_target_nodes = source_sink_prefilter_enabled
         .then(|| sink_target_nodes_for_funcs(idg.as_ref(), pack, &sink_by_func, &sink_func_set));
     let sink_match_count: usize = sink_by_func.values().map(Vec::len).sum();
-    let sink_target_nodes_for_schedule = sink_target_nodes.as_ref().and_then(|targets| {
-        if sink_target_nodes_are_selective_for_schedule(targets, sink_match_count) {
-            Some(targets.nodes.as_slice())
-        } else {
-            None
-        }
-    });
+    let sink_target_nodes_for_schedule = sink_target_nodes
+        .as_ref()
+        .filter(|targets| targets.complete && !targets.nodes.is_empty())
+        .map(|targets| targets.nodes.as_slice());
     let use_coarse_source_sink_schedule = transfer_languages.contains("java") && semantic_funcs.len() > 1_000;
-    let target_node_graph_cut_enabled = false;
+    let target_node_graph_cut_enabled = sink_target_nodes
+        .as_ref()
+        .is_some_and(|targets| targets.complete && !targets.nodes.is_empty());
     if let Some(targets) = sink_target_nodes.as_ref() {
         bonsai_diagnostics::debug_log!(
             "security-phase",
@@ -5867,7 +6180,10 @@ where
             target_node_graph_cut_enabled
         );
     }
-    let sink_target_nodes_for_graph: Option<&[bonsai_idg::WsNodeId]> = None;
+    let sink_target_nodes_for_graph: Option<&[bonsai_idg::WsNodeId]> = target_node_graph_cut_enabled
+        .then(|| sink_target_nodes.as_ref())
+        .flatten()
+        .map(|targets| targets.nodes.as_slice());
     let taint_caches = ws.inter_taint_caches();
     taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
     // Workspace-wide source-seeded graph index. The resident cache is
@@ -6004,12 +6320,13 @@ where
         let mut sink_matches = 0usize;
         let mut lineage_misses = 0usize;
         let mut group_out: Vec<FindingWithChain> = Vec::new();
-        let group_target_nodes =
-            if sink_target_nodes_for_graph.is_some() && !group.corridor.target_nodes.is_empty() {
+        let group_target_nodes = sink_target_nodes_for_graph.and_then(|global_targets| {
+            if !group.corridor.target_nodes.is_empty() {
                 Some(group.corridor.target_nodes.as_slice())
             } else {
-                None
-            };
+                Some(global_targets)
+            }
+        });
         let group_sink_func_targets = Some(&group.corridor.lineage_funcs);
         let group_lineage_func_targets = Some(&group.corridor.lineage_funcs);
         if debug_taint_phase {
@@ -7050,18 +7367,6 @@ fn sink_target_nodes_for_funcs(
     out.sort();
     out.dedup();
     SinkTargetNodes { nodes: out, complete }
-}
-
-fn sink_target_nodes_are_selective_for_schedule(targets: &SinkTargetNodes, sink_match_count: usize) -> bool {
-    const MAX_SELECTIVE_SCHEDULE_TARGET_NODES: usize = 50_000;
-    if targets.nodes.is_empty() || sink_match_count == 0 {
-        return false;
-    }
-    if targets.nodes.len() > MAX_SELECTIVE_SCHEDULE_TARGET_NODES {
-        return false;
-    }
-    let expected_span_nodes = sink_match_count.saturating_mul(16).max(8_192);
-    targets.nodes.len() <= expected_span_nodes
 }
 
 #[allow(clippy::too_many_arguments)] // Source scheduling needs rule, seed, transfer, and IDG context.
@@ -9597,6 +9902,97 @@ fn sanitizer_can_attach(
     true
 }
 
+fn sanitizer_assignment_output_feeds_sink_arg(
+    ws: &Workspace,
+    sanitizer_func: FuncId,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> bool {
+    if san.span.file != snk.span.file || !match_precedes_or_same(san, snk) {
+        return false;
+    }
+    let target_keys: AHashSet<String> = sink_tainted_args
+        .iter()
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .collect();
+    if target_keys.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sanitizer_func.raw())) else {
+        return false;
+    };
+    sanitizer_assignment_output_feeds_sink_arg_in_events(&decl.flow_events, san, &target_keys)
+}
+
+fn sanitizer_assignment_output_feeds_sink_arg_in_events(
+    events: &[FlowEvent],
+    san: &RuleMatch,
+    target_keys: &AHashSet<String>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                ..
+            } => {
+                let Some(target_key) = clean_overwrite_target_key(target) else {
+                    continue;
+                };
+                if !target_keys.contains(&target_key) {
+                    continue;
+                }
+                if !spans_overlap(*span, san.span) && !span_contains(*span, san.span) {
+                    continue;
+                }
+                let Some(source_call) = source_call.as_deref() else {
+                    continue;
+                };
+                if security_text_matches_source_strict(source_call, &san.match_text)
+                    || security_text_matches_source_strict(&san.match_text, source_call)
+                    || spans_overlap(*span, san.span)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if sanitizer_assignment_output_feeds_sink_arg_in_events(then_events, san, target_keys)
+                    || sanitizer_assignment_output_feeds_sink_arg_in_events(else_events, san, target_keys)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if sanitizer_assignment_output_feeds_sink_arg_in_events(body, san, target_keys) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if sanitizer_assignment_output_feeds_sink_arg_in_events(body, san, target_keys)
+                    || sanitizer_assignment_output_feeds_sink_arg_in_events(catch_events, san, target_keys)
+                    || sanitizer_assignment_output_feeds_sink_arg_in_events(finally_events, san, target_keys)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn post_sink_path_construction_containment_allowed(
     sanitizer_rule: Option<&Rule>,
     sink_rule: &Rule,
@@ -10579,6 +10975,13 @@ fn make_finding(
                     || sanitizer_is_nested_in_tainted_sink_arg(
                         src,
                         sanitizer_match,
+                        &context.sink_tainted_args,
+                    )
+                    || sanitizer_assignment_output_feeds_sink_arg(
+                        context.ws,
+                        hop_func,
+                        sanitizer_match,
+                        snk,
                         &context.sink_tainted_args,
                     )
                     || xxe_factory_hardening_sanitizes_sink(
