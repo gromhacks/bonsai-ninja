@@ -9931,12 +9931,16 @@ fn sanitizer_assignment_output_feeds_sink_arg_in_events(
     san: &RuleMatch,
     target_keys: &AHashSet<String>,
 ) -> bool {
+    let sanitizer_targets = sanitizer_assignment_targets_in_events(events, san);
     for event in events {
         match event {
             FlowEvent::Assign {
                 span,
                 target,
                 source_call,
+                source_name,
+                source_call_args,
+                source_names,
                 ..
             } => {
                 let Some(target_key) = clean_overwrite_target_key(target) else {
@@ -9945,16 +9949,20 @@ fn sanitizer_assignment_output_feeds_sink_arg_in_events(
                 if !target_keys.contains(&target_key) {
                     continue;
                 }
-                if !spans_overlap(*span, san.span) && !span_contains(*span, san.span) {
-                    continue;
-                }
-                let Some(source_call) = source_call.as_deref() else {
-                    continue;
-                };
-                if security_text_matches_source_strict(source_call, &san.match_text)
-                    || security_text_matches_source_strict(&san.match_text, source_call)
-                    || spans_overlap(*span, san.span)
-                {
+                let direct_sanitizer_assignment = (spans_overlap(*span, san.span)
+                    || span_contains(*span, san.span))
+                    && source_call.as_deref().is_some_and(|source_call| {
+                        security_text_matches_source_strict(source_call, &san.match_text)
+                            || security_text_matches_source_strict(&san.match_text, source_call)
+                            || spans_overlap(*span, san.span)
+                    });
+                let assignment_uses_sanitized_local = assignment_sources_include_any(
+                    source_name.as_deref(),
+                    source_call_args,
+                    source_names,
+                    &sanitizer_targets,
+                );
+                if direct_sanitizer_assignment || assignment_uses_sanitized_local {
                     return true;
                 }
             }
@@ -9984,6 +9992,447 @@ fn sanitizer_assignment_output_feeds_sink_arg_in_events(
                     || sanitizer_assignment_output_feeds_sink_arg_in_events(catch_events, san, target_keys)
                     || sanitizer_assignment_output_feeds_sink_arg_in_events(finally_events, san, target_keys)
                 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn sanitizer_assignment_targets_in_events(events: &[FlowEvent], san: &RuleMatch) -> AHashSet<String> {
+    let mut targets = AHashSet::new();
+    collect_sanitizer_assignment_targets(events, san, &mut targets);
+    targets
+}
+
+fn collect_sanitizer_assignment_targets(
+    events: &[FlowEvent],
+    san: &RuleMatch,
+    targets: &mut AHashSet<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                ..
+            } => {
+                let Some(target_key) = clean_overwrite_target_key(target) else {
+                    continue;
+                };
+                let source_call_matches = source_call.as_deref().is_some_and(|source_call| {
+                    security_text_matches_source_strict(source_call, &san.match_text)
+                        || security_text_matches_source_strict(&san.match_text, source_call)
+                });
+                if spans_overlap(*span, san.span) || span_contains(*span, san.span) || source_call_matches {
+                    targets.insert(target_key);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_sanitizer_assignment_targets(then_events, san, targets);
+                collect_sanitizer_assignment_targets(else_events, san, targets);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_sanitizer_assignment_targets(body, san, targets);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_sanitizer_assignment_targets(body, san, targets);
+                collect_sanitizer_assignment_targets(catch_events, san, targets);
+                collect_sanitizer_assignment_targets(finally_events, san, targets);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn assignment_sources_include_any(
+    source_name: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+    candidates: &AHashSet<String>,
+) -> bool {
+    !candidates.is_empty()
+        && source_name
+            .into_iter()
+            .chain(source_call_args.iter().map(String::as_str))
+            .chain(source_names.iter().map(String::as_str))
+            .filter_map(clean_overwrite_target_key)
+            .any(|source| candidates.contains(&source))
+}
+
+fn sanitizer_guard_feeds_sink_arg(
+    ws: &Workspace,
+    sanitizer_func: FuncId,
+    sanitizer_rule: Option<&Rule>,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> bool {
+    let Some(tag) = sanitizer_rule.and_then(|rule| rule.tag.as_deref()) else {
+        return false;
+    };
+    if !matches!(tag, "same-origin-path" | "ssrf-sanitize" | "allowlist-validate")
+        || san.span.file != snk.span.file
+        || !match_precedes_or_same(san, snk)
+    {
+        return false;
+    }
+    let target_keys: AHashSet<String> = sink_tainted_args
+        .iter()
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .filter(|target| !looks_like_clean_constant(target))
+        .collect();
+    if target_keys.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sanitizer_func.raw())) else {
+        return false;
+    };
+    let mut guarded = sanitizer_guard_variables_in_events(&decl.flow_events, san, tag);
+    if guarded.is_empty() {
+        guarded.extend(sanitizer_guard_variables_from_source_line(ws, san, tag));
+    }
+    guarded.retain(|var| !looks_like_clean_constant(var));
+    if guarded.is_empty() {
+        return false;
+    }
+    let guarded_set: AHashSet<String> = guarded.into_iter().collect();
+    if target_keys.iter().any(|target| guarded_set.contains(target)) {
+        return true;
+    }
+    guarded_variable_feeds_sink_target_in_events(
+        &decl.flow_events,
+        san.span,
+        snk.span,
+        &guarded_set,
+        &target_keys,
+    ) || guarded_variable_flows_into_receiver_before_sink(
+        &decl.flow_events,
+        san.span,
+        snk.span,
+        &guarded_set,
+        &target_keys,
+    )
+}
+
+fn sanitizer_guard_variables_in_events(events: &[FlowEvent], san: &RuleMatch, tag: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    collect_sanitizer_guard_variables(events, san, tag, &mut vars);
+    vars.sort();
+    vars.dedup();
+    vars
+}
+
+fn collect_sanitizer_guard_variables(
+    events: &[FlowEvent],
+    san: &RuleMatch,
+    tag: &str,
+    vars: &mut Vec<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span, receiver, args, ..
+            } if spans_overlap(*span, san.span) || span_contains(*span, san.span) => {
+                if matches!(tag, "same-origin-path") {
+                    if let Some(receiver) = receiver.as_deref().and_then(clean_overwrite_target_key) {
+                        vars.push(receiver);
+                    }
+                }
+                if matches!(tag, "ssrf-sanitize" | "allowlist-validate") {
+                    for arg in args {
+                        if let Some(place) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
+                            vars.push(place);
+                        }
+                        if let Some(value) = clean_overwrite_target_key(&arg.value_text) {
+                            vars.push(value);
+                        }
+                        for source in &arg.source_names {
+                            if let Some(value) = clean_overwrite_target_key(source) {
+                                vars.push(value);
+                            }
+                        }
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_sanitizer_guard_variables(then_events, san, tag, vars);
+                collect_sanitizer_guard_variables(else_events, san, tag, vars);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_sanitizer_guard_variables(body, san, tag, vars);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_sanitizer_guard_variables(body, san, tag, vars);
+                collect_sanitizer_guard_variables(catch_events, san, tag, vars);
+                collect_sanitizer_guard_variables(finally_events, san, tag, vars);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sanitizer_guard_variables_from_source_line(ws: &Workspace, san: &RuleMatch, tag: &str) -> Vec<String> {
+    let Ok(snapshot) = ws.vfs().snapshot(san.span.file) else {
+        return Vec::new();
+    };
+    let Some(line) = source_line_text(&snapshot.text, san.line) else {
+        return Vec::new();
+    };
+    match tag {
+        "same-origin-path" => receiver_before_call_token(line, &san.match_text)
+            .into_iter()
+            .collect(),
+        "ssrf-sanitize" | "allowlist-validate" => call_argument_identifiers_after(line, &san.match_text),
+        _ => Vec::new(),
+    }
+}
+
+fn receiver_before_call_token(line: &str, match_text: &str) -> Option<String> {
+    let token = match_text.trim();
+    let dot = token.rfind('.')?;
+    clean_overwrite_target_key(&token[..dot]).or_else(|| {
+        line.find(token)
+            .and_then(|idx| line[..idx].rsplit('.').next())
+            .and_then(clean_overwrite_target_key)
+    })
+}
+
+fn call_argument_identifiers_after(line: &str, match_text: &str) -> Vec<String> {
+    let token = match_text.trim();
+    let Some(start) = line.find(token) else {
+        return Vec::new();
+    };
+    let after = &line[start + token.len()..];
+    let Some(open_rel) = after.find('(') else {
+        return Vec::new();
+    };
+    let open = start + token.len() + open_rel;
+    let Some((_, args)) = balanced_paren_extent(line, open) else {
+        return Vec::new();
+    };
+    let mut vars: Vec<String> = identifier_tokens_outside_strings(args)
+        .into_iter()
+        .filter_map(|token| clean_overwrite_target_key(&token))
+        .filter(|token| !non_value_expression_token(token))
+        .collect();
+    vars.sort();
+    vars.dedup();
+    vars
+}
+
+fn guarded_variable_feeds_sink_target_in_events(
+    events: &[FlowEvent],
+    guard_span: Span,
+    sink_span: Span,
+    guarded: &AHashSet<String>,
+    sink_targets: &AHashSet<String>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call_args,
+                source_names,
+                ..
+            } if span.file == sink_span.file
+                && guard_span.end <= span.start
+                && span.start <= sink_span.start =>
+            {
+                let Some(target_key) = clean_overwrite_target_key(target) else {
+                    continue;
+                };
+                if sink_targets.contains(&target_key)
+                    && assignment_sources_include_any(
+                        source_name.as_deref(),
+                        source_call_args,
+                        source_names,
+                        guarded,
+                    )
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if guarded_variable_feeds_sink_target_in_events(
+                    then_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    sink_targets,
+                ) || guarded_variable_feeds_sink_target_in_events(
+                    else_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    sink_targets,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if guarded_variable_feeds_sink_target_in_events(
+                    body,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    sink_targets,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if guarded_variable_feeds_sink_target_in_events(
+                    body,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    sink_targets,
+                ) || guarded_variable_feeds_sink_target_in_events(
+                    catch_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    sink_targets,
+                ) || guarded_variable_feeds_sink_target_in_events(
+                    finally_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    sink_targets,
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn guarded_variable_flows_into_receiver_before_sink(
+    events: &[FlowEvent],
+    guard_span: Span,
+    sink_span: Span,
+    guarded: &AHashSet<String>,
+    receiver_targets: &AHashSet<String>,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                args,
+                ..
+            } if span.file == sink_span.file
+                && guard_span.end <= span.start
+                && span.start <= sink_span.start =>
+            {
+                let Some(receiver) = receiver.as_deref().and_then(clean_overwrite_target_key) else {
+                    continue;
+                };
+                if !receiver_targets.contains(&receiver) || !name.ends_with("setLocation") {
+                    continue;
+                }
+                if args.iter().any(|arg| {
+                    clean_overwrite_target_keys(&arg.value_text)
+                        .into_iter()
+                        .any(|key| guarded.contains(&key))
+                }) {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if guarded_variable_flows_into_receiver_before_sink(
+                    then_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    receiver_targets,
+                ) || guarded_variable_flows_into_receiver_before_sink(
+                    else_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    receiver_targets,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if guarded_variable_flows_into_receiver_before_sink(
+                    body,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    receiver_targets,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if guarded_variable_flows_into_receiver_before_sink(
+                    body,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    receiver_targets,
+                ) || guarded_variable_flows_into_receiver_before_sink(
+                    catch_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    receiver_targets,
+                ) || guarded_variable_flows_into_receiver_before_sink(
+                    finally_events,
+                    guard_span,
+                    sink_span,
+                    guarded,
+                    receiver_targets,
+                ) {
                     return true;
                 }
             }
@@ -10980,6 +11429,14 @@ fn make_finding(
                     || sanitizer_assignment_output_feeds_sink_arg(
                         context.ws,
                         hop_func,
+                        sanitizer_match,
+                        snk,
+                        &context.sink_tainted_args,
+                    )
+                    || sanitizer_guard_feeds_sink_arg(
+                        context.ws,
+                        hop_func,
+                        sanitizer_rule,
                         sanitizer_match,
                         snk,
                         &context.sink_tainted_args,
