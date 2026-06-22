@@ -9,7 +9,7 @@ use bonsai_sdk::Workspace;
 use bonsai_sdk::{
     chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id,
     find_call_span_to_func_uncached, func_display_name, CallEdgeResolver, CallPathTruncation, ChainCache,
-    ResolvedChain, TaintFlowIdentityStep,
+    ResolvedChain, SyntaxFlowQuery, TaintFlowIdentityStep,
 };
 use bonsai_taint::{EntryTaintGraph, TaintedCall, TaintedCallEdge, TaintedCallKind};
 use comfy_table::Cell;
@@ -1870,8 +1870,10 @@ fn inspect_taint_flows(
     let kind_filter: Vec<String> = kind_filter.iter().map(|kind| kind.to_lowercase()).collect();
     let mut entries: Vec<bonsai_common::FuncId> = candidate_entries.iter().copied().collect();
     entries.sort_by_key(|func| func.raw());
-    let idg = use_targeted_idg.then(|| ws.db().idg_service()).flatten();
-    let target_funcs = idg.is_some().then(|| candidate_entries.clone());
+    let target_funcs = use_targeted_idg
+        .then(|| ws.db().idg_service().is_some())
+        .unwrap_or(false)
+        .then(|| candidate_entries.clone());
     let mut flows = Vec::new();
     let mut truncated = false;
     for entry in entries {
@@ -1879,36 +1881,20 @@ fn inspect_taint_flows(
             truncated = true;
             break;
         }
-        let entry_truncated = if let Some(idg) = idg.as_ref() {
-            let graph = bonsai_taint::inspect_entry_taint_graph_from_idg_with_target_funcs(
-                entry,
-                target_funcs.as_ref(),
-                ws.db(),
-                idg.as_ref(),
-            );
-            collect_taint_flows_for_entry(
-                ws,
-                entry,
-                &graph,
-                matcher.as_ref(),
-                filters,
-                &kind_filter,
-                flow_cap,
-                &mut flows,
-            )
-        } else {
-            let graph = ws.dataflow().graph_for(entry, ws.db());
-            collect_taint_flows_for_entry(
-                ws,
-                entry,
-                graph.as_ref(),
-                matcher.as_ref(),
-                filters,
-                &kind_filter,
-                flow_cap,
-                &mut flows,
-            )
-        };
+        let query = SyntaxFlowQuery::new(entry)
+            .target_funcs(target_funcs.as_ref())
+            .prefer_warmed_idg(use_targeted_idg);
+        let graph = ws.syntax_flow_graph(query);
+        let entry_truncated = collect_taint_flows_for_entry(
+            ws,
+            entry,
+            graph.graph.as_ref(),
+            matcher.as_ref(),
+            filters,
+            &kind_filter,
+            flow_cap,
+            &mut flows,
+        );
         if entry_truncated {
             truncated = true;
             break;

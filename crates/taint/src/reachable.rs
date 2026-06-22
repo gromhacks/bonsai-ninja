@@ -398,6 +398,49 @@ pub fn taint_facts_for_entry(entry_func: FuncId, db: &AnalyzerDb, _sanitizers: &
     taint_facts_and_graph_for_entry(entry_func, db, &TokenSet::default()).0
 }
 
+/// Default entry seed for fact-oriented and diagnostic taint queries:
+/// formal params plus locally bound assignment targets and bare call
+/// arguments. This is the shared seed shape for `dump-taint` and the
+/// fact side of `inspect`/dataflow.
+#[must_use]
+pub fn default_entry_taint_seed(decl: Option<&bonsai_lang_api::Decl>) -> TokenSet {
+    let mut seed: TokenSet = decl
+        .map(|decl| {
+            decl.params
+                .iter()
+                .filter(|param| !param.is_empty())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(decl) = decl {
+        collect_assign_targets(&decl.flow_events, &mut seed, false);
+    }
+    seed
+}
+
+/// Default entry seed for graph materialization: the fact seed plus
+/// source-call names, return/yield values, and other graph-visible
+/// tokens. This wider seed ensures cached syntax-flow graphs contain
+/// every edge a downstream renderer might filter to.
+#[must_use]
+pub fn default_entry_graph_seed(decl: Option<&bonsai_lang_api::Decl>) -> TokenSet {
+    let mut seed: TokenSet = decl
+        .map(|decl| {
+            decl.params
+                .iter()
+                .filter(|param| !param.is_empty())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(decl) = decl {
+        collect_assign_targets(&decl.flow_events, &mut seed, true);
+        collect_graph_seed_tokens(&decl.flow_events, &mut seed);
+    }
+    seed
+}
+
 /// Compute interprocedural taint facts and the indexed call graph for
 /// `entry_func`. Two seeds are built and used:
 ///
@@ -437,32 +480,8 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
     let mut graph = EntryTaintGraph::default();
     let global = db.global_index();
     let entry_decl = global.decl_of(SymbolId::new(entry_func.raw()));
-    // Initial seed = entry's formal parameter names. Empty params are
-    // dropped — adapters occasionally emit them for unnamed positions.
-    let mut seed: TokenSet = entry_decl
-        .as_ref()
-        .map(|decl| {
-            decl.params
-                .iter()
-                .filter(|param| !param.is_empty())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut graph_seed = seed.clone();
-    // Augment seed with local assignment targets. Covers two cases:
-    //   * Param-less entries (Flask / Django views, top-level
-    //     scripts) — params alone would give an empty seed.
-    //   * Entries receiving taint via a param-derived local (JS
-    //     `let token = req.query.token`); Tree-sitter adapters
-    //     don't always populate `source_name` on the Assign, so
-    //     without this the local never picks up taint from the
-    //     param and the chain dies at the first call site.
-    if let Some(decl) = entry_decl.as_ref() {
-        collect_assign_targets(&decl.flow_events, &mut seed, false);
-        collect_assign_targets(&decl.flow_events, &mut graph_seed, true);
-        collect_graph_seed_tokens(&decl.flow_events, &mut graph_seed);
-    }
+    let seed = default_entry_taint_seed(entry_decl);
+    let graph_seed = default_entry_graph_seed(entry_decl);
 
     // Structural facts: even with no param-seeded propagation we
     // populate the entry's own name and param list so filters that
@@ -567,20 +586,7 @@ pub fn inspect_entry_taint_graph_from_idg_with_target_funcs(
 ) -> EntryTaintGraph {
     let global = db.global_index();
     let entry_decl = global.decl_of(SymbolId::new(entry_func.raw()));
-    let mut graph_seed: TokenSet = entry_decl
-        .as_ref()
-        .map(|decl| {
-            decl.params
-                .iter()
-                .filter(|param| !param.is_empty())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Some(decl) = entry_decl.as_ref() {
-        collect_assign_targets(&decl.flow_events, &mut graph_seed, true);
-        collect_graph_seed_tokens(&decl.flow_events, &mut graph_seed);
-    }
+    let graph_seed = default_entry_graph_seed(entry_decl);
     if graph_seed.is_empty() {
         return EntryTaintGraph::default();
     }
@@ -670,6 +676,9 @@ pub(crate) fn collect_assign_targets(
                 collect_assign_targets(else_events, out, include_source_calls);
             }
             FlowEvent::Loop { body, .. } => {
+                collect_assign_targets(body, out, include_source_calls);
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_assign_targets(body, out, include_source_calls);
             }
             FlowEvent::Try {

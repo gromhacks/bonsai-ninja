@@ -65,7 +65,9 @@ Understand behavior:
 raw taint paths that contain the query. Use `--syntax-only` for pure
 indexed facts, `--taint-flow` to force raw taint paths on broad queries,
 and `--graph-flow` when structural callgraph evidence with source bodies
-is explicitly needed.
+is explicitly needed. Inspect raw taint paths go through the workspace
+syntax-flow facade: a warmed IDG target cut is used only when already
+available, otherwise the canonical cached dataflow graph is used.
 
 Record understanding as:
 

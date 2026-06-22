@@ -45,6 +45,7 @@ fn run(args: &[&str]) -> Option<String> {
     let bin = bin_path()?;
     let mut full: Vec<&str> = args.to_vec();
     full.push("--no-color");
+    full.push("--no-progress");
     let out = Command::new(&bin)
         .args(&full)
         .env("COLUMNS", "200")

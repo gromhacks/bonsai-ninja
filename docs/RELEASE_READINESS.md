@@ -33,6 +33,27 @@ Focused engine/tool checks from the same pass were green:
 - `cargo test -q -p bonsai_taint --test inspect_target_graph`
 - `cargo test -q -p bonsai_security --test callback_flow_audit`
 
+Additional syntax-flow/tooling validation on 2026-06-21:
+
+- `cargo build --release` passed after centralizing inspect syntax-flow
+  graph selection and default entry taint seeds.
+- `git diff --check` passed.
+- `inspect examples/python/micro --query os.system --context 8k` reported
+  the expected rulepack-free taint path to `os.system`.
+- `dump-taint examples/python/micro --source run_admin_command` used the
+  shared default seed set `{cmd, user_id}` and completed cleanly.
+- `inspect ../elasticsearch --query execute --context 16k` completed in
+  15.64 seconds, reported 3,105 inspect items, paged the result, and
+  skipped the default taint overlay with the explicit large-broad-query
+  warning.
+- `inspect ../elasticsearch --query execute --taint-flow --context 16k`
+  completed in 21.53 seconds, reported 96 taint rows on page 1, and
+  surfaced the default taint candidate/row truncation metadata.
+- Local Cargo integration-test execution in this sandbox currently hangs
+  after launching test binaries, even for `--list`; those processes were
+  stopped after compile. Release builds and direct release-binary command
+  probes completed successfully.
+
 ## Large-repo behavior
 
 Elasticsearch spot checks on 2026-06-20 with the release binary:

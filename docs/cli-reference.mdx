@@ -131,7 +131,9 @@ YAML; use `security taint-analysis` for rulepack findings. For broad
 large-repo queries, the default taint preview is skipped with a warning
 unless `--taint-flow` is supplied. Use `--syntax-only` for pure indexed
 search and `--graph-flow` for explicit structural callgraph evidence with
-source bodies.
+source bodies. Raw taint rows come through the workspace syntax-flow
+facade, which uses a warmed IDG only when one already exists and otherwise
+falls back to the canonical cached dataflow graph.
 
 ```bash
 bonsai-ninja inspect ./src --query os.system --kind call
