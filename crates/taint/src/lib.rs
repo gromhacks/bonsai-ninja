@@ -46,8 +46,8 @@ pub use inter::{
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
-    apply_configured_transfer_fixpoint, entry_taint_call_records_from_idg,
-    entry_taint_call_records_from_idg_with_max_precision,
+    apply_configured_transfer_fixpoint, default_entry_graph_seed, default_entry_taint_seed,
+    entry_taint_call_records_from_idg, entry_taint_call_records_from_idg_with_max_precision,
     entry_taint_call_records_from_idg_with_target_filters_and_max_precision, entry_taint_graph_from_idg,
     entry_taint_graph_from_idg_with_max_precision,
     entry_taint_graph_from_idg_with_target_filters_and_max_precision,

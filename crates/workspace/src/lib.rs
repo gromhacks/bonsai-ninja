@@ -20,6 +20,7 @@ pub mod decl_name_index;
 pub mod enclosing_index;
 pub mod flow_ids;
 pub mod flow_ids_disk;
+pub mod flow_query;
 pub mod taint_index;
 pub mod taint_index_disk;
 pub mod transitive_callers;

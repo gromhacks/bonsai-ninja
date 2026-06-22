@@ -274,28 +274,7 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
 
     let effective_seed: bonsai_taint::TokenSet = if f.seeds.is_empty() {
         let symbol = bonsai_common::SymbolId::new(source_func.raw());
-        let decl = global.decl_of(symbol);
-        let mut seed: bonsai_taint::TokenSet = decl
-            .as_ref()
-            .map(|d| d.params.iter().filter(|p| !p.is_empty()).cloned().collect())
-            .unwrap_or_default();
-        // Augment the seed with every local the entry binds. Covers
-        // two gaps:
-        //   * Param-less entries (Flask / Django views, top-level
-        //     scripts) — params alone would give an empty seed.
-        //   * Entries that receive their taint via a param-derived
-        //     local (e.g. JS `let token = req.query.token`). The
-        //     Tree-sitter adapters don't always populate
-        //     `source_name` on the Assign, so without this fallback
-        //     `token` never picks up taint from `req` and the chain
-        //     dies at the first call site.
-        // Mirrors `bonsai_taint::taint_facts_for_entry`'s seeding so
-        // `dump-taint` and `inspect`'s taint view agree on the seed
-        // set across every language.
-        if let Some(d) = decl.as_ref() {
-            collect_assign_targets(&d.flow_events, &mut seed);
-        }
-        seed
+        bonsai_taint::default_entry_taint_seed(global.decl_of(symbol))
     } else {
         f.seeds.iter().cloned().collect()
     };
@@ -937,94 +916,6 @@ pub(crate) fn aggregate_flow_precision(
         .fold(bonsai_common::Precision::Exact, |acc, precision| {
             acc.meet(precision)
         })
-}
-
-/// Walk the entry's flow events and harvest every name it physically
-/// binds or touches as a call-site argument. Used as a permissive seed
-/// augmentation for param-less or param-adjacent entries so taint has
-/// every candidate carrier already in its initial state — specifically:
-///   * `Assign { target }` — locals the entry writes.
-///   * `Call { args[*].value_text }` — locals the entry passes to a
-///     callee. Catches pointer-out patterns like C's `sscanf(qs, fmt,
-///     token, action)` where the adapter can't see `token` / `action`
-///     as assignment targets but they carry taint at the call site.
-///
-/// Mirrors the same helper in `bonsai_taint::reachable` (kept here to
-/// avoid a cycle through the taint crate's private helpers).
-fn collect_assign_targets(events: &[FlowEvent], out: &mut bonsai_taint::TokenSet) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                target,
-                source_call_args,
-                ..
-            } => {
-                if !target.is_empty() {
-                    out.insert(target.clone());
-                }
-                // RHS args: bare identifiers might pick up taint
-                // through aliasing — `let token = req.cookies.token`
-                // needs `token` in the seed set.
-                for arg in source_call_args {
-                    let trimmed = arg.trim();
-                    if is_bare_identifier(trimmed) {
-                        out.insert(trimmed.to_string());
-                    }
-                }
-            }
-            FlowEvent::Call { args, .. } => {
-                for arg in args {
-                    // Bare identifiers only — keep `token` but skip
-                    // string literals / expressions like `"token=%s"`
-                    // or `a + b`. Bare-id check: first char is an
-                    // identifier-start char (letter / `_`) and the
-                    // rest is all identifier chars.
-                    let trimmed = arg.value_text.trim();
-                    if is_bare_identifier(trimmed) {
-                        out.insert(trimmed.to_string());
-                    }
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_assign_targets(then_events, out);
-                collect_assign_targets(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } => collect_assign_targets(body, out),
-            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_assign_targets(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_assign_targets(body, out);
-                collect_assign_targets(catch_events, out);
-                collect_assign_targets(finally_events, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// True when `s` is a bare identifier (letter/underscore start,
-/// ascii-alphanumeric/underscore tail). Used to gate call-arg
-/// tokens into the taint seed: we want `token`, not string
-/// literals or compound expressions.
-fn is_bare_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]

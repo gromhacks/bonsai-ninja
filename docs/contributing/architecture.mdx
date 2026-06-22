@@ -142,7 +142,10 @@ fixpoint, and the resulting closure is cut to a semantic target/lineage
 corridor before call records or findings are rendered. The older
 `interprocedural_taint_to_completion_with_caches` path remains as the
 function-summary engine used by diagnostics and compatibility surfaces; it is
-not the production source-to-sink scheduler. Sub-modules:
+not the production source-to-sink scheduler. `reachable.rs` also owns the
+shared default entry seed helpers used by cached dataflow, inspect, and
+`dump-taint`; command crates should not carry local copies of the
+params/assignment-target/bare-call-argument seed logic. Sub-modules:
 
 - `intra.rs` — single-function taint propagation over `flow_events`.
 - `inter/mod.rs` — interprocedural orchestration, typed-exception rules,
@@ -175,6 +178,11 @@ before rendering:
   `index --prewarm-dataflow`; persisted to
   `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
   readable for warm reopens).
+- `SyntaxFlowQuery` (`flow_query.rs`) — the command-facing facade for
+  rulepack-free entry taint graphs. It uses a warmed IDG target cut when
+  one is already seeded, otherwise it returns the canonical
+  `DataFlowCache` graph. Interactive commands use this instead of
+  open-coding IDG/dataflow selection.
 - `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
   `ValueFlowGraph` plus a `returning_seed_names` set
   (precomputed at graph-build time so security-analysis answers

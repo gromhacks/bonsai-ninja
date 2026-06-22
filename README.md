@@ -266,6 +266,13 @@ indexed search, `inspect --taint-flow` to force bounded raw taint paths on
 broad queries, and `inspect --graph-flow` when you explicitly want
 structural callgraph evidence with source bodies.
 
+`inspect` obtains raw taint rows through the workspace syntax-flow
+facade. That facade chooses a warmed IDG target cut when one already
+exists, otherwise it uses the canonical cached dataflow graph; the command
+does not build IDG in the hot path. `dump-taint` and the cached graph path
+share the same default entry seed helper so params, assignment targets, and
+bare call-argument carriers are interpreted consistently.
+
 Most review commands page by default:
 
 ```sh

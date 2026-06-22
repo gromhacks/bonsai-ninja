@@ -46,6 +46,25 @@ corridor. This is the deployed source-to-sink path; direct raw-AST taint and
 whole-workspace per-source/per-sink traversal are not production evidence
 paths.
 
+Rulepack-free inspect taint rows use `Workspace::syntax_flow_graph` from
+`crates/workspace/src/flow_query.rs`. That workspace facade is the only
+command-facing switch between a warmed IDG target cut and the canonical
+cached `EntryTaintGraph`; `inspect` does not build IDG on its hot path.
+Both backends use the same adapter-lowered `FlowEvent`s, resolver-backed
+call edges, precision ceiling, and taint crate propagation semantics.
+
+Default entry seeds are centralized in `reachable.rs`:
+
+- `default_entry_taint_seed` is used by fact-oriented and diagnostic
+  consumers such as `dump-taint`.
+- `default_entry_graph_seed` is used when materializing cached syntax-flow
+  graphs so downstream filters can query a wider but still syntax-derived
+  graph.
+
+Do not duplicate the params/assignment-target/bare-call-argument seed logic
+in command crates. Add new event container handling in the shared helper so
+inspect, cached dataflow, and dump-taint stay aligned.
+
 The workspace exposes the canonical `InterTaintCaches` singleton via
 `Workspace::inter_taint_caches()`. Production and diagnostic drivers borrow
 that one instance so resolver answers per `(caller_func, call_span)`, file

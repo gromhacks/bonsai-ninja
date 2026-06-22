@@ -2451,6 +2451,28 @@ fn production_taint_command_paths_use_filtered_semantic_idg_apis() {
     );
 }
 
+#[test]
+fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
+    let root = repo_root();
+    let inspect = read(&root.join("crates/cli/src/commands/inspect.rs"));
+    let body = function_body(&inspect, "inspect_taint_flows");
+    assert!(
+        body.contains("SyntaxFlowQuery::new") && body.contains("ws.syntax_flow_graph"),
+        "inspect_taint_flows must ask the workspace syntax-flow facade for taint graphs"
+    );
+    for forbidden in [
+        "dataflow().graph_for",
+        "inspect_entry_taint_graph_from_idg",
+        "entry_taint_graph_from_idg",
+        "build_and_seed_idg_service",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "inspect_taint_flows must not bypass the syntax-flow facade with `{forbidden}`"
+        );
+    }
+}
+
 /// Dependency manifests and lockfiles can affect semantic import/call
 /// resolution without changing source files. Cache freshness must scan those
 /// metadata files consistently across sidecars, SDK export cache, and CLI page
