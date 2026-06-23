@@ -54,6 +54,23 @@ Additional syntax-flow/tooling validation on 2026-06-21:
   stopped after compile. Release builds and direct release-binary command
   probes completed successfully.
 
+CLI help and documentation validation on 2026-06-22:
+
+- `cargo fmt --check` passed.
+- `CARGO_INCREMENTAL=0 cargo check -q -p bonsai_cli` passed.
+- `cargo build --release -q -p bonsai_cli` passed.
+- Root help renders `USAGE`, `COMMAND GROUPS`, `OPTIONS`, `EXAMPLES`,
+  then `SEE ALSO`; all checked help surfaces use uppercase section
+  headings consistently.
+- A 41-menu release help sweep passed with no stale `SAMPLE OUTPUT`
+  blocks, no title-case help headings, no control characters, and no
+  context/width guard failures.
+- `CARGO_INCREMENTAL=0 cargo test -p bonsai_cli --test browse_commands -- --test-threads=1`
+  passed 226 tests.
+- Documentation navigation targets, internal Markdown/MDX links,
+  documented `bonsai-ninja` command paths, and CLI-reference flag
+  coverage were checked against the release binary.
+
 ## Large-repo behavior
 
 Elasticsearch spot checks on 2026-06-20 with the release binary:

@@ -5,7 +5,19 @@ description: "Command and flag reference for security analysis, flow inspection,
 
 # CLI Reference
 
-Global options accepted before the command include `--no-color`, `--theme`, `--no-cache`, `--no-progress`, `--contains`, `--not-contains`, `--parse-timeout`, `--help`, and `--version`.
+Global options accepted before the command include `--no-color`,
+`--theme`, `--no-cache`, `--no-progress`, `--contains`,
+`--not-contains`, `--parse-timeout`, `--help`, and `--version`.
+
+## Help Layout
+
+`bonsai-ninja --help` is ordered for scanning: intro, `USAGE`,
+`COMMAND GROUPS`, `OPTIONS`, `EXAMPLES`, then `SEE ALSO`. Root help puts
+the grouped command index before global options so users can find the
+right command first. All help section headings use uppercase casing
+(`USAGE`, `COMMAND GROUPS`, `OPTIONS`, `ARGUMENTS`, `COMMANDS`,
+`EXAMPLES`, `SEE ALSO`) for a consistent themed layout across root and
+subcommand help.
 
 ## index
 
@@ -102,6 +114,7 @@ not a user-facing finding mode.
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
 | `--profile <PROFILE>` | None | Preset bundle. `production` applies production excludes, remote trust, high severity, and 16k context unless overridden. |
 | `--source <REGEX>` | None | Source rule ID regex. |
+| `--finding <S:ID>` | None | Re-render only one stable finding ID. |
 | `--trust <TRUST>` | None | Source trust filter. |
 | `--category <CATEGORY>` | None | Source category filter. Use `inferred` for inferred sources. |
 | `--sink <REGEX>` | None | Sink rule ID regex. |
@@ -111,27 +124,32 @@ not a user-facing finding mode.
 | `--exclude-file <TEXT>` | None | Exclude files whose path contains this text. Repeatable. |
 | `--inferred-sources` | false | Add synthetic entry-point parameter sources. |
 | `--exclude-tests` | false | Drop findings whose source or sink is in a test path. |
-| `--show-sanitized` | Compatibility | Sanitized reachable paths are already included with sanitizer evidence. |
+| `--show-sanitized` | false | Include sanitizer-cleared source-to-sink paths for audit and rulepack debugging. |
 | `--taint-budget <N>` | 512 | Interprocedural function/seed chunk size; analysis resumes chunks to completion. |
 | `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
 | `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
-| `--no-compact` | false | Expand every flow body. |
+| `--no-compact` | false | Compatibility flag; security text expands flow bodies by default. |
 | `--summary` | false | Emit only aggregate finding counts. Text shows compact tables; JSON emits the summary object without paged rows. |
 | `--format <FORMAT>` | text | `text`, `json`, or `sarif`. SARIF is supported for `taint-analysis` findings. |
+| `--baseline <PREV_JSON>` | None | Compare against a previous `taint-analysis --format json --all` file and classify findings as `new`, `unchanged`, or `fixed`. |
+| `--explain` | false | Explain why a `--source` / `--sink` pair does or does not connect instead of rendering findings. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## inspect
 
 `inspect` queries facts and renders the rulepack-free taint paths that
 contain the query or filters. It does not load source, sink, or sanitizer
-YAML; use `security taint-analysis` for rulepack findings. For broad
-large-repo queries, the default taint preview is skipped with a warning
-unless `--taint-flow` is supplied. Use `--syntax-only` for pure indexed
-search and `--graph-flow` for explicit structural callgraph evidence with
-source bodies. Raw taint rows come through the workspace syntax-flow
+YAML; use `security taint-analysis` for rulepack findings. For bounded
+queries, text output includes source-body flow evidence by default and
+paginates when the context budget fills. For broad large-repo queries, the
+default taint preview is skipped with a warning unless `--taint-flow` is
+supplied. Use `--syntax-only` for pure indexed search and `--graph-flow`
+to force structural source-body evidence for large or broad queries that
+would otherwise stay on the syntax fast path. Raw taint rows come through
+the workspace syntax-flow
 facade, which uses a warmed IDG only when one already exists and otherwise
 falls back to the canonical cached dataflow graph.
 
@@ -164,12 +182,12 @@ bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
 | `--flow <F:ID>` | None | Re-render one stable flow. |
 | `--view <VIEW>` | trace | `trace`, `grouped`, or `auto`. |
 | `--group <G:ID>` | None | Re-render one stable flow group. |
-| `--graph-flow` | false | Render explicit structural callgraph flows with source bodies. |
+| `--graph-flow` | false | Force structural source-body flow rendering for large or broad queries; bounded inspect renders code by default. |
 | `--taint-flow` | false | Force bounded raw taint-engine paths, including for broad queries or when `--syntax-only` is also present. |
 | `--syntax-only` | false | Omit the default rulepack-free taint paths and render only indexed syntax hits. |
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
-| `--format <FORMAT>` | text | `text` or `json`. |
+| `--format <FORMAT>` | text | `text` or native `json`; `sarif` is accepted by the shared parser but falls back to native JSON outside `security taint-analysis`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 ## show
@@ -195,7 +213,7 @@ bonsai-ninja show ./src R:aabbccdd --query execute
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Lift delegated command caps where supported. |
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory for `S:` finding IDs. |
-| `--format <FORMAT>` | text | `text` or `json`. |
+| `--format <FORMAT>` | text | `text` or native `json`; `sarif` is accepted by the shared parser but falls back to native JSON outside `security taint-analysis`. |
 | `--output-path <PATH>` | stdout | Write the delegated output to a file. |
 
 ## trace
@@ -283,7 +301,7 @@ JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
 | `--context <BUDGET>` | 32k | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every source flow. |
-| `--no-compact` | false | Expand every flow body. |
+| `--no-compact` | false | Compatibility flag; security text expands flow bodies by default. |
 | `--format <FORMAT>` | text | `text` or `json`. Source-flow mapping is not SARIF finding output; use `security taint-analysis --format sarif` for SARIF. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
@@ -334,7 +352,7 @@ bonsai-ninja search ./src "request.args"
 | `args` | Call-site arguments by callee, position, keyword, and value text. | `--callee`, `--value`, `--position`, `--keyword`, `--file`, `--in-fn`, `--regex` |
 | `classes` | Classes, structs, traits, interfaces, and enums. | `--kind`, `--file`, `--name`, `--has-method`, `--min-methods`, `--regex` |
 | `refs` | References to symbols, including read/call/type facts. | positional symbol, `--symbol`, `--file`, `--kind`, `--regex` |
-| `search` | Prefix-first fuzzy search over all browse facts. | positional query, `--kind`, `--file`, `--regex` |
+| `search` | Prefix-first fuzzy search over all browse facts. | positional query, `--query`, `--kind`, `--file`, `--regex` |
 
 Common browse output flags:
 
@@ -345,7 +363,7 @@ Common browse output flags:
 | `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
 | `--all` | false | Emit all rows with no paging/context cap. |
 | `--no-flows` | false | Hide flow-id columns on commands that include them. |
-| `--format <FORMAT>` | text | `text` or `json`. |
+| `--format <FORMAT>` | text | `text` or native `json`; `sarif` is accepted by the shared parser but falls back to native JSON outside `security taint-analysis`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
 Flow columns are semantic-only navigation labels: exact/narrowed facts only,
@@ -367,7 +385,7 @@ bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.ar
 | Command | Purpose | Key flags |
 |---|---|---|
 | `tree` | Workspace tree with file-level flow, edge, finding, and security annotations. | `--max-depth`, `--file`, `--exclude-file`, `--severity`, `--limit`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
-| `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
+| `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--symbol`, `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--output-path`, `--rules-dir` |
 
 `tree` and `read-file` are semantic-only for flow-bearing context. JSON
 includes top-level `analysis_complete` and

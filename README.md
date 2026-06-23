@@ -221,7 +221,7 @@ source build path for that platform. See
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --syntax-only
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --taint-flow
 
-# Explicit structural callgraph evidence with source bodies
+# Force structural source-body evidence for large or broad inspect queries
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --graph-flow
 
 # Run the security taint analysis
@@ -235,15 +235,17 @@ source build path for that platform. See
 
 | Family | Highlights |
 |---|---|
-| Workspace | `index`, `export`, `cache` |
 | Flow | `inspect`, `trace`, `show` |
-| Browse | `defs`, `entrypoints`, `calls`, `imports`, `refs`, `vars`, `strings`, `args`, `classes`, `comments`, `search`, `read-file`, `tree` |
-| Dump | `dump-hir`, `dump-cfg`, `dump-callgraph`, `dump-ast`, `dump-resolve`, `dump-edges`, `dump-taint` |
-| Export | `export` as JSON, NetworkX, GraphML, or Cypher |
+| Workspace | `index`, `export` |
+| Cache | `cache stats`, `cache clear`, `cache rebuild` |
+| Browse | `defs`, `entrypoints`, `calls`, `imports`, `vars`, `strings`, `comments`, `args`, `classes`, `refs`, `search` |
+| Navigation | `tree`, `read-file` |
 | Security | `security sources`, `sinks`, `sanitizers`, `deps`, `taint-analysis`, `source-analysis`, `pack` |
+| Debug | `dump-ast`, `dump-hir`, `dump-cfg`, `dump-callgraph`, `dump-edges`, `dump-resolve`, `dump-taint`, `diagnostics` |
 
 Run `./target/release/bonsai-ninja --help` for the full command and flag
-surface.
+surface. Root help is grouped by command family before global `OPTIONS`,
+and help sections use uppercase headings consistently across commands.
 
 ## Output And Paging
 
@@ -263,8 +265,8 @@ queries, `security source-analysis` renders `SOURCE FLOW`, and
 `security taint-analysis` renders `TAINT FLOW` with source, argument
 propagation, and sink annotations. Use `inspect --syntax-only` for pure
 indexed search, `inspect --taint-flow` to force bounded raw taint paths on
-broad queries, and `inspect --graph-flow` when you explicitly want
-structural callgraph evidence with source bodies.
+broad queries, and `inspect --graph-flow` to force structural source-body
+evidence for large or broad inspect queries.
 
 `inspect` obtains raw taint rows through the workspace syntax-flow
 facade. That facade chooses a warmed IDG target cut when one already
@@ -291,7 +293,7 @@ pages, and `--format json --no-color --no-progress` for scripts.
 - `BONSAI_NO_DATAFLOW=1` - skip explicit dataflow prewarm and trace eager hydration
 - `BONSAI_THEME` - terminal theme
 - `BONSAI_WORKSPACE_DIR` - per-workspace state directory
-- `BONSAI_CONTEXT` - default text paging budget
+- `BONSAI_CONTEXT` - default text and JSON paging budget
 - `BONSAI_NO_CACHE=1` - disable in-process caches for a command
 - `NO_COLOR` / `NO_PROGRESS` - disable ANSI styling or progress output
 

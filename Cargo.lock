@@ -261,7 +261,6 @@ dependencies = [
  "bonsai_hash",
  "bonsai_lang_api",
  "bonsai_sdk",
- "bonsai_taint",
  "clap",
  "comfy-table",
  "ignore",

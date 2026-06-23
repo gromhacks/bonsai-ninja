@@ -9,8 +9,9 @@
 use crate::Workspace;
 use ahash::AHashSet;
 use bonsai_common::FuncId;
-use bonsai_taint::EntryTaintGraph;
 use std::sync::Arc;
+
+pub use bonsai_taint::{EntryTaintGraph, TaintedCall, TaintedCallEdge, TaintedCallKind};
 
 /// Backend used to answer a syntax-flow query.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

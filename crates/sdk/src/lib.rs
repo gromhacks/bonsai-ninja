@@ -87,7 +87,10 @@ pub use bonsai_workspace::value_flow::{
     ValueFlowCache, ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind,
 };
 pub use bonsai_workspace::{
-    flow_query::{SyntaxFlowBackend, SyntaxFlowGraph, SyntaxFlowQuery},
+    flow_query::{
+        EntryTaintGraph, SyntaxFlowBackend, SyntaxFlowGraph, SyntaxFlowQuery, TaintedCall, TaintedCallEdge,
+        TaintedCallKind,
+    },
     summarize_precision, CrossModuleOptions, Workspace, WorkspaceError, WorkspaceOpenOptions as OpenOptions,
     WorkspaceStats,
 };

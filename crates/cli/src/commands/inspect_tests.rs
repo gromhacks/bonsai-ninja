@@ -132,6 +132,7 @@ fn sample_taint_flow() -> InspectTaintFlow {
         terminal: "os.system".to_string(),
         terminal_kind: "call".to_string(),
         precision: "narrowed".to_string(),
+        func_ids: Vec::new(),
         chain_display: vec!["handle".to_string(), "sink".to_string()],
         steps: vec![InspectTaintStep {
             caller: "sink".to_string(),

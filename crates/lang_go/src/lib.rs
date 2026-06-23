@@ -951,15 +951,9 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
 /// local (a nested assertion inside a call arg must not leak).
 fn go_direct_type_assertion_type(node: Node<'_>, src: &[u8]) -> Option<String> {
     let mut n = node;
-    loop {
-        match n.kind() {
-            "expression_list" | "parenthesized_expression" => {
-                let mut cursor = n.walk();
-                let first = n.named_children(&mut cursor).next()?;
-                n = first;
-            }
-            _ => break,
-        }
+    while matches!(n.kind(), "expression_list" | "parenthesized_expression") {
+        let mut cursor = n.walk();
+        n = n.named_children(&mut cursor).next()?;
     }
     if n.kind() == "type_assertion_expression" {
         let type_node = n.child_by_field_name("type")?;

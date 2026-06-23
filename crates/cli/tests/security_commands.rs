@@ -1348,6 +1348,122 @@ def run(cmd):
 }
 
 #[test]
+fn taint_analysis_default_text_expands_repeated_flow_bodies() {
+    let ws = temp_workspace("taint-default-full-bodies");
+    let rules = ws.join("security-patterns");
+    let source_dir = rules.join("langs/python/sources");
+    let sink_dir = rules.join("langs/python/sinks");
+    std::fs::create_dir_all(&source_dir).expect("source rule dir");
+    std::fs::create_dir_all(&sink_dir).expect("sink rule dir");
+    std::fs::write(
+        source_dir.join("params.yml"),
+        r"- id: python.test.user_param
+  enabled: true
+  trust: remote
+  tag: http-input
+  match:
+    kind: param
+    target:
+      name: user
+  description: Test-only user parameter source.
+",
+    )
+    .expect("write source rule");
+    std::fs::write(
+        sink_dir.join("cmd.yml"),
+        r"- id: python.test.os_system
+  enabled: true
+  tag: command-injection
+  severity: critical
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  description: Test-only os.system sink.
+- id: python.test.subprocess_run
+  enabled: true
+  tag: command-injection
+  severity: critical
+  match:
+    kind: call
+    callee:
+      attribute: [subprocess, run]
+  description: Test-only subprocess.run sink.
+",
+    )
+    .expect("write sink rule");
+    std::fs::write(
+        ws.join("app.py"),
+        r"
+import os
+import subprocess
+
+def handle_a(user):
+    return sink_os(normalize(user))
+
+def handle_b(user):
+    return sink_subprocess(normalize(user))
+
+def normalize(cmd):
+    return cmd.strip()
+
+def sink_os(cmd):
+    return os.system(cmd)
+
+def sink_subprocess(cmd):
+    return subprocess.run(cmd, shell=True)
+",
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        rules.to_str().unwrap(),
+        "taint-analysis",
+        "--source",
+        "^python\\.test\\.user_param$",
+        "--sink",
+        "^python\\.test\\.",
+        "--context",
+        "16k",
+    ])
+    .unwrap();
+
+    assert!(out.contains("TAINT FLOW 1"), "missing first flow:\n{out}");
+    assert!(out.contains("TAINT FLOW 2"), "missing second flow:\n{out}");
+    assert!(
+        !out.contains("body already rendered above"),
+        "default security text should favor full flow code over body folding:\n{out}"
+    );
+    assert!(
+        out.matches("[def] normalize").count() >= 2,
+        "shared helper body should render once per flow by default:\n{out}"
+    );
+
+    let json = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        rules.to_str().unwrap(),
+        "taint-analysis",
+        "--source",
+        "^python\\.test\\.user_param$",
+        "--sink",
+        "^python\\.test\\.",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        !json.contains("chain_func_ids"),
+        "internal render-cache function ids must not leak into JSON output:\n{json}"
+    );
+}
+
+#[test]
 fn taint_analysis_preserves_multiple_same_rule_sink_sites_in_grouped_json() {
     let ws = temp_workspace("same-rule-sinks");
     std::fs::write(
@@ -1769,6 +1885,62 @@ fn taint_analysis_summary_text_exposes_precision_counts() {
     assert!(
         !out.contains("TAINT FLOW"),
         "summary mode must not render finding bodies:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_summary_cache_does_not_hide_later_text_findings() {
+    let ws = temp_workspace("summary-cache-taint-text");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write vulnerable fixture");
+
+    let summary = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--summary",
+    ])
+    .unwrap();
+    assert!(
+        summary.contains("security taint-analysis summary")
+            && !summary.contains("FINDING 1")
+            && !summary.contains("TAINT FLOW"),
+        "summary mode should render only aggregate counts:\n{summary}"
+    );
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--context",
+        "32k",
+    ])
+    .unwrap();
+    assert!(
+        out.contains("security taint-analysis —") && out.contains("FINDING 1"),
+        "full text render must still include finding bodies after a summary render:\n{out}"
+    );
+    assert!(
+        out.contains("TAINT FLOW"),
+        "full text render should include source-backed taint flow code:\n{out}"
+    );
+    assert!(
+        !out.contains("total   0 tainted flow sections"),
+        "summary cache must not poison full text pagination:\n{out}"
     );
 }
 

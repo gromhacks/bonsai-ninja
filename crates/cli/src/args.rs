@@ -47,8 +47,7 @@ pub(crate) enum OutputFormat {
 pub(crate) enum BrowseFormat {
     Json,
     Text,
-    /// SARIF 2.1.0. Only meaningful for `security taint-analysis`;
-    /// non-finding-bearing browse commands silently fall back to JSON.
+    /// SARIF; only for `security taint-analysis`.
     Sarif,
 }
 
@@ -192,10 +191,10 @@ pub(crate) enum PrecisionFilter {
     long_about = themed_cli_long_about(),
     after_help = themed_after_help(),
     after_long_help = themed_after_help(),
-    // Drop clap's auto `Commands:` block — we render our own grouped,
+    // Drop clap's auto `COMMANDS:` block — we render our own grouped,
     // themed list in `after_help` so both don't appear. The template is
-    // built at runtime so the `Options:` heading picks up the user's
-    // theme color, matching clap's own `Usage:` / group headings.
+    // built at runtime so the `OPTIONS:` heading picks up the user's
+    // theme color, matching clap's own `USAGE:` / group headings.
     help_template = themed_help_template(),
     disable_help_subcommand = true,
     styles = clap_help_styles(),
@@ -206,9 +205,8 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) no_color: bool,
 
-    /// Color theme preset. Defaults to `moss`; also respects
-    /// `BONSAI_THEME`. Choices: `moss` (aliases: `bonsai`,
-    /// `forest`), `earthy-dark`, `dracula`, `retro-amber`.
+    /// Color theme preset: `moss`, `earthy-dark`, `dracula`, or `retro-amber`.
+    /// Also respects `BONSAI_THEME`.
     #[arg(long, global = true)]
     pub(crate) theme: Option<String>,
 
@@ -971,12 +969,7 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja defs ./src --has-callee os.system\n  \
                       \n  \
                       # Regex name match + JSON for tooling\n  \
-                      $ bonsai-ninja defs ./src --regex --name '^handle_.*' --format json\n\n\
-                      SAMPLE OUTPUT\n\n  \
-                      name               kind      location                           signature                        callees\n  \
-                      ─────────────────────────────────────────────────────────────────────────────────────────────────────────\n  \
-                      verify_token       function  python/micro/auth_service.py:5:5   verify_token(token)              sqlite3.connect → conn.cursor → cursor.execute (+2)\n  \
-                      run_admin_command  function  python/micro/auth_service.py:17:5  run_admin_command(user_id, cmd)  os.system")
+                      $ bonsai-ninja defs ./src --regex --name '^handle_.*' --format json")
     )]
     Defs {
         /// Workspace root to analyze.
@@ -1117,11 +1110,7 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja calls ./src --callee os.system\n  \
                       \n  \
                       # All calls in a specific file\n  \
-                      $ bonsai-ninja calls ./src --file gateway.py\n\n\
-                      SAMPLE OUTPUT\n\n  \
-                      callee       caller             location                           code\n  \
-                      ───────────────────────────────────────────────────────────────────────────────────────────────\n  \
-                      os.system    run_admin_command  python/micro/auth_service.py:19:9  os.system(\"notify-admin \" + cmd)")
+                      $ bonsai-ninja calls ./src --file gateway.py")
     )]
     Calls {
         /// Workspace root to analyze.
@@ -1784,15 +1773,16 @@ pub(crate) enum Cmd {
                       vars (assignments), strings, args, refs, decorators.\n\
                       \n\
                       By default inspect surfaces matching declarations / \
-                      occurrences and the indexed rulepack-free taint paths \
-                      that contain the query or filters. It does not load \
-                      source / sink / sanitizer YAML. Pass `--graph-flow` \
-                      when you explicitly want structural callgraph evidence \
-                      with source-body rendering for those hits; pass \
-                      `--syntax-only` for a pure index search. Taint previews \
-                      are capped; very large broad queries skip the default \
-                      taint preview with an explicit warning unless \
-                      `--taint-flow` is supplied.\n\
+                      occurrences, indexed rulepack-free taint paths, and \
+                      source-body flow evidence when the query is bounded \
+                      enough to fit the active context budget. It does not \
+                      load source / sink / sanitizer YAML. Pass `--graph-flow` \
+                      to force structural callgraph source bodies for large \
+                      or broad queries that would otherwise stay on the \
+                      syntax fast path; pass `--syntax-only` for a pure index \
+                      search. Taint previews are capped; very large broad \
+                      queries skip the default taint preview with an explicit \
+                      warning unless `--taint-flow` is supplied.\n\
                       \n\
                       Graph-flow chains that share the same entry + sink but take \
                       different intermediate paths get letter-suffixed labels \
@@ -1809,13 +1799,13 @@ pub(crate) enum Cmd {
                       taint preview for broad queries and when `--syntax-only` \
                       is also present."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Syntax hits plus rulepack-free taint paths for os.system\n  \
+                      # Syntax hits plus rulepack-free taint paths and code evidence\n  \
                       $ bonsai-ninja inspect ./src --query os.system\n  \
                       \n  \
                       # Pure indexed syntax hits only\n  \
                       $ bonsai-ninja inspect ./src --query os.system --syntax-only\n  \
                       \n  \
-                      # Explicit structural graph-flow evidence with source bodies\n  \
+                      # Force structural source-body evidence for large/broad queries\n  \
                       $ bonsai-ninja inspect ./src --query os.system --graph-flow\n  \
                       \n  \
                       # Regex query — syntax hits for exec-like calls\n  \
@@ -1833,19 +1823,11 @@ pub(crate) enum Cmd {
                       # --from/--to syntax window\n  \
                       $ bonsai-ninja inspect ./src --from handle_request --to os.system\n  \
                       \n  \
-                      # Grouped view for explicit graph-flow output\n  \
-                      $ bonsai-ninja inspect ./src --query exec --graph-flow --view grouped\n  \
+                      # Grouped view for structural flow output\n  \
+                      $ bonsai-ninja inspect ./src --query exec --view grouped\n  \
                       \n  \
                       # JSON output for CI / tooling\n  \
-                      $ bonsai-ninja inspect ./src --query os.system --format json\n\n\
-                      SAMPLE OUTPUT\n\n  \
-                      inspect `os.system` — 0 decl hit(s), 1 other hit(s)\n  \
-                      by kind: call=1\n  \
-                      \n  \
-                      ══ OCCURRENCE HITS\n  \
-                        flow   kind   location                                  in                  text\n  \
-                      ─────────────────────────────────────────────────────────────────────────────────────\n  \
-                        -      call   python/micro/auth_service.py:19:9        run_admin_command   os.system")
+                      $ bonsai-ninja inspect ./src --query os.system --format json")
     )]
     Inspect {
         /// Workspace root to analyze.
@@ -1951,11 +1933,10 @@ pub(crate) enum Cmd {
         /// pins a cluster of chains that share a tail.
         #[arg(long)]
         group: Option<String>,
-        /// Explicitly render structural call-graph flows with source
-        /// bodies for inspect hits. Default inspect already includes
-        /// query-scoped rulepack-free taint paths; graph-flow rendering
-        /// is opt-in because it can require workspace-scale callgraph
-        /// traversal on large repositories.
+        /// Force structural call-graph flows with source bodies for
+        /// inspect hits. Bounded default inspect already renders code;
+        /// this flag forces graph-flow rendering for large/broad queries
+        /// that would otherwise stay on the syntax fast path.
         #[arg(long = "graph-flow", default_value_t = false)]
         graph_flow: bool,
         /// Explicit flag for raw taint-engine paths. Query/filter-scoped
@@ -2288,7 +2269,7 @@ pub(crate) enum Cmd {
              # Jump from a symbol to its defining file\n  \
              $ bonsai-ninja read-file ./src --symbol verify_token\n  \
              \n  \
-             # Compact mark list for quick triage\n  \
+             # Compact mark list when you intentionally want less code\n  \
              $ bonsai-ninja read-file ./src auth/verify_token.py --compact\n  \
              \n  \
              # Slice + filter to flows on a chain from `request.args` to `os.system`\n  \
@@ -2866,8 +2847,8 @@ pub(crate) enum SecurityAction {
         /// Show every finding unconditionally — no paging, no cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Expand every flow body even when another rendered flow already
-        /// printed the same function body.
+        /// Compatibility flag. Security text expands flow bodies by
+        /// default and paginates when needed.
         #[arg(long = "no-compact", default_value_t = false)]
         no_compact: bool,
         /// Emit only a finding summary. Text renders compact tables;
@@ -3009,8 +2990,8 @@ pub(crate) enum SecurityAction {
         /// row cap, and no source-lineage path cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Expand every flow body even when another rendered flow already
-        /// printed the same function body.
+        /// Compatibility flag. Security text expands flow bodies by
+        /// default and paginates when needed.
         #[arg(long = "no-compact", default_value_t = false)]
         no_compact: bool,
         /// Output shape — `text` for the paginated source-flow report

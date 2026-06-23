@@ -15,6 +15,7 @@
 //!     OWN file — a sibling import does NOT cross-credit it;
 //!   * the same source fires when the framework is imported in-file;
 //!   * an absent package blocks the gate entirely.
+//!
 //! FQN/qualifier-carrying calls (`flask.request...`) and `receiver_type_in`
 //! sinks keep their cross-file reach through the candidate path in
 //! `call_context_allows`, which does not depend on the per-file import set.

@@ -1,6 +1,6 @@
 ---
 title: "Output Formats"
-description: "Text, JSON, graph, train, SARIF, and dependency output shapes."
+description: "Text, JSON, graph, training, SARIF, and dependency output shapes."
 ---
 
 # Output Formats
@@ -29,10 +29,9 @@ GROUP 1 G:701fc172b976025d  3 flow(s)
 
 ## Compact
 
-Compact text keeps flow headers and step labels while omitting repeated source bodies. `inspect` uses `FLOW`; security source mapping uses `SOURCE FLOW`; security findings use `TAINT FLOW`. `security taint-analysis` uses compact rendering by default; pass `--no-compact` only when you want repeated function bodies expanded.
+Compact text keeps flow headers and step labels while omitting repeated source bodies. `inspect` uses `FLOW`; security source mapping uses `SOURCE FLOW`; security findings use `TAINT FLOW`. Security text expands flow bodies by default and paginates when needed; compact security blocks remain only when full source bodies cannot be resolved for a finding.
 
 ```bash
-bonsai-ninja security ./src taint-analysis
 bonsai-ninja inspect ./src --query execute --compact
 ```
 

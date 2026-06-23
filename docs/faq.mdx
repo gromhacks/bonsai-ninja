@@ -21,7 +21,7 @@ You passed `--inferred-sources`. That mode seeds synthetic sources at entry-poin
 
 <Accordion title="How do I make output smaller?">
 
-Use `--compact` on commands that support it, reduce `--context`, add `--severity`, `--tag`, `--source`, or `--sink`, and page with `--page next`. `security taint-analysis` is compact by default; use `--no-compact` only when you want repeated function bodies expanded.
+Use `--compact` on commands that support it, reduce `--context`, add `--severity`, `--tag`, `--source`, or `--sink`, and page with `--page next`. Security flow reports expand source bodies by default and add pages when the active context budget is full.
 
 </Accordion>
 

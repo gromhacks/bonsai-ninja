@@ -1421,8 +1421,7 @@ impl Workspace {
                 included_files,
                 included_funcs,
             );
-        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
-        service
+        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global))
     }
 
     /// Return the workspace root path if we have one to serialise

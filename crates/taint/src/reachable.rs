@@ -2270,18 +2270,18 @@ fn apply_call_result_passthrough_fixpoint(
                         && call_receiver_has_descendant_input(summary, descendant_bases)
                     {
                         let key = (*caller, *call_span, u8::MAX, passthrough.callee.clone());
-                        if applied.insert(key) {
-                            if seed_call_result_passthrough_outputs(
+                        if applied.insert(key)
+                            && seed_call_result_passthrough_outputs(
                                 seed_nodes,
                                 &mut seeded,
                                 idg,
                                 *caller,
                                 *call_span,
                                 true,
-                            ) {
-                                grew = true;
-                                any_grew = true;
-                            }
+                            )
+                        {
+                            grew = true;
+                            any_grew = true;
                         }
                     }
                     for &arg_idx in &passthrough.input_arg_indices {

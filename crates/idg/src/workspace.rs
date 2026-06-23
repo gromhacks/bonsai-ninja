@@ -236,8 +236,8 @@ pub struct IdgWorkspace {
     /// aren't true call edges — they record that a writer-method's
     /// receiver-field write feeds a reader-method's receiver-field
     /// read. The query layer
-    /// ([`IdgQueryService::cross_call_edges_in_closure`]) lifts each
-    /// link into a synthetic [`CrossCallEdge`] when both endpoints
+    /// ([`crate::service::IdgQueryService::cross_call_edges_in_closure`]) lifts each
+    /// link into a synthetic [`crate::service::CrossCallEdge`] when both endpoints
     /// land in the same forward closure, so source/sink lineage and
     /// `find-group` chain enumeration can traverse cross-method
     /// state propagation the same way they traverse real calls.

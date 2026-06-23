@@ -13,7 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 bonsai_common = { workspace = true }
-bonsai_taint = { workspace = true }
 bonsai_hash = { workspace = true }
 bonsai_callgraph = { workspace = true }
 bonsai_lang_api = { workspace = true }

@@ -145,8 +145,13 @@ fn inspect_default_includes_rulepack_free_taint_flows() {
     let ws = ws_path();
     let out = run(&["inspect", ws.to_str().unwrap(), "--query", "os.system"]);
     assert!(
-        out.contains("1 taint flow(s)") && out.contains("══ TAINT FLOWS") && out.contains("T:"),
-        "default inspect should include query-scoped rulepack-free taint paths: {out}"
+        out.contains("taint flow(s)")
+            && out.contains("══ TAINT FLOWS")
+            && out.contains("T:")
+            && out.contains("FLOW ")
+            && out.contains("[module]")
+            && out.contains("[def]"),
+        "default inspect should include query-scoped taint paths and code bodies: {out}"
     );
 }
 
@@ -235,13 +240,13 @@ fn inspect_secondary_contains_filters_taint_rows() {
     ]);
     assert_eq!(
         v["taint_flows"].as_array().map(Vec::len),
-        Some(1),
-        "--contains must match taint row string leaves such as tainted argument values: {v:#}"
+        Some(2),
+        "--contains must match taint row string leaves such as tainted argument values across all matching taint paths: {v:#}"
     );
     assert_eq!(
         v["hits"].as_array().map(Vec::len),
-        Some(0),
-        "--contains should drop syntax rows that do not contain the tainted argument value: {v:#}"
+        Some(1),
+        "--contains should keep syntax rows whose expanded flow code contains the value: {v:#}"
     );
 }
 
@@ -262,15 +267,8 @@ fn inspect_secondary_not_contains_drops_only_matching_taint_rows() {
         "json",
     ]);
     assert!(
-        v.get("taint_flows")
-            .and_then(|flows| flows.as_array())
-            .is_none_or(Vec::is_empty),
-        "--not-contains must remove taint rows whose values contain the needle: {v:#}"
-    );
-    assert_eq!(
-        v["hits"].as_array().map(Vec::len),
-        Some(1),
-        "--not-contains should keep syntax rows that do not contain the taint-only value: {v:#}"
+        v.as_array().is_some_and(Vec::is_empty),
+        "--not-contains must remove rows whose taint values or expanded flow code contain the needle: {v:#}"
     );
 }
 

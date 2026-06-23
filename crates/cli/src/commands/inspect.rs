@@ -9,9 +9,9 @@ use bonsai_sdk::Workspace;
 use bonsai_sdk::{
     chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id,
     find_call_span_to_func_uncached, func_display_name, CallEdgeResolver, CallPathTruncation, ChainCache,
-    ResolvedChain, SyntaxFlowQuery, TaintFlowIdentityStep,
+    EntryTaintGraph, ResolvedChain, SyntaxFlowQuery, TaintFlowIdentityStep, TaintedCall, TaintedCallEdge,
+    TaintedCallKind,
 };
-use bonsai_taint::{EntryTaintGraph, TaintedCall, TaintedCallEdge, TaintedCallKind};
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
 
@@ -239,6 +239,8 @@ struct InspectTaintFlow {
     terminal: String,
     terminal_kind: String,
     precision: String,
+    #[serde(skip)]
+    func_ids: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     chain_display: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -467,23 +469,38 @@ fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
     false
 }
 
-#[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
-pub(crate) fn cmd_inspect(
-    root: &std::path::Path,
-    pattern: Option<&str>,
-    is_regex: bool,
-    kind_filter: &[String],
-    filters: InspectFilters<'_>,
-    max_flows: usize,
-    max_entry_probes: usize,
-    max_hits: usize,
-    render: InspectRenderOptions,
-    graph_flow: bool,
-    taint_flow: bool,
-    taint_flow_explicit: bool,
-    paging_cfg: paging::PagingConfig,
-    format: BrowseFormat,
-) -> Result<()> {
+pub(crate) struct InspectCommandOptions<'a> {
+    pub(crate) pattern: Option<&'a str>,
+    pub(crate) is_regex: bool,
+    pub(crate) kind_filter: &'a [String],
+    pub(crate) filters: InspectFilters<'a>,
+    pub(crate) max_flows: usize,
+    pub(crate) max_entry_probes: usize,
+    pub(crate) max_hits: usize,
+    pub(crate) render: InspectRenderOptions,
+    pub(crate) graph_flow: bool,
+    pub(crate) taint_flow: bool,
+    pub(crate) taint_flow_explicit: bool,
+    pub(crate) paging_cfg: paging::PagingConfig,
+    pub(crate) format: BrowseFormat,
+}
+
+pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions<'_>) -> Result<()> {
+    let InspectCommandOptions {
+        pattern,
+        is_regex,
+        kind_filter,
+        filters,
+        max_flows,
+        max_entry_probes,
+        max_hits,
+        render,
+        graph_flow,
+        taint_flow,
+        taint_flow_explicit,
+        paging_cfg,
+        format,
+    } = options;
     // Taint-aware default for `--query X` combined with standalone
     // `--from Y` or `--to Y`: synthesize the OPPOSITE endpoint from
     // the pattern so the filter enters the dual-mode matcher
@@ -510,7 +527,12 @@ pub(crate) fn cmd_inspect(
         .as_deref()
         .is_some_and(|id| id.starts_with("F:"))
         || render.group_id_filter.is_some();
-    let graph_flows_enabled = graph_flow || structural_flow_lookup;
+    let default_graph_flow = taint_flow
+        && !taint_flow_explicit
+        && render.flow_id_filter.is_none()
+        && render.group_id_filter.is_none()
+        && !workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT);
+    let graph_flows_enabled = graph_flow || structural_flow_lookup || default_graph_flow;
     let literal_prefilter = pattern.filter(|p| {
         !is_regex
             && p.len() >= 3
@@ -1617,12 +1639,14 @@ pub(crate) fn cmd_inspect(
         let (taint_flows, taint_flows_truncated) = inspect_taint_flows(
             ws,
             &taint_candidate_entries,
-            pattern,
-            is_regex,
-            filters,
-            kind_filter,
-            taint_flow_cap,
-            use_targeted_taint_graph,
+            InspectTaintFlowOptions {
+                pattern,
+                is_regex,
+                filters,
+                kind_filter,
+                flow_cap: taint_flow_cap,
+                use_targeted_idg: use_targeted_taint_graph,
+            },
         )?;
         report.taint_flows = taint_flows;
         report.summary.total_taint_flows = report.taint_flows.len();
@@ -1808,6 +1832,7 @@ pub(crate) fn cmd_inspect(
             let mut current_info = None;
             let current_text = page_cache::capture(|| {
                 current_info = Some(render_inspect_report_text(
+                    ws,
                     &report,
                     &render,
                     &paging_cfg,
@@ -1835,7 +1860,7 @@ pub(crate) fn cmd_inspect(
                 let mut page_info = None;
                 let text = page_cache::capture(|| {
                     page_info = Some(render_inspect_report_text(
-                        &report, &render, &page_cfg, pattern, is_regex,
+                        ws, &report, &render, &page_cfg, pattern, is_regex,
                     ));
                     Ok(())
                 })?;
@@ -1856,24 +1881,50 @@ pub(crate) fn cmd_inspect(
     Ok(())
 }
 
+struct InspectTaintFlowOptions<'a> {
+    pattern: Option<&'a str>,
+    is_regex: bool,
+    filters: InspectFilters<'a>,
+    kind_filter: &'a [String],
+    flow_cap: usize,
+    use_targeted_idg: bool,
+}
+
+struct TaintFlowMatchContext<'a> {
+    matcher: Option<&'a Matcher>,
+    filters: InspectFilters<'a>,
+    kind_filter: &'a [String],
+    flow_cap: usize,
+}
+
 fn inspect_taint_flows(
     ws: &Workspace,
     candidate_entries: &ahash::AHashSet<bonsai_common::FuncId>,
-    pattern: Option<&str>,
-    is_regex: bool,
-    filters: InspectFilters<'_>,
-    kind_filter: &[String],
-    flow_cap: usize,
-    use_targeted_idg: bool,
+    options: InspectTaintFlowOptions<'_>,
 ) -> Result<(Vec<InspectTaintFlow>, bool)> {
+    let InspectTaintFlowOptions {
+        pattern,
+        is_regex,
+        filters,
+        kind_filter,
+        flow_cap,
+        use_targeted_idg,
+    } = options;
     let matcher = pattern.map(|p| build_matcher(p, is_regex)).transpose()?;
     let kind_filter: Vec<String> = kind_filter.iter().map(|kind| kind.to_lowercase()).collect();
+    let match_context = TaintFlowMatchContext {
+        matcher: matcher.as_ref(),
+        filters,
+        kind_filter: &kind_filter,
+        flow_cap,
+    };
     let mut entries: Vec<bonsai_common::FuncId> = candidate_entries.iter().copied().collect();
     entries.sort_by_key(|func| func.raw());
-    let target_funcs = use_targeted_idg
-        .then(|| ws.db().idg_service().is_some())
-        .unwrap_or(false)
-        .then(|| candidate_entries.clone());
+    let target_funcs = if use_targeted_idg && ws.db().idg_service().is_some() {
+        Some(candidate_entries.clone())
+    } else {
+        None
+    };
     let mut flows = Vec::new();
     let mut truncated = false;
     for entry in entries {
@@ -1885,16 +1936,8 @@ fn inspect_taint_flows(
             .target_funcs(target_funcs.as_ref())
             .prefer_warmed_idg(use_targeted_idg);
         let graph = ws.syntax_flow_graph(query);
-        let entry_truncated = collect_taint_flows_for_entry(
-            ws,
-            entry,
-            graph.graph.as_ref(),
-            matcher.as_ref(),
-            filters,
-            &kind_filter,
-            flow_cap,
-            &mut flows,
-        );
+        let entry_truncated =
+            collect_taint_flows_for_entry(ws, entry, graph.graph.as_ref(), &match_context, &mut flows);
         if entry_truncated {
             truncated = true;
             break;
@@ -1945,17 +1988,19 @@ fn collect_taint_flows_for_entry(
     ws: &Workspace,
     entry: bonsai_common::FuncId,
     graph: &EntryTaintGraph,
-    matcher: Option<&Matcher>,
-    filters: InspectFilters<'_>,
-    kind_filter: &[String],
-    flow_cap: usize,
+    match_context: &TaintFlowMatchContext<'_>,
     out: &mut Vec<InspectTaintFlow>,
 ) -> bool {
     let trace_index = trace_record_index_for_inspect(&graph.call_records);
     for call in &graph.tainted_calls {
         if let Some(flow) = taint_flow_for_terminal_call(ws, entry, &trace_index, call, graph.precision) {
-            if taint_flow_matches(&flow, matcher, filters, kind_filter) {
-                if out.len() >= flow_cap {
+            if taint_flow_matches(
+                &flow,
+                match_context.matcher,
+                match_context.filters,
+                match_context.kind_filter,
+            ) {
+                if out.len() >= match_context.flow_cap {
                     return true;
                 }
                 out.push(flow);
@@ -1964,8 +2009,13 @@ fn collect_taint_flows_for_entry(
     }
     for record in &graph.call_records {
         if let Some(flow) = taint_flow_for_terminal_edge(ws, entry, &trace_index, record) {
-            if taint_flow_matches(&flow, matcher, filters, kind_filter) {
-                if out.len() >= flow_cap {
+            if taint_flow_matches(
+                &flow,
+                match_context.matcher,
+                match_context.filters,
+                match_context.kind_filter,
+            ) {
+                if out.len() >= match_context.flow_cap {
                     return true;
                 }
                 out.push(flow);
@@ -2051,6 +2101,7 @@ fn build_inspect_taint_flow(
             funcs.push(call.caller);
         }
     }
+    let func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
     let chain_display: Vec<String> = funcs
         .into_iter()
         .map(|func| func_display_name(ws, func))
@@ -2068,6 +2119,7 @@ fn build_inspect_taint_flow(
         terminal,
         terminal_kind: terminal_kind.to_string(),
         precision: precision_label(precision).to_string(),
+        func_ids,
         chain_display,
         steps,
     }
@@ -2351,7 +2403,7 @@ fn looks_like_string_literal(value: &str) -> bool {
     if trimmed.len() < 2 {
         return false;
     }
-    let literal = trimmed.trim_start_matches(|c| matches!(c, 'r' | 'R' | 'b' | 'B' | 'f' | 'F' | 'u' | 'U'));
+    let literal = trimmed.trim_start_matches(['r', 'R', 'b', 'B', 'f', 'F', 'u', 'U']);
     matches!(
         (literal.as_bytes().first(), literal.as_bytes().last()),
         (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) | (Some(b'`'), Some(b'`'))
@@ -2740,6 +2792,7 @@ fn resolve_view(render: &InspectRenderOptions, report: &InspectReport) -> Resolv
 /// per-decl / per-hit blocks, and the final paging math; delegates
 /// per-flow rendering to `render_flow_block` / `render_group_block`.
 fn render_inspect_report_text(
+    ws: &Workspace,
     report: &InspectReport,
     render: &InspectRenderOptions,
     paging_cfg: &paging::PagingConfig,
@@ -2875,10 +2928,9 @@ fn render_inspect_report_text(
     let total_decls = report.decl_hits.len();
     let total_units = total_decls + folded_order.len();
 
-    // Safety factor on dedup-aware byte estimates. With the
-    // per-page seen-set tracking the same way the renderer does,
-    // the raw estimate already matches actual output to within
-    // ~20 %. A 1.2× cushion covers per-line chrome (annotation
+    // Safety factor on full-body byte estimates. The raw estimate
+    // already matches actual output to within ~20 %. A 1.2× cushion
+    // covers per-line chrome (annotation
     // prefix, step number, indent) that `func_full_cost` doesn't
     // model exactly. Stored as numerator/denominator so we can
     // express fractional factors without rationals.
@@ -2886,75 +2938,36 @@ fn render_inspect_report_text(
     const COST_SAFETY_DEN: u64 = 5;
     // A flow/render unit carries more chrome than its source-body
     // bytes alone: FLOW headers, chain displays, match-point rows,
-    // annotation prefixes, owner context, and dedup placeholders.
+    // annotation prefixes, and owner context.
     // The per-function estimator intentionally stays cheap, so put
     // a floor on each unit. Without this, the planner could predict
     // one page while the live renderer stopped after a handful of
     // units, producing a next-page cursor with no stable page start.
-    const UNIT_RENDER_FLOOR_BYTES: u64 = 1_200;
+    const UNIT_RENDER_FLOOR_BYTES: u64 = 1_600;
     let scale = |raw: u64| (raw * COST_SAFETY_NUM / COST_SAFETY_DEN).max(UNIT_RENDER_FLOOR_BYTES);
-    // Per-function dedup-aware cost. Functions whose body has
-    // already been rendered earlier on the same page collapse to
-    // a one-line `(body already rendered above)` placeholder —
-    // the chain placeholder still appears, just the body is
-    // skipped. Tracking this in the cost estimator lets the pager
-    // pack flows that share functions (e.g. multiple chains
-    // ending in the same sink) onto the same page; the user gets
-    // more flows per page without losing any.
-    const PLACEHOLDER_BYTES: u64 = 120; // [module]+[def] header + "(body already rendered above)"
     fn func_full_cost(f: &InspectFunctionRendered) -> u64 {
         // Module path + def line + every body line. Mirrors what
         // `render_full_source_bodies` actually emits.
         let body: u64 = f.lines.iter().map(|l| (l.text.len() as u64) + 8).sum();
         (f.module_path.len() as u64) + (f.signature.len() as u64) + body + 64
     }
-    type SeenSet = ahash::AHashSet<(String, u32)>;
-    let func_dedup_cost = |func: &InspectFunctionRendered, seen: &SeenSet| -> u64 {
-        if seen.contains(&(func.module_path.clone(), func.start_line)) {
-            PLACEHOLDER_BYTES
-        } else {
-            func_full_cost(func)
-        }
-    };
-    let flow_dedup_cost = |flow: &InspectFlowRendered, seen: &SeenSet| -> u64 {
+    let flow_full_cost = |flow: &InspectFlowRendered| -> u64 {
         // Chain header (`══` + name + chain display) + every
-        // function in the chain (full or placeholder).
+        // function in the chain.
         let chain_header = 64 + (flow.chain.iter().map(|n| n.len() as u64 + 4).sum::<u64>());
-        chain_header
-            + flow
-                .functions
-                .iter()
-                .map(|f| func_dedup_cost(f, seen))
-                .sum::<u64>()
+        chain_header + flow.functions.iter().map(func_full_cost).sum::<u64>()
     };
-    let decl_dedup_cost = |decl: &InspectOut, seen: &SeenSet| -> u64 {
+    let decl_full_cost = |decl: &InspectOut| -> u64 {
         let header = (decl.symbol.len() as u64) + (decl.file.len() as u64) + 32;
-        header + decl.flows.iter().map(|f| flow_dedup_cost(f, seen)).sum::<u64>()
+        header + decl.flows.iter().map(&flow_full_cost).sum::<u64>()
     };
-    let unit_dedup_cost = |idx: usize, seen: &SeenSet| -> u64 {
+    let unit_full_cost = |idx: usize| -> u64 {
         let raw = if idx < total_decls {
-            decl_dedup_cost(&report.decl_hits[idx], seen)
+            decl_full_cost(&report.decl_hits[idx])
         } else {
-            flow_dedup_cost(folded_order[idx - total_decls], seen)
+            flow_full_cost(folded_order[idx - total_decls])
         };
         scale(raw)
-    };
-    let add_unit_keys = |idx: usize, seen: &mut SeenSet| {
-        let funcs: &[InspectFunctionRendered] = if idx < total_decls {
-            // Decl-hit unit: union of every flow's functions.
-            // Each gets added once.
-            for flow in &report.decl_hits[idx].flows {
-                for f in &flow.functions {
-                    seen.insert((f.module_path.clone(), f.start_line));
-                }
-            }
-            return;
-        } else {
-            &folded_order[idx - total_decls].functions
-        };
-        for f in funcs {
-            seen.insert((f.module_path.clone(), f.start_line));
-        }
     };
     let unit_compact_cost = |idx: usize| -> u64 {
         let raw = if idx < total_decls {
@@ -2988,10 +3001,24 @@ fn render_inspect_report_text(
     // pages now hit ~70-75 % of the stated budget.
     let unit_budget_bytes: Option<u64> = budget_bytes.map(|b| b - (b * 12 / 100));
     const TAINT_FLOW_ROW_AVG_BYTES: u64 = 320;
+    const HITS_ROW_AVG_BYTES: u64 = 220;
+    const TAINT_FLOW_TABLE_BUDGET_PCT: u64 = 10;
+    const HITS_TABLE_BUDGET_PCT: u64 = 10;
     let first_page_unit_budget_bytes = match (unit_budget_bytes, budget_bytes) {
-        (Some(unit_budget), Some(total_budget)) if !report.taint_flows.is_empty() => {
-            let taint_budget = (total_budget * 35 / 100).max(TAINT_FLOW_ROW_AVG_BYTES);
-            Some(unit_budget.saturating_sub(taint_budget))
+        (Some(unit_budget), Some(total_budget))
+            if !report.taint_flows.is_empty() || !report.hits.is_empty() =>
+        {
+            let taint_budget = if report.taint_flows.is_empty() {
+                0
+            } else {
+                (total_budget * TAINT_FLOW_TABLE_BUDGET_PCT / 100).max(TAINT_FLOW_ROW_AVG_BYTES)
+            };
+            let hits_budget = if report.hits.is_empty() {
+                0
+            } else {
+                (total_budget * HITS_TABLE_BUDGET_PCT / 100).max(HITS_ROW_AVG_BYTES)
+            };
+            Some(unit_budget.saturating_sub(taint_budget + hits_budget))
         }
         _ => unit_budget_bytes,
     };
@@ -2999,8 +3026,7 @@ fn render_inspect_report_text(
         total_units,
         first_page_unit_budget_bytes,
         unit_budget_bytes,
-        &unit_dedup_cost,
-        &add_unit_keys,
+        &unit_full_cost,
         &unit_compact_cost,
     );
     let total_pages = page_starts.len().max(1);
@@ -3048,8 +3074,7 @@ fn render_inspect_report_text(
     // estimate (chain bodies + headers). Gives the user an honest
     // "the full inspect output would be ~N tokens if you passed
     // --all" figure in the footer.
-    let empty_seen: SeenSet = SeenSet::default();
-    let total_uncapped_bytes: u64 = (0..total_units).map(|i| unit_dedup_cost(i, &empty_seen)).sum();
+    let total_uncapped_bytes: u64 = (0..total_units).map(&unit_full_cost).sum();
     let total_tokens_uncapped = paging::bytes_to_tokens(total_uncapped_bytes);
     let mut paging_info = paging::PageInfo {
         page_number,
@@ -3067,6 +3092,7 @@ fn render_inspect_report_text(
     };
     let bytes_before_payload = out_count::bytes();
 
+    let mut rendered_taint_rows = 0usize;
     if start_offset == 0 && !report.taint_flows.is_empty() {
         // The taint overlay is rendered before the structural page units,
         // so it must take its own slice of the page budget. Otherwise broad
@@ -3075,11 +3101,15 @@ fn render_inspect_report_text(
         const TAINT_FLOW_TEXT_LIMIT: usize = 50;
         let taint_flow_text_limit = budget_bytes
             .map(|budget| {
-                let taint_budget = (budget * 35 / 100).max(TAINT_FLOW_ROW_AVG_BYTES);
+                let taint_budget = (budget * TAINT_FLOW_TABLE_BUDGET_PCT / 100).max(TAINT_FLOW_ROW_AVG_BYTES);
                 ((taint_budget / TAINT_FLOW_ROW_AVG_BYTES) as usize).clamp(1, TAINT_FLOW_TEXT_LIMIT)
             })
             .unwrap_or(TAINT_FLOW_TEXT_LIMIT);
         render_taint_flows_table(u, &report.taint_flows, taint_flow_text_limit);
+        rendered_taint_rows = report.taint_flows.len().min(taint_flow_text_limit);
+        if should_render_raw_taint_bodies(render, total_units) {
+            render_raw_taint_flow_bodies(ws, u, &report.taint_flows, taint_flow_text_limit);
+        }
     }
 
     // Determine which units will render on THIS page (simulate).
@@ -3128,7 +3158,7 @@ fn render_inspect_report_text(
     // OCCURRENCE HITS table — per-page, filtered to the flows
     // rendered on THIS page. Every hit in this table points at a
     // FLOW block that appears below.
-    const HITS_ROW_AVG_BYTES: u64 = 220;
+    let mut rendered_hit_rows = 0usize;
     if !page_hits.is_empty() {
         cli_println!();
         cli_println!("{}", u.heading("══ OCCURRENCE HITS"));
@@ -3143,7 +3173,7 @@ fn render_inspect_report_text(
         }
         table_headers.push("text");
         let mut hits_table = u.table(&table_headers);
-        let hits_budget_bytes = budget_bytes.map(|b| (b * 35) / 100);
+        let hits_budget_bytes = budget_bytes.map(|b| (b * HITS_TABLE_BUDGET_PCT) / 100);
         let mut rendered_hits = 0usize;
         for hit in &page_hits {
             if let Some(b) = hits_budget_bytes {
@@ -3188,6 +3218,7 @@ fn render_inspect_report_text(
             hits_table.add_row(row);
             rendered_hits += 1;
         }
+        rendered_hit_rows = rendered_hits;
         cli_println!("{hits_table}");
         if rendered_hits < page_hits.len() {
             let skipped = page_hits.len() - rendered_hits;
@@ -3227,12 +3258,6 @@ fn render_inspect_report_text(
     // "squeeze in on this page" tool, it's a "too big for any
     // page" tool. Users walking pages get the full source bodies
     // in almost every case.
-    let mut seen_bodies: BodySet = BodySet::default();
-    // Per-page dedup-key set used by the COST estimator (coarser
-    // than `seen_bodies`, just `(file, start_line)`). Mirrors the
-    // simulator so the live walk's fit decisions match what
-    // `simulate_page_starts` predicted.
-    let mut page_seen_keys: SeenSet = SeenSet::default();
     let mut unit_cursor = start_offset;
     let mut rendered_units = 0usize;
     let mut compact_fallback_used = false;
@@ -3258,12 +3283,15 @@ fn render_inspect_report_text(
             }
         }
         let is_first_on_page = rendered_units == 0;
-        let dedup_aware = unit_dedup_cost(unit_index, &page_seen_keys);
+        let full_estimate = unit_full_cost(unit_index);
         let compact_estimate = unit_compact_cost(unit_index);
         let mut effective_render = render.clone();
-        if !fits(dedup_aware) {
-            let oversized_vs_total = unit_budget_bytes.is_some_and(|b| dedup_aware > b);
-            if is_first_on_page && oversized_vs_total {
+        let fits_unit_slice = fits(full_estimate);
+        let fits_strict_page = strict_remaining().is_none_or(|rem| full_estimate <= rem);
+        if !fits_unit_slice || !fits_strict_page {
+            let oversized_vs_total = unit_budget_bytes.is_some_and(|b| full_estimate > b);
+            let oversized_vs_strict_total = strict_budget_bytes.is_some_and(|b| full_estimate > b);
+            if is_first_on_page && (oversized_vs_total || oversized_vs_strict_total) {
                 // Pre-render proactive check: even compact must
                 // fit the strict remaining budget. If it doesn't,
                 // emit a one-line "too large" stub so the user
@@ -3281,7 +3309,7 @@ fn render_inspect_report_text(
                         } else {
                             folded_order[unit_index - total_decls].flow_id.clone()
                         };
-                        let est_tokens = paging::bytes_to_tokens(dedup_aware);
+                        let est_tokens = paging::bytes_to_tokens(full_estimate);
                         cli_println!();
                         cli_println!(
                             "{}",
@@ -3292,7 +3320,6 @@ fn render_inspect_report_text(
                         );
                         // Treat as rendered for cursor purposes so
                         // the next page advances past it.
-                        add_unit_keys(unit_index, &mut page_seen_keys);
                         rendered_units += 1;
                         unit_cursor = unit_index + 1;
                         continue;
@@ -3316,7 +3343,8 @@ fn render_inspect_report_text(
                 .last()
                 .cloned()
                 .unwrap_or_else(|| flow.flow_label.clone());
-            render_flow_block(u, &effective_render, flow, &header_name, &mut seen_bodies);
+            let mut local_seen_bodies: BodySet = BodySet::default();
+            render_flow_block(u, &effective_render, flow, &header_name, &mut local_seen_bodies);
             // Find the fold's match points for this flow by scanning
             // `report.hits` for entries whose flows list contains
             // this flow_id.
@@ -3334,10 +3362,6 @@ fn render_inspect_report_text(
                 .collect();
             render_match_points(u, &matches);
         }
-        // Update the cost-estimator dedup set so the NEXT unit's
-        // cost reflects what's already on the page. Mirrors the
-        // simulator's add_unit_keys.
-        add_unit_keys(unit_index, &mut page_seen_keys);
         rendered_units += 1;
         unit_cursor = unit_index + 1;
     }
@@ -3361,26 +3385,12 @@ fn render_inspect_report_text(
         );
     }
 
-    // Patch paging metadata to reflect what actually rendered. Some
-    // query-scoped inspect runs only render auxiliary tables (raw
-    // taint paths + occurrence hits) and have no structural flow
-    // blocks. Count those visible rows for the footer instead of
-    // claiming the page has zero results.
-    let auxiliary_rows = if total_units == 0 {
-        report.summary.total_taint_flows + page_hits.len()
-    } else {
-        0
-    };
-    let shown_rows = if rendered_units == 0 && auxiliary_rows > 0 {
-        auxiliary_rows
-    } else {
-        rendered_units
-    };
-    let total_rows = if total_units == 0 && auxiliary_rows > 0 {
-        auxiliary_rows
-    } else {
-        total_units
-    };
+    // Patch paging metadata to reflect visible result rows, not only
+    // structural flow units. The raw taint table and occurrence table are
+    // first-class user-facing inspect results now that default output shows
+    // the code needed to understand them.
+    let shown_rows = rendered_units + rendered_taint_rows + rendered_hit_rows;
+    let total_rows = total_units + report.summary.total_taint_flows + report.hits.len();
     paging_info.shown_rows = shown_rows as u64;
     paging_info.page_size = shown_rows as u64;
     paging_info.start_offset = start_offset as u64;
@@ -3422,17 +3432,13 @@ fn render_inspect_report_text(
 /// where the live render would have stopped page N-1.
 ///
 /// Empty-budget case: every unit fits on page 1, returns `vec![0]`.
-type PageSeenSet = ahash::AHashSet<(String, u32)>;
-type DedupCostFn<'a> = dyn Fn(usize, &PageSeenSet) -> u64 + 'a;
-type AddKeysFn<'a> = dyn Fn(usize, &mut PageSeenSet) + 'a;
 type UnitCostFn<'a> = dyn Fn(usize) -> u64 + 'a;
 
 fn simulate_page_starts(
     total_units: usize,
     first_page_budget_bytes: Option<u64>,
     budget_bytes: Option<u64>,
-    dedup_cost: &DedupCostFn<'_>,
-    add_unit_keys: &AddKeysFn<'_>,
+    full_cost: &UnitCostFn<'_>,
     compact_cost: &UnitCostFn<'_>,
 ) -> Vec<usize> {
     if total_units == 0 {
@@ -3449,11 +3455,6 @@ fn simulate_page_starts(
         let Some(b) = page_budget else {
             return vec![0];
         };
-        // Per-page dedup state — functions seen on the current
-        // page collapse to placeholders for subsequent units, so
-        // packing flows that share functions onto one page lets
-        // every flow show its full chain at low marginal cost.
-        let mut seen: ahash::AHashSet<(String, u32)> = ahash::AHashSet::new();
         let mut emitted: u64 = 0;
         let mut rendered_on_page = 0usize;
         let mut next_unit_index = unit_index;
@@ -3461,19 +3462,18 @@ fn simulate_page_starts(
             if emitted >= b {
                 break;
             }
-            let cost = dedup_cost(next_unit_index, &seen);
+            let cost = full_cost(next_unit_index);
             let is_first_on_page = rendered_on_page == 0;
             let unit_cost = if emitted + cost <= b {
                 cost
             } else if is_first_on_page && cost > b {
-                // Even with no dedup, the flow is bigger than the
-                // entire window — render compact, on its own page.
+                // The flow is bigger than the entire window — render
+                // compact, on its own page.
                 compact_cost(next_unit_index)
             } else {
                 break;
             };
             emitted += unit_cost;
-            add_unit_keys(next_unit_index, &mut seen);
             rendered_on_page += 1;
             next_unit_index += 1;
         }
@@ -3529,6 +3529,91 @@ fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow], text_limit: usiz
                 flows.len() - text_limit,
             ))
         );
+    }
+}
+
+fn should_render_raw_taint_bodies(render: &InspectRenderOptions, structural_units: usize) -> bool {
+    !render.compact
+        && render.group_id_filter.is_none()
+        && (structural_units == 0
+            || render
+                .flow_id_filter
+                .as_deref()
+                .is_some_and(|id| id.starts_with("T:")))
+}
+
+fn render_raw_taint_flow_bodies(ws: &Workspace, u: &Ui, flows: &[InspectTaintFlow], text_limit: usize) {
+    let render_opts = InspectRenderOptions {
+        compact: false,
+        flow_id_filter: None,
+        view: InspectView::Trace,
+        group_id_filter: None,
+    };
+    for (idx, flow) in flows.iter().take(text_limit).enumerate() {
+        let Some(rendered) = rendered_flow_from_raw_taint(ws, flow, (idx + 1) as u32) else {
+            continue;
+        };
+        let header_name = if flow.terminal.is_empty() {
+            flow.entry.as_str()
+        } else {
+            flow.terminal.as_str()
+        };
+        let mut local_seen = BodySet::default();
+        render_flow_block_with_heading(
+            u,
+            &render_opts,
+            &rendered,
+            header_name,
+            &mut local_seen,
+            "TAINT FLOW",
+        );
+    }
+}
+
+fn rendered_flow_from_raw_taint(
+    ws: &Workspace,
+    flow: &InspectTaintFlow,
+    flow_number: u32,
+) -> Option<InspectFlowRendered> {
+    let funcs: Vec<bonsai_common::FuncId> = flow
+        .func_ids
+        .iter()
+        .copied()
+        .map(bonsai_common::FuncId::new)
+        .collect();
+    if funcs.is_empty() {
+        return None;
+    }
+    let call_spans = vec![None; funcs.len().saturating_sub(1)];
+    let flow_label = flow_number.to_string();
+    let precision = precision_from_label(&flow.precision);
+    let mut rendered = render_flow_with_cached_call_spans(
+        ws,
+        &funcs,
+        &call_spans,
+        flow_number,
+        &flow_label,
+        precision,
+        None,
+        InspectFilters::default(),
+        true,
+        true,
+    )?;
+    rendered.flow_id.clone_from(&flow.taint_id);
+    if !flow.chain_display.is_empty() {
+        rendered.chain.clone_from(&flow.chain_display);
+        rendered.chain_display = flow.chain_display.join(" -> ");
+    }
+    Some(rendered)
+}
+
+fn precision_from_label(label: &str) -> bonsai_common::Precision {
+    match label {
+        "exact" => bonsai_common::Precision::Exact,
+        "narrowed" => bonsai_common::Precision::Narrowed,
+        "over-approximate" | "over_approximate" => bonsai_common::Precision::OverApproximate,
+        "unknown" => bonsai_common::Precision::Unknown,
+        _ => bonsai_common::Precision::Unknown,
     }
 }
 
@@ -3678,7 +3763,7 @@ fn render_group_block(
     members: &[&InspectFlowRendered],
     group_number: usize,
     header_name: &str,
-    seen_bodies: &mut BodySet,
+    _seen_bodies: &mut BodySet,
 ) {
     cli_println!();
     cli_println!("{}", u.ruler('═', 70));
@@ -3724,7 +3809,8 @@ fn render_group_block(
     // mode the per-member prefix list above is the whole render.
     if !render.compact {
         for flow in members {
-            render_flow_block(u, render, flow, header_name, seen_bodies);
+            let mut local_seen_bodies = BodySet::default();
+            render_flow_block(u, render, flow, header_name, &mut local_seen_bodies);
         }
     }
 }
@@ -4296,17 +4382,11 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
             truncation_suffix
         ))
     );
-    // One body-dedup set per decl-hit render. A decl whose
-    // upstream chain has many branches will re-pass through the
-    // same intermediate function on every flow; the dedup makes
-    // those intermediates render once per decl hit instead of per
-    // flow, while still preserving every per-flow header + chain
-    // line so flow_ids stay self-citable.
-    let mut seen_bodies: BodySet = BodySet::default();
     match view {
         ResolvedView::Trace => {
             for flow in &out.flows {
-                render_flow_block(u, render, flow, &out.symbol, &mut seen_bodies);
+                let mut local_seen_bodies = BodySet::default();
+                render_flow_block(u, render, flow, &out.symbol, &mut local_seen_bodies);
             }
         }
         ResolvedView::Grouped => {
@@ -4321,6 +4401,7 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
                         out.flows.iter().find(|flow| &flow.flow_id == member_flow_id)
                     })
                     .collect();
+                let mut local_seen_bodies = BodySet::default();
                 render_group_block(
                     u,
                     render,
@@ -4328,7 +4409,7 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
                     &members,
                     group_idx + 1,
                     &out.symbol,
-                    &mut seen_bodies,
+                    &mut local_seen_bodies,
                 );
             }
         }

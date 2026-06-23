@@ -1,4 +1,4 @@
-//! Phase 3b: workspace adapter that wires the [`stitch_idg`]
+//! Phase 3b: workspace adapter that wires the [`crate::builder::stitch_idg`]
 //! builder to the real [`bonsai_index::GlobalIndex`] +
 //! [`bonsai_callgraph::ResolvedCallGraph`].
 //!
@@ -14,7 +14,7 @@
 //! `bonsai_callgraph`; pulling the adapter into a sibling crate
 //! would force a cycle. The adapter is small (~200 LoC) and the
 //! [`CalleeResolver`] / [`FuncToSegment`] traits insulate the
-//! [`stitch_idg`] core from this code, so unit tests still don't
+//! [`crate::builder::stitch_idg`] core from this code, so unit tests still don't
 //! need a workspace.
 
 use ahash::{AHashMap, AHashSet};
@@ -50,11 +50,11 @@ impl LocalScopeKey {
     }
 }
 
-/// Pre-computed maps that the [`WorkspaceIdgBuilder`] uses for
+/// Pre-computed maps that `WorkspaceIdgBuilder` uses for
 /// `FuncId → file → SegmentId` lookups during stitching.
 struct WorkspaceMaps {
     /// `FuncId → SegmentId placeholder`. The placeholder maps 1:1
-    /// to a file id (one segment per file). [`stitch_idg`] then
+    /// to a file id (one segment per file). [`crate::builder::stitch_idg`] then
     /// translates placeholders to real `IdgWorkspace` segment ids
     /// during registration.
     func_to_seg: AHashMap<FuncId, SegmentId>,
@@ -3226,7 +3226,7 @@ fn collect_field_nodes(
 }
 
 /// Resolve a segment-local `(SegmentId, crate::node::NodeId)` to its workspace
-/// `WsNodeId` via the same unified address space as [`IdgQueryService`].
+/// `WsNodeId` via the same unified address space as `IdgQueryService`.
 fn ws_node_for(
     offsets: &SegmentOffsets,
     seg_id: crate::SegmentId,

@@ -561,12 +561,7 @@ fn java_cast_type_of_init(init: Node<'_>, src: &[u8]) -> Option<String> {
     let mut n = init;
     while n.kind() == "parenthesized_expression" {
         let mut cursor = n.walk();
-        let mut inner = None;
-        for child in n.named_children(&mut cursor) {
-            inner = Some(child);
-            break;
-        }
-        n = inner?;
+        n = n.named_children(&mut cursor).next()?;
     }
     if n.kind() == "cast_expression" {
         return n
