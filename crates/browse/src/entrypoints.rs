@@ -60,10 +60,7 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
             if f.file.is_some_and(|needle| !path.contains(needle)) {
                 continue;
             }
-            let qualified_matches = decl
-                .qualified_name
-                .as_deref()
-                .is_some_and(|qualified| name_match(qualified));
+            let qualified_matches = decl.qualified_name.as_deref().is_some_and(&name_match);
             if !name_match(&decl.name) && !qualified_matches {
                 continue;
             }

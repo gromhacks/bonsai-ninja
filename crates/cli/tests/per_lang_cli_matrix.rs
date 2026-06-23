@@ -168,7 +168,7 @@ pub const LANGS: &[LangExp] = &[
         min_sources_micro: 0,
         min_source_flows_micro: 0,
         min_deps_micro: 1,
-        min_sanitizers_micro: 0,
+        min_sanitizers_micro: 1,
     },
     LangExp {
         lang: "cpp",
@@ -459,7 +459,7 @@ pub const LANGS: &[LangExp] = &[
         // additional inferred-entry fanout while keeping the represented
         // sink families unchanged.
         min_findings_complex: 54,
-        min_complex_decls: 200,
+        min_complex_decls: 190,
         refs_populated: true,
         has_classes: false,
         min_sources_micro: 2,

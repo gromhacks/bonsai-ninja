@@ -13,8 +13,8 @@ use crate::args::{BrowseFormat, InspectView, OutputPathArg, SecurityAction};
 use crate::paging;
 
 use super::{
-    cmd_dump_ast, cmd_dump_edges, cmd_dump_resolve, cmd_inspect, paging_from_cli, InspectFilters,
-    InspectRenderOptions,
+    cmd_dump_ast, cmd_dump_edges, cmd_dump_resolve, cmd_inspect, paging_from_cli, InspectCommandOptions,
+    InspectFilters, InspectRenderOptions,
 };
 
 pub(crate) struct ShowArgs<'a> {
@@ -88,24 +88,26 @@ fn show_structural_flow(
 ) -> Result<()> {
     cmd_inspect(
         workspace,
-        None,
-        false,
-        &[],
-        InspectFilters::default(),
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        InspectRenderOptions {
-            compact,
-            flow_id_filter: Some(id.to_string()),
-            view: InspectView::Trace,
-            group_id_filter: None,
+        InspectCommandOptions {
+            pattern: None,
+            is_regex: false,
+            kind_filter: &[],
+            filters: InspectFilters::default(),
+            max_flows: usize::MAX,
+            max_entry_probes: usize::MAX,
+            max_hits: usize::MAX,
+            render: InspectRenderOptions {
+                compact,
+                flow_id_filter: Some(id.to_string()),
+                view: InspectView::Trace,
+                group_id_filter: None,
+            },
+            graph_flow: true,
+            taint_flow: false,
+            taint_flow_explicit: false,
+            paging_cfg,
+            format,
         },
-        true,
-        false,
-        false,
-        paging_cfg,
-        format,
     )
 }
 
@@ -118,24 +120,26 @@ fn show_flow_group(
 ) -> Result<()> {
     cmd_inspect(
         workspace,
-        None,
-        false,
-        &[],
-        InspectFilters::default(),
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        InspectRenderOptions {
-            compact,
-            flow_id_filter: None,
-            view: InspectView::Grouped,
-            group_id_filter: Some(id.to_string()),
+        InspectCommandOptions {
+            pattern: None,
+            is_regex: false,
+            kind_filter: &[],
+            filters: InspectFilters::default(),
+            max_flows: usize::MAX,
+            max_entry_probes: usize::MAX,
+            max_hits: usize::MAX,
+            render: InspectRenderOptions {
+                compact,
+                flow_id_filter: None,
+                view: InspectView::Grouped,
+                group_id_filter: Some(id.to_string()),
+            },
+            graph_flow: true,
+            taint_flow: false,
+            taint_flow_explicit: false,
+            paging_cfg,
+            format,
         },
-        true,
-        false,
-        false,
-        paging_cfg,
-        format,
     )
 }
 
@@ -148,24 +152,26 @@ fn show_raw_taint_flow(
 ) -> Result<()> {
     cmd_inspect(
         workspace,
-        None,
-        false,
-        &[],
-        InspectFilters::default(),
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        InspectRenderOptions {
-            compact,
-            flow_id_filter: Some(id.to_string()),
-            view: InspectView::Trace,
-            group_id_filter: None,
+        InspectCommandOptions {
+            pattern: None,
+            is_regex: false,
+            kind_filter: &[],
+            filters: InspectFilters::default(),
+            max_flows: usize::MAX,
+            max_entry_probes: usize::MAX,
+            max_hits: usize::MAX,
+            render: InspectRenderOptions {
+                compact,
+                flow_id_filter: Some(id.to_string()),
+                view: InspectView::Trace,
+                group_id_filter: None,
+            },
+            graph_flow: false,
+            taint_flow: true,
+            taint_flow_explicit: true,
+            paging_cfg,
+            format,
         },
-        false,
-        true,
-        true,
-        paging_cfg,
-        format,
     )
 }
 
@@ -192,7 +198,7 @@ fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
             intra_worklist_cap: None,
             context: args.context.map(str::to_string),
             page: args.page.map(str::to_string),
-            all: true,
+            all: args.all,
             no_compact: !args.compact,
             summary: false,
             format: args.format,

@@ -345,12 +345,14 @@ where
         ws,
         rules,
         &mut on_file_done,
-        ConstraintMode::Strict,
-        None,
-        None,
-        &empty_factory_returns(),
-        false,
-        FactRetention::Transient,
+        MatchRunConfig {
+            mode: ConstraintMode::Strict,
+            taint_view: None,
+            scan_files: None,
+            factory: &empty_factory_returns(),
+            dedup_file_matches: false,
+            retention: FactRetention::Transient,
+        },
     )
 }
 
@@ -370,12 +372,14 @@ where
         ws,
         rules,
         &mut on_file_done,
-        ConstraintMode::Strict,
-        None,
-        Some(files),
-        &empty_factory_returns(),
-        false,
-        FactRetention::Transient,
+        MatchRunConfig {
+            mode: ConstraintMode::Strict,
+            taint_view: None,
+            scan_files: Some(files),
+            factory: &empty_factory_returns(),
+            dedup_file_matches: false,
+            retention: FactRetention::Transient,
+        },
     )
 }
 
@@ -392,12 +396,14 @@ where
         ws,
         rules,
         &mut on_file_done,
-        ConstraintMode::Strict,
-        None,
-        Some(files),
-        &empty_factory_returns(),
-        false,
-        FactRetention::Cached,
+        MatchRunConfig {
+            mode: ConstraintMode::Strict,
+            taint_view: None,
+            scan_files: Some(files),
+            factory: &empty_factory_returns(),
+            dedup_file_matches: false,
+            retention: FactRetention::Cached,
+        },
     )
 }
 
@@ -414,12 +420,14 @@ where
         ws,
         rules,
         &mut on_file_done,
-        ConstraintMode::Strict,
-        None,
-        Some(files),
-        &empty_factory_returns(),
-        true,
-        FactRetention::Transient,
+        MatchRunConfig {
+            mode: ConstraintMode::Strict,
+            taint_view: None,
+            scan_files: Some(files),
+            factory: &empty_factory_returns(),
+            dedup_file_matches: true,
+            retention: FactRetention::Transient,
+        },
     )
 }
 
@@ -437,12 +445,14 @@ pub(crate) fn match_rule_against_facts_with_taint_view(
         ws,
         &[rule],
         &mut on_file_done,
-        ConstraintMode::Strict,
-        Some(taint_view),
-        None,
-        &empty_factory_returns(),
-        false,
-        FactRetention::Transient,
+        MatchRunConfig {
+            mode: ConstraintMode::Strict,
+            taint_view: Some(taint_view),
+            scan_files: None,
+            factory: &empty_factory_returns(),
+            dedup_file_matches: false,
+            retention: FactRetention::Transient,
+        },
     )
 }
 
@@ -806,12 +816,14 @@ where
         ws,
         rules,
         &mut on_file_done,
-        ConstraintMode::TaintEndpoint,
-        None,
-        Some(files),
-        factory,
-        false,
-        FactRetention::Cached,
+        MatchRunConfig {
+            mode: ConstraintMode::TaintEndpoint,
+            taint_view: None,
+            scan_files: Some(files),
+            factory,
+            dedup_file_matches: false,
+            retention: FactRetention::Cached,
+        },
     )
 }
 
@@ -832,12 +844,14 @@ where
         ws,
         rules,
         &mut on_file_done,
-        ConstraintMode::SinkInventory,
-        None,
-        Some(files),
-        &empty_factory_returns(),
-        true,
-        FactRetention::Transient,
+        MatchRunConfig {
+            mode: ConstraintMode::SinkInventory,
+            taint_view: None,
+            scan_files: Some(files),
+            factory: &empty_factory_returns(),
+            dedup_file_matches: true,
+            retention: FactRetention::Transient,
+        },
     )
 }
 
@@ -845,16 +859,19 @@ fn match_rules_against_facts_with_progress_and_mode<F>(
     ws: &Workspace,
     rules: &[&Rule],
     on_file_done: &mut F,
-    mode: ConstraintMode,
-    taint_view: Option<&InterTaintView<'_>>,
-    scan_files: Option<&[FileId]>,
-    factory: &Arc<FactoryReturns>,
-    dedup_file_matches: bool,
-    retention: FactRetention,
+    config: MatchRunConfig<'_, '_>,
 ) -> Vec<RuleMatch>
 where
     F: FnMut(),
 {
+    let MatchRunConfig {
+        mode,
+        taint_view,
+        scan_files,
+        factory,
+        dedup_file_matches,
+        retention,
+    } = config;
     let db = ws.db();
     let files: Vec<_> = scan_files
         .map(|files| files.to_vec())
@@ -940,18 +957,17 @@ where
                                         on_file_done();
                                         return file_out;
                                     };
-                                    scan_file_rules(
+                                    let ctx = FileScanContext {
                                         ws,
                                         file,
-                                        file_index.as_ref(),
-                                        &file_rules,
-                                        &constructor_names,
+                                        file_index: file_index.as_ref(),
+                                        constructor_names: &constructor_names,
                                         mode,
                                         taint_view,
                                         retention,
-                                        &receiver_base_map,
-                                        &mut file_out,
-                                    );
+                                        receiver_base_map: &receiver_base_map,
+                                    };
+                                    scan_file_rules(&ctx, &file_rules, &mut file_out);
                                 }
                                 FactRetention::Transient => {
                                     let file_index = global_file_indexes
@@ -963,18 +979,17 @@ where
                                         on_file_done();
                                         return file_out;
                                     };
-                                    scan_file_rules(
+                                    let ctx = FileScanContext {
                                         ws,
                                         file,
-                                        &file_index,
-                                        &file_rules,
-                                        &constructor_names,
+                                        file_index: &file_index,
+                                        constructor_names: &constructor_names,
                                         mode,
                                         taint_view,
                                         retention,
-                                        &receiver_base_map,
-                                        &mut file_out,
-                                    );
+                                        receiver_base_map: &receiver_base_map,
+                                    };
+                                    scan_file_rules(&ctx, &file_rules, &mut file_out);
                                 }
                             }
                             if dedup_file_matches {
@@ -1027,18 +1042,17 @@ where
                                                     let _ = tick_tx.send(());
                                                     return file_out;
                                                 };
-                                                scan_file_rules(
+                                                let ctx = FileScanContext {
                                                     ws,
                                                     file,
-                                                    file_index.as_ref(),
-                                                    &file_rules,
-                                                    &constructor_names,
+                                                    file_index: file_index.as_ref(),
+                                                    constructor_names: &constructor_names,
                                                     mode,
                                                     taint_view,
                                                     retention,
-                                                    &receiver_base_map,
-                                                    &mut file_out,
-                                                );
+                                                    receiver_base_map: &receiver_base_map,
+                                                };
+                                                scan_file_rules(&ctx, &file_rules, &mut file_out);
                                             }
                                             FactRetention::Transient => {
                                                 let file_index = global_file_indexes
@@ -1050,18 +1064,17 @@ where
                                                     let _ = tick_tx.send(());
                                                     return file_out;
                                                 };
-                                                scan_file_rules(
+                                                let ctx = FileScanContext {
                                                     ws,
                                                     file,
-                                                    &file_index,
-                                                    &file_rules,
-                                                    &constructor_names,
+                                                    file_index: &file_index,
+                                                    constructor_names: &constructor_names,
                                                     mode,
                                                     taint_view,
                                                     retention,
-                                                    &receiver_base_map,
-                                                    &mut file_out,
-                                                );
+                                                    receiver_base_map: &receiver_base_map,
+                                                };
+                                                scan_file_rules(&ctx, &file_rules, &mut file_out);
                                             }
                                         }
                                         if dedup_file_matches {
@@ -1149,7 +1162,9 @@ fn matcher_worker_count(file_count: usize) -> usize {
 }
 
 fn dedup_inventory_matches_in_place(matches: &mut Vec<RuleMatch>) {
-    let mut seen: AHashMap<(String, String, u32, u32, String, Option<String>), usize> = AHashMap::new();
+    type InventoryDedupKey = (String, String, u32, u32, String, Option<String>);
+
+    let mut seen: AHashMap<InventoryDedupKey, usize> = AHashMap::new();
     let mut deduped: Vec<RuleMatch> = Vec::with_capacity(matches.len());
     for m in matches.drain(..) {
         let key = (
@@ -1191,6 +1206,26 @@ enum ConstraintMode {
 enum FactRetention {
     Cached,
     Transient,
+}
+
+struct FileScanContext<'a, 'taint> {
+    ws: &'a Workspace,
+    file: FileId,
+    file_index: &'a DeclIndex,
+    constructor_names: &'a AHashSet<String>,
+    mode: ConstraintMode,
+    taint_view: Option<&'a InterTaintView<'taint>>,
+    retention: FactRetention,
+    receiver_base_map: &'a AHashMap<String, Vec<String>>,
+}
+
+struct MatchRunConfig<'a, 'taint> {
+    mode: ConstraintMode,
+    taint_view: Option<&'a InterTaintView<'taint>>,
+    scan_files: Option<&'a [FileId]>,
+    factory: &'a Arc<FactoryReturns>,
+    dedup_file_matches: bool,
+    retention: FactRetention,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1941,9 +1976,7 @@ fn regex_literal_anchor_tokens(pattern: &str) -> Vec<String> {
             }
             if ch == 'Q' {
                 token.clear();
-            } else if ch == 'E' {
-                flush_regex_anchor_token(&mut out, &mut token);
-            } else if ch == '.' || ch == '/' || ch == ':' || ch == '-' {
+            } else if ch == 'E' || matches!(ch, '.' | '/' | ':' | '-') {
                 flush_regex_anchor_token(&mut out, &mut token);
             } else if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
                 token.push(ch);
@@ -2441,100 +2474,64 @@ fn regex_terminal_call_key(pattern: &str) -> Option<String> {
 }
 
 fn scan_file_rules(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
+    ctx: &FileScanContext<'_, '_>,
     rules: &PreparedRuleBatch<'_, '_>,
-    constructor_names: &AHashSet<String>,
-    mode: ConstraintMode,
-    taint_view: Option<&InterTaintView<'_>>,
-    retention: FactRetention,
-    receiver_base_map: &AHashMap<String, Vec<String>>,
     out: &mut Vec<RuleMatch>,
 ) {
     if !rules.call_rules.is_empty() {
-        scan_calls_batch(
-            ws,
-            file,
-            file_index,
-            rules,
-            constructor_names,
-            mode,
-            taint_view,
-            retention,
-            receiver_base_map,
-            out,
-        );
+        scan_calls_batch(ctx, rules, out);
     }
     if !rules.read_rules.is_empty() {
         scan_refs_batch(
-            ws,
-            file,
-            file_index,
+            ctx,
             &rules.read_rules,
             RefKind::Read,
             rules.include_workspace_package_context,
-            retention,
             out,
         );
         scan_flow_reads_batch(
-            ws,
-            file,
-            file_index,
+            ctx.ws,
+            ctx.file,
+            ctx.file_index,
             &rules.read_rules,
             rules.include_workspace_package_context,
-            retention,
+            ctx.retention,
             out,
         );
     }
     if !rules.write_rules.is_empty() {
         scan_writes_batch(
-            ws,
-            file,
-            file_index,
+            ctx,
             &rules.write_rules,
             rules.include_workspace_package_context,
-            mode,
-            taint_view,
-            retention,
             out,
         );
         scan_ref_writes_batch(
-            ws,
-            file,
-            file_index,
+            ctx,
             &rules.write_rules,
             rules.include_workspace_package_context,
-            mode,
-            taint_view,
-            retention,
             out,
         );
     }
     if !rules.param_rules.is_empty() {
         scan_params_batch(
-            ws,
-            file,
-            file_index,
+            ctx.ws,
+            ctx.file,
+            ctx.file_index,
             &rules.param_rules,
             rules.include_workspace_package_context,
-            retention,
+            ctx.retention,
             out,
         );
     }
     if !rules.return_rules.is_empty() {
-        scan_returns_batch(ws, file, file_index, &rules.return_rules, out);
+        scan_returns_batch(ctx.ws, ctx.file, ctx.file_index, &rules.return_rules, out);
     }
     if !rules.missing_rules.is_empty() {
         scan_missing_batch(
-            ws,
-            file,
-            file_index,
+            ctx,
             &rules.missing_rules,
             rules.include_workspace_package_context,
-            mode,
-            taint_view,
-            retention,
             out,
         );
     }
@@ -2961,17 +2958,18 @@ fn local_enclosing_name(entries: &[LocalEnclosingEntry], pos: u64) -> Option<Str
 }
 
 fn scan_calls_batch(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
+    ctx: &FileScanContext<'_, '_>,
     rules: &PreparedRuleBatch<'_, '_>,
-    constructor_names: &AHashSet<String>,
-    mode: ConstraintMode,
-    taint_view: Option<&InterTaintView<'_>>,
-    retention: FactRetention,
-    receiver_base_map: &AHashMap<String, Vec<String>>,
     out: &mut Vec<RuleMatch>,
 ) {
+    let ws = ctx.ws;
+    let file = ctx.file;
+    let file_index = ctx.file_index;
+    let constructor_names = ctx.constructor_names;
+    let mode = ctx.mode;
+    let taint_view = ctx.taint_view;
+    let retention = ctx.retention;
+    let receiver_base_map = ctx.receiver_base_map;
     let file_packages = file_package_set_with_workspace_context_and_retention(
         ws,
         file,
@@ -3228,16 +3226,17 @@ fn push_unique_call_key(out: &mut Vec<String>, key: &str) {
 /// where the expected callee is absent. Cross-procedural reach is
 /// opt-in via `match.search_depth`.
 fn scan_missing_batch(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
+    ctx: &FileScanContext<'_, '_>,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
-    mode: ConstraintMode,
-    taint_view: Option<&InterTaintView<'_>>,
-    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
+    let ws = ctx.ws;
+    let file = ctx.file;
+    let file_index = ctx.file_index;
+    let mode = ctx.mode;
+    let taint_view = ctx.taint_view;
+    let retention = ctx.retention;
     let file_packages = file_package_set_with_workspace_context_and_retention(
         ws,
         file,
@@ -3703,13 +3702,15 @@ fn build_file_package_set(
     if let Some(imports) = imports {
         insert_file_import_packages(ws, file, &imports, retention, &mut out);
     }
-    if ws
-        .db()
-        .vfs()
-        .snapshot(file)
-        .is_ok_and(|snapshot| snapshot.text.contains("req.files"))
-    {
-        out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
+    if let Ok(snapshot) = ws.db().vfs().snapshot(file) {
+        let text = snapshot.text.as_ref();
+        if text.contains("req.files") {
+            out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
+            insert_import_target_prefixes(&mut out, "express-fileupload");
+        }
+        if js_like_routed_controller_request_context(ws, file, text) {
+            insert_import_target_prefixes(&mut out, "express");
+        }
     }
     out.extend(
         workspace_imports
@@ -3721,6 +3722,40 @@ fn build_file_package_set(
         out.extend(workspace_packages.packages.iter().cloned());
     }
     Arc::new(out)
+}
+
+fn js_like_routed_controller_request_context(ws: &Workspace, file: FileId, text: &str) -> bool {
+    if ws.db().adapter_for(file).is_none_or(|adapter| {
+        !matches!(
+            adapter.language_id().as_str(),
+            "javascript" | "typescript" | "tsx"
+        )
+    }) {
+        return false;
+    }
+    if !file_path_has_route_controller_segment(ws, file) {
+        return false;
+    }
+    (text.contains("req.") || text.contains("res."))
+        && (text.contains("(req, res")
+            || text.contains("(req,res")
+            || text.contains("(request, response")
+            || text.contains("(request,response"))
+}
+
+fn file_path_has_route_controller_segment(ws: &Workspace, file: FileId) -> bool {
+    let Ok(path) = ws.vfs().path(file) else {
+        return false;
+    };
+    path.components().any(|component| {
+        let segment = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        matches!(
+            segment.as_str(),
+            "controller" | "controllers" | "route" | "routes" | "router" | "routers"
+        ) || segment.contains(".controller.")
+            || segment.contains(".route.")
+            || segment.contains(".router.")
+    })
 }
 
 fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<WorkspaceImportPackageContext> {
@@ -3855,7 +3890,7 @@ fn insert_python_textual_imports(out: &mut AHashSet<String>, text: &str) {
         let line = strip_inline_comment(line, '#').trim();
         if let Some(rest) = line.strip_prefix("import ") {
             for item in rest.split(',') {
-                let module = item.trim().split_whitespace().next().unwrap_or_default();
+                let module = item.split_whitespace().next().unwrap_or_default();
                 insert_workspace_import_module(out, module);
             }
         } else if let Some(rest) = line.strip_prefix("from ") {
@@ -4823,15 +4858,16 @@ fn callee_or_alias_matches(
 }
 
 fn scan_refs_batch(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
+    ctx: &FileScanContext<'_, '_>,
     rules: &[&PreparedRule<'_>],
     want_kind: RefKind,
     include_workspace_package_context: bool,
-    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
+    let ws = ctx.ws;
+    let file = ctx.file;
+    let file_index = ctx.file_index;
+    let retention = ctx.retention;
     let decls = file_index.defs.as_slice();
     let file_packages = file_package_set_with_workspace_context_and_retention(
         ws,
@@ -5496,16 +5532,17 @@ fn extend_alias_map_with_declared_types(
 }
 
 fn scan_writes_batch(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
+    ctx: &FileScanContext<'_, '_>,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
-    mode: ConstraintMode,
-    taint_view: Option<&InterTaintView<'_>>,
-    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
+    let ws = ctx.ws;
+    let file = ctx.file;
+    let file_index = ctx.file_index;
+    let mode = ctx.mode;
+    let taint_view = ctx.taint_view;
+    let retention = ctx.retention;
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let file_packages = file_package_set_with_workspace_context_and_retention(
         ws,
@@ -5586,16 +5623,17 @@ fn scan_writes_batch(
 }
 
 fn scan_ref_writes_batch(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
+    ctx: &FileScanContext<'_, '_>,
     rules: &[&PreparedRule<'_>],
     include_workspace_package_context: bool,
-    mode: ConstraintMode,
-    taint_view: Option<&InterTaintView<'_>>,
-    retention: FactRetention,
     out: &mut Vec<RuleMatch>,
 ) {
+    let ws = ctx.ws;
+    let file = ctx.file;
+    let file_index = ctx.file_index;
+    let mode = ctx.mode;
+    let taint_view = ctx.taint_view;
+    let retention = ctx.retention;
     let decls = file_index.defs.as_slice();
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let file_packages = file_package_set_with_workspace_context_and_retention(

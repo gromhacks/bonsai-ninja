@@ -204,33 +204,23 @@ fn dump_ast_json_all_is_uncapped() {
 }
 
 // ---------------------------------------------------------------------------
-// Adjacent `code`-cell dedup — when a browse renderer emits two
-// consecutive rows whose source-line snippet is identical, the
-// second one becomes `↑ same`. Multiple browse commands share the
-// same helper; this test proves it wires up correctly on the two
-// highest-volume commands (`calls`, `args`).
+// Browse code cells — adjacent rows may point at the same source line, but
+// default text output repeats the code instead of collapsing it to a marker.
+// Pagination is the size-control mechanism.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn calls_collapses_adjacent_same_code_rows() {
+fn calls_repeats_adjacent_same_code_rows() {
     let ws = ws();
     // Python micro has two calls at `gateway.py:11:13` that share
-    // the line `token = request.args.get("token")` — the
-    // classification emits them in adjacent positions, so the
-    // second should fold.
+    // the line `token = request.args.get("token")`. The default
+    // render should keep the code visible rather than folding it.
     let Some(out) = run(&["calls", ws.to_str().unwrap()]) else {
         return;
     };
-    // Emit the marker when the fold fires. The fixture has so few
-    // rows that a *zero* fold count is also acceptable — this test
-    // really locks in that the marker is wired and never false-
-    // positives.
-    let same_count = out.matches("↑ same").count();
-    let request_args_count = out.matches("request.args.get").count();
     assert!(
-        same_count == 0 || request_args_count >= 1,
-        "fold marker appeared without the surviving code row ({same_count} × ↑, \
-         {request_args_count} × request.args.get):\n{out}"
+        !out.contains("↑ same") && out.contains("request.args.get"),
+        "browse output should render source code, not the old fold marker:\n{out}"
     );
 }
 
@@ -553,29 +543,13 @@ fn args_no_duplicate_entries_at_same_site() {
 }
 
 #[test]
-fn fold_marker_only_replaces_consecutive_identical_rows() {
+fn vars_default_render_has_no_same_code_fold_marker() {
     let ws = ws();
-    // Construct a case where the same source line legitimately
-    // repeats: every var assignment inside handle_request's body
-    // has a unique code cell, so the fold should not fire on vars.
     let Some(out) = run(&["vars", ws.to_str().unwrap()]) else {
         return;
     };
-    // The Python micro vars don't have adjacent identical lines in
-    // the default (by-name) sort. The marker may or may not appear;
-    // what we check is that every `↑ same` row is preceded by a
-    // non-marker row with actual code — i.e. no leading markers, no
-    // marker-marker chains.
-    let mut saw_real_line_since_last_marker = true;
-    for line in out.lines() {
-        if line.contains("↑ same") {
-            assert!(
-                saw_real_line_since_last_marker,
-                "`↑ same` must always follow a row with real code:\n{out}"
-            );
-            saw_real_line_since_last_marker = false;
-        } else if !line.trim().is_empty() {
-            saw_real_line_since_last_marker = true;
-        }
-    }
+    assert!(
+        !out.contains("↑ same"),
+        "default vars output should not fold source code cells:\n{out}"
+    );
 }

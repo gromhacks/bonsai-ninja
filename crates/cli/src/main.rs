@@ -40,7 +40,8 @@ use commands::{
     cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect, cmd_refs, cmd_search, cmd_strings,
     cmd_trace, cmd_vars, paging_from_cli, paging_from_cli_output, resolve_symbol_arg, ArgsFilters,
     CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters,
-    InspectFilters, InspectRenderOptions, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
+    InspectCommandOptions, InspectFilters, InspectRenderOptions, RefsFilters, SearchFilters, StringsFilters,
+    VarsFilters,
 };
 use help_theme::try_themed_help;
 
@@ -949,19 +950,21 @@ fn main() -> Result<()> {
             let taint_flow = taint_flow || !syntax_only;
             cmd_inspect(
                 &workspace,
-                q.as_deref(),
-                regex,
-                &kind,
-                filters,
-                mf,
-                mp,
-                mh,
-                render,
-                graph_flow,
-                taint_flow,
-                taint_flow_explicit,
-                paging,
-                format,
+                InspectCommandOptions {
+                    pattern: q.as_deref(),
+                    is_regex: regex,
+                    kind_filter: &kind,
+                    filters,
+                    max_flows: mf,
+                    max_entry_probes: mp,
+                    max_hits: mh,
+                    render,
+                    graph_flow,
+                    taint_flow,
+                    taint_flow_explicit,
+                    paging_cfg: paging,
+                    format,
+                },
             )
         }
         Cmd::Export {

@@ -1040,10 +1040,8 @@ fn dart_cast_local_alias(def: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasB
     let mut best: Option<Node<'_>> = None;
     let mut stack = vec![value];
     while let Some(n) = stack.pop() {
-        if n.kind() == "type_identifier" {
-            if best.is_none_or(|b| n.start_byte() < b.start_byte()) {
-                best = Some(n);
-            }
+        if n.kind() == "type_identifier" && best.is_none_or(|b| n.start_byte() < b.start_byte()) {
+            best = Some(n);
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {

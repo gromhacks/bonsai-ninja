@@ -3672,7 +3672,7 @@ fn chain_precision_for_records(records: &[&TaintedCallEdge]) -> Precision {
     })
 }
 
-fn semantic_chain_precision(edges: &[&bonsai_callgraph::CallEdge]) -> Precision {
+fn semantic_precision_for_edges(edges: &[&bonsai_callgraph::CallEdge]) -> Precision {
     edges
         .iter()
         .fold(Precision::Exact, |precision, edge| precision.meet(edge.precision))
@@ -3851,7 +3851,7 @@ fn build_call_evidence<'a>(
             let semantic_edges =
                 canonical_chain_index.semantic_edges_along_best_path(source_func, call.caller)?;
             let chain_funcs = chain_funcs_for_semantic_edges(source_func, &semantic_edges)?;
-            let chain_precision = semantic_chain_precision(&semantic_edges)
+            let chain_precision = semantic_precision_for_edges(&semantic_edges)
                 .meet(chain_precision_for_records(&original_records));
             let sanitizer_candidate_funcs = sanitizer_candidate_funcs_for_chain(&chain_funcs);
             let taint_path = taint_path_for_semantic_edges(ws, source_func, &semantic_edges, Some(call));
@@ -3985,6 +3985,8 @@ struct CanonicalChainIndex<'a> {
     semantic_edge: AHashMap<(FuncId, FuncId), &'a bonsai_callgraph::CallEdge>,
 }
 
+type SemanticPathHeapItem = std::cmp::Reverse<(u32, u8, u8, Vec<FuncId>)>;
+
 impl<'a> CanonicalChainIndex<'a> {
     fn new(records: &'a [TaintedCallEdge], call_graph: &'a bonsai_callgraph::ResolvedCallGraph) -> Self {
         let mut edge_synthetic: AHashMap<(FuncId, FuncId), bool> = AHashMap::default();
@@ -4090,7 +4092,7 @@ impl<'a> CanonicalChainIndex<'a> {
         }
         const MAX_HOPS: usize = 16;
         use std::collections::BinaryHeap;
-        let mut heap: BinaryHeap<std::cmp::Reverse<(u32, u8, u8, Vec<FuncId>)>> = BinaryHeap::new();
+        let mut heap: BinaryHeap<SemanticPathHeapItem> = BinaryHeap::new();
         heap.push(std::cmp::Reverse((0, 0, 0, vec![source_func])));
         let mut best_score: AHashMap<FuncId, u32> = AHashMap::default();
         best_score.insert(source_func, 0);
@@ -6251,10 +6253,11 @@ where
             target_node_graph_cut_enabled
         );
     }
-    let sink_target_nodes_for_graph: Option<&[bonsai_idg::WsNodeId]> = target_node_graph_cut_enabled
-        .then(|| sink_target_nodes.as_ref())
-        .flatten()
-        .map(|targets| targets.nodes.as_slice());
+    let sink_target_nodes_for_graph: Option<&[bonsai_idg::WsNodeId]> = if target_node_graph_cut_enabled {
+        sink_target_nodes.as_ref().map(|targets| targets.nodes.as_slice())
+    } else {
+        None
+    };
     let taint_caches = ws.inter_taint_caches();
     taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
     // Workspace-wide source-seeded graph index. The resident cache is
@@ -8871,7 +8874,7 @@ fn local_call_returns_clean_value(ws: &Workspace, call_span: Span, source_call: 
     let global = ws.db().global_index();
     let candidates: Vec<_> = global
         .decls_in(call_span.file)
-        .into_iter()
+        .iter()
         .filter(|decl| {
             clean_overwrite_callee_tail(&decl.name) == callee_tail
                 && !(call_span.start >= decl.span.start && call_span.start < decl.span.end)
@@ -8888,7 +8891,7 @@ fn function_returns_clean_value(ws: &Workspace, decl: &bonsai_lang_api::Decl) ->
     collect_return_values(&decl.flow_events, &mut returns);
     !returns.is_empty()
         && returns.iter().all(|(span, value_text, value_name)| {
-            return_value_is_clean(ws, decl, *span, value_text, value_name)
+            return_value_is_clean(ws, decl, *span, *value_text, *value_name)
         })
 }
 
@@ -8935,13 +8938,10 @@ fn return_value_is_clean(
     ws: &Workspace,
     decl: &bonsai_lang_api::Decl,
     return_span: Span,
-    value_text: &Option<&str>,
-    value_name: &Option<&str>,
+    value_text: Option<&str>,
+    value_name: Option<&str>,
 ) -> bool {
-    if value_text
-        .as_ref()
-        .is_some_and(|value| value_part_contains_only_clean_literals(value))
-    {
+    if value_text.is_some_and(value_part_contains_only_clean_literals) {
         return true;
     }
     let Some(target) = value_name
@@ -9328,7 +9328,7 @@ fn numeric_constant_assignments_before_span(ws: &Workspace, span: Span) -> AHash
         let Some(name) = lhs
             .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
             .filter(|part| !part.is_empty())
-            .last()
+            .next_back()
         else {
             continue;
         };
@@ -10121,15 +10121,13 @@ fn sanitizer_assignment_output_feeds_sink_arg(
     sanitizer_func: FuncId,
     san: &RuleMatch,
     snk: &RuleMatch,
+    sink_rule: &Rule,
     sink_tainted_args: &[TaintedArgInfo],
 ) -> bool {
     if san.span.file != snk.span.file || !match_precedes_or_same(san, snk) {
         return false;
     }
-    let target_keys: AHashSet<String> = sink_tainted_args
-        .iter()
-        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
-        .collect();
+    let target_keys = sanitizer_assignment_sink_target_keys(snk, sink_rule, sink_tainted_args);
     if target_keys.is_empty() {
         return false;
     }
@@ -10138,6 +10136,21 @@ fn sanitizer_assignment_output_feeds_sink_arg(
         return false;
     };
     sanitizer_assignment_output_feeds_sink_arg_in_events(&decl.flow_events, san, &target_keys)
+}
+
+fn sanitizer_assignment_sink_target_keys(
+    snk: &RuleMatch,
+    sink_rule: &Rule,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> AHashSet<String> {
+    let mut target_keys: AHashSet<String> = sink_tainted_args
+        .iter()
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .collect();
+    if target_keys.is_empty() && sink_rule.match_spec.kind == MatchKind::Return {
+        target_keys.extend(clean_overwrite_target_keys(&snk.match_text));
+    }
+    target_keys
 }
 
 fn sanitizer_assignment_output_feeds_sink_arg_in_events(
@@ -11645,6 +11658,7 @@ fn make_finding(
                         hop_func,
                         sanitizer_match,
                         snk,
+                        skr,
                         &context.sink_tainted_args,
                     )
                     || sanitizer_guard_feeds_sink_arg(
@@ -11959,10 +11973,15 @@ fn js_dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> O
     let snapshot = ws.vfs().snapshot(hit.span.file).ok()?;
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
-    let target_indent = leading_ascii_whitespace(*lines.get(target_idx)?);
+    let target_indent = leading_ascii_whitespace(lines.get(target_idx)?);
     let search_start = target_idx.saturating_sub(12);
-    for idx in search_start..target_idx {
-        let guard_line = lines[idx];
+    for (idx, guard_line) in lines
+        .iter()
+        .copied()
+        .enumerate()
+        .take(target_idx)
+        .skip(search_start)
+    {
         if !js_dev_only_env_guard_line(guard_line) {
             continue;
         }
@@ -13544,7 +13563,7 @@ fn assignment_rhs_for_target<'a>(line: &'a str, target: &str, language: &str) ->
         }
         "go" => {
             let (lhs, rhs) = trimmed.split_once(":=").or_else(|| trimmed.split_once('='))?;
-            let lhs = lhs.trim().split_whitespace().last().unwrap_or(lhs.trim());
+            let lhs = lhs.split_whitespace().last().unwrap_or_default();
             (lhs == target).then_some(rhs.trim())
         }
         _ => None,
@@ -14169,8 +14188,13 @@ fn finite_literal_map_lookup_allowlist_sanitizer(
             continue;
         }
         let search_start = target_idx.saturating_sub(30);
-        for idx in search_start..target_idx {
-            let line = lines[idx];
+        for (idx, line) in lines
+            .iter()
+            .copied()
+            .enumerate()
+            .take(target_idx)
+            .skip(search_start)
+        {
             if leading_ascii_whitespace(line) > target_indent {
                 continue;
             }

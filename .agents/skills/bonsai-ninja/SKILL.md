@@ -67,10 +67,11 @@ Understand behavior:
 ```
 
 `inspect` is rulepack-free by default: targeted queries include bounded
-raw taint paths that contain the query. Use `--syntax-only` for pure
-indexed facts, `--taint-flow` to force raw taint paths on broad queries,
-and `--graph-flow` when structural callgraph evidence with source bodies
-is explicitly needed.
+raw taint paths and source-body flow evidence that contain the query. Use
+`--syntax-only` for pure indexed facts, `--taint-flow` to force raw taint
+paths on broad queries, and `--graph-flow` to force structural
+source-body evidence on large or broad queries that would otherwise stay
+on the syntax fast path.
 
 Record understanding as:
 

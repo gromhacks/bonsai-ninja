@@ -9592,7 +9592,10 @@ fn inline_closure_param_extra_sources(
 
 fn call_is_trpc_procedure_handler(name: &str) -> bool {
     let compact: String = name.chars().filter(|ch| !ch.is_whitespace()).collect();
-    (compact.ends_with(".query") || compact.ends_with(".mutation") || compact.ends_with(".subscription"))
+    compact
+        .rsplit('.')
+        .next()
+        .is_some_and(|method| matches!(method, "query" | "mutation" | "subscription"))
         && compact.contains(".procedure")
         && compact.contains(".input(")
 }
@@ -10730,8 +10733,8 @@ pub fn populate_decl_return_types(
 /// constructor-shaped: the bare tail after the last `.`/`::` separator
 /// (dropping a leading `new`/generic args) when that tail is
 /// `PascalCase`. `ldap3.Connection` → `Connection`, `new Foo<T>` →
-/// `Foo`, `socket.socket` → `None` (lowercase tail, not a constructor),
-/// `obj.method` → `None`. This is the language-agnostic convention used
+/// `Foo`, `Util->new` → `Util`, `socket.socket` → `None` (lowercase tail,
+/// not a constructor), `obj.method` → `None`. This is the language-agnostic convention used
 /// for lightweight local type inference (`x = Pkg.Class(...)`), distinct
 /// from the `new`-only `receiver_type_from_constructor_expr` used for
 /// inline receiver expressions.
@@ -10746,6 +10749,7 @@ fn constructor_call_type_name(callee: &str) -> Option<String> {
     let constructor_target = without_generics
         .strip_suffix(".new")
         .or_else(|| without_generics.strip_suffix("::new"))
+        .or_else(|| without_generics.strip_suffix("->new"))
         .filter(|head| !head.is_empty())
         .unwrap_or(without_generics);
     let bare = constructor_target

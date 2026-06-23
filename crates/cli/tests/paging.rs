@@ -891,18 +891,15 @@ fn paged_footer_reports_command_specific_totals() {
     assert!(
         out.lines()
             .any(|line| line.contains("total") && line.contains("tainted flow")),
-        "security taint-analysis footer must report total tainted flow count, got:\n{out}"
+        "security taint-analysis footer must report total tainted-flow section count, got:\n{out}"
     );
 }
 
 #[test]
 fn inspect_live_budget_caps_total_output() {
-    // `inspect` is the only paged command that measures actual
-    // bytes emitted and matches the footer number to the payload
-    // size (the others still use paginate()'s cost estimate).
     // On a realistic query the total payload must stay close to
-    // the stated budget — we allow up to 2× for the "always render
-    // at least one row per section" safety net, but no higher.
+    // the stated budget. This guards the actual rendered footer
+    // value, not just the paginator's pre-render estimate.
     let Some(out) = run(&[
         "inspect",
         ws().to_str().unwrap(),
@@ -1198,6 +1195,14 @@ fn parse_context_line(out: &str) -> Option<(u64, u64)> {
     }
 }
 
+fn parse_total_pages(out: &str) -> Option<u64> {
+    let line = out.lines().find(|l| l.contains("page ") && l.contains(" of "))?;
+    line.split(" of ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+}
+
 #[test]
 fn security_no_compact_respects_context_budget() {
     let ws = complex_ws();
@@ -1211,8 +1216,62 @@ fn security_no_compact_respects_context_budget() {
         };
         assert_eq!(budget, 4096, "budget must echo --context flag");
         assert!(
-            used <= budget || out.contains("single row cost exceeded --context"),
-            "security {subcommand} --no-compact exceeded context without oversized-row warning: {used}>{budget}\n{out}"
+            used <= budget,
+            "security {subcommand} --no-compact exceeded context: {used}>{budget}\n{out}"
+        );
+        assert!(
+            !out.contains("single row cost exceeded --context")
+                && !out.contains("rendered output exceeded --context budget"),
+            "security {subcommand} --no-compact must split pages instead of rendering an oversized page:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn security_taint_analysis_never_exceeds_context_across_pages() {
+    let ws = complex_ws();
+    let ws_str = ws.to_str().unwrap();
+    let ctx = 4096u64;
+    let Some(first) = run(&["security", ws_str, "taint-analysis", "--context", "4k"]) else {
+        return;
+    };
+    let total_pages = parse_total_pages(&first).unwrap_or_else(|| {
+        panic!("security taint-analysis: missing page footer:\n{first}");
+    });
+    assert!(
+        total_pages > 1,
+        "fixture should force multi-page taint output at 4k context:\n{first}"
+    );
+
+    for page in 1..=total_pages {
+        let page_arg = page.to_string();
+        let Some(out) = run(&[
+            "security",
+            ws_str,
+            "taint-analysis",
+            "--context",
+            "4k",
+            "--page",
+            page_arg.as_str(),
+        ]) else {
+            return;
+        };
+        let Some((used, budget)) = parse_context_line(&out) else {
+            panic!("security taint-analysis page {page}: missing context footer:\n{out}");
+        };
+        assert_eq!(budget, ctx, "page {page}: budget must echo --context flag");
+        assert!(
+            used <= budget,
+            "security taint-analysis page {page} exceeded context: {used}>{budget}\n{out}"
+        );
+        assert!(
+            out.contains("TAINT FLOW"),
+            "security taint-analysis page {page} should render flow code by default:\n{out}"
+        );
+        assert!(
+            !out.contains("single row cost exceeded --context")
+                && !out.contains("rendered output exceeded --context budget"),
+            "security taint-analysis page {page} must split pages instead of rendering oversized output:\n{out}"
         );
     }
 }

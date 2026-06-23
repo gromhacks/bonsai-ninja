@@ -615,7 +615,7 @@ fn walk_dir(dir: &Path, target_names: &AHashSet<String>, out: &mut Vec<String>) 
 
 /// Collect the first evidence file for every rule dependency key present in
 /// workspace imports, keyed by language. The candidate generator mirrors
-/// [`import_matches_package`] but runs once per import target instead of once
+/// `import_matches_package` but runs once per import target instead of once
 /// per `(rule key, import target)` pair.
 fn collect_workspace_import_evidence(
     ws: &Workspace,

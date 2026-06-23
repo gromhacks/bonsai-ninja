@@ -98,7 +98,7 @@ For CI or scripts:
 Each finding has a stable `S:` ID, a source rule, a sink rule, a status, and a primary `F:` flow ID. The source and sink show exact file, line, function, and rule metadata. The flow block shows the call path and the tainted argument at each hop.
 
 <Tip>
-Use `--no-compact` when you want every function body rendered in the text report. Use compact output when you only need the chain and step labels.
+Security text reports render flow bodies by default. Use `--context` and `--page next` to walk larger reports without losing source code.
 </Tip>
 
 ```bash
@@ -107,7 +107,8 @@ Use `--no-compact` when you want every function body rendered in the text report
 ```
 
 For code-navigation queries, `inspect` is rulepack-free by default: it
-shows syntax hits plus bounded taint paths that contain the query. Add
-`--syntax-only` for pure indexed search, `--taint-flow` to force raw
-taint paths on broad queries, or `--graph-flow` for explicit structural
-callgraph evidence.
+shows syntax hits plus bounded taint paths and source-body flow evidence
+that contain the query. Add `--syntax-only` for pure indexed search,
+`--taint-flow` to force raw taint paths on broad queries, or
+`--graph-flow` to force structural source-body evidence for large or broad
+queries.

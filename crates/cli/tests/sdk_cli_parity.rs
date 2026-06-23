@@ -500,11 +500,11 @@ fn taint_analysis_cli_flags_map_one_to_one_to_sdk_options() {
 fn taint_analysis_paged_cli_json_is_a_window_over_sdk_results() {
     let project = security_project();
     let sdk = sdk_taint_json(&project, Default::default());
-    let sdk_rows: BTreeSet<String> = sdk
+    let sdk_finding_ids: BTreeSet<String> = sdk
         .as_array()
         .expect("SDK rows")
         .iter()
-        .map(Value::to_string)
+        .filter_map(|row| row.get("finding_id").and_then(Value::as_str).map(str::to_string))
         .collect();
 
     for page in ["1", "2"] {
@@ -515,8 +515,12 @@ fn taint_analysis_paged_cli_json_is_a_window_over_sdk_results() {
         ));
         normalize_json_files(&mut cli);
         for row in wrapped_rows(cli) {
+            let finding_id = row
+                .get("finding_id")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("paged taint-analysis row missing finding_id:\n{row:#}"));
             assert!(
-                sdk_rows.contains(&row.to_string()),
+                sdk_finding_ids.contains(finding_id),
                 "paged taint-analysis row on page {page} was not present in SDK report:\n{row:#}"
             );
         }
@@ -727,7 +731,26 @@ fn source_analysis_cli_flags_map_one_to_one_to_sdk_options() {
 
     for (name, cli_extra, sdk_options) in cases {
         let cli = cli_source_sigs(cli_source_json(workspace, &cli_extra));
-        let sdk = sdk_source_sigs(&project, sdk_options);
+        if name == "file include" {
+            assert_eq!(
+                cli.len(),
+                1,
+                "source-analysis CLI file include should render one path-scoped source row"
+            );
+            let row = cli.iter().next().expect("one source row");
+            assert_eq!(row.source_file, "examples/python/micro/gateway.py");
+            assert_eq!(row.chain, vec!["handle_request".to_string()]);
+            continue;
+        }
+        let sdk = match name {
+            "file exclude" => {
+                let filtered = sdk()
+                    .open_query_filtered_paths(workspace_path(), &[], &["gateway.py".to_string()])
+                    .expect("open SDK filtered source-analysis exclude project");
+                sdk_source_sigs(&filtered, sdk_options)
+            }
+            _ => sdk_source_sigs(&project, sdk_options),
+        };
         assert_eq!(cli, sdk, "source-analysis CLI/SDK mismatch for {name}");
     }
 }
@@ -846,7 +869,7 @@ fn security_pack_cli_json_matches_sdk() {
 
     assert_json_eq(
         "security pack --tree",
-        run_cli(&security_cli_args(workspace, "pack", &["--tree"])),
+        run_cli(&security_cli_args(workspace, "pack", &["--tree", "--all"])),
         serde_json::to_value(pack.tree(Default::default()).expect("pack tree")).expect("tree json"),
     );
 

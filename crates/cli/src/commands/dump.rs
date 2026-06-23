@@ -722,7 +722,7 @@ pub(crate) fn cmd_dump_taint(
                 emit_json_value_paged_cached(root, &report, &paging_cfg, "dump-taint", filters_hash)?;
             }
             BrowseFormat::Text => {
-                render_taint_report_text_paged(root, &report, compact, &paging_cfg, filters_hash)?
+                render_taint_report_text_paged(root, &report, compact, &paging_cfg, filters_hash)?;
             }
         },
     }

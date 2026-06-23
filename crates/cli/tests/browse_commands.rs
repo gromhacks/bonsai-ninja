@@ -1942,22 +1942,18 @@ fn top_level_help_contains_examples_and_theme_note() {
 }
 
 #[test]
-fn inspect_help_has_examples_and_sample_output() {
+fn inspect_help_is_concise_and_has_examples() {
     let Some(out) = run(&["inspect", "--help"]) else {
         return;
     };
     assert!(out.contains("EXAMPLES"), "inspect help missing EXAMPLES");
     assert!(
-        out.contains("SAMPLE OUTPUT"),
-        "inspect help missing SAMPLE OUTPUT block: {out}"
-    );
-    assert!(
         out.contains("--query os.system"),
         "inspect help missing query example: {out}"
     );
     assert!(
-        out.contains("OCCURRENCE HITS") && out.contains("os.system"),
-        "inspect sample output should show syntax occurrence hits by default: {out}"
+        !out.contains("SAMPLE OUTPUT") && !out.contains("OCCURRENCE HITS"),
+        "inspect help should not render sample-output walls: {out}"
     );
 }
 
@@ -1980,12 +1976,16 @@ fn trace_help_has_examples() {
 }
 
 #[test]
-fn calls_help_has_sample_output() {
+fn calls_help_has_concise_examples() {
     let Some(out) = run(&["calls", "--help"]) else {
         return;
     };
-    assert!(out.contains("SAMPLE OUTPUT"));
+    assert!(out.contains("EXAMPLES"));
     assert!(out.contains("os.system"));
+    assert!(
+        !out.contains("SAMPLE OUTPUT"),
+        "calls help should not render sample-output walls: {out}"
+    );
 }
 
 #[test]
@@ -1994,7 +1994,7 @@ fn top_level_help_groups_commands() {
         return;
     };
     assert!(out.contains("COMMAND GROUPS"), "grouping section missing: {out}");
-    for group in &["Flow analysis", "Workspace", "Browse facts", "Debug dumps"] {
+    for group in &["Flow", "Workspace", "Browse", "Debug"] {
         assert!(out.contains(group), "help missing group `{group}`: {out}");
     }
     assert!(
@@ -2004,6 +2004,14 @@ fn top_level_help_groups_commands() {
     assert!(
         out.contains("security source-analysis"),
         "top-level help should advertise source-analysis: {out}"
+    );
+    let usage_idx = out.find("USAGE:").expect("USAGE present");
+    let groups_idx = out.find("COMMAND GROUPS").expect("COMMAND GROUPS present");
+    let options_idx = out.find("OPTIONS:").expect("OPTIONS present");
+    let examples_idx = out.find("EXAMPLES").expect("EXAMPLES block present");
+    assert!(
+        usage_idx < groups_idx && groups_idx < options_idx && options_idx < examples_idx,
+        "root help should render usage, command groups, options, then examples:\n{out}"
     );
     assert!(
         !out.contains("security taint-analysis Run"),
@@ -2019,12 +2027,12 @@ fn top_level_help_groups_commands() {
     );
     // Each group's commands appear under the grouping block.
     for (group, cmd) in [
-        ("Flow analysis", "inspect"),
-        ("Flow analysis", "trace"),
+        ("Flow", "inspect"),
+        ("Flow", "trace"),
         ("Workspace", "index"),
-        ("Browse facts", "defs"),
-        ("Browse facts", "entrypoints"),
-        ("Debug dumps", "dump-hir"),
+        ("Browse", "defs"),
+        ("Browse", "entrypoints"),
+        ("Debug", "dump-hir"),
     ] {
         let group_idx = out.find(group).expect("group present");
         let after = &out[group_idx..];
@@ -2032,10 +2040,10 @@ fn top_level_help_groups_commands() {
     }
 
     let security_idx = out.find("  Security").expect("Security group present");
-    let debug_idx = out.find("  Debug dumps").expect("Debug dumps group present");
+    let debug_idx = out.find("  Debug").expect("Debug group present");
     assert!(
         debug_idx > security_idx,
-        "Debug dumps group should render after Security and stay at the bottom:\n{out}"
+        "Debug group should render after Security and stay at the bottom:\n{out}"
     );
     for cmd in [
         "dump-ast",
@@ -2049,27 +2057,26 @@ fn top_level_help_groups_commands() {
     ] {
         assert!(
             out[debug_idx..].contains(cmd),
-            "Debug dumps group missing `{cmd}`:\n{out}"
+            "Debug group missing `{cmd}`:\n{out}"
         );
     }
-    let examples_idx = out.find("EXAMPLES").expect("EXAMPLES block present");
     assert!(
-        debug_idx < examples_idx,
-        "Debug dumps group should be the last command group before EXAMPLES:\n{out}"
+        debug_idx < options_idx,
+        "Debug group should be the last command group before OPTIONS:\n{out}"
     );
 }
 
 #[test]
 fn top_level_help_has_no_duplicate_commands_block() {
-    // The old "Commands:" heading used to appear above the COMMAND GROUPS
+    // The old "COMMANDS:" heading used to appear above the COMMAND GROUPS
     // block. We suppress it via a custom help_template so each command
     // shows up exactly once.
     let Some(out) = run(&["--help"]) else {
         return;
     };
     assert!(
-        !out.contains("\nCommands:\n"),
-        "auto `Commands:` block should be suppressed, got:\n{out}"
+        !out.contains("\nCOMMANDS:\n"),
+        "auto `COMMANDS:` block should be suppressed, got:\n{out}"
     );
     // The grouped block is still there.
     assert!(out.contains("COMMAND GROUPS"));
@@ -2100,16 +2107,12 @@ fn cache_help_documents_persisted_sidecar_workflow() {
         "cache help should show precise dataflow sidecar invalidation: {out}"
     );
     assert!(
-        out.contains("cache rebuild ./src"),
-        "cache help should advertise rebuilding the sidecars: {out}"
-    );
-    assert!(
-        out.contains("dataflow.v3.factstore"),
-        "cache help should name the current factstore sidecar: {out}"
-    );
-    assert!(
         out.contains("cache stats"),
         "cache help should advertise cache stats for benchmark tooling: {out}"
+    );
+    assert!(
+        !out.contains("dataflow.v3.factstore"),
+        "parent cache help should stay concise; detailed sidecar names belong in stats output: {out}"
     );
 }
 
@@ -2203,8 +2206,26 @@ fn every_help_menu_renders_and_documents_core_surface() {
         let Some(out) = run(&args) else {
             return;
         };
-        assert!(out.contains("Usage:"), "{args:?}: help missing Usage:\n{out}");
-        let usage = out.lines().find(|line| line.starts_with("Usage:")).unwrap_or("");
+        assert!(out.contains("USAGE:"), "{args:?}: help missing USAGE:\n{out}");
+        assert!(
+            out.lines().count() <= 140,
+            "{args:?}: help is too long ({} lines):\n{out}",
+            out.lines().count()
+        );
+        let widest = out.lines().map(str::len).max().unwrap_or(0);
+        assert!(
+            widest <= 180,
+            "{args:?}: help has an over-wide line ({widest} chars):\n{out}"
+        );
+        assert!(
+            !out.chars().any(|ch| ch.is_control() && ch != '\n' && ch != '\t'),
+            "{args:?}: help contains a control character:\n{out}"
+        );
+        assert!(
+            !out.contains("SAMPLE OUTPUT"),
+            "{args:?}: help should stay concise and avoid sample-output blocks:\n{out}"
+        );
+        let usage = out.lines().find(|line| line.starts_with("USAGE:")).unwrap_or("");
         let required_positionals: Vec<String> = usage
             .split_whitespace()
             .filter_map(|part| {
@@ -2217,7 +2238,7 @@ fn every_help_menu_renders_and_documents_core_surface() {
             })
             .collect();
         if !required_positionals.is_empty() {
-            let args_section = out.split("Arguments:").nth(1).unwrap_or("");
+            let args_section = out.split("ARGUMENTS:").nth(1).unwrap_or("");
             assert!(
                 !args_section.is_empty(),
                 "{args:?}: help usage lists required args but has no Arguments section:\n{out}"
@@ -2888,8 +2909,8 @@ fn options_heading_still_present_after_template_override() {
         return;
     };
     assert!(
-        out.contains("Options:"),
-        "Options: heading missing after template override: {out}"
+        out.contains("OPTIONS:"),
+        "OPTIONS: heading missing after template override: {out}"
     );
 }
 
@@ -4538,7 +4559,7 @@ fn every_lang_micro_chain_reaches_entry_to_sink() {
 // Browse-fact match coverage for `--from` / `--to` / `--query`
 //
 // The filter / query path must match against every fact kind the
-// tool surfaces under "Browse facts" in `--help`:
+// tool surfaces under the browse commands in `--help`:
 //
 //   defs      → function / method / class / struct names
 //   calls     → call-site names (qualified + short)

@@ -864,9 +864,7 @@ fn python_argument_place_from_text(text: &str) -> Option<String> {
         return None;
     }
     let mut parts = text.split('.');
-    let Some(first) = parts.next() else {
-        return None;
-    };
+    let first = parts.next()?;
     if !python_is_identifier_like(first) {
         return None;
     }

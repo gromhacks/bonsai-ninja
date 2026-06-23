@@ -3,42 +3,30 @@
 //! Clap's default help is already structured; the pieces here
 //! supplement it with:
 //!
-//! - A grouped `after_long_help` block (`HELP_GROUPS`) that
-//!   replaces clap's auto `Commands:` list with a curated layout.
+//! - A grouped root command index (`HELP_GROUPS`) that replaces
+//!   clap's auto `COMMANDS:` list with a curated layout.
 //! - An `EXAMPLES` block ([`HELP_EXAMPLES`]) themed with the same
 //!   palette as the rest of the CLI.
 //! - Post-processing of clap's rendered help so indented body text
 //!   picks up the active theme color (clap doesn't expose a style
 //!   slot for body prose).
 //!
-//! Entry points: [`themed_after_help`] for the root `--help`,
-//! [`themed_subcommand_long_about`] / [`themed_subcommand_after_help`]
-//! for per-subcommand `--help`, and [`try_themed_help`] as the early
-//! dispatcher that intercepts `--help` / `-h` before clap runs.
+//! Entry points: [`themed_command_groups`] / [`themed_after_help`] for
+//! the root `--help`, [`themed_subcommand_long_about`] /
+//! [`themed_subcommand_after_help`] for per-subcommand `--help`, and
+//! [`try_themed_help`] as the early dispatcher that intercepts
+//! `--help` / `-h` before clap runs.
 
 use crate::theme;
 use crate::{resolve_theme_early, Cli};
 
 pub(crate) const CLI_LONG_ABOUT: &str = "\
-bonsai-ninja reads a directory of source code, builds a workspace-wide
-index of decls / calls / refs / imports / strings / assignments /
-comments, and lets you trace execution flow across modules and
-classes in 21 languages.
+bonsai-ninja indexes a source tree and lets you browse symbols, trace
+cross-file execution, inspect source-backed flows, and run rulepack-driven
+security taint analysis across 21 languages.";
 
-The headline command is `inspect` — give it a query, it surfaces every
-flow that reaches the match. The headline security command is
-`security taint-analysis` — it applies YAML source/sink/sanitizer
-rules to the indexed graph with exact source seeds and emits a
-paginated source→sink finding report.
-`export` dumps the full taint graph (functions, call edges,
-propagations, entry-points, chains) as JSON so downstream tooling can
-reproduce every finding without re-running the analyzer.
-
-Supports: Python, JavaScript, TypeScript, Java, Kotlin, C#, Swift,
-Scala, Go, Rust, PHP, Ruby, C, C++, Perl, Dart, Lua, Elixir,
-Erlang, Objective-C, Solidity.
-
-Run `bonsai-ninja --version` to print the binary version.";
+const MAX_HELP_DESCRIPTION_LINES: usize = 2;
+const MAX_SUBCOMMAND_EXAMPLE_COMMANDS: usize = 3;
 
 /// Apply the active theme to the root `Cli` long-about prose. Runs at
 /// command-construction time so clap receives an already-colored
@@ -55,141 +43,74 @@ pub(crate) fn themed_cli_long_about() -> String {
 /// help menu without coupling them to the per-command `about` text.
 pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
-        "Flow analysis",
+        "Flow",
         &[
-            ("inspect", "Find every cross-module flow that reaches a match"),
-            ("trace", "Expand a function's call tree end-to-end"),
-            ("show", "Open the owning drilldown view for a stable F:/T:/E:/S: id"),
+            ("inspect", "Find hits and source-backed flows"),
+            ("trace", "Expand one entry point's call tree"),
+            ("show", "Open an F:/T:/E:/S: id"),
         ],
     ),
     (
         "Workspace",
         &[
-            ("index", "Ingest a workspace and print stats"),
-            ("export", "Dump the full index as JSON"),
+            ("index", "Parse a workspace and print stats"),
+            ("export", "Export the graph as JSON"),
         ],
     ),
     (
         "Cache",
         &[
-            // The dataflow sidecar (`.bonsai/dataflow.v2.bin`) stores
-            // the workspace-wide taint facts built at `Workspace::open`.
-            // These subcommands are the UI for inspecting and
-            // invalidating it without leaving the CLI.
-            (
-                "cache stats",
-                "Report cache config + on-disk `.bonsai/` sidecar size",
-            ),
-            (
-                "cache clear",
-                "Delete `.bonsai/` sidecars (add `--dataflow-only` for just the taint cache)",
-            ),
-            (
-                "cache rebuild",
-                "Delete the dataflow sidecar and rebuild it from scratch",
-            ),
+            ("cache stats", "Show cache config and sidecar size"),
+            ("cache clear", "Delete `.bonsai/` sidecars"),
+            ("cache rebuild", "Rebuild the dataflow sidecar"),
         ],
     ),
     (
-        "Browse facts",
+        "Browse",
         &[
-            ("defs", "Functions / methods / classes / structs"),
-            (
-                "entrypoints",
-                "Callable roots with no semantic in-workspace callers",
-            ),
-            ("calls", "Call sites with caller, location, code"),
-            ("imports", "import / use / include statements (alias, wildcard)"),
-            ("vars", "Assignments captured from each function's flow"),
-            ("strings", "String / char literals with category (sql / url / …)"),
-            (
-                "comments",
-                "Comments classified by kind (todo / fixme / security / doc)",
-            ),
-            ("args", "Call-site arguments with position + value"),
-            ("classes", "Classes / structs / traits / interfaces / enums"),
-            ("refs", "Every reference to a symbol (read / call / type)"),
-            ("search", "Prefix-first fuzzy search over every browse fact"),
+            ("defs", "Definitions"),
+            ("entrypoints", "Likely callable roots"),
+            ("calls", "Call sites"),
+            ("imports", "Imports/includes"),
+            ("vars", "Assignments"),
+            ("strings", "String literals"),
+            ("comments", "Comments"),
+            ("args", "Call arguments"),
+            ("classes", "Classes and structs"),
+            ("refs", "Symbol references"),
+            ("search", "Fuzzy search"),
         ],
     ),
     (
         "Navigation",
         &[
-            (
-                "tree",
-                "Workspace tree with finding / flow / cross-file edge annotations per file",
-            ),
-            (
-                "read-file",
-                "Single-file view with marks for findings / sources / sinks plus cross-file caller / callee bodies",
-            ),
+            ("tree", "Annotated workspace tree"),
+            ("read-file", "Annotated source view"),
         ],
     ),
     (
-        // Rulepack-driven security analysis. Every subcommand under
-        // `security` loads the YAML pack at `./security-patterns/`
-        // (override with `--rules-dir`) and uses the rules as the
-        // query — no search string required.
         "Security",
         &[
-            (
-                "security sources",
-                "Enumerate source matches — table, rulepack is the query",
-            ),
-            (
-                "security sinks",
-                "Enumerate sink matches with severity column + `--severity` filter",
-            ),
-            (
-                "security sanitizers",
-                "Enumerate sanitizer call sites — cleansing ops the pack recognizes",
-            ),
-            (
-                "security deps",
-                "Packages the rulepack mentions whose imports the workspace uses",
-            ),
-            (
-                "security taint-analysis",
-                "Apply source/sink rules to taint; paginated finding report",
-            ),
-            (
-                "security source-analysis",
-                "Map downstream taint/call paths from source matches",
-            ),
-            (
-                "security pack",
-                "Audit the rulepack itself — per-lang / per-category coverage + gaps",
-            ),
+            ("security sources", "Rulepack source matches"),
+            ("security sinks", "Rulepack sink matches"),
+            ("security sanitizers", "Sanitizer matches"),
+            ("security deps", "Rulepack dependency hits"),
+            ("security taint-analysis", "Source-to-sink findings"),
+            ("security source-analysis", "Downstream source flows"),
+            ("security pack", "Rulepack audit"),
         ],
     ),
     (
-        "Debug dumps",
+        "Debug",
         &[
-            // One command per analysis-pipeline layer. Order mirrors
-            // the pipeline itself: parse → HIR → CFG → call graph →
-            // resolver → taint. When `inspect` produces a surprising
-            // result, walk down the list to find the layer that
-            // already disagrees with your expectation.
-            ("dump-ast", "Tree-sitter parse tree (per file or per function)"),
-            ("dump-hir", "HIR — flow-event tree of a single function"),
-            ("dump-cfg", "CFG — basic blocks derived from the flow-event tree"),
-            (
-                "dump-callgraph",
-                "Per-function caller / outgoing counts (sorted hottest-first)",
-            ),
-            (
-                "dump-edges",
-                "Resolved call edges (FuncId-keyed, with precision tag + call site)",
-            ),
-            (
-                "dump-resolve",
-                "Name resolver — every stage's input + output for one name",
-            ),
-            (
-                "dump-taint",
-                "Intraprocedural + interprocedural taint propagation from a seeded entry",
-            ),
-            ("diagnostics", "Run every adapter's diagnostic pass"),
+            ("dump-ast", "Parse tree"),
+            ("dump-hir", "HIR for one function"),
+            ("dump-cfg", "CFG for one function"),
+            ("dump-callgraph", "Caller/callee counts"),
+            ("dump-edges", "Resolved call edges"),
+            ("dump-resolve", "Resolver stages"),
+            ("dump-taint", "Taint propagation"),
+            ("diagnostics", "Adapter diagnostics"),
         ],
     ),
 ];
@@ -198,110 +119,35 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
 /// fragments so the builder can paint commands / flags separately.
 pub(crate) const HELP_EXAMPLES: &[(&str, &[&str])] = &[
     (
-        "Find every flow that reaches a suspected sink (command injection):",
-        &[
-            "bonsai-ninja inspect ./src --query os.system",
-            "bonsai-ninja inspect ./src --query exec --regex",
-        ],
+        "Inspect a sink and its flows:",
+        &["bonsai-ninja inspect ./src --query os.system"],
     ),
     (
-        "Browse every call site that invokes a specific callee:",
-        &["bonsai-ninja calls ./src --callee os.system"],
-    ),
-    (
-        "Find likely entry points before tracing behavior:",
-        &["bonsai-ninja entrypoints ./src --kind function"],
-    ),
-    (
-        "List every definition in a file, JSON output for tooling:",
-        &["bonsai-ninja defs ./src --file auth_service.py --format json"],
-    ),
-    (
-        "Sweep TODO / FIXME / SECURITY markers across the workspace:",
-        &[
-            "bonsai-ninja comments ./src --kind todo",
-            "bonsai-ninja comments ./src --kind security",
-        ],
-    ),
-    (
-        "Trace a specific entry point end-to-end:",
+        "Trace behavior from an entry point:",
         &["bonsai-ninja trace ./src handle_request"],
     ),
     (
-        "Run the rulepack security scan (source → sink flows):",
-        &[
-            "bonsai-ninja security ./src taint-analysis --severity high",
-            "bonsai-ninja security ./src sinks --tag command-injection",
-            "bonsai-ninja security ./src pack --audit",
-        ],
+        "Browse before drilling in:",
+        &["bonsai-ninja calls ./src --callee os.system"],
     ),
     (
-        "Emit SARIF 2.1.0 for SAST-tool integration (GitHub code scanning / IDEs):",
-        &[
-            "bonsai-ninja security ./src taint-analysis --format sarif > findings.sarif.json",
-            "BONSAI_RULES_DIR=/path/to/security-patterns bonsai-ninja security ./src taint-analysis --format sarif",
-        ],
+        "Run security analysis:",
+        &["bonsai-ninja security ./src taint-analysis --severity high"],
     ),
     (
-        "Navigate the workspace with finding / cross-file annotations:",
-        &[
-            "bonsai-ninja tree ./src --severity high",
-            "bonsai-ninja read-file ./src auth/verify_token.py --compact",
-        ],
+        "Emit machine-readable output:",
+        &["bonsai-ninja export ./src > index.json"],
     ),
-    (
-        "Export the full taint graph for downstream tooling:",
-        &[
-            "bonsai-ninja export ./src > index.json",
-            "bonsai-ninja export ./src | jq '.taint_graph | keys'",
-        ],
-    ),
-    (
-        "Stable content-hash ids round-trip across runs:",
-        &[
-            "bonsai-ninja inspect ./src --flow F:0123456789abcdef",
-            "bonsai-ninja dump-edges ./src --edge E:aabbccdd",
-            "bonsai-ninja dump-taint ./src --source handle_request --taint T:abc123",
-        ],
-    ),
-    (
-        "Theme selection (default: moss):",
-        &[
-            "BONSAI_THEME=dracula bonsai-ninja defs ./src",
-            "bonsai-ninja --theme retro-amber calls ./src",
-            "bonsai-ninja --theme earthy-dark defs ./src",
-        ],
-    ),
+    ("Change the theme:", &["bonsai-ninja --theme dracula defs ./src"]),
 ];
 
-/// Build the after-help block shown below clap's auto-generated options
-/// list. Colors are applied via ANSI when the target terminal supports
-/// them; otherwise the output is plain text. The theme is resolved from
-/// `--theme` / `BONSAI_THEME` so the help menu picks up the same palette as
-/// the rest of the CLI.
-pub(crate) fn themed_after_help() -> String {
-    use owo_colors::OwoColorize;
-
+/// Build the grouped root command index. The root template places this
+/// before global options so the command surface is the first scannable
+/// section after usage.
+pub(crate) fn themed_command_groups() -> String {
     let theme = resolve_theme_early();
     let palette = theme.palette();
     let colors = help_colors_enabled();
-
-    // Local painter: apply the palette slot only when colors are on.
-    let paint = |text: &str, style: &owo_colors::Style| -> String {
-        if colors {
-            text.style(*style).to_string()
-        } else {
-            text.to_string()
-        }
-    };
-    // Section header: underlined + palette.header.
-    let header = |text: &str| -> String {
-        if colors {
-            text.style(palette.header).underline().to_string()
-        } else {
-            text.to_string()
-        }
-    };
 
     // Pad command names so descriptions line up even as grouped
     // labels grow (for example, `security source-analysis`).
@@ -321,57 +167,89 @@ pub(crate) fn themed_after_help() -> String {
         .unwrap_or(0)
         + 2;
 
-    // ── COMMAND GROUPS ────────────────────────────────────────────────
-    out.push_str(&header("COMMAND GROUPS"));
+    out.push_str(&help_section_header("COMMAND GROUPS", &palette, colors));
     out.push('\n');
     for (group, entries) in HELP_GROUPS {
         out.push('\n');
         out.push_str("  ");
-        out.push_str(&paint(group, &palette.accent));
+        out.push_str(&paint_help_text(group, &palette.accent, colors));
         out.push('\n');
         for (cmd, desc) in *entries {
             out.push_str("    ");
-            out.push_str(&paint(&pad(cmd, command_pad_width), &palette.name));
-            out.push_str(&paint(desc, &palette.dim));
+            out.push_str(&paint_help_text(
+                &pad(cmd, command_pad_width),
+                &palette.name,
+                colors,
+            ));
+            out.push_str(&paint_help_text(desc, &palette.dim, colors));
             out.push('\n');
         }
     }
-    out.push('\n');
+    out
+}
 
-    // ── EXAMPLES ──────────────────────────────────────────────────────
-    out.push_str(&header("EXAMPLES"));
+/// Build the root after-help block shown below global options. Colors
+/// are applied via ANSI when the target terminal supports them;
+/// otherwise the output is plain text. The theme is resolved from
+/// `--theme` / `BONSAI_THEME` so the help menu picks up the same palette
+/// as the rest of the CLI.
+pub(crate) fn themed_after_help() -> String {
+    let theme = resolve_theme_early();
+    let palette = theme.palette();
+    let colors = help_colors_enabled();
+
+    let mut out = String::new();
+    out.push_str(&help_section_header("EXAMPLES", &palette, colors));
     out.push('\n');
     for (prose, cmds) in HELP_EXAMPLES {
         out.push('\n');
         out.push_str("  ");
-        out.push_str(&paint(prose, &palette.dim));
+        out.push_str(&paint_help_text(prose, &palette.dim, colors));
         out.push('\n');
         for cmd in *cmds {
             out.push_str("    ");
-            out.push_str(&paint("$ ", &palette.dim));
+            out.push_str(&paint_help_text("$ ", &palette.dim, colors));
             out.push_str(&paint_command(cmd, &palette, colors));
             out.push('\n');
         }
     }
     out.push('\n');
 
-    // ── SEE ALSO ──────────────────────────────────────────────────────
-    out.push_str(&header("SEE ALSO"));
+    out.push_str(&help_section_header("SEE ALSO", &palette, colors));
     out.push_str("\n\n  ");
-    out.push_str(&paint(
+    out.push_str(&paint_help_text(
         "Run `bonsai-ninja <command> --help` for per-command usage + examples.",
         &palette.dim,
+        colors,
     ));
     out.push_str("\n  ");
-    out.push_str(&paint("Common starting points: ", &palette.dim));
+    out.push_str(&paint_help_text("Common starting points: ", &palette.dim, colors));
     for (i, cmd) in ["inspect", "trace", "defs", "calls", "refs"].iter().enumerate() {
         if i > 0 {
-            out.push_str(&paint(", ", &palette.dim));
+            out.push_str(&paint_help_text(", ", &palette.dim, colors));
         }
-        out.push_str(&paint(cmd, &palette.name));
+        out.push_str(&paint_help_text(cmd, &palette.name, colors));
     }
     out.push('\n');
     out
+}
+
+fn help_section_header(text: &str, palette: &theme::ChromePalette, colors: bool) -> String {
+    use owo_colors::OwoColorize;
+    if colors {
+        text.style(palette.header).underline().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn paint_help_text(text: &str, style: &owo_colors::Style, colors: bool) -> String {
+    use owo_colors::OwoColorize;
+    if colors {
+        text.style(*style).to_string()
+    } else {
+        text.to_string()
+    }
 }
 
 /// Colorize a subcommand's `long_about` prose — the paragraph(s)
@@ -390,15 +268,16 @@ pub(crate) fn themed_subcommand_long_about(raw_prose: &str) -> String {
     use owo_colors::OwoColorize;
     let theme = resolve_theme_early();
     let palette = theme.palette();
+    let compact = compact_long_about(raw_prose);
     if !help_colors_enabled() {
-        return raw_prose.to_string();
+        return compact;
     }
     // Split on backticks to highlight `ident` code references in the
     // `literal` slot color while the surrounding prose stays in the
     // dim body tone. The iterator alternates: even indices are
     // outside-backtick prose, odd indices are inside-backtick code.
     let mut colorized = String::new();
-    for (segment_index, segment) in raw_prose.split('`').enumerate() {
+    for (segment_index, segment) in compact.split('`').enumerate() {
         let is_code_span = segment_index % 2 == 1;
         if is_code_span {
             colorized.push('`');
@@ -409,6 +288,15 @@ pub(crate) fn themed_subcommand_long_about(raw_prose: &str) -> String {
         }
     }
     colorized
+}
+
+fn compact_long_about(raw_prose: &str) -> String {
+    let paragraph = raw_prose
+        .split("\n\n")
+        .find(|paragraph| !paragraph.trim().is_empty())
+        .unwrap_or(raw_prose)
+        .trim();
+    wrap_words(paragraph, 88)
 }
 
 /// Colorize a subcommand's `after_help` block — the
@@ -431,13 +319,14 @@ pub(crate) fn themed_subcommand_after_help(raw_after_help: &str) -> String {
     let theme = resolve_theme_early();
     let palette = theme.palette();
     let colors_enabled = help_colors_enabled();
+    let compact = compact_after_help(raw_after_help);
     if !colors_enabled {
-        return raw_after_help.to_string();
+        return compact;
     }
     let leading_whitespace =
         |line: &str| -> String { line.chars().take_while(|c| c.is_whitespace()).collect() };
     let mut colorized = String::new();
-    for line in raw_after_help.split('\n') {
+    for line in compact.split('\n') {
         // Section heading: any line whose non-space chars are all
         // uppercase ASCII letters / spaces / hyphens. Catches
         // `EXAMPLES`, `SEE ALSO`, `NOTES` etc. without matching
@@ -477,10 +366,51 @@ pub(crate) fn themed_subcommand_after_help(raw_after_help: &str) -> String {
     }
     // `split('\n')` yields an empty trailing element for text ending
     // in `\n`; strip the extra newline our loop appended.
-    if colorized.ends_with('\n') && !raw_after_help.ends_with('\n') {
+    if colorized.ends_with('\n') && !compact.ends_with('\n') {
         colorized.pop();
     }
     colorized
+}
+
+fn compact_after_help(raw_after_help: &str) -> String {
+    let mut out = String::new();
+    let mut command_count = 0usize;
+    let mut keep_next_command_comment = true;
+    let mut previous_blank = false;
+    for line in raw_after_help.lines() {
+        let trimmed = line.trim_start();
+        if trimmed == "SAMPLE OUTPUT" {
+            break;
+        }
+        if trimmed.starts_with("# ") {
+            keep_next_command_comment = command_count < MAX_SUBCOMMAND_EXAMPLE_COMMANDS;
+            if !keep_next_command_comment {
+                continue;
+            }
+        } else if trimmed.starts_with("$ ") {
+            if command_count >= MAX_SUBCOMMAND_EXAMPLE_COMMANDS {
+                keep_next_command_comment = false;
+                continue;
+            }
+            command_count += 1;
+            keep_next_command_comment = true;
+        } else if !trimmed.is_empty() {
+            keep_next_command_comment = true;
+        } else if !keep_next_command_comment {
+            continue;
+        }
+        if trimmed.is_empty() {
+            if previous_blank {
+                continue;
+            }
+            previous_blank = true;
+        } else {
+            previous_blank = false;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 /// Paint a shell command line: the binary + subcommand get `name`
@@ -507,21 +437,22 @@ pub(crate) fn paint_command(cmd: &str, palette: &theme::ChromePalette, colors: b
     out
 }
 
-/// Custom help template. Matches clap's default shape but drops
-/// `{subcommands}` (we render our own grouped list in `after_help`) and
-/// colorizes the `Options:` section heading with the active theme.
+/// Custom root help template. Matches clap's default shape but drops
+/// `{subcommands}` (we render our own grouped list before global
+/// options) and colorizes the `OPTIONS:` section heading with the
+/// active theme.
 pub(crate) fn themed_help_template() -> String {
-    use owo_colors::OwoColorize;
     let theme = resolve_theme_early();
     let palette = theme.palette();
-    let options_heading = if help_colors_enabled() {
-        "Options:".style(palette.header).underline().to_string()
-    } else {
-        "Options:".to_string()
-    };
+    let colors = help_colors_enabled();
+    let usage_heading = help_section_header("USAGE:", &palette, colors);
+    let options_heading = help_section_header("OPTIONS:", &palette, colors);
+    let command_groups = themed_command_groups();
     format!(
         "{{about-with-newline}}\n\
-         {{usage-heading}} {{usage}}\n\
+         {usage_heading} {{usage}}\n\
+         \n\
+         {command_groups}\n\
          \n\
          {options_heading}\n\
          {{options}}{{after-help}}"
@@ -552,11 +483,17 @@ pub(crate) fn try_themed_help() -> Option<i32> {
     // Anything after a `--` marker is ignored (positional argument
     // scope).
     let mut help_requested = false;
+    let mut long_help_requested = false;
     for arg in argv.iter().skip(1) {
         if arg == "--" {
             break;
         }
-        if arg == "--help" || arg == "-h" {
+        if arg == "--help" {
+            help_requested = true;
+            long_help_requested = true;
+            break;
+        }
+        if arg == "-h" {
             help_requested = true;
             break;
         }
@@ -605,20 +542,29 @@ pub(crate) fn try_themed_help() -> Option<i32> {
         }
     }
 
-    // Render clap's long help. `write_long_help(writer)` strips ANSI
+    // Render clap help. `write_long_help(writer)` strips ANSI
     // when the target isn't a TTY (our `Vec<u8>`, clap can't tell),
     // which would drop the pre-colored escapes embedded by
     // `themed_subcommand_long_about`. Use `render_long_help()` — it
     // returns a `StyledStr` — and emit the ANSI-bearing form when
-    // colors are enabled, plain `Display` otherwise.
-    let styled = command.render_long_help();
+    // colors are enabled, plain `Display` otherwise. `-h` intentionally
+    // uses clap's short renderer; `--help` uses the long renderer.
+    let styled = if long_help_requested {
+        command.render_long_help()
+    } else {
+        command.render_help()
+    };
     let rendered_help = if help_colors_enabled() {
         styled.ansi().to_string()
     } else {
         styled.to_string()
     };
+    let rendered_help = rendered_help
+        .replace("Print help (see more with '--help')", "Print help")
+        .replace("Print help (see a summary with '-h')", "Print help");
+    let rendered_help = normalize_help_section_casing(&rendered_help);
 
-    // `colorize_help_body` both reflows `Commands:` blocks into the
+    // `colorize_help_body` both reflows `COMMANDS:` blocks into the
     // roomier name-on-its-own-line shape AND paints description
     // bodies in the palette's dim slot. The reflow runs
     // unconditionally (it's a readability fix, not a color-only
@@ -631,13 +577,21 @@ pub(crate) fn try_themed_help() -> Option<i32> {
     Some(0)
 }
 
+fn normalize_help_section_casing(rendered_help: &str) -> String {
+    rendered_help
+        .replace("Usage:", "USAGE:")
+        .replace("Arguments:", "ARGUMENTS:")
+        .replace("Options:", "OPTIONS:")
+        .replace("Commands:", "COMMANDS:")
+}
+
 /// Post-process a clap-rendered help string. Two concerns:
 ///
 /// 1. Flag-description body lines (10+ space-indented, plain text
 ///    without ANSI) get painted in the `dim` body slot.
-/// 2. Parent-subcommand `Commands:` blocks, which clap renders as a
+/// 2. Parent-subcommand `COMMANDS:` blocks, which clap renders as a
 ///    single dense line per entry, get reflowed into the same shape
-///    as the `Options:` list — command name on its own line, indented
+///    as the `OPTIONS:` list — command name on its own line, indented
 ///    dim description below, blank line between entries — so parent
 ///    helps read consistently with leaf helps.
 pub(crate) fn colorize_help_body(rendered_help: &str) -> String {
@@ -648,9 +602,26 @@ pub(crate) fn colorize_help_body(rendered_help: &str) -> String {
     let mut out = String::with_capacity(rendered_help.len() + 256);
     let lines: Vec<&str> = rendered_help.split('\n').collect();
     let mut line_index = 0usize;
+    let mut description_lines_for_item = 0usize;
+    let mut compact_item_section = false;
     while line_index < lines.len() {
         let line = lines[line_index];
+        let header_probe = strip_ansi_roughly(line);
+        let header_trimmed = header_probe.trim();
+        if matches!(
+            header_trimmed,
+            "Arguments:" | "ARGUMENTS:" | "Options:" | "OPTIONS:"
+        ) {
+            compact_item_section = true;
+        } else if looks_like_section_header(line) && !header_probe.starts_with(char::is_whitespace) {
+            compact_item_section = false;
+        }
+        if compact_item_section && line.trim().is_empty() {
+            line_index += 1;
+            continue;
+        }
         if is_commands_header(line) {
+            description_lines_for_item = 0;
             out.push_str(line);
             out.push('\n');
             line_index += 1;
@@ -689,10 +660,47 @@ pub(crate) fn colorize_help_body(rendered_help: &str) -> String {
         let leading_space_count = line.chars().take_while(|c| *c == ' ').count();
         let has_content = !line.trim().is_empty();
         let is_description_body = !already_has_ansi && leading_space_count >= 10 && has_content;
-        if is_description_body && colors {
-            out.push_str(&line.style(palette.dim).to_string());
+        let stripped = strip_ansi_roughly(line);
+        let trimmed = stripped.trim_start();
+        let is_item_header = has_content
+            && leading_space_count <= 6
+            && (trimmed.starts_with('-') || trimmed.starts_with('<') || trimmed.starts_with('['));
+        let is_section_header = looks_like_section_header(line);
+        let is_value_metadata = trimmed.starts_with('[')
+            || trimmed == "Possible values:"
+            || trimmed == "Value hint:"
+            || trimmed.starts_with("- ");
+        let line = if compact_item_section && is_item_header && !is_description_body {
+            compact_inline_item_line(line)
         } else {
-            out.push_str(line);
+            line.to_string()
+        };
+        if is_item_header || is_section_header || !has_content {
+            description_lines_for_item = 0;
+        }
+        if is_description_body && colors {
+            if !is_value_metadata {
+                description_lines_for_item += 1;
+                if description_lines_for_item > MAX_HELP_DESCRIPTION_LINES {
+                    line_index += 1;
+                    continue;
+                }
+            }
+            let line = if is_value_metadata {
+                line.to_string()
+            } else {
+                compact_description_line(&line)
+            };
+            out.push_str(&line.style(palette.dim).to_string());
+        } else if is_description_body && !is_value_metadata {
+            description_lines_for_item += 1;
+            if description_lines_for_item > MAX_HELP_DESCRIPTION_LINES {
+                line_index += 1;
+                continue;
+            }
+            out.push_str(&compact_description_line(&line));
+        } else {
+            out.push_str(&line);
         }
         out.push('\n');
         line_index += 1;
@@ -703,10 +711,105 @@ pub(crate) fn colorize_help_body(rendered_help: &str) -> String {
     out
 }
 
-/// `Commands:` header detector. Matches either the plain string or a
+fn compact_inline_item_line(line: &str) -> String {
+    let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let body = line.trim_start();
+    let Some(split_at) = find_inline_help_split(body) else {
+        return line.to_string();
+    };
+    let name = body[..split_at].trim_end();
+    let desc = body[split_at..].trim_start();
+    if desc.is_empty() {
+        return line.to_string();
+    }
+    let compact_desc = compact_description_line(&format!("          {desc}"));
+    format!("{leading}{name}  {}", compact_desc.trim_start())
+}
+
+fn find_inline_help_split(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    let mut idx = 0usize;
+    while idx + 1 < bytes.len() {
+        if bytes[idx] == b' ' && bytes[idx + 1] == b' ' {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn compact_description_line(line: &str) -> String {
+    const MAX_CHARS: usize = 112;
+
+    let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+    let body = line.trim_start();
+    if body.chars().count() <= MAX_CHARS {
+        return line.to_string();
+    }
+    let compact_body = if let Some(sentence_end) = first_sentence_end(body) {
+        body[..sentence_end].trim_end()
+    } else {
+        body
+    };
+    if compact_body.chars().count() <= MAX_CHARS {
+        return format!("{leading}{compact_body}");
+    }
+
+    let mut end = 0usize;
+    for (count, (idx, ch)) in compact_body.char_indices().enumerate() {
+        if count >= MAX_CHARS {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+    if let Some(word_boundary) = compact_body[..end].rfind(char::is_whitespace) {
+        end = word_boundary;
+    }
+    let truncated =
+        compact_body[..end].trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == ':');
+    format!("{leading}{truncated}...")
+}
+
+fn wrap_words(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut line_len = 0usize;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if line_len > 0 && line_len + 1 + word_len > width {
+            out.push('\n');
+            line_len = 0;
+        } else if line_len > 0 {
+            out.push(' ');
+            line_len += 1;
+        }
+        out.push_str(word);
+        line_len += word_len;
+    }
+    out
+}
+
+fn first_sentence_end(body: &str) -> Option<usize> {
+    let bytes = body.as_bytes();
+    for (idx, ch) in body.char_indices() {
+        if ch != '.' && ch != '!' && ch != '?' {
+            continue;
+        }
+        let next = idx + ch.len_utf8();
+        let sentence = &body[..next];
+        if sentence.ends_with("e.g.") || sentence.ends_with("i.e.") {
+            continue;
+        }
+        if next >= body.len() || bytes.get(next).is_some_and(u8::is_ascii_whitespace) {
+            return Some(next);
+        }
+    }
+    None
+}
+
+/// `COMMANDS:` header detector. Matches either the plain string or a
 /// clap-styled variant (ANSI escapes around it).
 fn is_commands_header(line: &str) -> bool {
-    strip_ansi_roughly(line).trim_end() == "Commands:"
+    matches!(strip_ansi_roughly(line).trim_end(), "Commands:" | "COMMANDS:")
 }
 
 /// Generic section-header detector used to know when a block has
@@ -727,7 +830,7 @@ fn looks_like_section_header(line: &str) -> bool {
 }
 
 /// Cheap ANSI CSI stripper — just enough to make
-/// `"\x1b[1mCommands:\x1b[0m"` match `Commands:` for header
+/// `"\x1b[1mCOMMANDS:\x1b[0m"` match `COMMANDS:` for header
 /// detection. Not for measurement.
 fn strip_ansi_roughly(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -757,7 +860,7 @@ fn strip_ansi_roughly(s: &str) -> String {
 
 /// Rewrite one `  name  description` line into a two-row entry: the
 /// name on a 2-space-indented row (themed bold + `palette.name`), the
-/// description indented 10 spaces + dim below. Matches the `Options:`
+/// description indented 10 spaces + dim below. Matches the `OPTIONS:`
 /// block shape so parent subcommand helps read consistently.
 fn reflow_commands_entry(out: &mut String, entry: &str, palette: &theme::ChromePalette, colors: bool) {
     use owo_colors::OwoColorize;
@@ -792,11 +895,11 @@ fn reflow_commands_entry(out: &mut String, entry: &str, palette: &theme::ChromeP
     }
     out.push('\n');
     if !desc.is_empty() {
-        out.push_str("          ");
+        let desc = compact_description_line(&format!("          {desc}"));
         if colors {
             out.push_str(&desc.style(palette.dim).to_string());
         } else {
-            out.push_str(desc);
+            out.push_str(&desc);
         }
         out.push('\n');
     }

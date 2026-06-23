@@ -690,40 +690,6 @@ pub(crate) fn paging_from_cli_output(
     ))
 }
 
-/// Row-level code-cell folder. Browse commands frequently emit
-/// adjacent rows that point at the same source line — for
-/// example, multiple call events or argument positions on a
-/// single `r.URL.Query().Get("k")` expression. Rendering the
-/// source line verbatim for every such row wastes tokens
-/// (~30–50 chars per repeat × hundreds of rows on real
-/// workspaces) without adding information.
-///
-/// [`fold_repeated_code`] takes a borrowed code-line string and
-/// the previous non-empty rendered line, and returns the string
-/// to actually render. When the two match, returns the dim `↑
-/// same` marker so the reader can tell at a glance "this row
-/// shares the previous source line." Never elides the first
-/// occurrence.
-///
-/// The caller threads a `&mut Option<String>` across the row
-/// loop — `None` at the start, updated to the most recent
-/// rendered line after each call. Rows whose `code` field is
-/// empty (e.g. classes, imports with empty snippets) pass through
-/// unchanged.
-pub(crate) fn fold_repeated_code(code: &str, prev: &mut Option<String>) -> String {
-    if code.is_empty() {
-        return code.to_string();
-    }
-    let trimmed = code.trim();
-    if let Some(p) = prev.as_deref() {
-        if p == trimmed {
-            return "↑ same".to_string();
-        }
-    }
-    *prev = Some(trimmed.to_string());
-    code.to_string()
-}
-
 /// Header helper: extend `base` with a trailing `"flows"` column
 /// when the `flows` column is enabled. Keeps the column list in
 /// one place per renderer so ordering stays consistent.
@@ -1007,18 +973,12 @@ pub(crate) fn cmd_calls(
                     let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["callee text", "caller", "location", "code"], flows);
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for c in &rows {
                         let caller = c.caller.as_deref().unwrap_or("-");
                         let loc = format!("{}:{}:{}", short_file(&c.file), c.line, c.column);
                         let ext = extension_for(&c.file);
                         let line_text = read_line(ws, &c.file, c.line);
-                        let code_render = fold_repeated_code(&line_text, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
                             Cell::new(u.name(&c.callee)),
                             Cell::new(u.kind(caller)),
@@ -1343,7 +1303,6 @@ pub(crate) fn cmd_imports(
                     let headers =
                         with_flows_header(&["module", "symbol", "alias", "kind", "location", "code"], flows);
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for import in &rows {
                         let alias = import.alias.clone().unwrap_or_else(|| "-".to_string());
                         // `symbol` column surfaces the specific name imported
@@ -1356,12 +1315,7 @@ pub(crate) fn cmd_imports(
                         let loc = format!("{}:{}", short_file(&import.file), import.line);
                         let ext = extension_for(&import.file);
                         let line_text = read_line(ws, &import.file, import.line);
-                        let code_render = fold_repeated_code(&line_text, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
                             Cell::new(u.name(&import.module)),
                             Cell::new(u.dim(&symbol)),
@@ -1414,7 +1368,6 @@ fn render_imports_streaming_first_page(
     let mut rows_seen = 0usize;
     let mut tokens_used = 0u64;
     let mut stopped_for_budget = false;
-    let mut last_code: Option<String> = None;
 
     'files: for file_id in ws.vfs().all_files() {
         let path = path_for_file_id(ws, file_id);
@@ -1459,12 +1412,7 @@ fn render_imports_streaming_first_page(
             }
             tokens_used = tokens_used.saturating_add(row_tokens);
             let ext = extension_for(&path);
-            let code_render = fold_repeated_code(&line_text, &mut last_code);
-            let code_cell = if code_render == "↑ same" {
-                Cell::new(u.dim(&code_render))
-            } else {
-                Cell::new(u.snippet(&code_render, ext))
-            };
+            let code_cell = Cell::new(u.snippet(&line_text, ext));
             table.add_row(vec![
                 Cell::new(u.name(&imp.module)),
                 Cell::new(u.dim(&symbol)),
@@ -1624,18 +1572,12 @@ pub(crate) fn cmd_vars(
                     let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["var", "in", "source", "location", "code"], flows);
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for v in &rows {
                         let loc = format!("{}:{}:{}", short_file(&v.file), v.line, v.column);
                         let src = v.source_name.clone().unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&v.file);
                         let line_text = read_line(ws, &v.file, v.line);
-                        let code_render = fold_repeated_code(&line_text, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
                             Cell::new(u.name(&v.name)),
                             Cell::new(u.kind(&v.in_function)),
@@ -1741,7 +1683,6 @@ pub(crate) fn cmd_strings(
                     let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["category", "text", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for s in &rows {
                         let preview = truncate(&s.text, 60);
                         let loc = format!("{}:{}:{}", short_file(&s.file), s.line, s.column);
@@ -1749,12 +1690,7 @@ pub(crate) fn cmd_strings(
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&s.file);
                         let line_text = read_line(ws, &s.file, s.line);
-                        let code_render = fold_repeated_code(&line_text, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
                             Cell::new(u.annotation(&s.category)),
                             Cell::new(u.name(&preview)),
@@ -1942,7 +1878,6 @@ pub(crate) fn cmd_args(
                         flows,
                     );
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for a in &rows {
                         let pos_label = a
                             .keyword
@@ -1955,12 +1890,7 @@ pub(crate) fn cmd_args(
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&a.file);
                         let line_text = read_line(ws, &a.file, a.line);
-                        let code_render = fold_repeated_code(&line_text, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(&line_text, ext));
                         let mut cells = vec![
                             Cell::new(u.name(&a.callee)),
                             Cell::new(u.loc(&pos_label)),
@@ -2295,19 +2225,13 @@ pub(crate) fn cmd_refs(
                     let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["symbol", "kind", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for r in &rows {
                         let loc = format!("{}:{}:{}", short_file(&r.file), r.line, r.column);
                         let snip = truncate(r.snippet.trim(), 100);
                         let enclosing = enclosing_fn_for_file_line(ws, &r.file, r.line)
                             .unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&r.file);
-                        let code_render = fold_repeated_code(&snip, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(&snip, ext));
                         let mut cells = vec![
                             Cell::new(u.name(&r.symbol)),
                             Cell::new(u.kind(&r.kind)),
@@ -2399,19 +2323,13 @@ pub(crate) fn cmd_search(
                         flows,
                     );
                     let mut t = u.table(&headers);
-                    let mut last_code: Option<String> = None;
                     for h in &rows {
                         let loc = format!("{}:{}:{}", short_file(&h.file), h.line, h.column);
                         let qualified = h.qualified_name.clone().unwrap_or_else(|| "-".to_string());
                         let context = h.context.clone().unwrap_or_else(|| "-".to_string());
                         let ext = extension_for(&h.file);
                         let code = h.code.trim();
-                        let code_render = fold_repeated_code(code, &mut last_code);
-                        let code_cell = if code_render == "↑ same" {
-                            Cell::new(u.dim(&code_render))
-                        } else {
-                            Cell::new(u.snippet(&code_render, ext))
-                        };
+                        let code_cell = Cell::new(u.snippet(code, ext));
                         let mut cells = vec![
                             Cell::new(u.name(&h.name)),
                             Cell::new(u.kind(&h.kind)),

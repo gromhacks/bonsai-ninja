@@ -43,6 +43,10 @@ fn seed_idg_on(db: &AnalyzerDb) -> Arc<IdgQueryService> {
     svc
 }
 
+fn call_name_ends_with_symbol(name: &str, symbol: &str) -> bool {
+    name == symbol || name.rsplit('.').next() == Some(symbol)
+}
+
 #[test]
 fn inspect_target_graph_cuts_tainted_calls_to_selected_functions() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
@@ -76,13 +80,13 @@ def helper(value):
     assert!(
         tainted_names
             .iter()
-            .any(|name| *name == "other" || name.ends_with(".other")),
+            .any(|name| call_name_ends_with_symbol(name, "other")),
         "targeted inspect graph should keep tainted calls inside helper; got {tainted_names:?}"
     );
     assert!(
         !tainted_names
             .iter()
-            .any(|name| *name == "sink" || name.ends_with(".sink")),
+            .any(|name| call_name_ends_with_symbol(name, "sink")),
         "targeted inspect graph should exclude unrelated terminal calls in entry; got {tainted_names:?}"
     );
 }

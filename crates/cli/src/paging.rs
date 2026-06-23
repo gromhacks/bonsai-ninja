@@ -299,7 +299,7 @@ pub(crate) fn bytes_to_tokens(bytes: u64) -> u64 {
 /// view (the shape used by every browse / security / dump-callgraph
 /// / dump-edges command). Covers column padding (2–4 spaces per
 /// column × 5–8 columns), ANSI styling bursts around cells
-/// (~20 bytes each), the `↑ same`-fold prefixes, the `flows`-column
+/// (~20 bytes each), repeated source-code cells, the `flows`-column
 /// F-id list, and the occasional line-wrap that comfy-table adds
 /// when a cell's text doesn't fit the terminal's column budget.
 /// Without this floor, the cost estimates under-count by 4–6× and

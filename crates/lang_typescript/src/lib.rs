@@ -555,7 +555,8 @@ fn insert_graphql_resolver_dispatches(events: &mut Vec<FlowEvent>, dispatches: &
             continue;
         }
         let inserted = inserts.len();
-        events.splice((index + 1)..(index + 1), inserts);
+        let insert_at = index + 1;
+        events.splice(insert_at..insert_at, inserts);
         index += inserted + 1;
     }
 }

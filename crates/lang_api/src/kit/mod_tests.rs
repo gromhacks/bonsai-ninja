@@ -288,6 +288,9 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
         vec![
             // `source_call` languages (Python/Java/C#/Go): `conn = Connection(...)`.
             assign("conn", Some("Connection"), sp(10, 30)),
+            // Perl/Ruby-style class constructor methods should type the
+            // receiver as the owner, not as the method call tail.
+            assign("obj", Some("Util->new"), sp(31, 39)),
             // JS/TS shape: `const client = new ApolloClient({})` is an
             // Assign with no source_call plus a sibling constructor Call
             // whose span lies inside the assignment's RHS.
@@ -309,6 +312,7 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
             .map(|a| a.type_name.as_str())
     };
     assert_eq!(typed("conn"), Some("Connection"), "{:?}", decl.type_aliases);
+    assert_eq!(typed("obj"), Some("Util"), "{:?}", decl.type_aliases);
     assert_eq!(
         typed("client"),
         Some("ApolloClient"),

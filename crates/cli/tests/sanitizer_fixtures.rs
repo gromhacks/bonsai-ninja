@@ -309,7 +309,7 @@ fn sanitizer_evidence_has_complete_shape() {
                 let file = s.get("file").and_then(|v| v.as_str()).unwrap_or("");
                 let line = s.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
                 assert!(
-                    rule_id.contains(".sanitizer."),
+                    rule_id.contains(".sanitizer.") || rule_id.contains(".passthrough."),
                     "[{lang}] sanitizer evidence has non-sanitizer rule_id: {rule_id}"
                 );
                 assert!(!file.is_empty(), "[{lang}] sanitizer evidence missing file");
