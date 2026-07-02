@@ -186,6 +186,7 @@ fn assert_top_level_callgraph_is_semantic(lang: &str, export: &Value) {
             matches!(precision, "exact" | "narrowed"),
             "[{lang}] export.callgraph must be semantic-only; got precision={precision} row={row}"
         );
+        assert_provenance_fields(lang, "export.callgraph", row);
     }
     let summary_count = export
         .get("summary")
@@ -196,6 +197,27 @@ fn assert_top_level_callgraph_is_semantic(lang: &str, export: &Value) {
         summary_count,
         rows.len() as u64,
         "[{lang}] summary.call_edge_count must match semantic callgraph rows"
+    );
+}
+
+fn assert_taint_call_edges_have_provenance(lang: &str, export: &Value) {
+    let rows = export
+        .get("taint_graph")
+        .and_then(|tg| tg.get("call_edges"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("[{lang}] export missing taint_graph.call_edges"));
+    for row in rows {
+        assert_provenance_fields(lang, "taint_graph.call_edges", row);
+    }
+}
+
+fn assert_provenance_fields(lang: &str, section: &'static str, row: &Value) {
+    let stage = row.get("resolver_stage").and_then(Value::as_str).unwrap_or("");
+    let evidence = row.get("evidence").and_then(Value::as_str).unwrap_or("");
+    let confidence = row.get("confidence").and_then(Value::as_u64);
+    assert!(
+        !stage.is_empty() && !evidence.is_empty() && confidence.is_some_and(|value| value <= 100),
+        "[{lang}] {section} row missing resolver provenance: {row}"
     );
 }
 
@@ -231,6 +253,110 @@ fn assert_flow_graph_names_are_workspace_functions(lang: &str, export: &Value) {
     }
 }
 
+fn assert_python_export_preserves_decl_extent_and_import_symbols(export: &Value) {
+    let files = export
+        .get("files")
+        .and_then(Value::as_array)
+        .expect("export files array");
+    let gateway = files
+        .iter()
+        .find(|file| {
+            file.get("path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| path.ends_with("gateway.py"))
+        })
+        .expect("gateway.py export file");
+    let handle_request = gateway
+        .get("decls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|decl| decl.get("name").and_then(Value::as_str) == Some("handle_request"))
+        .expect("handle_request decl");
+    assert_eq!(
+        handle_request.get("line").and_then(Value::as_u64),
+        Some(10),
+        "handle_request start line drifted: {handle_request}"
+    );
+    assert_eq!(
+        handle_request.get("end_line").and_then(Value::as_u64),
+        Some(17),
+        "export decl end_line must cover the full function body: {handle_request}"
+    );
+
+    let imported_names: BTreeSet<String> = gateway
+        .get("imports")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|imp| imp.get("module").and_then(Value::as_str) == Some(".user_service"))
+        .filter_map(|imp| {
+            imp.get("original_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(
+        imported_names,
+        BTreeSet::from(["get_user".to_string(), "update_user".to_string()]),
+        "export imports must preserve per-symbol original_name facts: {gateway}"
+    );
+}
+
+fn collect_export_import_rows(export: &Value) -> Vec<&Value> {
+    export
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|file| {
+            file.get("imports")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .collect()
+}
+
+fn assert_lua_export_hides_module_table_bindings(export: &Value) {
+    let rows = collect_export_import_rows(export);
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.get("alias").and_then(Value::as_str) == Some("M")),
+        "Lua export must not expose resolver-only module table alias M as an import row: {rows:?}"
+    );
+    for (module, alias) in [
+        ("luasql.sqlite3", "luasql"),
+        ("auth_service", "auth"),
+        ("user_service", "user_service"),
+    ] {
+        assert!(
+            rows.iter().any(|row| {
+                row.get("module").and_then(Value::as_str) == Some(module)
+                    && row.get("alias").and_then(Value::as_str) == Some(alias)
+            }),
+            "Lua export missing real require row module={module} alias={alias}: {rows:?}"
+        );
+    }
+}
+
+fn assert_ruby_export_hides_inferred_constant_bindings(export: &Value) {
+    let rows = collect_export_import_rows(export);
+    assert!(
+        rows.iter()
+            .all(|row| row.get("alias").and_then(Value::as_str).is_none()),
+        "Ruby export must not expose inferred constants as standalone import aliases: {rows:?}"
+    );
+    for module in ["auth_service", "sinatra", "sqlite3", "user_service"] {
+        assert!(
+            rows.iter()
+                .any(|row| row.get("module").and_then(Value::as_str) == Some(module)),
+            "Ruby export missing real require row module={module}: {rows:?}"
+        );
+    }
+}
+
 #[test]
 fn every_lang_micro_export_funcid_refs_resolve() {
     let Some(_) = bin_path() else {
@@ -243,6 +369,29 @@ fn every_lang_micro_export_funcid_refs_resolve() {
         };
         assert_func_refs_resolve(lang, &export);
         assert_top_level_callgraph_is_semantic(lang, &export);
+        assert_taint_call_edges_have_provenance(lang, &export);
         assert_flow_graph_names_are_workspace_functions(lang, &export);
     }
+}
+
+#[test]
+fn python_export_preserves_decl_extent_and_import_symbols() {
+    let Some(_) = bin_path() else {
+        eprintln!("skipping export schema drift test: release binary missing");
+        return;
+    };
+    let export = run_export("python").expect("python export");
+    assert_python_export_preserves_decl_extent_and_import_symbols(&export);
+}
+
+#[test]
+fn export_hides_resolver_only_import_bindings() {
+    let Some(_) = bin_path() else {
+        eprintln!("skipping export schema drift test: release binary missing");
+        return;
+    };
+    let lua = run_export("lua").expect("lua export");
+    assert_lua_export_hides_module_table_bindings(&lua);
+    let ruby = run_export("ruby").expect("ruby export");
+    assert_ruby_export_hides_inferred_constant_bindings(&ruby);
 }

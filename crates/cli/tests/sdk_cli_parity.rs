@@ -8,7 +8,7 @@
 use bonsai_sdk::{Severity, SourceAnalysisOptions, SourceLineageLimits, TaintAnalysisOptions};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LANGS: &[&str] = &[
@@ -56,6 +56,38 @@ fn workspace_path() -> PathBuf {
     repo_root().join("examples/python/micro")
 }
 
+fn temp_workspace(name: &str) -> PathBuf {
+    let dst = std::env::temp_dir().join(format!(
+        "bonsai-cli-sdk-parity-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&dst);
+    copy_dir(&workspace_path(), &dst);
+    dst
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create temp fixture dir");
+    for entry in std::fs::read_dir(src).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == ".bonsai" {
+            continue;
+        }
+        let target = dst.join(name);
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).expect("copy fixture file");
+        }
+    }
+}
+
 fn lang_workspace_path(lang: &str) -> PathBuf {
     repo_root().join(format!("examples/{lang}/micro"))
 }
@@ -91,6 +123,26 @@ fn run_cli(args: &[&str]) -> Value {
             String::from_utf8_lossy(&out.stdout)
         )
     })
+}
+
+fn run_cli_text(args: &[&str]) -> String {
+    let out = Command::new(bin_path())
+        .args(args)
+        .arg("--no-color")
+        .current_dir(repo_root())
+        .env("COLUMNS", "200")
+        .env_remove("BONSAI_CONTEXT")
+        .output()
+        .expect("run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "bonsai-ninja {:?} exited with {}:\nstdout={}\nstderr={}",
+        args,
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 fn run_cli_stdout_no_dataflow(args: &[&str]) -> String {
@@ -258,6 +310,31 @@ fn sorted_rows(value: Value) -> Value {
     sorted_json_array(value)
 }
 
+fn json_string_field_values(value: &Value, field: &str, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(text)) = map.get(field) {
+                out.push(text.clone());
+            }
+            for child in map.values() {
+                json_string_field_values(child, field, out);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                json_string_field_values(child, field, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_contains_string_field(value: &Value, field: &str, expected: &str) -> bool {
+    let mut values = Vec::new();
+    json_string_field_values(value, field, &mut values);
+    values.iter().any(|value| value == expected)
+}
+
 fn assert_json_eq(label: &str, cli: Value, sdk: Value) {
     let cli = normalized_json(cli);
     let sdk = normalized_json(sdk);
@@ -377,6 +454,33 @@ fn entry_symbol(lang: &str) -> &'static str {
 
 fn trace_source_symbol(lang: &str) -> &'static str {
     entry_symbol(lang)
+}
+
+fn slice_site(lang: &str) -> (&'static str, u32, &'static str) {
+    match lang {
+        "c" => ("result", 13, "gateway.c"),
+        "cpp" => ("result", 12, "gateway.cpp"),
+        "csharp" => ("result", 19, "Gateway.cs"),
+        "dart" => ("result", 5, "gateway.dart"),
+        "elixir" => ("result", 6, "gateway.ex"),
+        "erlang" => ("Result", 6, "gateway.erl"),
+        "go" => ("result", 19, "gateway.go"),
+        "java" => ("result", 25, "Gateway.java"),
+        "javascript" => ("result", 18, "gateway.js"),
+        "kotlin" => ("result", 17, "Gateway.kt"),
+        "lua" => ("result", 7, "gateway.lua"),
+        "objc" => ("result", 12, "Gateway.m"),
+        "perl" => ("result", 8, "gateway.pl"),
+        "php" => ("$result", 10, "gateway.php"),
+        "python" => ("result", 15, "gateway.py"),
+        "ruby" => ("result", 16, "gateway.rb"),
+        "rust" => ("result", 12, "gateway.rs"),
+        "scala" => ("result", 17, "Gateway.scala"),
+        "solidity" => ("action", 15, "Gateway.sol"),
+        "swift" => ("result", 11, "Gateway.swift"),
+        "typescript" => ("result", 18, "gateway.ts"),
+        other => panic!("missing slice fixture site for {other}"),
+    }
 }
 
 fn sdk_taint_json(project: &bonsai_sdk::Project, options: TaintAnalysisOptions) -> Value {
@@ -652,6 +756,12 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
             .expect("stats json"),
         );
 
+        assert_json_eq(
+            &format!("{lang} context"),
+            run_cli(&["context", ws_arg]),
+            serde_json::to_value(project.semantic_context()).expect("context json"),
+        );
+
         for file in project.workspace().vfs().all_files() {
             project
                 .workspace()
@@ -662,9 +772,136 @@ fn index_and_diagnostics_cli_json_match_sdk_for_every_language() {
         assert_json_eq(
             &format!("{lang} diagnostics"),
             run_cli(&["diagnostics", ws_arg]),
-            serde_json::to_value(project.diagnostics()).expect("diagnostics json"),
+            serde_json::to_value(project.diagnostics_report()).expect("diagnostics json"),
         );
     }
+}
+
+#[test]
+fn slice_cli_json_matches_sdk_facade() {
+    for &lang in LANGS {
+        let project = basic_project_for_lang(lang);
+        let ws_arg = lang_workspace_arg(lang);
+        let (symbol, line, file) = slice_site(lang);
+        let line_s = line.to_string();
+        let cli = run_cli(&[
+            "slice", &ws_arg, "--symbol", symbol, "--line", &line_s, "--file", file, "--format", "json",
+        ]);
+        let sdk = serde_json::to_value(project.browse().slices(bonsai_sdk::SliceFilters {
+            symbol,
+            line,
+            file: Some(file),
+            ..Default::default()
+        }))
+        .expect("slice json");
+        assert_json_eq(&format!("{lang} slice"), cli.clone(), sdk);
+        let slices = cli
+            .get("slices")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{lang} slice JSON missing slices array:\n{cli:#}"));
+        assert!(
+            slices.iter().any(|slice| slice
+                .get("step_count")
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                > 0),
+            "{lang} slice parity must exercise a non-empty syntax-derived slice:\n{cli:#}"
+        );
+    }
+}
+
+#[test]
+fn cache_commands_cli_json_match_sdk_facade() {
+    let root = temp_workspace("cache");
+    let root_arg = root.to_str().expect("temp workspace path utf8");
+    let bonsai = sdk();
+
+    let project = bonsai.open_query(&root).expect("open temp project");
+    project
+        .cache()
+        .rebuild_dataflow()
+        .expect("write dataflow sidecar");
+    let stats = project.cache().stats().expect("SDK cache stats");
+    assert!(
+        stats.dataflow_sidecar_exists,
+        "fixture should have a dataflow sidecar before clear: {stats:#?}"
+    );
+    assert_json_eq(
+        "cache stats after SDK dataflow rebuild",
+        run_cli(&["cache", "stats", root_arg, "--format", "json"]),
+        serde_json::to_value(stats).expect("cache stats json"),
+    );
+
+    run_cli_text(&["cache", "clear", root_arg, "--dataflow-only"]);
+    let stats = bonsai
+        .cache(&root)
+        .stats()
+        .expect("SDK cache stats after dataflow clear");
+    assert!(
+        !stats.dataflow_sidecar_exists && !stats.dataflow_factstore_sidecar_exists,
+        "CLI cache clear --dataflow-only should remove only dataflow sidecars: {stats:#?}"
+    );
+
+    run_cli_text(&["cache", "rebuild", root_arg]);
+    let stats = bonsai
+        .cache(&root)
+        .stats()
+        .expect("SDK cache stats after CLI rebuild");
+    assert!(
+        stats.callgraph_sidecar_exists && stats.callgraph_sidecar_bytes > 0,
+        "CLI cache rebuild should write the callgraph sidecar visible to SDK: {stats:#?}"
+    );
+    assert!(
+        stats.idg_sidecar_exists && stats.idg_sidecar_bytes > 0,
+        "CLI cache rebuild should write the IDG sidecar visible to SDK: {stats:#?}"
+    );
+    assert!(
+        !stats.dataflow_sidecar_exists && !stats.dataflow_factstore_sidecar_exists,
+        "CLI cache rebuild should not run full dataflow prewarm: {stats:#?}"
+    );
+    assert!(
+        !stats.export_sidecar_exists,
+        "CLI cache rebuild should warm export only with --export: {stats:#?}"
+    );
+    assert_json_eq(
+        "cache stats after CLI rebuild",
+        run_cli(&["cache", "stats", root_arg, "--format", "json"]),
+        serde_json::to_value(&stats).expect("cache stats json"),
+    );
+
+    run_cli_text(&["cache", "clear", root_arg]);
+    let stats = bonsai
+        .cache(&root)
+        .stats()
+        .expect("SDK cache stats after CLI clear");
+    assert!(
+        !stats.bonsai_dir_exists,
+        "CLI cache clear should remove the SDK-visible .bonsai directory: {stats:#?}"
+    );
+    assert_json_eq(
+        "cache stats after CLI clear",
+        run_cli(&["cache", "stats", root_arg, "--format", "json"]),
+        serde_json::to_value(&stats).expect("cache stats json"),
+    );
+
+    let stats = bonsai
+        .rebuild_structural_cache(&root, true)
+        .expect("SDK structural cache rebuild with export");
+    assert!(
+        stats.callgraph_sidecar_exists && stats.idg_sidecar_exists && stats.export_sidecar_exists,
+        "SDK rebuild with export should write the bounded sidecars CLI reports: {stats:#?}"
+    );
+    assert!(
+        !stats.dataflow_sidecar_exists && !stats.dataflow_factstore_sidecar_exists,
+        "SDK structural rebuild should match CLI rebuild and avoid full dataflow prewarm: {stats:#?}"
+    );
+    assert_json_eq(
+        "cache stats after SDK rebuild",
+        run_cli(&["cache", "stats", root_arg, "--format", "json"]),
+        serde_json::to_value(stats).expect("cache stats json"),
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -902,6 +1139,17 @@ fn browse_fact_commands_cli_json_match_sdk_for_every_language() {
                     .expect("calls json"),
             ),
             (
+                "entrypoints",
+                vec!["entrypoints", ws_arg, "--format", "json", "--all"],
+                serde_json::to_value(
+                    project
+                        .browse()
+                        .entrypoints(Default::default())
+                        .expect("sdk entrypoints"),
+                )
+                .expect("entrypoints json"),
+            ),
+            (
                 "imports",
                 vec!["imports", ws_arg, "--format", "json", "--all"],
                 serde_json::to_value(project.browse().imports(Default::default()).expect("sdk imports"))
@@ -935,6 +1183,17 @@ fn browse_fact_commands_cli_json_match_sdk_for_every_language() {
                 vec!["args", ws_arg, "--format", "json", "--all"],
                 serde_json::to_value(project.browse().args(Default::default()).expect("sdk args"))
                     .expect("args json"),
+            ),
+            (
+                "operations",
+                vec!["operations", ws_arg, "--format", "json", "--all"],
+                serde_json::to_value(
+                    project
+                        .browse()
+                        .operations(Default::default())
+                        .expect("sdk operations"),
+                )
+                .expect("operations json"),
             ),
             (
                 "classes",
@@ -988,6 +1247,417 @@ fn browse_fact_commands_cli_json_match_sdk_for_every_language() {
 }
 
 #[test]
+fn navigation_cli_json_matches_sdk_facade() {
+    let project = security_project();
+    let workspace = "examples/python/micro";
+
+    assert_json_eq(
+        "python semantic tree",
+        run_cli(&[
+            "tree",
+            workspace,
+            "--rules-dir",
+            "security-patterns",
+            "--all",
+            "--format",
+            "json",
+        ]),
+        serde_json::to_value(
+            project
+                .browse()
+                .tree(bonsai_sdk::TreeFilters {
+                    limit: 0,
+                    max_finding_ids_per_file: Some(0),
+                    max_flow_ids_per_file: Some(0),
+                    max_cross_file_edges_per_file: Some(0),
+                    ..Default::default()
+                })
+                .expect("sdk tree"),
+        )
+        .expect("tree json"),
+    );
+
+    assert_json_eq(
+        "python read-file",
+        run_cli(&[
+            "read-file",
+            workspace,
+            "gateway.py",
+            "--rules-dir",
+            "security-patterns",
+            "--all",
+            "--format",
+            "json",
+        ]),
+        serde_json::to_value(
+            project
+                .browse()
+                .read_file(bonsai_sdk::ReadFileFilters {
+                    path: "gateway.py",
+                    max_inlined_bodies: Some(0),
+                    ..Default::default()
+                })
+                .expect("sdk read-file"),
+        )
+        .expect("read-file json"),
+    );
+}
+
+fn inspect_decl_flow_ids(value: &Value, target: &str) -> BTreeSet<String> {
+    value
+        .get("decl_hits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|hit| hit.get("symbol").and_then(Value::as_str) == Some(target))
+        .flat_map(|hit| hit.get("flows").and_then(Value::as_array).into_iter().flatten())
+        .filter_map(|flow| flow.get("flow_id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+fn inspect_decl_group_ids(value: &Value, target: &str) -> BTreeSet<String> {
+    value
+        .get("decl_hits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|hit| hit.get("symbol").and_then(Value::as_str) == Some(target))
+        .flat_map(|hit| hit.get("groups").and_then(Value::as_array).into_iter().flatten())
+        .filter_map(|group| group.get("group_id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn inspect_structural_flow_ids_match_sdk_facade() {
+    let project = basic_project_for_lang("python");
+    let workspace = "examples/python/micro";
+    let target = "run_admin_command";
+    let cli = run_cli(&[
+        "inspect", workspace, "--query", target, "--format", "json", "--all",
+    ]);
+    let sdk_targets = project
+        .inspect()
+        .chains(bonsai_sdk::InspectQuery {
+            pattern: Some(target),
+            max_chains: usize::MAX,
+            max_probes: usize::MAX,
+            ..Default::default()
+        })
+        .expect("sdk inspect chains");
+    let sdk_target = sdk_targets
+        .iter()
+        .find(|item| item.target == target)
+        .unwrap_or_else(|| panic!("SDK inspect target `{target}` missing: {sdk_targets:#?}"));
+    let sdk_flow_ids: BTreeSet<String> = sdk_target
+        .chains
+        .iter()
+        .map(|chain| chain.flow_id.clone())
+        .collect();
+    let sdk_group_ids: BTreeSet<String> = sdk_target
+        .groups
+        .iter()
+        .map(|group| group.group_id.clone())
+        .collect();
+
+    assert_eq!(
+        inspect_decl_flow_ids(&cli, target),
+        sdk_flow_ids,
+        "CLI inspect structural flow ids must match SDK inspect chains:\n{cli:#}"
+    );
+    assert_eq!(
+        inspect_decl_group_ids(&cli, target),
+        sdk_group_ids,
+        "CLI inspect grouped flow ids must match SDK inspect groups:\n{cli:#}"
+    );
+}
+
+#[test]
+fn show_structural_ids_roundtrip_through_cli_and_sdk() {
+    let project = security_project();
+    let workspace = "examples/python/micro";
+    let edge = project
+        .dump()
+        .edges(Default::default())
+        .into_iter()
+        .next()
+        .expect("fixture should emit at least one edge");
+    match project
+        .show()
+        .by_id(&edge.edge_id, Default::default())
+        .expect("sdk show E:")
+    {
+        bonsai_sdk::ShowOutcome::Edge(row) => assert_eq!(row.edge_id, edge.edge_id),
+        other => panic!("expected SDK Edge outcome, got {other:?}"),
+    }
+    let cli_edge = run_cli(&["show", workspace, &edge.edge_id, "--format", "json", "--all"]);
+    assert!(
+        json_contains_string_field(&cli_edge, "edge_id", &edge.edge_id),
+        "CLI show E: JSON should contain reopened edge id {}; got:\n{cli_edge:#}",
+        edge.edge_id
+    );
+
+    let ast_root = match project.dump().ast(bonsai_sdk::AstFilters {
+        function: Some("handle_request"),
+        max_depth: Some(0),
+        ..Default::default()
+    }) {
+        bonsai_sdk::AstOutcome::Dumps(mut dumps) => dumps.pop().expect("AST dump"),
+        bonsai_sdk::AstOutcome::NodeIdNotFound => panic!("function AST should exist"),
+    };
+    let node_id = ast_root.root.node_id.clone();
+    match project
+        .show()
+        .by_id(
+            &node_id,
+            bonsai_sdk::ShowOptions {
+                ast_function: Some("handle_request"),
+                ast_max_depth: Some(0),
+                ..Default::default()
+            },
+        )
+        .expect("sdk show N:")
+    {
+        bonsai_sdk::ShowOutcome::AstNode(row) => assert_eq!(row.root.node_id, node_id),
+        other => panic!("expected SDK AstNode outcome, got {other:?}"),
+    }
+    let cli_node = run_cli(&["show", workspace, &node_id, "--format", "json", "--all"]);
+    assert!(
+        json_contains_string_field(&cli_node, "node_id", &node_id),
+        "CLI show N: JSON should contain reopened node id {node_id}; got:\n{cli_node:#}"
+    );
+
+    let candidate_id = match project.dump().resolve("handle_request", Default::default()) {
+        bonsai_sdk::ResolveOutcome::Trace(trace) => trace
+            .candidates
+            .first()
+            .expect("resolver candidate")
+            .candidate_id
+            .clone(),
+        other => panic!("expected resolver trace, got {other:?}"),
+    };
+    match project
+        .show()
+        .by_id(
+            &candidate_id,
+            bonsai_sdk::ShowOptions {
+                query: Some("handle_request"),
+                ..Default::default()
+            },
+        )
+        .expect("sdk show R:")
+    {
+        bonsai_sdk::ShowOutcome::ResolverCandidate(trace) => {
+            assert_eq!(trace.candidates.len(), 1);
+            assert_eq!(trace.candidates[0].candidate_id, candidate_id);
+        }
+        other => panic!("expected SDK ResolverCandidate outcome, got {other:?}"),
+    }
+    let cli_candidate = run_cli(&[
+        "show",
+        workspace,
+        &candidate_id,
+        "--query",
+        "handle_request",
+        "--format",
+        "json",
+    ]);
+    assert!(
+        json_contains_string_field(&cli_candidate, "candidate_id", &candidate_id),
+        "CLI show R: JSON should contain reopened candidate id {candidate_id}; got:\n{cli_candidate:#}"
+    );
+
+    let targets = project
+        .inspect()
+        .chains(bonsai_sdk::InspectQuery {
+            pattern: Some("handle_request"),
+            max_chains: usize::MAX,
+            max_probes: usize::MAX,
+            ..Default::default()
+        })
+        .expect("sdk inspect chains");
+    let target = targets
+        .iter()
+        .find(|target| !target.chains.is_empty() && !target.groups.is_empty())
+        .expect("fixture should emit inspect chains and groups");
+
+    let flow_id = target.chains[0].flow_id.clone();
+    match project
+        .show()
+        .by_id(&flow_id, Default::default())
+        .expect("sdk show F:")
+    {
+        bonsai_sdk::ShowOutcome::InspectFlow(flow) => {
+            assert_eq!(flow.flow_id, flow_id);
+            assert!(flow
+                .matches
+                .iter()
+                .any(|matched| matched.chain.flow_id == flow_id));
+        }
+        other => panic!("expected SDK InspectFlow outcome, got {other:?}"),
+    }
+    let cli_flow = run_cli(&["show", workspace, &flow_id, "--format", "json", "--all"]);
+    assert!(
+        json_contains_string_field(&cli_flow, "flow_id", &flow_id),
+        "CLI show F: JSON should contain reopened flow id {flow_id}; got:\n{cli_flow:#}"
+    );
+
+    let group = &target.groups[0];
+    let group_id = group.group_id.clone();
+    let expected_member = group
+        .member_flow_ids
+        .first()
+        .expect("group should have member flow ids")
+        .clone();
+    match project
+        .show()
+        .by_id(&group_id, Default::default())
+        .expect("sdk show G:")
+    {
+        bonsai_sdk::ShowOutcome::InspectFlowGroup(group) => {
+            assert_eq!(group.group_id, group_id);
+            assert!(group.matches.iter().any(|matched| {
+                matched.group.group_id == group_id
+                    && matched
+                        .chains
+                        .iter()
+                        .any(|chain| chain.flow_id == expected_member)
+            }));
+        }
+        other => panic!("expected SDK InspectFlowGroup outcome, got {other:?}"),
+    }
+    let cli_group = run_cli(&["show", workspace, &group_id, "--format", "json", "--all"]);
+    assert!(
+        json_contains_string_field(&cli_group, "group_id", &group_id),
+        "CLI show G: JSON should contain reopened group id {group_id}; got:\n{cli_group:#}"
+    );
+    assert!(
+        json_contains_string_field(&cli_group, "flow_id", &expected_member),
+        "CLI show G: JSON should contain member flow id {expected_member}; got:\n{cli_group:#}"
+    );
+
+    let taint = match project.dump().taint(bonsai_sdk::TaintFilters {
+        source: "update_user",
+        seeds: vec!["token".into(), "action".into()],
+        ..Default::default()
+    }) {
+        bonsai_sdk::TaintOutcome::Report(report) => report,
+        other => panic!("expected taint report, got {other:?}"),
+    };
+    let taint_id = taint
+        .records
+        .first()
+        .expect("fixture should emit a T: propagation id")
+        .taint_id
+        .clone();
+    match project
+        .show()
+        .by_id(
+            &taint_id,
+            bonsai_sdk::ShowOptions {
+                taint_source: Some("update_user"),
+                taint_seeds: &["token", "action"],
+                ..Default::default()
+            },
+        )
+        .expect("sdk show T:")
+    {
+        bonsai_sdk::ShowOutcome::TaintPropagation(report) => {
+            assert_eq!(report.records.len(), 1);
+            assert_eq!(report.records[0].taint_id, taint_id);
+        }
+        other => panic!("expected SDK TaintPropagation outcome, got {other:?}"),
+    }
+    let cli_taint = run_cli(&[
+        "show",
+        workspace,
+        &taint_id,
+        "--taint-source",
+        "update_user",
+        "--taint-seed",
+        "token",
+        "--taint-seed",
+        "action",
+        "--format",
+        "json",
+        "--all",
+    ]);
+    assert!(
+        json_contains_string_field(&cli_taint, "taint_id", &taint_id),
+        "CLI show T: JSON should contain reopened taint id {taint_id}; got:\n{cli_taint:#}"
+    );
+
+    let security = project
+        .security()
+        .taint_analysis(bonsai_sdk::TaintAnalysisOptions {
+            include_pattern_only: true,
+            show_sanitized: true,
+            ..Default::default()
+        })
+        .expect("security findings");
+    let finding_id = security
+        .findings
+        .first()
+        .expect("fixture should emit at least one security finding")
+        .finding
+        .finding_id
+        .clone();
+    let security_group_id = security
+        .findings
+        .first()
+        .and_then(|finding| finding.finding.group_id.clone())
+        .expect("fixture should emit a security group id");
+    match project
+        .show()
+        .by_id(&finding_id, Default::default())
+        .expect("sdk show S:")
+    {
+        bonsai_sdk::ShowOutcome::SecurityFinding(finding) => {
+            assert_eq!(finding.finding.finding_id, finding_id);
+        }
+        other => panic!("expected SDK SecurityFinding outcome, got {other:?}"),
+    }
+    let cli_finding = run_cli(&[
+        "show",
+        workspace,
+        &finding_id,
+        "--rules-dir",
+        "security-patterns",
+        "--format",
+        "json",
+        "--all",
+    ]);
+    assert!(
+        json_contains_string_field(&cli_finding, "finding_id", &finding_id),
+        "CLI show S: JSON should contain reopened finding id {finding_id}; got:\n{cli_finding:#}"
+    );
+
+    match project
+        .show()
+        .by_id(&security_group_id, Default::default())
+        .expect("sdk show security G:")
+    {
+        bonsai_sdk::ShowOutcome::SecurityFindingGroup(group) => {
+            assert_eq!(group.group_id, security_group_id.as_str());
+        }
+        other => panic!("expected SDK SecurityFindingGroup outcome, got {other:?}"),
+    }
+    let cli_group = run_cli(&[
+        "show",
+        workspace,
+        &security_group_id,
+        "--rules-dir",
+        "security-patterns",
+        "--format",
+        "json",
+        "--all",
+    ]);
+    assert!(
+        json_contains_string_field(&cli_group, "group_id", &security_group_id),
+        "CLI show G: JSON should contain reopened security group id {security_group_id}; got:\n{cli_group:#}"
+    );
+}
+
+#[test]
 fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
     for &lang in LANGS {
         let project = security_project_for_lang(lang);
@@ -1028,6 +1698,29 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
             &format!("{lang} dump-edges"),
             run_cli(&["dump-edges", ws_arg, "--format", "json", "--all"]),
             serde_json::to_value(project.dump().edges(Default::default())).expect("edges json"),
+        );
+        assert_json_rows_eq(
+            &format!("{lang} dump-resolution"),
+            run_cli(&["dump-resolution", ws_arg, "--format", "json", "--all"]),
+            serde_json::to_value(project.dump().resolution_coverage(Default::default()))
+                .expect("resolution coverage json"),
+        );
+        assert_json_eq(
+            &format!("{lang} path"),
+            run_cli(&[
+                "path", ws_arg, "--from", entry, "--to", "verify", "--format", "json",
+            ]),
+            serde_json::to_value(
+                project
+                    .browse()
+                    .paths(bonsai_sdk::PathFilters {
+                        from: entry,
+                        to: "verify",
+                        ..Default::default()
+                    })
+                    .expect("sdk path"),
+            )
+            .expect("path json"),
         );
         let ast = match project.dump().ast(bonsai_sdk::AstFilters {
             function: Some(entry),

@@ -751,6 +751,13 @@ fn build_callee_endpoints(
     out
 }
 
+fn callee_needs_synthetic_receiver_field_forwarding(endpoints: &CalleeEndpoints) -> bool {
+    !endpoints.receiver_consumer_nodes.is_empty()
+        || !endpoints.receiver_field_bases.is_empty()
+        || !endpoints.implicit_receiver_bases.is_empty()
+        || !endpoints.return_field_projections.is_empty()
+}
+
 fn collect_yield_value_nodes(segment: &IdgSegment) -> AHashSet<NodeId> {
     let mut out = AHashSet::new();
     for edge in &segment.edges {
@@ -783,7 +790,7 @@ fn collect_receiver_consumer_nodes(
                 push_call_arg_node(segment, func, site.site, u8::MAX, &mut out);
             }
         }
-        if site.args_count == 0 && site.receiver.is_none() && !site.receiver_types.is_empty() {
+        if site.explicit_args_count == 0 && site.receiver.is_none() && !site.receiver_types.is_empty() {
             push_call_arg_node(segment, func, site.site, 0, &mut out);
         }
     }
@@ -1201,7 +1208,9 @@ fn stitch_call_site(
                     }
                 }
             }
-            if endpoints.receiver_param_index.is_none() {
+            if endpoints.receiver_param_index.is_none()
+                && callee_needs_synthetic_receiver_field_forwarding(endpoints)
+            {
                 if let Some(receiver) = site
                     .receiver
                     .as_deref()
@@ -2164,9 +2173,12 @@ fn enqueue_field_write(
     key: FieldPlaceKey,
     hit: FieldPlaceHit,
     pending: &mut VecDeque<PendingFieldWrite>,
-    _enqueued: &mut AHashSet<PendingFieldWrite>,
+    enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
-    pending.push_back(PendingFieldWrite { key, hit });
+    let pending_write = PendingFieldWrite { key, hit };
+    if enqueued.insert(pending_write.clone()) {
+        pending.push_back(pending_write);
+    }
 }
 
 fn enqueue_recorded_field_writes(
@@ -3424,7 +3436,8 @@ fn stitch_debug_enabled() -> bool {
 
 fn stitch_debug_log(args: std::fmt::Arguments<'_>) {
     if stitch_debug_enabled() {
-        eprintln!("[idg-build] {args}");
+        let message = bonsai_diagnostics::debug::render_message(&args.to_string());
+        eprintln!("[idg-build] {message}");
     }
 }
 

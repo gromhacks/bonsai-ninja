@@ -25,7 +25,7 @@ bonsai-ninja indexes a source tree and lets you browse symbols, trace
 cross-file execution, inspect source-backed flows, and run rulepack-driven
 security taint analysis across 21 languages.";
 
-const MAX_HELP_DESCRIPTION_LINES: usize = 2;
+const MAX_HELP_DESCRIPTION_LINES: usize = 8;
 const MAX_SUBCOMMAND_EXAMPLE_COMMANDS: usize = 3;
 
 /// Apply the active theme to the root `Cli` long-about prose. Runs at
@@ -47,6 +47,8 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("inspect", "Find hits and source-backed flows"),
             ("trace", "Expand one entry point's call tree"),
+            ("path", "Ranked call paths"),
+            ("slice", "Backward symbol slice"),
             ("show", "Open an F:/T:/E:/S: id"),
         ],
     ),
@@ -54,6 +56,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Workspace",
         &[
             ("index", "Parse a workspace and print stats"),
+            ("context", "Workspace semantic context"),
             ("export", "Export the graph as JSON"),
         ],
     ),
@@ -62,7 +65,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("cache stats", "Show cache config and sidecar size"),
             ("cache clear", "Delete `.bonsai/` sidecars"),
-            ("cache rebuild", "Rebuild the dataflow sidecar"),
+            ("cache rebuild", "Rebuild semantic structural sidecars"),
         ],
     ),
     (
@@ -76,6 +79,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("strings", "String literals"),
             ("comments", "Comments"),
             ("args", "Call arguments"),
+            ("operations", "Use-site operations"),
             ("classes", "Classes and structs"),
             ("refs", "Symbol references"),
             ("search", "Fuzzy search"),
@@ -108,6 +112,7 @@ pub(crate) const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("dump-cfg", "CFG for one function"),
             ("dump-callgraph", "Caller/callee counts"),
             ("dump-edges", "Resolved call edges"),
+            ("dump-resolution", "Resolution coverage"),
             ("dump-resolve", "Resolver stages"),
             ("dump-taint", "Taint propagation"),
             ("diagnostics", "Adapter diagnostics"),
@@ -739,35 +744,11 @@ fn find_inline_help_split(body: &str) -> Option<usize> {
 }
 
 fn compact_description_line(line: &str) -> String {
-    const MAX_CHARS: usize = 112;
+    const MAX_CHARS: usize = 100;
 
     let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
     let body = line.trim_start();
-    if body.chars().count() <= MAX_CHARS {
-        return line.to_string();
-    }
-    let compact_body = if let Some(sentence_end) = first_sentence_end(body) {
-        body[..sentence_end].trim_end()
-    } else {
-        body
-    };
-    if compact_body.chars().count() <= MAX_CHARS {
-        return format!("{leading}{compact_body}");
-    }
-
-    let mut end = 0usize;
-    for (count, (idx, ch)) in compact_body.char_indices().enumerate() {
-        if count >= MAX_CHARS {
-            break;
-        }
-        end = idx + ch.len_utf8();
-    }
-    if let Some(word_boundary) = compact_body[..end].rfind(char::is_whitespace) {
-        end = word_boundary;
-    }
-    let truncated =
-        compact_body[..end].trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == ':');
-    format!("{leading}{truncated}...")
+    wrap_words_with_prefix(body, MAX_CHARS, &leading)
 }
 
 fn wrap_words(text: &str, width: usize) -> String {
@@ -788,22 +769,34 @@ fn wrap_words(text: &str, width: usize) -> String {
     out
 }
 
-fn first_sentence_end(body: &str) -> Option<usize> {
-    let bytes = body.as_bytes();
-    for (idx, ch) in body.char_indices() {
-        if ch != '.' && ch != '!' && ch != '?' {
+fn wrap_words_with_prefix(text: &str, width: usize, prefix: &str) -> String {
+    let prefix_len = prefix.chars().count();
+    let body_width = width.saturating_sub(prefix_len).max(24);
+    let mut out = String::new();
+    let mut line_len = 0usize;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if line_len == 0 {
+            out.push_str(prefix);
+            out.push_str(word);
+            line_len = word_len;
             continue;
         }
-        let next = idx + ch.len_utf8();
-        let sentence = &body[..next];
-        if sentence.ends_with("e.g.") || sentence.ends_with("i.e.") {
-            continue;
-        }
-        if next >= body.len() || bytes.get(next).is_some_and(u8::is_ascii_whitespace) {
-            return Some(next);
+        if line_len + 1 + word_len > body_width {
+            out.push('\n');
+            out.push_str(prefix);
+            out.push_str(word);
+            line_len = word_len;
+        } else {
+            out.push(' ');
+            out.push_str(word);
+            line_len += 1 + word_len;
         }
     }
-    None
+    if out.is_empty() {
+        out.push_str(prefix);
+    }
+    out
 }
 
 /// `COMMANDS:` header detector. Matches either the plain string or a

@@ -5,12 +5,14 @@
 //! CLI-only helpers, so these tests pin the public workspace API.
 
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
-use bonsai_workspace::{dataflow::DataFlowCache, Workspace, WorkspaceOpenOptions};
+use bonsai_workspace::{dataflow::DataFlowCache, idg_sidecar_path, Workspace, WorkspaceOpenOptions};
 use std::{
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static IDG_SIDECAR_LIMIT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn python_registry() -> Arc<LanguageRegistry> {
     let registry = Arc::new(LanguageRegistry::new());
@@ -69,6 +71,56 @@ fn sdk_index_is_structural_by_default() {
 }
 
 #[test]
+fn workspace_root_under_generated_ancestor_still_indexes_root_sources() {
+    let outer = tempdir_for_test("bonsai-root-under-generated-ancestor");
+    let root = outer.join("target").join("chosen-workspace");
+    std::fs::create_dir_all(root.join("target")).expect("create nested target fixture");
+    std::fs::write(root.join("app.py"), "def handle():\n    return 1\n").expect("write root source");
+    std::fs::write(
+        root.join("target").join("generated.py"),
+        "def generated():\n    return 2\n",
+    )
+    .expect("write nested generated source");
+
+    let ws = Workspace::index(&root, python_registry()).expect("index workspace under target ancestor");
+    assert_eq!(
+        ws.stats().files,
+        1,
+        "the selected workspace root must be honored even when an ancestor is named target"
+    );
+    let indexed_paths = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .filter_map(|file| {
+            ws.vfs()
+                .path(file)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        indexed_paths.iter().any(|path| path.ends_with("app.py")),
+        "root source should be indexed: {indexed_paths:#?}"
+    );
+    assert!(
+        indexed_paths.iter().all(|path| !path.ends_with("generated.py")),
+        "generated subdirectory inside the workspace should still be skipped: {indexed_paths:#?}"
+    );
+
+    let fingerprints = ws
+        .source_file_fingerprints(&root)
+        .expect("fingerprint workspace under target ancestor");
+    assert_eq!(
+        fingerprints.len(),
+        1,
+        "fingerprinting must use the same root-relative generated-path policy"
+    );
+
+    let _ = std::fs::remove_dir_all(outer);
+}
+
+#[test]
 fn sdk_full_prewarm_writes_dataflow_sidecar() {
     let root = tempdir_for_test("bonsai-sdk-full-prewarm");
     write_fixture(&root);
@@ -85,6 +137,37 @@ fn sdk_full_prewarm_writes_dataflow_sidecar() {
         "explicit full prewarm should persist the reusable dataflow sidecar"
     );
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn sdk_full_prewarm_skips_global_idg_when_sidecar_is_disabled() {
+    let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
+    let old_limit = std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT").ok();
+    std::env::set_var("BONSAI_IDG_SIDECAR_FILE_LIMIT", "0");
+
+    let root = tempdir_for_test("bonsai-sdk-full-prewarm-no-idg-sidecar");
+    write_fixture(&root);
+
+    let ws = Workspace::open_with_options(&root, python_registry(), WorkspaceOpenOptions::full_prewarm())
+        .expect("full prewarm workspace with IDG sidecar disabled");
+    assert!(
+        ws.dataflow().is_prewarmed(),
+        "full prewarm should still compute reusable dataflow facts"
+    );
+    assert!(
+        ws.db().idg_service().is_none(),
+        "full prewarm must not build an unsavable workspace-global IDG"
+    );
+    assert!(
+        !idg_sidecar_path(&root).exists(),
+        "IDG sidecar should not be written when the sidecar gate disables it"
+    );
+
+    match old_limit {
+        Some(value) => std::env::set_var("BONSAI_IDG_SIDECAR_FILE_LIMIT", value),
+        None => std::env::remove_var("BONSAI_IDG_SIDECAR_FILE_LIMIT"),
+    }
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -4,7 +4,7 @@
 //! exercise sanitizer credit + non-crediting tag classification.
 
 use super::*;
-use crate::finding::FindingMatch;
+use crate::finding::{FindingMatch, TaintedArgInfo};
 use crate::loader::LanguagePack;
 use bonsai_taint::TaintedCallKind;
 
@@ -559,6 +559,64 @@ fn path_filter_keeps_file_suffix_and_plain_substring_filters() {
 }
 
 #[test]
+fn workspace_relative_path_filters_ignore_generated_ancestors() {
+    let root = std::path::Path::new("/repo/target/chosen-workspace");
+    assert!(
+        !path_filter_matches_with_root(Some(root), "/repo/target/chosen-workspace/app.py", "target/"),
+        "workspace-relative filters must not exclude a project merely because an ancestor is named target"
+    );
+    assert!(
+        path_filter_matches_with_root(
+            Some(root),
+            "/repo/target/chosen-workspace/target/generated.py",
+            "target/"
+        ),
+        "workspace-relative filters must still exclude matching paths inside the selected project"
+    );
+}
+
+#[test]
+fn workspace_relative_test_filters_ignore_test_ancestors() {
+    let root = std::path::Path::new("/repo/tests/chosen-workspace");
+    assert!(
+        !path_is_excluded_with_root(Some(root), "/repo/tests/chosen-workspace/app.py", &[], true),
+        "--exclude-tests must not classify a selected workspace as tests because a parent is named tests"
+    );
+    assert!(
+        path_is_excluded_with_root(
+            Some(root),
+            "/repo/tests/chosen-workspace/tests/test_app.py",
+            &[],
+            true
+        ),
+        "--exclude-tests must still apply to test paths inside the selected workspace"
+    );
+}
+
+#[test]
+fn workspace_relative_from_test_flag_ignores_test_ancestors() {
+    let root = std::path::Path::new("/repo/tests/chosen-workspace");
+    assert!(!path_is_test_file_with_root(
+        Some(root),
+        "/repo/tests/chosen-workspace/app.py"
+    ));
+    assert!(path_is_test_file_with_root(
+        Some(root),
+        "/repo/tests/chosen-workspace/tests/test_app.py"
+    ));
+}
+
+#[test]
+fn explicit_absolute_path_filters_still_match_absolute_paths() {
+    let root = std::path::Path::new("/repo/target/chosen-workspace");
+    assert!(path_filter_matches_with_root(
+        Some(root),
+        "/repo/target/chosen-workspace/app.py",
+        "/repo/target/chosen-workspace/app.py"
+    ));
+}
+
+#[test]
 fn source_sink_dedup_uses_byte_span_not_display_position() {
     let first = rule_match_with_span(10, 20);
     let second = rule_match_with_span(30, 40);
@@ -693,6 +751,14 @@ fn precision_filter_keeps_only_requested_confidence() {
     assert!(finding_precision_within("narrowed", Precision::Narrowed));
     assert!(!finding_precision_within("over-approximate", Precision::Narrowed));
     assert!(!finding_precision_within("unknown", Precision::Narrowed));
+    assert!(
+        !finding_precision_within("over-approximate", Precision::Unknown),
+        "diagnostic-only precision must never become public finding evidence"
+    );
+    assert!(
+        !finding_precision_within("unknown", Precision::Unknown),
+        "unknown precision must remain diagnostic-only even under a broad caller cap"
+    );
 }
 
 fn tainted_edge(
@@ -909,6 +975,109 @@ fn group_id_hashes_shared_tail_not_full_flow_chain() {
         &group_id_for_chain_names(&first)[2..],
         "flow and group IDs must not alias when the shared tail differs from the full chain",
     );
+}
+
+fn finding_match_for_grouping(rule_id: &str, line: u32, text: &str) -> FindingMatch {
+    FindingMatch {
+        rule_id: rule_id.to_string(),
+        file: "app.py".to_string(),
+        line,
+        column: 1,
+        text: text.to_string(),
+        enclosing_fn: Some("handle".to_string()),
+        tag: Some("http-input".to_string()),
+        severity: None,
+        category: Some("http-input".to_string()),
+        trust: Some("remote".to_string()),
+        payload_types: vec!["query".to_string()],
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    }
+}
+
+fn sink_match_for_grouping() -> FindingMatch {
+    let mut sink = finding_match_for_grouping("python.cmdi.os_system", 50, "os.system");
+    sink.file = "sink.py".to_string();
+    sink.enclosing_fn = Some("run".to_string());
+    sink.tag = Some("command-injection".to_string());
+    sink.category = Some("process-exec".to_string());
+    sink.severity = Some(Severity::Critical);
+    sink.trust = None;
+    sink.payload_types.clear();
+    sink.tainted_args = vec![TaintedArgInfo {
+        index: 0,
+        value_text: "cmd".to_string(),
+    }];
+    sink
+}
+
+fn finding_with_flow_for_grouping(
+    finding_id: &str,
+    source_line: u32,
+    source_value: &str,
+    flow_id: &str,
+) -> FindingWithChain {
+    let source = finding_match_for_grouping("python.flask.request_args_get", source_line, "request.args.get");
+    let sink = sink_match_for_grouping();
+    let taint_path = vec![TaintPropagationStep {
+        caller: "handle".to_string(),
+        callee: "run".to_string(),
+        file: "app.py".to_string(),
+        line: 20,
+        column: 5,
+        tainted_args: vec![TaintPropagationArg {
+            index: 0,
+            value_text: source_value.to_string(),
+            param_name: "cmd".to_string(),
+        }],
+    }];
+    FindingWithChain {
+        finding: Finding {
+            finding_id: finding_id.to_string(),
+            language: "python".to_string(),
+            source,
+            sink,
+            sanitizers_seen: Vec::new(),
+            group_id: Some("G:sharedtail".to_string()),
+            representative_flow_id: Some(flow_id.to_string()),
+            analysis_complete: true,
+            analysis_incomplete_reasons: Vec::new(),
+            chain_display: vec!["handle".to_string(), "run".to_string()],
+            taint_path,
+            hops: Vec::new(),
+            tag: Some("command-injection".to_string()),
+            severity: Some(Severity::Critical),
+            precision: "narrowed".to_string(),
+            cwe: vec!["CWE-78".to_string()],
+            owasp: Vec::new(),
+            status: FindingStatus::Unsanitized,
+            from_test: false,
+        },
+        chain_funcs: vec![FuncId::new(1), FuncId::new(2)],
+    }
+}
+
+#[test]
+fn combined_findings_do_not_merge_distinct_representative_flows() {
+    let groups = combine_findings_by_source_flow(vec![
+        finding_with_flow_for_grouping("S:token", 11, "token", "F:token-flow"),
+        finding_with_flow_for_grouping("S:action", 12, "action", "F:action-flow"),
+    ]);
+
+    assert_eq!(
+        groups.len(),
+        2,
+        "distinct representative flow ids must not collapse into one mixed source/path finding"
+    );
+    for group in groups {
+        let source_line = group.finding.source.line;
+        let propagated = group.finding.taint_path[0].tainted_args[0].value_text.as_str();
+        match source_line {
+            11 => assert_eq!(propagated, "token"),
+            12 => assert_eq!(propagated, "action"),
+            other => panic!("unexpected source line {other}"),
+        }
+    }
 }
 
 #[test]

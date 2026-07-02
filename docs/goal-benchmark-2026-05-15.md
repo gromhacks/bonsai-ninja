@@ -2,6 +2,11 @@
 
 Benchmark run for `docs/goal.md` using `./target/release/bonsai-ninja`.
 
+Historical note: this benchmark predates the later `index` contract change.
+At the time of these measurements, default `index <workspace>` was a
+structural parse/index pass. Current builds use plain `index` as the semantic
+sidecar warm-up path and expose the old cheap behavior as `--structural-only`.
+
 Full JSON reports:
 
 - `target/goal-benchmark-examples.json`
@@ -232,9 +237,9 @@ reports `analysis_complete: true`.
 
 ## Latest Examples Regression Check
 
-After making SDK/workspace default indexing structural and keeping
-semantic analysis explicit/on demand, the primary `examples/` target was
-rerun with:
+After making SDK/workspace default indexing structural in the May 2026
+benchmark branch and keeping semantic analysis explicit/on demand at that
+time, the primary `examples/` target was rerun with:
 
 ```shell
 python3 scripts/goal_benchmark.py \
@@ -708,12 +713,15 @@ Current release verification:
   process stayed silent for roughly 2.5 minutes and was terminated, so it is
   not counted as a passed test in this note.
 
-## Structural Index Regression Contract
+## Historical Structural Index Regression Contract
 
-Default `index <workspace>` remains a structural parse/index pass. Full
-workspace dataflow prewarm is available only through the explicit
-`--prewarm-dataflow` path; cache rebuild also stays structural and warms only
-bounded reusable artifacts such as the callgraph and IDG sidecars.
+At the time of this benchmark, default `index <workspace>` remained a
+structural parse/index pass. Current builds keep default `index` on that
+syntax/construct path and require `index --semantic` for whole-workspace
+semantic sidecar warm-up. The historical benchmark's full-workspace dataflow
+prewarm was available only through the explicit `--prewarm-dataflow` path;
+cache rebuild also stayed structural and warmed only bounded reusable artifacts
+such as the callgraph and IDG sidecars.
 
 Current release verification:
 
@@ -722,10 +730,10 @@ Current release verification:
 - `cargo build -q --release -p bonsai_cli`: passed.
 - Added `default_index_path_stays_structural_without_eager_dataflow_prewarm`
   in `crates/conformance/tests/architecture_invariants.rs`.
-- Source probe confirmed `cmd_index` routes default runs through
+- Historical source probe confirmed `cmd_index` routed default runs through
   `open_project_parse_only(root)?`, while `open_project_dataflow_prewarm`
-  requires the explicit `prewarm_dataflow` flag.
-- Source probe confirmed `WorkspaceOpenOptions::parse_only` has
+  required the explicit `prewarm_dataflow` flag.
+- Historical source probe confirmed `WorkspaceOpenOptions::parse_only` had
   `load_dataflow_sidecar=false`, `prewarm_dataflow=false`,
   `save_dataflow_sidecar=false`, `load_value_flow_sidecar=false`,
   `prewarm_value_flow=false`, and `prewarm_flow_ids=false`.
@@ -930,8 +938,8 @@ Cache evidence:
 - Warm/final cache: callgraph sidecar (`313,418` bytes) and IDG factstore
   (`7,550,514` bytes), `7,863,932` bytes total.
 - Warm speedups: callgraph `1.491x`, export `1.268x`, source-analysis
-  `1.285x`, taint-analysis `1.208x`; index is intentionally structural and
-  roughly unchanged (`0.987x`).
+  `1.285x`, taint-analysis `1.208x`; in this historical run, index was
+  intentionally structural and roughly unchanged (`0.987x`).
 
 ## Redis Benchmark
 
@@ -1029,8 +1037,8 @@ Cache evidence:
 - Warm/final cache: callgraph sidecar (`987,348` bytes) and IDG factstore
   (`42,151,515` bytes), `43,138,863` artifact bytes total.
 - Warm speedups: callgraph `1.770x`, export `2.198x`, source-analysis
-  `1.830x`, taint-analysis `1.213x`; index is structural and roughly
-  unchanged (`0.956x`).
+  `1.830x`, taint-analysis `1.213x`; in this historical run, index was
+  structural and roughly unchanged (`0.956x`).
 
 ## Post Semantic-Fix Verification
 
@@ -1095,8 +1103,8 @@ Cache evidence:
 - Warm/final cache: callgraph sidecar (`314,270` bytes) and IDG factstore
   (`7,586,457` bytes), `7,900,727` artifact bytes total.
 - Warm speedups: callgraph `1.453x`, export `1.261x`, source-analysis
-  `1.338x`, taint-analysis `1.231x`; index remains structural and roughly
-  unchanged (`1.013x`).
+  `1.338x`, taint-analysis `1.231x`; in this historical run, index remained
+  structural and roughly unchanged (`1.013x`).
 
 Current examples CLI smoke:
 
@@ -1349,12 +1357,12 @@ Mapping of `docs/goal.md` requirements to current evidence:
 | User-visible analysis facts are semantic; no name-only or unresolved fan-out is reported as accurate. | Public precision filters reject `over-approximate`/`unknown`; Redis and OWASP `dump-edges --all` are all `narrowed`; the post-fix OWASP `doPost -> equals` and `doPost -> getName` checks both return `0` rows; unsupported dynamic cells are explicitly deferred in `docs/TAINT_COVERAGE_MATRIX.md` instead of forced through unsafe broad matching. |
 | Partial, capped, timed-out, stale, or approximate analysis is not presented as complete. | Completion metadata audit reviewed remaining production `analysis_complete=true` sites; paged/security/inspect/trace/export/debug wrappers now surface incomplete reasons; examples/large export phase summaries report complete chain/propagation coverage with zero truncation. |
 | Flow, taint, source, security, export, and debug commands compute requested exact scope before rendering. | Examples, Redis, and OWASP `source-analysis`, `taint-analysis`, `export --all`, `dump-edges --all`, and `dump-taint` smokes completed with semantic precision and explicit completion metadata. |
-| Default `index <workspace>` is structural and fast, not an eager full-workspace taint solve. | `index examples`: `625` files, `0` cached CFGs, `0.631s`; `index crates`: previously measured `429` files, `0` cached CFGs, `1.59s`; direct original hang target no longer hangs. |
+| Historical May 2026 default `index <workspace>` was structural and fast, not an eager full-workspace taint solve. Current builds keep default `index` structural and use `index --semantic` for explicit sidecar warm-up. | Historical `index examples`: `625` files, `0` cached CFGs, `0.631s`; historical `index crates`: previously measured `429` files, `0` cached CFGs, `1.59s`; direct original hang target no longer hangs. |
 | Avoid duplicated work through reusable indexes/callgraphs/IDG/value-flow caches with correct invalidation. | Warm benchmarks show valid callgraph/IDG sidecars and speedups across examples, Redis, and OWASP; the latest Redis final cache is `42,500,615` bytes and the latest OWASP final cache is `44,015,907` bytes. |
 | Keep memory bounded and avoid retaining every full per-entry graph. | Current runs stay below guards: examples under `397 MB`, Redis under `816 MB`, OWASP under `853 MB`; Redis dense export uses compressed complete callgraph mode rather than materializing multi-GB path sets in memory. |
-| Expensive audit/export/prewarm work is explicit, observable, and exact. | Full `export --all` and benchmark harness capture phase summaries including chain mode, truncation counts, and propagation completeness; default index remains structural. |
+| Expensive audit/export/prewarm work is explicit, observable, and exact. | Full `export --all` and benchmark harness capture phase summaries including chain mode, truncation counts, and propagation completeness; at benchmark time, default index remained structural. |
 | Caches never determine correctness or hide stale facts. | Cache freshness invariant covers source, dependency metadata, matcher policy, rule/config, and pipeline versions; callgraph/dataflow/IDG/value-flow/taint/flow-id cache versions were bumped for the current semantic changes. |
-| Regression tests prove accuracy, cache behavior, and fast structural indexing. | Compile-time Rust coverage passes through `cargo check --tests` and `cargo test --no-run`; focused runtime regressions pass from a fresh target dir; after cleaning polluted `target/debug`, default-target test harnesses launch normally and `cargo test --workspace --no-fail-fast` passes, including rulepack conformance `28/28`, architecture invariants `45/45`, the 21-language CLI/security matrices, SARIF checks, doc tests, and cache/hot-reload coverage. |
+| Regression tests prove accuracy, cache behavior, and the cheap structural-only index path. | Compile-time Rust coverage passes through `cargo check --tests` and `cargo test --no-run`; focused runtime regressions pass from a fresh target dir; after cleaning polluted `target/debug`, default-target test harnesses launch normally and `cargo test --workspace --no-fail-fast` passes, including rulepack conformance `28/28`, architecture invariants `45/45`, the 21-language CLI/security matrices, SARIF checks, doc tests, and cache/hot-reload coverage. Current builds test `--structural-only` for the cheap path. |
 | Benchmarks cover `examples/`, Redis, and Java OWASP Benchmark with cold/warm time, RSS, cache, and finding counts. | Current examples, Redis, and OWASP sections above document cold/warm timings, RSS, row/finding counts, cache artifact bytes, and warm behavior, including the 2026-05-17 post-fix runs. |
 | Code remains scoped, deterministic, and professional. | `cargo fmt --all --check`, `git diff --check`, and focused `cargo clippy` pass; changes are confined to analysis semantics, tests, and documentation. |
 

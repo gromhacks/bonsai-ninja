@@ -231,6 +231,13 @@ fn flows_column_present_for_every_language_args() {
 }
 
 #[test]
+fn flows_column_present_for_every_language_operations() {
+    for &lang in LANGUAGES {
+        assert_flows_header(lang, "operations", &[]);
+    }
+}
+
+#[test]
 fn flows_column_present_for_every_language_classes() {
     for &lang in LANGUAGES {
         assert_flows_header(lang, "classes", &[]);
@@ -292,7 +299,16 @@ fn flows_flag_does_not_break_json_output() {
     for &lang in LANGUAGES {
         let Some(ws) = ws_for(lang) else { continue };
         let ws_str = ws.to_str().unwrap();
-        for &cmd in &["defs", "calls", "imports", "vars", "strings", "args", "classes"] {
+        for &cmd in &[
+            "defs",
+            "calls",
+            "imports",
+            "vars",
+            "strings",
+            "args",
+            "operations",
+            "classes",
+        ] {
             // JSON output should parse regardless of whether flows
             // is on or off — test both paths.
             for extra in &[vec!["--format", "json"], vec!["--no-flows", "--format", "json"]] {
@@ -606,6 +622,11 @@ fn strings_flows_column_populated() {
 #[test]
 fn args_flows_column_populated() {
     assert_browse_cmd_has_flow_ids("args", &[]);
+}
+
+#[test]
+fn operations_flows_column_populated() {
+    assert_browse_cmd_has_flow_ids("operations", &["--kind", "call"]);
 }
 
 #[test]

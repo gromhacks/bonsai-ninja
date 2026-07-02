@@ -397,8 +397,13 @@ fn validate_index_sorted_and_bounded(header: &Header, index_bytes: &[u8]) -> Fac
     for i in 0..count {
         let row = &index_bytes[i * INDEX_ENTRY_SIZE..(i + 1) * INDEX_ENTRY_SIZE];
         let entry = IndexEntry::from_bytes(row).ok_or(FactStoreError::BadIndexEntry { row: i })?;
-        if i > 0 && entry.key < prev_key {
-            return Err(FactStoreError::UnsortedIndex);
+        if i > 0 {
+            if entry.key < prev_key {
+                return Err(FactStoreError::UnsortedIndex);
+            }
+            if entry.key == prev_key {
+                return Err(FactStoreError::DuplicateKey(entry.key));
+            }
         }
         let payload_end = entry
             .payload_offset

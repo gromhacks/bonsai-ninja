@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace_adapter;
-use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, ResolvedCallGraph};
+use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCallGraph};
 use bonsai_common::{Precision, SymbolId};
 use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, ModulePath, Visibility};
 
@@ -84,6 +84,7 @@ fn resolved_graph(edges: impl IntoIterator<Item = (FuncId, FuncId, Span)>) -> Re
             span,
             kind: EdgeKind::Direct,
             precision: Precision::Narrowed,
+            provenance: EdgeProvenance::direct_symbol(),
         });
     }
     ResolvedCallGraph::from_call_graph(cg)

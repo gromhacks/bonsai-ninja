@@ -60,14 +60,45 @@ There is no CI database build step and no code upload. The release binary
 operates on your source tree and writes local cache state only when that
 helps performance.
 
-`bonsai-ninja index` is structural by default: it parses supported files,
-builds declaration/import indexes, and leaves exact dataflow work to the
-commands that need it. Query commands load valid persisted sidecars when
-present and compute missing facts on demand. For editor and agent
-workflows, `bonsai-ninja index --watch` stays running and hot-reloads
-saved file changes into the live workspace. Pass `--prewarm-dataflow`
-only when you intentionally want the legacy full-workspace dataflow
-sidecar rebuilt up front.
+`bonsai-ninja index` is the syntax/construct warm-up command: it parses
+supported files and builds declaration/import indexes without forcing an
+expensive whole-workspace semantic prewarm. Query commands still validate
+persisted sidecars and compute missing exact facts on demand when needed.
+For editor and agent workflows, `bonsai-ninja index --watch` stays running
+and hot-reloads saved file changes into the live workspace. Pass
+`--semantic` only when you intentionally want structural semantic sidecars
+prewarmed up front, and `--prewarm-dataflow` only when you intentionally
+want the legacy full-workspace taint/dataflow sidecar rebuilt by itself.
+
+Explicit semantic producers write binary factstores for speed and
+`.bonsai/manifest.json` for visibility. The manifest records sidecar
+coverage, producer fingerprints, paths, and missing reasons; commands still
+validate and read the binary sidecars before reusing analysis facts. Cache
+stats validate sidecar payloads, not just path/size metadata, so a corrupt
+same-size factstore is reported stale instead of silently treated as warm.
+The retrieval sidecar is a deterministic candidate index over persisted
+facts. Exact indexes decide candidates; canonical facts and semantic graph
+verification decide truth. Vector similarity is never evidence. Search and
+literal-filtered browse commands can validate a fresh retrieval sidecar from
+source/dependency/build fingerprints before candidate lookup; large-workspace
+inspect can use that warmed sidecar only before opening a scoped workspace.
+All displayed rows/chains are hydrated through canonical APIs. If the sidecar
+is absent or stale, commands fall back to canonical syntax facts. Search may
+build retrieval on demand for small complete workspaces; inspect does not
+build a retrieval sidecar as part of normal query-time hydration, and scoped
+large-repo query workspaces never publish partial retrieval state under the
+full workspace `.bonsai/` directory.
+
+Interactive commands render progress on stderr for each visible stage:
+workspace ingest/parse, sidecar/cache checks, optional sidecar prewarms,
+query collection, analysis phases, pagination/cache writes, and final
+rendering. Progress never writes to stdout, so JSON, SARIF, DOT, and
+`--output-path` payloads stay clean. Use `--no-progress` or
+`NO_PROGRESS=1` to suppress the bars; progress is also hidden
+automatically when stderr is not a TTY.
+Security analysis progress includes scope and cache notes: file/rule
+counts, source/sink match counts, taint-graph cache hit/miss state, and
+whether a sidecar write-through finished.
 
 ## Human-First And LLM-First
 
@@ -205,6 +236,9 @@ source build path for that platform. See
 # Keep the index hot while editing
 ./target/release/bonsai-ninja index ./my-app --watch
 
+# Explain workspace roots, manifests, and skipped generated/dependency trees
+./target/release/bonsai-ninja context ./my-app
+
 # Map the tree
 ./target/release/bonsai-ninja tree ./my-app --max-depth 3
 
@@ -214,14 +248,20 @@ source build path for that platform. See
 # Trace a function
 ./target/release/bonsai-ninja trace ./my-app handle_request
 
+# Find ranked semantic call paths between two callables
+./target/release/bonsai-ninja path ./my-app --from handle_request --to run_admin_command
+
+# Slice one symbol backwards from a source line
+./target/release/bonsai-ninja slice ./my-app --symbol result --line 15 --file gateway.py
+
 # Inspect syntax hits and rulepack-free taint paths for a target
 ./target/release/bonsai-ninja inspect ./my-app os.system
 
-# Syntax hits only, or force bounded raw taint paths for broad queries
+# Output-scope controls: indexed hits only, or bounded raw taint paths
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --syntax-only
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --taint-flow
 
-# Force structural source-body evidence for large or broad inspect queries
+# Request structural source-body evidence for a large inspect result set
 ./target/release/bonsai-ninja inspect ./my-app --query os.system --graph-flow
 
 # Run the security taint analysis
@@ -235,13 +275,13 @@ source build path for that platform. See
 
 | Family | Highlights |
 |---|---|
-| Flow | `inspect`, `trace`, `show` |
-| Workspace | `index`, `export` |
+| Flow | `inspect`, `trace`, `path`, `slice`, `show` |
+| Workspace | `index`, `context`, `export` |
 | Cache | `cache stats`, `cache clear`, `cache rebuild` |
-| Browse | `defs`, `entrypoints`, `calls`, `imports`, `vars`, `strings`, `comments`, `args`, `classes`, `refs`, `search` |
+| Browse | `defs`, `entrypoints`, `calls`, `imports`, `vars`, `strings`, `comments`, `args`, `operations`, `classes`, `refs`, `search` |
 | Navigation | `tree`, `read-file` |
 | Security | `security sources`, `sinks`, `sanitizers`, `deps`, `taint-analysis`, `source-analysis`, `pack` |
-| Debug | `dump-ast`, `dump-hir`, `dump-cfg`, `dump-callgraph`, `dump-edges`, `dump-resolve`, `dump-taint`, `diagnostics` |
+| Debug | `dump-ast`, `dump-hir`, `dump-cfg`, `dump-callgraph`, `dump-edges`, `dump-resolution`, `dump-resolve`, `dump-taint`, `diagnostics` |
 
 Run `./target/release/bonsai-ninja --help` for the full command and flag
 surface. Root help is grouped by command family before global `OPTIONS`,
@@ -259,14 +299,22 @@ Commands with `--format` also accept `--output-path <PATH>` to write the
 selected text, JSON, SARIF, DOT, or graph export payload directly to a
 file instead of stdout.
 
+Accuracy is one mode: public analysis facts are emitted only when backed
+by exact or narrowed static evidence. When static analysis cannot prove a
+fact precisely enough, bonsai-ninja reports the limitation through
+coverage/provenance/incomplete metadata instead of downgrading to a
+guess.
+
 Text output names the evidence type directly: `inspect` renders generic
 `FLOW` call paths and rulepack-free `T:` taint paths for normal targeted
 queries, `security source-analysis` renders `SOURCE FLOW`, and
 `security taint-analysis` renders `TAINT FLOW` with source, argument
-propagation, and sink annotations. Use `inspect --syntax-only` for pure
-indexed search, `inspect --taint-flow` to force bounded raw taint paths on
-broad queries, and `inspect --graph-flow` to force structural source-body
-evidence for large or broad inspect queries.
+propagation, and sink annotations. Use `inspect --syntax-only` when you
+deliberately want indexed facts without flow evidence,
+`inspect --taint-flow` to request bounded raw taint paths for large result
+sets, and `inspect --graph-flow` to request structural source-body
+evidence for large result sets that would otherwise render syntax/index
+facts only. These flags change output scope, not analysis accuracy.
 
 `inspect` obtains raw taint rows through the workspace syntax-flow
 facade. That facade chooses a warmed IDG target cut when one already
@@ -326,6 +374,10 @@ for finding in report.findings {
 
 Long-lived SDK projects refresh from disk before command facades run, so
 embedded tools see saved file changes without reopening the whole project.
+Projects opened through literal, path, or include/exclude reduced-open
+helpers keep that reduced scope stable by default.
+Security phase progress and cache/scope notes are exposed through the same
+SDK progress event stream the CLI renders on stderr.
 
 Full API notes live in [docs/contributing/sdk.mdx](docs/contributing/sdk.mdx).
 

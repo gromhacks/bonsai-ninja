@@ -17,6 +17,7 @@ bonsai_diagnostics = { workspace = true }
 bonsai_hash = { workspace = true }
 bonsai_inspect = { workspace = true }
 bonsai_lang_api = { workspace = true }
+bonsai_retrieval = { workspace = true }
 bonsai_security = { workspace = true }
 bonsai_trace = { workspace = true }
 bonsai_workspace = { workspace = true }

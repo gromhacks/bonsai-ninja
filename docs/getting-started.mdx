@@ -12,7 +12,7 @@ description: "Install bonsai-ninja, run a first security scan, and read the outp
 3. Keep `index --watch` running while you edit if you want save-time hot reloads.
 4. Run `security taint-analysis` against a source tree.
 5. Re-run with JSON or SARIF when you need machine-readable output.
-6. Use `inspect` or `show F:...` to drill into a specific flow.
+6. Use `show F:...` or `security taint-analysis --flow F:...` to drill into a specific security flow.
 
 </Steps>
 
@@ -64,13 +64,21 @@ release target matrix and parser bundle constraints.
 ./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis --rules-dir ./security-patterns
 ```
 
-`index` is structural by default: it parses supported files and builds
-the declaration/import indexes that later commands share. Browse,
-inspect, trace, security, export, and debug commands load reusable
-sidecars when present and compute the exact analysis scope they need
-before rendering. Pass `--prewarm-dataflow` only when a benchmark or
-workflow explicitly needs the full-workspace dataflow sidecar built up
-front.
+`index` is the syntax/construct warm-up command: it parses supported files
+and builds the declaration/import indexes that later commands share without
+forcing a whole-workspace semantic prewarm. Browse, inspect, trace, security,
+export, and debug commands validate and hydrate sidecars when present, then
+compute missing exact facts on demand when needed. Pass `--semantic` only
+when a workflow explicitly wants structural semantic sidecars built up front;
+pass `--prewarm-dataflow` only when it needs the legacy full-workspace
+dataflow sidecar built by itself. Retrieval sidecars are candidate lookup:
+exact indexes decide candidates; canonical facts and semantic graph
+verification decide truth. Vector similarity is never evidence. Search,
+inspect, and literal-filtered browse commands validate a fresh retrieval
+sidecar from source/dependency/build fingerprints before large-repo candidate
+lookup, then hydrate the selected candidate files/facts through canonical
+APIs. Large or scoped queries that are not prewarmed fall back to canonical
+syntax-backed facts instead of writing partial retrieval cache state.
 
 For development workflows, keep the workspace hot while your editor saves:
 
@@ -80,6 +88,8 @@ For development workflows, keep the workspace hot while your editor saves:
 
 Long-lived SDK projects use the same refresh path before queries, so
 embedded tools can keep one project open and still see saved changes.
+Reduced-open SDK projects, such as literal or path-filtered query opens,
+keep their declared file scope stable by default.
 
 For CI or scripts:
 
@@ -95,20 +105,30 @@ For CI or scripts:
 
 ## Read A Finding
 
-Each finding has a stable `S:` ID, a source rule, a sink rule, a status, and a primary `F:` flow ID. The source and sink show exact file, line, function, and rule metadata. The flow block shows the call path and the tainted argument at each hop.
+Each finding has a stable `S:` ID, a source rule, a sink rule, a status, a primary security `F:` flow ID, and a `G:` flow-group ID. The source and sink show exact file, line, function, and rule metadata. The flow block shows the call path and the tainted argument at each hop.
 
 <Tip>
 Security text reports render flow bodies by default. Use `--context` and `--page next` to walk larger reports without losing source code.
 </Tip>
 
 ```bash
-./target/release/bonsai-ninja inspect ./src --query os.system --flow F:0123456789abcdef
+./target/release/bonsai-ninja security ./src taint-analysis --flow F:0123456789abcdef
+./target/release/bonsai-ninja security ./src taint-analysis --group G:0123456789abcdef
 ./target/release/bonsai-ninja show ./src F:0123456789abcdef
+./target/release/bonsai-ninja show ./src G:0123456789abcdef
 ```
+
+Use `inspect --flow F:...` / `inspect --group G:...` for structural
+inspect IDs printed by `inspect`, `defs`, `refs`, and other
+code-navigation commands. Security finding flow/group IDs are taint-path
+IDs; reopen them with `show F:...` / `show G:...` or
+`security taint-analysis --flow F:...` / `--group G:...`.
 
 For code-navigation queries, `inspect` is rulepack-free by default: it
 shows syntax hits plus bounded taint paths and source-body flow evidence
-that contain the query. Add `--syntax-only` for pure indexed search,
-`--taint-flow` to force raw taint paths on broad queries, or
-`--graph-flow` to force structural source-body evidence for large or broad
-queries.
+that contain the query. Add `--syntax-only` when you deliberately want
+indexed facts without flow evidence, `--taint-flow` to request bounded raw
+taint paths for large result sets, or `--graph-flow` to request structural
+source-body evidence for large result sets that would otherwise render
+syntax/index facts only. These flags change output scope, not analysis
+accuracy.

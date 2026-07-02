@@ -598,15 +598,22 @@ const ALL_PAGED_COMMANDS: &[(&str, &[&str])] = &[
     ("vars", &[]),
     ("strings", &[]),
     ("args", &[]),
+    ("operations", &[]),
     ("classes", &[]),
     ("refs", &["handle_request"]),
     ("search", &["--query", "request"]),
     ("dump-callgraph", &[]),
     ("dump-edges", &[]),
+    ("dump-resolution", &[]),
     ("dump-ast", &["--file", "gateway.py"]),
     ("dump-taint", &["--source", "handle_request"]),
     ("inspect", &["--query", "verify"]),
     ("trace", &["handle_request"]),
+    ("path", &["--from", "handle_request", "--to", "verify_token"]),
+    (
+        "slice",
+        &["--symbol", "result", "--line", "15", "--file", "gateway.py"],
+    ),
     ("tree", &[]),
     ("read-file", &["gateway.py"]),
 ];
@@ -871,7 +878,8 @@ fn paged_footer_reports_command_specific_totals() {
         ("defs", &[][..], "definition"),
         ("calls", &[][..], "call site"),
         ("imports", &[][..], "unique import"),
-        ("dump-edges", &[][..], "dataflow edge"),
+        ("dump-callgraph", &[][..], "function"),
+        ("dump-edges", &[][..], "semantic call edge"),
     ] {
         let mut args: Vec<&str> = vec![cmd, ws_str, "--context", "256"];
         args.extend_from_slice(extra);
@@ -1228,6 +1236,37 @@ fn security_no_compact_respects_context_budget() {
 }
 
 #[test]
+fn security_deps_respects_context_budget_for_long_rule_descriptions() {
+    let ws = complex_ws();
+    let ws_str = ws.to_str().unwrap();
+    let Some(out) = run(&[
+        "security",
+        ws_str,
+        "deps",
+        "--severity",
+        "high",
+        "--context",
+        "2k",
+    ]) else {
+        return;
+    };
+    let Some((used, budget)) = parse_context_line(&out) else {
+        panic!("security deps: missing context footer:\n{out}");
+    };
+    assert_eq!(budget, 2048, "budget must echo --context flag");
+    assert!(
+        used <= budget,
+        "security deps exceeded context: {used}>{budget}\n{out}"
+    );
+    assert!(
+        !out.contains("single row cost exceeded --context")
+            && !out.contains("rendered output exceeded --context budget")
+            && !out.contains("page cost estimate was short"),
+        "security deps must page long dependency descriptions instead of rendering an oversized page:\n{out}"
+    );
+}
+
+#[test]
 fn security_taint_analysis_never_exceeds_context_across_pages() {
     let ws = complex_ws();
     let ws_str = ws.to_str().unwrap();
@@ -1460,8 +1499,31 @@ fn main_text_commands_reuse_rendered_page_cache() {
         vec!["search", ws_str, "request", "--context", "1k"],
         vec!["dump-callgraph", ws_str, "--context", "1k"],
         vec!["dump-edges", ws_str, "--context", "1k"],
+        vec!["dump-resolution", ws_str, "--context", "1k"],
         vec!["dump-ast", ws_str, "--context", "1k"],
         vec!["trace", ws_str, "handle_request", "--context", "1k"],
+        vec![
+            "path",
+            ws_str,
+            "--from",
+            "handle_request",
+            "--to",
+            "verify_token",
+            "--context",
+            "1k",
+        ],
+        vec![
+            "slice",
+            ws_str,
+            "--symbol",
+            "cmd",
+            "--line",
+            "47",
+            "--file",
+            "ml_pipeline.py",
+            "--context",
+            "1k",
+        ],
         vec!["security", ws_str, "sources", "--context", "1k"],
         vec!["security", ws_str, "sinks", "--context", "1k"],
         vec!["security", ws_str, "sanitizers", "--context", "1k"],
@@ -1493,7 +1555,34 @@ fn main_json_commands_reuse_rendered_page_cache() {
         vec!["search", ws_str, "request", "--format", "json", "--context", "1k"],
         vec!["dump-callgraph", ws_str, "--format", "json", "--context", "1k"],
         vec!["dump-edges", ws_str, "--format", "json", "--context", "1k"],
+        vec!["dump-resolution", ws_str, "--format", "json", "--context", "1k"],
         vec!["dump-ast", ws_str, "--format", "json", "--context", "1k"],
+        vec![
+            "path",
+            ws_str,
+            "--from",
+            "handle_request",
+            "--to",
+            "verify_token",
+            "--format",
+            "json",
+            "--context",
+            "1k",
+        ],
+        vec![
+            "slice",
+            ws_str,
+            "--symbol",
+            "cmd",
+            "--line",
+            "47",
+            "--file",
+            "ml_pipeline.py",
+            "--format",
+            "json",
+            "--context",
+            "1k",
+        ],
         vec![
             "trace",
             ws_str,

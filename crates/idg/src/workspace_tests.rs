@@ -284,6 +284,28 @@ fn load_rejects_pipeline_hash_mismatch() {
 }
 
 #[test]
+fn sidecar_file_validator_rejects_corrupt_payload() {
+    let mut w = IdgWorkspace::new();
+    let mut seg = IdgSegment::new();
+    populate_segment(&mut seg, FuncId::new(1));
+    w.register_segment(seg);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("idg.factstore");
+    w.save_to_disk(&path, 0xCAFE).expect("save");
+    assert_eq!(
+        IdgWorkspace::validate_sidecar_file(&path).expect("valid sidecar"),
+        1
+    );
+
+    let len = std::fs::metadata(&path).expect("metadata").len();
+    std::fs::write(&path, vec![0_u8; len as usize]).expect("corrupt same-size sidecar");
+    assert!(
+        IdgWorkspace::validate_sidecar_file(&path).is_err(),
+        "same-size corrupt IDG factstore must not validate"
+    );
+}
+
+#[test]
 fn load_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("does-not-exist.factstore");

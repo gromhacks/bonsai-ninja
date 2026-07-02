@@ -4,7 +4,7 @@ use super::*;
 fn taint_options_default_to_semantic_precision() {
     assert_eq!(
         TaintAnalysisOptions::default().max_precision,
-        Some(Precision::Narrowed)
+        Some(PUBLIC_SEMANTIC_MAX_PRECISION)
     );
 }
 
@@ -22,19 +22,19 @@ fn taint_options_clamp_broad_precision_to_semantic() {
         ..TaintAnalysisOptions::default()
     }
     .semantic_precision_only();
-    assert_eq!(none.max_precision, Some(Precision::Narrowed));
+    assert_eq!(none.max_precision, Some(PUBLIC_SEMANTIC_MAX_PRECISION));
 
     let broad = TaintAnalysisOptions {
         max_precision: Some(Precision::OverApproximate),
         ..TaintAnalysisOptions::default()
     }
     .semantic_precision_only();
-    assert_eq!(broad.max_precision, Some(Precision::Narrowed));
+    assert_eq!(broad.max_precision, Some(PUBLIC_SEMANTIC_MAX_PRECISION));
 
     let unknown = TaintAnalysisOptions {
         max_precision: Some(Precision::Unknown),
         ..TaintAnalysisOptions::default()
     }
     .semantic_precision_only();
-    assert_eq!(unknown.max_precision, Some(Precision::Narrowed));
+    assert_eq!(unknown.max_precision, Some(PUBLIC_SEMANTIC_MAX_PRECISION));
 }

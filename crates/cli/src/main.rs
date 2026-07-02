@@ -11,7 +11,7 @@
 //! - **Flow commands** (the headline): `trace`, `diagnostics`,
 //!   `dump-hir`, `dump-cfg`, `dump-callgraph`, `index`.
 //! - **Browse / inspect commands**: `defs`, `entrypoints`, `calls`,
-//!   `imports`, `vars`, `strings`, `args`, `classes`, `refs`, `search`,
+//!   `imports`, `vars`, `strings`, `args`, `operations`, `classes`, `refs`, `search`,
 //!   `inspect`, `export`.
 //!   All read from the same `GlobalIndex` + per-file `DeclIndex`, so
 //!   behavior is uniform across every supported language.
@@ -35,13 +35,14 @@ mod ui;
 
 use args::{CacheAction, Cli, Cmd, SecurityAction};
 use commands::{
-    cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_diagnostics, cmd_dump_ast,
-    cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolve, cmd_dump_taint,
-    cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect, cmd_refs, cmd_search, cmd_strings,
-    cmd_trace, cmd_vars, paging_from_cli, paging_from_cli_output, resolve_symbol_arg, ArgsFilters,
-    CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters,
-    InspectCommandOptions, InspectFilters, InspectRenderOptions, RefsFilters, SearchFilters, StringsFilters,
-    VarsFilters,
+    cmd_args, cmd_cache, cmd_calls, cmd_classes, cmd_comments, cmd_context, cmd_defs, cmd_diagnostics,
+    cmd_dump_ast, cmd_dump_callgraph, cmd_dump_cfg, cmd_dump_edges, cmd_dump_hir, cmd_dump_resolution,
+    cmd_dump_resolve, cmd_dump_taint, cmd_entrypoints, cmd_export, cmd_imports, cmd_index, cmd_inspect,
+    cmd_operations, cmd_path, cmd_refs, cmd_search, cmd_slice, cmd_strings, cmd_trace, cmd_vars,
+    paging_from_cli, paging_from_cli_output, resolve_symbol_arg, ArgsFilters, CallsFilters, ClassesFilters,
+    CommentsFilters, DefsFilters, EntryPointsFilters, ImportsFilters, IndexCommandOptions,
+    InspectCommandOptions, InspectFilters, InspectRenderOptions, OperationsFilters, PathCommandOptions,
+    RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 use help_theme::try_themed_help;
 
@@ -281,7 +282,7 @@ fn main() -> Result<()> {
     install_global_rayon_pool();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "error".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -348,7 +349,19 @@ fn main() -> Result<()> {
             watch,
             interval_ms,
             prewarm_dataflow,
-        } => cmd_index(&workspace, watch, interval_ms, prewarm_dataflow),
+            semantic,
+            structural_only,
+        } => cmd_index(
+            &workspace,
+            IndexCommandOptions {
+                watch,
+                interval_ms,
+                prewarm_dataflow,
+                semantic,
+                structural_only,
+            },
+        ),
+        Cmd::Context { workspace, .. } => cmd_context(&workspace),
         Cmd::Trace {
             workspace,
             symbol,
@@ -375,11 +388,63 @@ fn main() -> Result<()> {
             };
             cmd_trace(&workspace, fn_arg, from, to, paging, format, trace_opts)
         }
+        Cmd::Path {
+            workspace,
+            from,
+            to,
+            regex,
+            max_paths,
+            max_depth,
+            max_probes,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => cmd_path(
+            &workspace,
+            PathCommandOptions {
+                from: &from,
+                to: &to,
+                regex,
+                max_paths,
+                max_depth,
+                max_probes,
+                paging_cfg: paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+                format,
+            },
+        ),
+        Cmd::Slice {
+            workspace,
+            symbol,
+            line,
+            file,
+            max_steps,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => cmd_slice(
+            &workspace,
+            &symbol,
+            line,
+            file.as_deref(),
+            max_steps,
+            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+            format,
+        ),
         Cmd::Show {
             workspace,
             id,
             query,
             in_file,
+            taint_source,
+            taint_seeds,
+            taint_sanitizers,
+            taint_sink,
+            taint_budget,
+            taint_intra_worklist_cap,
             compact,
             context,
             page,
@@ -392,6 +457,12 @@ fn main() -> Result<()> {
             id: &id,
             query: query.as_deref(),
             in_file: in_file.as_deref(),
+            taint_source: taint_source.as_deref(),
+            taint_seeds: &taint_seeds,
+            taint_sanitizers: &taint_sanitizers,
+            taint_sink: taint_sink.as_deref(),
+            taint_budget,
+            taint_intra_worklist_cap,
             compact,
             context: context.as_deref(),
             page: page.as_deref(),
@@ -450,6 +521,24 @@ fn main() -> Result<()> {
             precision,
             compact,
             edge.as_deref(),
+            limit,
+            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+            format,
+        ),
+        Cmd::DumpResolution {
+            workspace,
+            file,
+            unresolved_only,
+            limit,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => cmd_dump_resolution(
+            &workspace,
+            file.as_deref(),
+            unresolved_only,
             limit,
             paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
             format,
@@ -770,6 +859,34 @@ fn main() -> Result<()> {
             !no_flows,
             format,
         ),
+        Cmd::Operations {
+            workspace,
+            kind,
+            name,
+            file,
+            in_fn,
+            regex,
+            limit,
+            no_flows,
+            context,
+            page,
+            all,
+            format,
+            output: _,
+        } => cmd_operations(
+            &workspace,
+            OperationsFilters {
+                kind: kind.as_deref(),
+                name: name.as_deref(),
+                file: file.as_deref(),
+                in_fn: in_fn.as_deref(),
+                regex,
+            },
+            limit,
+            paging_from_cli(context.as_deref(), page.as_deref(), all, format)?,
+            !no_flows,
+            format,
+        ),
         Cmd::Classes {
             workspace,
             name,
@@ -1065,13 +1182,17 @@ fn configured_rayon_stack_bytes() -> usize {
 fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
         Cmd::Index { workspace, .. }
+        | Cmd::Context { workspace, .. }
         | Cmd::Trace { workspace, .. }
+        | Cmd::Path { workspace, .. }
+        | Cmd::Slice { workspace, .. }
         | Cmd::Show { workspace, .. }
         | Cmd::Diagnostics { workspace }
         | Cmd::DumpHir { workspace, .. }
         | Cmd::DumpCfg { workspace, .. }
         | Cmd::DumpCallgraph { workspace, .. }
         | Cmd::DumpEdges { workspace, .. }
+        | Cmd::DumpResolution { workspace, .. }
         | Cmd::DumpAst { workspace, .. }
         | Cmd::DumpResolve { workspace, .. }
         | Cmd::DumpTaint { workspace, .. }
@@ -1083,6 +1204,7 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Strings { workspace, .. }
         | Cmd::Comments { workspace, .. }
         | Cmd::Args { workspace, .. }
+        | Cmd::Operations { workspace, .. }
         | Cmd::Classes { workspace, .. }
         | Cmd::Refs { workspace, .. }
         | Cmd::Search { workspace, .. }
@@ -1098,9 +1220,12 @@ fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
 fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
         Cmd::Trace { output, .. }
+        | Cmd::Path { output, .. }
+        | Cmd::Slice { output, .. }
         | Cmd::Show { output, .. }
         | Cmd::DumpCallgraph { output, .. }
         | Cmd::DumpEdges { output, .. }
+        | Cmd::DumpResolution { output, .. }
         | Cmd::DumpAst { output, .. }
         | Cmd::DumpResolve { output, .. }
         | Cmd::DumpTaint { output, .. }
@@ -1112,11 +1237,13 @@ fn command_output_path(cmd: &Cmd) -> Option<&std::path::Path> {
         | Cmd::Strings { output, .. }
         | Cmd::Comments { output, .. }
         | Cmd::Args { output, .. }
+        | Cmd::Operations { output, .. }
         | Cmd::Classes { output, .. }
         | Cmd::Refs { output, .. }
         | Cmd::Search { output, .. }
         | Cmd::Inspect { output, .. }
         | Cmd::Export { output, .. }
+        | Cmd::Context { output, .. }
         | Cmd::Tree { output, .. }
         | Cmd::ReadFile { output, .. } => output.output_path.as_deref(),
         Cmd::Security { action, .. } => security_action_output_path(action),

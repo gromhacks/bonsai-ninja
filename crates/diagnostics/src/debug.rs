@@ -124,9 +124,95 @@ pub fn reset_for_tests() {
 macro_rules! debug_log {
     ($category:expr, $($arg:tt)*) => {
         if $crate::debug::is_enabled($category) {
-            eprintln!("[{}] {}", $category, format_args!($($arg)*));
+            let message = format!($($arg)*);
+            eprintln!("[{}] {}", $category, $crate::debug::render_message(&message));
         }
     };
+}
+
+/// Render debug text for terminal output.
+///
+/// Analyzer debug messages are intentionally not a stable API, but they
+/// are still read by people during long runs. Keep the useful details while
+/// avoiding raw `key=value` dumps in terminal output.
+#[must_use]
+pub fn render_message(message: &str) -> String {
+    if !message.contains('=') {
+        return message.to_string();
+    }
+    let mut out = String::new();
+    let mut previous_token = "";
+    for token in message.split_whitespace() {
+        let rendered = render_message_token(token);
+        if out.is_empty() {
+            out.push_str(&rendered.text);
+        } else if rendered.was_key_value && previous_token != "->" && !previous_token.ends_with(':') {
+            out.push_str(" · ");
+            out.push_str(&rendered.text);
+        } else {
+            out.push(' ');
+            out.push_str(&rendered.text);
+        }
+        previous_token = token;
+    }
+    out
+}
+
+struct RenderedToken {
+    text: String,
+    was_key_value: bool,
+}
+
+fn render_message_token(token: &str) -> RenderedToken {
+    let (core, suffix) = trim_trailing_separator(token);
+    let Some((key, value)) = core.split_once('=') else {
+        return RenderedToken {
+            text: token.to_string(),
+            was_key_value: false,
+        };
+    };
+    if key.is_empty()
+        || value.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return RenderedToken {
+            text: token.to_string(),
+            was_key_value: false,
+        };
+    }
+    let label = humanize_key_label(key);
+    let value = match value {
+        "true" => "on".to_string(),
+        "false" => "off".to_string(),
+        _ => value.to_string(),
+    };
+    RenderedToken {
+        text: format!("{label} {value}{suffix}"),
+        was_key_value: true,
+    }
+}
+
+fn trim_trailing_separator(token: &str) -> (&str, &str) {
+    if token.len() > 1 && token.ends_with([',', ';']) {
+        token.split_at(token.len() - 1)
+    } else {
+        (token, "")
+    }
+}
+
+fn humanize_key_label(key: &str) -> String {
+    key.split(['_', '-'])
+        .map(|part| match part {
+            "dst" => "destination",
+            "func" => "function",
+            "funcs" => "functions",
+            "src" => "source",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]

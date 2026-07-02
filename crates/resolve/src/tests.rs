@@ -374,6 +374,16 @@ fn unqualified_class_resolution_accepts_wildcard_import_target_only() {
 }
 
 #[test]
+fn module_target_matches_rust_root_prefixed_modules() {
+    let module = ModulePath::from_segments(["util"]);
+
+    assert!(module_target_matches_decl_module_path("crate::util", &module));
+    assert!(module_target_matches_decl_module_path("crate::util::*", &module));
+    assert!(module_target_matches_decl_module_path("self::util", &module));
+    assert!(module_target_matches_decl_module_path("super::util", &module));
+}
+
+#[test]
 fn relative_alias_target_resolves_against_caller_module() {
     let mut global = GlobalIndex::new();
     let local_file = FileId::new(1);

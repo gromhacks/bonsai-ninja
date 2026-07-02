@@ -137,20 +137,20 @@ pub(crate) fn replay_if_hit(workspace: &Path) -> anyhow::Result<bool> {
     if cache_disabled() || requested_page_arg().is_none() {
         return Ok(false);
     }
-    let bar = progress::spinner("validating rendered page cache");
+    let stage = progress::ScopedSpinner::new("validating rendered page cache");
     let Some(cache) = read_cache(workspace)? else {
-        bar.finish_and_clear();
+        stage.finish();
         return Ok(false);
     };
     if !cache_is_fresh(workspace, &cache)? {
-        bar.finish_and_clear();
+        stage.finish();
         return Ok(false);
     }
     let Some(page) = requested_page(&cache.pages) else {
-        bar.finish_and_clear();
+        stage.finish();
         return Ok(false);
     };
-    bar.finish_and_clear();
+    stage.finish();
     emit_cached_text(&page.text)?;
     Ok(true)
 }
@@ -368,7 +368,7 @@ where
     let current_page = current_info.page_number;
     let mut cached_pages = Vec::new();
     let render_label = format!("rendering {command} page");
-    let render_bar = progress::spinner(&render_label);
+    let render_stage = progress::ScopedSpinner::new(&render_label);
     for page_number in eager_window(current_page, current_info.total_pages) {
         let mut page_cfg = cfg.clone();
         if page_number != current_page {
@@ -382,12 +382,12 @@ where
             text,
         });
     }
-    render_bar.finish_and_clear();
-    let cache_bar = progress::spinner("saving rendered page cache");
+    render_stage.finish();
+    let cache_stage = progress::ScopedSpinner::new("saving rendered page cache");
     if let Err(e) = save_pages(workspace, cached_pages.clone()) {
         tracing::debug!("page cache save failed: {e}");
     }
-    cache_bar.finish_and_clear();
+    cache_stage.finish();
     if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
         emit_cached_text(&page.text)?;
     }

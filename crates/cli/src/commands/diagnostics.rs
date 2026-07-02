@@ -14,24 +14,36 @@ use crate::progress;
 
 use super::{
     not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
-    open_project_parse_only,
+    open_project_parse_only, open_project_semantic_prewarm,
 };
 
-pub(crate) fn cmd_index(
-    root: &std::path::Path,
-    watch: bool,
-    interval_ms: u64,
-    prewarm_dataflow: bool,
-) -> Result<()> {
-    let (project, _footer) = if prewarm_dataflow {
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct IndexCommandOptions {
+    pub(crate) watch: bool,
+    pub(crate) interval_ms: u64,
+    pub(crate) prewarm_dataflow: bool,
+    pub(crate) semantic: bool,
+    pub(crate) structural_only: bool,
+}
+
+pub(crate) fn cmd_index(root: &std::path::Path, options: IndexCommandOptions) -> Result<()> {
+    let _ = options.structural_only;
+    let (project, _footer) = if options.prewarm_dataflow {
         open_project_dataflow_prewarm(root)?
+    } else if options.semantic {
+        open_project_semantic_prewarm(root)?
     } else {
         open_project_parse_only(root)?
     };
+    let stage = progress::ScopedSpinner::new("collecting index stats");
+    if options.prewarm_dataflow || options.semantic {
+        let _manifest = project.cache().write_manifest()?;
+    }
     let stats = project.stats();
+    stage.finish();
     cli_println!("{}", serde_json::to_string_pretty(&stats)?);
     flush_stdout()?;
-    if !watch {
+    if !options.watch {
         return Ok(());
     }
     cli_println!(
@@ -39,11 +51,11 @@ pub(crate) fn cmd_index(
         serde_json::to_string_pretty(&json!({
             "event": "watching",
             "workspace": root.display().to_string(),
-            "interval_ms": interval_ms,
+            "interval_ms": options.interval_ms,
         }))?
     );
     flush_stdout()?;
-    let interval = Duration::from_millis(interval_ms.max(100));
+    let interval = Duration::from_millis(options.interval_ms.max(100));
     loop {
         std::thread::sleep(interval);
         let report = project.refresh_from_disk()?;
@@ -64,6 +76,16 @@ pub(crate) fn cmd_index(
     }
 }
 
+pub(crate) fn cmd_context(root: &std::path::Path) -> Result<()> {
+    let (project, _footer) = open_project_parse_only(root)?;
+    let stage = progress::ScopedSpinner::new("collecting workspace context");
+    let context = project.semantic_context();
+    stage.finish();
+    cli_println!("{}", serde_json::to_string_pretty(&context)?);
+    flush_stdout()?;
+    Ok(())
+}
+
 fn flush_stdout() -> Result<()> {
     std::io::stdout().flush()?;
     Ok(())
@@ -74,23 +96,29 @@ pub(crate) fn cmd_diagnostics(root: &std::path::Path) -> Result<()> {
     let ws = project.workspace();
     let files = ws.vfs().all_files();
     let bar = progress::progress_bar("collecting diagnostics", files.len() as u64);
-    for f in files {
-        let _ = ws.db().parse(f)?;
-        bar.inc(1);
-    }
+    let parse_result = (|| -> Result<()> {
+        for f in files {
+            let _ = ws.db().parse(f)?;
+            bar.inc(1);
+        }
+        Ok(())
+    })();
     bar.finish_and_clear();
-    cli_println!("{}", serde_json::to_string_pretty(&project.diagnostics())?);
+    parse_result?;
+    cli_println!("{}", serde_json::to_string_pretty(&project.diagnostics_report())?);
     Ok(())
 }
 
 pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
     let (project, _footer) = open_project_index_only(root)?;
     let ws = project.workspace();
+    let stage = progress::ScopedSpinner::new("building HIR dump");
     let dump = project
         .dump()
         .hir(symbol)
         .map_err(|err| anyhow::anyhow!("dump-hir: {err}"))?
         .ok_or_else(|| not_found_with_suggestions(ws, symbol))?;
+    stage.finish();
     cli_println!("{}", serde_json::to_string_pretty(&dump)?);
     Ok(())
 }
@@ -98,11 +126,13 @@ pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
 pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
     let (project, _footer) = open_project_index_only(root)?;
     let ws = project.workspace();
+    let stage = progress::ScopedSpinner::new("building CFG dump");
     let cfg = project
         .dump()
         .cfg(symbol)
         .map_err(|err| anyhow::anyhow!("dump-cfg: {err}"))?
         .ok_or_else(|| not_found_with_suggestions(ws, symbol))?;
+    stage.finish();
     cli_println!("{}", serde_json::to_string_pretty(&cfg)?);
     Ok(())
 }

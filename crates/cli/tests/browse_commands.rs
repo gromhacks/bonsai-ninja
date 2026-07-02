@@ -427,6 +427,109 @@ fn args_json_declares_syntactic_scope() {
 }
 
 // -----------------------------------------------------------------------------
+// operations
+// -----------------------------------------------------------------------------
+
+#[test]
+fn operations_table_shows_use_site_facts() {
+    let ws = ws_path();
+    let Some(out) = run(&["operations", ws.to_str().unwrap(), "--kind", "call"]) else {
+        return;
+    };
+    for h in &["kind", "name", "in", "detail", "operands", "location", "code"] {
+        assert!(out.contains(h), "operations header missing `{h}`: {out}");
+    }
+    assert!(
+        out.contains("verify_token") || out.contains("update_user"),
+        "operations call facts missing expected fixture call: {out}"
+    );
+}
+
+#[test]
+fn operations_json_filters_by_kind_and_name() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "operations",
+        ws.to_str().unwrap(),
+        "--kind",
+        "write",
+        "--name",
+        "action",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("operations --format json: valid JSON");
+    let rows = v.as_array().expect("operations JSON array");
+    assert_eq!(
+        rows.first().and_then(|row| row["name"].as_str()),
+        Some("action"),
+        "operations should rank exact target matches before operand-only matches: {out}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["kind"] == "write"
+                && row["name"] == "action"
+                && row["in_function"] == "handle_request"
+                && row
+                    .get("operands")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some()
+        }),
+        "operations JSON missing action write row: {out}"
+    );
+}
+
+#[test]
+fn operations_does_not_report_literal_returns_as_reads() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "operations",
+        ws.to_str().unwrap(),
+        "--kind",
+        "read",
+        "--name",
+        "None",
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&out).expect("operations literal-read JSON parses");
+    assert!(
+        rows.is_empty(),
+        "`return None` is a literal return, not a read of a symbol: {out}"
+    );
+
+    for (lang, literal) in [("swift", "nil"), ("cpp", "nullptr")] {
+        let Some(out) = run_on(
+            lang,
+            &[
+                "operations",
+                "--kind",
+                "read",
+                "--name",
+                literal,
+                "--format",
+                "json",
+                "--all",
+            ],
+        ) else {
+            return;
+        };
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(&out).expect("operations literal-read JSON parses");
+        assert!(
+            rows.is_empty(),
+            "{lang}: literal `{literal}` is not a read of a symbol: {out}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
 // classes
 // -----------------------------------------------------------------------------
 
@@ -494,6 +597,33 @@ fn search_json_shape() {
     assert!(!v.as_array().unwrap().is_empty(), "search JSON empty");
 }
 
+#[test]
+fn search_file_kind_hydrates_canonical_file_rows() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "search",
+        ws.to_str().unwrap(),
+        "gateway.py",
+        "--kind",
+        "file",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("search file JSON parses");
+    assert_eq!(rows.len(), 1, "expected exactly one file row: {out}");
+    let row = &rows[0];
+    assert_eq!(row["kind"], "file");
+    assert_eq!(row["name"], "gateway.py");
+    assert!(
+        row["qualified_name"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("gateway.py")),
+        "file row should carry the full path as qualified_name: {row}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // themes
 // -----------------------------------------------------------------------------
@@ -544,21 +674,33 @@ fn index_prints_file_count() {
 }
 
 #[test]
-fn index_default_does_not_write_dataflow_sidecars() {
+fn index_structural_only_does_not_write_semantic_sidecars() {
     let tmp = tempdir_for_test("bonsai_index_structural_only");
     write_tiny_python_workspace(&tmp);
 
-    let Some(out) = run(&["index", tmp.to_str().unwrap()]) else {
+    let Some(out) = run(&["index", tmp.to_str().unwrap(), "--structural-only"]) else {
         return;
     };
     assert!(out.contains("files"), "index summary missing: {out}");
     assert!(
         !tmp.join(".bonsai/dataflow.v2.bin").exists(),
-        "default index must not write the legacy dataflow sidecar"
+        "`index --structural-only` must not write the legacy dataflow sidecar"
     );
     assert!(
         !tmp.join(".bonsai/dataflow.v3.factstore").exists(),
-        "default index must not write the factstore dataflow sidecar"
+        "`index --structural-only` must not write the factstore dataflow sidecar"
+    );
+    assert!(
+        !tmp.join(".bonsai/value_flow.v3.factstore").exists(),
+        "`index --structural-only` must not write the value-flow sidecar"
+    );
+    assert!(
+        !tmp.join(".bonsai/flow_ids.v3.factstore").exists(),
+        "`index --structural-only` must not write the flow-id sidecar"
+    );
+    assert!(
+        !tmp.join(".bonsai/manifest.json").exists(),
+        "`index --structural-only` must not publish a semantic cache manifest"
     );
 }
 
@@ -575,6 +717,14 @@ fn index_prewarm_dataflow_writes_factstore_sidecar() {
         tmp.join(".bonsai/dataflow.v3.factstore").exists(),
         "`index --prewarm-dataflow` must write the streaming factstore sidecar"
     );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(tmp.join(".bonsai/manifest.json")).expect("read cache manifest"),
+    )
+    .expect("cache manifest JSON");
+    assert_eq!(
+        manifest["coverage"]["legacy_dataflow_ready"], true,
+        "`index --prewarm-dataflow` should report dataflow readiness for the current streaming factstore: {manifest:#?}"
+    );
     assert!(
         !tmp.join(".bonsai/value_flow.v3.factstore").exists(),
         "`index --prewarm-dataflow` must not prewarm unrelated value-flow sidecars"
@@ -583,6 +733,171 @@ fn index_prewarm_dataflow_writes_factstore_sidecar() {
         !tmp.join(".bonsai/flow_ids.v3.factstore").exists(),
         "`index --prewarm-dataflow` must not prewarm unrelated flow-id sidecars"
     );
+}
+
+#[test]
+fn index_default_stays_structural_and_does_not_write_semantic_sidecars() {
+    let tmp = tempdir_for_test("bonsai_index_default_structural");
+    write_tiny_python_workspace(&tmp);
+
+    let Some(out) = run(&["index", tmp.to_str().unwrap()]) else {
+        return;
+    };
+    assert!(out.contains("files"), "index summary missing: {out}");
+    let Some(stats_out) = run(&["cache", "stats", tmp.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let stats: serde_json::Value = serde_json::from_str(&stats_out).expect("cache stats JSON");
+    assert_eq!(
+        stats["callgraph_sidecar_exists"], false,
+        "`index` should stay structural by default and avoid the semantic callgraph sidecar: {stats_out}"
+    );
+    assert_eq!(
+        stats["idg_sidecar_exists"], false,
+        "`index` should stay structural by default and avoid the shared IDG factstore: {stats_out}"
+    );
+    assert_eq!(
+        stats["dataflow_factstore_sidecar_exists"], false,
+        "`index` should stay structural by default and avoid the dataflow factstore: {stats_out}"
+    );
+    assert_eq!(
+        stats["value_flow_sidecar_exists"], false,
+        "`index` should stay structural by default and avoid the value-flow factstore: {stats_out}"
+    );
+    assert_eq!(
+        stats["flow_ids_sidecar_exists"], false,
+        "`index` should stay structural by default and avoid the flow-id factstore: {stats_out}"
+    );
+    assert_eq!(
+        stats["manifest_exists"], false,
+        "`index` should not publish a semantic cache manifest by default: {stats_out}"
+    );
+}
+
+#[test]
+fn index_semantic_flag_writes_shared_semantic_sidecars() {
+    let tmp = tempdir_for_test("bonsai_index_semantic");
+    write_tiny_python_workspace(&tmp);
+
+    let Some(out) = run(&["index", tmp.to_str().unwrap(), "--semantic"]) else {
+        return;
+    };
+    assert!(out.contains("files"), "index summary missing: {out}");
+    let Some(stats_out) = run(&["cache", "stats", tmp.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let stats: serde_json::Value = serde_json::from_str(&stats_out).expect("cache stats JSON");
+    assert_eq!(
+        stats["manifest_exists"], true,
+        "`index --semantic` should publish the cache manifest: {stats_out}"
+    );
+    assert_eq!(
+        stats["dataflow_factstore_sidecar_exists"], false,
+        "`index --semantic` should not run the legacy all-entry dataflow prewarm: {stats_out}"
+    );
+    assert_eq!(
+        stats["idg_sidecar_exists"], true,
+        "`index --semantic` should write the shared IDG factstore: {stats_out}"
+    );
+    assert_eq!(
+        stats["validation"]["manifest_status"], "fresh",
+        "`cache stats` should validate the semantic cache manifest: {stats_out}"
+    );
+    assert_eq!(
+        stats["validation"]["semantic_ready"], true,
+        "`cache stats` should report validated semantic readiness: {stats_out}"
+    );
+
+    let Some(path_out) = run(&[
+        "path",
+        tmp.to_str().unwrap(),
+        "--from",
+        "handle",
+        "--to",
+        "sink",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let path: serde_json::Value = serde_json::from_str(&path_out).expect("path JSON");
+    assert_eq!(
+        path["idg_available"], true,
+        "`path` should hydrate and use the warmed IDG sidecar after `index --semantic`: {path_out}"
+    );
+    assert!(
+        path["backends"]
+            .as_array()
+            .is_some_and(|backends| backends.iter().any(|backend| backend == "warmed-idg-cross-call")),
+        "`path` should report the warmed IDG backend after semantic indexing: {path_out}"
+    );
+}
+
+#[test]
+fn path_and_slice_text_summaries_are_polished() {
+    let ws = ws_path();
+    let ws_str = ws.to_str().unwrap();
+
+    let Some(path_out) = run(&[
+        "path",
+        ws_str,
+        "--from",
+        "handle_request",
+        "--to",
+        "run_admin_command",
+        "--context",
+        "4k",
+    ]) else {
+        return;
+    };
+    assert!(
+        path_out.contains("status") && path_out.contains("incomplete"),
+        "path summary should render a human status label:\n{path_out}"
+    );
+    assert!(
+        path_out.contains("IDG") && path_out.contains("semantic edge"),
+        "path summary should render IDG availability with a count phrase:\n{path_out}"
+    );
+    for raw in [
+        "complete no",
+        "idg available",
+        "idg edges",
+        "resolved-callgraph,warmed",
+    ] {
+        assert!(
+            !path_out.contains(raw),
+            "path summary leaked old/raw wording `{raw}`:\n{path_out}"
+        );
+    }
+
+    let Some(slice_out) = run(&[
+        "slice",
+        ws_str,
+        "--symbol",
+        "user_id",
+        "--line",
+        "12",
+        "--file",
+        "user_service.py",
+        "--context",
+        "4k",
+    ]) else {
+        return;
+    };
+    assert!(
+        slice_out.contains("limit") && slice_out.contains("64 steps"),
+        "slice summary should render the step limit as prose:\n{slice_out}"
+    );
+    assert!(
+        slice_out.contains("status") && slice_out.contains("incomplete"),
+        "slice summary should render a human status label:\n{slice_out}"
+    );
+    for raw in ["complete no", "max steps"] {
+        assert!(
+            !slice_out.contains(raw),
+            "slice summary leaked old/raw wording `{raw}`:\n{slice_out}"
+        );
+    }
 }
 
 #[test]
@@ -1372,6 +1687,47 @@ fn inspect_decl_sidebar_uses_semantic_callgraph_edges() {
     );
 }
 
+#[test]
+fn inspect_json_reports_semantic_flow_backend_summary() {
+    let ws = ws_path();
+    let Some(out) = run_inspect_graph(
+        &ws,
+        &[
+            "--query",
+            "run_admin_command",
+            "--taint-flow",
+            "--format",
+            "json",
+            "--all",
+        ],
+    ) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    let summary = &v["summary"];
+    let entry_queries = summary["semantic_flow_entry_queries"]
+        .as_u64()
+        .unwrap_or_default();
+    assert!(
+        entry_queries > 0,
+        "inspect taint overlay should report semantic flow entry queries:\n{out}"
+    );
+    let backend_counts = summary["semantic_flow_backend_counts"]
+        .as_object()
+        .unwrap_or_else(|| panic!("semantic flow backend counts missing:\n{out}"));
+    assert!(
+        !backend_counts.is_empty(),
+        "semantic flow backend counts should name the selected backend:\n{out}"
+    );
+    let cache_hits = summary["semantic_flow_cache_hits"].as_u64().unwrap_or_default();
+    let cache_misses = summary["semantic_flow_cache_misses"].as_u64().unwrap_or_default();
+    assert_eq!(
+        cache_hits + cache_misses,
+        entry_queries,
+        "semantic flow cache hit/miss counts must account for each entry query:\n{out}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // filter coverage for every browse command + inspect
 // -----------------------------------------------------------------------------
@@ -2029,9 +2385,12 @@ fn top_level_help_groups_commands() {
     for (group, cmd) in [
         ("Flow", "inspect"),
         ("Flow", "trace"),
+        ("Flow", "path"),
+        ("Flow", "slice"),
         ("Workspace", "index"),
         ("Browse", "defs"),
         ("Browse", "entrypoints"),
+        ("Browse", "operations"),
         ("Debug", "dump-hir"),
     ] {
         let group_idx = out.find(group).expect("group present");
@@ -2051,6 +2410,7 @@ fn top_level_help_groups_commands() {
         "dump-cfg",
         "dump-callgraph",
         "dump-edges",
+        "dump-resolution",
         "dump-resolve",
         "dump-taint",
         "diagnostics",
@@ -2081,7 +2441,17 @@ fn top_level_help_has_no_duplicate_commands_block() {
     // The grouped block is still there.
     assert!(out.contains("COMMAND GROUPS"));
     // Each subcommand name is listed exactly once at help-index depth.
-    for cmd in ["inspect", "trace", "defs", "calls", "imports", "dump-hir"] {
+    for cmd in [
+        "inspect",
+        "trace",
+        "path",
+        "slice",
+        "defs",
+        "calls",
+        "imports",
+        "operations",
+        "dump-hir",
+    ] {
         let occurrences = out
             .match_indices(&format!("    {cmd}"))
             .filter(|(_, m)| *m == format!("    {cmd}"))
@@ -2117,6 +2487,21 @@ fn cache_help_documents_persisted_sidecar_workflow() {
 }
 
 #[test]
+fn cache_clear_help_labels_dataflow_only_correctly() {
+    let Some(out) = run(&["cache", "clear", "--help"]) else {
+        return;
+    };
+    assert!(
+        out.contains("only drop the dataflow cache"),
+        "cache clear help should describe --dataflow-only as dataflow cache clearing:\n{out}"
+    );
+    assert!(
+        !out.contains("only drop the taint cache"),
+        "cache clear help must not describe --dataflow-only as taint cache clearing:\n{out}"
+    );
+}
+
+#[test]
 fn cache_stats_json_reports_analysis_sidecars() {
     let ws = ws_path();
     let Some(out) = run(&["cache", "stats", ws.to_str().unwrap(), "--format", "json"]) else {
@@ -2125,6 +2510,7 @@ fn cache_stats_json_reports_analysis_sidecars() {
     let value: serde_json::Value = serde_json::from_str(&out).expect("cache stats JSON");
     for key in [
         "bonsai_dir",
+        "manifest",
         "dataflow_factstore_sidecar",
         "value_flow_sidecar",
         "flow_ids_sidecar",
@@ -2132,6 +2518,7 @@ fn cache_stats_json_reports_analysis_sidecars() {
         "idg_sidecar",
         "taint_graph_sidecar",
         "export_sidecar",
+        "validation",
     ] {
         assert!(
             value.get(key).is_some(),
@@ -2167,11 +2554,14 @@ fn every_help_menu_renders_and_documents_core_surface() {
         vec!["--help"],
         vec!["index", "--help"],
         vec!["trace", "--help"],
+        vec!["path", "--help"],
+        vec!["slice", "--help"],
         vec!["diagnostics", "--help"],
         vec!["dump-hir", "--help"],
         vec!["dump-cfg", "--help"],
         vec!["dump-callgraph", "--help"],
         vec!["dump-edges", "--help"],
+        vec!["dump-resolution", "--help"],
         vec!["dump-ast", "--help"],
         vec!["dump-resolve", "--help"],
         vec!["dump-taint", "--help"],
@@ -2182,6 +2572,7 @@ fn every_help_menu_renders_and_documents_core_surface() {
         vec!["strings", "--help"],
         vec!["comments", "--help"],
         vec!["args", "--help"],
+        vec!["operations", "--help"],
         vec!["classes", "--help"],
         vec!["refs", "--help"],
         vec!["search", "--help"],
@@ -2217,6 +2608,12 @@ fn every_help_menu_renders_and_documents_core_surface() {
             widest <= 180,
             "{args:?}: help has an over-wide line ({widest} chars):\n{out}"
         );
+        for line in out.lines() {
+            assert!(
+                !line.trim_end().ends_with("..."),
+                "{args:?}: help line looks clipped instead of wrapped:\n{line}\n\nfull help:\n{out}"
+            );
+        }
         assert!(
             !out.chars().any(|ch| ch.is_control() && ch != '\n' && ch != '\t'),
             "{args:?}: help contains a control character:\n{out}"
@@ -2328,6 +2725,71 @@ fn tree_json_marks_depth_limited_view_incomplete() {
 }
 
 #[test]
+fn tree_file_filter_is_workspace_relative_in_fast_mode() {
+    let outer = tempdir_for_test("tree-filter-parent");
+    let root = outer.join("tests/chosen-workspace");
+    std::fs::create_dir_all(root.join("tests")).expect("create workspace");
+    std::fs::write(root.join("app.py"), "def app_marker():\n    return 1\n").expect("write app");
+    std::fs::write(root.join("tests/helper.py"), "def test_marker():\n    return 2\n").expect("write helper");
+
+    let Some(out) = run(&[
+        "tree",
+        root.to_str().unwrap(),
+        "--file",
+        "tests/",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("tree JSON must parse");
+    assert_eq!(
+        parsed["summary"]["total_files_scanned"].as_u64(),
+        Some(1),
+        "tree --file tests/ should scan only workspace-local tests files:\n{out}"
+    );
+    let rendered = serde_json::to_string(&parsed).expect("serialize tree");
+    assert!(
+        rendered.contains("helper.py"),
+        "tree should include tests/helper.py:\n{out}"
+    );
+    assert!(
+        !rendered.contains("app.py"),
+        "tree must not include root app.py only because an ancestor outside the workspace is tests/:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(outer);
+}
+
+#[test]
+fn tree_fast_mode_skips_internal_case_probe_files() {
+    let root = tempdir_for_test("tree-internal-probe");
+    std::fs::write(root.join("app.py"), "def app_marker():\n    return 1\n").expect("write app");
+    std::fs::write(root.join(".bonsai_case_probe_123_456"), "").expect("write probe-like file");
+    std::fs::write(
+        root.join(".bonsai_case_probe_notes.py"),
+        "def user_owned_probe_notes():\n    return 1\n",
+    )
+    .expect("write user-owned similarly prefixed source file");
+
+    let Some(out) = run(&["tree", root.to_str().unwrap(), "--compact"]) else {
+        return;
+    };
+    assert!(
+        out.contains("app.py"),
+        "tree should still render real files:\n{out}"
+    );
+    assert!(
+        !out.contains(".bonsai_case_probe_123_456"),
+        "tree must not render transient internal case-probe files:\n{out}"
+    );
+    assert!(
+        out.contains(".bonsai_case_probe_notes.py"),
+        "tree must not hide user-owned similarly prefixed source files:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn tree_compact_text_marks_depth_limited_view_incomplete() {
     let ws = ws_path();
     let Some(out) = run(&["tree", ws.to_str().unwrap(), "--max-depth", "0", "--compact"]) else {
@@ -2422,6 +2884,43 @@ fn read_file_resolves_unique_nested_basename() {
             .is_some_and(|source| source.contains("verify_token")),
         "read-file should render the resolved nested source:\n{out}"
     );
+}
+
+#[test]
+fn read_file_rejects_substring_only_path_match() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let root = tempdir_for_test("read-file-substring-path");
+    std::fs::write(root.join("myapp.py"), "def myapp_marker():\n    return 1\n").expect("write source");
+
+    let out = Command::new(&bin)
+        .args([
+            "read-file",
+            root.to_str().unwrap(),
+            "app.py",
+            "--format",
+            "json",
+            "--no-color",
+        ])
+        .env("COLUMNS", "200")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "read-file app.py must not resolve myapp.py by substring; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        rendered.contains("did not match any supported source file") && rendered.contains("myapp.py"),
+        "read-file should reject substring-only matches and offer suggestions; got:\n{rendered}"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -2819,6 +3318,20 @@ fn dump_edges_uses_semantic_resolved_callgraph_edges_only() {
             .all(|row| matches!(row["precision"].as_str(), Some("exact" | "narrowed"))),
         "dump-edges must not expose broad precision classes:\n{out}"
     );
+    assert!(
+        rows.iter().all(|row| {
+            row["resolver_stage"]
+                .as_str()
+                .is_some_and(|stage| !stage.is_empty())
+                && row["evidence"]
+                    .as_str()
+                    .is_some_and(|evidence| !evidence.is_empty())
+                && row["confidence"]
+                    .as_u64()
+                    .is_some_and(|confidence| confidence <= 100)
+        }),
+        "dump-edges must expose resolver provenance on every edge:\n{out}"
+    );
 }
 
 #[test]
@@ -2889,7 +3402,7 @@ fn diagnostics_points_at_specific_error_node() {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-    let arr = v.as_array().expect("array");
+    let arr = v["diagnostics"].as_array().expect("diagnostics array");
     // C++ fixture has syntax errors. Each diagnostic should point at a
     // narrow span, not at the whole file.
     for d in arr {
@@ -3135,7 +3648,12 @@ fn inspect_kind_filter_works_for_every_lang() {
                     if part.is_empty() {
                         continue;
                     }
-                    let kind = part.split('=').next().unwrap_or("");
+                    let kind = part
+                        .split_once(':')
+                        .map(|(kind, _)| kind)
+                        .or_else(|| part.split_once('=').map(|(kind, _)| kind))
+                        .unwrap_or(part)
+                        .trim();
                     assert_eq!(
                         kind, "call",
                         "{lang}: --kind call let through kind `{kind}` in summary: {line}"
@@ -3146,10 +3664,9 @@ fn inspect_kind_filter_works_for_every_lang() {
     }
 }
 
-/// `--file <substring>` filters hits to files whose path contains the
-/// substring. Using `.` (a universally-present file extension char)
-/// should keep every hit; using a clearly-absent substring drops them
-/// all.
+/// `--file <TEXT>` filters hits by workspace-relative file path. Using `.`
+/// (a universally-present file extension char) should keep every hit; using
+/// a clearly-absent substring drops them all.
 #[test]
 fn inspect_file_filter_works_for_every_lang() {
     for lang in LANG_MICROS {
@@ -3772,6 +4289,10 @@ fn cli_refs_captures_dotted_method_calls() {
         return;
     };
     assert_contains("kotlin", "refs getParameter", &k_bare, "getParameter");
+    let Some(k_receiver) = run_on("kotlin", &["refs", "req"]) else {
+        return;
+    };
+    assert_contains("kotlin", "refs req", &k_receiver, "req.getParameter");
 
     // Swift: same invariant for `authService.verifyToken`.
     let Some(s_full) = run_on("swift", &["refs", "authService.verifyToken"]) else {
@@ -3787,6 +4308,15 @@ fn cli_refs_captures_dotted_method_calls() {
         return;
     };
     assert_contains("swift", "refs verifyToken", &s_bare, "verifyToken");
+    let Some(s_receiver) = run_on("swift", &["refs", "authService"]) else {
+        return;
+    };
+    assert_contains(
+        "swift",
+        "refs authService",
+        &s_receiver,
+        "authService.verifyToken",
+    );
 }
 
 /// Pin JS `require(...)` and Ruby `require/require_relative` imports
@@ -3809,6 +4339,54 @@ fn cli_imports_captures_call_based_require() {
     assert_contains("ruby", "imports", &rb_out, "sqlite3");
     assert_contains("ruby", "imports", &rb_out, "user_service");
     assert_contains("ruby", "imports", &rb_out, "sinatra");
+}
+
+#[test]
+fn cli_imports_hide_resolver_only_bindings() {
+    let Some(lua_out) = run_on("lua", &["imports", "--format", "json", "--all"]) else {
+        return;
+    };
+    let lua_rows: serde_json::Value = serde_json::from_str(lua_out.trim()).expect("lua imports JSON");
+    let lua_rows = lua_rows.as_array().expect("lua imports array");
+    assert!(
+        !lua_rows
+            .iter()
+            .any(|row| row.get("alias").and_then(serde_json::Value::as_str) == Some("M")),
+        "Lua module export table alias M is resolver-only and must not be a public import row: {lua_rows:?}"
+    );
+    for (module, alias) in [
+        ("luasql.sqlite3", "luasql"),
+        ("auth_service", "auth"),
+        ("user_service", "user_service"),
+    ] {
+        assert!(
+            lua_rows.iter().any(|row| {
+                row.get("module").and_then(serde_json::Value::as_str) == Some(module)
+                    && row.get("alias").and_then(serde_json::Value::as_str) == Some(alias)
+            }),
+            "Lua real require row missing module={module} alias={alias}: {lua_rows:?}"
+        );
+    }
+
+    let Some(ruby_out) = run_on("ruby", &["imports", "--format", "json", "--all"]) else {
+        return;
+    };
+    let ruby_rows: serde_json::Value = serde_json::from_str(ruby_out.trim()).expect("ruby imports JSON");
+    let ruby_rows = ruby_rows.as_array().expect("ruby imports array");
+    assert!(
+        ruby_rows
+            .iter()
+            .all(|row| row.get("alias").and_then(serde_json::Value::as_str).is_none()),
+        "Ruby inferred constant bindings are resolver-only and must not be standalone import rows: {ruby_rows:?}"
+    );
+    for module in ["auth_service", "sinatra", "sqlite3", "user_service"] {
+        assert!(
+            ruby_rows
+                .iter()
+                .any(|row| row.get("module").and_then(serde_json::Value::as_str) == Some(module)),
+            "Ruby real require row missing module={module}: {ruby_rows:?}"
+        );
+    }
 }
 
 /// End-to-end sink audit: for every language's micro fixture, both
@@ -4001,6 +4579,7 @@ fn cache_stats_prints_caps_and_on_disk_path() {
         "enclosing cap",
         "BONSAI_NO_CACHE env",
         "on-disk cache",
+        "cache manifest",
     ] {
         assert!(out.contains(label), "cache stats missing `{label}` line:\n{out}");
     }
@@ -4008,6 +4587,10 @@ fn cache_stats_prints_caps_and_on_disk_path() {
     assert!(
         out.contains(".bonsai"),
         "cache stats must surface the .bonsai path:\n{out}"
+    );
+    assert!(
+        !out.contains("manifest freshness  fresh:"),
+        "fresh cache manifests should not inherit sidecar freshness detail:\n{out}"
     );
 }
 
@@ -4885,6 +5468,10 @@ fn show_flow_id_reopens_inspect_drilldown() {
         out.contains(target) && out.contains("FLOW"),
         "show F: should delegate to inspect and render the target flow; got:\n{out}"
     );
+    assert!(
+        !out.contains("OCCURRENCE HITS") && !out.contains("match points:"),
+        "show F: is a structural-chain drilldown; it must not attach arbitrary syntax hits:\n{out}"
+    );
 }
 
 #[test]
@@ -4924,6 +5511,91 @@ fn show_taint_id_reopens_inspect_taint_drilldown() {
     assert!(
         out.contains(target) && out.contains("TAINT FLOWS"),
         "show T: should delegate to inspect taint drilldown; got:\n{out}"
+    );
+}
+
+#[test]
+fn show_taint_id_with_source_reopens_dump_taint_drilldown() {
+    let ws = ws_path();
+    let Some(full) = run(&[
+        "dump-taint",
+        ws.to_str().unwrap(),
+        "--source",
+        "update_user",
+        "--seed",
+        "token",
+        "--seed",
+        "action",
+    ]) else {
+        return;
+    };
+    let ids = extract_taint_ids(&full);
+    let Some(target) = ids.first() else {
+        panic!("fixture should emit at least one dump-taint T: id:\n{full}");
+    };
+    let Some(out) = run(&[
+        "show",
+        ws.to_str().unwrap(),
+        target,
+        "--taint-source",
+        "update_user",
+        "--taint-seed",
+        "token",
+        "--taint-seed",
+        "action",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.trim()).expect("show dump-taint JSON must parse");
+    let records = parsed["records"].as_array().expect("records array");
+    assert_eq!(
+        records.len(),
+        1,
+        "show dump-taint drilldown should keep one record: {out}"
+    );
+    assert_eq!(records[0]["taint_id"].as_str(), Some(target.as_str()));
+    assert_eq!(parsed["source"].as_str(), Some("update_user"));
+    assert_eq!(
+        parsed["seeds"].as_array().expect("seeds array").len(),
+        2,
+        "show dump-taint drilldown should preserve explicit seeds: {out}"
+    );
+}
+
+#[test]
+fn show_taint_dump_filters_require_source() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = ws_path();
+    let out = Command::new(&bin)
+        .args([
+            "show",
+            ws.to_str().unwrap(),
+            "T:00000000",
+            "--taint-seed",
+            "token",
+            "--no-color",
+        ])
+        .env("COLUMNS", "200")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "show T: with dump-taint filters but no source must fail; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        rendered.contains("--taint-source"),
+        "show T: dump-taint error should explain the missing source; got:\n{rendered}"
     );
 }
 

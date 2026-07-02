@@ -1,7 +1,176 @@
-//! X_07 — Star import.
+//! X_07 — Wildcard import/load exposes unqualified symbols.
+//!
+//! Positive: file A defines `helper(p) { sink(p) }`. File B uses the
+//! language's unqualified wildcard import/load form and calls
+//! `helper(args)` without a namespace qualifier. The resolver must
+//! constrain the bare call to the imported module instead of falling
+//! back to workspace-wide name matching.
 #![allow(unreachable_pub)]
+
 use crate::helpers::{run_positive_cell, LangFixture};
 use std::sync::Arc;
+
+#[test]
+fn x_07_cpp() {
+    run_positive_cell(
+        "X_07",
+        LangFixture {
+            lang: "cpp",
+            adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
+            files: &[
+                ("util.cpp", "namespace util { void helper(const char *p) { sink(p); } }\n"),
+                (
+                    "entry.cpp",
+                    "namespace util { void helper(const char *p); }\nusing namespace util;\nvoid entry(const char *args) { helper(args); }\n",
+                ),
+            ],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn x_07_csharp() {
+    run_positive_cell("X_07", LangFixture {
+        lang: "csharp",
+        adapter: Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
+        files: &[
+            ("Util.cs", "namespace App { public static class Util { public static void Helper(string p) { Sink.SinkFn(p); } } }\n"),
+            ("Demo.cs", "using static App.Util;\nnamespace App { public class Demo { public void Entry(string args) { Helper(args); } } }\n"),
+        ],
+        entry: "Entry",
+        seed: &["args"],
+        sink: "SinkFn",
+    });
+}
+
+#[test]
+fn x_07_dart() {
+    run_positive_cell(
+        "X_07",
+        LangFixture {
+            lang: "dart",
+            adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
+            files: &[
+                ("util.dart", "void helper(String p) { sink(p); }\n"),
+                (
+                    "entry.dart",
+                    "import 'util.dart';\nvoid entry(String args) { helper(args); }\n",
+                ),
+            ],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn x_07_elixir() {
+    run_positive_cell(
+        "X_07",
+        LangFixture {
+            lang: "elixir",
+            adapter: Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
+            files: &[
+                (
+                    "util.ex",
+                    "defmodule Util do\n  def helper(p), do: sink(p)\nend\n",
+                ),
+                (
+                    "entry.ex",
+                    "defmodule Entry do\n  import Util\n  def entry(args), do: helper(args)\nend\n",
+                ),
+            ],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn x_07_go() {
+    run_positive_cell(
+        "X_07",
+        LangFixture {
+            lang: "go",
+            adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
+            files: &[
+                (
+                    "util/util.go",
+                    "package util\nfunc Helper(p string) { sink(p) }\n",
+                ),
+                (
+                    "entry/entry.go",
+                    "package entry\nimport . \"app/util\"\nfunc Entry(args string) { Helper(args) }\n",
+                ),
+            ],
+            entry: "Entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn x_07_java() {
+    run_positive_cell("X_07", LangFixture {
+        lang: "java",
+        adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        files: &[
+            ("Util.java", "package app;\npublic class Util { public static void helper(String p) { sink(p); } }\n"),
+            ("Demo.java", "package app;\nimport static app.Util.*;\npublic class Demo { void entry(String args) { helper(args); } }\n"),
+        ],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+
+#[test]
+fn x_07_kotlin() {
+    run_positive_cell(
+        "X_07",
+        LangFixture {
+            lang: "kotlin",
+            adapter: Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
+            files: &[
+                ("util.kt", "package util\nfun helper(p: String) { sink(p) }\n"),
+                (
+                    "a.kt",
+                    "import util.*\nfun entry(args: String) { helper(args) }\n",
+                ),
+            ],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn x_07_php() {
+    run_positive_cell(
+        "X_07",
+        LangFixture {
+            lang: "php",
+            adapter: Arc::new(bonsai_lang_php::PhpAdapter::new()),
+            files: &[
+                ("util.php", "<?php\nfunction helper($p) { sink($p); }\n"),
+                (
+                    "entry.php",
+                    "<?php\nrequire_once 'util.php';\nfunction entry($args) { helper($args); }\n",
+                ),
+            ],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
 
 #[test]
 fn x_07_python() {
@@ -10,176 +179,20 @@ fn x_07_python() {
         LangFixture {
             lang: "python",
             adapter: Arc::new(bonsai_lang_python::PythonAdapter::new()),
-            files: &[("a.py", "def entry(args):\n    sink(args)\n")],
+            files: &[
+                ("util.py", "def helper(p):\n    sink(p)\n"),
+                (
+                    "entry.py",
+                    "from util import *\n\ndef entry(args):\n    helper(args)\n",
+                ),
+            ],
             entry: "entry",
             seed: &["args"],
             sink: "sink",
         },
     );
 }
-#[test]
-fn x_07_javascript() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "javascript",
-            adapter: Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
-            files: &[("a.js", "function entry(args) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_typescript() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "typescript",
-            adapter: Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
-            files: &[("a.ts", "function entry(args: string) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_java() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "java",
-            adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
-            files: &[(
-                "Demo.java",
-                "class Demo { void entry(String args) { sink(args); } }\n",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_kotlin() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "kotlin",
-            adapter: Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
-            files: &[("a.kt", "fun entry(args: String) { sink(args) }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_scala() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "scala",
-            adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
-            files: &[(
-                "a.scala",
-                "object Demo { def entry(args: String): Unit = sink(args) }\n",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_csharp() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "csharp",
-            adapter: Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
-            files: &[(
-                "Demo.cs",
-                "class Demo { void Entry(string args) { Sink(args); } }\n",
-            )],
-            entry: "Entry",
-            seed: &["args"],
-            sink: "Sink",
-        },
-    );
-}
-#[test]
-fn x_07_go() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "go",
-            adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
-            files: &[("a.go", "package main\nfunc entry(args string) { sink(args) }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_rust() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "rust",
-            adapter: Arc::new(bonsai_lang_rust::RustAdapter::new()),
-            files: &[("a.rs", "fn entry(args: String) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_c() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "c",
-            adapter: Arc::new(bonsai_lang_c::CAdapter::new()),
-            files: &[("a.c", "void entry(char *args) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_cpp() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "cpp",
-            adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
-            files: &[("a.cpp", "void entry(const char *args) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_objc() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "objc",
-            adapter: Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
-            files: &[("a.m", "void entry(NSString *args) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
+
 #[test]
 fn x_07_ruby() {
     run_positive_cell(
@@ -187,128 +200,58 @@ fn x_07_ruby() {
         LangFixture {
             lang: "ruby",
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
-            files: &[("a.rb", "def entry(args)\n  sink(args)\nend\n")],
+            files: &[
+                ("util.rb", "def helper(p)\n  sink(p)\nend\n"),
+                (
+                    "entry.rb",
+                    "require_relative 'util'\n\ndef entry(args)\n  helper(args)\nend\n",
+                ),
+            ],
             entry: "entry",
             seed: &["args"],
             sink: "sink",
         },
     );
 }
+
 #[test]
-fn x_07_php() {
+fn x_07_rust() {
     run_positive_cell(
         "X_07",
         LangFixture {
-            lang: "php",
-            adapter: Arc::new(bonsai_lang_php::PhpAdapter::new()),
-            files: &[("a.php", "<?php\nfunction entry($args) { sink($args); }\n")],
+            lang: "rust",
+            adapter: Arc::new(bonsai_lang_rust::RustAdapter::new()),
+            files: &[
+                ("util.rs", "pub fn helper(p: String) { sink(p); }\n"),
+                (
+                    "entry.rs",
+                    "use crate::util::*;\npub fn entry(args: String) { helper(args); }\n",
+                ),
+            ],
             entry: "entry",
             seed: &["args"],
             sink: "sink",
         },
     );
 }
+
 #[test]
-fn x_07_perl() {
+fn x_07_scala() {
     run_positive_cell(
         "X_07",
         LangFixture {
-            lang: "perl",
-            adapter: Arc::new(bonsai_lang_perl::PerlAdapter::new()),
-            files: &[("a.pl", "sub entry { my ($args) = @_; sink($args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_swift() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "swift",
-            adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
-            files: &[("a.swift", "func entry(args: String) { sink(args) }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_dart() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "dart",
-            adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
-            files: &[("a.dart", "void entry(String args) { sink(args); }\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_lua() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "lua",
-            adapter: Arc::new(bonsai_lang_lua::LuaAdapter::new()),
-            files: &[("a.lua", "function entry(args)\n  sink(args)\nend\n")],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_elixir() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "elixir",
-            adapter: Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
-            files: &[(
-                "a.ex",
-                "defmodule Demo do\n  def entry(args) do\n    sink(args)\n  end\nend\n",
-            )],
-            entry: "entry",
-            seed: &["args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_erlang() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "erlang",
-            adapter: Arc::new(bonsai_lang_erlang::ErlangAdapter::new()),
-            files: &[(
-                "demo.erl",
-                "-module(demo).\n-export([entry/1]).\nentry(Args) -> sink(Args).\n",
-            )],
-            entry: "entry",
-            seed: &["Args"],
-            sink: "sink",
-        },
-    );
-}
-#[test]
-fn x_07_solidity() {
-    run_positive_cell(
-        "X_07",
-        LangFixture {
-            lang: "solidity",
-            adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
-            files: &[(
-                "Demo.sol",
-                "contract Demo { function entry(string memory args) public { sink(args); } }\n",
-            )],
+            lang: "scala",
+            adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
+            files: &[
+                (
+                    "Util.scala",
+                    "package util\nobject Util { def helper(p: String): Unit = sink(p) }\n",
+                ),
+                (
+                    "Demo.scala",
+                    "import util.Util._\nobject Demo { def entry(args: String): Unit = helper(args) }\n",
+                ),
+            ],
             entry: "entry",
             seed: &["args"],
             sink: "sink",

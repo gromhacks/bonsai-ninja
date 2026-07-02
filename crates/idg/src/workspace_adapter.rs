@@ -2001,7 +2001,8 @@ fn idg_build_enabled() -> bool {
 
 fn idg_build_log(args: std::fmt::Arguments<'_>) {
     if idg_build_enabled() {
-        eprintln!("[idg-build] {args}");
+        let message = bonsai_diagnostics::debug::render_message(&args.to_string());
+        eprintln!("[idg-build] {message}");
     }
 }
 

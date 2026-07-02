@@ -51,7 +51,7 @@ Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidec
 
 <Accordion title="How do I keep results current while editing?">
 
-Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and prints fresh structural stats. Combine it with `--prewarm-dataflow` only when you intentionally want save-time dataflow sidecar rebuilds. SDK `Project` facades use the same refresh path before commands run.
+Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and prints fresh stats without forcing a whole-workspace semantic prewarm. Use `index ./src --semantic` for an explicit sidecar warm-up job. SDK `Project` facades use the same refresh path before commands run.
 
 </Accordion>
 

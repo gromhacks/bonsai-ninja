@@ -26,7 +26,8 @@
 
 use bonsai_common::FileId;
 use bonsai_lang_api::kit::{
-    alias_map_from_imports, extract_generic_imports, extract_read_write_refs, language_from_pack,
+    alias_map_from_imports, extract_call_refs, extract_generic_imports, extract_read_write_refs,
+    language_from_pack,
 };
 use bonsai_lang_api::{AliasTarget, ImportIndex, ImportScope, ImportSpec, RefKind};
 
@@ -46,6 +47,15 @@ fn refs(pack: &str, src: &str) -> Vec<(RefKind, String)> {
     extract_read_write_refs(&tree, FileId::INVALID, src.as_bytes())
         .into_iter()
         .map(|r| (r.kind, r.name))
+        .collect()
+}
+
+fn call_refs(pack: &str, src: &str) -> Vec<String> {
+    let tree = parse(pack, src);
+    extract_call_refs(&tree, FileId::INVALID, src.as_bytes())
+        .into_iter()
+        .filter(|r| r.kind == RefKind::Call)
+        .map(|r| r.name)
         .collect()
 }
 
@@ -278,6 +288,42 @@ fn read_swift_navigation_expression_suffix_field() {
     assert!(
         found.contains(&(RefKind::Read, "Request.query".to_string())),
         "expected Swift navigation_expression read in {found:?}"
+    );
+}
+
+#[test]
+fn erlang_call_refs_use_callee_not_arguments() {
+    let found = call_refs(
+        "erlang",
+        r#"
+-module(user_service).
+get_user(Token) ->
+    auth_service:verify_token(Token).
+
+update_user(Token) ->
+    UserId = verify_token(Token),
+    UserId.
+"#,
+    );
+    assert!(
+        found.contains(&"auth_service:verify_token".to_string()),
+        "expected remote Erlang callee ref in {found:?}"
+    );
+    assert_eq!(
+        found
+            .iter()
+            .filter(|name| name.as_str() == "auth_service:verify_token")
+            .count(),
+        1,
+        "remote Erlang callees should be emitted once by the enclosing call: {found:?}"
+    );
+    assert!(
+        found.contains(&"verify_token".to_string()),
+        "expected local Erlang callee ref in {found:?}"
+    );
+    assert!(
+        !found.iter().any(|name| name == "Token" || name == "UserId"),
+        "Erlang call refs must not classify arguments or locals as callees: {found:?}"
     );
 }
 

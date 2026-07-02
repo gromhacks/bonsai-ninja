@@ -86,10 +86,11 @@ class and verify each box.
 - [ ] **Pagination still works** for the affected command.
 - [ ] **Inspect mode contract holds.** Default targeted queries include
       rulepack-free taint paths plus source-body flow evidence,
-      `--syntax-only` disables them, `--taint-flow` forces bounded raw
-      taint paths, and `--graph-flow` forces structural source-body
-      evidence on large or broad queries that would otherwise stay on
-      the syntax fast path.
+      `--syntax-only` deliberately omits flow evidence from the output,
+      `--taint-flow` requests bounded raw taint paths, and `--graph-flow`
+      requests structural source-body evidence for large result sets that
+      would otherwise render syntax/index facts only. These flags change
+      output scope, not the exact/narrowed static-evidence contract.
 - [ ] **Stable ID routing holds.** `show F:`, `show G:`, `show T:`,
       `show E:`, `show N:`, `show S:`, and resolver-scoped `show R:`
       delegate to the expected owner command.

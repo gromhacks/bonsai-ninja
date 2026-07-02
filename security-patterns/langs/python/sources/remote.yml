@@ -521,6 +521,27 @@
           value = request.form
           return value
   description: Flask/FastAPI/Sanic/Starlette request.form - URL-encoded / multipart form body. Same adapter fact is canonicalized here to avoid duplicate framework-specific form sources.
+- id: python.flask.request_data
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [flask]
+  packages: [flask]
+  match:
+    kind: read
+    target:
+      attribute: [request, data]
+  match_examples:
+  - name: flask request data
+    code: |
+      import flask
+      def example():
+          value = request.data
+          return value
+  description: Flask request.data - raw request body bytes supplied by the remote client.
 - id: python.flask.request_files
   enabled: false
   disabled_reason:

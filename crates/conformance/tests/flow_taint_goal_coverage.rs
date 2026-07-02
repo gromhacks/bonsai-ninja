@@ -6,8 +6,11 @@
 //! command, SDK, benchmark-gap, or rulepack-configurability coverage,
 //! this suite fails even before the more expensive behavioral tests run.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+
+use bonsai_lang_api::{FlowEdgeKind, FLOW_EDGE_TAXONOMY};
 
 const SUPPORTED_LANGS: &[&str] = &[
     "c",
@@ -58,6 +61,44 @@ fn assert_contains_all(label: &str, haystack: &str, needles: &[&str]) {
     );
 }
 
+fn taxonomy_names() -> Vec<&'static str> {
+    FlowEdgeKind::ALL.iter().map(|kind| kind.as_str()).collect()
+}
+
+fn registered_adapter_langs() -> BTreeSet<String> {
+    bonsai_adapters::all_adapters()
+        .into_iter()
+        .map(|adapter| adapter.language_id().as_str().to_string())
+        .collect()
+}
+
+fn adapter_docs_table_langs(markdown: &str) -> BTreeSet<String> {
+    markdown
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if !line.starts_with("| lang_") {
+                return None;
+            }
+            line.split('|')
+                .nth(1)
+                .map(str::trim)
+                .and_then(|cell| cell.strip_prefix("lang_"))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn adapter_capability_snapshot_langs(snapshot: &str) -> BTreeSet<String> {
+    snapshot
+        .lines()
+        .filter_map(|line| {
+            let first = line.split_whitespace().next()?;
+            first.strip_prefix("lang_").map(str::to_string)
+        })
+        .collect()
+}
+
 #[test]
 fn all_language_matrices_name_every_supported_language() {
     let cli_matrix = read("crates/cli/tests/per_lang_cli_matrix.rs");
@@ -87,6 +128,24 @@ fn all_language_matrices_name_every_supported_language() {
 }
 
 #[test]
+fn adapter_capability_docs_and_snapshot_name_registered_adapters() {
+    let registered = registered_adapter_langs();
+    let docs = read("docs/contributing/adapter-capabilities.mdx");
+    let docs_langs = adapter_docs_table_langs(&docs);
+    assert_eq!(
+        docs_langs, registered,
+        "adapter-capabilities.mdx table must name exactly the registered adapters"
+    );
+
+    let snapshot = read(".snapshots/ADAPTER_CAPABILITIES.snapshot");
+    let snapshot_langs = adapter_capability_snapshot_langs(&snapshot);
+    assert_eq!(
+        snapshot_langs, registered,
+        ".snapshots/ADAPTER_CAPABILITIES.snapshot must name exactly the registered adapters"
+    );
+}
+
+#[test]
 fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
     let cli_matrix = read("crates/cli/tests/per_lang_cli_matrix.rs");
     assert_contains_all(
@@ -98,7 +157,10 @@ fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
             "micro_refs_verify_token",
             "micro_inspect_reaches_run_admin_command",
             "micro_trace_handler",
+            "micro_path_handler_to_verifier",
+            "micro_slice_action_at_update_call",
             "micro_dump_edges",
+            "micro_dump_resolution",
             "micro_dump_resolve_handler",
             "micro_dump_taint_from_handler",
             "micro_export_taint_graph",
@@ -122,8 +184,12 @@ fn flow_taint_cli_command_surfaces_have_per_language_behavioral_coverage() {
             "ALL_PAGED_COMMANDS",
             "\"calls\"",
             "\"args\"",
+            "\"operations\"",
             "\"refs\"",
             "\"dump-edges\"",
+            "\"dump-resolution\"",
+            "\"path\"",
+            "\"slice\"",
             "\"inspect\"",
             "\"trace\"",
             "every_command_json_wraps_when_context_is_set",
@@ -158,21 +224,233 @@ fn sdk_parity_covers_all_flow_taint_commands_for_every_language() {
             "security_inventory_cli_json_matches_sdk_for_every_language",
             "browse_fact_commands_cli_json_match_sdk_for_every_language",
             "dump_and_trace_commands_cli_json_match_sdk_for_every_language",
+            "slice_cli_json_matches_sdk_facade",
+            "fn slice_site",
+            "non-empty syntax-derived slice",
+            "cache_commands_cli_json_match_sdk_facade",
+            "navigation_cli_json_matches_sdk_facade",
+            "inspect_structural_flow_ids_match_sdk_facade",
+            "show_structural_ids_roundtrip_through_cli_and_sdk",
+            "CLI show E:",
+            "CLI show N:",
+            "CLI show R:",
+            "CLI show F:",
+            "CLI show G:",
+            "CLI show T:",
+            "CLI show S:",
             "export_graph_database_formats_cli_match_sdk_for_every_language",
             "native_export_json_cli_matches_sdk_for_every_language",
+            "\"cache\"",
+            "\"show\"",
+            "\"tree\"",
+            "\"read-file\"",
             "\"taint-analysis\"",
             "\"source-analysis\"",
             "\"sources\"",
             "\"sinks\"",
             "\"sanitizers\"",
             "\"calls\"",
+            "\"entrypoints\"",
             "\"args\"",
+            "\"operations\"",
             "\"refs\"",
             "\"dump-edges\"",
+            "\"dump-resolution\"",
+            "\"path\"",
+            "\"slice\"",
             "\"dump-resolve\"",
             "\"dump-taint\"",
             "\"trace\"",
             "\"export\"",
+        ],
+    );
+}
+
+#[test]
+fn whole_program_flow_taxonomy_is_complete_documented_and_language_neutral() {
+    const REQUIRED: &[&str] = &[
+        "LOCAL_ASSIGN",
+        "EXPR_PROPAGATION",
+        "DEF_USE",
+        "ARG_TO_PARAM",
+        "RECEIVER_TO_THIS",
+        "RETURN_TO_CALLER",
+        "FIELD_WRITE",
+        "FIELD_READ",
+        "INDEX_WRITE",
+        "INDEX_READ",
+        "OBJECT_CONSTRUCTION",
+        "DESTRUCTURING",
+        "CLOSURE_CAPTURE",
+        "GLOBAL_ACCESS",
+        "IMPORT_EXPORT",
+        "ALIAS",
+        "DEREFERENCE",
+        "HEAP_STORE",
+        "HEAP_LOAD",
+        "CONTAINER_STORE",
+        "CONTAINER_LOAD",
+        "ITERATION",
+        "YIELD",
+        "THROW_TO_CATCH",
+        "AWAIT_RESOLUTION",
+        "CALLBACK_INVOCATION",
+        "EVENT_DISPATCH",
+        "DYNAMIC_PROPERTY_ACCESS",
+        "SERIALIZE",
+        "DESERIALIZE",
+        "SANITIZE",
+        "SINK",
+        "CONTROL_DEPENDENCE",
+        "IMPLICIT_FLOW",
+        "INTER_FILE",
+        "INTER_PACKAGE",
+    ];
+
+    let names = taxonomy_names();
+    let unique: BTreeSet<_> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len(), "taxonomy names must be unique");
+    assert_eq!(
+        unique,
+        REQUIRED.iter().copied().collect(),
+        "taxonomy must cover the full language-neutral edge contract"
+    );
+    assert_eq!(
+        FLOW_EDGE_TAXONOMY.len(),
+        FlowEdgeKind::ALL.len(),
+        "every taxonomy enum variant needs an implementation spec"
+    );
+
+    for spec in FLOW_EDGE_TAXONOMY {
+        assert!(
+            !spec.carriers.is_empty(),
+            "{} must name shared engine carriers",
+            spec.name()
+        );
+        for carrier in spec.carriers {
+            assert!(
+                !SUPPORTED_LANGS
+                    .iter()
+                    .any(|lang| carrier.eq_ignore_ascii_case(lang)),
+                "{} carrier `{carrier}` must describe shared engine facts, not one language",
+                spec.name()
+            );
+        }
+    }
+
+    let docs = read("docs/contributing/taint-engine-spec.mdx");
+    assert_contains_all("taint engine taxonomy docs", &docs, &names);
+    assert_contains_all(
+        "taint engine taxonomy caveats",
+        &docs,
+        &[
+            "Whole-program data-flow edge taxonomy",
+            "PASS",
+            "ENGINE_ONLY",
+            "STATIC_LIMIT",
+            "Language-specific `N/A` belongs in the taint matrix",
+            "InterThrow",
+            "reserved",
+            "Wildcard import",
+        ],
+    );
+}
+
+#[test]
+fn adapter_flow_event_audit_tracks_current_flow_event_enum() {
+    let script = read("scripts/audit-adapter-flow-events.sh");
+    assert_contains_all(
+        "adapter FlowEvent audit script",
+        &script,
+        &[
+            "Call Branch Loop Assign Return Throw Try Break Continue Yield Await Defer Using Lifecycle",
+            "fields on `FlowEvent::Loop` / `FlowEvent::Try`",
+        ],
+    );
+    assert!(
+        !script.contains("ForEach Param"),
+        "adapter audit script must not look for stale FlowEvent variants"
+    );
+
+    let snapshot = read(".snapshots/ADAPTER_FLOW_EVENT_COVERAGE.snapshot");
+    assert_contains_all(
+        "adapter FlowEvent audit snapshot",
+        &snapshot,
+        &[
+            "Loop",
+            "Try",
+            "Break",
+            "Continue",
+            "Yield",
+            "Await",
+            "Defer",
+            "Using",
+            "Lifecycle",
+        ],
+    );
+    assert!(
+        !snapshot.lines().next().unwrap_or_default().contains("ForEach"),
+        "adapter FlowEvent snapshot must use current FlowEvent names"
+    );
+}
+
+#[test]
+fn public_security_accuracy_contract_is_semantic_only() {
+    let precision = read("crates/common/src/precision.rs");
+    assert_contains_all(
+        "shared precision contract",
+        &precision,
+        &[
+            "Public security findings have a single accuracy contract",
+            "is_proven_static_evidence",
+            "is_diagnostic_only",
+            "OverApproximate",
+            "Unknown",
+        ],
+    );
+
+    let analysis = read("crates/security/src/analysis/mod.rs");
+    assert_contains_all(
+        "security analysis semantic-only contract",
+        &analysis,
+        &[
+            "PUBLIC_SEMANTIC_MAX_PRECISION",
+            "one accuracy contract",
+            "semantic_precision_only",
+            "precision.is_proven_static_evidence()",
+        ],
+    );
+
+    let semantic_tests = read("crates/security/src/analysis/semantic_options_tests.rs");
+    assert_contains_all(
+        "semantic precision option tests",
+        &semantic_tests,
+        &[
+            "taint_options_default_to_semantic_precision",
+            "taint_options_clamp_broad_precision_to_semantic",
+            "PUBLIC_SEMANTIC_MAX_PRECISION",
+        ],
+    );
+
+    let status_tests = read("crates/security/src/analysis/compute_status_tests.rs");
+    assert_contains_all(
+        "finding precision filter tests",
+        &status_tests,
+        &[
+            "diagnostic-only precision must never become public finding evidence",
+            "unknown precision must remain diagnostic-only",
+        ],
+    );
+
+    let baseline = read("docs/COVERAGE_BASELINE.md");
+    assert_contains_all(
+        "coverage baseline public accuracy wording",
+        &baseline,
+        &[
+            "Public findings have one accuracy contract",
+            "not a second accuracy level",
+            "diagnostic-only",
+            "not a lower public accuracy mode",
         ],
     );
 }
@@ -313,6 +591,221 @@ fn security_api_patterns_remain_rulepack_configurable_not_engine_hardcoded() {
             "library decode passthrough belongs in rulepack semantics",
             "unknown decode methods must not become generic CallArg->CallRet passthroughs",
             "TransferOptions",
+        ],
+    );
+}
+
+#[test]
+fn generated_capability_docs_and_diagnostics_stay_linked() {
+    let adapter_docs = read("docs/contributing/adapter-capabilities.mdx");
+    assert_contains_all(
+        "adapter capability docs",
+        &adapter_docs,
+        &[
+            "capability_matrix_report",
+            "build/capability-matrix.md",
+            "build/capability-matrix.json",
+            "Project::diagnostics_report()",
+            "bonsai-ninja diagnostics",
+        ],
+    );
+
+    let conformance = read("crates/conformance/tests/capability_matrix.rs");
+    assert_contains_all(
+        "capability matrix conformance",
+        &conformance,
+        &[
+            "write_matrix_to_build",
+            "21 * Capability::ALL.len()",
+            "assert_capability_universal",
+        ],
+    );
+
+    let sdk = read("crates/sdk/src/lib.rs");
+    assert_contains_all(
+        "SDK diagnostics report",
+        &sdk,
+        &[
+            "pub struct DiagnosticsReport",
+            "pub struct AdapterCapabilityRow",
+            "pub fn diagnostics_report",
+            "adapter_capabilities",
+            "workspace_languages",
+        ],
+    );
+
+    let cli_diagnostics = read("crates/cli/src/commands/diagnostics.rs");
+    assert_contains_all(
+        "CLI diagnostics command",
+        &cli_diagnostics,
+        &["diagnostics_report", "serde_json::to_string_pretty"],
+    );
+
+    let parity = read("crates/cli/tests/sdk_cli_parity.rs");
+    assert_contains_all(
+        "diagnostics CLI/SDK parity",
+        &parity,
+        &[
+            "index_and_diagnostics_cli_json_match_sdk_for_every_language",
+            "diagnostics_report",
+        ],
+    );
+}
+
+#[test]
+fn cli_reference_documents_stable_id_and_cache_surfaces() {
+    let cli_reference = read("docs/cli-reference.mdx");
+    assert_contains_all(
+        "CLI reference stable id surface",
+        &cli_reference,
+        &[
+            "| `F:` | `inspect --flow`",
+            "| `G:` | `inspect --group`",
+            "| `T:` | raw inspect taint path",
+            "| `E:` | `dump-edges --edge`",
+            "| `N:` | `dump-ast --node`",
+            "| `R:` | `dump-resolve --candidate`",
+            "| `S:` | `security taint-analysis --finding`",
+            "bonsai-ninja show ./src S:",
+            "bonsai-ninja show ./src R:",
+            "bonsai-ninja show ./src T:",
+        ],
+    );
+    assert_contains_all(
+        "CLI reference hot cache workflow",
+        &cli_reference,
+        &[
+            "cache stats ./src",
+            "cache clear ./src --dataflow-only",
+            "cache rebuild ./src",
+            "does not run the legacy full-workspace dataflow prewarm",
+            "taint-graph",
+            "export sidecar",
+        ],
+    );
+}
+
+#[test]
+fn long_command_progress_uses_scoped_cleanup_for_shared_renderers() {
+    let page_cache = read("crates/cli/src/page_cache.rs");
+    assert_contains_all(
+        "shared rendered-page progress",
+        &page_cache,
+        &[
+            "ScopedSpinner::new(\"validating rendered page cache\")",
+            "ScopedSpinner::new(&render_label)",
+            "ScopedSpinner::new(\"saving rendered page cache\")",
+        ],
+    );
+    assert!(
+        !page_cache.contains("progress::spinner("),
+        "page-cache replay/render progress must use scoped cleanup so early render/cache errors cannot leave duplicate spinners"
+    );
+
+    let security = read("crates/cli/src/commands/security.rs");
+    assert_contains_all(
+        "security top-level progress",
+        &security,
+        &[
+            "ScopedSpinner::new(\"loading security rules\")",
+            "stage.finish();",
+        ],
+    );
+
+    let diagnostics = read("crates/cli/src/commands/diagnostics.rs");
+    assert_contains_all(
+        "diagnostics progress cleanup",
+        &diagnostics,
+        &[
+            "let parse_result = (|| -> Result<()>",
+            "bar.finish_and_clear();",
+            "parse_result?;",
+        ],
+    );
+}
+
+#[test]
+fn relevance_ranking_runs_before_render_budget_across_shared_surfaces() {
+    let common = read("crates/browse/src/common.rs");
+    assert_contains_all(
+        "browse relevance helpers",
+        &common,
+        &[
+            "textual_relevance_key",
+            "best_textual_relevance_key",
+            "Lower is better",
+            "rank exact matches first",
+        ],
+    );
+    let common_tests = read("crates/browse/src/common_relevance_tests.rs");
+    assert_contains_all(
+        "browse relevance unit tests",
+        &common_tests,
+        &[
+            "textual_relevance_orders_exact_prefix_and_substring",
+            "textual_relevance_preserves_deterministic_sort_for_regex_or_empty_query",
+            "best_textual_relevance_uses_best_candidate_in_row",
+        ],
+    );
+
+    for (path, markers) in [
+        (
+            "crates/browse/src/defs.rs",
+            &["def_relevance_key", "best_textual_relevance_key", "out.sort_by"][..],
+        ),
+        (
+            "crates/browse/src/calls.rs",
+            &["callee_rank", "caller_rank", "out.sort_by"][..],
+        ),
+        (
+            "crates/browse/src/refs.rs",
+            &["symbol_rank", "textual_relevance_key", "out.sort_by"][..],
+        ),
+        (
+            "crates/browse/src/search.rs",
+            &["One ranked search result", "hits.sort_by", "hits.truncate(limit)"][..],
+        ),
+        (
+            "crates/browse/src/operations.rs",
+            &["kind_rank", "name_rank", "out.sort_by"][..],
+        ),
+        (
+            "crates/browse/src/entrypoints.rs",
+            &[
+                "entrypoint_relevance_key",
+                "best_textual_relevance_key",
+                "out.sort_by",
+            ][..],
+        ),
+    ] {
+        let text = read(path);
+        assert_contains_all(path, &text, markers);
+    }
+
+    let read_file = read("crates/cli/src/commands/read_file.rs");
+    assert_contains_all(
+        "read-file relevance",
+        &read_file,
+        &[
+            "ranked_path_matches",
+            "nearest_path_suggestions",
+            "score_a.cmp(score_b)",
+        ],
+    );
+    let trace = read("crates/cli/src/commands/trace.rs");
+    assert_contains_all(
+        "trace suggestion relevance",
+        &trace,
+        &["let mut scored", "score += 80", "scored.sort_by"],
+    );
+    let security = read("crates/security/src/analysis/mod.rs");
+    assert_contains_all(
+        "security finding relevance",
+        &security,
+        &[
+            "source_preference_rank_for_sink",
+            "source_specificity_rank",
+            "truncated when rankers read the first result",
         ],
     );
 }

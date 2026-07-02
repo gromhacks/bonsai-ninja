@@ -11,8 +11,9 @@
 //! - `source-analysis` renders downstream source-driven paths without
 //!   requiring a sink rule, for entrypoint / attack-surface mapping.
 
-#![allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+mod progress_ui;
 
+use self::progress_ui::{ScopedProgress, SecurityAnalysisProgress};
 use crate::args::{BrowseFormat, SecurityAction, SourceAnalysisFormat};
 use crate::commands::{
     emit_json_paged_cached, emit_json_value_paged_cached, open_project_index_filtered_paths,
@@ -35,11 +36,9 @@ use bonsai_sdk::{
     TaintPropagationArg, TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, FAMILY_NOT_APPLICABLE,
 };
 use comfy_table::Cell;
-use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 fn source_analysis_json_incomplete_reasons(
     command: &str,
@@ -66,12 +65,16 @@ fn source_analysis_json_incomplete_reasons(
     reasons
 }
 
-const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v6";
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v7";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisRenderReport {
     summary: TaintAnalysisSummary,
     findings: Vec<TaintAnalysisRenderFinding>,
+    /// True when every finding was saved after bulk flow-evidence
+    /// attachment. JSON `--all` needs this because it serializes full
+    /// finding rows; text output can rebuild flow bodies lazily.
+    bulk_flow_evidence: bool,
 }
 
 /// One finding in the cached render report. Flow render structs are
@@ -111,6 +114,8 @@ struct BaselineDiff {
 struct TaintAnalysisRenderReportCache {
     summary: TaintAnalysisSummary,
     findings: Vec<TaintAnalysisRenderFindingCache>,
+    #[serde(default)]
+    bulk_flow_evidence: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -133,6 +138,7 @@ impl From<&TaintAnalysisRenderReport> for TaintAnalysisRenderReportCache {
                     chain_func_ids: item.chain_func_ids.clone(),
                 })
                 .collect(),
+            bulk_flow_evidence: report.bulk_flow_evidence,
         }
     }
 }
@@ -150,6 +156,7 @@ impl From<TaintAnalysisRenderReportCache> for TaintAnalysisRenderReport {
                     baseline_status: None,
                 })
                 .collect(),
+            bulk_flow_evidence: report.bulk_flow_evidence,
         }
     }
 }
@@ -230,18 +237,27 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
         | SecurityAction::Pack { rules_dir, .. } => rules_dir.as_deref(),
     };
     let rules_dir = resolve_rules_dir(workspace, action_rules_dir);
-    let spin = progress::spinner("loading security rules");
+    let stage = progress::ScopedSpinner::new("loading security rules");
     let mut pack = load_rulepack(&rules_dir)
         .map_err(|e| anyhow::anyhow!("security: rulepack load failed at `{}`: {e}", rules_dir.display()))?;
+    let mut project_local_overrides = Vec::new();
     if let Some(local) = load_workspace_local_rules(workspace)
         .map_err(|e| anyhow::anyhow!("security: project-local rule load failed: {e}"))?
     {
-        let overridden = pack.merge_overriding(local);
-        for id in overridden {
-            eprintln!("warning: project-local rule `{id}` overrides global rule with the same id");
+        project_local_overrides = pack.merge_overriding(local);
+    }
+    stage.finish();
+    if !project_local_overrides.is_empty() {
+        let u = ui();
+        for id in project_local_overrides {
+            eprintln!(
+                "{}",
+                u.warn(&format!(
+                    "warning: project-local rule `{id}` overrides global rule with the same id"
+                ))
+            );
         }
     }
-    spin.finish_and_clear();
 
     match action {
         SecurityAction::Sources {
@@ -375,6 +391,8 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             profile,
             source,
             finding,
+            flow,
+            group,
             mut trust,
             category,
             sink,
@@ -414,6 +432,8 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 &rules_dir,
                 source,
                 finding,
+                flow,
+                group,
                 trust,
                 category,
                 sink,
@@ -703,6 +723,7 @@ fn resolve_rules_dir(workspace: &Path, rules_dir: Option<&Path>) -> PathBuf {
 }
 
 // ---- sources ----
+#[allow(clippy::too_many_arguments)] // Mirrors CLI filters; grouping would obscure the dispatcher mapping.
 fn cmd_sources(
     workspace: &Path,
     pack: &Rulepack,
@@ -851,6 +872,7 @@ fn safe_inventory_literal_anchor(literal: &str) -> bool {
 }
 
 // ---- sinks ----
+#[allow(clippy::too_many_arguments)] // Mirrors CLI filters; grouping would obscure the dispatcher mapping.
 fn cmd_sinks(
     workspace: &Path,
     pack: &Rulepack,
@@ -908,6 +930,7 @@ fn cmd_sinks(
 }
 
 // ---- sanitizers ----
+#[allow(clippy::too_many_arguments)] // Mirrors CLI filters; grouping would obscure the dispatcher mapping.
 fn cmd_sanitizers(
     workspace: &Path,
     pack: &Rulepack,
@@ -965,6 +988,7 @@ fn cmd_sanitizers(
 }
 
 // ---- deps ----
+#[allow(clippy::too_many_arguments)] // Mirrors CLI filters; grouping would obscure the dispatcher mapping.
 fn cmd_deps(
     workspace: &Path,
     pack: &Rulepack,
@@ -996,19 +1020,10 @@ fn cmd_deps(
         ("framework", framework.as_deref().unwrap_or("")),
         ("severity", severity.as_deref().unwrap_or("")),
     ]);
-    let cost = |r: &DependencyRow| {
-        (r.language.len()
-            + r.key.len()
-            + r.rule_ids.iter().map(|s| s.len() + 1).sum::<usize>()
-            + r.signals.iter().map(|s| s.len() + 1).sum::<usize>()
-            + r.evidence_files.iter().map(|s| s.len() + 1).sum::<usize>()
-            + 16) as u64
-            + paging::TABLE_ROW_CHROME_BYTES
-    };
+    let cost = |r: &DependencyRow| dep_block_cost_bytes(r, pack);
 
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
-            let render_progress = ScopedProgress::new("rendering deps JSON");
             emit_json_paged_cached(
                 workspace,
                 &inv.rows,
@@ -1017,10 +1032,8 @@ fn cmd_deps(
                 filters_hash,
                 cost,
             )?;
-            render_progress.finish();
         }
         BrowseFormat::Text => {
-            let render_progress = ScopedProgress::new("rendering deps page");
             page_cache::emit_paged_text(
                 workspace,
                 &inv.rows,
@@ -1053,7 +1066,6 @@ fn cmd_deps(
                     Ok(())
                 },
             )?;
-            render_progress.finish();
         }
     }
     Ok(())
@@ -1067,6 +1079,8 @@ fn cmd_flows(
     rules_dir: &Path,
     source: Option<String>,
     finding: Option<String>,
+    flow: Option<String>,
+    group: Option<String>,
     trust: Option<String>,
     category: Option<String>,
     sink: Option<String>,
@@ -1098,6 +1112,9 @@ fn cmd_flows(
     if finding.is_some() && explain {
         bail!("`security taint-analysis --finding` cannot be combined with --explain");
     }
+    if group.is_some() && explain {
+        bail!("`security taint-analysis --group` cannot be combined with --explain");
+    }
     // Render-time diff input — does NOT enter the analysis cache key.
     let baseline_ids = baseline.map(load_baseline_finding_ids).transpose()?;
     let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
@@ -1117,6 +1134,8 @@ fn cmd_flows(
         ("kind", "taint-analysis"),
         ("source", source.as_deref().unwrap_or("")),
         ("finding", finding.as_deref().unwrap_or("")),
+        ("flow", flow.as_deref().unwrap_or("")),
+        ("group", group.as_deref().unwrap_or("")),
         ("trust", trust.as_deref().unwrap_or("")),
         ("category", category.as_deref().unwrap_or("")),
         ("sink", sink.as_deref().unwrap_or("")),
@@ -1137,8 +1156,20 @@ fn cmd_flows(
     ]);
 
     // `--explain` needs the project (to count source/sink match sites),
-    // so it bypasses the rendered-report fast path.
-    if !explain && !matches!(format, BrowseFormat::Sarif) && !paging_cfg.all && finding.is_none() {
+    // so it bypasses the rendered-report fast path. SARIF is rendered
+    // directly from the raw security report, and finding-specific
+    // renders intentionally rerun the narrow request. Text `--all` can
+    // reuse compact cached findings because it attaches flow bodies
+    // lazily; JSON `--all` needs a payload saved with bulk flow
+    // evidence.
+    let needs_bulk_flow_evidence_cache =
+        !summary_only && matches!(format, BrowseFormat::Json) && paging_cfg.all;
+    if !explain
+        && !matches!(format, BrowseFormat::Sarif)
+        && finding.is_none()
+        && flow.is_none()
+        && group.is_none()
+    {
         if let Some(cached_report) = page_cache::read_keyed_payload::<TaintAnalysisRenderReportCache>(
             workspace,
             filters_hash,
@@ -1150,8 +1181,11 @@ fn cmd_flows(
                 tracing::debug!(
                     "ignoring taint render cache payload with summary count but no finding bodies"
                 );
+            } else if needs_bulk_flow_evidence_cache && !cached_report.bulk_flow_evidence {
+                tracing::debug!(
+                    "ignoring compact taint render cache payload for JSON --all bulk flow evidence"
+                );
             } else {
-                let render_progress = ScopedProgress::new("rendering cached taint report");
                 let cached_render_project = if matches!(format, BrowseFormat::Text) && !summary_only {
                     Some(if !files.is_empty() || !exclude_files.is_empty() {
                         open_security_project_filtered_paths(
@@ -1170,6 +1204,7 @@ fn cmd_flows(
                 let render_workspace = cached_render_project
                     .as_ref()
                     .map(|(project, _footer)| project.workspace());
+                let render_progress = ScopedProgress::new("rendering cached taint report");
                 emit_taint_render_report(
                     workspace,
                     render_workspace,
@@ -1198,6 +1233,7 @@ fn cmd_flows(
     let mut report = project.security().taint_analysis_with_phase_progress(
         TaintAnalysisOptions {
             source: source.clone(),
+            flow_id: flow.clone(),
             trust: trust.clone(),
             category: category.clone(),
             sink: sink.clone(),
@@ -1220,7 +1256,19 @@ fn cmd_flows(
     if let Some(finding_id) = finding.as_deref() {
         filter_report_to_finding_id(&mut report, finding_id)?;
     }
-    if !summary_only && (matches!(format, BrowseFormat::Sarif) || paging_cfg.all || finding.is_some()) {
+    if let Some(flow_id) = flow.as_deref() {
+        ensure_report_has_security_flow_id(&report, flow_id)?;
+    }
+    if let Some(group_id) = group.as_deref() {
+        filter_report_to_security_group_id(&mut report, group_id)?;
+    }
+    let bulk_flow_evidence_attached = !summary_only
+        && (matches!(format, BrowseFormat::Sarif)
+            || paging_cfg.all
+            || finding.is_some()
+            || flow.is_some()
+            || group.is_some());
+    if bulk_flow_evidence_attached {
         attach_flow_evidence_to_report(project.workspace(), &mut report);
     }
 
@@ -1268,7 +1316,11 @@ fn cmd_flows(
         BrowseFormat::Json | BrowseFormat::Text => {}
     }
 
-    let render_report = build_taint_render_report(report, /* include_findings = */ !summary_only);
+    let render_report = build_taint_render_report(
+        report,
+        /* include_findings = */ !summary_only,
+        bulk_flow_evidence_attached,
+    );
     let render_progress = ScopedProgress::new(if summary_only {
         "rendering taint summary"
     } else if matches!(format, BrowseFormat::Json) {
@@ -1410,6 +1462,17 @@ fn save_taint_payload_if_requested(
     // re-renders instead of re-analyzing.
     if let Some(payload) = payload {
         let cache_payload = TaintAnalysisRenderReportCache::from(payload);
+        if !cache_payload.bulk_flow_evidence {
+            if let Ok(Some(existing)) = page_cache::read_keyed_payload::<TaintAnalysisRenderReportCache>(
+                workspace,
+                filters_hash,
+                TAINT_RENDER_CACHE_KIND,
+            ) {
+                if existing.bulk_flow_evidence {
+                    return;
+                }
+            }
+        }
         if let Err(e) =
             page_cache::save_keyed_payload(workspace, filters_hash, TAINT_RENDER_CACHE_KIND, &cache_payload)
         {
@@ -1439,6 +1502,37 @@ fn filter_report_to_finding_id(report: &mut TaintAnalysisReport, finding_id: &st
             "no finding matching `{finding_id}` in this workspace + filter combination. \
              Finding ids are printed as `S:<hex>` in `security taint-analysis` text output \
              and as `finding.finding_id` in JSON output."
+        );
+    }
+    Ok(())
+}
+
+fn ensure_report_has_security_flow_id(report: &TaintAnalysisReport, flow_id: &str) -> Result<()> {
+    if report.findings.iter().any(|combined| {
+        combined
+            .finding
+            .representative_flow_id
+            .as_deref()
+            .is_some_and(|candidate| candidate == flow_id)
+    }) {
+        return Ok(());
+    }
+    bail!(
+        "no security flow matching `{flow_id}` in this workspace + filter combination. \
+         Security flow ids are printed as `F:<hex>` in `security taint-analysis` text output \
+         and as `representative_flow_id` in JSON output."
+    );
+}
+
+fn filter_report_to_security_group_id(report: &mut TaintAnalysisReport, group_id: &str) -> Result<()> {
+    report
+        .findings
+        .retain(|combined| combined.finding.group_id.as_deref() == Some(group_id));
+    if report.findings.is_empty() {
+        bail!(
+            "no security flow group matching `{group_id}` in this workspace + filter combination. \
+             Security group ids are printed as `G:<hex>` in `security taint-analysis` text output \
+             and as `group_id` in JSON output."
         );
     }
     Ok(())
@@ -1704,7 +1798,7 @@ fn render_taint_analysis_report_heading(summary: &TaintAnalysisSummary) {
         "{}",
         u.dim(&format!(
             "security taint-analysis — {} finding(s)  \
-             (critical={}, high={}, medium={})  · \
+             (critical {}, high {}, medium {})  · \
              {} source rule(s) · {} sink rule(s) · {} sanitizer rule(s) loaded",
             summary.total_findings,
             summary.severity_counts.get("critical").copied().unwrap_or(0),
@@ -1981,12 +2075,14 @@ fn security_line_cost_bytes(line: &crate::commands::inspect::InspectLine) -> u64
 fn build_taint_render_report(
     report: TaintAnalysisReport,
     include_findings: bool,
+    bulk_flow_evidence: bool,
 ) -> TaintAnalysisRenderReport {
     let summary = build_taint_summary(&report);
     if !include_findings {
         return TaintAnalysisRenderReport {
             summary,
             findings: Vec::new(),
+            bulk_flow_evidence: false,
         };
     }
     let findings = report
@@ -2001,7 +2097,11 @@ fn build_taint_render_report(
             }
         })
         .collect();
-    TaintAnalysisRenderReport { summary, findings }
+    TaintAnalysisRenderReport {
+        summary,
+        findings,
+        bulk_flow_evidence,
+    }
 }
 
 /// Load the set of stable finding ids from a previous `taint-analysis
@@ -2201,7 +2301,7 @@ fn emit_taint_explain(
 fn print_baseline_summary(diff: &BaselineDiff, format: BrowseFormat) {
     if matches!(format, BrowseFormat::Json) {
         eprintln!(
-            "baseline diff: {} new, {} fixed, {} unchanged",
+            "baseline diff — {} new · {} fixed · {} unchanged",
             diff.new, diff.fixed, diff.unchanged
         );
         return;
@@ -2316,7 +2416,11 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         report.summary.sink_rule_count,
         report.summary.sanitizer_rule_count,
     );
-    TaintAnalysisRenderReport { summary, findings }
+    TaintAnalysisRenderReport {
+        summary,
+        findings,
+        bulk_flow_evidence: report.bulk_flow_evidence,
+    }
 }
 
 fn flow_from_finding_hops(
@@ -2619,7 +2723,6 @@ fn cmd_source_analysis(
 
     match format {
         SourceAnalysisFormat::Json => {
-            let render_progress = ScopedProgress::new("rendering source JSON");
             if paging_cfg.json_wrapped() {
                 page_cache::emit_paged_text(
                     workspace,
@@ -2651,14 +2754,14 @@ fn cmd_source_analysis(
                     },
                 )?;
             } else {
+                let render_progress = ScopedProgress::new("rendering source JSON");
                 let rendered = render_source_analysis_candidates(ws, &candidates);
                 cli_println!("{}", serde_json::to_string_pretty(&rendered)?);
+                render_progress.finish();
             }
-            render_progress.finish();
             Ok(())
         }
         SourceAnalysisFormat::Text => {
-            let render_progress = ScopedProgress::new("rendering source page");
             let cost_progress = ScopedProgress::new("estimating source page costs");
             let function_costs =
                 function_costs_for_paths(ws, candidates.iter().flat_map(|c| c.path.iter().copied()), true);
@@ -2720,7 +2823,6 @@ fn cmd_source_analysis(
                 tracing::debug!("page cache save failed: {e}");
             }
             cache_progress.finish();
-            render_progress.finish();
             if let Some(page) = cached_pages.iter().find(|p| p.number == current_page) {
                 page_cache::emit_cached_text(&page.text)?;
             }
@@ -2732,6 +2834,7 @@ fn cmd_source_analysis(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Renderer state is explicit to keep pagination metadata visible at call sites.
 fn render_source_analysis_text_page(
     ws: &bonsai_sdk::Workspace,
     pack: &Rulepack,
@@ -2752,17 +2855,17 @@ fn render_source_analysis_text_page(
         ))
     );
     if !lineage_summary.is_complete() {
-        cli_println!(
-            "{}",
-            u.warn(&format!(
-                "lineage incomplete: {} representative flow(s); {} truncated by hop budget; {} additional path(s) omitted; max {} hop(s), {} path(s) rendered per flow",
-                lineage_summary.incomplete_flows,
-                lineage_summary.truncated_hop_flows,
-                lineage_summary.omitted_paths,
-                lineage_summary.max_hops,
-                lineage_summary.max_paths,
-            ))
+        let reason = format!(
+            "{} representative flow(s); {} truncated by hop budget; {} additional path(s) omitted; max {} hop(s), {} path(s) rendered per flow",
+            lineage_summary.incomplete_flows,
+            lineage_summary.truncated_hop_flows,
+            lineage_summary.omitted_paths,
+            lineage_summary.max_hops,
+            lineage_summary.max_paths,
         );
+        for line in u.wrapped_warn_labeled_lines("lineage incomplete", &reason) {
+            cli_println!("{line}");
+        }
     }
     let render_opts = crate::commands::InspectRenderOptions {
         compact: false,
@@ -3162,7 +3265,14 @@ fn render_source_analysis_source(u: &Ui, source: &FindingMatch, pack: &Rulepack)
         .filter(|desc| !desc.is_empty())
         .unwrap_or_else(|| "inferred entry-point parameter used as a taint seed.".to_string());
     if !summary.is_empty() {
-        cli_println!("    {} {}", u.dim("summary:"), summary);
+        for line in u.wrapped_dim_prefixed_lines(
+            "    summary: ",
+            &format!("    {} ", u.dim("summary:")),
+            "             ",
+            &summary,
+        ) {
+            cli_println!("{line}");
+        }
     }
 }
 
@@ -3225,11 +3335,25 @@ fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFinding
     }
     let packages = combined_sink_metadata(combined, pack, |r| &r.packages);
     if !packages.is_empty() {
-        cli_println!("  {}   {}", u.dim("packages:"), u.dim(&packages.join(", ")));
+        for line in u.wrapped_dim_prefixed_lines(
+            "  packages: ",
+            &format!("  {} ", u.dim("packages:")),
+            "            ",
+            &packages.join(", "),
+        ) {
+            cli_println!("{line}");
+        }
     }
     let frameworks = combined_sink_metadata(combined, pack, |r| &r.frameworks);
     if !frameworks.is_empty() {
-        cli_println!("  {} {}", u.dim("frameworks:"), u.dim(&frameworks.join(", ")));
+        for line in u.wrapped_dim_prefixed_lines(
+            "  frameworks: ",
+            &format!("  {} ", u.dim("frameworks:")),
+            "              ",
+            &frameworks.join(", "),
+        ) {
+            cli_println!("{line}");
+        }
     }
     cli_println!();
 
@@ -3239,7 +3363,14 @@ fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFinding
     // stitches them with "→". A plain-English overview before the
     // per-side evidence blocks below.
     if let Some(summary) = synth_summary(combined, pack) {
-        cli_println!("  {} {}", u.dim("summary:"), summary);
+        for line in u.wrapped_dim_prefixed_lines(
+            "  summary: ",
+            &format!("  {} ", u.dim("summary:")),
+            "           ",
+            &summary,
+        ) {
+            cli_println!("{line}");
+        }
         cli_println!();
     }
 
@@ -3330,7 +3461,15 @@ fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulep
     if let Some(r) = rule {
         let desc = r.description.trim();
         if !desc.is_empty() {
-            cli_println!("    {} {}", u.dim(side.narrative_prefix()), u.dim(desc),);
+            let prefix = format!("    {} ", side.narrative_prefix());
+            for line in u.wrapped_dim_prefixed_lines(
+                &prefix,
+                &format!("    {} ", u.dim(side.narrative_prefix())),
+                &" ".repeat(prefix.len()),
+                desc,
+            ) {
+                cli_println!("{line}");
+            }
         }
     }
     let loc = format!("{}:{}:{}", short_file(&m.file), m.line, m.column);
@@ -3356,7 +3495,14 @@ fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulep
             })
             .collect::<Vec<_>>()
             .join(", ");
-        cli_println!("    {} {}", u.dim("tainted args:"), u.dim(&args_text));
+        for line in u.wrapped_dim_prefixed_lines(
+            "    tainted args: ",
+            &format!("    {} ", u.dim("tainted args:")),
+            "                  ",
+            &args_text,
+        ) {
+            cli_println!("{line}");
+        }
     }
     // Supporting taxonomy chips — only fields not already in the
     // finding headline above, so we don't repeat severity / cwe /
@@ -3364,14 +3510,14 @@ fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulep
     let mut chips: Vec<String> = Vec::new();
     if matches!(side, FindingSide::Source) {
         if let Some(trust) = m.trust.as_deref() {
-            chips.push(format!("{}={}", u.dim("trust"), u.dim(trust)));
+            chips.push(meta_chip(u, "trust", u.dim(trust)));
         }
     }
     if let Some(tag) = m.tag.as_deref() {
-        chips.push(format!("{}={}", u.dim("tag"), u.dim(tag)));
+        chips.push(meta_chip(u, "tag", u.dim(tag)));
     }
     if let Some(cat) = m.category.as_deref() {
-        chips.push(format!("{}={}", u.dim("category"), u.dim(cat)));
+        chips.push(meta_chip(u, "category", u.dim(cat)));
     }
     // Sink-side only: sink severity (source severity is irrelevant).
     // The finding's severity (from the sink) already appears in the
@@ -3379,12 +3525,12 @@ fn render_finding_side(u: &Ui, side: FindingSide, m: &FindingMatch, pack: &Rulep
     if matches!(side, FindingSide::Sanitizer) {
         if let Some(r) = rule {
             if !r.packages.is_empty() {
-                chips.push(format!("{}={}", u.dim("packages"), u.dim(&r.packages.join(","))));
+                chips.push(meta_chip(u, "packages", u.dim(&r.packages.join(", "))));
             }
         }
     }
     if !chips.is_empty() {
-        cli_println!("    {}  [{}]", u.dim("—"), chips.join(" · "));
+        cli_println!("    {}  {}", u.dim("—"), chips.join(" · "));
     }
 }
 
@@ -3511,7 +3657,9 @@ fn render_site_code(u: &Ui, label: &str, m: &FindingMatch, pack: &Rulepack) {
     if let Some(r) = pack.find_rule_by_id(&m.rule_id) {
         let desc = r.description.trim();
         if !desc.is_empty() {
-            cli_println!("    {}", u.dim(desc));
+            for line in u.wrapped_dim_prefixed_lines("    ", "    ", "    ", desc) {
+                cli_println!("{line}");
+            }
         }
     }
 }
@@ -3625,141 +3773,6 @@ fn source_analysis_text_cost_bytes(
             .sum::<u64>()
 }
 
-// ---- shared helpers ----
-/// Renders one progress bar per `AnalysisProgress` phase emitted by the
-/// security analysis pipeline. Each `PhaseStarted` opens a fresh bar
-/// with the announced total, `PhaseTicked` increments it, and
-/// `PhaseFinished` clears it. `Drop` is the safety net for early
-/// returns / errors that bypass the explicit `PhaseFinished`.
-struct SecurityAnalysisProgress {
-    bar: Option<ProgressBar>,
-    phase_label: Option<&'static str>,
-    phase_started: Option<Instant>,
-    phase_ticks: u64,
-}
-
-struct ScopedProgress {
-    bar: Option<ProgressBar>,
-    label: String,
-    started: Instant,
-    finished: bool,
-}
-
-impl ScopedProgress {
-    fn new(label: &str) -> Self {
-        Self {
-            bar: Some(progress::spinner(label)),
-            label: label.to_string(),
-            started: Instant::now(),
-            finished: false,
-        }
-    }
-
-    fn finish(mut self) {
-        self.log_timing();
-        self.finished = true;
-        if let Some(bar) = self.bar.take() {
-            bar.finish_and_clear();
-        }
-    }
-
-    fn log_timing(&self) {
-        if debug_category_enabled("security-phase") {
-            eprintln!(
-                "[security-phase] {}: {:.3}s",
-                self.label,
-                self.started.elapsed().as_secs_f64()
-            );
-        }
-    }
-}
-
-impl Drop for ScopedProgress {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.log_timing();
-        }
-        if let Some(bar) = self.bar.take() {
-            bar.finish_and_clear();
-        }
-    }
-}
-
-impl SecurityAnalysisProgress {
-    fn new() -> Self {
-        Self {
-            bar: None,
-            phase_label: None,
-            phase_started: None,
-            phase_ticks: 0,
-        }
-    }
-
-    fn handle(&mut self, event: bonsai_sdk::AnalysisProgress) {
-        match event {
-            bonsai_sdk::AnalysisProgress::PhaseStarted { label, total } => {
-                if let Some(bar) = self.bar.take() {
-                    bar.finish_and_clear();
-                }
-                self.bar = Some(if total == 0 {
-                    progress::spinner(label)
-                } else {
-                    progress::progress_bar(label, total)
-                });
-                self.phase_label = Some(label);
-                self.phase_started = Some(Instant::now());
-                self.phase_ticks = 0;
-            }
-            bonsai_sdk::AnalysisProgress::PhaseTicked => {
-                self.phase_ticks = self.phase_ticks.saturating_add(1);
-                if let Some(bar) = &self.bar {
-                    bar.inc(1);
-                }
-            }
-            bonsai_sdk::AnalysisProgress::PhaseFinished => {
-                self.log_phase_timing();
-                if let Some(bar) = self.bar.take() {
-                    bar.finish_and_clear();
-                }
-                self.phase_label = None;
-                self.phase_started = None;
-                self.phase_ticks = 0;
-            }
-        }
-    }
-
-    fn log_phase_timing(&self) {
-        if !debug_category_enabled("security-phase") {
-            return;
-        }
-        let (Some(label), Some(started)) = (self.phase_label, self.phase_started) else {
-            return;
-        };
-        eprintln!(
-            "[security-phase] {label}: {:.3}s ticks={}",
-            started.elapsed().as_secs_f64(),
-            self.phase_ticks
-        );
-    }
-}
-
-impl Drop for SecurityAnalysisProgress {
-    fn drop(&mut self) {
-        self.log_phase_timing();
-        if let Some(bar) = self.bar.take() {
-            bar.finish_and_clear();
-        }
-    }
-}
-
-fn debug_category_enabled(category: &str) -> bool {
-    std::env::var("BONSAI_DEBUG").ok().is_some_and(|raw| {
-        raw.split(',')
-            .map(str::trim)
-            .any(|part| part == category || part == "*" || part == "all")
-    })
-}
-
 // Note: SDK severity parsing is case-insensitive. The previous
 // CLI-local copy was case-sensitive and rejected `--severity HIGH`
 // etc.; routing through the SDK removes the parity drift.
@@ -3817,6 +3830,10 @@ fn severity_cell(u: &Ui, sev: &str) -> String {
     }
 }
 
+fn meta_chip(u: &Ui, label: &str, value: String) -> String {
+    format!("{} {}", u.dim(label), value)
+}
+
 // ---- match-table renderer (sources + sinks) ----
 /// Render `security sources` / `security sinks` matches as one inspect-
 /// style block per match — rule id + metadata chips, file:line:col +
@@ -3825,6 +3842,7 @@ fn severity_cell(u: &Ui, sev: &str) -> String {
 /// opening the YAML. JSON output keeps every field (including the new
 /// description / cwe / owasp / frameworks / packages chips) so tooling
 /// gets the same context.
+#[allow(clippy::too_many_arguments)] // Shared renderer needs both workspace context and paging/cache keys.
 fn render_match_table(
     workspace: &Path,
     label: &str,
@@ -3849,8 +3867,6 @@ fn render_match_table(
 
     match format {
         BrowseFormat::Json | BrowseFormat::Sarif => {
-            let render_label = format!("rendering {label} JSON");
-            let render_progress = ScopedProgress::new(&render_label);
             let rows = security_match_rows(pack, matches);
             let cost_row = |_: &SecurityMatchRow| 512u64;
             let command = format!("security/{label}");
@@ -3873,11 +3889,8 @@ fn render_match_table(
                     Ok(())
                 },
             )?;
-            render_progress.finish();
         }
         BrowseFormat::Text => {
-            let render_label = format!("rendering {label} page");
-            let render_progress = ScopedProgress::new(&render_label);
             let command = format!("security/{label}");
             page_cache::emit_paged_text(
                 workspace,
@@ -3916,7 +3929,6 @@ fn render_match_table(
                     Ok(())
                 },
             )?;
-            render_progress.finish();
         }
     }
     Ok(())
@@ -3939,44 +3951,40 @@ fn render_standalone_match(
     let mut chips: Vec<String> = Vec::new();
     if show_severity {
         let sev = rule.and_then(|r| r.severity.map(|s| s.as_str())).unwrap_or("-");
-        chips.push(format!("{}={}", u.dim("severity"), severity_cell(u, sev)));
+        chips.push(meta_chip(u, "severity", severity_cell(u, sev)));
     }
     if let Some(trust) = rule.and_then(|r| r.trust) {
-        chips.push(format!("{}={}", u.dim("trust"), u.dim(trust_str(trust))));
+        chips.push(meta_chip(u, "trust", u.dim(trust_str(trust))));
     }
     if let Some(cat) = rule.and_then(|r| r.category.as_deref()) {
-        chips.push(format!("{}={}", u.dim("category"), u.dim(cat)));
+        chips.push(meta_chip(u, "category", u.dim(cat)));
     }
     if let Some(tag) = rule.and_then(|r| r.tag.as_deref()) {
-        chips.push(format!("{}={}", u.dim("tag"), u.dim(tag)));
+        chips.push(meta_chip(u, "tag", u.dim(tag)));
     }
     if let Some(r) = rule {
         if !r.cwe.is_empty() {
-            chips.push(format!("{}={}", u.dim("cwe"), u.dim(&r.cwe.join(","))));
+            chips.push(meta_chip(u, "cwe", u.dim(&r.cwe.join(", "))));
         }
         if !r.frameworks.is_empty() {
-            chips.push(format!(
-                "{}={}",
-                u.dim("frameworks"),
-                u.dim(&r.frameworks.join(","))
-            ));
+            chips.push(meta_chip(u, "frameworks", u.dim(&r.frameworks.join(", "))));
         }
         if !r.packages.is_empty() {
-            chips.push(format!("{}={}", u.dim("packages"), u.dim(&r.packages.join(","))));
+            chips.push(meta_chip(u, "packages", u.dim(&r.packages.join(", "))));
         }
     }
-    let chip_trailer = if chips.is_empty() {
-        String::new()
-    } else {
-        format!("  [{}]", chips.join(" · "))
-    };
     cli_println!();
-    cli_println!(
-        "{}  {}{}",
-        u.kind(&format!("[{label} {idx}]")),
-        u.name(&m.rule_id),
-        chip_trailer,
-    );
+    cli_println!("{}  {}", u.kind(&format!("[{label} {idx}]")), u.name(&m.rule_id),);
+    if !chips.is_empty() {
+        for line in u.wrapped_dim_prefixed_lines(
+            "    meta: ",
+            &format!("    {} ", u.dim("meta:")),
+            "          ",
+            &chips.join(" · "),
+        ) {
+            cli_println!("{line}");
+        }
+    }
     let loc = format!("{}:{}:{}", short_file(&m.file), m.line, m.column);
     let in_fn = m
         .enclosing_fn
@@ -3994,7 +4002,9 @@ fn render_standalone_match(
     if let Some(r) = rule {
         let desc = r.description.trim();
         if !desc.is_empty() {
-            cli_println!("    {}", u.dim(desc));
+            for line in u.wrapped_dim_prefixed_lines("    ", "    ", "    ", desc) {
+                cli_println!("{line}");
+            }
         }
     }
 }
@@ -4008,37 +4018,31 @@ fn render_standalone_match(
 fn render_dep_block(u: &Ui, idx: usize, r: &DependencyRow, pack: &Rulepack) {
     let mut chips: Vec<String> = Vec::new();
     if let Some(sev) = r.severity {
-        chips.push(format!(
-            "{}={}",
-            u.dim("severity"),
-            severity_cell(u, sev.as_str())
-        ));
+        chips.push(meta_chip(u, "severity", severity_cell(u, sev.as_str())));
     }
-    chips.push(format!("{}={}", u.dim("lang"), u.dim(&r.language)));
+    chips.push(meta_chip(u, "lang", u.dim(&r.language)));
     if !r.tags.is_empty() {
-        chips.push(format!("{}={}", u.dim("tags"), u.dim(&r.tags.join(","))));
+        chips.push(meta_chip(u, "tags", u.dim(&r.tags.join(", "))));
     }
-    chips.push(format!(
-        "{}={}",
-        u.dim("rules"),
-        u.dim(&format!("{}", r.rule_ids.len()))
-    ));
+    chips.push(meta_chip(u, "rules", u.dim(&r.rule_ids.len().to_string())));
     if !r.signals.is_empty() {
         let take: Vec<&str> = r.signals.iter().take(4).map(|s| s.as_str()).collect();
-        let mut joined = take.join(",");
+        let mut joined = take.join(", ");
         if r.signals.len() > 4 {
-            joined.push_str(&format!(",+{} more", r.signals.len() - 4));
+            joined.push_str(&format!(", +{} more", r.signals.len() - 4));
         }
-        chips.push(format!("{}={}", u.dim("signals"), u.dim(&joined)));
+        chips.push(meta_chip(u, "signals", u.dim(&joined)));
     }
-    let chip_trailer = format!("  [{}]", chips.join(" · "));
     cli_println!();
-    cli_println!(
-        "{}  {}{}",
-        u.kind(&format!("[PACKAGE {idx}]")),
-        u.name(&r.key),
-        chip_trailer,
-    );
+    cli_println!("{}  {}", u.kind(&format!("[PACKAGE {idx}]")), u.name(&r.key),);
+    for line in u.wrapped_dim_prefixed_lines(
+        "    meta: ",
+        &format!("    {} ", u.dim("meta:")),
+        "          ",
+        &chips.join(" · "),
+    ) {
+        cli_println!("{line}");
+    }
 
     let shown: Vec<&String> = r.evidence_files.iter().take(5).collect();
     for file in &shown {
@@ -4056,17 +4060,49 @@ fn render_dep_block(u: &Ui, idx: usize, r: &DependencyRow, pack: &Rulepack) {
         if let Some(rule) = pack.find_rule_by_id(rid) {
             let desc = rule.description.trim();
             if !desc.is_empty() && seen_desc.insert(desc.to_string()) {
-                cli_println!("    {} {}", u.dim("·"), u.dim(desc));
+                for line in u.wrapped_bullet_lines("·", desc) {
+                    cli_println!("{line}");
+                }
             }
         }
     }
+}
+
+fn dep_block_cost_bytes(r: &DependencyRow, pack: &Rulepack) -> u64 {
+    let chip_bytes = r.language.len()
+        + r.key.len()
+        + r.tags.iter().map(|s| s.len() + 2).sum::<usize>()
+        + r.signals.iter().take(4).map(|s| s.len() + 2).sum::<usize>()
+        + r.rule_ids.len().to_string().len()
+        + 96;
+    let evidence_bytes = r
+        .evidence_files
+        .iter()
+        .take(5)
+        .map(|file| short_file(file).len() + 8)
+        .sum::<usize>()
+        + if r.evidence_files.len() > 5 { 32 } else { 0 };
+    let mut seen_desc: ahash::AHashSet<&str> = ahash::AHashSet::new();
+    let description_bytes = r
+        .rule_ids
+        .iter()
+        .filter_map(|rid| pack.find_rule_by_id(rid))
+        .map(|rule| rule.description.trim())
+        .filter(|desc| !desc.is_empty() && seen_desc.insert(*desc))
+        // Bullet rendering wraps descriptions and adds indentation on
+        // each line. Description bytes dominate the block; a fixed
+        // per-description allowance keeps pages under context without
+        // wasting most of the requested budget.
+        .map(|desc| desc.len().saturating_add(64))
+        .sum::<usize>();
+    (chip_bytes + evidence_bytes + description_bytes) as u64 + paging::TABLE_ROW_CHROME_BYTES
 }
 
 // ---- pack — rulepack inspector / auditor ----
 // Mode flags (audit / tree / validate / taint_replay) mirror the `pack`
 // subcommand's CLI flags one-to-one; grouping them into a struct would
 // just shift the boolean surface without improving the call site.
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn cmd_pack(
     workspace: &Path,
     pack: &Rulepack,
@@ -4206,34 +4242,10 @@ fn cmd_pack(
                         paged.iter().take(limit_eff).collect()
                     };
                     let u = ui();
-                    let headers = [
-                        "rule",
-                        "lang",
-                        "kind",
-                        "family",
-                        "tag",
-                        "severity",
-                        "on?",
-                        "description",
-                    ];
-                    let mut t = u.table(&headers);
-                    for r in &display_rows {
-                        let sev = r.severity.as_deref().unwrap_or("-");
-                        let tag = r.tag.as_deref().unwrap_or("-");
-                        let on = if r.enabled { "y" } else { "·" };
-                        t.add_row(vec![
-                            Cell::new(u.name(&r.rule_id)),
-                            Cell::new(u.dim(&r.language)),
-                            Cell::new(u.kind(&r.kind)),
-                            Cell::new(u.kind(&r.family)),
-                            Cell::new(u.dim(tag)),
-                            Cell::new(severity_cell(u, sev)),
-                            Cell::new(u.dim(on)),
-                            Cell::new(u.dim(&r.description)),
-                        ]);
+                    cli_println!("{}", u.dim(&format!("security pack — {row_count} rule(s)")));
+                    for (idx, r) in display_rows.iter().enumerate() {
+                        render_pack_rule_block(u, idx + 1, r);
                     }
-                    cli_println!("{t}");
-                    cli_println!("{}", u.dim(&format!("({row_count} rule(s))")));
                     render_truncation_notice(display_rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja security <ws> pack");
                     Ok(())
@@ -4242,6 +4254,62 @@ fn cmd_pack(
         }
     }
     Ok(())
+}
+
+fn render_pack_rule_block(u: &Ui, idx: usize, r: &PackRuleRow) {
+    let sev = r.severity.as_deref().unwrap_or("-");
+    let state = if r.enabled { "enabled" } else { "disabled" };
+    let mut chips = vec![
+        meta_chip(u, "lang", u.dim(&r.language)),
+        meta_chip(u, "kind", u.kind(&r.kind)),
+        meta_chip(u, "family", u.kind(&r.family)),
+        meta_chip(u, "severity", severity_cell(u, sev)),
+        meta_chip(u, "state", u.dim(state)),
+    ];
+    if let Some(tag) = r.tag.as_deref().filter(|tag| !tag.is_empty()) {
+        chips.push(meta_chip(u, "tag", u.dim(tag)));
+    }
+
+    cli_println!();
+    cli_println!("{}  {}", u.kind(&format!("[RULE {idx}]")), u.name(&r.rule_id));
+    for line in u.wrapped_dim_prefixed_lines(
+        "    meta: ",
+        &format!("    {} ", u.dim("meta:")),
+        "          ",
+        &chips.join(" · "),
+    ) {
+        cli_println!("{line}");
+    }
+    if !r.packages.is_empty() {
+        for line in u.wrapped_dim_prefixed_lines(
+            "    packages: ",
+            &format!("    {} ", u.dim("packages:")),
+            "              ",
+            &r.packages.join(", "),
+        ) {
+            cli_println!("{line}");
+        }
+    }
+    if !r.frameworks.is_empty() {
+        for line in u.wrapped_dim_prefixed_lines(
+            "    frameworks: ",
+            &format!("    {} ", u.dim("frameworks:")),
+            "                ",
+            &r.frameworks.join(", "),
+        ) {
+            cli_println!("{line}");
+        }
+    }
+    if !r.description.trim().is_empty() {
+        for line in u.wrapped_dim_prefixed_lines(
+            "    description: ",
+            &format!("    {} ", u.dim("description:")),
+            "                 ",
+            r.description.trim(),
+        ) {
+            cli_println!("{line}");
+        }
+    }
 }
 
 fn render_pack_validation(
@@ -4270,9 +4338,9 @@ fn render_pack_validation(
             } else {
                 u.warn("invalid")
             };
-            cli_println!(
-                "security pack validation — {} ({} rule(s), {} enabled, {} disabled, {} waiting on re-enable work, {} example(s) on enabled rules / {} total, {} error(s), {} warning(s))",
-                status,
+            cli_println!("{} {}", u.label("security pack validation"), status);
+            let summary = format!(
+                "{} rule(s), {} enabled, {} disabled, {} waiting on re-enable work, {} example(s) on enabled rules / {} total, {} error(s), {} warning(s)",
                 report.rule_count,
                 report.enabled_rule_count,
                 report.disabled_rule_count,
@@ -4282,6 +4350,9 @@ fn render_pack_validation(
                 report.errors,
                 report.warnings
             );
+            for line in u.wrapped_dim_prefixed_lines("  ", "  ", "  ", &summary) {
+                cli_println!("{line}");
+            }
             if !report.disabled_reason_counts.is_empty() {
                 let counts = report
                     .disabled_reason_counts
@@ -4289,7 +4360,14 @@ fn render_pack_validation(
                     .map(|(code, count)| format!("{code}: {count}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                cli_println!("{}", u.dim(&format!("disabled reasons — {counts}")));
+                for line in u.wrapped_dim_prefixed_lines(
+                    "disabled reasons — ",
+                    &u.dim("disabled reasons — "),
+                    "                   ",
+                    &counts,
+                ) {
+                    cli_println!("{line}");
+                }
             }
             if !report.issues.is_empty() {
                 let mut t = u.table(&["level", "code", "rule", "path", "message"]);
@@ -4422,17 +4500,25 @@ fn render_audit(
         );
     }
     if !FAMILY_NOT_APPLICABLE.is_empty() {
+        let visible_languages: Vec<&str> = report
+            .languages
+            .iter()
+            .map(|lang| lang.language.as_str())
+            .collect();
         let descriptions: Vec<String> = FAMILY_NOT_APPLICABLE
             .iter()
-            .map(|(lang, fam)| format!("{lang}/{}", family_short_label(fam)))
+            .filter(|(lang, _)| visible_languages.contains(lang))
+            .map(|(lang, fam)| format!("{lang}/{fam}"))
             .collect();
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "n/a (per-cell) = family intentionally empty for this lang ({})",
-                descriptions.join(", ")
-            ))
-        );
+        if !descriptions.is_empty() {
+            cli_println!(
+                "{}",
+                u.dim(&format!(
+                    "n/a (per-cell) = family intentionally not applicable for that language ({})",
+                    descriptions.join(", ")
+                ))
+            );
+        }
     }
     cli_println!(
         "{}",
@@ -4456,7 +4542,9 @@ fn render_audit(
         })
         .collect::<Vec<_>>()
         .join("  ");
-    cli_println!("{}", u.dim(&format!("legend: {legend}")));
+    for line in u.wrapped_dim_prefixed_lines("legend: ", &u.dim("legend: "), "        ", &legend) {
+        cli_println!("{line}");
+    }
     Ok(())
 }
 

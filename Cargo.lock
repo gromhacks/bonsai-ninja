@@ -208,15 +208,19 @@ name = "bonsai_browse"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "bonsai_adapters",
  "bonsai_callgraph",
  "bonsai_cfg",
  "bonsai_common",
+ "bonsai_diagnostics",
  "bonsai_hash",
  "bonsai_idg",
  "bonsai_index",
  "bonsai_inspect",
  "bonsai_lang_api",
+ "bonsai_lang_python",
  "bonsai_resolve",
+ "bonsai_retrieval",
  "bonsai_taint",
  "bonsai_workspace",
  "parking_lot",
@@ -224,6 +228,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "tree-sitter",
 ]
 
@@ -260,6 +265,7 @@ dependencies = [
  "bonsai_common",
  "bonsai_hash",
  "bonsai_lang_api",
+ "bonsai_retrieval",
  "bonsai_sdk",
  "clap",
  "comfy-table",
@@ -711,6 +717,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bonsai_retrieval"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bincode",
+ "bonsai_adapters",
+ "bonsai_callgraph",
+ "bonsai_common",
+ "bonsai_factstore",
+ "bonsai_hash",
+ "bonsai_lang_api",
+ "bonsai_workspace",
+ "regex",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "bonsai_sdk"
 version = "0.1.0"
 dependencies = [
@@ -725,6 +749,7 @@ dependencies = [
  "bonsai_hash",
  "bonsai_inspect",
  "bonsai_lang_api",
+ "bonsai_retrieval",
  "bonsai_security",
  "bonsai_trace",
  "bonsai_workspace",

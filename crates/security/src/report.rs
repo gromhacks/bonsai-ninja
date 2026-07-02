@@ -7,6 +7,7 @@ use crate::deps::DependencyInventory;
 use crate::finding::Finding;
 use crate::matcher::RuntimeDisabledRule;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 const CWE_TAXONOMY_GUID: &str = "25F72D7E-8A92-459D-AD67-64853F788765";
 
@@ -517,15 +518,7 @@ fn cwe_help_uri(cwe: &str) -> String {
 /// published SARIF reports (S8).
 fn artifact_location_relative(path: &str, workspace_root: Option<&str>) -> serde_json::Value {
     if let Some(root) = workspace_root {
-        let root_normalized = root.trim_end_matches('/');
-        let root_with_sep = format!("{root_normalized}/");
-        if path == root_normalized {
-            return serde_json::json!({
-                "uri": "",
-                "uriBaseId": "%SRCROOT%",
-            });
-        }
-        if let Some(relative) = path.strip_prefix(&root_with_sep) {
+        if let Some(relative) = relative_artifact_uri(path, root) {
             return serde_json::json!({
                 "uri": relative,
                 "uriBaseId": "%SRCROOT%",
@@ -535,6 +528,49 @@ fn artifact_location_relative(path: &str, workspace_root: Option<&str>) -> serde
     serde_json::json!({
         "uri": path,
     })
+}
+
+fn relative_artifact_uri(path: &str, workspace_root: &str) -> Option<String> {
+    let paths = path_candidates(path);
+    let roots = path_candidates(workspace_root);
+    for path in &paths {
+        for root in &roots {
+            if path == root {
+                return Some(String::new());
+            }
+            if let Ok(relative) = path.strip_prefix(root) {
+                return Some(normalize_artifact_uri(&relative.to_string_lossy()));
+            }
+        }
+    }
+    None
+}
+
+fn path_candidates(path: &str) -> Vec<PathBuf> {
+    let raw = PathBuf::from(path);
+    let mut candidates = vec![raw.clone()];
+    if let Some(canonical) = canonicalize_path_or_existing_parent(&raw) {
+        if canonical != raw {
+            candidates.push(canonical);
+        }
+    }
+    candidates
+}
+
+fn canonicalize_path_or_existing_parent(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let parent = path.parent()?;
+    let canonical_parent = parent.canonicalize().ok()?;
+    Some(match path.file_name() {
+        Some(file_name) => canonical_parent.join(file_name),
+        None => canonical_parent,
+    })
+}
+
+fn normalize_artifact_uri(value: &str) -> String {
+    value.replace('\\', "/")
 }
 
 /// Encode a filesystem path as a `file://` URI. Absolute Unix paths

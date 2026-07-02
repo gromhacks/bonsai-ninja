@@ -1,11 +1,11 @@
 //! Browse commands: `defs`, `entrypoints`, `calls`, `imports`, `vars`,
-//! `strings`, `comments`, `args`, `classes`, `refs`, `search`. Each reads
+//! `strings`, `comments`, `args`, `operations`, `classes`, `refs`, `search`. Each reads
 //! from the shared `GlobalIndex` and emits a uniform `{header row, rows, footer}`
 //! shape. JSON output keeps a bare array when the full result fits the
 //! token budget; larger or explicitly paged renders use `{rows, page}`.
 
 use anyhow::Result;
-use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
+use bonsai_lang_api::{DeclKind, FlowEvent};
 use bonsai_sdk::Workspace;
 use comfy_table::Cell;
 
@@ -18,12 +18,12 @@ use crate::ui::{extension_for, Ui};
 use crate::{cli_println, ui};
 
 use super::{
-    open_project_index_matching_literal, open_project_index_only as open_project,
-    open_workspace_syntax_filtered_paths, open_workspace_syntax_only,
+    open_project_index_filtered_paths, open_project_index_matching_literal,
+    open_project_index_only as open_project, open_workspace_syntax_filtered_paths,
+    open_workspace_syntax_only,
 };
 
 const BROWSE_LITERAL_PREFILTER_FILE_LIMIT: usize = 5_000;
-
 fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0usize;
@@ -78,6 +78,102 @@ fn open_browse_project(
     Ok((project, footer, use_literal_prefilter))
 }
 
+fn open_browse_project_with_retrieval(
+    root: &std::path::Path,
+    literal: Option<&str>,
+    kind: Option<&str>,
+    file: Option<&str>,
+    regex: bool,
+) -> Result<(bonsai_sdk::Project, WorkspaceFooter, bool)> {
+    if let Some(query) = literal {
+        if let Some(include_filters) = retrieval_prefilter_for_browse_literal(root, query, kind, file, regex)?
+        {
+            let (project, footer) = open_project_index_filtered_paths(root, &include_filters, &[])?;
+            return Ok((project, footer, true));
+        }
+    }
+    open_browse_project(root, literal, regex)
+}
+
+fn retrieval_prefilter_for_browse_literal(
+    root: &std::path::Path,
+    query: &str,
+    kind: Option<&str>,
+    file: Option<&str>,
+    regex: bool,
+) -> Result<Option<Vec<String>>> {
+    retrieval_prefilter_for_browse_literal_with_limit(
+        root,
+        query,
+        kind,
+        file,
+        regex,
+        BROWSE_LITERAL_PREFILTER_FILE_LIMIT,
+    )
+}
+
+fn retrieval_prefilter_for_browse_literal_with_limit(
+    root: &std::path::Path,
+    query: &str,
+    kind: Option<&str>,
+    file: Option<&str>,
+    regex: bool,
+    large_workspace_limit: usize,
+) -> Result<Option<Vec<String>>> {
+    if regex || query.trim().len() < 3 || !workspace_file_count_exceeds(root, large_workspace_limit) {
+        return Ok(None);
+    }
+    let Some(mut include_filters) = super::bonsai_for_cli().retrieval_hydration_include_filters(
+        root,
+        query,
+        SearchFilters {
+            kind,
+            file,
+            regex: false,
+        },
+    )?
+    else {
+        return Ok(None);
+    };
+    include_filters.sort();
+    include_filters.dedup();
+    Ok(Some(include_filters))
+}
+
+fn retrieval_prefilter_for_search(
+    root: &std::path::Path,
+    query: &str,
+    f: SearchFilters<'_>,
+) -> Result<Option<Vec<String>>> {
+    retrieval_prefilter_for_search_with_limit(root, query, f, BROWSE_LITERAL_PREFILTER_FILE_LIMIT)
+}
+
+fn retrieval_prefilter_for_search_with_limit(
+    root: &std::path::Path,
+    query: &str,
+    f: SearchFilters<'_>,
+    large_workspace_limit: usize,
+) -> Result<Option<Vec<String>>> {
+    if f.regex || query.trim().len() < 3 || !workspace_file_count_exceeds(root, large_workspace_limit) {
+        return Ok(None);
+    }
+    let Some(mut include_filters) =
+        super::bonsai_for_cli().retrieval_hydration_include_filters(root, query, f)?
+    else {
+        return Ok(None);
+    };
+    include_filters.sort();
+    include_filters.dedup();
+    Ok(Some(include_filters))
+}
+
+fn with_browse_progress<T>(label: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let stage = progress::ScopedSpinner::new(label);
+    let out = f()?;
+    stage.finish();
+    Ok(out)
+}
+
 // Filter + output types are re-exports of the SDK definitions in
 // `bonsai_browse`. Keeping them aliased here means existing call
 // sites in the dispatcher need no changes — they already build the
@@ -85,7 +181,7 @@ fn open_browse_project(
 // types.
 pub(crate) use bonsai_sdk::{
     ArgsFilters, CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters,
-    ImportsFilters, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
+    ImportsFilters, OperationsFilters, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -114,13 +210,25 @@ pub(crate) fn cmd_defs(
         };
         return render_defs_streaming_first_page(&ws, f, limit, &paging_cfg, flows && large_workspace);
     }
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let retrieval_kind = if f.name.is_some() {
+        f.kind
+    } else if f.has_callee.is_some() {
+        Some("call")
+    } else if f.has_decorator.is_some() {
+        Some("ref-decorator")
+    } else {
+        f.kind
+    };
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .defs(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting definitions", || {
+        project
+            .browse()
+            .defs(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -224,22 +332,19 @@ fn render_defs_streaming_first_page(
     let mut tokens_used = 0u64;
     let mut stopped_for_budget = false;
 
-    'files: for file_id in ws.vfs().all_files() {
+    let files = ws.vfs().all_files();
+    let scan_bar = progress::progress_bar("streaming definitions", files.len() as u64);
+    'files: for file_id in files {
+        scan_bar.inc(1);
         let path = path_for_file_id(ws, file_id);
-        if f.file.is_some_and(|needle| !path.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !bonsai_sdk::file_path_matches_filter(ws, &path, needle))
+        {
             continue;
         }
         let Some(index) = ws.db().decl_index_uncached(file_id) else {
             continue;
         };
-        let decorators_on_file: Option<Vec<String>> = f.has_decorator.map(|_| {
-            index
-                .refs
-                .iter()
-                .filter(|reference| reference.kind == RefKind::Decorator)
-                .map(|reference| reference.name.clone())
-                .collect()
-        });
         for decl in &index.defs {
             let kind = decl_kind_string(decl.kind);
             if f.kind
@@ -258,7 +363,8 @@ fn render_defs_streaming_first_page(
                 }
             }
             if let Some(needle) = f.has_decorator {
-                let decorators = decorators_on_file.as_deref().unwrap_or(&[]);
+                let decorators =
+                    bonsai_sdk::decl_decorator_names(ws, file_id, &index, decl.span, decl.name_span);
                 if !decorators.iter().any(|name| name.contains(needle)) {
                     continue;
                 }
@@ -303,6 +409,7 @@ fn render_defs_streaming_first_page(
             rows_rendered += 1;
         }
     }
+    scan_bar.finish_and_clear();
 
     cli_println!("{table}");
     if stopped_for_budget {
@@ -328,24 +435,13 @@ pub(crate) fn cmd_entrypoints(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let large_workspace = workspace_file_count_exceeds(root, BROWSE_LITERAL_PREFILTER_FILE_LIMIT);
-    if matches!(format, BrowseFormat::Text)
-        && !f.regex
-        && matches!(paging_cfg.page, paging::PageArg::First)
-        && !paging_cfg.all
-        && large_workspace
-        && f.file.is_none()
-        && f.name.is_none()
-        && f.kind.is_none()
-    {
-        let (ws, _footer) = open_workspace_syntax_only(root)?;
-        return render_entrypoints_streaming_first_page(&ws, f, limit, &paging_cfg);
-    }
     let (project, _footer) = open_project(root)?;
-    let out = project
-        .browse()
-        .entrypoints(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting entrypoints", || {
+        project
+            .browse()
+            .entrypoints(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -416,115 +512,6 @@ pub(crate) fn cmd_entrypoints(
         }
     }
     Ok(())
-}
-
-fn render_entrypoints_streaming_first_page(
-    ws: &bonsai_sdk::Workspace,
-    f: EntryPointsFilters<'_>,
-    limit: usize,
-    paging_cfg: &paging::PagingConfig,
-) -> Result<()> {
-    let budget_tokens = paging_cfg
-        .effective_budget()
-        .unwrap_or(paging::DEFAULT_CONTEXT_TEXT);
-    let max_rows = effective_limit(limit, paging_cfg);
-    let u = ui();
-    let mut table = u.table(&["name", "kind", "location", "signature", "callees", "reason"]);
-    let mut rows_rendered = 0usize;
-    let mut tokens_used = 0u64;
-    let mut stopped_for_budget = false;
-
-    'files: for file_id in ws.vfs().all_files() {
-        let path = path_for_file_id(ws, file_id);
-        if f.file.is_some_and(|needle| !path.contains(needle)) {
-            continue;
-        }
-        let Some(index) = ws.db().decl_index_uncached(file_id) else {
-            continue;
-        };
-        for decl in &index.defs {
-            if !is_callable_entry_candidate_kind(decl.kind) {
-                continue;
-            }
-            let kind = decl_kind_string(decl.kind);
-            if f.kind
-                .is_some_and(|needle| !kind.contains(&needle.to_lowercase()))
-            {
-                continue;
-            }
-            if f.name.is_some_and(|needle| {
-                !decl.name.contains(needle)
-                    && !decl
-                        .qualified_name
-                        .as_deref()
-                        .is_some_and(|qualified| qualified.contains(needle))
-            }) {
-                continue;
-            }
-            let (line, column) = line_col_for_span(ws, decl.name_span);
-            let display_params = dedup_sigil_params(&decl.params);
-            let signature = if display_params.is_empty() {
-                format!("{}()", decl.name)
-            } else {
-                format!("{}({})", decl.name, display_params.join(", "))
-            };
-            let loc = format!("{}:{}:{}", short_file(&path), line, column);
-            let callees = summarize_callees(decl, 4);
-            let reason = "semantic_callers_not_loaded";
-            let row_cost = browse_table_row_cost(&[
-                decl.name.len(),
-                kind.len(),
-                loc.len(),
-                signature.len(),
-                callees.len(),
-                reason.len(),
-            ]);
-            let row_tokens = paging::bytes_to_tokens(row_cost);
-            if rows_rendered > 0
-                && (tokens_used.saturating_add(row_tokens) > budget_tokens
-                    || (max_rows != 0 && rows_rendered >= max_rows))
-            {
-                stopped_for_budget = true;
-                break 'files;
-            }
-            tokens_used = tokens_used.saturating_add(row_tokens);
-            table.add_row(vec![
-                Cell::new(u.name(&decl.name)),
-                Cell::new(u.kind(&kind)),
-                Cell::new(u.path(&loc)),
-                Cell::new(u.snippet(&signature, extension_for(&path))),
-                Cell::new(u.dim(&callees)),
-                Cell::new(u.dim(reason)),
-            ]);
-            rows_rendered += 1;
-        }
-    }
-
-    cli_println!("{table}");
-    if stopped_for_budget {
-        cli_println!(
-            "{}",
-            u.dim(&format!(
-                "({rows_rendered} entrypoint candidates shown; more matches exist, narrow with --file/--name/--kind or use --all/JSON for exact semantic entrypoints)"
-            ))
-        );
-    } else {
-        cli_println!("{}", u.dim(&format!("({rows_rendered} entrypoint candidates)")));
-    }
-    cli_println!(
-        "{}",
-        u.dim(
-            "semantic caller exclusion omitted for this large-workspace first page; use --all/JSON or a narrower filter for exact entrypoints"
-        )
-    );
-    Ok(())
-}
-
-fn is_callable_entry_candidate_kind(kind: DeclKind) -> bool {
-    matches!(
-        kind,
-        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-    )
 }
 
 /// Build a name → `&Decl` lookup used by browse commands that want to
@@ -723,53 +710,73 @@ pub(crate) fn build_flow_annotator<'a>(
     (Some(bonsai_sdk::FlowAnnotator::new(ws)), Some(bar))
 }
 
-/// Cell helper: wrap a flow-id string for the `flows` column.
-/// Empty string becomes a dim `-` so the column never looks blank.
-/// Non-empty strings render in the "loc" style (monospace-leaning,
-/// same palette as file paths) so the `F:<16-hex>` ids are easy to
-/// spot and copy.
-///
-/// When the row's enclosing function carries many flows (a hub
-/// caller can sit on dozens), the cell can grow large enough to
-/// dominate the per-row paging budget — `--callee unwrap` on a
-/// huge workspace was paginating one row per page because each row
-/// pulled in the same long flow list. Cap the displayed list at a
-/// fixed sample plus an "(+N more)" tail so the cell stays bounded
-/// while users still see enough flow ids to drill into via
-/// `inspect --flow F:<16-hex>`. If the underlying label set itself
-/// was capped, the cell retains a trailing ellipsis and the renderer
-/// prints an incomplete-flow-column notice.
-pub(crate) fn flows_cell(u: &Ui, labels: &str) -> Cell {
-    if labels.is_empty() {
-        return Cell::new(u.dim("-"));
+/// Cell helper: render compact flow references for the `flows`
+/// column. Full `F:<16-hex>` ids are intentionally not placed
+/// inside dense browse tables because comfy-table may split long
+/// tokens under width pressure. The cell gets short per-render
+/// references (`F1`, `F2`, ...), and `render_flow_column_notice`
+/// prints the complete copyable ids below the table.
+pub(crate) fn format_flow_labels_for_cell(labels: &str, status: &mut FlowColumnStatus) -> Option<String> {
+    if labels.trim().is_empty() {
+        return None;
     }
     const MAX_INLINE_FLOWS: usize = 8;
-    let mut parts: Vec<&str> = labels.split_whitespace().collect();
-    let truncation_marker = parts.last().copied().map(|p| p.ends_with('…')).unwrap_or(false);
-    if parts.len() > MAX_INLINE_FLOWS {
-        let extra = parts.len() - MAX_INLINE_FLOWS;
-        parts.truncate(MAX_INLINE_FLOWS);
-        let mut shown = parts.join(" ");
-        shown.push_str(&format!(" (+{extra} more)"));
-        if truncation_marker {
-            shown.push('…');
-        }
-        Cell::new(u.loc(&shown))
-    } else {
-        Cell::new(u.loc(labels))
+    let ids: Vec<String> = labels
+        .split_whitespace()
+        .filter_map(|part| {
+            let id = part.trim_end_matches('…');
+            (!id.is_empty()).then(|| id.to_string())
+        })
+        .collect();
+    if ids.is_empty() {
+        return None;
     }
+    let mut refs = Vec::new();
+    for id in ids.iter().take(MAX_INLINE_FLOWS) {
+        refs.push(status.flow_ref(id));
+    }
+    if refs.is_empty() {
+        return None;
+    }
+    let extra = ids.len().saturating_sub(MAX_INLINE_FLOWS);
+    let mut shown = refs.join("\n");
+    if extra > 0 {
+        shown.push_str(&format!("\n(+{extra} more)"));
+    }
+    if flow_labels_truncated(labels) {
+        shown.push('…');
+    }
+    Some(shown)
 }
 
 #[derive(Default)]
-struct FlowColumnStatus {
+pub(crate) struct FlowColumnStatus {
     truncated_rows: usize,
+    pub(crate) flow_ids: Vec<String>,
+}
+
+impl FlowColumnStatus {
+    fn flow_ref(&mut self, id: &str) -> String {
+        let idx = self
+            .flow_ids
+            .iter()
+            .position(|existing| existing == id)
+            .unwrap_or_else(|| {
+                self.flow_ids.push(id.to_string());
+                self.flow_ids.len() - 1
+            });
+        format!("F{}", idx + 1)
+    }
 }
 
 fn flow_cell_with_status(u: &Ui, labels: &str, status: &mut FlowColumnStatus) -> Cell {
     if flow_labels_truncated(labels) {
         status.truncated_rows += 1;
     }
-    flows_cell(u, labels)
+    let Some(shown) = format_flow_labels_for_cell(labels, status) else {
+        return Cell::new(u.dim("-"));
+    };
+    Cell::new(u.loc(&shown))
 }
 
 fn flow_labels_truncated(labels: &str) -> bool {
@@ -777,6 +784,12 @@ fn flow_labels_truncated(labels: &str) -> bool {
 }
 
 fn render_flow_column_notice(u: &Ui, status: &FlowColumnStatus) {
+    if !status.flow_ids.is_empty() {
+        cli_println!("{}", u.label("flow ids:"));
+        for (idx, id) in status.flow_ids.iter().enumerate() {
+            cli_println!("  {} {}", u.dim(&format!("F{}", idx + 1)), u.loc(id));
+        }
+    }
     if status.truncated_rows == 0 {
         return;
     }
@@ -905,13 +918,16 @@ pub(crate) fn cmd_calls(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.callee.or(f.caller);
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, Some("call"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .calls(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting call sites", || {
+        project
+            .browse()
+            .calls(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     // Filter-signature hash: same `(cmd, filters_hash, offset)`
     // tuple used to derive the cursor must be stable across runs
     // so a `P:xxxxxxxx` cursor from a bug report reproduces.
@@ -1238,14 +1254,17 @@ pub(crate) fn cmd_imports(
             flows && large_workspace,
         );
     }
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, Some("import"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
     f.resolve_workspace_bindings = flows && matches!(format, BrowseFormat::Text);
-    let out = project
-        .browse()
-        .imports(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting imports", || {
+        project
+            .browse()
+            .imports(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("file", f.file.unwrap_or("")),
         ("module", f.module.unwrap_or("")),
@@ -1369,9 +1388,14 @@ fn render_imports_streaming_first_page(
     let mut tokens_used = 0u64;
     let mut stopped_for_budget = false;
 
-    'files: for file_id in ws.vfs().all_files() {
+    let files = ws.vfs().all_files();
+    let scan_bar = progress::progress_bar("streaming imports", files.len() as u64);
+    'files: for file_id in files {
+        scan_bar.inc(1);
         let path = path_for_file_id(ws, file_id);
-        if f.file.is_some_and(|needle| !path.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !bonsai_sdk::file_path_matches_filter(ws, &path, needle))
+        {
             continue;
         }
         let Some(import_index) = ws.db().import_index_uncached(file_id) else {
@@ -1424,6 +1448,7 @@ fn render_imports_streaming_first_page(
             rows_rendered += 1;
         }
     }
+    scan_bar.finish_and_clear();
 
     cli_println!("{table}");
     if stopped_for_budget {
@@ -1515,13 +1540,16 @@ pub(crate) fn cmd_vars(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.name.or(f.source).or(f.in_fn);
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, Some("var"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .vars(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting variables", || {
+        project
+            .browse()
+            .vars(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("name", f.name.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -1620,13 +1648,16 @@ pub(crate) fn cmd_strings(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.contains.or(f.in_fn);
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, Some("string"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .strings(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting strings", || {
+        project
+            .browse()
+            .strings(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("category", f.category.unwrap_or("")),
         ("contains", f.contains.unwrap_or("")),
@@ -1737,12 +1768,15 @@ pub(crate) fn cmd_comments(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.contains.or(f.in_fn);
-    let (project, _footer, _partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let (project, _footer, _partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, Some("comment"), f.file, f.regex)?;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .comments(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting comments", || {
+        project
+            .browse()
+            .comments(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("kind", f.kind.unwrap_or("")),
         ("contains", f.contains.unwrap_or("")),
@@ -1806,13 +1840,21 @@ pub(crate) fn cmd_args(
     format: BrowseFormat,
 ) -> Result<()> {
     let prefilter_literal = f.callee.or(f.value).or(f.in_fn).or(f.keyword);
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let retrieval_kind = if f.callee.is_some() {
+        Some("call")
+    } else {
+        Some("arg")
+    };
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .args(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting arguments", || {
+        project
+            .browse()
+            .args(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("callee", f.callee.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -1925,6 +1967,142 @@ pub(crate) fn cmd_args(
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
+pub(crate) fn cmd_operations(
+    root: &std::path::Path,
+    f: OperationsFilters<'_>,
+    limit: usize,
+    paging_cfg: paging::PagingConfig,
+    flows: bool,
+    format: BrowseFormat,
+) -> Result<()> {
+    let prefilter_literal = f.name.or(f.in_fn);
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, Some("operation"), f.file, f.regex)?;
+    let flows = flows && !partial_workspace;
+    let ws = project.workspace();
+    let out = with_browse_progress("collecting operations", || {
+        project
+            .browse()
+            .operations(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
+    let filters_hash = paging::hash_filters(&[
+        ("kind", f.kind.unwrap_or("")),
+        ("name", f.name.unwrap_or("")),
+        ("file", f.file.unwrap_or("")),
+        ("in_fn", f.in_fn.unwrap_or("")),
+        ("regex", if f.regex { "1" } else { "0" }),
+    ]);
+    let text_cost = matches!(format, BrowseFormat::Text);
+    let exact_flow_cost_ann =
+        (flows && text_cost && out.len() <= 512).then(|| bonsai_sdk::FlowAnnotator::new(ws));
+    let cost = |op: &bonsai_sdk::OperationOut| {
+        let operands_len = op
+            .operands
+            .iter()
+            .map(|operand| operand.role.len() + operand.name.len() + 2)
+            .sum::<usize>();
+        if !text_cost {
+            return (op.kind.len()
+                + op.name.len()
+                + op.in_function.len()
+                + op.detail.as_deref().map_or(0, str::len)
+                + operands_len
+                + op.file.len()
+                + 16
+                + read_line(ws, &op.file, op.line).len()) as u64
+                + paging::TABLE_ROW_CHROME_BYTES;
+        }
+        let loc_len = short_file(&op.file).len() + 24;
+        browse_table_row_cost(&[
+            op.kind.len(),
+            op.name.len(),
+            op.in_function.len(),
+            op.detail.as_deref().unwrap_or("-").len(),
+            operands_len.min(80),
+            loc_len,
+        ])
+        .saturating_add(source_line_estimated_cell_cost())
+        .saturating_add(location_flow_labels_cell_cost(
+            exact_flow_cost_ann.as_ref(),
+            flows,
+            &op.file,
+            op.line,
+        ))
+    };
+    match format {
+        BrowseFormat::Json | BrowseFormat::Sarif => {
+            emit_json_paged_cached(root, &out, &paging_cfg, "operations", filters_hash, cost)?;
+        }
+        BrowseFormat::Text => {
+            page_cache::emit_paged_text(
+                root,
+                &out,
+                &paging_cfg,
+                "operations",
+                filters_hash,
+                cost,
+                |paged, info, cfg| {
+                    let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
+                    let u = ui();
+                    let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
+                    let headers = with_flows_header(
+                        &["kind", "name", "in", "detail", "operands", "location", "code"],
+                        flows,
+                    );
+                    let mut t = u.table(&headers);
+                    for op in &rows {
+                        let operands = if op.operands.is_empty() {
+                            "-".to_string()
+                        } else {
+                            truncate(
+                                &op.operands
+                                    .iter()
+                                    .map(|operand| format!("{}:{}", operand.role, operand.name))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                80,
+                            )
+                        };
+                        let loc = format!("{}:{}:{}", short_file(&op.file), op.line, op.column);
+                        let ext = extension_for(&op.file);
+                        let line_text = read_line(ws, &op.file, op.line);
+                        let mut cells = vec![
+                            Cell::new(u.kind(&op.kind)),
+                            Cell::new(u.name(&op.name)),
+                            Cell::new(u.kind(&op.in_function)),
+                            Cell::new(u.dim(op.detail.as_deref().unwrap_or("-"))),
+                            Cell::new(u.dim(&operands)),
+                            Cell::new(u.path(&loc)),
+                            Cell::new(u.snippet(&line_text, ext)),
+                        ];
+                        if let Some(ann) = flow_ann.as_ref() {
+                            let labels = ann.labels_for(&op.file, op.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
+                            if let Some(b) = flow_bar.as_ref() {
+                                b.inc(1);
+                            }
+                        }
+                        t.add_row(cells);
+                    }
+                    if let Some(b) = flow_bar {
+                        b.finish_and_clear();
+                    }
+                    cli_println!("{t}");
+                    cli_println!("{}", u.dim(&format!("({} operations)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
+                    render_truncation_notice(rows.len(), truncated);
+                    render_paging_footer(info, "bonsai-ninja operations <workspace>");
+                    Ok(())
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 pub(crate) fn cmd_classes(
     root: &std::path::Path,
     f: ClassesFilters<'_>,
@@ -1950,13 +2128,21 @@ pub(crate) fn cmd_classes(
         };
         return render_classes_streaming_first_page(&ws, f, limit, &paging_cfg, flows && large_workspace);
     }
-    let (project, _footer, partial_workspace) = open_browse_project(root, prefilter_literal, f.regex)?;
+    let retrieval_kind = if f.has_method.is_some() {
+        Some("method")
+    } else {
+        f.kind
+    };
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, prefilter_literal, retrieval_kind, f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .classes(f)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+    let out = with_browse_progress("collecting classes", || {
+        project
+            .browse()
+            .classes(f)
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("name", f.name.unwrap_or("")),
         ("file", f.file.unwrap_or("")),
@@ -2080,9 +2266,14 @@ fn render_classes_streaming_first_page(
     let mut tokens_used = 0u64;
     let mut stopped_for_budget = false;
 
-    'files: for file_id in ws.vfs().all_files() {
+    let files = ws.vfs().all_files();
+    let scan_bar = progress::progress_bar("streaming classes", files.len() as u64);
+    'files: for file_id in files {
+        scan_bar.inc(1);
         let path = path_for_file_id(ws, file_id);
-        if f.file.is_some_and(|needle| !path.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !bonsai_sdk::file_path_matches_filter(ws, &path, needle))
+        {
             continue;
         }
         let Some(index) = ws.db().decl_index_uncached(file_id) else {
@@ -2160,6 +2351,7 @@ fn render_classes_streaming_first_page(
             rows_rendered += 1;
         }
     }
+    scan_bar.finish_and_clear();
 
     cli_println!("{table}");
     if stopped_for_budget {
@@ -2188,13 +2380,16 @@ pub(crate) fn cmd_refs(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer, partial_workspace) = open_browse_project(root, Some(symbol), f.regex)?;
+    let (project, _footer, partial_workspace) =
+        open_browse_project_with_retrieval(root, Some(symbol), Some("ref"), f.file, f.regex)?;
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let out = project
-        .browse()
-        .refs(symbol, f)
-        .map_err(|e| anyhow::anyhow!("invalid regex `{symbol}`: {e}"))?;
+    let out = with_browse_progress("collecting references", || {
+        project
+            .browse()
+            .refs(symbol, f)
+            .map_err(|e| anyhow::anyhow!("invalid regex `{symbol}`: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("symbol", symbol),
         ("kind", f.kind.unwrap_or("")),
@@ -2274,13 +2469,21 @@ pub(crate) fn cmd_search(
     flows: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer, partial_workspace) = open_browse_project(root, Some(query), f.regex)?;
+    let retrieval_filters = retrieval_prefilter_for_search(root, query, f)?;
+    let (project, _footer, partial_workspace) = if let Some(include_filters) = retrieval_filters {
+        let (project, footer) = open_project_index_filtered_paths(root, &include_filters, &[])?;
+        (project, footer, true)
+    } else {
+        open_browse_project(root, Some(query), f.regex)?
+    };
     let flows = flows && !partial_workspace;
     let ws = project.workspace();
-    let hits = project
-        .browse()
-        .search(query, f, usize::MAX)
-        .map_err(|e| anyhow::anyhow!("invalid regex `{query}`: {e}"))?;
+    let hits = with_browse_progress("hydrating verified facts", || {
+        project
+            .browse()
+            .search(query, f, usize::MAX)
+            .map_err(|e| anyhow::anyhow!("invalid regex `{query}`: {e}"))
+    })?;
     let filters_hash = paging::hash_filters(&[
         ("query", query),
         ("kind", f.kind.unwrap_or("")),

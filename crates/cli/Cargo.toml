@@ -16,6 +16,7 @@ bonsai_common = { workspace = true }
 bonsai_hash = { workspace = true }
 bonsai_callgraph = { workspace = true }
 bonsai_lang_api = { workspace = true }
+bonsai_retrieval = { workspace = true }
 bonsai_sdk = { workspace = true }
 bonsai_adapters = { workspace = true }
 

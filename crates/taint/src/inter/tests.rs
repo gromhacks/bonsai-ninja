@@ -747,6 +747,34 @@ def entry(user_input):
 }
 
 #[test]
+fn assignment_rhs_tainted_call_terminals_use_call_span_not_assignment_span() {
+    let src = "
+def entry(data):
+    decoded = passthrough(data)
+";
+    let db = python_ws_one_file(src);
+    let entry = func_id_of(&db, "entry");
+    let expected_call_span = first_call_span(&db, entry, "passthrough");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    let terminal_calls: Vec<_> = result
+        .tainted_calls
+        .iter()
+        .filter(|call| call.name == "passthrough" && call.kind == TaintedCallKind::Call)
+        .collect();
+    assert!(
+        !terminal_calls.is_empty(),
+        "expected passthrough(data) to be recorded as a tainted terminal call: {:?}",
+        result.tainted_calls
+    );
+    for call in terminal_calls {
+        assert_eq!(
+            call.call_span, expected_call_span,
+            "assignment-RHS call terminals must point at the RHS call token, not the broader assignment"
+        );
+    }
+}
+
+#[test]
 fn direct_call_preserves_explicit_descendant_taint_for_callee_fields() {
     let caller_state = seed(&["env.*"]);
     let mut callee_seed = TokenSet::default();

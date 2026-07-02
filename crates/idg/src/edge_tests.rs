@@ -85,3 +85,30 @@ fn edge_kind_tag_values_are_pinned() {
     assert_eq!(IdgEdgeKind::IntraYield.tag(), 9);
     assert_eq!(IdgEdgeKind::IntraAwait.tag(), 10);
 }
+
+#[test]
+fn every_idg_edge_kind_declares_taxonomy_families() {
+    for tag in 0u8..=10 {
+        let kind = IdgEdgeKind::from_tag(tag).expect("known tag");
+        assert!(
+            !kind.taxonomy().is_empty(),
+            "{kind:?} should expose at least one taxonomy family"
+        );
+    }
+}
+
+#[test]
+fn idg_taxonomy_mapping_names_core_interprocedural_edges() {
+    assert!(IdgEdgeKind::InterCallArg
+        .taxonomy()
+        .contains(&bonsai_lang_api::FlowEdgeKind::ArgToParam));
+    assert!(IdgEdgeKind::InterCallArg
+        .taxonomy()
+        .contains(&bonsai_lang_api::FlowEdgeKind::ReceiverToThis));
+    assert!(IdgEdgeKind::InterReturn
+        .taxonomy()
+        .contains(&bonsai_lang_api::FlowEdgeKind::ReturnToCaller));
+    assert!(IdgEdgeKind::InterThrow
+        .taxonomy()
+        .contains(&bonsai_lang_api::FlowEdgeKind::ThrowToCatch));
+}

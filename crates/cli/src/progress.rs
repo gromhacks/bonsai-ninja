@@ -40,8 +40,22 @@ pub(crate) fn is_disabled() -> bool {
     !std::io::stderr().is_terminal()
 }
 
+#[must_use]
+pub(crate) fn is_explicitly_disabled() -> bool {
+    *NO_PROGRESS.get().unwrap_or(&false) || std::env::var("NO_PROGRESS").is_ok()
+}
+
 fn color_disabled() -> bool {
     *NO_COLOR_PROGRESS.get().unwrap_or(&false) || std::env::var("NO_COLOR").is_ok()
+}
+
+#[must_use]
+pub(crate) fn debug_category_enabled(category: &str) -> bool {
+    std::env::var("BONSAI_DEBUG").ok().is_some_and(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .any(|part| part == category || part == "*" || part == "all")
+    })
 }
 
 /// Whether the per-command workspace footer (cloc/LLM-style
@@ -97,4 +111,34 @@ pub(crate) fn spinner(label: &str) -> ProgressBar {
     spin.set_message(label.to_string());
     spin.enable_steady_tick(std::time::Duration::from_millis(120));
     spin
+}
+
+/// Scoped spinner for command stages whose duration is not known up
+/// front. The bar is cleared both on explicit [`Self::finish`] and on drop,
+/// so early returns do not leave terminal chrome behind.
+pub(crate) struct ScopedSpinner {
+    bar: Option<ProgressBar>,
+}
+
+impl ScopedSpinner {
+    #[must_use]
+    pub(crate) fn new(label: &str) -> Self {
+        Self {
+            bar: Some(spinner(label)),
+        }
+    }
+
+    pub(crate) fn finish(mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for ScopedSpinner {
+    fn drop(&mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
+        }
+    }
 }

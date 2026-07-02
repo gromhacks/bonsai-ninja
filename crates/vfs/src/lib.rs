@@ -11,7 +11,7 @@
 //! which holds an exclusive lock, while reads can proceed concurrently.
 
 use ahash::AHashMap;
-use bonsai_common::FileId;
+use bonsai_common::{FileId, BONSAI_CASE_PROBE_PREFIX};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -327,7 +327,7 @@ fn probe_case_insensitive_with_temp(dir: &Path) -> Option<bool> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    let name = format!(".bonsai_case_probe_{}_{}", std::process::id(), nanos);
+    let name = format!("{BONSAI_CASE_PROBE_PREFIX}{}_{}", std::process::id(), nanos);
     let probe = dir.join(&name);
     let alternate = dir.join(name.to_uppercase());
     let file = std::fs::OpenOptions::new()

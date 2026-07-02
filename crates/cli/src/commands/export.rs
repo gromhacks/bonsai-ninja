@@ -24,11 +24,13 @@ pub(crate) fn cmd_export(
 ) -> Result<()> {
     let cacheable_default_json = format == ExportFormat::Json && !complete_chains && !full_propagations;
     if cacheable_default_json {
+        let stage = progress::ScopedSpinner::new("checking export cache");
         let cache_hit = output::with_writer(|writer| {
             bonsai_sdk::WorkspaceCache::new(root)
                 .with_discovered_rulepack_root()
                 .stream_default_export_cache_if_fresh(writer)
         })?;
+        stage.finish();
         if cache_hit {
             return Ok(());
         }
@@ -36,9 +38,9 @@ pub(crate) fn cmd_export(
 
     let (project, _footer) = open_project(root)?;
     if let Some(format) = graph_export_format(format) {
-        let spin = progress::spinner("rendering graph");
+        let spin = progress::ScopedSpinner::new("rendering graph export");
         let rendered = project.export().graph(format)?;
-        spin.finish_and_clear();
+        spin.finish();
         output::with_writer(|writer| {
             writer.write_all(rendered.as_bytes())?;
             if !rendered.ends_with('\n') {
@@ -52,7 +54,7 @@ pub(crate) fn cmd_export(
     // Native JSON export visits every file, decl, ref, import, and
     // string. On a 1 k-file workspace this is multi-second; spinner
     // signals progress while the renderer runs.
-    let spin = progress::spinner("building export");
+    let spin = progress::ScopedSpinner::new("building native export");
     let export = project.export();
     let options = bonsai_sdk::NativeExportOptions {
         full_propagations,
@@ -60,12 +62,14 @@ pub(crate) fn cmd_export(
     };
     if !cacheable_default_json {
         write_native_json(&export, options)?;
-        spin.finish_and_clear();
+        spin.finish();
         return Ok(());
     }
     export.write_default_json_cache_streaming(options)?;
-    spin.finish_and_clear();
+    spin.finish();
+    let stream_stage = progress::ScopedSpinner::new("streaming export output");
     stream_default_cache_or_render(&export, options)?;
+    stream_stage.finish();
     Ok(())
 }
 

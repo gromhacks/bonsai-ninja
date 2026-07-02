@@ -17,10 +17,13 @@ pub(crate) mod cross_module;
 pub mod dataflow;
 pub mod dataflow_disk;
 pub mod decl_name_index;
+pub mod decorators;
 pub mod enclosing_index;
 pub mod flow_ids;
 pub mod flow_ids_disk;
 pub mod flow_query;
+pub mod receiver_fields;
+pub mod semantic_context;
 pub mod taint_index;
 pub mod taint_index_disk;
 pub mod transitive_callers;
@@ -53,6 +56,13 @@ use transitive_callers::TransitiveCallersIndex;
 use value_flow::ValueFlowCache;
 
 pub use cross_module::CrossModuleOptions;
+pub use decorators::decl_decorator_names;
+pub use receiver_fields::receiver_field_target;
+pub use semantic_context::{
+    WorkspaceContextRoot, WorkspaceContextRootKind, WorkspaceSemanticContext,
+    WorkspaceSemanticContextSummary, WorkspaceSourceTransformation, WorkspaceSourceVariant,
+    WorkspaceToolchainManifest,
+};
 
 const DEFAULT_IDG_SIDECAR_FILE_LIMIT: usize = 5_000;
 
@@ -70,6 +80,11 @@ pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
     bonsai_idg::workspace::idg_sidecar_path(workspace_root)
 }
 
+/// Validate that an existing workspace IDG sidecar is structurally readable.
+pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
+    bonsai_idg::workspace::IdgWorkspace::validate_sidecar_file(path)
+}
+
 fn idg_sidecar_file_limit() -> usize {
     std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT")
         .ok()
@@ -79,6 +94,13 @@ fn idg_sidecar_file_limit() -> usize {
 
 fn workspace_idg_sidecar_enabled(file_count: usize) -> bool {
     file_count <= idg_sidecar_file_limit()
+}
+
+/// Whether the default workspace-wide IDG sidecar is enabled for a
+/// workspace with `file_count` supported source files.
+#[must_use]
+pub fn idg_sidecar_enabled_for_file_count(file_count: usize) -> bool {
+    workspace_idg_sidecar_enabled(file_count)
 }
 
 fn has_summary_output(global: &bonsai_index::GlobalIndex, func: FuncId) -> bool {
@@ -503,14 +525,21 @@ struct Inner {
     /// `None` for tests / synthetic workspaces that open without a
     /// real on-disk root; persistence is skipped silently in that case.
     idg_sidecar_root: Mutex<Option<std::path::PathBuf>>,
+    /// True only when this workspace was opened over the complete
+    /// supported source set under `workspace_root`. Literal-, path-,
+    /// and filter-scoped query workspaces are exact for their scoped
+    /// command, but must not publish reusable whole-workspace sidecars
+    /// under the shared `.bonsai/` directory.
+    complete_workspace_index: Mutex<bool>,
 }
 
-#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, Serialize)]
 pub struct WorkspaceStats {
     pub files: usize,
     pub cached_decl_indexes: usize,
     pub cached_cfgs: usize,
     pub reparsed_files: u64,
+    pub semantic_context: WorkspaceSemanticContextSummary,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -546,29 +575,61 @@ pub struct FileRefresh {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceOpenEvent {
     IngestStarted,
-    IngestFinished { files: usize },
-    ParseStarted { files: usize },
+    IngestFinished {
+        files: usize,
+    },
+    ParseStarted {
+        files: usize,
+    },
     ParseFileIndexed,
     ParseFinished,
-    DataflowPrewarmStarted { pending: usize },
+    DataflowPrewarmStarted {
+        pending: usize,
+    },
     DataflowEntryBuilt,
     DataflowPrewarmFinished,
     ValueFlowPrewarmStarted,
     ValueFlowPrewarmFinished,
     FlowIdsPrewarmStarted,
     FlowIdsPrewarmFinished,
+    CacheChecked {
+        cache: &'static str,
+        status: WorkspaceCacheStatus,
+        entries: usize,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceCacheStatus {
+    Hit,
+    Miss,
+    Skipped,
+    Error,
+}
+
+const fn cache_status_for_entries(entries: usize) -> WorkspaceCacheStatus {
+    if entries > 0 {
+        WorkspaceCacheStatus::Hit
+    } else {
+        WorkspaceCacheStatus::Miss
+    }
 }
 
 /// Controls how [`Workspace::open_with_options`] interacts with the
-/// persisted dataflow sidecar.
+/// persisted workspace sidecars.
 ///
-/// The default is structural query behavior: parse and index the
+/// The workspace-open default is structural query behavior: parse and index the
 /// workspace, load still-fresh sidecars, and compute requested semantic
-/// facts on demand. Use [`Self::full_prewarm`] only for explicit
-/// audit/cache rebuild flows that intentionally compute reusable facts
-/// up front.
+/// facts on demand. High-level `index` commands intentionally use
+/// [`Self::parse_only`] unless the caller explicitly requests semantic
+/// or dataflow prewarm.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceOpenOptions {
+    /// Load the resolved callgraph sidecar before queries run. This is
+    /// independent of dataflow: disabling dataflow prewarm must not
+    /// accidentally force every query command to rebuild the callgraph.
+    #[serde(default = "default_load_callgraph_sidecar")]
+    pub load_callgraph_sidecar: bool,
     /// Load `<workspace>/.bonsai/dataflow.v2.bin` before queries run.
     pub load_dataflow_sidecar: bool,
     /// Compute every missing dataflow entry during open.
@@ -590,6 +651,11 @@ pub struct WorkspaceOpenOptions {
     /// Compute the workspace-wide flow-id cache during open so every
     /// browse-row flow-id lookup is O(1).
     pub prewarm_flow_ids: bool,
+    /// Load the workspace-wide IDG factstore during query open when a
+    /// fresh sidecar already exists. This is read-only: misses do not
+    /// build the IDG unless a later semantic command asks for it.
+    #[serde(default = "default_load_idg_sidecar")]
+    pub load_idg_sidecar: bool,
     /// Build every per-file declaration index during open. Explicit
     /// index/prewarm commands keep this enabled. Query commands leave
     /// it disabled so large workspaces can ingest file contents and
@@ -600,6 +666,14 @@ pub struct WorkspaceOpenOptions {
     /// `None` uses the parser default (`BONSAI_PARSE_TIMEOUT_MS` or
     /// 30 seconds); `Some(0)` disables the timeout guard.
     pub parse_timeout_ms: Option<u64>,
+}
+
+const fn default_load_idg_sidecar() -> bool {
+    true
+}
+
+const fn default_load_callgraph_sidecar() -> bool {
+    true
 }
 
 impl Default for WorkspaceOpenOptions {
@@ -616,6 +690,7 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn query_only() -> Self {
         Self {
+            load_callgraph_sidecar: true,
             load_dataflow_sidecar: true,
             prewarm_dataflow: false,
             save_dataflow_sidecar: false,
@@ -623,6 +698,7 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: false,
             save_value_flow_sidecar: false,
             prewarm_flow_ids: false,
+            load_idg_sidecar: true,
             eager_decl_index: false,
             parse_timeout_ms: None,
         }
@@ -634,6 +710,7 @@ impl WorkspaceOpenOptions {
     #[must_use]
     pub const fn parse_only() -> Self {
         Self {
+            load_callgraph_sidecar: false,
             load_dataflow_sidecar: false,
             prewarm_dataflow: false,
             save_dataflow_sidecar: false,
@@ -641,6 +718,7 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: false,
             save_value_flow_sidecar: false,
             prewarm_flow_ids: false,
+            load_idg_sidecar: false,
             eager_decl_index: true,
             parse_timeout_ms: None,
         }
@@ -649,12 +727,12 @@ impl WorkspaceOpenOptions {
     /// Explicit full-prewarm mode. Parses and indexes the workspace,
     /// loads still-fresh sidecars, computes every missing reusable
     /// dataflow/value-flow/flow-id entry, and writes sidecars back.
-    /// This is intentionally not the default: callers must opt in
-    /// when their command scope requires expensive whole-workspace
-    /// preparation.
+    /// This is intentionally not the generic workspace-open default; high-level
+    /// index facades opt into it to implement "index once, query many times".
     #[must_use]
     pub const fn full_prewarm() -> Self {
         Self {
+            load_callgraph_sidecar: true,
             load_dataflow_sidecar: true,
             prewarm_dataflow: true,
             save_dataflow_sidecar: true,
@@ -662,6 +740,7 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: true,
             save_value_flow_sidecar: true,
             prewarm_flow_ids: true,
+            load_idg_sidecar: true,
             eager_decl_index: true,
             parse_timeout_ms: None,
         }
@@ -701,6 +780,7 @@ impl Workspace {
                 reparse_counter: Mutex::new(0),
                 root_label: Mutex::new(String::new()),
                 idg_sidecar_root: Mutex::new(None),
+                complete_workspace_index: Mutex::new(false),
             }),
         }
     }
@@ -865,9 +945,48 @@ impl Workspace {
     /// sidecar path for `root`. Builds the graph on-demand if it
     /// hasn't been built yet.
     pub fn save_callgraph_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        if !self.is_complete_workspace_index() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "callgraph sidecars require a complete workspace index",
+            ));
+        }
         let path = callgraph_sidecar::callgraph_sidecar_path(root);
         let graph = self.cached_resolved_call_graph();
         callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, &graph)
+    }
+
+    /// Load the workspace IDG sidecar for `root` and seed the shared
+    /// [`AnalyzerDb`] IDG service when the factstore is fresh. Returns
+    /// the loaded segment count. Missing, stale, or version-mismatched
+    /// sidecars are reported as `Ok(None)` so query opens can stay
+    /// read-only and compute only if a later command explicitly needs
+    /// the graph.
+    pub fn load_idg_sidecar(&self, root: &Path) -> bonsai_idg::IdgResult<Option<usize>> {
+        if let Some(service) = self.inner.db.idg_service() {
+            return Ok(Some(service.segment_count()));
+        }
+        if !workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len()) {
+            tracing::debug!(
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace IDG sidecar load for large workspace"
+            );
+            return Ok(None);
+        }
+        let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
+        if !sidecar.exists() {
+            return Ok(None);
+        }
+        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, Some(root));
+        let Some(loaded) = bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)?
+        else {
+            return Ok(None);
+        };
+        let segment_count = loaded.segment_count();
+        let global = self.inner.db.global_index();
+        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global));
+        self.inner.db.set_idg_service(service);
+        Ok(Some(segment_count))
     }
 
     pub fn cached_resolved_call_graph(&self) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
@@ -1149,23 +1268,21 @@ impl Workspace {
         // latency; the sidecar reduces it to a single mmap + decode
         // for subsequent invocations against the same content-hashed
         // workspace.
-        let use_idg_sidecar = workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
+        let use_idg_sidecar = self.is_complete_workspace_index()
+            && workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
         if use_idg_sidecar {
             if let Some(root) = self.root_path() {
-                let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
-                if let Ok(Some(loaded)) =
-                    bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
-                {
-                    let service =
-                        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
-                    self.inner.db.set_idg_service(service.clone());
-                    return service;
+                if self.load_idg_sidecar(&root).ok().flatten().is_some() {
+                    if let Some(service) = self.inner.db.idg_service() {
+                        return service;
+                    }
                 }
             }
         } else {
             tracing::debug!(
+                complete_workspace = self.is_complete_workspace_index(),
                 file_limit = idg_sidecar_file_limit(),
-                "skipping workspace IDG sidecar load for large workspace"
+                "skipping workspace IDG sidecar load"
             );
         }
         let cg = self.cached_resolved_call_graph();
@@ -1205,13 +1322,36 @@ impl Workspace {
             }
         } else {
             tracing::debug!(
+                complete_workspace = self.is_complete_workspace_index(),
                 file_limit = idg_sidecar_file_limit(),
-                "skipping workspace IDG sidecar save for large workspace"
+                "skipping workspace IDG sidecar save"
             );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
+    }
+
+    /// Build and seed the workspace IDG only when the resulting
+    /// sidecar is enabled for this workspace size. Large workspaces
+    /// intentionally skip the global IDG sidecar; callers that are
+    /// merely warming persisted artifacts should not pay for an
+    /// unsaved whole-workspace graph.
+    pub fn build_and_seed_persisted_idg_service(&self) -> Option<Arc<bonsai_idg::IdgQueryService>> {
+        if !self.is_complete_workspace_index() {
+            tracing::debug!("skipping workspace IDG prewarm because the workspace index is scoped");
+            return None;
+        }
+        let files = self.inner.db.vfs().all_files().len();
+        if !workspace_idg_sidecar_enabled(files) {
+            tracing::debug!(
+                files,
+                file_limit = idg_sidecar_file_limit(),
+                "skipping workspace IDG prewarm because the sidecar is disabled for this workspace size"
+            );
+            return None;
+        }
+        Some(self.build_and_seed_idg_service())
     }
 
     /// Build a workspace IDG with caller-supplied transfer options
@@ -1233,7 +1373,8 @@ impl Workspace {
         let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), transfer_hash);
-        let use_idg_sidecar = workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
+        let use_idg_sidecar = self.is_complete_workspace_index()
+            && workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
         if use_idg_sidecar {
             if let Some(root) = root_path.as_deref() {
                 let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
@@ -1248,8 +1389,9 @@ impl Workspace {
             }
         } else {
             tracing::debug!(
+                complete_workspace = self.is_complete_workspace_index(),
                 file_limit = idg_sidecar_file_limit(),
-                "skipping workspace transfer IDG sidecar load for large workspace"
+                "skipping workspace transfer IDG sidecar load"
             );
         }
         let cg = self.cached_resolved_call_graph();
@@ -1280,8 +1422,9 @@ impl Workspace {
             }
         } else {
             tracing::debug!(
+                complete_workspace = self.is_complete_workspace_index(),
                 file_limit = idg_sidecar_file_limit(),
-                "skipping workspace transfer IDG sidecar save for large workspace"
+                "skipping workspace transfer IDG sidecar save"
             );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
@@ -1439,6 +1582,19 @@ impl Workspace {
         *self.inner.idg_sidecar_root.lock() = Some(root.to_path_buf());
     }
 
+    /// Whether this workspace contains the complete supported source
+    /// set for its recorded root. Scoped query workspaces deliberately
+    /// index fewer files and therefore cannot safely write reusable
+    /// whole-workspace sidecars.
+    #[must_use]
+    pub fn is_complete_workspace_index(&self) -> bool {
+        *self.inner.complete_workspace_index.lock()
+    }
+
+    fn set_complete_workspace_index(&self, complete: bool) {
+        *self.inner.complete_workspace_index.lock() = complete;
+    }
+
     /// Drop the persisted IDG sidecar (if any) so a stale snapshot
     /// can't survive a file edit. Best-effort: missing file and
     /// permission errors are swallowed since the in-memory invalidation
@@ -1556,13 +1712,32 @@ impl Workspace {
         literal: &str,
         options: WorkspaceOpenOptions,
     ) -> Result<Self, WorkspaceError> {
+        Self::open_query_matching_literal_with_options_and_events(root, registry, literal, options, &|_| {})
+    }
+
+    /// Same as [`Self::open_query_matching_literal_with_options`],
+    /// emitting workspace lifecycle events while the reduced file set
+    /// is selected and indexed.
+    pub fn open_query_matching_literal_with_options_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        literal: &str,
+        options: WorkspaceOpenOptions,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root);
+        ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_workspace_root(canonical_root.clone());
+        on_event(WorkspaceOpenEvent::IngestStarted);
         let (files, skipped_minified) =
             read_supported_source_files_matching_literal(&canonical_root, &ws.inner.registry, literal)?;
+        let file_count = files.len();
         for source in files {
             let path = &source.path;
             let old_id = ws.inner.vfs.lookup(path);
@@ -1573,8 +1748,11 @@ impl Workspace {
             *ws.inner.reparse_counter.lock() += 1;
             let _ = id;
         }
+        on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
         let files = ws.vfs().all_files();
-        index_workspace_files_with_bounded_parallelism(&ws, &files, &|_| {});
+        on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
+        index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
+        on_event(WorkspaceOpenEvent::ParseFinished);
         if skipped_minified > 0 {
             tracing::info!(
                 skipped = skipped_minified,
@@ -1613,17 +1791,44 @@ impl Workspace {
         exclude_filters: &[String],
         options: WorkspaceOpenOptions,
     ) -> Result<Self, WorkspaceError> {
+        Self::open_query_filtered_paths_with_options_and_events(
+            root,
+            registry,
+            include_filters,
+            exclude_filters,
+            options,
+            &|_| {},
+        )
+    }
+
+    /// Same as [`Self::open_query_filtered_paths_with_options`],
+    /// emitting lifecycle events for frontends that want progress
+    /// while the scoped file set is selected.
+    pub fn open_query_filtered_paths_with_options_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        include_filters: &[String],
+        exclude_filters: &[String],
+        options: WorkspaceOpenOptions,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root);
+        ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_workspace_root(canonical_root.clone());
+        on_event(WorkspaceOpenEvent::IngestStarted);
         let (files, skipped_minified) = read_supported_source_files_filtered_paths(
             &canonical_root,
             &ws.inner.registry,
             include_filters,
             exclude_filters,
         )?;
+        let file_count = files.len();
         for source in files {
             let path = &source.path;
             let old_id = ws.inner.vfs.lookup(path);
@@ -1633,6 +1838,13 @@ impl Workspace {
             }
             *ws.inner.reparse_counter.lock() += 1;
             let _ = id;
+        }
+        on_event(WorkspaceOpenEvent::IngestFinished { files: file_count });
+        if options.eager_decl_index {
+            let files = ws.vfs().all_files();
+            on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
+            index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
+            on_event(WorkspaceOpenEvent::ParseFinished);
         }
         if skipped_minified > 0 {
             tracing::info!(
@@ -1667,18 +1879,40 @@ impl Workspace {
         path: &Path,
         options: WorkspaceOpenOptions,
     ) -> Result<Self, WorkspaceError> {
+        Self::open_query_matching_path_with_options_and_events(root, registry, path, options, &|_| {})
+    }
+
+    /// Same as [`Self::open_query_matching_path_with_options`],
+    /// emitting lifecycle events while the single-file workspace is
+    /// opened and indexed.
+    pub fn open_query_matching_path_with_options_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        path: &Path,
+        options: WorkspaceOpenOptions,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         let ws = Self::new_with_open_options(registry, options);
         ws.set_idg_sidecar_root(root);
+        ws.set_complete_workspace_index(false);
         let canonical_root = canonical_workspace_root(root);
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_workspace_root(canonical_root.clone());
+        on_event(WorkspaceOpenEvent::IngestStarted);
         let source = read_supported_source_file_at_path(&canonical_root, &ws.inner.registry, path)?;
         let id = ws
             .inner
             .vfs
             .write(source.path.clone(), Arc::<str>::from(source.text));
         *ws.inner.reparse_counter.lock() += 1;
+        on_event(WorkspaceOpenEvent::IngestFinished { files: 1 });
+        on_event(WorkspaceOpenEvent::ParseStarted { files: 1 });
         let _ = ws.db().decl_index(id);
+        on_event(WorkspaceOpenEvent::ParseFileIndexed);
+        on_event(WorkspaceOpenEvent::ParseFinished);
         Ok(ws)
     }
 
@@ -1736,6 +1970,13 @@ impl Workspace {
         let skip_prewarm = std::env::var("BONSAI_NO_DATAFLOW")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        if options.load_dataflow_sidecar && skip_prewarm {
+            on_event(WorkspaceOpenEvent::CacheChecked {
+                cache: "dataflow",
+                status: WorkspaceCacheStatus::Skipped,
+                entries: 0,
+            });
+        }
         if options.load_dataflow_sidecar && !skip_prewarm {
             // Prefer the new disk-backed factstore sidecar if one
             // exists — opening it is just an mmap, and it'll keep
@@ -1744,22 +1985,88 @@ impl Workspace {
             // `.bonsai/dataflow.v2.bin` files continue to warm-start
             // a session.
             let factstore_sidecar = DataFlowCache::factstore_sidecar_path(root);
-            let loaded = ws
+            let loaded = match ws
                 .inner
                 .dataflow
                 .load_factstore_sidecar(&factstore_sidecar, ws.db())
-                .unwrap_or(0);
+            {
+                Ok(entries) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "dataflow factstore",
+                        status: cache_status_for_entries(entries),
+                        entries,
+                    });
+                    entries
+                }
+                Err(_) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "dataflow factstore",
+                        status: WorkspaceCacheStatus::Error,
+                        entries: 0,
+                    });
+                    0
+                }
+            };
             if loaded == 0 {
                 let legacy_sidecar = DataFlowCache::sidecar_path(root);
-                let _ = ws.inner.dataflow.load_from_disk(&legacy_sidecar, ws.db());
+                match ws.inner.dataflow.load_from_disk(&legacy_sidecar, ws.db()) {
+                    Ok(entries) => {
+                        on_event(WorkspaceOpenEvent::CacheChecked {
+                            cache: "dataflow legacy",
+                            status: cache_status_for_entries(entries),
+                            entries,
+                        });
+                    }
+                    Err(_) => {
+                        on_event(WorkspaceOpenEvent::CacheChecked {
+                            cache: "dataflow legacy",
+                            status: WorkspaceCacheStatus::Error,
+                            entries: 0,
+                        });
+                    }
+                }
             }
         }
         // Try to load the persisted call graph before any cache
         // that depends on it asks for one. Saves several seconds
         // on every CLI invocation against a workspace with a
         // fresh `.bonsai/callgraph.v10.bin`.
-        if options.load_dataflow_sidecar && !skip_prewarm {
-            let _ = ws.load_callgraph_sidecar(root);
+        if options.load_callgraph_sidecar {
+            let hit = ws.load_callgraph_sidecar(root);
+            on_event(WorkspaceOpenEvent::CacheChecked {
+                cache: "callgraph",
+                status: if hit {
+                    WorkspaceCacheStatus::Hit
+                } else {
+                    WorkspaceCacheStatus::Miss
+                },
+                entries: usize::from(hit),
+            });
+        }
+        if options.load_idg_sidecar && !skip_prewarm {
+            match ws.load_idg_sidecar(root) {
+                Ok(Some(entries)) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "IDG factstore",
+                        status: WorkspaceCacheStatus::Hit,
+                        entries,
+                    });
+                }
+                Ok(None) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "IDG factstore",
+                        status: WorkspaceCacheStatus::Miss,
+                        entries: 0,
+                    });
+                }
+                Err(_) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "IDG factstore",
+                        status: WorkspaceCacheStatus::Error,
+                        entries: 0,
+                    });
+                }
+            }
         }
         if options.prewarm_dataflow && !skip_prewarm {
             // Build the workspace-cached call graph once, then seed
@@ -1769,12 +2076,15 @@ impl Workspace {
             ws.inner.dataflow.seed_call_graph(cg.clone());
             ws.inner.flow_ids.seed_call_graph(cg);
             // Build the workspace IDG once the call graph and global
-            // index are available. Seeded onto the db so every
-            // consumer (value-flow, security analysis, browse,
-            // inspect, dump, export) can fetch it via
-            // `db.idg_service()` instead of running the legacy
-            // per-source interprocedural engine.
-            let _ = ws.build_and_seed_idg_service();
+            // index are available, but only when the result can be
+            // persisted for later commands. On very large workspaces
+            // the sidecar gate intentionally disables the global IDG
+            // artifact; eagerly constructing it here would spend
+            // minutes materializing a whole-workspace object-field
+            // closure that the short-lived index process then drops.
+            // Commands that need semantic flow still build their exact
+            // requested scope on demand.
+            let _ = ws.build_and_seed_persisted_idg_service();
             // Seed the dataflow cache with the workspace's
             // InterTaintCaches singleton so the engine's resolver
             // memo / alias maps / function summaries built during
@@ -1831,9 +2141,31 @@ impl Workspace {
         let skip_value_flow = std::env::var("BONSAI_NO_VALUE_FLOW")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        if options.load_value_flow_sidecar && skip_value_flow {
+            on_event(WorkspaceOpenEvent::CacheChecked {
+                cache: "value-flow",
+                status: WorkspaceCacheStatus::Skipped,
+                entries: 0,
+            });
+        }
         if options.load_value_flow_sidecar && !skip_value_flow {
             let sidecar = ValueFlowCache::sidecar_path(root);
-            let _ = ws.inner.value_flow.load_from_disk(&sidecar, ws.db());
+            match ws.inner.value_flow.load_from_disk(&sidecar, ws.db()) {
+                Ok(entries) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "value-flow",
+                        status: cache_status_for_entries(entries),
+                        entries,
+                    });
+                }
+                Err(_) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "value-flow",
+                        status: WorkspaceCacheStatus::Error,
+                        entries: 0,
+                    });
+                }
+            }
         }
         if options.prewarm_value_flow && !skip_value_flow {
             on_event(WorkspaceOpenEvent::ValueFlowPrewarmStarted);
@@ -1878,7 +2210,22 @@ impl Workspace {
             // in-memory if disk write fails.
             let sidecar = FlowIdCache::sidecar_path(root);
             // Try to hydrate from any existing sidecar before recomputing.
-            let _ = ws.inner.flow_ids.load_from_disk(&sidecar, ws.db());
+            match ws.inner.flow_ids.load_from_disk(&sidecar, ws.db()) {
+                Ok(entries) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "flow-ids",
+                        status: cache_status_for_entries(entries),
+                        entries,
+                    });
+                }
+                Err(_) => {
+                    on_event(WorkspaceOpenEvent::CacheChecked {
+                        cache: "flow-ids",
+                        status: WorkspaceCacheStatus::Error,
+                        entries: 0,
+                    });
+                }
+            }
             if let Err(err) = ws
                 .inner
                 .flow_ids
@@ -1931,6 +2278,7 @@ impl Workspace {
 
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
         *self.inner.root_label.lock() = root.display().to_string();
+        self.set_complete_workspace_index(true);
         let canonical_root = canonical_workspace_root(root);
         self.inner.db.set_workspace_root(canonical_root.clone());
         let mut ingested = Vec::new();
@@ -2088,7 +2436,36 @@ impl Workspace {
             cached_decl_indexes,
             cached_cfgs,
             reparsed_files: *self.inner.reparse_counter.lock(),
+            semantic_context: self.semantic_context_summary(),
         }
+    }
+
+    /// Language-neutral project context derived from indexed syntax
+    /// paths plus bounded filesystem discovery of roots the ingest
+    /// layer intentionally skips (dependencies, generated output,
+    /// caches, and VCS metadata). Adapters and frontends use this
+    /// shared contract instead of inventing per-language workspace
+    /// heuristics.
+    #[must_use]
+    pub fn semantic_context(&self) -> WorkspaceSemanticContext {
+        self.build_semantic_context(true)
+    }
+
+    #[must_use]
+    pub fn semantic_context_summary(&self) -> WorkspaceSemanticContextSummary {
+        self.build_semantic_context(false).summary
+    }
+
+    fn build_semantic_context(&self, discover_roots: bool) -> WorkspaceSemanticContext {
+        let root = self.inner.db.workspace_root();
+        let files = self
+            .inner
+            .vfs
+            .all_files()
+            .into_iter()
+            .filter_map(|file| self.inner.vfs.path(file).ok().map(|path| path.as_ref().clone()))
+            .collect::<Vec<_>>();
+        semantic_context::build_workspace_semantic_context(root.as_deref(), &files, discover_roots)
     }
 
     pub fn lookup_function(&self, qualified: &str) -> Option<FuncId> {
@@ -2858,7 +3235,10 @@ where
         .parents(true)
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
-    builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
+    let root_for_filter = canonical_root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        include_minified || !path_looks_minified_under_root(&root_for_filter, entry.path())
+    });
     let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
     entries.sort_by(|a, b| a.path().cmp(b.path()));
 
@@ -2873,7 +3253,7 @@ where
         if registry.adapter_for_extension(ext).is_none() {
             continue;
         }
-        if !include_minified && path_looks_minified(path) {
+        if !include_minified && path_looks_minified_under_root(canonical_root, path) {
             tracing::debug!(path = %path.display(), "skipping minified file (filename)");
             skipped_minified += 1;
             continue;
@@ -2945,7 +3325,7 @@ fn read_supported_source_file_at_path(
     if registry.adapter_for_extension(ext).is_none() {
         return Err(WorkspaceError::NoAdapter(ext.to_string()));
     }
-    if !include_minified() && path_looks_minified(&path) {
+    if !include_minified() && path_looks_minified_under_root(canonical_root, &path) {
         return Err(WorkspaceError::NoAdapter(format!(
             "minified source skipped: {}",
             path.display()
@@ -2993,7 +3373,10 @@ fn read_supported_source_files_impl(
         .parents(true)
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
-    builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
+    let root_for_filter = canonical_root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        include_minified || !path_looks_minified_under_root(&root_for_filter, entry.path())
+    });
     let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
     entries.sort_by(|a, b| a.path().cmp(b.path()));
 
@@ -3026,13 +3409,15 @@ fn read_supported_source_files_impl(
             if registry.adapter_for_extension(ext).is_none() {
                 return ReadOutcome::Skip;
             }
-            if !include_minified && path_looks_minified(path) {
+            if !include_minified && path_looks_minified_under_root(canonical_root, path) {
                 tracing::debug!(path = %path.display(), "skipping minified file (filename)");
                 skipped_counter.fetch_add(1, Ordering::Relaxed);
                 return ReadOutcome::Skip;
             }
-            if path_filter.is_some_and(|filter| !source_path_allowed(path, filter)) {
-                return ReadOutcome::Skip;
+            if let Some(filter) = path_filter {
+                if !source_path_allowed(canonical_root, path, filter) {
+                    return ReadOutcome::Skip;
+                }
             }
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
@@ -3083,26 +3468,45 @@ struct PathFilterSpec<'a> {
     exclude_filters: &'a [String],
 }
 
-fn source_path_allowed(path: &Path, filter: PathFilterSpec<'_>) -> bool {
-    let path = normalize_path_for_filter(&path.to_string_lossy());
+fn source_path_allowed(root: &Path, path: &Path, filter: PathFilterSpec<'_>) -> bool {
+    let relative = normalize_path_for_filter(
+        &semantic_context::context_relative_path(Some(root), path).to_string_lossy(),
+    );
+    let absolute = normalize_path_for_filter(&path.to_string_lossy());
     (filter.include_filters.is_empty()
         || filter
             .include_filters
             .iter()
-            .any(|include| path_filter_matches(&path, include)))
+            .any(|include| path_filter_matches_scoped(&relative, &absolute, include)))
         && !filter
             .exclude_filters
             .iter()
-            .any(|exclude| path_filter_matches(&path, exclude))
+            .any(|exclude| path_filter_matches_scoped(&relative, &absolute, exclude))
+}
+
+fn path_filter_matches_scoped(relative: &str, absolute: &str, filter: &str) -> bool {
+    if path_filter_matches(relative, filter) {
+        return true;
+    }
+    filter_looks_like_absolute_path(filter) && path_filter_matches(absolute, filter)
+}
+
+fn filter_looks_like_absolute_path(filter: &str) -> bool {
+    let normalized = normalize_path_for_filter(filter);
+    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
+        return true;
+    }
+    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
 }
 
 fn path_filter_matches(path: &str, filter: &str) -> bool {
+    let path = normalize_path_for_filter(path);
     let filter = normalize_path_for_filter(filter);
     if filter.is_empty() {
         return false;
     }
     if filter.contains('/') {
-        return path_filter_with_separator_matches(path, &filter);
+        return path_filter_with_separator_matches(&path, &filter);
     }
     path.contains(filter.as_str())
 }
@@ -3248,6 +3652,20 @@ pub fn path_looks_minified(path: &Path) -> bool {
     // `.min.` sits between the base name and the extension (`foo.min.js`).
     // `-min.` catches the dash-separated convention (`foo-min.js`).
     lower.contains(".min.") || lower.contains("-min.")
+}
+
+/// Same generated/minified check as [`path_looks_minified`], but scoped to
+/// `root`. This is the predicate ingest paths should use so an explicit
+/// workspace rooted under an ancestor named `target`, `build`, `vendor`, etc.
+/// is still analyzed; only generated/dependency segments inside that selected
+/// workspace are skipped.
+#[must_use]
+pub fn path_looks_minified_under_root(root: &Path, path: &Path) -> bool {
+    let scoped = path.strip_prefix(root).unwrap_or(path);
+    if scoped.as_os_str().is_empty() {
+        return false;
+    }
+    path_looks_minified(scoped)
 }
 
 /// Does the file content look minified? Heuristic: any single line

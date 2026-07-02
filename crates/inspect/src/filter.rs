@@ -119,6 +119,31 @@ pub struct InspectFilters<'a> {
     pub in_fn: Option<&'a str>,
 }
 
+/// Concrete hit evidence supplied to [`chain_matches_filters_for_hit`].
+/// The text alone is not enough when `--from-kind` / `--to-kind` is
+/// active: `model = pickle.loads` contains `pickle`, but the hit itself
+/// is a write, not a call.
+#[derive(Copy, Clone, Debug)]
+pub struct FilterHit<'a> {
+    pub text: &'a str,
+    pub kind: Option<FactKindFilter>,
+}
+
+impl<'a> FilterHit<'a> {
+    #[must_use]
+    pub fn new(text: &'a str, kind: FactKindFilter) -> Self {
+        Self {
+            text,
+            kind: Some(kind),
+        }
+    }
+
+    #[must_use]
+    pub fn untyped(text: &'a str) -> Self {
+        Self { text, kind: None }
+    }
+}
+
 /// Case-insensitive "word-boundary" match: the needle matches the
 /// haystack if it appears as a prefix of some identifier token.
 /// Tokens are split on non-alphanumeric characters (`.`, `_`, space,
@@ -193,9 +218,27 @@ pub fn chain_matches_filters(
     taint_facts: &dyn Fn() -> Arc<KindedTokens>,
     filters: InspectFilters<'_>,
 ) -> bool {
-    let hit_matches = |needle: &str| -> bool { hit_text.is_some_and(|t| name_token_match(t, needle)) };
-    let chain_name_matches =
-        |needle: &str| -> bool { chain_func_names.iter().any(|n| name_token_match(n, needle)) };
+    let hit = hit_text.map(FilterHit::untyped);
+    chain_matches_filters_for_hit(hit, chain_func_names, taint_facts, filters)
+}
+
+/// Typed variant of [`chain_matches_filters`]. Prefer this when the
+/// caller knows the browse-fact kind of the rendered hit.
+pub fn chain_matches_filters_for_hit(
+    hit: Option<FilterHit<'_>>,
+    chain_func_names: &[String],
+    taint_facts: &dyn Fn() -> Arc<KindedTokens>,
+    filters: InspectFilters<'_>,
+) -> bool {
+    let hit_matches = |needle: &str, kind: Option<FactKindFilter>| -> bool {
+        hit.is_some_and(|hit| {
+            kind.is_none_or(|kind| hit.kind == Some(kind)) && name_token_match(hit.text, needle)
+        })
+    };
+    let chain_name_matches = |needle: &str, kind: Option<FactKindFilter>| -> bool {
+        kind.is_none_or(|kind| kind == FactKindFilter::Decl)
+            && chain_func_names.iter().any(|n| name_token_match(n, needle))
+    };
     let tokens_contain = |tokens: &KindedTokens, needle: &str, kind: Option<FactKindFilter>| -> bool {
         match kind {
             Some(kind_filter) => tokens
@@ -215,15 +258,15 @@ pub fn chain_matches_filters(
     // Match if the needle lands on this exact call path: hit text,
     // a chain hop / tail callee, or a propagated taint fact.
     let taint_or_hit = |needle: &str, kind: Option<FactKindFilter>| -> bool {
-        hit_matches(needle) || chain_name_matches(needle) || taint_matches(needle, kind)
+        hit_matches(needle, kind) || chain_name_matches(needle, kind) || taint_matches(needle, kind)
     };
     match (filters.from, filters.to) {
         (None, None) => true,
         (Some(from), None) => taint_or_hit(from, filters.from_kind),
         (None, Some(to)) => taint_or_hit(to, filters.to_kind),
         (Some(from), Some(to)) => {
-            let hit_from = hit_matches(from);
-            let hit_to = hit_matches(to);
+            let hit_from = hit_matches(from, filters.from_kind);
+            let hit_to = hit_matches(to, filters.to_kind);
             if !hit_from && !hit_to {
                 return false;
             }

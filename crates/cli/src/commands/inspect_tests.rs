@@ -1,11 +1,15 @@
 use super::{
-    taint_flow_contains_needle, taint_flow_matches_query, walk_flow_hits, HitOut, InspectFilters,
-    InspectTaintFlow, InspectTaintStep, InspectTaintedArg, Matcher,
+    build_filter_marker, import_hit_text, retrieval_prefilter_for_inspect_with_limit,
+    taint_flow_contains_needle, taint_flow_matches_query, walk_flow_hits, FlowHitWalkContext, HitOut,
+    InspectFilters, InspectTaintFlow, InspectTaintStep, InspectTaintedArg, Matcher,
 };
 use crate::args::FactKindFilter;
 use bonsai_common::{FileId, FuncId, Span};
-use bonsai_lang_api::FlowEvent;
+use bonsai_lang_api::{DeclKind, FlowEvent, ImportScope, ImportSpec};
 use bonsai_sdk::find_call_span_by_name;
+use bonsai_sdk::Workspace;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn span(start: u32) -> Span {
     Span {
@@ -47,8 +51,12 @@ fn walk_flow_hits_surfaces_assignment_source_calls() {
         &[assign_event()],
         FuncId::new(1),
         "handler",
-        &matcher,
-        &kinds,
+        FlowHitWalkContext {
+            workspace: None,
+            matcher: &matcher,
+            endpoint_kind_filter: None,
+            kinds: &kinds,
+        },
         &mut out,
         &mut push,
     );
@@ -75,13 +83,49 @@ fn walk_flow_hits_surfaces_assignment_source_call_args() {
         &[assign_event()],
         FuncId::new(1),
         "handler",
-        &matcher,
-        &kinds,
+        FlowHitWalkContext {
+            workspace: None,
+            matcher: &matcher,
+            endpoint_kind_filter: None,
+            kinds: &kinds,
+        },
         &mut out,
         &mut push,
     );
 
     assert_eq!(seen, vec![("arg".to_string(), "request".to_string())]);
+}
+
+#[test]
+fn walk_flow_hits_honors_endpoint_kind_filter() {
+    let matcher = Matcher::build(Some("read_user"), false).expect("matcher");
+    let kinds = ahash::AHashSet::default();
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut out: Vec<HitOut> = Vec::new();
+    let mut push = |kind: &str,
+                    text: String,
+                    _span: Span,
+                    _containing: Option<(FuncId, String)>,
+                    _exact: bool,
+                    _out: &mut Vec<HitOut>| {
+        seen.push((kind.to_string(), text));
+    };
+
+    walk_flow_hits(
+        &[assign_event()],
+        FuncId::new(1),
+        "handler",
+        FlowHitWalkContext {
+            workspace: None,
+            matcher: &matcher,
+            endpoint_kind_filter: Some(bonsai_sdk::FactKindFilter::Call),
+            kinds: &kinds,
+        },
+        &mut out,
+        &mut push,
+    );
+
+    assert_eq!(seen, vec![("call".to_string(), "read_user".to_string())]);
 }
 
 #[test]
@@ -125,10 +169,171 @@ fn inspect_cli_filters_map_one_to_one_to_sdk_filters() {
     }
 }
 
+#[test]
+fn filter_marker_matches_structured_subjects_not_raw_source_text() {
+    let filters = InspectFilters {
+        to: Some("pickle"),
+        ..InspectFilters::default()
+    };
+
+    let raw_line_only = build_filter_marker(filters, &["call loads"], "7");
+    assert_eq!(
+        raw_line_only, "",
+        "raw source text must not place a TO marker without a structured fact subject"
+    );
+
+    let structured_subject = build_filter_marker(filters, &["pickle.loads"], "7");
+    assert_eq!(structured_subject, "[FLOW 7 TO: pickle]");
+}
+
+#[test]
+fn inspect_import_hit_text_keeps_original_and_alias_visible() {
+    let renamed_symbol = ImportSpec {
+        span: span(1),
+        module: "os".to_string(),
+        alias: Some("run_command".to_string()),
+        is_wildcard: false,
+        original_name: Some("system".to_string()),
+        scope: ImportScope::Module,
+    };
+    assert_eq!(import_hit_text(&renamed_symbol), "system from os as run_command");
+
+    let renamed_module = ImportSpec {
+        span: span(2),
+        module: "os".to_string(),
+        alias: Some("operating_system".to_string()),
+        is_wildcard: false,
+        original_name: None,
+        scope: ImportScope::Module,
+    };
+    assert_eq!(import_hit_text(&renamed_module), "os as operating_system");
+}
+
+#[test]
+fn inspect_retrieval_prefilter_uses_warmed_sidecar_candidate_files() {
+    let root = tempdir_for_test("inspect-retrieval-prefilter");
+    std::fs::write(root.join("app.py"), "def unrelated():\n    return 1\n").expect("write app");
+    std::fs::write(
+        root.join("service.py"),
+        "def inspect_unique_symbol():\n    return 'ok'\n",
+    )
+    .expect("write service");
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.ingest_dir(&root).expect("ingest");
+    bonsai_retrieval::save_sidecar(&ws, &root).expect("save retrieval sidecar");
+
+    let filters = retrieval_prefilter_for_inspect_with_limit(
+        &root,
+        Some("inspect_unique_symbol"),
+        false,
+        InspectFilters::default(),
+        false,
+        false,
+        1,
+    )
+    .expect("prefilter")
+    .expect("fresh retrieval sidecar should provide inspect candidates");
+
+    assert_eq!(filters, vec!["service.py"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn inspect_retrieval_prefilter_keeps_files_matched_only_by_named_arg_key() {
+    let root = tempdir_for_test("inspect-retrieval-prefilter-named-arg");
+    std::fs::write(root.join("app.py"), "def unrelated():\n    return 1\n").expect("write app");
+    std::fs::write(
+        root.join("service.py"),
+        "def handler(endpoint):\n    connect(destination_kw=endpoint)\n",
+    )
+    .expect("write service");
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.ingest_dir(&root).expect("ingest");
+    bonsai_retrieval::save_sidecar(&ws, &root).expect("save retrieval sidecar");
+
+    let filters = retrieval_prefilter_for_inspect_with_limit(
+        &root,
+        Some("destination_kw"),
+        false,
+        InspectFilters::default(),
+        false,
+        false,
+        1,
+    )
+    .expect("prefilter")
+    .expect("fresh retrieval sidecar should provide inspect candidates for named arg keys");
+
+    assert_eq!(filters, vec!["service.py"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn inspect_retrieval_prefilter_uses_safe_empty_scope_for_no_candidates() {
+    let root = tempdir_for_test("inspect-retrieval-empty");
+    std::fs::write(root.join("app.py"), "def only_symbol():\n    return 1\n").expect("write app");
+    std::fs::write(root.join("other.py"), "def other_symbol():\n    return 2\n").expect("write other");
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.ingest_dir(&root).expect("ingest");
+    bonsai_retrieval::save_sidecar(&ws, &root).expect("save retrieval sidecar");
+
+    let filters = retrieval_prefilter_for_inspect_with_limit(
+        &root,
+        Some("missing_symbol"),
+        false,
+        InspectFilters::default(),
+        false,
+        false,
+        1,
+    )
+    .expect("prefilter")
+    .expect("fresh retrieval sidecar should decide no candidates");
+
+    assert!(
+        !filters.is_empty(),
+        "inspect must not pass [] to filtered workspace open because [] opens every file"
+    );
+    assert!(!filters.iter().any(|filter| std::path::Path::new(filter)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn inspect_retrieval_prefilter_skips_graph_flow_queries() {
+    let root = tempdir_for_test("inspect-retrieval-graph-flow");
+    std::fs::write(
+        root.join("app.py"),
+        "def inspect_unique_symbol():\n    return 1\n",
+    )
+    .expect("write app");
+    std::fs::write(root.join("other.py"), "def other_symbol():\n    return 2\n").expect("write other");
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    ws.ingest_dir(&root).expect("ingest");
+    bonsai_retrieval::save_sidecar(&ws, &root).expect("save retrieval sidecar");
+
+    let filters = retrieval_prefilter_for_inspect_with_limit(
+        &root,
+        Some("inspect_unique_symbol"),
+        false,
+        InspectFilters::default(),
+        true,
+        false,
+        1,
+    )
+    .expect("prefilter");
+
+    assert!(
+        filters.is_none(),
+        "graph-flow inspect must keep whole-workspace semantic evidence available"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn sample_taint_flow() -> InspectTaintFlow {
     InspectTaintFlow {
         taint_id: "T:1234".to_string(),
         entry: "handle".to_string(),
+        entry_kind: Some(DeclKind::Function),
         terminal: "os.system".to_string(),
         terminal_kind: "call".to_string(),
         precision: "narrowed".to_string(),
@@ -149,6 +354,23 @@ fn sample_taint_flow() -> InspectTaintFlow {
             }],
         }],
     }
+}
+
+fn tempdir_for_test(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let base = std::env::temp_dir();
+    for attempt in 0..100 {
+        let path = base.join(format!("{name}-{}-{nanos:x}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create tempdir {}: {error}", path.display()),
+        }
+    }
+    panic!("could not allocate tempdir for {name}");
 }
 
 #[test]
@@ -183,4 +405,42 @@ fn taint_from_to_needles_ignore_file_paths() {
         "from/to needle matched a file path instead of taint path content"
     );
     assert!(taint_flow_contains_needle(&flow, "cmd"));
+}
+
+#[test]
+fn taint_from_to_needles_ignore_constructor_prelude_labels() {
+    let mut flow = sample_taint_flow();
+    flow.entry = "Gateway".to_string();
+    flow.entry_kind = Some(DeclKind::Constructor);
+    flow.chain_display = vec![
+        "Gateway".to_string(),
+        "handleRequest".to_string(),
+        "updateUser".to_string(),
+    ];
+    flow.steps.insert(
+        0,
+        InspectTaintStep {
+            caller: "Gateway".to_string(),
+            callee: "handleRequest".to_string(),
+            file: "/tmp/Gateway.java".to_string(),
+            line: 16,
+            column: 9,
+            kind: "propagation".to_string(),
+            precision: "narrowed".to_string(),
+            tainted_args: Vec::new(),
+        },
+    );
+
+    assert!(
+        !taint_flow_contains_needle(&flow, "Gateway"),
+        "constructor/prelude labels must not satisfy untyped from/to taint needles"
+    );
+    assert!(
+        taint_flow_contains_needle(&flow, "os.system"),
+        "terminal call names should remain matchable"
+    );
+    assert!(
+        taint_flow_contains_needle(&flow, "cmd"),
+        "tainted values should remain matchable"
+    );
 }

@@ -22,6 +22,7 @@ use bonsai_lang_api::{Decl, LanguageRegistry};
 use bonsai_workspace::{FileRefreshKind, WorkspaceOpenOptions};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     fs,
     io::{self, Write},
@@ -37,6 +38,9 @@ const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v8.json";
 const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v8.meta.json";
 const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
 const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v7";
+const CACHE_MANIFEST_FILE: &str = "manifest.json";
+const CACHE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const RETRIEVAL_NO_CANDIDATES_FILTER: &str = "/__bonsai_no_retrieval_candidates__/__none__";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub mod read_file;
@@ -52,19 +56,22 @@ pub use tree::{
 };
 
 pub use bonsai_browse::{
-    collect_callee_names, ArgOut, ArgsFilters, AstFileDump, AstFilters, AstNode, AstOutcome, CallOut,
-    CallgraphRow, CallsFilters, ClassOut, ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters,
-    EdgeRecord, EdgesFilters, EntryPointOut, EntryPointsFilters, FlowAnnotator, GraphExportFormat,
-    GraphProjection, HirDump, ImportOut, ImportsFilters, Locator, PrecisionClass, RefOut, RefsFilters,
-    ResolveFilters, ResolveOutcome, ResolveTrace, SearchFilters, SearchHit, StringOut, StringsFilters,
+    collect_callee_names, file_path_excluded_by_filters, file_path_matches_filter, ArgOut, ArgsFilters,
+    AstFileDump, AstFilters, AstNode, AstOutcome, CallOut, CallgraphRow, CallsFilters, ClassOut,
+    ClassesFilters, CommentOut, CommentsFilters, DefOut, DefsFilters, EdgeRecord, EdgesFilters,
+    EntryPointOut, EntryPointsFilters, FlowAnnotator, GraphExportFormat, GraphProjection, HirDump, ImportOut,
+    ImportsFilters, Locator, OperationOperandOut, OperationOut, OperationsFilters, PathFilters,
+    PathFunctionRow, PathOutcome, PathRow, PrecisionClass, RefOut, RefsFilters, ResolutionCoverageDeclRow,
+    ResolutionCoverageFileRow, ResolutionCoverageFilters, ResolveFilters, ResolveOutcome, ResolveTrace,
+    SearchFilters, SearchHit, SliceFilters, SliceOutcome, SliceRow, SliceStep, StringOut, StringsFilters,
     TaintFilters, TaintOutcome, TaintReport, VarOut, VarsFilters,
 };
 pub use bonsai_inspect::{
-    chain_matches_filters, chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id,
-    compute_taint_flow_id, find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func,
-    func_display_name, matching_decls, matching_func_ids, name_token_match, CallEdgeResolver,
-    CallPathTruncation, ChainCache, FactKindFilter, InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
-    TaintFlowIdentityStep,
+    chain_matches_filters, chain_matches_filters_for_hit, chain_to_names, compute_flow_id,
+    compute_flow_labels_from, compute_group_id, compute_taint_flow_id, find_call_span_by_name,
+    find_call_span_to_func_uncached, find_enclosing_func, func_display_name, matching_decls,
+    matching_func_ids, name_token_match, CallEdgeResolver, CallPathTruncation, ChainCache, FactKindFilter,
+    FilterHit, InspectFilters, Matcher, PrecisionFilter, ResolvedChain, TaintFlowIdentityStep,
 };
 pub use bonsai_security::{
     build_flow_bodies, canonical_sink_audit_applies, drain_runtime_disabled_rules,
@@ -88,11 +95,13 @@ pub use bonsai_workspace::value_flow::{
 };
 pub use bonsai_workspace::{
     flow_query::{
-        EntryTaintGraph, SyntaxFlowBackend, SyntaxFlowGraph, SyntaxFlowQuery, TaintedCall, TaintedCallEdge,
-        TaintedCallKind,
+        EntryTaintGraph, SyntaxFlowBackend, SyntaxFlowCacheStatus, SyntaxFlowGraph, SyntaxFlowPlan,
+        SyntaxFlowQuery, TaintedCall, TaintedCallEdge, TaintedCallKind,
     },
-    summarize_precision, CrossModuleOptions, Workspace, WorkspaceError, WorkspaceOpenOptions as OpenOptions,
-    WorkspaceStats,
+    summarize_precision, CrossModuleOptions, Workspace, WorkspaceContextRoot, WorkspaceContextRootKind,
+    WorkspaceError, WorkspaceOpenOptions as OpenOptions, WorkspaceSemanticContext,
+    WorkspaceSemanticContextSummary, WorkspaceSourceTransformation, WorkspaceSourceVariant, WorkspaceStats,
+    WorkspaceToolchainManifest,
 };
 
 pub mod cache {
@@ -105,12 +114,55 @@ pub mod refs {
     pub use bonsai_browse::refs::read_snippet;
 }
 
+pub use bonsai_browse::decl_decorator_names;
+
 pub mod strings {
     pub use bonsai_browse::strings::enclosing_fn_for_file_line;
 }
 
 pub mod trace_render {
     pub use bonsai_trace::render::{to_dot, to_json, to_text};
+}
+
+/// Full diagnostics report shared by the SDK and CLI.
+///
+/// `diagnostics` is the traditional adapter/parser warning stream.
+/// `adapter_capabilities` is the machine-readable capability declaration
+/// for every registered adapter, so diagnostics consumers do not have to
+/// cross-reference generated docs by hand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiagnosticsReport {
+    pub diagnostics: Vec<bonsai_diagnostics::Diagnostic>,
+    pub workspace_languages: Vec<String>,
+    pub adapter_capabilities: Vec<AdapterCapabilityRow>,
+}
+
+/// One adapter's declared capability metadata, serialized for diagnostics
+/// and SDK consumers.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AdapterCapabilityRow {
+    pub language: String,
+    pub display_name: String,
+    pub file_extensions: Vec<String>,
+    pub modules: bonsai_lang_api::CapabilityLevel,
+    pub generics: bonsai_lang_api::CapabilityLevel,
+    pub macros: bonsai_lang_api::CapabilityLevel,
+    pub dynamic_dispatch: bonsai_lang_api::CapabilityLevel,
+    pub exceptions: bonsai_lang_api::CapabilityLevel,
+    pub async_await: bonsai_lang_api::CapabilityLevel,
+    pub coroutines: bonsai_lang_api::CapabilityLevel,
+    pub reflection: bonsai_lang_api::CapabilityLevel,
+    pub ffi: bonsai_lang_api::CapabilityLevel,
+    pub pattern_matching: bonsai_lang_api::CapabilityLevel,
+    pub receiver_types: bonsai_lang_api::CapabilityLevel,
+    pub module_export_aliases: Vec<String>,
+    pub constructor_method_names: Vec<String>,
+    pub super_receiver_tokens: Vec<String>,
+    pub implicit_receiver_tokens: Vec<String>,
+}
+
+fn string_vec(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_string()).collect()
 }
 
 /// Progress lifecycle event emitted by [`Bonsai::index_with_progress`]
@@ -122,10 +174,11 @@ pub mod trace_render {
 ///
 /// Re-exported from `bonsai_workspace::WorkspaceOpenEvent` so SDK
 /// consumers and the workspace's own `open_with_options_and_events`
-/// path see the same variants. Earlier the SDK had a private copy
-/// plus a hand-rolled prewarm pipeline; both have been collapsed
-/// onto the workspace's canonical implementation.
-pub use bonsai_workspace::WorkspaceOpenEvent;
+/// path see the same variants. `WorkspaceCacheStatus` describes
+/// sidecar/cache checks emitted during open. Earlier the SDK had a
+/// private copy plus a hand-rolled prewarm pipeline; both have been
+/// collapsed onto the workspace's canonical implementation.
+pub use bonsai_workspace::{WorkspaceCacheStatus, WorkspaceOpenEvent};
 
 /// SDK configuration and workspace factory.
 #[derive(Clone)]
@@ -186,30 +239,78 @@ impl Bonsai {
         Ok(self)
     }
 
-    /// Parse and structurally index the workspace. Missing exact
-    /// analysis facts are computed by the query that requests them;
-    /// use [`Self::open_with_options`] with
-    /// [`WorkspaceOpenOptions::full_prewarm`] for explicit cache
-    /// rebuild/audit prewarm.
+    /// Attach a pre-loaded security rulepack. Use this when the
+    /// embedding application already parsed or synthesized the pack
+    /// and wants every project opened by this builder to share it.
+    #[must_use]
+    pub fn with_loaded_rulepack(mut self, root: impl AsRef<Path>, rulepack: Rulepack) -> Self {
+        self.rulepack_root = Some(root.as_ref().to_path_buf());
+        self.rulepack = Some(Arc::new(rulepack));
+        self
+    }
+
+    /// Parse and structurally index the workspace. Missing exact analysis
+    /// facts are loaded from fresh sidecars or computed by the query that
+    /// requests them; use [`Self::index_semantic`] or
+    /// [`WorkspaceOpenOptions::full_prewarm`] for an explicit cache prewarm.
     ///
     /// Rulepacks classify sources/sinks/sanitizers and can contribute
-    /// declarative transfer semantics. Explicit prewarm sidecars are still
+    /// declarative transfer semantics. Explicit prewarm sidecars are
     /// deterministic for a given rulepack/configuration; query-time exact
-    /// analysis refreshes the necessary configured transfer profile.
+    /// analysis still refreshes any configured transfer profile it needs.
     pub fn index(&self, root: impl AsRef<Path>) -> Result<Project> {
+        self.index_structural(root)
+    }
+
+    /// Parse and structurally index the workspace without warming persisted
+    /// semantic sidecars.
+    pub fn index_structural(&self, root: impl AsRef<Path>) -> Result<Project> {
         let root = root.as_ref();
         let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
         let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
         Ok(self.project(root, ws, options))
     }
 
-    /// Parse and structurally index the workspace, emitting progress
-    /// events for terminal frontends.
+    /// Same as [`Self::index`], emitting progress events for terminal or IDE
+    /// frontends.
     pub fn index_with_progress<F>(&self, root: impl AsRef<Path>, on_event: F) -> Result<Project>
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
+        self.index_structural_with_progress(root, on_event)
+    }
+
+    /// Same as [`Self::index_structural`], emitting progress events for
+    /// terminal or IDE frontends.
+    pub fn index_structural_with_progress<F>(&self, root: impl AsRef<Path>, on_event: F) -> Result<Project>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         self.open_with_options_and_progress(root, WorkspaceOpenOptions::parse_only(), on_event)
+    }
+
+    /// Parse/index the workspace and eagerly build the reusable semantic
+    /// structural sidecars shared by query commands: callgraph and,
+    /// when enabled for the workspace size, the workspace IDG. This
+    /// deliberately does not run the legacy all-entry dataflow prewarm;
+    /// use [`WorkspaceOpenOptions::full_prewarm`] for that explicit
+    /// audit/benchmark workflow.
+    pub fn index_semantic(&self, root: impl AsRef<Path>) -> Result<Project> {
+        let project = self.open_with_options(root, WorkspaceOpenOptions::parse_only())?;
+        let _ = project.cache().warm_structural()?;
+        Ok(project)
+    }
+
+    /// Same as [`Self::index_semantic`], emitting progress events for terminal
+    /// or IDE frontends.
+    pub fn index_semantic_with_progress<F>(&self, root: impl AsRef<Path>, on_event: F) -> Result<Project>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let project =
+            self.open_with_options_and_progress(root, WorkspaceOpenOptions::parse_only(), on_event)?;
+        let _ = project.cache().warm_structural()?;
+        Ok(project)
     }
 
     /// Open a workspace for fast semantic queries: load the dataflow sidecar
@@ -219,6 +320,101 @@ impl Bonsai {
         let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
         let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
         Ok(self.project(root, ws, options))
+    }
+
+    /// Return workspace-relative file filters for fact candidates from a
+    /// fresh retrieval sidecar.
+    ///
+    /// Retrieval is candidate lookup only. Callers must open the returned file
+    /// scope and hydrate through canonical browse/search/inspect APIs before rendering
+    /// public facts. Returns `Ok(None)` when the query shape is unsupported or
+    /// the retrieval sidecar is missing/stale for the current source,
+    /// dependency, build, or pipeline fingerprint.
+    pub fn retrieval_candidate_file_filters(
+        &self,
+        root: impl AsRef<Path>,
+        query: &str,
+        filters: SearchFilters<'_>,
+    ) -> Result<Option<Vec<String>>> {
+        let root = root.as_ref();
+        if filters.regex || query.trim().len() < 3 {
+            return Ok(None);
+        }
+        let fingerprint_ws = Workspace::new(self.registry.clone());
+        let Ok(fingerprints) = fingerprint_ws.source_file_fingerprints(root) else {
+            return Ok(None);
+        };
+        let root_for_pipeline = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let pipeline = bonsai_retrieval::pipeline_hash_for_source_fingerprints(
+            Some(root_for_pipeline.as_path()),
+            fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
+        );
+        let Ok(index) = bonsai_retrieval::load_sidecar_with_pipeline(root, pipeline) else {
+            return Ok(None);
+        };
+        let candidates = index
+            .query(&bonsai_retrieval::RetrievalQuery {
+                text: query,
+                kind: filters.kind,
+                file: filters.file,
+                workspace_root: Some(root_for_pipeline.as_path()),
+                regex: false,
+                limit: 0,
+            })
+            .map_err(|err| anyhow!("invalid retrieval query `{query}`: {err}"))?;
+        let mut include_filters: Vec<String> = candidates
+            .into_iter()
+            .filter_map(|doc| retrieval_include_filter(root, &doc.file_path))
+            .collect();
+        include_filters.sort();
+        include_filters.dedup();
+        Ok(Some(include_filters))
+    }
+
+    /// Compatibility spelling for search integrations. Retrieval candidates
+    /// are not search-specific; prefer [`Self::retrieval_candidate_file_filters`]
+    /// for new SDK integrations that hydrate browse or inspect facts.
+    pub fn retrieval_search_candidate_file_filters(
+        &self,
+        root: impl AsRef<Path>,
+        query: &str,
+        filters: SearchFilters<'_>,
+    ) -> Result<Option<Vec<String>>> {
+        self.retrieval_candidate_file_filters(root, query, filters)
+    }
+
+    /// Return include filters that are safe to pass to
+    /// [`Self::open_query_filtered_paths`] for canonical fact hydration.
+    ///
+    /// Unlike [`Self::retrieval_candidate_file_filters`], a fresh
+    /// sidecar with zero matching facts returns an impossible include filter
+    /// rather than `[]`, because an empty include filter means "open every
+    /// source file" to path-filtered workspace opens.
+    pub fn retrieval_hydration_include_filters(
+        &self,
+        root: impl AsRef<Path>,
+        query: &str,
+        filters: SearchFilters<'_>,
+    ) -> Result<Option<Vec<String>>> {
+        let Some(filters) = self.retrieval_candidate_file_filters(root, query, filters)? else {
+            return Ok(None);
+        };
+        if filters.is_empty() {
+            return Ok(Some(vec![RETRIEVAL_NO_CANDIDATES_FILTER.to_string()]));
+        }
+        Ok(Some(filters))
+    }
+
+    /// Compatibility spelling for search integrations. Prefer
+    /// [`Self::retrieval_hydration_include_filters`] for new SDK integrations
+    /// that hydrate browse or inspect facts.
+    pub fn retrieval_search_hydration_include_filters(
+        &self,
+        root: impl AsRef<Path>,
+        query: &str,
+        filters: SearchFilters<'_>,
+    ) -> Result<Option<Vec<String>>> {
+        self.retrieval_hydration_include_filters(root, query, filters)
     }
 
     /// Open only files whose raw text contains `literal`, then parse
@@ -234,7 +430,30 @@ impl Bonsai {
             literal,
             options,
         )?;
-        Ok(self.project(root, ws, options))
+        Ok(self.project(root, ws, options).with_auto_refresh(false))
+    }
+
+    /// Same as [`Self::open_query_matching_literal`], emitting
+    /// workspace lifecycle events while the reduced file set is opened.
+    pub fn open_query_matching_literal_with_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        literal: &str,
+        on_event: F,
+    ) -> Result<Project>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let root = root.as_ref();
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
+        let ws = Workspace::open_query_matching_literal_with_options_and_events(
+            root,
+            self.registry.clone(),
+            literal,
+            options,
+            &on_event,
+        )?;
+        Ok(self.project(root, ws, options).with_auto_refresh(false))
     }
 
     /// Open only files whose paths match the supplied include/exclude
@@ -255,7 +474,32 @@ impl Bonsai {
             exclude_filters,
             options,
         )?;
-        Ok(self.project(root, ws, options))
+        Ok(self.project(root, ws, options).with_auto_refresh(false))
+    }
+
+    /// Same as [`Self::open_query_filtered_paths`], emitting
+    /// workspace lifecycle events while the scoped file set is opened.
+    pub fn open_query_filtered_paths_with_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        include_filters: &[String],
+        exclude_filters: &[String],
+        on_event: F,
+    ) -> Result<Project>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let root = root.as_ref();
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
+        let ws = Workspace::open_query_filtered_paths_with_options_and_events(
+            root,
+            self.registry.clone(),
+            include_filters,
+            exclude_filters,
+            options,
+            &on_event,
+        )?;
+        Ok(self.project(root, ws, options).with_auto_refresh(false))
     }
 
     /// Open and index exactly one supported source file under `root`.
@@ -276,7 +520,30 @@ impl Bonsai {
             path.as_ref(),
             options,
         )?;
-        Ok(self.project(root, ws, options))
+        Ok(self.project(root, ws, options).with_auto_refresh(false))
+    }
+
+    /// Same as [`Self::open_query_matching_path`], emitting workspace
+    /// lifecycle events while the single-file workspace is opened.
+    pub fn open_query_matching_path_with_progress<F>(
+        &self,
+        root: impl AsRef<Path>,
+        path: impl AsRef<Path>,
+        on_event: F,
+    ) -> Result<Project>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
+        let root = root.as_ref();
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
+        let ws = Workspace::open_query_matching_path_with_options_and_events(
+            root,
+            self.registry.clone(),
+            path.as_ref(),
+            options,
+            &on_event,
+        )?;
+        Ok(self.project(root, ws, options).with_auto_refresh(false))
     }
 
     /// Open a workspace with explicit sidecar/prewarm behavior.
@@ -288,7 +555,9 @@ impl Bonsai {
         let root = root.as_ref();
         let options = self.apply_workspace_options(options);
         let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
-        Ok(self.project(root, ws, options))
+        let project = self.project(root, ws, options);
+        persist_manifest_for_explicit_prewarm(&project)?;
+        Ok(project)
     }
 
     /// Open a workspace with explicit sidecar/prewarm behavior,
@@ -305,14 +574,31 @@ impl Bonsai {
         let root = root.as_ref();
         let options = self.apply_workspace_options(options);
         let ws = self.workspace_with_options_and_progress(root, options, &on_event)?;
-        Ok(self.project(root, ws, options))
+        let project = self.project(root, ws, options);
+        persist_manifest_for_explicit_prewarm(&project)?;
+        Ok(project)
     }
 
     /// Open a root-only cache handle. This does not parse or index the
     /// workspace; it only manages SDK-owned persisted analysis cache files.
     #[must_use]
     pub fn cache(&self, root: impl AsRef<Path>) -> WorkspaceCache {
-        WorkspaceCache::new(root)
+        let mut cache = WorkspaceCache::new(root);
+        if let Some(rulepack_root) = self.rulepack_root.as_deref() {
+            cache = cache.with_rulepack_root(rulepack_root);
+        } else {
+            cache = cache.with_discovered_rulepack_root();
+        }
+        cache
+    }
+
+    /// Rebuild the same bounded structural sidecars as
+    /// `bonsai-ninja cache rebuild`: callgraph and IDG, plus the
+    /// default export cache when `warm_export` is true. This does not
+    /// run the legacy full-workspace dataflow prewarm.
+    pub fn rebuild_structural_cache(&self, root: impl AsRef<Path>, warm_export: bool) -> Result<CacheStats> {
+        let project = self.index_structural(root)?;
+        project.cache().rebuild_structural_with_export(warm_export)
     }
 
     /// Return a rulepack facade for rootless pack inspection APIs.
@@ -410,6 +696,17 @@ impl Bonsai {
         Workspace::open_with_options_and_events(root, self.registry.clone(), options, on_event)
             .with_context(|| format!("opening workspace at {}", root.display()))
     }
+}
+
+fn persist_manifest_for_explicit_prewarm(project: &Project) -> Result<()> {
+    let options = project.refresh_options;
+    let writes_analysis_sidecars = (options.prewarm_dataflow && options.save_dataflow_sidecar)
+        || (options.prewarm_value_flow && options.save_value_flow_sidecar)
+        || options.prewarm_flow_ids;
+    if writes_analysis_sidecars {
+        let _ = project.cache().warm_structural()?;
+    }
+    Ok(())
 }
 
 /// Opened/indexed project handle.
@@ -525,9 +822,73 @@ impl Project {
     }
 
     #[must_use]
+    pub fn semantic_context(&self) -> bonsai_workspace::WorkspaceSemanticContext {
+        self.refresh_from_disk_best_effort();
+        self.workspace.semantic_context()
+    }
+
+    #[must_use]
     pub fn diagnostics(&self) -> Vec<bonsai_diagnostics::Diagnostic> {
         self.refresh_from_disk_best_effort();
         self.workspace.diagnostics()
+    }
+
+    #[must_use]
+    pub fn diagnostics_report(&self) -> DiagnosticsReport {
+        self.refresh_from_disk_best_effort();
+        DiagnosticsReport {
+            diagnostics: self.workspace.diagnostics(),
+            workspace_languages: self.workspace_languages(),
+            adapter_capabilities: self.adapter_capability_rows(),
+        }
+    }
+
+    fn workspace_languages(&self) -> Vec<String> {
+        let mut langs = BTreeSet::new();
+        let db = self.workspace.db();
+        for file in db.global_index().all_files() {
+            if let Some(adapter) = db.adapter_for(file) {
+                langs.insert(adapter.language_id().as_str().to_string());
+            }
+        }
+        langs.into_iter().collect()
+    }
+
+    fn adapter_capability_rows(&self) -> Vec<AdapterCapabilityRow> {
+        let mut rows: Vec<AdapterCapabilityRow> = self
+            .registry
+            .all()
+            .into_iter()
+            .map(|adapter| {
+                let caps = adapter.capabilities();
+                AdapterCapabilityRow {
+                    language: adapter.language_id().as_str().to_string(),
+                    display_name: adapter.display_name().to_string(),
+                    file_extensions: adapter
+                        .file_extensions()
+                        .iter()
+                        .map(|ext| (*ext).to_string())
+                        .collect(),
+                    modules: caps.modules,
+                    generics: caps.generics,
+                    macros: caps.macros,
+                    dynamic_dispatch: caps.dynamic_dispatch,
+                    exceptions: caps.exceptions,
+                    async_await: caps.async_await,
+                    coroutines: caps.coroutines,
+                    reflection: caps.reflection,
+                    ffi: caps.ffi,
+                    pattern_matching: caps.pattern_matching,
+                    receiver_types: caps.receiver_types,
+                    module_export_aliases: string_vec(caps.module_export_aliases),
+                    constructor_method_names: string_vec(caps.effective_constructor_method_names()),
+                    super_receiver_tokens: string_vec(caps.effective_super_receiver_tokens()),
+                    implicit_receiver_tokens: string_vec(caps.effective_implicit_receiver_tokens()),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.language.cmp(&b.language));
+        rows
     }
 
     /// Fingerprint of the source files known to this project's current
@@ -640,6 +1001,12 @@ impl Project {
     }
 
     #[must_use]
+    pub fn show(&self) -> Show<'_> {
+        self.refresh_from_disk_best_effort();
+        Show { project: self }
+    }
+
+    #[must_use]
     pub fn export(&self) -> Export<'_> {
         self.refresh_from_disk_best_effort();
         Export { project: self }
@@ -689,6 +1056,21 @@ fn workspace_fingerprints_from_vfs(workspace: &Workspace) -> AHashMap<PathBuf, u
         .collect()
 }
 
+fn retrieval_include_filter(root: &Path, file_path: &str) -> Option<String> {
+    if file_path.is_empty() || file_path == "<unknown>" {
+        return None;
+    }
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let path = Path::new(file_path);
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let relative = canonical_path
+        .strip_prefix(&root)
+        .or_else(|_| path.strip_prefix(&root))
+        .unwrap_or(path);
+    let filter = relative.to_string_lossy().replace('\\', "/");
+    (!filter.is_empty()).then_some(filter)
+}
+
 /// Core cache facade. This manages SDK-owned workspace analysis cache files,
 /// not CLI rendered-page cache entries.
 pub struct Cache<'a> {
@@ -700,6 +1082,9 @@ pub struct CacheStats {
     pub bonsai_dir: PathBuf,
     pub bonsai_dir_exists: bool,
     pub total_bytes: u64,
+    pub manifest: PathBuf,
+    pub manifest_exists: bool,
+    pub manifest_bytes: u64,
     pub dataflow_sidecar: PathBuf,
     pub dataflow_sidecar_exists: bool,
     pub dataflow_sidecar_bytes: u64,
@@ -718,12 +1103,124 @@ pub struct CacheStats {
     pub idg_sidecar: PathBuf,
     pub idg_sidecar_exists: bool,
     pub idg_sidecar_bytes: u64,
+    pub retrieval_sidecar: PathBuf,
+    pub retrieval_sidecar_exists: bool,
+    pub retrieval_sidecar_bytes: u64,
     pub taint_graph_sidecar: PathBuf,
     pub taint_graph_sidecar_exists: bool,
     pub taint_graph_sidecar_bytes: u64,
     pub export_sidecar: PathBuf,
     pub export_sidecar_exists: bool,
     pub export_sidecar_bytes: u64,
+    pub validation: CacheValidationReport,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheValidationReport {
+    pub manifest_status: CacheFreshnessStatus,
+    pub structural_ready: bool,
+    pub semantic_ready: bool,
+    pub legacy_dataflow_ready: bool,
+    pub taint_graph_ready: bool,
+    pub export_ready: bool,
+    pub sidecars: Vec<CacheSidecarValidation>,
+    pub stale_reasons: Vec<String>,
+}
+
+impl CacheValidationReport {
+    fn unvalidated() -> Self {
+        Self {
+            manifest_status: CacheFreshnessStatus::Unvalidated,
+            structural_ready: false,
+            semantic_ready: false,
+            legacy_dataflow_ready: false,
+            taint_graph_ready: false,
+            export_ready: false,
+            sidecars: Vec::new(),
+            stale_reasons: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheSidecarValidation {
+    pub name: String,
+    pub path: PathBuf,
+    pub status: CacheFreshnessStatus,
+    pub exists: bool,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheFreshnessStatus {
+    Fresh,
+    Missing,
+    Stale,
+    Unvalidated,
+    NotApplicable,
+    Error,
+}
+
+impl CacheFreshnessStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Missing => "missing",
+            Self::Stale => "stale",
+            Self::Unvalidated => "unvalidated",
+            Self::NotApplicable => "not-applicable",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CacheManifest {
+    pub schema_version: u32,
+    pub engine_version: String,
+    pub build_fingerprint: String,
+    pub matcher_policy_fingerprint: u128,
+    pub workspace_root: PathBuf,
+    pub cache_dir: PathBuf,
+    pub workspace_sources: WorkspaceContentFingerprint,
+    pub dependency_metadata: WorkspaceContentFingerprint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rulepack: Option<WorkspaceContentFingerprint>,
+    pub coverage: CacheManifestCoverage,
+    pub sidecars: Vec<CacheManifestSidecar>,
+    pub validation_note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CacheManifestCoverage {
+    pub structural_ready: bool,
+    pub semantic_ready: bool,
+    pub legacy_dataflow_ready: bool,
+    pub taint_graph_ready: bool,
+    pub export_ready: bool,
+    pub missing_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CacheManifestSidecar {
+    pub name: String,
+    pub path: PathBuf,
+    pub purpose: String,
+    pub status: CacheManifestSidecarStatus,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheManifestSidecarStatus {
+    Present,
+    Missing,
 }
 
 /// Root-only persisted analysis cache facade.
@@ -771,7 +1268,14 @@ impl WorkspaceCache {
     }
 
     pub fn stats(&self) -> std::io::Result<CacheStats> {
+        let mut stats = self.raw_stats()?;
+        stats.validation = cache_validation_report(&stats, &self.root, self.rulepack_root.as_deref());
+        Ok(stats)
+    }
+
+    fn raw_stats(&self) -> std::io::Result<CacheStats> {
         let bonsai_dir = self.root.join(".bonsai");
+        let manifest = self.manifest_path();
         let dataflow_sidecar = bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root);
         let dataflow_factstore_sidecar =
             bonsai_workspace::dataflow::DataFlowCache::factstore_sidecar_path(&self.root);
@@ -779,15 +1283,19 @@ impl WorkspaceCache {
         let flow_ids_sidecar = bonsai_workspace::flow_ids::FlowIdCache::sidecar_path(&self.root);
         let callgraph_sidecar = bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&self.root);
         let idg_sidecar = bonsai_workspace::idg_sidecar_path(&self.root);
-        let taint_graph_sidecar = bonsai_workspace::taint_index::TaintGraphIndex::sidecar_path(&self.root);
+        let retrieval_sidecar = bonsai_retrieval::retrieval_sidecar_path(&self.root);
+        let taint_graph_sidecar =
+            bonsai_workspace::taint_index::TaintGraphIndex::latest_sidecar_path(&self.root);
         let export_sidecar = default_export_cache_path(&self.root);
         let total_bytes = dir_size(&bonsai_dir)?;
+        let manifest_bytes = file_size(&manifest);
         let dataflow_sidecar_bytes = file_size(&dataflow_sidecar);
         let dataflow_factstore_sidecar_bytes = file_size(&dataflow_factstore_sidecar);
         let value_flow_sidecar_bytes = file_size(&value_flow_sidecar);
         let flow_ids_sidecar_bytes = file_size(&flow_ids_sidecar);
         let callgraph_sidecar_bytes = file_size(&callgraph_sidecar);
         let idg_sidecar_bytes = file_size(&idg_sidecar);
+        let retrieval_sidecar_bytes = file_size(&retrieval_sidecar);
         let taint_graph_sidecar_bytes = file_size(&taint_graph_sidecar);
         let export_sidecar_bytes = file_size(&export_sidecar);
         Ok(CacheStats {
@@ -798,10 +1306,14 @@ impl WorkspaceCache {
             flow_ids_sidecar_exists: flow_ids_sidecar.is_file(),
             callgraph_sidecar_exists: callgraph_sidecar.is_file(),
             idg_sidecar_exists: idg_sidecar.is_file(),
+            retrieval_sidecar_exists: retrieval_sidecar.is_file(),
             taint_graph_sidecar_exists: taint_graph_sidecar.is_file(),
             export_sidecar_exists: export_sidecar.is_file(),
+            manifest_exists: manifest.is_file(),
             bonsai_dir,
             total_bytes,
+            manifest,
+            manifest_bytes,
             dataflow_sidecar,
             dataflow_sidecar_bytes,
             dataflow_factstore_sidecar,
@@ -814,10 +1326,63 @@ impl WorkspaceCache {
             callgraph_sidecar_bytes,
             idg_sidecar,
             idg_sidecar_bytes,
+            retrieval_sidecar,
+            retrieval_sidecar_bytes,
             taint_graph_sidecar,
             taint_graph_sidecar_bytes,
             export_sidecar,
             export_sidecar_bytes,
+            validation: CacheValidationReport::unvalidated(),
+        })
+    }
+
+    #[must_use]
+    pub fn manifest_path(&self) -> PathBuf {
+        self.root.join(".bonsai").join(CACHE_MANIFEST_FILE)
+    }
+
+    pub fn manifest(&self) -> Result<CacheManifest> {
+        let stats = self.raw_stats()?;
+        self.manifest_from_stats(&stats)
+    }
+
+    pub fn read_manifest(&self) -> Result<Option<CacheManifest>> {
+        let path = self.manifest_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    pub fn write_manifest(&self) -> Result<CacheManifest> {
+        let manifest = self.manifest()?;
+        let mut bytes = serde_json::to_vec_pretty(&manifest)?;
+        bytes.push(b'\n');
+        write_atomic_bytes(&self.manifest_path(), &bytes)?;
+        Ok(manifest)
+    }
+
+    fn manifest_from_stats(&self, stats: &CacheStats) -> Result<CacheManifest> {
+        let sidecars = cache_manifest_sidecars(stats);
+        let workspace_sources = workspace_source_fingerprint_from_disk(&self.root)?;
+        let idg_sidecar_applicable =
+            bonsai_workspace::idg_sidecar_enabled_for_file_count(workspace_sources.files);
+        let coverage = cache_manifest_coverage(&sidecars, stats, idg_sidecar_applicable);
+        Ok(CacheManifest {
+            schema_version: CACHE_MANIFEST_SCHEMA_VERSION,
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_fingerprint: export_cache_build_fingerprint().to_string(),
+            matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
+            workspace_root: self.root.clone(),
+            cache_dir: stats.bonsai_dir.clone(),
+            workspace_sources,
+            dependency_metadata: dependency_metadata_fingerprint(&self.root)?,
+            rulepack: self.rulepack_root.as_deref().map(rulepack_content_fingerprint).transpose()?,
+            coverage,
+            sidecars,
+            validation_note: "Commands validate sidecar headers and pipeline fingerprints before reuse; this manifest records cache coverage and producer fingerprints at write time.".to_string(),
         })
     }
 
@@ -885,12 +1450,26 @@ impl Cache<'_> {
         let mut cache = WorkspaceCache::new(&self.project.root);
         if let Some(rulepack_root) = self.project.rulepack_root.as_deref() {
             cache = cache.with_rulepack_root(rulepack_root);
+        } else {
+            cache = cache.with_discovered_rulepack_root();
         }
         cache
     }
 
     pub fn stats(&self) -> std::io::Result<CacheStats> {
         self.workspace_cache().stats()
+    }
+
+    pub fn manifest(&self) -> Result<CacheManifest> {
+        self.workspace_cache().manifest()
+    }
+
+    pub fn read_manifest(&self) -> Result<Option<CacheManifest>> {
+        self.workspace_cache().read_manifest()
+    }
+
+    pub fn write_manifest(&self) -> Result<CacheManifest> {
+        self.workspace_cache().write_manifest()
     }
 
     pub fn clear_all(&self) -> std::io::Result<()> {
@@ -919,10 +1498,795 @@ impl Cache<'_> {
             .stream_default_export_cache_if_fresh(writer)
     }
 
+    /// Rebuild the bounded structural sidecars used by query,
+    /// inspect, export, and security commands. This matches CLI
+    /// `cache rebuild`: clear the persisted workspace cache, write a
+    /// fresh callgraph sidecar, build/write the workspace IDG sidecar,
+    /// and optionally warm the default export cache. It deliberately
+    /// does not rebuild the legacy eager dataflow sidecar.
+    pub fn rebuild_structural(&self) -> Result<CacheStats> {
+        self.rebuild_structural_with_export(false)
+    }
+
+    /// Warm structural semantic sidecars without clearing unrelated
+    /// cache artifacts. This is the SDK counterpart to
+    /// `bonsai-ninja index --semantic`: write the resolved callgraph,
+    /// build/write the workspace IDG only when its sidecar is enabled
+    /// for this workspace size, and refresh the manifest. It does not
+    /// run the legacy all-entry dataflow prewarm.
+    pub fn warm_structural(&self) -> Result<CacheStats> {
+        let cache = self.workspace_cache();
+        let workspace = &self.project.workspace;
+        if !workspace.load_callgraph_sidecar(&self.project.root) {
+            let _ = workspace.cached_resolved_call_graph();
+            workspace.save_callgraph_sidecar(&self.project.root)?;
+        }
+        match workspace.load_idg_sidecar(&self.project.root) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                let _ = workspace.build_and_seed_persisted_idg_service();
+            }
+        }
+        let _ = bonsai_retrieval::ensure_sidecar(workspace, &self.project.root)?;
+        let _ = cache.write_manifest()?;
+        Ok(cache.stats()?)
+    }
+
+    /// Same as [`Self::rebuild_structural`], with optional default
+    /// native-export JSON cache warming.
+    pub fn rebuild_structural_with_export(&self, warm_export: bool) -> Result<CacheStats> {
+        let cache = self.workspace_cache();
+        cache.clear_all()?;
+        let workspace = &self.project.workspace;
+        workspace.db().invalidate_idg_service();
+        let _ = workspace.cached_resolved_call_graph();
+        workspace.save_callgraph_sidecar(&self.project.root)?;
+        let _ = workspace.build_and_seed_persisted_idg_service();
+        bonsai_retrieval::save_sidecar(workspace, &self.project.root)?;
+        if warm_export {
+            self.project.export().warm_default_json_cache()?;
+        }
+        let _ = cache.write_manifest()?;
+        Ok(cache.stats()?)
+    }
+
     pub fn rebuild_dataflow(&self) -> std::io::Result<()> {
         self.project.workspace.reindex_dataflow();
-        self.project.workspace.save_dataflow_sidecar(&self.project.root)
+        self.project.workspace.save_dataflow_sidecar(&self.project.root)?;
+        let _ = self.workspace_cache().write_manifest();
+        Ok(())
     }
+}
+
+fn cache_manifest_sidecars(stats: &CacheStats) -> Vec<CacheManifestSidecar> {
+    vec![
+        cache_manifest_sidecar(
+            "callgraph",
+            &stats.callgraph_sidecar,
+            stats.callgraph_sidecar_exists,
+            stats.callgraph_sidecar_bytes,
+            "Resolved semantic callgraph shared by inspect, path, trace, export, and security.",
+        ),
+        cache_manifest_sidecar(
+            "idg",
+            &stats.idg_sidecar,
+            stats.idg_sidecar_exists,
+            stats.idg_sidecar_bytes,
+            "Interprocedural data graph used by security, taint, inspect flow, path, and slice backends.",
+        ),
+        cache_manifest_sidecar(
+            "retrieval",
+            &stats.retrieval_sidecar,
+            stats.retrieval_sidecar_exists,
+            stats.retrieval_sidecar_bytes,
+            "Fact-backed candidate index for search and candidate narrowing. Canonical facts still decide truth.",
+        ),
+        cache_manifest_sidecar(
+            "dataflow_factstore",
+            &stats.dataflow_factstore_sidecar,
+            stats.dataflow_factstore_sidecar_exists,
+            stats.dataflow_factstore_sidecar_bytes,
+            "Per-function syntax-flow taint graphs for rulepack-free flow queries.",
+        ),
+        cache_manifest_sidecar(
+            "dataflow_legacy",
+            &stats.dataflow_sidecar,
+            stats.dataflow_sidecar_exists,
+            stats.dataflow_sidecar_bytes,
+            "Compatibility dataflow sidecar retained for older warm-reopen paths.",
+        ),
+        cache_manifest_sidecar(
+            "value_flow",
+            &stats.value_flow_sidecar,
+            stats.value_flow_sidecar_exists,
+            stats.value_flow_sidecar_bytes,
+            "Seed-free value-flow graphs reused by slice, dump edges, and security narrowing.",
+        ),
+        cache_manifest_sidecar(
+            "flow_ids",
+            &stats.flow_ids_sidecar,
+            stats.flow_ids_sidecar_exists,
+            stats.flow_ids_sidecar_bytes,
+            "Stable flow labels used by browse, inspect, read-file, and export renderers.",
+        ),
+        cache_manifest_sidecar(
+            "taint_graph",
+            &stats.taint_graph_sidecar,
+            stats.taint_graph_sidecar_exists,
+            stats.taint_graph_sidecar_bytes,
+            "Configured source-seeded taint graph cache keyed by source function and seed set.",
+        ),
+        cache_manifest_sidecar(
+            "export_default",
+            &stats.export_sidecar,
+            stats.export_sidecar_exists,
+            stats.export_sidecar_bytes,
+            "Default native export JSON for downstream tooling and repeated export commands.",
+        ),
+    ]
+}
+
+fn cache_manifest_sidecar(
+    name: &str,
+    path: &Path,
+    exists: bool,
+    bytes: u64,
+    purpose: &str,
+) -> CacheManifestSidecar {
+    CacheManifestSidecar {
+        name: name.to_string(),
+        path: path.to_path_buf(),
+        purpose: purpose.to_string(),
+        status: if exists {
+            CacheManifestSidecarStatus::Present
+        } else {
+            CacheManifestSidecarStatus::Missing
+        },
+        bytes,
+        missing_reason: (!exists).then(|| "sidecar has not been produced for this workspace".to_string()),
+    }
+}
+
+fn cache_manifest_coverage(
+    sidecars: &[CacheManifestSidecar],
+    stats: &CacheStats,
+    idg_sidecar_applicable: bool,
+) -> CacheManifestCoverage {
+    let idg_ready = stats.idg_sidecar_exists || !idg_sidecar_applicable;
+    let structural_ready = stats.callgraph_sidecar_exists && idg_ready && stats.retrieval_sidecar_exists;
+    let semantic_ready = structural_ready;
+    let mut missing_reasons = Vec::new();
+    let required_sidecars: &[&str] = if idg_sidecar_applicable {
+        &["callgraph", "idg", "retrieval"]
+    } else {
+        &["callgraph", "retrieval"]
+    };
+    for required in required_sidecars {
+        if let Some(sidecar) = sidecars.iter().find(|sidecar| {
+            sidecar.name == *required && sidecar.status == CacheManifestSidecarStatus::Missing
+        }) {
+            missing_reasons.push(format!(
+                "{} missing: {}",
+                sidecar.name,
+                sidecar
+                    .missing_reason
+                    .as_deref()
+                    .unwrap_or("sidecar has not been produced")
+            ));
+        }
+    }
+    CacheManifestCoverage {
+        structural_ready,
+        semantic_ready,
+        legacy_dataflow_ready: stats.dataflow_factstore_sidecar_exists || stats.dataflow_sidecar_exists,
+        taint_graph_ready: stats.taint_graph_sidecar_exists,
+        export_ready: stats.export_sidecar_exists,
+        missing_reasons,
+    }
+}
+
+fn cache_validation_report(
+    stats: &CacheStats,
+    root: &Path,
+    rulepack_root: Option<&Path>,
+) -> CacheValidationReport {
+    let source_files = match source_file_fingerprints_from_disk(root) {
+        Ok(fingerprints) => fingerprints,
+        Err(err) => {
+            return cache_validation_error_report(
+                stats,
+                format!("workspace source fingerprint failed: {err}"),
+            )
+        }
+    };
+    let current_sources = source_fingerprint_from_pairs(
+        root,
+        source_files.iter().map(|file| (file.path.as_path(), file.hash)),
+    );
+    let idg_sidecar_applicable = bonsai_workspace::idg_sidecar_enabled_for_file_count(current_sources.files);
+    let export_validation = export_sidecar_validation(stats, root, rulepack_root);
+    let manifest_state = validate_cache_manifest(stats, root, rulepack_root, current_sources);
+
+    let (manifest_status, sidecars, mut stale_reasons) = match manifest_state {
+        ManifestValidationState::Fresh(manifest) => {
+            let sidecars = validate_manifest_sidecars(
+                stats,
+                root,
+                manifest.as_ref(),
+                idg_sidecar_applicable,
+                export_validation,
+                &source_files,
+            );
+            let stale_reasons = sidecars
+                .iter()
+                .filter(|sidecar| {
+                    matches!(
+                        sidecar.status,
+                        CacheFreshnessStatus::Stale
+                            | CacheFreshnessStatus::Unvalidated
+                            | CacheFreshnessStatus::Error
+                    )
+                })
+                .filter_map(|sidecar| {
+                    sidecar
+                        .reason
+                        .as_ref()
+                        .map(|reason| format!("{}: {reason}", sidecar.name))
+                })
+                .collect();
+            (CacheFreshnessStatus::Fresh, sidecars, stale_reasons)
+        }
+        ManifestValidationState::Missing => (
+            CacheFreshnessStatus::Missing,
+            validate_without_manifest(stats, idg_sidecar_applicable, export_validation),
+            vec!["cache manifest is missing; sidecars cannot be validated as reusable".to_string()],
+        ),
+        ManifestValidationState::Stale(reasons) => (
+            CacheFreshnessStatus::Stale,
+            validate_stale_manifest_sidecars(stats, idg_sidecar_applicable, export_validation),
+            reasons,
+        ),
+        ManifestValidationState::Error(reason) => (
+            CacheFreshnessStatus::Error,
+            validate_error_sidecars(stats, idg_sidecar_applicable, export_validation, &reason),
+            vec![reason],
+        ),
+    };
+
+    let structural_ready = validation_status(&sidecars, "callgraph") == Some(CacheFreshnessStatus::Fresh)
+        && matches!(
+            validation_status(&sidecars, "idg"),
+            Some(CacheFreshnessStatus::Fresh | CacheFreshnessStatus::NotApplicable)
+        )
+        && validation_status(&sidecars, "retrieval") == Some(CacheFreshnessStatus::Fresh);
+    let legacy_dataflow_ready = matches!(
+        validation_status(&sidecars, "dataflow_factstore"),
+        Some(CacheFreshnessStatus::Fresh)
+    ) || matches!(
+        validation_status(&sidecars, "dataflow_legacy"),
+        Some(CacheFreshnessStatus::Fresh)
+    );
+    let taint_graph_ready = validation_status(&sidecars, "taint_graph") == Some(CacheFreshnessStatus::Fresh);
+    let export_ready = validation_status(&sidecars, "export_default") == Some(CacheFreshnessStatus::Fresh);
+
+    stale_reasons.sort();
+    stale_reasons.dedup();
+    CacheValidationReport {
+        manifest_status,
+        structural_ready,
+        semantic_ready: structural_ready,
+        legacy_dataflow_ready,
+        taint_graph_ready,
+        export_ready,
+        sidecars,
+        stale_reasons,
+    }
+}
+
+fn cache_validation_error_report(stats: &CacheStats, reason: String) -> CacheValidationReport {
+    CacheValidationReport {
+        manifest_status: CacheFreshnessStatus::Error,
+        structural_ready: false,
+        semantic_ready: false,
+        legacy_dataflow_ready: false,
+        taint_graph_ready: false,
+        export_ready: false,
+        sidecars: cache_validation_inputs(stats)
+            .into_iter()
+            .map(|input| CacheSidecarValidation {
+                name: input.name.to_string(),
+                path: input.path.to_path_buf(),
+                status: CacheFreshnessStatus::Error,
+                exists: input.exists,
+                bytes: input.bytes,
+                reason: Some(reason.clone()),
+            })
+            .collect(),
+        stale_reasons: vec![reason],
+    }
+}
+
+enum ManifestValidationState {
+    Fresh(Box<CacheManifest>),
+    Missing,
+    Stale(Vec<String>),
+    Error(String),
+}
+
+fn validate_cache_manifest(
+    stats: &CacheStats,
+    root: &Path,
+    rulepack_root: Option<&Path>,
+    current_sources: WorkspaceContentFingerprint,
+) -> ManifestValidationState {
+    if !stats.manifest_exists {
+        return ManifestValidationState::Missing;
+    }
+    let bytes = match fs::read(&stats.manifest) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return ManifestValidationState::Missing,
+        Err(err) => {
+            return ManifestValidationState::Error(format!(
+                "reading cache manifest {} failed: {err}",
+                stats.manifest.display()
+            ))
+        }
+    };
+    let manifest: CacheManifest = match serde_json::from_slice(&bytes) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return ManifestValidationState::Error(format!(
+                "parsing cache manifest {} failed: {err}",
+                stats.manifest.display()
+            ))
+        }
+    };
+
+    let mut reasons = Vec::new();
+    if manifest.schema_version != CACHE_MANIFEST_SCHEMA_VERSION {
+        reasons.push(format!(
+            "manifest schema version {} does not match {}",
+            manifest.schema_version, CACHE_MANIFEST_SCHEMA_VERSION
+        ));
+    }
+    if manifest.engine_version != env!("CARGO_PKG_VERSION") {
+        reasons.push(format!(
+            "manifest engine version {} does not match {}",
+            manifest.engine_version,
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    if manifest.build_fingerprint != export_cache_build_fingerprint() {
+        reasons.push("manifest build fingerprint does not match the running binary".to_string());
+    }
+    if manifest.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
+        reasons.push("manifest matcher policy fingerprint does not match the running binary".to_string());
+    }
+    if manifest.workspace_sources != current_sources {
+        reasons.push("workspace source content changed since the cache manifest was written".to_string());
+    }
+    match dependency_metadata_fingerprint(root) {
+        Ok(current) if manifest.dependency_metadata != current => {
+            reasons.push("dependency metadata changed since the cache manifest was written".to_string());
+        }
+        Ok(_) => {}
+        Err(err) => reasons.push(format!("dependency metadata fingerprint failed: {err}")),
+    }
+    match rulepack_root.map(rulepack_content_fingerprint).transpose() {
+        Ok(current) if manifest.rulepack != current => {
+            reasons.push("rulepack content changed since the cache manifest was written".to_string());
+        }
+        Ok(_) => {}
+        Err(err) => reasons.push(format!("rulepack fingerprint failed: {err}")),
+    }
+    if reasons.is_empty() {
+        ManifestValidationState::Fresh(Box::new(manifest))
+    } else {
+        ManifestValidationState::Stale(reasons)
+    }
+}
+
+fn validate_manifest_sidecars(
+    stats: &CacheStats,
+    root: &Path,
+    manifest: &CacheManifest,
+    idg_sidecar_applicable: bool,
+    export_validation: CacheSidecarValidation,
+    source_files: &[bonsai_workspace::SourceFileFingerprint],
+) -> Vec<CacheSidecarValidation> {
+    cache_validation_inputs(stats)
+        .into_iter()
+        .map(|input| {
+            if input.name == "export_default" {
+                return export_validation.clone();
+            }
+            if input.name == "idg" && !idg_sidecar_applicable {
+                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+            }
+            let manifest_sidecar = manifest
+                .sidecars
+                .iter()
+                .find(|sidecar| sidecar.name == input.name);
+            let Some(manifest_sidecar) = manifest_sidecar else {
+                return CacheSidecarValidation {
+                    name: input.name.to_string(),
+                    path: input.path.to_path_buf(),
+                    status: if input.exists {
+                        CacheFreshnessStatus::Unvalidated
+                    } else {
+                        CacheFreshnessStatus::Missing
+                    },
+                    exists: input.exists,
+                    bytes: input.bytes,
+                    reason: Some("sidecar is not listed in the cache manifest".to_string()),
+                };
+            };
+            match manifest_sidecar.status {
+                CacheManifestSidecarStatus::Missing if input.exists => CacheSidecarValidation {
+                    name: input.name.to_string(),
+                    path: input.path.to_path_buf(),
+                    status: CacheFreshnessStatus::Unvalidated,
+                    exists: true,
+                    bytes: input.bytes,
+                    reason: Some("sidecar was written after the cache manifest".to_string()),
+                },
+                CacheManifestSidecarStatus::Missing => CacheSidecarValidation {
+                    name: input.name.to_string(),
+                    path: input.path.to_path_buf(),
+                    status: CacheFreshnessStatus::Missing,
+                    exists: false,
+                    bytes: input.bytes,
+                    reason: manifest_sidecar.missing_reason.clone(),
+                },
+                CacheManifestSidecarStatus::Present if !input.exists => CacheSidecarValidation {
+                    name: input.name.to_string(),
+                    path: input.path.to_path_buf(),
+                    status: CacheFreshnessStatus::Stale,
+                    exists: false,
+                    bytes: input.bytes,
+                    reason: Some("cache manifest lists the sidecar, but the file is missing".to_string()),
+                },
+                CacheManifestSidecarStatus::Present if manifest_sidecar.bytes != input.bytes => {
+                    CacheSidecarValidation {
+                        name: input.name.to_string(),
+                        path: input.path.to_path_buf(),
+                        status: CacheFreshnessStatus::Stale,
+                        exists: true,
+                        bytes: input.bytes,
+                        reason: Some(format!(
+                            "sidecar size changed since manifest write: manifest={} actual={}",
+                            manifest_sidecar.bytes, input.bytes
+                        )),
+                    }
+                }
+                CacheManifestSidecarStatus::Present => {
+                    if let Some(reason) = validate_sidecar_payload(input, root, source_files) {
+                        CacheSidecarValidation {
+                            name: input.name.to_string(),
+                            path: input.path.to_path_buf(),
+                            status: CacheFreshnessStatus::Stale,
+                            exists: true,
+                            bytes: input.bytes,
+                            reason: Some(reason),
+                        }
+                    } else {
+                        CacheSidecarValidation {
+                            name: input.name.to_string(),
+                            path: input.path.to_path_buf(),
+                            status: CacheFreshnessStatus::Fresh,
+                            exists: true,
+                            bytes: input.bytes,
+                            reason: None,
+                        }
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn validate_sidecar_payload(
+    input: CacheValidationInput<'_>,
+    root: &Path,
+    source_files: &[bonsai_workspace::SourceFileFingerprint],
+) -> Option<String> {
+    match input.name {
+        "callgraph" if input.exists => {
+            bonsai_workspace::callgraph_sidecar::validate_callgraph_sidecar_file_with_source_fingerprints(
+                input.path,
+                source_files
+                    .iter()
+                    .map(|file| (file.path.as_path(), file.hash)),
+            )
+                .err()
+                .map(|err| format!("callgraph sidecar validation failed: {err}"))
+        }
+        "idg" if input.exists => bonsai_workspace::validate_idg_sidecar_file(input.path)
+            .err()
+            .map(|err| format!("idg sidecar validation failed: {err}")),
+        "retrieval" if input.exists => retrieval_pipeline_hash_from_sources(root, source_files)
+            .and_then(|pipeline| {
+                bonsai_retrieval::validate_sidecar_file_with_pipeline(input.path, pipeline)
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from)
+            })
+            .err()
+            .map(|err| format!("retrieval sidecar validation failed: {err}")),
+        "dataflow_factstore" if input.exists => {
+            bonsai_workspace::dataflow::DataFlowCache::validate_factstore_sidecar_file_with_source_fingerprints(
+                input.path,
+                source_files
+                    .iter()
+                    .map(|file| (file.path.as_path(), file.hash)),
+            )
+                .err()
+                .map(|err| format!("dataflow factstore sidecar validation failed: {err}"))
+        }
+        "value_flow" if input.exists => {
+            bonsai_workspace::value_flow::ValueFlowCache::validate_sidecar_file_with_source_fingerprints(
+                input.path,
+                source_files
+                    .iter()
+                    .map(|file| (file.path.as_path(), file.hash)),
+            )
+                .err()
+                .map(|err| format!("value-flow sidecar validation failed: {err}"))
+        }
+        "flow_ids" if input.exists => {
+            bonsai_workspace::flow_ids::FlowIdCache::validate_sidecar_file_with_source_fingerprints(
+                input.path,
+                source_files
+                    .iter()
+                    .map(|file| (file.path.as_path(), file.hash)),
+            )
+                .err()
+                .map(|err| format!("flow-id sidecar validation failed: {err}"))
+        }
+        "taint_graph" if input.exists => {
+            bonsai_workspace::taint_index::TaintGraphIndex::validate_sidecar_file(input.path)
+                .err()
+                .map(|err| format!("taint-graph sidecar validation failed: {err}"))
+        }
+        _ => None,
+    }
+}
+
+fn validate_without_manifest(
+    stats: &CacheStats,
+    idg_sidecar_applicable: bool,
+    export_validation: CacheSidecarValidation,
+) -> Vec<CacheSidecarValidation> {
+    cache_validation_inputs(stats)
+        .into_iter()
+        .map(|input| {
+            if input.name == "export_default" {
+                return export_validation.clone();
+            }
+            if input.name == "idg" && !idg_sidecar_applicable {
+                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+            }
+            CacheSidecarValidation {
+                name: input.name.to_string(),
+                path: input.path.to_path_buf(),
+                status: if input.exists {
+                    CacheFreshnessStatus::Unvalidated
+                } else {
+                    CacheFreshnessStatus::Missing
+                },
+                exists: input.exists,
+                bytes: input.bytes,
+                reason: Some("cache manifest is missing".to_string()),
+            }
+        })
+        .collect()
+}
+
+fn validate_stale_manifest_sidecars(
+    stats: &CacheStats,
+    idg_sidecar_applicable: bool,
+    export_validation: CacheSidecarValidation,
+) -> Vec<CacheSidecarValidation> {
+    cache_validation_inputs(stats)
+        .into_iter()
+        .map(|input| {
+            if input.name == "export_default" {
+                return export_validation.clone();
+            }
+            if input.name == "idg" && !idg_sidecar_applicable {
+                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+            }
+            CacheSidecarValidation {
+                name: input.name.to_string(),
+                path: input.path.to_path_buf(),
+                status: if input.exists {
+                    CacheFreshnessStatus::Stale
+                } else {
+                    CacheFreshnessStatus::Missing
+                },
+                exists: input.exists,
+                bytes: input.bytes,
+                reason: Some("cache manifest is stale".to_string()),
+            }
+        })
+        .collect()
+}
+
+fn validate_error_sidecars(
+    stats: &CacheStats,
+    idg_sidecar_applicable: bool,
+    export_validation: CacheSidecarValidation,
+    reason: &str,
+) -> Vec<CacheSidecarValidation> {
+    cache_validation_inputs(stats)
+        .into_iter()
+        .map(|input| {
+            if input.name == "export_default" {
+                return export_validation.clone();
+            }
+            if input.name == "idg" && !idg_sidecar_applicable {
+                return not_applicable_validation(input, "IDG sidecar is disabled for this workspace size");
+            }
+            CacheSidecarValidation {
+                name: input.name.to_string(),
+                path: input.path.to_path_buf(),
+                status: CacheFreshnessStatus::Error,
+                exists: input.exists,
+                bytes: input.bytes,
+                reason: Some(reason.to_string()),
+            }
+        })
+        .collect()
+}
+
+fn export_sidecar_validation(
+    stats: &CacheStats,
+    root: &Path,
+    rulepack_root: Option<&Path>,
+) -> CacheSidecarValidation {
+    if !stats.export_sidecar_exists {
+        return CacheSidecarValidation {
+            name: "export_default".to_string(),
+            path: stats.export_sidecar.clone(),
+            status: CacheFreshnessStatus::Missing,
+            exists: false,
+            bytes: stats.export_sidecar_bytes,
+            reason: Some("sidecar has not been produced for this workspace".to_string()),
+        };
+    }
+    let file = match fs::File::open(&stats.export_sidecar) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return CacheSidecarValidation {
+                name: "export_default".to_string(),
+                path: stats.export_sidecar.clone(),
+                status: CacheFreshnessStatus::Missing,
+                exists: false,
+                bytes: 0,
+                reason: Some("sidecar disappeared during validation".to_string()),
+            }
+        }
+        Err(err) => {
+            return CacheSidecarValidation {
+                name: "export_default".to_string(),
+                path: stats.export_sidecar.clone(),
+                status: CacheFreshnessStatus::Error,
+                exists: true,
+                bytes: stats.export_sidecar_bytes,
+                reason: Some(format!("opening export sidecar failed: {err}")),
+            }
+        }
+    };
+    match export_cache_is_fresh_via_fd(root, rulepack_root, &file) {
+        Ok(true) => CacheSidecarValidation {
+            name: "export_default".to_string(),
+            path: stats.export_sidecar.clone(),
+            status: CacheFreshnessStatus::Fresh,
+            exists: true,
+            bytes: stats.export_sidecar_bytes,
+            reason: None,
+        },
+        Ok(false) => CacheSidecarValidation {
+            name: "export_default".to_string(),
+            path: stats.export_sidecar.clone(),
+            status: CacheFreshnessStatus::Stale,
+            exists: true,
+            bytes: stats.export_sidecar_bytes,
+            reason: Some("export metadata does not match the current workspace/build".to_string()),
+        },
+        Err(err) => CacheSidecarValidation {
+            name: "export_default".to_string(),
+            path: stats.export_sidecar.clone(),
+            status: CacheFreshnessStatus::Error,
+            exists: true,
+            bytes: stats.export_sidecar_bytes,
+            reason: Some(format!("validating export metadata failed: {err}")),
+        },
+    }
+}
+
+fn not_applicable_validation(input: CacheValidationInput<'_>, reason: &str) -> CacheSidecarValidation {
+    CacheSidecarValidation {
+        name: input.name.to_string(),
+        path: input.path.to_path_buf(),
+        status: CacheFreshnessStatus::NotApplicable,
+        exists: input.exists,
+        bytes: input.bytes,
+        reason: Some(reason.to_string()),
+    }
+}
+
+fn validation_status(sidecars: &[CacheSidecarValidation], name: &str) -> Option<CacheFreshnessStatus> {
+    sidecars
+        .iter()
+        .find(|sidecar| sidecar.name == name)
+        .map(|sidecar| sidecar.status)
+}
+
+#[derive(Clone, Copy)]
+struct CacheValidationInput<'a> {
+    name: &'static str,
+    path: &'a Path,
+    exists: bool,
+    bytes: u64,
+}
+
+fn cache_validation_inputs(stats: &CacheStats) -> Vec<CacheValidationInput<'_>> {
+    vec![
+        CacheValidationInput {
+            name: "callgraph",
+            path: &stats.callgraph_sidecar,
+            exists: stats.callgraph_sidecar_exists,
+            bytes: stats.callgraph_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "idg",
+            path: &stats.idg_sidecar,
+            exists: stats.idg_sidecar_exists,
+            bytes: stats.idg_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "retrieval",
+            path: &stats.retrieval_sidecar,
+            exists: stats.retrieval_sidecar_exists,
+            bytes: stats.retrieval_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "dataflow_factstore",
+            path: &stats.dataflow_factstore_sidecar,
+            exists: stats.dataflow_factstore_sidecar_exists,
+            bytes: stats.dataflow_factstore_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "dataflow_legacy",
+            path: &stats.dataflow_sidecar,
+            exists: stats.dataflow_sidecar_exists,
+            bytes: stats.dataflow_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "value_flow",
+            path: &stats.value_flow_sidecar,
+            exists: stats.value_flow_sidecar_exists,
+            bytes: stats.value_flow_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "flow_ids",
+            path: &stats.flow_ids_sidecar,
+            exists: stats.flow_ids_sidecar_exists,
+            bytes: stats.flow_ids_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "taint_graph",
+            path: &stats.taint_graph_sidecar,
+            exists: stats.taint_graph_sidecar_exists,
+            bytes: stats.taint_graph_sidecar_bytes,
+        },
+        CacheValidationInput {
+            name: "export_default",
+            path: &stats.export_sidecar,
+            exists: stats.export_sidecar_exists,
+            bytes: stats.export_sidecar_bytes,
+        },
+    ]
 }
 
 fn file_size(path: &Path) -> u64 {
@@ -1176,13 +2540,28 @@ fn current_exe_is_newer_than_cache(cache_metadata: &fs::Metadata) -> bool {
 }
 
 pub fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<WorkspaceContentFingerprint> {
-    let registry = bonsai_adapters::all_languages_registry();
-    let workspace = Workspace::new(registry);
-    let fingerprints = workspace
-        .source_file_fingerprints(root)
-        .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))?;
+    let fingerprints = source_file_fingerprints_from_disk(root)?;
     Ok(source_fingerprint_from_pairs(
         root,
+        fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
+    ))
+}
+
+fn source_file_fingerprints_from_disk(root: &Path) -> Result<Vec<bonsai_workspace::SourceFileFingerprint>> {
+    let registry = bonsai_adapters::all_languages_registry();
+    let workspace = Workspace::new(registry);
+    workspace
+        .source_file_fingerprints(root)
+        .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))
+}
+
+fn retrieval_pipeline_hash_from_sources(
+    root: &Path,
+    fingerprints: &[bonsai_workspace::SourceFileFingerprint],
+) -> Result<u64> {
+    let root_for_pipeline = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    Ok(bonsai_retrieval::pipeline_hash_for_source_fingerprints(
+        Some(root_for_pipeline.as_path()),
         fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
     ))
 }
@@ -1369,6 +2748,14 @@ impl Browse<'_> {
         bonsai_browse::args(&self.project.workspace, &filters)
     }
 
+    pub fn operations(
+        &self,
+        filters: OperationsFilters<'_>,
+    ) -> Result<Vec<bonsai_browse::OperationOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::operations(&self.project.workspace, &filters)
+    }
+
     pub fn classes(&self, filters: ClassesFilters<'_>) -> Result<Vec<bonsai_browse::ClassOut>, regex::Error> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::classes(&self.project.workspace, &filters)
@@ -1391,6 +2778,16 @@ impl Browse<'_> {
     ) -> Result<Vec<bonsai_browse::SearchHit>, regex::Error> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::search(&self.project.workspace, query, &filters, limit)
+    }
+
+    pub fn paths(&self, filters: PathFilters<'_>) -> Result<bonsai_browse::PathOutcome, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::paths(&self.project.workspace, &filters)
+    }
+
+    pub fn slices(&self, filters: SliceFilters<'_>) -> bonsai_browse::SliceOutcome {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::slices(&self.project.workspace, &filters)
     }
 
     /// Workspace navigation: hierarchical view with finding /
@@ -1452,6 +2849,15 @@ impl Dump<'_> {
     }
 
     #[must_use]
+    pub fn resolution_coverage(
+        &self,
+        filters: ResolutionCoverageFilters<'_>,
+    ) -> Vec<bonsai_browse::ResolutionCoverageFileRow> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::resolution_coverage(&self.project.workspace, &filters)
+    }
+
+    #[must_use]
     pub fn ast(&self, filters: AstFilters<'_>) -> AstOutcome {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_ast(&self.project.workspace, &filters)
@@ -1489,6 +2895,359 @@ impl Dump<'_> {
         }
         bonsai_browse::dump_taint(&self.project.workspace, &filters)
     }
+}
+
+/// Stable-id drilldown facade.
+///
+/// This is the SDK counterpart to the structured parts of CLI `show`:
+/// `E:` call edges, `F:` inspect graph flows or security taint-path
+/// flows, `G:` inspect graph-flow groups, `N:` AST nodes, `R:`
+/// resolver candidates, source-seeded `T:` dump-taint propagation ids,
+/// and `S:` security findings.
+pub struct Show<'a> {
+    project: &'a Project,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShowOptions<'a> {
+    /// Required for `R:` resolver candidate ids.
+    pub query: Option<&'a str>,
+    /// Optional file-context substring for `R:` resolver candidate ids.
+    pub in_file: Option<&'a str>,
+    /// Optional file filter for `N:` AST node ids.
+    pub ast_file: Option<&'a str>,
+    /// Optional function scope for `N:` AST node ids.
+    pub ast_function: Option<&'a str>,
+    /// Optional AST depth cap for `N:` drilldown.
+    pub ast_max_depth: Option<usize>,
+    /// Required for structured `T:` dump-taint propagation ids.
+    pub taint_source: Option<&'a str>,
+    /// Seed identifiers for structured `T:` propagation ids.
+    pub taint_seeds: &'a [&'a str],
+    /// Sanitizer identifiers for structured `T:` propagation ids.
+    pub taint_sanitizers: &'a [&'a str],
+    /// Optional sink-name filter when resolving `T:` propagation ids.
+    pub taint_sink: Option<&'a str>,
+    /// Optional compatibility budget for structured `T:` drilldown.
+    pub taint_budget: Option<u32>,
+    /// Optional intraprocedural worklist cap for structured `T:` drilldown.
+    pub taint_intra_worklist_cap: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub enum ShowOutcome {
+    Edge(EdgeRecord),
+    AstNode(AstFileDump),
+    ResolverCandidate(Box<ResolveTrace>),
+    InspectFlow(InspectFlowShow),
+    InspectFlowGroup(InspectFlowGroupShow),
+    TaintPropagation(TaintReport),
+    SecurityFinding(Box<CombinedFindingWithChain>),
+    SecurityFindingGroup(SecurityFindingGroupShow),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectFlowShow {
+    pub flow_id: String,
+    pub matches: Vec<InspectFlowDrilldown>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectFlowDrilldown {
+    pub target_func_id: u32,
+    pub target: String,
+    pub chain: InspectChain,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectFlowGroupShow {
+    pub group_id: String,
+    pub matches: Vec<InspectFlowGroupDrilldown>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectFlowGroupDrilldown {
+    pub target_func_id: u32,
+    pub target: String,
+    pub group: InspectChainGroup,
+    pub chains: Vec<InspectChain>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SecurityFindingGroupShow {
+    pub group_id: String,
+    pub findings: Vec<CombinedFindingWithChain>,
+}
+
+impl Show<'_> {
+    pub fn by_id(&self, id: &str, options: ShowOptions<'_>) -> Result<ShowOutcome> {
+        self.project.refresh_from_disk_best_effort();
+        let id = id.trim();
+        let (prefix, body) = stable_id_parts(id)?;
+        match prefix {
+            "E" => self.edge(id),
+            "F" => self.structural_or_security_flow(id),
+            "G" => self.structural_or_security_group(id),
+            "N" => self.ast_node(id, options),
+            "R" => self.resolver_candidate(id, options),
+            "T" => self.taint_propagation(id, options),
+            "S" => self.security_finding(id),
+            unsupported => Err(anyhow!(
+                "stable id `{unsupported}:{body}` is not supported by SDK structured show yet; supported prefixes are E:, F:, G:, N:, R:, T:, and S:"
+            )),
+        }
+    }
+
+    pub fn edge(&self, edge_id: &str) -> Result<ShowOutcome> {
+        let mut rows = self.project.dump().edges(EdgesFilters {
+            edge_id: Some(edge_id),
+            ..Default::default()
+        });
+        match rows.len() {
+            1 => Ok(ShowOutcome::Edge(rows.remove(0))),
+            0 => Err(anyhow!("edge id `{edge_id}` was not found")),
+            _ => Err(anyhow!("edge id `{edge_id}` matched multiple rows")),
+        }
+    }
+
+    pub fn ast_node(&self, node_id: &str, options: ShowOptions<'_>) -> Result<ShowOutcome> {
+        match self.project.dump().ast(AstFilters {
+            file: options.ast_file,
+            function: options.ast_function,
+            max_depth: options.ast_max_depth,
+            node_id: Some(node_id),
+        }) {
+            AstOutcome::Dumps(mut dumps) if dumps.len() == 1 => Ok(ShowOutcome::AstNode(dumps.remove(0))),
+            AstOutcome::Dumps(_) | AstOutcome::NodeIdNotFound => {
+                Err(anyhow!("AST node id `{node_id}` was not found"))
+            }
+        }
+    }
+
+    pub fn resolver_candidate(&self, candidate_id: &str, options: ShowOptions<'_>) -> Result<ShowOutcome> {
+        let Some(query) = options.query else {
+            return Err(anyhow!(
+                "`show {candidate_id}` needs ShowOptions::query because resolver candidate ids are scoped to the original dump-resolve query"
+            ));
+        };
+        match self.project.dump().resolve(
+            query,
+            ResolveFilters {
+                in_file: options.in_file,
+                candidate_id: Some(candidate_id),
+            },
+        ) {
+            ResolveOutcome::Trace(trace) => Ok(ShowOutcome::ResolverCandidate(trace)),
+            ResolveOutcome::FileContextNotFound { needle } => Err(anyhow!(
+                "resolver file context `{needle}` was not found for candidate id `{candidate_id}`"
+            )),
+            ResolveOutcome::CandidateNotFound => {
+                Err(anyhow!("resolver candidate id `{candidate_id}` was not found"))
+            }
+        }
+    }
+
+    pub fn structural_flow(&self, flow_id: &str) -> Result<ShowOutcome> {
+        let mut matches = Vec::new();
+        for target in self.inspect_chains_for_show()? {
+            for chain in target.chains {
+                if chain.flow_id == flow_id {
+                    matches.push(InspectFlowDrilldown {
+                        target_func_id: target.target_func_id,
+                        target: target.target.clone(),
+                        chain,
+                    });
+                }
+            }
+        }
+        if matches.is_empty() {
+            Err(anyhow!("structural flow id `{flow_id}` was not found"))
+        } else {
+            Ok(ShowOutcome::InspectFlow(InspectFlowShow {
+                flow_id: flow_id.to_string(),
+                matches,
+            }))
+        }
+    }
+
+    pub fn structural_or_security_flow(&self, flow_id: &str) -> Result<ShowOutcome> {
+        match self.structural_flow(flow_id) {
+            Ok(outcome) => Ok(outcome),
+            Err(structural_err) => self.security_flow(flow_id).map_err(|security_err| {
+                anyhow!(
+                    "flow id `{flow_id}` was not found as a structural inspect flow or security taint flow: {structural_err}; {security_err}"
+                )
+            }),
+        }
+    }
+
+    pub fn flow_group(&self, group_id: &str) -> Result<ShowOutcome> {
+        let mut matches = Vec::new();
+        for target in self.inspect_chains_for_show()? {
+            for group in target.groups.iter().filter(|group| group.group_id == group_id) {
+                let member_ids: AHashSet<&str> = group.member_flow_ids.iter().map(String::as_str).collect();
+                let chains = target
+                    .chains
+                    .iter()
+                    .filter(|chain| member_ids.contains(chain.flow_id.as_str()))
+                    .cloned()
+                    .collect();
+                matches.push(InspectFlowGroupDrilldown {
+                    target_func_id: target.target_func_id,
+                    target: target.target.clone(),
+                    group: group.clone(),
+                    chains,
+                });
+            }
+        }
+        if matches.is_empty() {
+            Err(anyhow!("structural flow group id `{group_id}` was not found"))
+        } else {
+            Ok(ShowOutcome::InspectFlowGroup(InspectFlowGroupShow {
+                group_id: group_id.to_string(),
+                matches,
+            }))
+        }
+    }
+
+    pub fn structural_or_security_group(&self, group_id: &str) -> Result<ShowOutcome> {
+        match self.flow_group(group_id) {
+            Ok(outcome) => Ok(outcome),
+            Err(structural_err) => self.security_group(group_id).map_err(|security_err| {
+                anyhow!(
+                    "group id `{group_id}` was not found as a structural inspect group or security taint group: {structural_err}; {security_err}"
+                )
+            }),
+        }
+    }
+
+    pub fn taint_propagation(&self, taint_id: &str, options: ShowOptions<'_>) -> Result<ShowOutcome> {
+        let Some(source) = options.taint_source else {
+            return Err(anyhow!(
+                "`show {taint_id}` needs ShowOptions::taint_source because structured T: propagation ids are source-seeded"
+            ));
+        };
+        match self.project.dump().taint(TaintFilters {
+            source,
+            seeds: options
+                .taint_seeds
+                .iter()
+                .map(|seed| (*seed).to_string())
+                .collect(),
+            sanitizers: options
+                .taint_sanitizers
+                .iter()
+                .map(|sanitizer| (*sanitizer).to_string())
+                .collect(),
+            sink: options.taint_sink,
+            budget: options.taint_budget,
+            intra_worklist_cap: options.taint_intra_worklist_cap,
+            taint_id: Some(taint_id),
+            ..Default::default()
+        }) {
+            TaintOutcome::Report(report) => Ok(ShowOutcome::TaintPropagation(report)),
+            TaintOutcome::SourceNotFound => Err(anyhow!("taint source `{source}` was not found")),
+            TaintOutcome::SourceAmbiguous { candidates, .. } => Err(anyhow!(
+                "taint source `{source}` is ambiguous ({} candidates)",
+                candidates.len()
+            )),
+            TaintOutcome::TaintIdNotFound => Err(anyhow!("taint propagation id `{taint_id}` was not found")),
+        }
+    }
+
+    pub fn security_finding(&self, finding_id: &str) -> Result<ShowOutcome> {
+        let report = self.project.security().taint_analysis(TaintAnalysisOptions {
+            include_pattern_only: true,
+            show_sanitized: true,
+            attach_flow_evidence: true,
+            ..Default::default()
+        })?;
+        let mut matches: Vec<_> = report
+            .findings
+            .into_iter()
+            .filter(|combined| {
+                combined.finding.finding_id == finding_id
+                    || combined
+                        .member_finding_ids
+                        .iter()
+                        .any(|member_id| member_id == finding_id)
+            })
+            .collect();
+        match matches.len() {
+            1 => Ok(ShowOutcome::SecurityFinding(Box::new(matches.remove(0)))),
+            0 => Err(anyhow!(
+                "security finding id `{finding_id}` was not found in this workspace + rulepack"
+            )),
+            _ => Err(anyhow!(
+                "security finding id `{finding_id}` matched multiple findings in this workspace + rulepack"
+            )),
+        }
+    }
+
+    pub fn security_flow(&self, flow_id: &str) -> Result<ShowOutcome> {
+        let report = self.project.security().taint_analysis(TaintAnalysisOptions {
+            flow_id: Some(flow_id.to_string()),
+            include_pattern_only: true,
+            show_sanitized: true,
+            attach_flow_evidence: true,
+            ..Default::default()
+        })?;
+        let mut matches = report.findings;
+        match matches.len() {
+            1 => Ok(ShowOutcome::SecurityFinding(Box::new(matches.remove(0)))),
+            0 => Err(anyhow!(
+                "security flow id `{flow_id}` was not found in this workspace + rulepack"
+            )),
+            _ => Err(anyhow!(
+                "security flow id `{flow_id}` matched multiple findings in this workspace + rulepack"
+            )),
+        }
+    }
+
+    pub fn security_group(&self, group_id: &str) -> Result<ShowOutcome> {
+        let report = self.project.security().taint_analysis(TaintAnalysisOptions {
+            include_pattern_only: true,
+            show_sanitized: true,
+            attach_flow_evidence: true,
+            ..Default::default()
+        })?;
+        let matches: Vec<_> = report
+            .findings
+            .into_iter()
+            .filter(|combined| combined.finding.group_id.as_deref() == Some(group_id))
+            .collect();
+        if matches.is_empty() {
+            Err(anyhow!(
+                "security group id `{group_id}` was not found in this workspace + rulepack"
+            ))
+        } else {
+            Ok(ShowOutcome::SecurityFindingGroup(SecurityFindingGroupShow {
+                group_id: group_id.to_string(),
+                findings: matches,
+            }))
+        }
+    }
+
+    fn inspect_chains_for_show(&self) -> Result<Vec<InspectTargetChains>> {
+        Ok(self.project.inspect().chains(InspectQuery {
+            pattern: None,
+            regex: false,
+            max_chains: usize::MAX,
+            max_probes: usize::MAX,
+        })?)
+    }
+}
+
+fn stable_id_parts(id: &str) -> Result<(&str, &str)> {
+    let Some((prefix, body)) = id.split_once(':') else {
+        return Err(anyhow!(
+            "stable id `{id}` is missing a prefix; expected E:, F:, G:, N:, R:, T:, or S:"
+        ));
+    };
+    if body.is_empty() {
+        return Err(anyhow!("stable id `{id}` is missing its hash body"));
+    }
+    Ok((prefix, body))
 }
 
 /// Export facade.
@@ -1672,7 +3431,9 @@ impl Security<'_> {
         options: TaintAnalysisOptions,
     ) -> Result<bonsai_security::TaintAnalysisReport> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::run_taint_analysis(&self.project.workspace, self.pack()?, options)
+        let report = bonsai_security::run_taint_analysis(&self.project.workspace, self.pack()?, options)?;
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
     }
 
     pub fn taint_analysis_with_progress<F>(
@@ -1684,19 +3445,21 @@ impl Security<'_> {
         F: FnMut(&'static str),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::run_taint_analysis_with_progress(
+        let report = bonsai_security::run_taint_analysis_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_rule,
-        )
+        )?;
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
     }
 
     /// Phase-aware progress variant. The callback receives
     /// `PhaseStarted { label, total }` / `PhaseTicked` / `PhaseFinished`
     /// events so a CLI can render a progress bar with a known length
-    /// for every long-running phase, including post-matching chain
-    /// assembly (which the legacy callback can't describe).
+    /// for every long-running phase, plus `Note` events for scope/cache
+    /// observability that the legacy callback can't describe.
     pub fn taint_analysis_with_phase_progress<F>(
         &self,
         options: TaintAnalysisOptions,
@@ -1706,12 +3469,14 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::run_taint_analysis_with_phase_progress(
+        let report = bonsai_security::run_taint_analysis_with_phase_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
-        )
+        )?;
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
     }
 
     pub fn source_analysis(
@@ -1719,7 +3484,9 @@ impl Security<'_> {
         options: SourceAnalysisOptions,
     ) -> Result<bonsai_security::SourceAnalysisReport> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::run_source_analysis(&self.project.workspace, self.pack()?, options)
+        let report = bonsai_security::run_source_analysis(&self.project.workspace, self.pack()?, options)?;
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
     }
 
     pub fn source_analysis_with_progress<F>(
@@ -1731,15 +3498,19 @@ impl Security<'_> {
         F: FnMut(&'static str),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::run_source_analysis_with_progress(
+        let report = bonsai_security::run_source_analysis_with_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_rule,
-        )
+        )?;
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
     }
 
     /// Phase-aware progress variant of [`Self::source_analysis_with_progress`].
+    /// Emits phase progress plus `Note` events for source scope and
+    /// taint-graph cache observability.
     pub fn source_analysis_with_phase_progress<F>(
         &self,
         options: SourceAnalysisOptions,
@@ -1749,12 +3520,21 @@ impl Security<'_> {
         F: FnMut(bonsai_security::AnalysisProgress),
     {
         self.project.refresh_from_disk_best_effort();
-        bonsai_security::run_source_analysis_with_phase_progress(
+        let report = bonsai_security::run_source_analysis_with_phase_progress(
             &self.project.workspace,
             self.pack()?,
             options,
             on_progress,
-        )
+        )?;
+        self.refresh_cache_manifest_best_effort();
+        Ok(report)
+    }
+
+    fn refresh_cache_manifest_best_effort(&self) {
+        if !self.project.workspace.is_complete_workspace_index() {
+            return;
+        }
+        let _ = self.project.cache().write_manifest();
     }
 
     pub fn sources(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
@@ -2026,15 +3806,27 @@ pub struct InspectTargetChains {
     pub target_func_id: u32,
     pub target: String,
     pub chains: Vec<InspectChain>,
+    pub groups: Vec<InspectChainGroup>,
     pub truncated: bool,
     pub truncation: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InspectChain {
+    pub flow_id: String,
     pub funcs: Vec<u32>,
     pub names: Vec<String>,
     pub precision: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectChainGroup {
+    pub group_id: String,
+    pub member_flow_ids: Vec<String>,
+    pub shared_suffix: Vec<String>,
+    pub unique_prefixes: Vec<Vec<String>>,
+    pub precision: String,
+    pub member_count: usize,
 }
 
 impl Inspect<'_> {
@@ -2070,22 +3862,106 @@ impl Inspect<'_> {
         let mut out = Vec::new();
         for target in targets {
             let (chains, truncation) = cache.chains_resolved(target, query.max_chains, query.max_probes);
+            let chains = chains
+                .into_iter()
+                .map(|chain| {
+                    let names = bonsai_inspect::chain_to_names(&self.project.workspace, &chain.funcs);
+                    InspectChain {
+                        flow_id: bonsai_inspect::compute_flow_id(&names),
+                        funcs: chain.funcs.iter().map(|func| func.raw()).collect(),
+                        names,
+                        precision: format!("{:?}", chain.precision),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let groups = group_inspect_chains_by_suffix(&chains);
             out.push(InspectTargetChains {
                 target_func_id: target.raw(),
                 target: bonsai_inspect::func_display_name(&self.project.workspace, target),
-                chains: chains
-                    .into_iter()
-                    .map(|chain| InspectChain {
-                        funcs: chain.funcs.iter().map(|func| func.raw()).collect(),
-                        names: bonsai_inspect::chain_to_names(&self.project.workspace, &chain.funcs),
-                        precision: format!("{:?}", chain.precision),
-                    })
-                    .collect(),
+                chains,
+                groups,
                 truncated: truncation.is_truncated(),
                 truncation: truncation.label().map(str::to_string),
             });
         }
         Ok(out)
+    }
+}
+
+fn group_inspect_chains_by_suffix(chains: &[InspectChain]) -> Vec<InspectChainGroup> {
+    if chains.is_empty() {
+        return Vec::new();
+    }
+
+    let mut bucket_index_by_sink: AHashMap<String, usize> = AHashMap::new();
+    let mut buckets: Vec<(String, Vec<&InspectChain>)> = Vec::new();
+    for chain in chains {
+        let Some(sink_name) = chain.names.last().cloned() else {
+            continue;
+        };
+        let bucket_idx = *bucket_index_by_sink.entry(sink_name.clone()).or_insert_with(|| {
+            buckets.push((sink_name.clone(), Vec::new()));
+            buckets.len() - 1
+        });
+        buckets[bucket_idx].1.push(chain);
+    }
+
+    let mut groups = Vec::with_capacity(buckets.len());
+    for (_sink_name, members) in buckets {
+        let shortest_member_chain_len = members.iter().map(|member| member.names.len()).min().unwrap_or(1);
+        let mut suffix_len = 1usize;
+        while suffix_len < shortest_member_chain_len {
+            let candidate_idx_in_first = members[0].names.len() - 1 - suffix_len;
+            let candidate_name = &members[0].names[candidate_idx_in_first];
+            let every_member_agrees = members.iter().all(|member| {
+                let candidate_idx = member.names.len() - 1 - suffix_len;
+                &member.names[candidate_idx] == candidate_name
+            });
+            if every_member_agrees {
+                suffix_len += 1;
+            } else {
+                break;
+            }
+        }
+
+        let first_member_chain = &members[0].names;
+        let shared_suffix = first_member_chain[first_member_chain.len() - suffix_len..].to_vec();
+        let mut member_flow_ids = Vec::with_capacity(members.len());
+        let mut unique_prefixes = Vec::with_capacity(members.len());
+        let mut precision = "Exact".to_string();
+        for member in &members {
+            member_flow_ids.push(member.flow_id.clone());
+            let prefix_end = member.names.len() - suffix_len;
+            unique_prefixes.push(member.names[..prefix_end].to_vec());
+            precision = worse_precision(&precision, &member.precision).to_string();
+        }
+
+        groups.push(InspectChainGroup {
+            group_id: bonsai_inspect::compute_group_id(&shared_suffix),
+            member_flow_ids,
+            shared_suffix,
+            unique_prefixes,
+            precision,
+            member_count: members.len(),
+        });
+    }
+    groups
+}
+
+fn worse_precision<'a>(left: &'a str, right: &'a str) -> &'a str {
+    if precision_rank(right) > precision_rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn precision_rank(precision: &str) -> u8 {
+    match precision {
+        "Exact" => 0,
+        "Narrowed" => 1,
+        "OverApproximate" => 2,
+        _ => 3,
     }
 }
 

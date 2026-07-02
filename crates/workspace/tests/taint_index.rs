@@ -74,6 +74,75 @@ fn double_insert_keeps_first_winner() {
 }
 
 #[test]
+fn sidecar_file_validator_rejects_corrupt_payload_even_when_size_matches() {
+    let root = tempdir_for("taint-graph-corrupt-validator");
+    let ws = ws_with_python_source("def entry(x):\n    return x\n");
+    let path = TaintGraphIndex::sidecar_path(&root);
+    let idx = TaintGraphIndex::new();
+    idx.insert_if_absent(
+        FuncId::new(1),
+        vec!["x".to_string()],
+        Arc::new(EntryTaintGraph::default()),
+    );
+    idx.save_to_disk(&path, ws.db())
+        .expect("save taint graph sidecar");
+    assert_eq!(
+        TaintGraphIndex::validate_sidecar_file(&path).expect("validate fresh taint graph sidecar"),
+        1
+    );
+
+    let bytes = std::fs::metadata(&path).expect("taint graph metadata").len();
+    std::fs::write(&path, vec![0_u8; bytes as usize]).expect("overwrite same-size corrupt factstore");
+    assert!(
+        TaintGraphIndex::validate_sidecar_file(&path).is_err(),
+        "same-size corrupt taint graph factstore must not validate"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn configured_sidecar_paths_do_not_collide() {
+    let root = tempdir_for("taint-graph-config-paths");
+    let legacy = TaintGraphIndex::sidecar_path(&root);
+    let source = TaintGraphIndex::sidecar_path_for_config(&root, 0x11);
+    let taint = TaintGraphIndex::sidecar_path_for_config(&root, 0x22);
+    let namespaced = TaintGraphIndex::sidecar_path_for_config_namespace(&root, "taint-analysis", 0x11);
+
+    assert_eq!(TaintGraphIndex::sidecar_path_for_config(&root, 0), legacy);
+    assert_ne!(source, legacy);
+    assert_ne!(taint, legacy);
+    assert_ne!(source, taint);
+    assert_ne!(source, namespaced);
+    assert!(source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".0000000000000011.")));
+    assert!(namespaced
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".taint-analysis.0000000000000011.")));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn latest_sidecar_path_prefers_configured_sidecars_when_present() {
+    let root = tempdir_for("taint-graph-latest-path");
+    let legacy = TaintGraphIndex::sidecar_path(&root);
+    let configured = TaintGraphIndex::sidecar_path_for_config(&root, 0xfeed);
+
+    assert_eq!(TaintGraphIndex::latest_sidecar_path(&root), legacy);
+    std::fs::create_dir_all(configured.parent().expect("configured sidecar parent"))
+        .expect("create cache dir");
+    std::fs::write(&configured, b"configured").expect("write configured sidecar marker");
+
+    assert_eq!(TaintGraphIndex::latest_sidecar_path(&root), configured);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn resident_cache_respects_capacity() {
     let idx = TaintGraphIndex::with_capacity(2);
     idx.insert_if_absent(

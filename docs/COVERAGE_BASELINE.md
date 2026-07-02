@@ -1,29 +1,34 @@
 # Coverage baseline
 
-Per-language modeling levels for the constructs the security engine
-cares about. **The headline:** every supported language gets the
-common case modeled semantically; rare grammar shapes are surfaced as
-unsupported or incomplete rather than widened into guessed findings.
+Per-language static-evidence declarations for the constructs the security
+engine cares about. **The headline:** every supported language gets
+semantic static evidence where the construct is statically knowable; rare
+or runtime-only shapes are surfaced as unsupported or incomplete rather
+than widened into guessed findings.
 
-Most cells in the table below say `Partial` because **`Partial` is
-the engine's healthy default**, not a gap. See [What the levels
-mean](#what-the-levels-mean) below before getting alarmed by a wall
-of `Partial`s.
+Most cells in the table below say `Partial`, but **`Partial` is not a
+user-facing accuracy mode**. It is an internal declaration that the
+adapter/engine can emit proven static evidence for recognized forms and
+will leave unrecognized forms as diagnostic incompleteness.
 
 > **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](TAINT_COVERAGE_MATRIX.md)?**
 > The taint matrix shows every applicable cell as `pass` - that's the
-> per-scenario behavioural truth (1267 tests run the real engine on
-> each scenario × language and assert the right answer). This doc is
-> the *modeling-level declaration* - `Partial` here means "common
-> case is semantic, rare shapes are marked incomplete/unsupported," not
-> "the test fails." Both views are correct simultaneously.
+> per-scenario behavioural truth (`TAINT_COVERAGE_MATRIX.md` currently
+> reports 1279 applicable scenario × language cells that run the real
+> engine and assert the right answer). This doc is
+> the *static-evidence declaration* - `Partial` here means "recognized
+> forms produce semantic evidence, rare shapes are marked
+> incomplete/unsupported," not "the test fails." Both views are correct
+> simultaneously.
 >
 > **Should everything here be `Exact`?** No - and that is principled,
-> not a gap. `Exact` requires a closed-form analysis with no dynamic
-> uncertainty. Real-world languages don't admit that for most constructs.
-> The production-correct stance is to model the common case semantically
-> and surface the remaining cases as incompleteness/debug metadata -
-> exactly what `Partial` denotes.
+> not a gap. `Exact` means a closed static model exists for that
+> construct. Real-world languages do not admit closed static models for
+> reflection, FFI, runtime imports, macro expansion, actor messages, or
+> framework event dispatch without extra runtime/build facts. The
+> production-correct stance is to emit proven static evidence when it
+> exists and surface the remaining cases as incompleteness/debug metadata
+> - exactly what `Partial` denotes.
 >
 > **Should everything here be supported (no `Unsupported` cells)?**
 > The remaining `Unsupported` cells are deliberate engineering
@@ -47,11 +52,13 @@ of `Partial`s.
 
 ## TL;DR
 
-- The engine runs taint analysis successfully on every language in
-  the table.
-- A `Partial` cell means *"common case is modeled semantically; rare forms
-  are marked incomplete/unsupported instead of reported as guessed flows"*.
-  It does NOT mean broken or unimplemented.
+- The engine runs taint analysis successfully on every language in the table.
+- Public findings have one accuracy contract: exact/narrowed semantic
+  evidence only. `Precision::OverApproximate` and `Precision::Unknown`
+  are diagnostic-only and must not become user-facing findings.
+- A `Partial` cell means *"recognized forms produce proven static
+  evidence; rare forms are marked incomplete/unsupported instead of
+  reported as guessed flows"*. It does NOT mean broken or unimplemented.
 - An `Unsupported` cell means *"rules anchored on this construct are
   rejected at rulepack load time"* - a deliberate choice that prevents
   rules from firing on shapes the engine wouldn't analyse precisely.
@@ -64,16 +71,17 @@ of `Partial`s.
 
 ## What the levels mean
 
-| Level | Engine behaviour | Effect on rules | When you'd see it |
+| Level | Internal evidence declaration | Effect on rules | When you'd see it |
 |---|---|---|---|
-| `Exact` | Construct modeled precisely. Findings get `Precision::Exact`. | Rule fires whenever it matches. | Only set when an adapter has a closed-form analysis for this category (rare today; see [backlog](#backlog) below). |
-| `Partial` | Common case modeled semantically; rare forms are marked incomplete/unsupported. | Rule fires only when semantic evidence exists. | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
-| `Unsupported` | Construct ignored. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine wouldn't analyse correctly. |
+| `Exact` | Construct has a closed static model. Findings may use `Precision::Exact`. | Rule fires whenever the static model proves a match. | Only set when an adapter has a closed-form analysis for this category (rare today; see [backlog](#backlog) below). |
+| `Partial` | Recognized forms produce semantic evidence; unrecognized forms are marked incomplete/unsupported. | Rule fires only when exact/narrowed semantic evidence exists. | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
+| `Unsupported` | Construct has no static evidence model. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine would not analyze correctly. |
 | `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |
 
-So `Partial` everywhere is **good news**: it's the engine telling you
-"I will analyse your code, and where I'm uncertain I'll mark the
-finding so you can decide whether to act on it."
+So `Partial` everywhere is **not a second accuracy level**: it is the
+engine telling you "I will emit a finding only for proven static evidence,
+and where I cannot prove it I will report incompleteness/diagnostics
+instead of guessing."
 
 ## Capability matrix
 
@@ -83,9 +91,9 @@ Capabilities are grouped by what they affect.
 
 These are the constructs the resolver and CFG layer use to walk a
 program. Without them, the engine can't even build a call graph.
-Every supported language declares `Partial` here, meaning the engine
-can analyse the language end-to-end with the standard precision-flag
-caveats.
+Every supported language declares `Partial` here, meaning the engine can
+analyse the language end-to-end while still rejecting unproven edges from
+public findings.
 
 | Language | Modules | Dyn dispatch | Exceptions | Receiver types | Module export aliases |
 |---|---|---|---|---|---|
@@ -150,16 +158,17 @@ The Coroutines column was previously marked `Unsupported`; it is
 shapes (`yield`, `yield_statement`, `yield_expression`,
 `yield_from_expression`, `co_yield_*`) and emits `FlowEvent::Yield`,
 which the interprocedural engine treats as return-equivalent for
-summary construction. The `Partial` (rather than `Exact`) caveat is
-that cross-process generator-state propagation is intentionally out
-of scope.
+summary construction. The `Partial` (rather than `Exact`) caveat is that
+cross-process generator-state propagation has no closed static proof and
+therefore remains diagnostic/incomplete rather than a guessed finding.
 
 ### Tier 3 - Adapter conveniences (precision boosters)
 
 These don't gate rule loading; they affect how the resolver narrows
-candidate edges. `Unsupported` here means findings that go through
-this construct are not emitted as semantic evidence; `Partial` means
-they're handled in the common case.
+candidate edges. `Unsupported` here means findings that go through this
+construct are not emitted as semantic evidence; `Partial` means recognized
+forms can emit exact/narrowed evidence and unrecognized forms stay
+diagnostic-only.
 
 | Language | Macros | Reflection | FFI |
 |---|---|---|---|
@@ -255,8 +264,8 @@ neglect.
 
 ## Backlog
 
-Promotion candidates - places where an adapter could declare `Exact`
-once the matching test coverage lands:
+Promotion candidates - places where an adapter could declare `Exact` once
+the matching static model and test coverage land:
 
 - **C# / Java / Kotlin:** `Exceptions -> Exact` (typed `throws` /
   checked exceptions / `try-catch` chains are statically analysable
@@ -303,13 +312,14 @@ re-blessing makes the test fail. Either is caught by CI.
 Things that aren't visible in this matrix:
 
 - **Per-language rule density.** A language with a thin rulepack and
-  `Partial` capabilities will surface fewer findings than one with a
-  fat rulepack and identical capabilities. That's about rule writing,
-  not engine support.
+  `Partial` capabilities may surface fewer findings than one with a fat
+  rulepack and identical capabilities. That's about rule writing and
+  available static evidence, not a lower public accuracy mode.
 - **Real-world completion distribution.** What fraction of findings on
   a typical workspace land at `Exact` / `Narrowed` and what fraction of
   sections are marked incomplete. That's measurable by running the engine
-  on a corpus and tallying `precision` plus completion metadata.
+  on a corpus and tallying public semantic evidence plus completion
+  metadata.
 - **CFG completeness.** Whether each adapter emits Call / Assign /
   Param / Return for every grammar shape. That's the actual taint-
   coverage question, and it's tested by the per-language matrix
@@ -318,6 +328,6 @@ Things that aren't visible in this matrix:
   `crates/security/tests/security_pipeline_regressions.rs`), not
   declared here.
 
-If you want a real "how good is taint coverage" view, the precision
+If you want a real "how good is taint coverage" view, the evidence
 histogram is the metric - capability levels are a contract for rule
-validation, not a coverage scorecard.
+validation and incompleteness reporting, not a second accuracy mode.

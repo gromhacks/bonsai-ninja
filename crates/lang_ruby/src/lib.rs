@@ -1507,7 +1507,11 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
                         alias: Some(constant),
                         is_wildcard: true,
                         original_name: None,
-                        scope: ImportScope::Module,
+                        // Resolver-only constant binding inferred
+                        // from the loader target (`user_service` ->
+                        // `UserService`). The visible import row is
+                        // still the require/load statement itself.
+                        scope: ImportScope::Local,
                     });
                 }
             }

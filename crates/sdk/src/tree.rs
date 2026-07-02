@@ -13,7 +13,7 @@
 //! `docs/contributing/architecture.mdx`.
 
 use ahash::AHashMap;
-use bonsai_browse::Locator;
+use bonsai_browse::{file_path_excluded_by_filters, file_path_matches_filter, Locator};
 use bonsai_callgraph::EdgeKind;
 use bonsai_common::{FuncId, Precision, SymbolId};
 use bonsai_security::rule::Severity;
@@ -266,14 +266,12 @@ pub fn tree(
             let abs = ws.vfs().path(fid).ok()?;
             let rel = abs.display().to_string();
             if let Some(needle) = filters.file {
-                if !rel.contains(needle) {
+                if !file_path_matches_filter(ws, &rel, needle) {
                     return None;
                 }
             }
-            for ex in filters.exclude_files {
-                if rel.contains(ex.as_str()) {
-                    return None;
-                }
+            if file_path_excluded_by_filters(ws, &rel, filters.exclude_files) {
+                return None;
             }
             Some((rel, fid))
         })

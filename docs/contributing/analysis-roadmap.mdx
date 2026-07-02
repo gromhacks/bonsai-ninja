@@ -24,10 +24,11 @@ constraint).
 |---|---|---|---|
 | **P1 — Type-aware flow narrowing** | **Shipped (lexical)** — `RequiresRuntimeType` constraint reads `instanceof X` / `isinstance(_, X)` / `_ is X` / `typeof _ === "X"` predicates and gates rules on the narrowing. CFG-aware variant (block-dominance) is the remaining lift. | n/a — the lexical implementation reads `FlowEvent::Branch.condition` text. | Available; no pack-side adoption yet (constraint is opt-in). |
 | **P2 — Sanitizer crediting precision** | **Shipped** — `FindingMatch.sanitised_arg_indices` records which arg slots got cleansed; multi-step sanitiser chains carry both wrappers. | n/a. | Available; report renderer surfaces it. |
-| **P3 — Constants / value-range tracking** | **Shipped** — `arg_lt` / `arg_le` / `arg_gt` / `arg_ge` constraints with sign / hex / oct / bin / underscore-aware literal parsing. | n/a — uses existing arg `value_text`. | Adopted by weak-crypto-strength rules (`RSA.new < 2048`, etc.). |
+| **P3 — Constants / value-range tracking** | **Shipped (shared domain)** — `bonsai_abstract_interp::AbstractValue` carries constants, bounded integer ranges, boolean domains, string length ranges, nullness / nullable values, bounded literal sets, and simple path relations. Rule-level `arg_lt` / `arg_le` / `arg_gt` / `arg_ge` constraints still use literal parsing until individual analyses consume the shared domain. | n/a — adapters already emit `FlowEvent` operands; shared `Operation` facts can feed the same domain. | Adopted by weak-crypto-strength rules for literal checks; broader range/nullness adoption is pending. |
 | **P4 — Missing-call detection** | **Shipped (intra-procedural)** — `MatchKind::Missing` walker fires on decls that don't call the expected target. Cross-procedural BFS through the call graph is the remaining lift. | n/a. | Available; pack adoption pending. |
 | **P5 — Must-alias / points-to** | **Shipped (intra-procedural)** — `MustAlias` constraint resolves simple rename chains (`y = x`) within a decl. Compound RHS is not aliasing; cross-procedure aliasing is conservative. Foundation for P6. | n/a. | Available; opt-in. |
 | **P6 — Lifecycle state machine** | **Shipped** — flow-sensitive lattice consumes `FlowEvent::Lifecycle { name, transition }` events; `RequiresState` constraint queries the state at each call site. Canonical states: `freed`, `closed`, `unlocked`, `cancelled`, `moved`. | **All 21 langs** emit lifecycle events for their idiomatic free / close / unlock / cancel / move calls via `bonsai_lang_api::inject_lifecycle_events`. | Available; pack-side promotion of audit-pair rules in flight. |
+| **P7 — Expression / use-site operations** | **Shipped (shared facts)** — `bonsai_lang_api::operations_from_flow_events` derives first-class `Operation` facts for reads, writes, calls, allocation, returns, throws, awaits, branch conditions, catch bindings, resource scopes, lifecycle releases, and normalized place shapes. | n/a — adapters continue to emit the shared `FlowEvent` contract; operations are derived once in the engine. | Available through CLI/SDK `operations`; analysis adoption is pending. |
 
 `MATCHER_POLICY_FINGERPRINT` in `bonsai_common::policy` is bumped each
 time matcher, resolver, IDG, or taint propagation semantics change in a
@@ -48,9 +49,13 @@ The taint engine already does the heavy lifting for injection analysis:
 - **Value-preserving call results** for string transforms, formatting,
   joins, and Go `append`, without promoting structural metadata such as
   `sizeof(buf)` into value flow.
-- **Semantic callable binding** for local aliases and single-lambda
-  closure factories, plus same-directory top-level resolution only for
-  languages with shared file namespaces.
+- **Semantic callable binding** for local aliases, receiver-projected
+  storage such as `obj.cb` / `self.cb`, and single-lambda closure
+  factories, plus same-directory top-level resolution only for languages
+  with shared file namespaces.
+- **Resolution honesty metadata** on semantic call edges: resolver stage,
+  evidence, confidence, and per-file resolution coverage are exposed
+  through CLI, SDK, and export surfaces from the shared callgraph.
 - **Path-sensitive branch merge** via per-arm cloning + union, plus
   pattern-arm disjointness for Scala / Swift / Rust match expressions.
 - **Typed catch-arm narrowing** for Java / Kotlin / C# — `IOException`

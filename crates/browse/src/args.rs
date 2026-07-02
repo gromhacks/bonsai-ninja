@@ -7,7 +7,7 @@
 //! an `os.system` argument that came from `request.args`?") and for
 //! refactor scoping.
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
 use crate::strings::enclosing_fn_for_file_line;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
@@ -115,7 +115,9 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
         if !callee_match(&arg.callee) {
             return false;
         }
-        if f.file.is_some_and(|needle| !arg.file.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !file_path_matches_filter(ws, &arg.file, needle))
+        {
             return false;
         }
         if let Some(needle) = f.in_fn {
@@ -167,15 +169,40 @@ pub fn args(ws: &Workspace, f: &ArgsFilters<'_>) -> Result<Vec<ArgOut>, regex::E
     // Final display order: group by callee, then by position,
     // then by location.
     facts.sort_by(|a, b| {
-        a.out
-            .callee
-            .cmp(&b.out.callee)
-            .then_with(|| a.out.position.cmp(&b.out.position))
-            .then_with(|| a.out.file.cmp(&b.out.file))
-            .then_with(|| a.out.line.cmp(&b.out.line))
-            .then_with(|| a.out.column.cmp(&b.out.column))
+        arg_relevance_key(&a.out, f)
+            .cmp(&arg_relevance_key(&b.out, f))
+            .then_with(|| {
+                a.out
+                    .callee
+                    .cmp(&b.out.callee)
+                    .then_with(|| a.out.position.cmp(&b.out.position))
+                    .then_with(|| a.out.file.cmp(&b.out.file))
+                    .then_with(|| a.out.line.cmp(&b.out.line))
+                    .then_with(|| a.out.column.cmp(&b.out.column))
+            })
     });
     Ok(facts.into_iter().map(|fact| fact.out).collect())
+}
+
+fn arg_relevance_key(row: &ArgOut, f: &ArgsFilters<'_>) -> ((u8, usize), (u8, usize), (u8, usize)) {
+    let callee = f
+        .callee
+        .filter(|_| !f.regex)
+        .map_or((u8::MAX, usize::MAX), |callee| {
+            textual_relevance_key(&row.callee, Some(callee), false)
+        });
+    let value = f
+        .value
+        .filter(|_| !f.regex)
+        .map_or((u8::MAX, usize::MAX), |value| {
+            textual_relevance_key(&row.value, Some(value), false)
+        });
+    let keyword = f.keyword.map_or((u8::MAX, usize::MAX), |keyword| {
+        row.keyword.as_deref().map_or((u8::MAX, usize::MAX), |value| {
+            textual_relevance_key(value, Some(keyword), false)
+        })
+    });
+    (callee, value, keyword)
 }
 
 /// Walk a decl's flow-event tree and append one [`ArgFact`] per

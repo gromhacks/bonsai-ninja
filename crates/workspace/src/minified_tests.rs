@@ -53,6 +53,51 @@ fn path_build_output_segments() {
 }
 
 #[test]
+fn root_relative_path_ignores_generated_ancestors_outside_workspace() {
+    let root = PathBuf::from("/tmp/repo/target/smoke-workspace");
+    assert!(!path_looks_minified_under_root(&root, &root.join("app.py")));
+    assert!(path_looks_minified_under_root(
+        &root,
+        &root.join("target/release/app.py")
+    ));
+    assert!(path_looks_minified_under_root(
+        &root,
+        &root.join(".bonsai/cache.py")
+    ));
+}
+
+#[test]
+fn root_relative_source_filters_ignore_generated_ancestors_outside_workspace() {
+    let root = PathBuf::from("/tmp/repo/target/smoke-workspace");
+    let include_filters = Vec::new();
+    let exclude_filters = vec!["target/".to_string()];
+    let filter = PathFilterSpec {
+        include_filters: &include_filters,
+        exclude_filters: &exclude_filters,
+    };
+    assert!(
+        source_path_allowed(&root, &root.join("app.py"), filter),
+        "path filters must not exclude the selected workspace because an ancestor is named target"
+    );
+    assert!(
+        !source_path_allowed(&root, &root.join("target/generated.py"), filter),
+        "path filters must still exclude matching generated paths inside the selected workspace"
+    );
+}
+
+#[test]
+fn root_relative_source_filters_still_accept_explicit_absolute_paths() {
+    let root = PathBuf::from("/tmp/repo/target/smoke-workspace");
+    let include_filters = vec![root.join("app.py").to_string_lossy().into_owned()];
+    let exclude_filters = Vec::new();
+    let filter = PathFilterSpec {
+        include_filters: &include_filters,
+        exclude_filters: &exclude_filters,
+    };
+    assert!(source_path_allowed(&root, &root.join("app.py"), filter));
+}
+
+#[test]
 fn path_workspace_state_dirs() {
     assert!(path_looks_minified(&PathBuf::from(".bonsai/shadow.py")));
     assert!(path_looks_minified(&PathBuf::from(".git/hooks/pre-commit.py")));

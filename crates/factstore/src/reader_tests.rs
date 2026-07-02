@@ -1,5 +1,7 @@
 use super::*;
+use crate::format::INDEX_ENTRY_SIZE;
 use crate::writer::FactStoreWriter;
+use std::io::{Seek, SeekFrom, Write};
 
 fn write_test_store(path: &Path, table: u32, hash: u64, entries: &[(u64, u64, &[u8])]) {
     let w = FactStoreWriter::create(path, table, hash).expect("create");
@@ -117,6 +119,30 @@ fn iter_visits_entries_in_key_order() {
         collected,
         vec![(10, b"a".to_vec()), (20, b"b".to_vec()), (30, b"c".to_vec()),]
     );
+}
+
+#[test]
+fn open_rejects_duplicate_index_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v.bin");
+    write_test_store(&path, 0, 0, &[(1, 0, b"one"), (2, 0, b"two")]);
+
+    let r = FactStoreReader::open(&path, 0, 0).expect("open before mutation");
+    let second_index_key = r.header().index_offset + INDEX_ENTRY_SIZE as u64;
+    drop(r);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open for mutation");
+    file.seek(SeekFrom::Start(second_index_key))
+        .expect("seek index key");
+    file.write_all(&1u64.to_le_bytes())
+        .expect("overwrite duplicate key");
+    file.sync_all().expect("sync mutation");
+
+    let err = FactStoreReader::open(&path, 0, 0).expect_err("duplicate key must reject");
+    assert!(matches!(err, FactStoreError::DuplicateKey(1)));
 }
 
 #[test]

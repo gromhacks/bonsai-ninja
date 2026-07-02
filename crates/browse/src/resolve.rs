@@ -6,7 +6,7 @@
 //! stage's intermediate state — the trace exposes the algorithm, not
 //! just its final output.
 
-use crate::common::format_span;
+use crate::common::{file_path_matches_filter, format_span};
 use bonsai_callgraph::{collect_callable_targets, short_callee};
 use bonsai_common::FileId;
 use bonsai_hash::fnv1a_names_low32;
@@ -18,9 +18,9 @@ use serde::Serialize;
 /// Filter bundle for [`dump_resolve`].
 #[derive(Copy, Clone, Default, Debug)]
 pub struct ResolveFilters<'a> {
-    /// Apply the alias map of the file whose path contains this
-    /// substring. When `None`, the lookup runs in "global" mode (no
-    /// alias rewrite).
+    /// Apply the alias map of the file whose workspace-relative path
+    /// matches this text. Explicit absolute paths are also accepted. When
+    /// `None`, the lookup runs in "global" mode (no alias rewrite).
     pub in_file: Option<&'a str>,
     /// Drill into one candidate by its `R:`-prefixed id.
     pub candidate_id: Option<&'a str>,
@@ -109,13 +109,13 @@ where
 {
     let global = ws.db().global_index();
 
-    // `--in-file` matches a file path substring. The same shape
+    // `--in-file` matches a workspace-relative file path. The same shape
     // any other browse filter uses.
     let resolved_file_id: Option<bonsai_common::FileId> = f.in_file.and_then(|needle| {
         global.all_files().find(|file_id| {
             ws.vfs()
                 .path(*file_id)
-                .is_ok_and(|p| p.display().to_string().contains(needle))
+                .is_ok_and(|p| file_path_matches_filter(ws, &p.display().to_string(), needle))
         })
     });
     let applied_file_display: Option<String> =

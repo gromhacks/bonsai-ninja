@@ -272,12 +272,19 @@ pub(crate) enum Cmd {
                       a summary (file count, decls, refs, module count) as \
                       JSON.\n\
                       \n\
-                      By default this is a structural parse/index pass only: \
-                      it does not eagerly compute the exact dataflow graph for \
-                      every callable. Later browse, inspect, trace, security, \
-                      export, and debug commands compute the exact analysis \
-                      scope they need before rendering, reusing valid persisted \
-                      facts only as a performance optimization.\n\
+                      By default this is syntax/construct index-up-front behavior: \
+                      bonsai parses source, builds declaration/import indexes, \
+                      and records workspace stats without warming expensive \
+                      whole-workspace semantic sidecars. Later query commands \
+                      hydrate fresh sidecars when present and compute requested \
+                      exact facts on demand.\n\
+                      \n\
+                      Pass `--semantic` when you intentionally want a full \
+                      semantic prewarm: resolved callgraph and, when enabled \
+                      for the workspace size, the workspace IDG plus \
+                      `.bonsai/manifest.json`. This \
+                      can be expensive on large or dense workspaces and should \
+                      be used only when front-loading that cost is desired.\n\
                       \n\
                       Pass `--prewarm-dataflow` only when you explicitly want \
                       the legacy full-workspace dataflow sidecar rebuild. That \
@@ -286,9 +293,9 @@ pub(crate) enum Cmd {
                       \n\
                       Pass `--watch` to keep the process alive as a workflow \
                       tool: bonsai polls the source tree, hot-reloads saved \
-                      changes into the live workspace, and prints fresh structural \
-                      stats. Combine it with `--prewarm-dataflow` only when you \
-                      want save-time dataflow sidecar rebuilds."),
+                      changes into the live workspace, and prints fresh stats. \
+                      Use `--structural-only --watch` only when you want saved \
+                      edits refreshed without semantic sidecar prewarm."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Sanity-check a workspace\n  \
                       $ bonsai-ninja index ./src\n  \
@@ -296,24 +303,62 @@ pub(crate) enum Cmd {
                       # Keep the index warm while editing\n  \
                       $ bonsai-ninja index ./src --watch\n  \
                       \n  \
+                      # Explicitly warm structural semantic sidecars\n  \
+                      $ bonsai-ninja index ./src --semantic\n  \
+                      \n  \
                       # Force a fresh taint sidecar before measuring\n  \
                       $ bonsai-ninja cache clear ./src --dataflow-only\n  \
-                      $ bonsai-ninja index ./src --prewarm-dataflow")
+                      $ bonsai-ninja index ./src --prewarm-dataflow\n  \
+                      \n  \
+                      # Explicit spelling for default structural indexing\n  \
+                      $ bonsai-ninja index ./src --structural-only")
     )]
     Index {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Compute and persist exact dataflow for every callable
-        /// during this index run. Disabled by default so `index`
-        /// remains a fast structural pass.
-        #[arg(long)]
+        /// Use `cache clear ./src --dataflow-only` first to force a fresh
+        /// rebuild, then compute and persist only the legacy dataflow
+        /// factstore during this index run. This is narrower than `--semantic`
+        /// and intentionally more expensive than default indexing.
+        #[arg(long, conflicts_with = "structural_only")]
         prewarm_dataflow: bool,
+        /// Build and persist structural semantic sidecars used by later
+        /// query commands. Does not run the legacy all-entry dataflow prewarm.
+        #[arg(long, conflicts_with_all = ["prewarm_dataflow", "structural_only"])]
+        semantic: bool,
+        /// Parse and structurally index only; do not warm semantic sidecars.
+        #[arg(long)]
+        structural_only: bool,
         /// Keep running and refresh the live index when files change on disk.
         #[arg(long)]
         watch: bool,
         /// Poll interval for `--watch`, in milliseconds.
         #[arg(long = "interval-ms", default_value_t = 750)]
         interval_ms: u64,
+    },
+
+    /// Print normalized workspace semantic context.
+    #[command(
+        display_order = 11,
+        long_about = themed_subcommand_long_about("Open <WORKSPACE> and emit the shared, language-neutral project \
+                      context as JSON: indexed module roots, dependency roots, \
+                      generated / excluded roots, toolchain manifests, configured \
+                      source hints, source-transformation evidence, and a compact \
+                      summary. This is the same structure exposed by \
+                      `bonsai_sdk::Project::semantic_context()` so CLI and SDK \
+                      consumers reason over identical workspace-shape facts."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # Explain the workspace shape used by analysis\n  \
+                      $ bonsai-ninja context ./src\n  \
+                      \n  \
+                      # Machine-readable output only\n  \
+                      $ bonsai-ninja context ./src --no-color --no-progress")
+    )]
+    Context {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        #[command(flatten)]
+        output: OutputPathArg,
     },
 
     /// Cross-module execution trace from a function (headline feature).
@@ -386,22 +431,134 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Resolve a stable bonsai id and open its owning drilldown view.
+    /// Ranked structural call paths between two functions.
     #[command(
         display_order = 3,
+        long_about = themed_subcommand_long_about("Find bounded, ranked call paths from one callable to another \
+                      using only syntax-derived, resolver-backed semantic callgraph \
+                      edges. The command does not search raw text or invent missing \
+                      edges. If unresolved call sites or traversal caps mean absence \
+                      cannot be proven, the output marks analysis incomplete and says \
+                      why."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # Shortest semantic paths from entry to sink\n  \
+                      $ bonsai-ninja path ./src --from handle_request --to os.system\n  \
+                      \n  \
+                      # Machine-readable output for tooling\n  \
+                      $ bonsai-ninja path ./src --from handle_request --to run_admin_command --format json\n  \
+                      \n  \
+                      # Wider bounded search\n  \
+                      $ bonsai-ninja path ./src --from controller --to execute --max-paths 25 --max-depth 16")
+    )]
+    Path {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Source callable name or pattern.
+        #[arg(long)]
+        from: String,
+        /// Target callable name or pattern.
+        #[arg(long)]
+        to: String,
+        /// Interpret `--from` and `--to` as regexes instead of substring matches.
+        #[arg(long, default_value_t = false)]
+        regex: bool,
+        /// Maximum paths to emit after ranking.
+        #[arg(long, default_value_t = 10)]
+        max_paths: usize,
+        /// Maximum semantic call edges in one path.
+        #[arg(long, default_value_t = 12)]
+        max_depth: usize,
+        /// Maximum graph states to probe before marking analysis incomplete.
+        #[arg(long, default_value_t = 4096)]
+        max_probes: usize,
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based (`--page 2`), cursor (`P:xxxxxxxx`), or `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit every row, no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` for rendered paths, `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
+    /// Backward slice for a symbol at a source line.
+    #[command(
+        display_order = 4,
+        long_about = themed_subcommand_long_about("Build a bounded backwards slice for one normalized symbol \
+                      at one source line using adapter-emitted syntax-flow facts. \
+                      The command follows local assignments, call arguments, returns, \
+                      and lifecycle/use-site facts. It does not search raw text or \
+                      invent interprocedural summaries; parameter and opaque-call \
+                      boundaries are reported as incomplete analysis reasons."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # What influences result at line 15?\n  \
+                      $ bonsai-ninja slice ./src --symbol result --line 15\n  \
+                      \n  \
+                      # Disambiguate same-line callables by file\n  \
+                      $ bonsai-ninja slice ./src --symbol action --line 15 --file gateway.py\n  \
+                      \n  \
+                      # Machine-readable output for tooling\n  \
+                      $ bonsai-ninja slice ./src --symbol result --line 15 --format json")
+    )]
+    Slice {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Variable / place / normalized symbol to slice backwards from.
+        #[arg(long)]
+        symbol: String,
+        /// One-based source line where `--symbol` is inspected.
+        #[arg(long)]
+        line: u32,
+        /// Optional workspace-relative file path filter used to narrow candidates.
+        /// Explicit absolute paths are also accepted.
+        #[arg(long)]
+        file: Option<String>,
+        /// Maximum slice steps to emit. Use 0 for uncapped.
+        #[arg(long, default_value_t = 64)]
+        max_steps: usize,
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based (`--page 2`), cursor (`P:xxxxxxxx`), or `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit every row, no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` for rendered slices, `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
+    /// Resolve a stable bonsai id and open its owning drilldown view.
+    #[command(
+        display_order = 5,
         long_about = themed_subcommand_long_about(
             "Resolve a stable bonsai id and re-open the command view \
-             that owns it. Supports structural flow ids (`F:`), flow \
-             group ids (`G:`), raw inspect taint ids (`T:`), call-edge \
+             that owns it. Supports structural/security flow ids (`F:`), \
+             flow group ids (`G:`), raw inspect taint ids (`T:`), call-edge \
              ids (`E:`), AST node ids (`N:`), security finding ids \
              (`S:`), and resolver candidate ids (`R:`). `R:` ids are \
              scoped to the resolver query that produced them, so pass \
-             `--query <name>` with `show R:...`.\n\
+             `--query <name>` with `show R:...`. Structured dump-taint \
+             `T:` propagation ids are source-seeded; pass `--taint-source` \
+             and the original dump-taint filters to reopen that view.\n\
              \n\
              This is a navigation shortcut over existing commands: \
-             `F:` / `G:` / `T:` use `inspect`, `E:` uses `dump-edges`, \
-             `N:` uses `dump-ast`, `R:` uses `dump-resolve`, and `S:` \
-             uses `security taint-analysis --finding`."
+             structural `F:` / `G:` use `inspect`, security taint `F:` / `G:` \
+             fall back to `security taint-analysis --flow` / `--group`, raw inspect \
+             `T:` uses `inspect`, \
+             structured dump-taint `T:` uses `dump-taint --taint`, `E:` \
+             uses `dump-edges`, `N:` uses `dump-ast`, `R:` uses \
+             `dump-resolve`, and `S:` uses `security taint-analysis --finding`."
         ),
         after_help = themed_subcommand_after_help(
             "EXAMPLES\n\n  \
@@ -410,6 +567,9 @@ pub(crate) enum Cmd {
              \n  \
              # Re-open one raw inspect taint path\n  \
              $ bonsai-ninja show ./src T:aabbccdd\n  \
+             \n  \
+             # Re-open one structured dump-taint propagation\n  \
+             $ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token --taint-seed action\n  \
              \n  \
              # Re-open one security finding\n  \
              $ bonsai-ninja show ./src S:0123456789abcdef --rules-dir security-patterns\n  \
@@ -429,6 +589,24 @@ pub(crate) enum Cmd {
         /// File context for `R:` resolver candidate ids.
         #[arg(long = "in-file")]
         in_file: Option<String>,
+        /// Source function for structured dump-taint `T:` propagation ids.
+        #[arg(long = "taint-source")]
+        taint_source: Option<String>,
+        /// Seed identifiers for structured dump-taint `T:` propagation ids. Repeatable.
+        #[arg(long = "taint-seed")]
+        taint_seeds: Vec<String>,
+        /// Sanitizer identifiers for structured dump-taint `T:` propagation ids. Repeatable.
+        #[arg(long = "taint-sanitizer")]
+        taint_sanitizers: Vec<String>,
+        /// Sink filter for structured dump-taint `T:` propagation ids.
+        #[arg(long = "taint-sink")]
+        taint_sink: Option<String>,
+        /// Compatibility budget for structured dump-taint `T:` propagation ids.
+        #[arg(long = "taint-budget")]
+        taint_budget: Option<u32>,
+        /// Intraprocedural worklist cap for structured dump-taint `T:` propagation ids.
+        #[arg(long = "taint-intra-worklist-cap")]
+        taint_intra_worklist_cap: Option<u32>,
         /// Render compact source/flow output when the delegated command supports it.
         #[arg(long, default_value_t = false)]
         compact: bool,
@@ -455,13 +633,14 @@ pub(crate) enum Cmd {
     #[command(
         display_order = 11,
         long_about = themed_subcommand_long_about("Run every language adapter's diagnostic pass across the \
-                      workspace and print the aggregated results. Flags \
-                      adapter-level extraction issues (unsupported \
-                      construct per language, tree-sitter parse errors, \
-                      unresolved imports) before they silently degrade \
-                      inspect / taint output. Exits 0 even when \
-                      warnings are present — CI pipelines can still gate \
-                      on specific lines."),
+                      workspace and print a report containing aggregated \
+                      diagnostics, workspace languages, and adapter capability \
+                      declarations. Flags adapter-level extraction issues \
+                      (unsupported construct per language, tree-sitter parse \
+                      errors, unresolved imports) and capability gaps before \
+                      they silently degrade inspect / taint output. Exits 0 \
+                      even when warnings are present — CI pipelines can still \
+                      gate on specific fields."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Run every adapter's diagnostic pass\n  \
                       $ bonsai-ninja diagnostics ./src\n  \
@@ -608,13 +787,14 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Dump semantic resolved call edges with `EdgeKind` + `Precision`.
+    /// Dump semantic resolved call edges with kind, precision, and provenance.
     #[command(
         display_order = 33,
         long_about = themed_subcommand_long_about("One record per resolved call edge: caller, callee, call-site \
-                      location, `EdgeKind` (Direct / Virtual), and semantic \
-                      `Precision` (Exact / Narrowed). Broad resolver \
-                      diagnostics are kept out of analysis output.\n\
+                      location, `EdgeKind` (Direct / Virtual), semantic \
+                      `Precision` (Exact / Narrowed), and resolver provenance \
+                      (`resolver_stage`, `evidence`, `confidence`). Broad \
+                      resolver diagnostics are kept out of analysis output.\n\
                       \n\
                       Every edge carries a stable `edge_id` (`E:` + 8 hex) \
                       — a FNV-1a content hash over (caller, callee, call \
@@ -683,9 +863,65 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Dump the tree-sitter parse tree per file or per function.
+    /// Dump call resolution coverage by file and declaration.
     #[command(
         display_order = 34,
+        long_about = themed_subcommand_long_about("Report how completely syntax-derived call sites resolved to \
+                      semantic callgraph edges. The command walks shared \
+                      FlowEvent::Call facts from every adapter and compares \
+                      them with the canonical resolved call graph, so the \
+                      coverage numbers are language-agnostic and never come \
+                      from raw-text BFS or guessed edges. Known \
+                      external/library calls are counted separately and do not \
+                      reduce workspace-resolution coverage.\n\
+                      \n\
+                      Use this when `inspect`, `trace`, or taint output looks sparse: \
+                      files with unresolved calls, dynamic calls, macro call \
+                      sites, or missing receiver-type facts identify where \
+                      downstream code-intelligence modes will be incomplete."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # Per-file resolution coverage\n  \
+                      $ bonsai-ninja dump-resolution ./src\n  \
+                      \n  \
+                      # Machine-readable rows with nested per-decl detail\n  \
+                      $ bonsai-ninja dump-resolution ./src --format json --all\n  \
+                      \n  \
+                      # Focus only files that still have unresolved call sites\n  \
+                      $ bonsai-ninja dump-resolution ./src --unresolved-only")
+    )]
+    DumpResolution {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Include only files whose workspace-relative path matches this text.
+        /// Explicit absolute paths are also accepted.
+        #[arg(long)]
+        file: Option<String>,
+        /// Include only files with at least one unresolved call site.
+        #[arg(long, default_value_t = false)]
+        unresolved_only: bool,
+        /// Max rows in the text rendering (`0` = uncapped). JSON
+        /// uses token-budget paging unless `--all` is set.
+        #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
+        limit: usize,
+        /// Token-budget ceiling for rendered output. Shorthand `4k` etc.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render (1-based number, `P:xxxxxxxx`, or `next`).
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit every row, no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` for the rendered table, `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
+    /// Dump the tree-sitter parse tree per file or per function.
+    #[command(
+        display_order = 35,
         long_about = themed_subcommand_long_about("Emit the tree-sitter parse tree for the workspace, one file \
                       at a time (or one function with `--function`). The ground-truth \
                       view of what the grammar actually extracted — the first place \
@@ -723,7 +959,8 @@ pub(crate) enum Cmd {
         workspace: PathBuf,
         /// Positional symbol (alternative to `--function`).
         symbol_pos: Option<String>,
-        /// Filter to files whose path contains this substring.
+        /// Filter to files whose workspace-relative path matches this text.
+        /// Explicit absolute paths are also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Scope to a single function's subtree (decl name). Takes
@@ -811,8 +1048,9 @@ pub(crate) enum Cmd {
         /// Name to resolve.
         #[arg(long)]
         name: Option<String>,
-        /// Apply the alias map of the file whose path contains this
-        /// substring. When omitted the lookup runs in "global" mode
+        /// Apply the alias map of the file whose workspace-relative path
+        /// matches this text. Explicit absolute paths are also accepted.
+        /// When omitted the lookup runs in "global" mode
         /// (no alias rewrite) — matching how a dynamic `getattr(...)`
         /// or top-level reference would resolve.
         #[arg(long = "in-file")]
@@ -952,7 +1190,7 @@ pub(crate) enum Cmd {
                       the decl — paste into `inspect --flow` to expand).\n\
                       \n\
                       Supports filters by kind (`function`, `class`, \
-                      `method`, …), file-path substring, name substring / \
+                      `method`, …), workspace-relative file filter, name substring / \
                       regex, has-callee / has-decorator / has-param \
                       narrowers for decl-shape queries. `--no-flows` \
                       suppresses the `flows` column on very large \
@@ -977,7 +1215,8 @@ pub(crate) enum Cmd {
         /// Substring match on the decl kind (`function`, `method`, `class`, …).
         #[arg(long)]
         kind: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Substring match on the decl's short name.
@@ -1040,7 +1279,7 @@ pub(crate) enum Cmd {
                       \n\
                       Columns: name, kind, location, signature, callees \
                       (deduplicated outgoing call names), and reason. Filters \
-                      mirror `defs`: kind, file-path substring, name substring \
+                      mirror `defs`: kind, workspace-relative file filter, name substring \
                       or regex. The command does not build IDG / taint state."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # List likely roots\n  \
@@ -1061,7 +1300,8 @@ pub(crate) enum Cmd {
         /// Substring match on the decl kind (`function`, `method`, `constructor`).
         #[arg(long)]
         kind: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Substring match on the decl's short or qualified name.
@@ -1118,7 +1358,8 @@ pub(crate) enum Cmd {
         /// Substring match on the callee name.
         #[arg(long)]
         callee: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Substring match on the enclosing (caller) function.
@@ -1214,7 +1455,8 @@ pub(crate) enum Cmd {
     Imports {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Substring match on the module name.
@@ -1290,7 +1532,8 @@ pub(crate) enum Cmd {
         /// Substring match on the variable name (assignment target).
         #[arg(long)]
         name: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Only assignments inside a function whose name contains this substring.
@@ -1356,7 +1599,8 @@ pub(crate) enum Cmd {
         /// Substring match on the literal's text.
         #[arg(long)]
         contains: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Only strings inside a function whose name contains this substring.
@@ -1435,7 +1679,8 @@ pub(crate) enum Cmd {
         /// Substring match on the comment text.
         #[arg(long)]
         contains: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Only comments inside a function whose name contains
@@ -1499,7 +1744,8 @@ pub(crate) enum Cmd {
         /// Substring match on the callee name.
         #[arg(long)]
         callee: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Only calls inside an enclosing fn whose name contains this substring.
@@ -1549,9 +1795,79 @@ pub(crate) enum Cmd {
         output: OutputPathArg,
     },
 
-    /// Review classes / structs / interfaces with method counts.
+    /// Review syntax-derived expression and use-site operations.
     #[command(
         display_order = 26,
+        long_about = themed_subcommand_long_about("Every language-neutral operation derived from flow events: \
+                      reads, writes, calls, returns, throws, awaits, \
+                      lifecycle transitions, resource scopes, allocations, \
+                      and normalized place shapes such as field access or \
+                      indexing. This is a syntax fact surface — it does not \
+                      invent call edges or parse raw file text."),
+        after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
+                      # Every operation in the workspace\n  \
+                      $ bonsai-ninja operations ./src\n  \
+                      \n  \
+                      # Writes involving a target or operand name\n  \
+                      $ bonsai-ninja operations ./src --kind write --name token\n  \
+                      \n  \
+                      # Field/index/deref-shaped use sites in one function\n  \
+                      $ bonsai-ninja operations ./src --kind field_access --in-fn handle_request")
+    )]
+    Operations {
+        /// Workspace root to analyze.
+        workspace: PathBuf,
+        /// Operation kind filter (`read`, `write`, `call`, `index`, `field_access`, ...).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Match operation target or operand name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
+        #[arg(long)]
+        file: Option<String>,
+        /// Only operations inside a function whose name contains this substring.
+        #[arg(long = "in-fn")]
+        in_fn: Option<String>,
+        /// Interpret `--kind` / `--name` as regex.
+        #[arg(long, default_value_t = false)]
+        regex: bool,
+        /// Max rows in the text table (`0` = uncapped). JSON uses
+        /// token-budget paging unless `--all` is set.
+        #[arg(long, default_value_t = BROWSE_TEXT_LIMIT_DEFAULT)]
+        limit: usize,
+        /// Suppress the `flows` column. The column is ON by default
+        /// and lists the taint-flow IDs (`F:<16-hex>`) whose
+        /// upstream call chains reach the row's enclosing function;
+        /// paste any ID into `inspect --flow F:<16-hex>` to expand
+        /// the chain. Pass `--no-flows` on very large workspaces
+        /// where chain enumeration adds a few seconds you don't
+        /// want to pay.
+        #[arg(long = "no-flows", default_value_t = false)]
+        no_flows: bool,
+        /// Token-budget ceiling for rendered output. Shorthand: `4k`
+        /// `32k` `128k` `1m`. `0` / `all` / `uncapped` disables.
+        /// Defaults to `BONSAI_CONTEXT` or `32k` for text and JSON.
+        #[arg(long)]
+        context: Option<String>,
+        /// Page to render — 1-based number (`--page 3`), stable
+        /// cursor (`--page P:xxxxxxxx`), or `next`.
+        #[arg(long)]
+        page: Option<String>,
+        /// Emit every row, no paging or context cap.
+        #[arg(long, default_value_t = false)]
+        all: bool,
+        /// Output shape — `text` for the rendered table / tree, `json` for machine-readable output.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
+        #[command(flatten)]
+        output: OutputPathArg,
+    },
+
+    /// Review classes / structs / interfaces with method counts.
+    #[command(
+        display_order = 27,
         long_about = themed_subcommand_long_about("Every class / struct / trait / interface / enum decl, with \
                       method count and (up to 8) method names per row. The \
                       `flows` column unions the flow-ids reaching every \
@@ -1573,7 +1889,8 @@ pub(crate) enum Cmd {
         /// Substring match on the class name.
         #[arg(long)]
         name: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Kind filter (`class`, `struct`, `trait`, `interface`, `enum`).
@@ -1622,7 +1939,7 @@ pub(crate) enum Cmd {
 
     /// Every indexed reference to a symbol.
     #[command(
-        display_order = 27,
+        display_order = 28,
         long_about = themed_subcommand_long_about("Find every place a symbol is read, called, or referenced. \
                       Columns: symbol, kind, enclosing fn, location, code.\n\
                       \n\
@@ -1656,7 +1973,8 @@ pub(crate) enum Cmd {
         /// Ref kind filter (`call`, `read`, `write`, `type`, `import`, `macro`, `decorator`, `other`).
         #[arg(long)]
         kind: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Only refs inside an enclosing fn whose name contains this substring.
@@ -1699,7 +2017,7 @@ pub(crate) enum Cmd {
 
     /// Fuzzy search across indexed browse facts.
     #[command(
-        display_order = 28,
+        display_order = 29,
         long_about = themed_subcommand_long_about("Prefix-first fuzzy search over every indexed browse fact: \
                       decl names / qualified names, call sites, imports, \
                       assignment targets, strings, comments, args, and refs. \
@@ -1709,7 +2027,7 @@ pub(crate) enum Cmd {
                       A query is required — either as the positional \
                       argument or via `--query`. Use `--regex` to treat the \
                       query as a regex; `--kind` to filter by fact kind; \
-                      `--file` to scope to a path substring. The `flows` \
+                      `--file` to scope to a workspace-relative path. The `flows` \
                       column (on by default) lists every `F:<16-hex>` that \
                       reaches each hit — paste into `inspect --flow` to \
                       expand the chain."),
@@ -1736,7 +2054,8 @@ pub(crate) enum Cmd {
         /// `string`, `comment`, `arg`, `ref-read`, …).
         #[arg(long)]
         kind: Option<String>,
-        /// Substring match on the file path.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Interpret the query as a regex.
@@ -1777,12 +2096,15 @@ pub(crate) enum Cmd {
                       source-body flow evidence when the query is bounded \
                       enough to fit the active context budget. It does not \
                       load source / sink / sanitizer YAML. Pass `--graph-flow` \
-                      to force structural callgraph source bodies for large \
-                      or broad queries that would otherwise stay on the \
-                      syntax fast path; pass `--syntax-only` for a pure index \
-                      search. Taint previews are capped; very large broad \
-                      queries skip the default taint preview with an explicit \
-                      warning unless `--taint-flow` is supplied.\n\
+                      to request structural callgraph source bodies for large \
+                      result sets that would otherwise render syntax/index \
+                      facts only; pass `--syntax-only` to deliberately omit \
+                      flow evidence from the output. These flags change output \
+                      scope, not analysis accuracy: emitted graph facts still \
+                      use the same exact/narrowed static evidence contract. \
+                      Taint previews are capped; very large result sets skip \
+                      the default taint preview with an explicit warning unless \
+                      `--taint-flow` is supplied.\n\
                       \n\
                       Graph-flow chains that share the same entry + sink but take \
                       different intermediate paths get letter-suffixed labels \
@@ -1795,9 +2117,9 @@ pub(crate) enum Cmd {
                       `inspect` is the pattern-less query layer over the \
                       indexed taint graph `export` ships; `security taint-analysis` \
                       applies rulepack source / sink / sanitizer matches with \
-                      exact source seeds. `--taint-flow` forces the bounded raw \
-                      taint preview for broad queries and when `--syntax-only` \
-                      is also present."),
+                      exact source seeds. `--taint-flow` requests the bounded \
+                      raw taint preview for large result sets and when \
+                      `--syntax-only` is also present."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Syntax hits plus rulepack-free taint paths and code evidence\n  \
                       $ bonsai-ninja inspect ./src --query os.system\n  \
@@ -1805,7 +2127,7 @@ pub(crate) enum Cmd {
                       # Pure indexed syntax hits only\n  \
                       $ bonsai-ninja inspect ./src --query os.system --syntax-only\n  \
                       \n  \
-                      # Force structural source-body evidence for large/broad queries\n  \
+                      # Request structural source-body evidence for a large result set\n  \
                       $ bonsai-ninja inspect ./src --query os.system --graph-flow\n  \
                       \n  \
                       # Regex query — syntax hits for exec-like calls\n  \
@@ -1871,7 +2193,8 @@ pub(crate) enum Cmd {
         /// mirror of `--from-kind`.
         #[arg(long = "to-kind", value_enum)]
         to_kind: Option<FactKindFilter>,
-        /// Only keep hits whose file path contains this substring.
+        /// Only keep hits whose workspace-relative file path matches this text.
+        /// Explicit absolute paths are also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Only keep non-decl hits whose enclosing function matches
@@ -1933,21 +2256,22 @@ pub(crate) enum Cmd {
         /// pins a cluster of chains that share a tail.
         #[arg(long)]
         group: Option<String>,
-        /// Force structural call-graph flows with source bodies for
+        /// Request structural call-graph flows with source bodies for
         /// inspect hits. Bounded default inspect already renders code;
-        /// this flag forces graph-flow rendering for large/broad queries
-        /// that would otherwise stay on the syntax fast path.
+        /// this flag renders graph-flow evidence for large result sets
+        /// that would otherwise show syntax/index facts only. It does
+        /// not lower the resolver's exact/narrowed evidence contract.
         #[arg(long = "graph-flow", default_value_t = false)]
         graph_flow: bool,
         /// Explicit flag for raw taint-engine paths. Query/filter-scoped
         /// taint paths are shown by default unless `--syntax-only` is
-        /// set, but very large broad queries skip the default preview
+        /// set, but very large result sets skip the default preview
         /// for latency; this flag forces the bounded raw preview.
         #[arg(long = "taint-flow", default_value_t = false)]
         taint_flow: bool,
         /// Pure indexed syntax search: omit the default rulepack-free
-        /// taint paths. Useful for very broad exploratory searches
-        /// where flow context is not needed.
+        /// taint paths. This changes output scope only; it is not a
+        /// lower-accuracy analysis mode.
         #[arg(long = "syntax-only", default_value_t = false)]
         syntax_only: bool,
         /// Token-budget ceiling for rendered output. Paging unit is
@@ -2188,7 +2512,8 @@ pub(crate) enum Cmd {
         /// Limit the tree to the first N levels.
         #[arg(long)]
         max_depth: Option<usize>,
-        /// Substring match on file paths.
+        /// Workspace-relative file path filter. Explicit absolute paths are
+        /// also accepted.
         #[arg(long)]
         file: Option<String>,
         /// Exclude files whose paths contain this substring.
@@ -2393,12 +2718,14 @@ pub(crate) enum SecurityAction {
         /// `socket-input`, `token-input`, `ui-input`, `ws-input`.
         #[arg(long)]
         tag: Option<String>,
-        /// File-path include substring (repeatable). Keep only hits in
-        /// files whose path contains any of the given substrings.
+        /// File-path include filter (repeatable). Keep only hits in files
+        /// whose workspace-relative path matches any value. Explicit
+        /// absolute paths are also accepted.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable). Drop hits in files
-        /// whose path contains any of the given substrings.
+        /// File-path exclude filter (repeatable). Drop hits in files whose
+        /// workspace-relative path matches any value. Explicit absolute paths
+        /// are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Cap on rendered rows (mirrors `search --limit`). `0` =
@@ -2501,10 +2828,12 @@ pub(crate) enum SecurityAction {
         /// `template-render`.
         #[arg(long)]
         category: Option<String>,
-        /// File-path include substring (repeatable).
+        /// File-path include filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable).
+        /// File-path exclude filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Cap on rendered rows (`0` = uncapped).
@@ -2580,10 +2909,12 @@ pub(crate) enum SecurityAction {
         /// canonical family. Mirrors `sinks --category`.
         #[arg(long)]
         category: Option<String>,
-        /// File-path include substring (repeatable).
+        /// File-path include filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable).
+        /// File-path exclude filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Cap on rendered rows (`0` = uncapped).
@@ -2648,10 +2979,12 @@ pub(crate) enum SecurityAction {
         /// widen the filter).
         #[arg(long)]
         severity: Option<String>,
-        /// File-path include substring (repeatable).
+        /// File-path include filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable).
+        /// File-path exclude filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Cap on rendered rows (`0` = uncapped).
@@ -2697,8 +3030,8 @@ pub(crate) enum SecurityAction {
                       Mirrors `inspect` pagination — the paging unit is one \
                       finding block; each finding shows the source line, the \
                       sink line, the chain between them, and stable ids \
-                      (`S:` for the finding, `F:` for the flow, `G:` for the \
-                      flow group)."),
+                      (`S:` for the finding, `F:` for the security flow, \
+                      `G:` for the flow group)."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # High-severity findings only\n  \
                       $ bonsai-ninja security ./src taint-analysis --severity high\n  \
@@ -2742,6 +3075,14 @@ pub(crate) enum SecurityAction {
         /// Re-render only the finding with this stable `S:<hex>` id.
         #[arg(long)]
         finding: Option<String>,
+        /// Re-render only the security finding whose representative
+        /// taint-path flow id matches this stable `F:<hex>` id.
+        #[arg(long)]
+        flow: Option<String>,
+        /// Re-render only findings in this stable security flow group
+        /// (`G:<hex>` as printed by `security taint-analysis`).
+        #[arg(long)]
+        group: Option<String>,
         /// Source trust class narrower — `remote`, `local`, `service`,
         /// `ipc`, `database`, `library`, `config`, or `physical`.
         #[arg(long)]
@@ -2784,12 +3125,14 @@ pub(crate) enum SecurityAction {
         /// `web-llm`, `xss`, `xxe`, `zip-slip`.
         #[arg(long)]
         tag: Option<String>,
-        /// File-path include substring (repeatable). Analyze only
-        /// files whose path contains one of the given values.
+        /// File-path include filter (repeatable). Analyze only files whose
+        /// workspace-relative path matches one of the given values. Explicit
+        /// absolute paths are also accepted.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable). Exclude files
-        /// whose path contains one of the given values.
+        /// File-path exclude filter (repeatable). Exclude files whose
+        /// workspace-relative path matches one of the given values. Explicit
+        /// absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Opt in to inferred per-function entry-point sources. By
@@ -2963,11 +3306,13 @@ pub(crate) enum SecurityAction {
         /// inferred entry-point seed (see `--inferred-sources`).
         #[arg(long)]
         category: Option<String>,
-        /// File-path include substring (repeatable). Keep only source
-        /// seeds in files whose path contains any of the given substrings.
+        /// File-path include filter (repeatable). Keep only source seeds in
+        /// files whose workspace-relative path matches any value. Explicit
+        /// absolute paths are also accepted.
         #[arg(long = "file")]
         files: Vec<String>,
-        /// File-path exclude substring (repeatable).
+        /// File-path exclude filter (repeatable). Match workspace-relative
+        /// paths; explicit absolute paths are also accepted.
         #[arg(long = "exclude-file")]
         exclude_files: Vec<String>,
         /// Opt in to inferred per-function entry-point sources. Off by
@@ -3160,7 +3505,7 @@ pub(crate) enum CacheAction {
                       # Wipe every sidecar under .bonsai/\n  \
                       $ bonsai-ninja cache clear ./src\n  \
                       \n  \
-                      # Keep other sidecars, only drop the taint cache\n  \
+                      # Keep other sidecars, only drop the dataflow cache\n  \
                       $ bonsai-ninja cache clear ./src --dataflow-only")
     )]
     Clear {

@@ -2,19 +2,23 @@
 //!
 //! This command deliberately delegates to the owning renderer for each
 //! id family instead of re-implementing flow/finding formatting:
-//! F/G/T -> inspect, E -> dump-edges, N -> dump-ast, R -> dump-resolve,
-//! S -> security taint-analysis.
+//! F/G/raw-inspect T -> inspect, structured dump-taint T -> dump-taint,
+//! E -> dump-edges, N -> dump-ast, R -> dump-resolve, S/security G ->
+//! security taint-analysis. SDK structural-chain fallback is used only
+//! for structural F/G ids that the SDK exposes but the downstream
+//! inspect renderer does not print for the same query shape.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::args::{BrowseFormat, InspectView, OutputPathArg, SecurityAction};
+use crate::cli_println;
 use crate::paging;
 
 use super::{
-    cmd_dump_ast, cmd_dump_edges, cmd_dump_resolve, cmd_inspect, paging_from_cli, InspectCommandOptions,
-    InspectFilters, InspectRenderOptions,
+    cmd_dump_ast, cmd_dump_edges, cmd_dump_resolve, cmd_dump_taint, cmd_inspect, open_project_index_only,
+    paging_from_cli, InspectCommandOptions, InspectFilters, InspectRenderOptions,
 };
 
 pub(crate) struct ShowArgs<'a> {
@@ -22,6 +26,12 @@ pub(crate) struct ShowArgs<'a> {
     pub(crate) id: &'a str,
     pub(crate) query: Option<&'a str>,
     pub(crate) in_file: Option<&'a str>,
+    pub(crate) taint_source: Option<&'a str>,
+    pub(crate) taint_seeds: &'a [String],
+    pub(crate) taint_sanitizers: &'a [String],
+    pub(crate) taint_sink: Option<&'a str>,
+    pub(crate) taint_budget: Option<u32>,
+    pub(crate) taint_intra_worklist_cap: Option<u32>,
     pub(crate) compact: bool,
     pub(crate) context: Option<&'a str>,
     pub(crate) page: Option<&'a str>,
@@ -33,9 +43,16 @@ pub(crate) struct ShowArgs<'a> {
 pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
     let id = args.id.trim();
     let paging_cfg = paging_from_cli(args.context, args.page, args.all, args.format)?;
-    match id_prefix(id)? {
-        "F" => show_structural_flow(args.workspace, id, args.compact, paging_cfg, args.format),
-        "G" => show_flow_group(args.workspace, id, args.compact, paging_cfg, args.format),
+    let prefix = id_prefix(id)?;
+    if prefix != "T" && args.has_dump_taint_context() {
+        anyhow::bail!(
+            "dump-taint show options (`--taint-source`, `--taint-seed`, `--taint-sanitizer`, `--taint-sink`, `--taint-budget`, `--taint-intra-worklist-cap`) only apply to T: ids"
+        );
+    }
+    match prefix {
+        "F" => show_structural_or_security_flow(&args, id, paging_cfg),
+        "G" => show_structural_or_security_group(&args, id, paging_cfg),
+        "T" if args.has_dump_taint_context() => show_dump_taint_propagation(args, id, paging_cfg),
         "T" => show_raw_taint_flow(args.workspace, id, args.compact, paging_cfg, args.format),
         "E" => cmd_dump_edges(
             args.workspace,
@@ -79,6 +96,17 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
     }
 }
 
+impl ShowArgs<'_> {
+    fn has_dump_taint_context(&self) -> bool {
+        self.taint_source.is_some()
+            || !self.taint_seeds.is_empty()
+            || !self.taint_sanitizers.is_empty()
+            || self.taint_sink.is_some()
+            || self.taint_budget.is_some()
+            || self.taint_intra_worklist_cap.is_some()
+    }
+}
+
 fn show_structural_flow(
     workspace: &Path,
     id: &str,
@@ -109,6 +137,27 @@ fn show_structural_flow(
             format,
         },
     )
+}
+
+fn show_structural_or_security_flow(
+    args: &ShowArgs<'_>,
+    id: &str,
+    paging_cfg: paging::PagingConfig,
+) -> Result<()> {
+    match show_structural_flow(args.workspace, id, args.compact, paging_cfg.clone(), args.format) {
+        Ok(()) => Ok(()),
+        Err(err) if err.to_string().contains("no flow matching") => {
+            match show_sdk_structural_flow(args.workspace, id, args.format) {
+                Ok(()) => Ok(()),
+                Err(sdk_err) => show_security_flow(args, id).map_err(|security_err| {
+                    anyhow::anyhow!(
+                        "flow id `{id}` was not found by inspect render, SDK structural chains, or security taint flow: {err}; {sdk_err}; {security_err}"
+                    )
+                }),
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn show_flow_group(
@@ -143,6 +192,84 @@ fn show_flow_group(
     )
 }
 
+fn show_structural_or_security_group(
+    args: &ShowArgs<'_>,
+    id: &str,
+    paging_cfg: paging::PagingConfig,
+) -> Result<()> {
+    match show_flow_group(args.workspace, id, args.compact, paging_cfg.clone(), args.format) {
+        Ok(()) => Ok(()),
+        Err(err) if err.to_string().contains("no flow group matching") => {
+            match show_sdk_structural_group(args.workspace, id, args.format) {
+                Ok(()) => Ok(()),
+                Err(sdk_err) => show_security_group(args, id).map_err(|security_err| {
+                    anyhow::anyhow!(
+                        "group id `{id}` was not found by inspect render, SDK structural chains, or security taint group: {err}; {sdk_err}; {security_err}"
+                    )
+                }),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn show_sdk_structural_flow(workspace: &Path, id: &str, format: BrowseFormat) -> Result<()> {
+    let (project, _footer) = open_project_index_only(workspace)?;
+    match project.show().structural_flow(id)? {
+        bonsai_sdk::ShowOutcome::InspectFlow(flow) => emit_sdk_inspect_flow(&flow, format),
+        other => anyhow::bail!("SDK structural flow lookup returned unexpected outcome: {other:?}"),
+    }
+}
+
+fn show_sdk_structural_group(workspace: &Path, id: &str, format: BrowseFormat) -> Result<()> {
+    let (project, _footer) = open_project_index_only(workspace)?;
+    match project.show().flow_group(id)? {
+        bonsai_sdk::ShowOutcome::InspectFlowGroup(group) => emit_sdk_inspect_group(&group, format),
+        other => anyhow::bail!("SDK structural group lookup returned unexpected outcome: {other:?}"),
+    }
+}
+
+fn emit_sdk_inspect_flow(flow: &bonsai_sdk::InspectFlowShow, format: BrowseFormat) -> Result<()> {
+    match format {
+        BrowseFormat::Json | BrowseFormat::Sarif => {
+            cli_println!("{}", serde_json::to_string_pretty(flow)?);
+        }
+        BrowseFormat::Text => {
+            cli_println!("FLOW {}", flow.flow_id);
+            for matched in &flow.matches {
+                cli_println!(
+                    "{}  target={}  chain={}",
+                    matched.target_func_id,
+                    matched.target,
+                    matched.chain.names.join(" -> ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_sdk_inspect_group(group: &bonsai_sdk::InspectFlowGroupShow, format: BrowseFormat) -> Result<()> {
+    match format {
+        BrowseFormat::Json | BrowseFormat::Sarif => {
+            cli_println!("{}", serde_json::to_string_pretty(group)?);
+        }
+        BrowseFormat::Text => {
+            cli_println!("GROUP {}  {} match(es)", group.group_id, group.matches.len());
+            for matched in &group.matches {
+                cli_println!(
+                    "{}  target={}  group={}  members={}",
+                    matched.target_func_id,
+                    matched.target,
+                    matched.group.group_id,
+                    matched.group.member_flow_ids.join(", ")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn show_raw_taint_flow(
     workspace: &Path,
     id: &str,
@@ -175,6 +302,27 @@ fn show_raw_taint_flow(
     )
 }
 
+fn show_dump_taint_propagation(args: ShowArgs<'_>, id: &str, paging_cfg: paging::PagingConfig) -> Result<()> {
+    let Some(source) = args.taint_source else {
+        anyhow::bail!(
+            "`show {id}` with dump-taint filters needs `--taint-source <function>` because structured T: propagation ids are source-seeded"
+        );
+    };
+    cmd_dump_taint(
+        args.workspace,
+        source,
+        args.taint_seeds,
+        args.taint_sanitizers,
+        args.taint_sink,
+        args.taint_budget,
+        args.taint_intra_worklist_cap,
+        args.compact,
+        Some(id),
+        paging_cfg,
+        args.format,
+    )
+}
+
 fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
     super::security::cmd_security(
         args.workspace,
@@ -183,6 +331,84 @@ fn show_security_finding(args: ShowArgs<'_>, id: &str) -> Result<()> {
             profile: None,
             source: None,
             finding: Some(id.to_string()),
+            flow: None,
+            group: None,
+            trust: None,
+            category: None,
+            sink: None,
+            severity: None,
+            tag: None,
+            files: Vec::new(),
+            exclude_files: Vec::new(),
+            inferred_sources: false,
+            include_pattern_only: true,
+            exclude_tests: false,
+            show_sanitized: true,
+            taint_budget: None,
+            intra_worklist_cap: None,
+            context: args.context.map(str::to_string),
+            page: args.page.map(str::to_string),
+            all: args.all,
+            no_compact: !args.compact,
+            summary: false,
+            format: args.format,
+            baseline: None,
+            explain: false,
+            output: OutputPathArg {
+                output_path: Option::<PathBuf>::None,
+            },
+        },
+    )
+}
+
+fn show_security_flow(args: &ShowArgs<'_>, id: &str) -> Result<()> {
+    super::security::cmd_security(
+        args.workspace,
+        SecurityAction::TaintAnalysis {
+            rules_dir: args.rules_dir.map(Path::to_path_buf),
+            profile: None,
+            source: None,
+            finding: None,
+            flow: Some(id.to_string()),
+            group: None,
+            trust: None,
+            category: None,
+            sink: None,
+            severity: None,
+            tag: None,
+            files: Vec::new(),
+            exclude_files: Vec::new(),
+            inferred_sources: false,
+            include_pattern_only: true,
+            exclude_tests: false,
+            show_sanitized: true,
+            taint_budget: None,
+            intra_worklist_cap: None,
+            context: args.context.map(str::to_string),
+            page: args.page.map(str::to_string),
+            all: args.all,
+            no_compact: !args.compact,
+            summary: false,
+            format: args.format,
+            baseline: None,
+            explain: false,
+            output: OutputPathArg {
+                output_path: Option::<PathBuf>::None,
+            },
+        },
+    )
+}
+
+fn show_security_group(args: &ShowArgs<'_>, id: &str) -> Result<()> {
+    super::security::cmd_security(
+        args.workspace,
+        SecurityAction::TaintAnalysis {
+            rules_dir: args.rules_dir.map(Path::to_path_buf),
+            profile: None,
+            source: None,
+            finding: None,
+            flow: None,
+            group: Some(id.to_string()),
             trust: None,
             category: None,
             sink: None,

@@ -1478,7 +1478,7 @@ fn scala_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
         }
     }
     // Receiver = up-to-last-dot; call_name = full dotted form.
-    let last_dot = inner.rfind('.').unwrap();
+    let last_dot = inner.rfind('.')?;
     Some((inner[..last_dot].to_string(), inner.to_string()))
 }
 

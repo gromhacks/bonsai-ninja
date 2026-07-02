@@ -65,7 +65,7 @@ mod tests;
 
 pub use identifiers::{
     first_identifier_descendant, first_identifier_like_child, first_named_child, first_named_child_of_kind,
-    looks_like_bare_identifier, looks_like_identifier,
+    looks_like_bare_identifier, looks_like_identifier, looks_like_literal_value,
 };
 pub use param_extraction::extract_param_annotations;
 pub use return_extraction::{
@@ -2947,12 +2947,13 @@ fn span_contains(outer: Span, inner: Span) -> bool {
 fn tail_expression_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
     if looks_like_identifier(node.kind()) {
         let text = node_text(node, src).trim().to_string();
-        if !text.is_empty() {
+        if !text.is_empty() && !looks_like_literal_value(node.kind(), &text) {
             return Some(text);
         }
     }
     let text = node_text(node, src).trim();
-    looks_like_bare_identifier(text).then(|| text.to_string())
+    (looks_like_bare_identifier(text) && !looks_like_literal_value(node.kind(), text))
+        .then(|| text.to_string())
 }
 
 /// Walk a method-chain receiver subtree looking for nested
@@ -6531,11 +6532,17 @@ fn collect_receiver_state_source_name(
 
 pub(crate) fn argument_place(node: &Node<'_>, src: &[u8]) -> Option<String> {
     let text = normalize_call_name_whitespace(node_text(node, src));
+    if looks_like_literal_value(node.kind(), &text) {
+        return None;
+    }
     if !text.is_empty() && argument_node_is_place(node, text.as_str()) && qualified_place_text(&text) {
         return Some(normalise_qualified_text(&text));
     }
     if let Some(value) = node.child_by_field_name("value") {
         let text = normalize_call_name_whitespace(node_text(&value, src));
+        if looks_like_literal_value(value.kind(), &text) {
+            return None;
+        }
         if !text.is_empty() && argument_node_is_place(&value, text.as_str()) {
             return Some(normalise_qualified_text(&text));
         }
@@ -6551,6 +6558,9 @@ fn qualified_place_text(text: &str) -> bool {
 }
 
 fn argument_node_is_place(node: &Node<'_>, text: &str) -> bool {
+    if looks_like_literal_value(node.kind(), text) {
+        return false;
+    }
     if looks_like_bare_identifier(text) {
         return true;
     }
@@ -6841,6 +6851,9 @@ pub fn extract_decorators(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) ->
     ];
     let mut out = Vec::new();
     for node in collect_kinds(tree, DECORATOR_KINDS) {
+        if !decorator_node_is_marker_syntax(&node, src) {
+            continue;
+        }
         // Prefer a named-field lookup for the decorator's target name.
         let name_node = node
             .child_by_field_name("name")
@@ -6863,6 +6876,27 @@ pub fn extract_decorators(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) ->
         });
     }
     out
+}
+
+fn decorator_node_is_marker_syntax(node: &Node<'_>, src: &[u8]) -> bool {
+    match node.kind() {
+        // Python uses `attribute` for normal member access
+        // (`pickle.loads`), while Swift and several annotation
+        // grammars also use it for real `@objc`-style attributes.
+        // Keep generic `attribute` support, but only when the node is
+        // visibly marker syntax or lives under a real attribute list.
+        "attribute" => {
+            let raw = node_text(node, src);
+            let trimmed = raw.trim_start();
+            trimmed.starts_with('@')
+                || trimmed.starts_with("#[")
+                || trimmed.starts_with("[[")
+                || node
+                    .parent()
+                    .is_some_and(|parent| matches!(parent.kind(), "attribute_list" | "attribute_item"))
+        }
+        _ => true,
+    }
 }
 
 /// Scan the tree for import-like statements across common grammars. The
@@ -7533,6 +7567,10 @@ const MACRO_DEFINITION_NAMES: &[&str] = &[
 pub fn extract_call_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> Vec<crate::Ref> {
     let mut out = Vec::new();
     for node in collect_kinds(tree, COMMON_CALL_KINDS) {
+        if erlang_remote_is_call_expr(&node) {
+            continue;
+        }
+        let erlang_call = erlang_call_callee(&node, src);
         let erlang_remote = erlang_remote_callee(&node, src);
         // Prefer the named expression-like child that names the callee.
         // For dotted calls (`req.getParameter(...)`, `foo.bar.baz(...)`)
@@ -7544,6 +7582,7 @@ pub fn extract_call_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> 
         let callee_node = node
             .child_by_field_name("function")
             .or_else(|| node.child_by_field_name("callee"))
+            .or_else(|| erlang_call.as_ref().map(|(n, _)| *n))
             .or_else(|| erlang_remote.as_ref().map(|(n, _)| *n))
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| first_callee_expression_child(&node))
@@ -7562,6 +7601,7 @@ pub fn extract_call_refs(tree: &tree_sitter::Tree, file: FileId, src: &[u8]) -> 
         // regex.
         let mut inner_name = erlang_remote
             .as_ref()
+            .or(erlang_call.as_ref())
             .map(|(_, name)| normalize_call_name_whitespace(name))
             .unwrap_or_else(|| normalize_call_name_whitespace(node_text(&callee, src)));
         if node.kind() == "macro_invocation" && !inner_name.ends_with('!') {
@@ -9886,6 +9926,42 @@ fn first_callee_expression_child<'tree>(node: &Node<'tree>) -> Option<Node<'tree
         }
     }
     None
+}
+
+fn erlang_call_callee<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let expr = node.child_by_field_name("expr")?;
+    if let Some((callee_node, name)) = erlang_remote_callee(&expr, src) {
+        return Some((callee_node, name));
+    }
+    let callee_node = expr
+        .child_by_field_name("expr")
+        .or_else(|| expr.child_by_field_name("name"))
+        .or_else(|| first_identifier_like_child(&expr))
+        .or_else(|| first_identifier_descendant(expr))
+        .unwrap_or(expr);
+    let name = node_text(&callee_node, src).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((callee_node, name))
+}
+
+fn erlang_remote_is_call_expr(node: &Node<'_>) -> bool {
+    if node.kind() != "remote" {
+        return false;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if parent.kind() != "call" {
+        return false;
+    }
+    parent
+        .child_by_field_name("expr")
+        .is_some_and(|expr| expr.id() == node.id())
 }
 
 fn erlang_remote_callee<'tree>(node: &Node<'tree>, src: &[u8]) -> Option<(Node<'tree>, String)> {

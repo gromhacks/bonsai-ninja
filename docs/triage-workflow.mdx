@@ -60,13 +60,14 @@ Prefer rule fixes over suppressions. When a project needs local policy, disable 
 | ID | Meaning | Use |
 |---|---|---|
 | `S:` | Stable finding ID | Cross-run dedupe and triage tracking. |
-| `F:` | Stable flow ID | Re-render a specific path with `inspect --flow`. |
-| `G:` | Stable group ID | Re-render a group of flows sharing a tail. |
+| `F:` | Stable flow ID | Re-render a security taint path with `show F:...` or `security taint-analysis --flow`; use `inspect --flow` only for structural inspect flow IDs. |
+| `G:` | Stable group ID | Re-render a structural group with `show G:...` / `inspect --group`, or a security taint group with `show G:...` / `security taint-analysis --group`. |
 | `T:` | Taint propagation record ID | Debug propagation with `dump-taint`. |
 
 ## Re-Run
 
 ```bash
 bonsai-ninja security ./src taint-analysis --format json --all > after.json
-bonsai-ninja inspect ./src --query os.system --flow F:0123456789abcdef
+bonsai-ninja security ./src taint-analysis --flow F:0123456789abcdef
+bonsai-ninja show ./src F:0123456789abcdef
 ```

@@ -231,7 +231,7 @@ impl<'a> TraceBuilder<'a> {
         self.emit(
             StepKind::Return,
             func,
-            decl.body_span.unwrap_or(decl.span),
+            decl.name_span,
             Precision::Exact,
             format!("Exit {}", decl.name),
         );
@@ -364,6 +364,7 @@ impl<'a> TraceBuilder<'a> {
                 target,
                 source_name,
                 source_call,
+                source_call_args,
                 source_names,
                 ..
             } => {
@@ -401,7 +402,14 @@ impl<'a> TraceBuilder<'a> {
                     func,
                     *span,
                     Precision::Exact,
-                    format!("Assign {target}"),
+                    assignment_trace_message(
+                        "Assign",
+                        target,
+                        source_name.as_deref(),
+                        source_call.as_deref(),
+                        source_call_args,
+                        source_names,
+                    ),
                 )
             }
             FlowEvent::Return { span, .. } => {
@@ -926,6 +934,46 @@ fn types_from_decl(decl: &Decl) -> AHashMap<String, String> {
         .iter()
         .map(|alias| (alias.name.clone(), alias.type_name.clone()))
         .collect()
+}
+
+fn assignment_trace_message(
+    prefix: &str,
+    target: &str,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+) -> String {
+    let rhs = assignment_trace_rhs(source_name, source_call, source_call_args, source_names);
+    match rhs {
+        Some(rhs) => format!("{prefix} {target} = {rhs}"),
+        None => format!("{prefix} {target}"),
+    }
+}
+
+fn assignment_trace_rhs(
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+) -> Option<String> {
+    if let Some(name) = source_name.map(str::trim).filter(|name| !name.is_empty()) {
+        return Some(name.to_string());
+    }
+    if let Some(call) = source_call.map(str::trim).filter(|call| !call.is_empty()) {
+        return Some(if source_call_args.is_empty() {
+            format!("{call}()")
+        } else {
+            format!("{call}({})", source_call_args.join(", "))
+        });
+    }
+    if !source_names.is_empty() {
+        return Some(source_names.join(" + "));
+    }
+    if !source_call_args.is_empty() {
+        return Some(source_call_args.join(", "));
+    }
+    None
 }
 
 fn declares_type_alias(decl: Option<&Decl>, target: &str) -> bool {

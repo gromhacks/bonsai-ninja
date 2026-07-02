@@ -19,6 +19,17 @@ artifacts. For LLM-readable text use `--no-color --no-progress
 For save-time workflows, keep `index <workspace> --watch --no-progress`
 running; command and SDK facades refresh saved file changes before they
 render.
+`index <workspace>` is the syntax/construct warm-up path: it parses source
+and builds declaration/import indexes without forcing a whole-workspace
+semantic prewarm. Use `index <workspace> --semantic` only when you
+intentionally want structural semantic sidecars and
+`.bonsai/manifest.json` built up front; commands still validate sidecar
+headers/payloads before reuse and compute requested exact facts on demand.
+Retrieval is candidate lookup only: search and literal-filtered browse can
+reuse a fresh sidecar before candidate lookup, and large-workspace inspect can
+use a warmed sidecar only before opening a scoped workspace. Rendered facts
+still hydrate through canonical APIs, and scoped query workspaces do not
+publish partial retrieval sidecars under the full workspace cache.
 
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor
@@ -31,8 +42,13 @@ Start with shape, then follow one concrete behavior.
 
 ```shell
 ./target/release/bonsai-ninja index <workspace> --no-progress
+# Optional explicit semantic sidecar prewarm:
+./target/release/bonsai-ninja index <workspace> --semantic --no-progress
+# Explicit spelling for default syntax/construct indexing:
+./target/release/bonsai-ninja index <workspace> --structural-only --no-progress
 # Optional during active editing:
 ./target/release/bonsai-ninja index <workspace> --watch --no-progress
+./target/release/bonsai-ninja context <workspace> --no-color --no-progress
 ./target/release/bonsai-ninja tree <workspace> --max-depth 3 --compact --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja imports <workspace> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja defs <workspace> --kind function --context 16k --no-color --no-progress
@@ -63,12 +79,15 @@ Understand behavior:
 
 `inspect` is rulepack-free by default: targeted queries include bounded
 raw taint paths and source-body flow evidence that contain the query. Use
-`--syntax-only` for pure indexed facts, `--taint-flow` to force raw taint
-paths on broad queries, and `--graph-flow` to force structural
-source-body evidence on large or broad queries that would otherwise stay
-on the syntax fast path. Inspect raw taint paths go through the workspace
-syntax-flow facade: a warmed IDG target cut is used only when already
-available, otherwise the canonical cached dataflow graph is used.
+`--syntax-only` when you deliberately want indexed facts without flow
+evidence, `--taint-flow` to request bounded raw taint paths for large
+result sets, and `--graph-flow` to request structural source-body
+evidence for large result sets that would otherwise render syntax/index
+facts only. These flags change output scope, not analysis accuracy:
+emitted graph facts still use the exact/narrowed static evidence
+contract. Inspect raw taint paths go through the workspace syntax-flow
+facade: a warmed IDG target cut is used only when already available,
+otherwise the canonical cached dataflow graph is used.
 
 Record understanding as:
 
@@ -123,7 +142,9 @@ tests, specs, fixtures, mocks, samples, examples, demos, e2e/integration
 harnesses, vendored deps, package caches, build outputs, generated code,
 docs, scripts, deploy files, migrations, and language-specific test
 layouts. Use `--exclude-tests` alone when you want only the narrower
-test-path filter.
+test-path filter. Security file and profile filters are workspace-relative:
+an ancestor directory outside the selected workspace does not make the
+workspace generated, vendored, or test code.
 
 Inventory when needed:
 
@@ -140,11 +161,18 @@ Filter findings by rule class:
 ./target/release/bonsai-ninja security <workspace> taint-analysis --trust remote --severity high --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis --tag command-injection --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis --source <source-rule> --sink <sink-rule> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> taint-analysis --flow F:<id> --context 16k --no-color --no-progress
+./target/release/bonsai-ninja security <workspace> taint-analysis --group G:<id> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja security <workspace> taint-analysis --format sarif --no-color --no-progress > findings.sarif.json
 ```
 
-For each issue, cite `S:` finding id, `F:` flow id, source line, sink
+For each issue, cite `S:` finding id, `F:` flow id, `G:` group id, source line, sink
 line, sanitizer status, and the exact page/cursor coverage reviewed.
+Security `F:` ids are taint-path flow ids and security `G:` ids are
+taint-path group ids; reopen them with `show F:<id>` / `show G:<id>` or
+`security taint-analysis --flow F:<id>` / `--group G:<id>`. Use
+`inspect --flow` / `inspect --group` for structural ids printed by
+code-navigation commands.
 
 Solidity is a smart-contract security pack, not an app/web taint parity
 language. Treat its findings as on-chain hazards such as reentrancy,

@@ -146,6 +146,96 @@ fn idg_sidecar_written_on_open_then_reloaded_on_reopen() {
 }
 
 #[test]
+fn scoped_literal_workspace_does_not_write_whole_workspace_idg_sidecar() {
+    let tmp = std::env::temp_dir().join(format!(
+        "bonsai-idg-scoped-sidecar-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp dir");
+    write_file(
+        &tmp,
+        "app.py",
+        "# needle\ndef f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n",
+    );
+    write_file(&tmp, "other.py", "def skipped(y):\n    return y\n");
+
+    let ws = Workspace::open_query_matching_literal(&tmp, registry(), "needle")
+        .expect("open scoped literal workspace");
+    assert!(
+        !ws.is_complete_workspace_index(),
+        "literal query workspace should be marked incomplete"
+    );
+    assert!(
+        ws.build_and_seed_persisted_idg_service().is_none(),
+        "scoped workspace should not prewarm a persisted whole-workspace IDG"
+    );
+
+    let service = ws.build_and_seed_idg_service();
+    assert!(
+        service.intra_edge_count() > 0,
+        "scoped queries may still build an in-memory IDG for the current run"
+    );
+    let sidecar = bonsai_workspace::idg_sidecar_path(&tmp);
+    assert!(
+        !sidecar.exists(),
+        "scoped workspace must not publish {}",
+        sidecar.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn query_open_hydrates_existing_idg_sidecar_without_full_prewarm() {
+    let tmp = std::env::temp_dir().join(format!(
+        "bonsai-idg-query-hydrate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp dir");
+    write_file(
+        &tmp,
+        "app.py",
+        "def f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n",
+    );
+
+    let cold = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::query_only())
+        .expect("cold query open");
+    assert!(
+        cold.db().idg_service().is_none(),
+        "query open must not build IDG when no sidecar exists"
+    );
+    drop(cold);
+
+    let indexed = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
+        .expect("full prewarm open");
+    let indexed_service = indexed.db().idg_service().expect("full prewarm should seed IDG");
+    let expected_segments = indexed_service.segment_count();
+    let expected_edges = indexed_service.intra_edge_count();
+    drop(indexed);
+
+    let query = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::query_only())
+        .expect("query open after sidecar");
+    let service = query
+        .db()
+        .idg_service()
+        .expect("query open should hydrate existing IDG sidecar");
+    assert_eq!(service.segment_count(), expected_segments);
+    assert_eq!(service.intra_edge_count(), expected_edges);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn idg_sidecar_invalidated_on_out_of_band_file_change() {
     // Stress the content-fingerprint check: open the workspace, let
     // it write a sidecar against the original `app.py`, then mutate

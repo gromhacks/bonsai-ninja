@@ -24,7 +24,7 @@ use tree_sitter::Node;
 
 use super::{
     first_identifier_descendant, first_identifier_like_child, looks_like_bare_identifier,
-    looks_like_identifier, node_text,
+    looks_like_identifier, looks_like_literal_value, node_text,
 };
 
 /// Extract the single value-bearing identifier of the value being
@@ -32,18 +32,25 @@ use super::{
 /// `return x` and `return `${x}`` → `Some("x")`; multi-operand
 /// expressions such as `return x + y` remain `None`.
 pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    // Try the textual fallback first — works on grammars that don't
-    // expose a value field at all.
-    if let Some(value_text) = return_statement_value_text(node, src) {
-        if looks_like_bare_identifier(&value_text) {
-            return Some(value_text);
-        }
-    }
-    let value_node = return_value_node(node)?;
+    let Some(value_node) = return_value_node(node) else {
+        // Text fallback is only for grammars that expose no value node.
+        // When a grammar gives us structured syntax, trust it: literal
+        // nodes such as Python `none` / JS `null` must not be promoted
+        // to value-bearing identifiers just because their text is a
+        // bare word.
+        return return_statement_value_text(node, src).and_then(|value_text| {
+            (looks_like_bare_identifier(&value_text) && !looks_like_literal_value(node.kind(), &value_text))
+                .then_some(value_text)
+        });
+    };
     let value_kind = value_node.kind();
     // Direct identifier — most languages parse `return x` this way.
     if looks_like_identifier(value_kind) {
-        return Some(node_text(&value_node, src).trim().to_string());
+        let text = node_text(&value_node, src).trim().to_string();
+        if !looks_like_literal_value(value_kind, &text) {
+            return Some(text);
+        }
+        return None;
     }
     // Some grammars wrap the value in a single-expression container
     // with no sibling type node — the lone identifier child is the

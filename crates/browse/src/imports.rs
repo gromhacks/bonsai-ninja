@@ -6,7 +6,10 @@
 //! dedicated import index, so coverage is uniform across the
 //! supported languages.
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{
+    best_textual_relevance_key, file_path_matches_filter, format_span, make_name_filter,
+    textual_relevance_key,
+};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -394,7 +397,9 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
                 .path(file_id)
                 .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
             let mut per_file: Vec<ImportOut> = Vec::new();
-            if f.file.is_some_and(|needle| !path.contains(needle)) {
+            if f.file
+                .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
+            {
                 return per_file.into_iter();
             }
             let pairs: Vec<bonsai_lang_api::ImportSpec> = ws.db().imports_for(file_id);
@@ -509,12 +514,41 @@ pub fn imports(ws: &Workspace, f: &ImportsFilters<'_>) -> Result<Vec<ImportOut>,
     // named list), then alphabetical by module, then by file/line to
     // stabilise ties.
     out.sort_by(|a, b| {
-        a.is_wildcard
-            .cmp(&b.is_wildcard)
-            .then_with(|| a.module.cmp(&b.module))
-            .then_with(|| a.alias.cmp(&b.alias))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
+        import_relevance_key(a, f)
+            .cmp(&import_relevance_key(b, f))
+            .then_with(|| {
+                a.is_wildcard
+                    .cmp(&b.is_wildcard)
+                    .then_with(|| a.module.cmp(&b.module))
+                    .then_with(|| a.alias.cmp(&b.alias))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+            })
     });
     Ok(out)
+}
+
+fn import_relevance_key(row: &ImportOut, f: &ImportsFilters<'_>) -> ((u8, usize), (u8, usize)) {
+    let module = f
+        .module
+        .filter(|_| !f.regex)
+        .map_or((u8::MAX, usize::MAX), |module| {
+            best_textual_relevance_key(
+                [
+                    Some(row.module.as_str()),
+                    row.original_name.as_deref(),
+                    row.alias.as_deref(),
+                ]
+                .into_iter()
+                .flatten(),
+                Some(module),
+                false,
+            )
+        });
+    let alias = f.alias.map_or((u8::MAX, usize::MAX), |alias| {
+        row.alias.as_deref().map_or((u8::MAX, usize::MAX), |value| {
+            textual_relevance_key(value, Some(alias), false)
+        })
+    });
+    (module, alias)
 }

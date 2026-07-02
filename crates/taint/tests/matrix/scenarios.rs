@@ -325,7 +325,7 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "X_07",
         category: Category::CrossFile,
         polarity: Polarity::Positive,
-        description: "Star import (from x import *)",
+        description: "Wildcard import/load exposes bare symbol",
     },
     Scenario {
         id: "X_08",

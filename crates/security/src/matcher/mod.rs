@@ -14,7 +14,7 @@ use bonsai_lang_api::{
     TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
-use bonsai_workspace::Workspace;
+use bonsai_workspace::{decl_decorator_names, receiver_field_target, Workspace};
 use regex::Regex;
 use std::{
     cell::RefCell,
@@ -917,8 +917,9 @@ where
         AHashSet::new()
     };
     if let Some(started) = constructor_started {
-        eprintln!(
-            "[security-phase] matcher constructor prepass: {:.3}s files={} names={}",
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "matcher constructor prepass: {:.3}s files={} names={}",
             started.elapsed().as_secs_f64(),
             constructor_files.len(),
             constructor_names.len()
@@ -1102,7 +1103,10 @@ where
                     Ok(()) => {
                         completed += 1;
                         if debug_security_phase && completed % 5_000 == 0 {
-                            eprintln!("[security-phase] matcher scan progress: {completed}/{total}");
+                            bonsai_diagnostics::debug_log!(
+                                "security-phase",
+                                "matcher scan progress: {completed}/{total}"
+                            );
                         }
                         on_file_done();
                     }
@@ -1112,8 +1116,9 @@ where
             match worker.join() {
                 Ok(out) => {
                     if debug_security_phase {
-                        eprintln!(
-                            "[security-phase] matcher scan stats: files={} parsed={} text_skipped={} matches={}",
+                        bonsai_diagnostics::debug_log!(
+                            "security-phase",
+                            "matcher scan stats: files={} parsed={} text_skipped={} matches={}",
                             total,
                             parsed_files.load(Ordering::Relaxed),
                             text_skipped_files.load(Ordering::Relaxed),
@@ -2623,7 +2628,7 @@ fn scan_params_batch(
     );
     let alias_map = file_alias_map_with_retention(ws, file, retention);
     for decl in &file_index.defs {
-        let decl_decorators = collect_decl_decorator_names(ws, file, file_index, decl.name_span);
+        let decl_decorators = decl_decorator_names(ws, file, file_index, decl.span, decl.name_span);
         for (idx, param) in decl.params.iter().enumerate() {
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
@@ -4340,11 +4345,11 @@ struct FileDeclFactsBundle {
 // folded into the cache key's `content_hash`. Two workspaces that
 // open byte-identical files share the cache hit (correct).
 //
-// Note: `collect_decl_decorator_names` consults `ws` to walk the
-// adapter for decorator extraction. The workspace handle leaves
-// no state in the cached bundle other than what's derived from
-// `decl.flow_events` + content_hash, so two workspaces with
-// byte-identical files produce byte-identical bundles.
+// Note: `decl_decorator_names` consults `ws` only for source text
+// needed to attach file-level decorator refs to declaration spans.
+// The workspace handle leaves no state in the cached bundle other
+// than what's derived from adapter facts + content_hash, so two
+// workspaces with byte-identical files produce byte-identical bundles.
 /// Rulepack-declared factory-method return types. A rule with
 /// `returns_type: Cursor` whose structured callee names a method
 /// (`name: cursor` or `attribute: [Connection, cursor]`) declares that
@@ -4669,7 +4674,7 @@ fn build_decl_match_facts_bundle(
             extend_alias_map_with_declared_types(&mut alias_map, &factory_type_aliases);
         }
         let receiver_counts = receiver_method_call_counts(&calls);
-        let decl_decorators = collect_decl_decorator_names(ws, file, file_index, decl.name_span);
+        let decl_decorators = decl_decorator_names(ws, file, file_index, decl.span, decl.name_span);
         let alias_chains = collect_must_alias_pairs(&decl.flow_events);
         let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
         let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
@@ -5748,88 +5753,6 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
         }
     }
     false
-}
-
-/// Decorator name segments attached to `decl_span`, used by the
-/// `EnclosingDecoratorIn` constraint and Missing walker scoping.
-/// Each dotted segment is emitted so rules can match the framework-
-/// stable tail (`route`, `post`) regardless of receiver spelling.
-fn collect_decl_decorator_names(
-    ws: &Workspace,
-    file: FileId,
-    file_index: &DeclIndex,
-    decl_span: Span,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
-    for r in &file_index.refs {
-        if r.kind != RefKind::Decorator {
-            continue;
-        }
-        if r.span.end > decl_span.start {
-            continue;
-        }
-        // Mirror `detect_framework_decorator`: only count decorators
-        // sitting just before the decl head.
-        if decl_span.start.saturating_sub(r.span.end) > 512 {
-            continue;
-        }
-        if !decorator_is_attached_to_decl(ws, file, r.span, decl_span) {
-            continue;
-        }
-        for segment in decorator_name_segments(&r.name) {
-            if !out.contains(&segment) {
-                out.push(segment);
-            }
-        }
-        // Some grammars expose only the leftmost identifier as the
-        // ref name (Python `@app.route` → "app"). Splice the source
-        // span to recover the dotted callee.
-        if let Some(text) = source_text.as_deref() {
-            let start = r.span.start as usize;
-            let end = r.span.end as usize;
-            if let Some(raw) = (start < end).then(|| text.get(start..end)).flatten() {
-                let head = raw
-                    .trim_start_matches('@')
-                    .split(|c: char| c == '(' || c.is_whitespace())
-                    .next()
-                    .unwrap_or("")
-                    .trim_end_matches(',');
-                for segment in decorator_name_segments(head) {
-                    if !out.contains(&segment) {
-                        out.push(segment);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Split a qualified decorator name into its segments.
-/// `app.route` → `["app.route", "app", "route"]`. The full form
-/// is kept first so exact-match rules still hit.
-fn decorator_name_segments(raw: &str) -> Vec<String> {
-    let trimmed = raw.trim().trim_start_matches('@').trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-    let mut segments: Vec<String> = vec![trimmed.to_string()];
-    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
-        if !trimmed.contains(sep) {
-            continue;
-        }
-        for part in trimmed.split(sep) {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            if !segments.iter().any(|existing| existing == part) {
-                segments.push(part.to_string());
-            }
-        }
-    }
-    segments
 }
 
 /// Intra-procedural must-alias map for the `MustAlias` constraint.
@@ -7604,7 +7527,7 @@ where
     );
 
     // G3 cross-method field-taint: build a per-class set of
-    // qualified field writes sourced from that method's params
+    // receiver-field writes sourced from that method's params
     // (`this.cmd = token` / `self.cmd = x`). Every sibling method
     // of the class inherits those fields as synthetic sources so
     // `constructor(t) { this.cmd = t }` + `run() { sink(this.cmd) }`
@@ -7639,7 +7562,7 @@ where
             }
             scanned_decls = scanned_decls.saturating_add(1);
             let has_callers = callees_seen.contains(&decl.symbol);
-            let decorator_kind = detect_framework_decorator(&decl.name, ws, file, decl.name_span);
+            let decorator_kind = detect_framework_decorator(ws, file, decl.span, decl.name_span);
             // Entry-point heuristic:
             //   - has a framework decorator → definitely entry
             //   - OR has no in-workspace caller AND is top-level / public
@@ -7673,10 +7596,10 @@ where
                 }
             }
 
-            // G3 cross-method: if this method's class has any field
+            // G3 cross-method: if this method's class has any receiver-field
             // writes sourced from a param (recorded in
             // class_field_writes), emit a synthetic source for the
-            // qualified field name inside this method. Class membership
+            // receiver-field name inside this method. Class membership
             // must come from adapter-emitted `Decl.parent`; the matcher
             // does not recover ownership from source-span containment.
             let class_symbol = decl.parent;
@@ -7791,8 +7714,9 @@ fn log_inferred_subphase(
     let Some(started) = started else {
         return;
     };
-    eprintln!(
-        "[security-phase] inferred {label}: {:.3}s {args}",
+    bonsai_diagnostics::debug_log!(
+        "security-phase",
+        "inferred {label}: {:.3}s {args}",
         started.elapsed().as_secs_f64()
     );
 }
@@ -7880,9 +7804,9 @@ fn flow_read_token_span(events: &[FlowEvent], token: &str) -> Option<Span> {
     None
 }
 
-/// Scan every class's methods for `Assign { target: qualified_field_name,
+/// Scan every class's methods for `Assign { target: receiver_field_name,
 /// source: this-method's param }` writes. Returns a map
-/// `class_symbol → set of qualified field names` so sibling methods
+/// `class_symbol → set of receiver-field names` so sibling methods
 /// can inherit field taint (G3 cross-method field-taint).
 ///
 /// Class→method relationship is semantic: adapters populate
@@ -7969,21 +7893,6 @@ fn collect_receiver_field_writes_from_events(
     }
 }
 
-/// True when `target` looks like a write to a receiver field —
-/// `this.x`, `self.x`, `$this->x`, `@x`, or any qualified target with
-/// `.` / `->`. Used by class-field-taint inheritance to decide which
-/// assignments establish a class-level taint binding.
-fn receiver_field_target(target: &str) -> bool {
-    let target = target.trim();
-    target.starts_with("this.")
-        || target.starts_with("self.")
-        || target.starts_with("$this->")
-        || target.starts_with('@')
-        || target.starts_with("this->")
-        || target.contains('.')
-        || target.contains("->")
-}
-
 /// True when `name` matches one of the formal parameters of the
 /// enclosing method. Sigil-tolerant (Perl `$x`, Rust `&x`, C `*x`)
 /// because adapters surface params in their declared form but
@@ -8029,76 +7938,15 @@ impl EntryKind {
 /// belong in the rulepack or language adapters; this inference layer
 /// only uses the structural fact that the parser found a decorator.
 fn detect_framework_decorator(
-    _decl_name: &str,
     ws: &Workspace,
     file: FileId,
     decl_span: Span,
+    decl_name_span: Span,
 ) -> Option<EntryKind> {
     let global = ws.db().global_index();
     let idx = global.file_index(file)?;
-    for r in &idx.refs {
-        if r.kind != RefKind::Decorator {
-            continue;
-        }
-        // Decorator refs span the whole decorator; they must sit
-        // shortly before the decl's name_span.
-        if r.span.end > decl_span.start {
-            continue;
-        }
-        if decl_span.start.saturating_sub(r.span.end) > 512 {
-            // Too far before the decl — unrelated decorator.
-            continue;
-        }
-        if !decorator_is_attached_to_decl(ws, file, r.span, decl_span) {
-            continue;
-        }
-        return Some(EntryKind::Decorator);
-    }
-    None
-}
-
-fn decorator_is_attached_to_decl(
-    ws: &Workspace,
-    file: FileId,
-    decorator_span: Span,
-    decl_span: Span,
-) -> bool {
-    let Ok(snapshot) = ws.vfs().snapshot(file) else {
-        return true;
-    };
-    let text = snapshot.text.as_bytes();
-    if !decorator_line_has_marker(text, decorator_span) {
-        return false;
-    }
-    let start = decorator_span.end as usize;
-    let end = decl_span.start as usize;
-    if start >= end || end > text.len() {
-        return false;
-    }
-    let gap = &text[start..end];
-    !gap.iter().any(|b| {
-        matches!(*b, b'{' | b'}' | b';') || b.is_ascii_control() && *b != b'\n' && *b != b'\r' && *b != b'\t'
-    })
-}
-
-fn decorator_line_has_marker(text: &[u8], decorator_span: Span) -> bool {
-    let start = decorator_span.start as usize;
-    if start >= text.len() {
-        return false;
-    }
-    let line_start = text[..start]
-        .iter()
-        .rposition(|b| matches!(*b, b'\n' | b'\r'))
-        .map_or(0, |idx| idx + 1);
-    let line_end = text[start..]
-        .iter()
-        .position(|b| matches!(*b, b'\n' | b'\r'))
-        .map_or(text.len(), |idx| start + idx);
-    let line = &text[line_start..line_end];
-    line.iter()
-        .copied()
-        .find(|b| !matches!(*b, b' ' | b'\t'))
-        .is_some_and(|b| matches!(b, b'@' | b'['))
+    (!decl_decorator_names(ws, file, idx, decl_span, decl_name_span).is_empty())
+        .then_some(EntryKind::Decorator)
 }
 
 /// Walk assignment-only callable references that do not necessarily
@@ -8149,8 +7997,9 @@ fn collect_assignment_referenced_callable_symbols(
         }
     }
     if bonsai_diagnostics::debug::is_enabled("security-phase") {
-        eprintln!(
-            "[security-phase] inferred assignment refs detail: seen={} fast_hits={} skipped_simple={} skipped_qualified={} cache_hits={} fallback_resolves={} fallback_symbols={}",
+        bonsai_diagnostics::debug_log!(
+            "security-phase",
+            "inferred assignment refs detail: seen={} fast_hits={} skipped_simple={} skipped_qualified={} cache_hits={} fallback_resolves={} fallback_symbols={}",
             stats.seen,
             stats.fast_hits,
             stats.skipped_simple,
@@ -8172,7 +8021,10 @@ fn collect_assignment_referenced_callable_symbols(
                 .map(|(name, count)| format!("{name}:{count}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!("[security-phase] inferred assignment fallback names: {rendered}");
+            bonsai_diagnostics::debug_log!(
+                "security-phase",
+                "inferred assignment fallback names: {rendered}"
+            );
         }
     }
 }

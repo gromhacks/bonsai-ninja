@@ -133,6 +133,11 @@ fn args_deterministic_across_threads() {
 }
 
 #[test]
+fn operations_deterministic_across_threads() {
+    assert_deterministic(&["operations", "--format", "json"]);
+}
+
+#[test]
 fn classes_deterministic_across_threads() {
     assert_deterministic(&["classes", "--format", "json"]);
 }

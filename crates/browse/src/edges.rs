@@ -66,6 +66,9 @@ pub struct EdgesFilters<'a> {
 /// decl name spans. `kind` is `direct` / `virtual`; `precision` is
 /// `exact` / `narrowed` on public surfaces. Diagnostic-only internal
 /// classes are not emitted by default analysis/export commands.
+/// `resolver_stage` / `evidence` / `confidence` are forwarded from the
+/// shared resolver provenance on the call edge; the dump layer does not
+/// infer or rewrite them.
 #[derive(Serialize, Clone, Debug)]
 pub struct EdgeRecord {
     pub edge_id: String,
@@ -81,6 +84,9 @@ pub struct EdgeRecord {
     pub call_text: String,
     pub kind: String,
     pub precision: String,
+    pub resolver_stage: String,
+    pub evidence: String,
+    pub confidence: u8,
 }
 
 /// Stable content-hash id for one resolved call edge: `E:` + 8 hex
@@ -146,7 +152,7 @@ impl PrecisionClass {
     }
 }
 
-fn edge_record_from_resolved_edge(
+pub(crate) fn edge_record_from_resolved_edge(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     edge: &CallEdge,
@@ -176,6 +182,9 @@ fn edge_record_from_resolved_edge(
         call_text: call_text_for_edge(ws, caller_decl, edge).unwrap_or_else(|| callee_decl.name.clone()),
         kind: edge_kind_display(edge.kind).to_string(),
         precision: precision_display(edge.precision).to_string(),
+        resolver_stage: edge.provenance.resolver_stage.clone(),
+        evidence: edge.provenance.evidence.clone(),
+        confidence: edge.provenance.confidence,
     })
 }
 

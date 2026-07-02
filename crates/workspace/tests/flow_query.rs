@@ -2,7 +2,7 @@ use ahash::AHashSet;
 use bonsai_common::{FuncId, SymbolId};
 use bonsai_lang_api::{AdapterArc, DeclKind, LanguageRegistry};
 use bonsai_workspace::{
-    flow_query::{SyntaxFlowBackend, SyntaxFlowQuery},
+    flow_query::{SyntaxFlowBackend, SyntaxFlowCacheStatus, SyntaxFlowQuery},
     Workspace,
 };
 use std::sync::Arc;
@@ -59,6 +59,20 @@ fn syntax_flow_query_uses_cached_dataflow_when_idg_is_cold() {
     let result = ws.syntax_flow_graph(SyntaxFlowQuery::new(entry).prefer_warmed_idg(true));
 
     assert_eq!(result.backend, SyntaxFlowBackend::CachedDataflow);
+    assert_eq!(result.plan.backend, SyntaxFlowBackend::CachedDataflow);
+    assert_eq!(result.plan.cache_status, SyntaxFlowCacheStatus::MissComputed);
+    assert!(result.plan.prefer_warmed_idg);
+    assert!(!result.plan.idg_available);
+    assert_eq!(result.plan.target_cut_size, None);
+    assert!(
+        result
+            .plan
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason.contains("warmed IDG unavailable")),
+        "cold preferred-IDG query should explain why it fell back: {:#?}",
+        result.plan
+    );
     assert!(
         ws.db().idg_service().is_none(),
         "syntax_flow_graph must not build IDG on the inspect hot path"
@@ -67,6 +81,10 @@ fn syntax_flow_query_uses_cached_dataflow_when_idg_is_cold() {
         graph_mentions_call(&ws, result.graph.as_ref(), "sink"),
         "cached dataflow backend must preserve the syntax-shaped sink flow"
     );
+
+    let warm_result = ws.syntax_flow_graph(SyntaxFlowQuery::new(entry).prefer_warmed_idg(true));
+    assert_eq!(warm_result.backend, SyntaxFlowBackend::CachedDataflow);
+    assert_eq!(warm_result.plan.cache_status, SyntaxFlowCacheStatus::Hit);
 }
 
 #[test]
@@ -90,6 +108,15 @@ fn syntax_flow_query_uses_warmed_idg_target_cut() {
     );
 
     assert_eq!(result.backend, SyntaxFlowBackend::WarmedIdgTargetCut);
+    assert_eq!(result.plan.backend, SyntaxFlowBackend::WarmedIdgTargetCut);
+    assert_eq!(result.plan.cache_status, SyntaxFlowCacheStatus::Hit);
+    assert!(result.plan.idg_available);
+    assert_eq!(result.plan.target_cut_size, Some(1));
+    assert!(
+        result.plan.fallback_reasons.is_empty(),
+        "IDG-backed query should not report fallback: {:#?}",
+        result.plan
+    );
     assert!(
         graph_mentions_call(&ws, result.graph.as_ref(), "sink"),
         "warmed IDG backend must preserve the target-cut sink flow"

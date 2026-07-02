@@ -17,11 +17,14 @@ pub const NO_CONSTRUCTOR_METHOD_NAMES: &[&str] = &["<no-constructor-method>"];
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityLevel {
-    /// The adapter handles this construct precisely.
+    /// The adapter has a closed static model for this construct.
     Exact,
-    /// The adapter handles the common case; rare forms emit diagnostics.
+    /// The adapter emits proven static evidence for recognized forms;
+    /// unrecognized forms stay diagnostic/incomplete and must not be
+    /// widened into public findings.
     Partial,
-    /// The construct is ignored; reachable uses degrade to `Precision::Unknown`.
+    /// The adapter has no static model for this construct; rules that
+    /// require it should be rejected or treated as not applicable.
     Unsupported,
 }
 

@@ -6,11 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How confident the analyzer is in a given fact. Every cross-layer
-/// fact carries a `Precision` and gets `meet`-folded as it flows
-/// through analyses. The lattice ordering is `Exact < Narrowed <
-/// OverApproximate < Unknown` — `meet` returns the worse (greater)
-/// of two precisions.
+/// Internal precision lattice for analyzer facts.
+///
+/// Public security findings have a single accuracy contract: proven
+/// static evidence only. `Exact` and `Narrowed` satisfy that contract;
+/// `OverApproximate` and `Unknown` are diagnostic-only states that
+/// explain why evidence was not emitted. Every cross-layer fact still
+/// carries this enum so the engine can conservatively `meet` precision
+/// while keeping imprecise facts out of user-facing findings.
+///
+/// The lattice ordering is `Exact < Narrowed < OverApproximate <
+/// Unknown` — `meet` returns the worse (greater) of two precisions.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -63,6 +69,22 @@ impl Precision {
     #[must_use]
     pub const fn is_semantic(self) -> bool {
         matches!(self, Self::Exact | Self::Narrowed)
+    }
+
+    /// True iff this fact can be used as public static evidence.
+    ///
+    /// This intentionally aliases [`Self::is_semantic`]. The separate
+    /// name makes the product contract explicit at call sites that
+    /// decide whether a fact is allowed to become a finding.
+    #[must_use]
+    pub const fn is_proven_static_evidence(self) -> bool {
+        self.is_semantic()
+    }
+
+    /// True iff this precision is only suitable for diagnostics.
+    #[must_use]
+    pub const fn is_diagnostic_only(self) -> bool {
+        matches!(self, Self::OverApproximate | Self::Unknown)
     }
 }
 

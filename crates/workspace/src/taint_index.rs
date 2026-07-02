@@ -36,9 +36,12 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
+// v10 (2026-07-01): taint graph/dataflow cache semantics changed to avoid
+// seeding callee/module target components as value carriers and to keep exact
+// RHS call spans for assignment-derived terminal calls.
 // v9 (2026-05-27): taint graph derives from the IDG, whose construction
-// + seeding changed this WIP — old graphs are no longer equivalent.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 9;
+// and seeding changed enough that old graphs are no longer equivalent.
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 10;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).
@@ -336,6 +339,80 @@ impl TaintGraphIndex {
             .join(format!("taint_graph.v{TAINT_GRAPH_CACHE_VERSION}.factstore"))
     }
 
+    /// Conventional sidecar path for a specific taint/source analysis
+    /// configuration. The fixed [`Self::sidecar_path`] remains the
+    /// legacy no-config path; configured analyses get their own file
+    /// so `source-analysis` and `taint-analysis` do not evict each
+    /// other's warm facts.
+    #[must_use]
+    pub fn sidecar_path_for_config(workspace_root: &Path, config_fingerprint: u64) -> PathBuf {
+        if config_fingerprint == 0 {
+            return Self::sidecar_path(workspace_root);
+        }
+        workspace_bonsai_dir(workspace_root).join(format!(
+            "taint_graph.v{TAINT_GRAPH_CACHE_VERSION}.{config_fingerprint:016x}.factstore"
+        ))
+    }
+
+    /// Conventional sidecar path for a specific analysis phase and
+    /// configuration. The phase label is part of the filename so
+    /// source inventory and finding analysis keep independent warm
+    /// files even if their transfer configuration otherwise matches.
+    #[must_use]
+    pub fn sidecar_path_for_config_namespace(
+        workspace_root: &Path,
+        namespace: &str,
+        config_fingerprint: u64,
+    ) -> PathBuf {
+        let namespace = sanitize_sidecar_namespace(namespace);
+        if namespace.is_empty() {
+            return Self::sidecar_path_for_config(workspace_root, config_fingerprint);
+        }
+        workspace_bonsai_dir(workspace_root).join(format!(
+            "taint_graph.v{TAINT_GRAPH_CACHE_VERSION}.{namespace}.{config_fingerprint:016x}.factstore"
+        ))
+    }
+
+    /// Return the most recently modified taint-graph sidecar for
+    /// diagnostics and cache stats. This preserves compatibility with
+    /// the legacy fixed filename while allowing configured analyses to
+    /// persist sidecars independently.
+    #[must_use]
+    pub fn latest_sidecar_path(workspace_root: &Path) -> PathBuf {
+        let legacy = Self::sidecar_path(workspace_root);
+        let Some(parent) = legacy.parent() else {
+            return legacy;
+        };
+        let prefix = format!("taint_graph.v{TAINT_GRAPH_CACHE_VERSION}");
+        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return legacy;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(&prefix) || !name.ends_with(".factstore") {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let replace = best.as_ref().is_none_or(|(best_modified, best_path)| {
+                modified > *best_modified || (modified == *best_modified && path > *best_path)
+            });
+            if replace {
+                best = Some((modified, path));
+            }
+        }
+        best.map_or(legacy, |(_, path)| path)
+    }
+
     /// Persist the index as a fact-store file. Streams the in-memory
     /// entries (and any entries already on disk that the in-memory
     /// map didn't cover) through the streaming writer so peak RAM
@@ -534,6 +611,24 @@ impl TaintGraphIndex {
         inner.persist = None;
         Ok(entries)
     }
+
+    /// Validate that a taint-graph factstore is structurally readable and
+    /// carries the expected table id. Rulepack/config freshness is checked
+    /// separately by cache manifests and command-specific fingerprints.
+    pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {
+        let reader = FactStoreReader::open_relaxed(path).map_err(map_factstore_io)?;
+        if reader.header().table_id != TAINT_GRAPH_TABLE_ID {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "taint-graph factstore table id mismatch: file={} expected={}",
+                    reader.header().table_id,
+                    TAINT_GRAPH_TABLE_ID
+                ),
+            ));
+        }
+        Ok(reader.len())
+    }
 }
 
 /// Best-effort cleanup for temp files left by a process that was
@@ -596,6 +691,16 @@ fn insert_resident(
     inner.resident_order.push_back(key.clone());
     inner.by_source_seed.insert(key, graph.clone());
     (graph, persist)
+}
+
+fn sanitize_sidecar_namespace(namespace: &str) -> String {
+    namespace
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 fn persist_graph_entry(

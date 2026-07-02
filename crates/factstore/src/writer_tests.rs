@@ -36,6 +36,29 @@ fn entries_are_sorted_by_key_ascending() {
 }
 
 #[test]
+fn finish_rejects_duplicate_keys_without_publishing_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("v.bin");
+    let w = FactStoreWriter::create(&target, 0, 0).expect("create");
+    w.add(7, 0, b"first").expect("add");
+    w.add(7, 0, b"second").expect("add");
+    let err = w.finish().expect_err("duplicate key must fail");
+    assert!(matches!(err, FactStoreError::DuplicateKey(7)));
+    assert!(
+        !target.exists(),
+        "failed duplicate-key finalization must not publish {target:?}"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("readdir")
+        .filter_map(|entry| entry.ok())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "failed duplicate-key finalization must clean temp files, got {leftovers:?}"
+    );
+}
+
+#[test]
 fn finish_creates_file_at_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("v.bin");

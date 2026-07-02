@@ -9,7 +9,7 @@
 
 use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
-    workspace_content_fingerprint,
+    workspace_content_fingerprint, workspace_content_fingerprint_from_paths,
 };
 use crate::value_flow_disk::{
     decode as decode_value_flow_entry, encode as encode_value_flow_entry, ValueFlowEntry,
@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// they don't share `MAGIC` with the factstore reader so they fail
 /// the open check naturally.
 // v8 (2026-05-27): the value-flow graph derives from the IDG, whose
-// construction + seeding changed this WIP — reject older sidecars.
+// construction and seeding changed enough to reject older sidecars.
 pub const VALUE_FLOW_CACHE_VERSION: u32 = 8;
 
 /// Caller-defined table id stamped into the factstore header. Lets
@@ -47,13 +47,17 @@ const VALUE_FLOW_TABLE_ID: u32 = 1;
 /// content fingerprint so source changes cannot reuse stale FuncId-
 /// keyed graphs.
 fn value_flow_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
+    value_flow_pipeline_hash_for_content(workspace_content_fingerprint(db), sidecar_path)
+}
+
+fn value_flow_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &Path) -> u64 {
     let raw = MATCHER_POLICY_FINGERPRINT;
     // Fold the 128-bit fingerprint into 64 bits by xor of halves.
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
     lo ^ hi
         ^ u64::from(VALUE_FLOW_CACHE_VERSION)
-        ^ workspace_content_fingerprint(db)
+        ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
         ^ crate::build_fingerprint_hash()
 }
@@ -687,6 +691,45 @@ impl ValueFlowCache {
         let mut inner = self.inner.write();
         inner.disk = Some(Arc::new(reader));
         Ok(entries)
+    }
+
+    /// Validate that a value-flow factstore is structurally readable and
+    /// carries the expected table id. Freshness is checked separately by
+    /// cache manifests and workspace fingerprints.
+    pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {
+        let reader = FactStoreReader::open_relaxed(path).map_err(map_factstore_io)?;
+        if reader.header().table_id != VALUE_FLOW_TABLE_ID {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "value-flow factstore table id mismatch: file={} expected={}",
+                    reader.header().table_id,
+                    VALUE_FLOW_TABLE_ID
+                ),
+            ));
+        }
+        Ok(reader.len())
+    }
+
+    /// Validate a value-flow factstore against the exact source path/hash set
+    /// currently on disk. This mirrors [`Self::load_from_disk`] without
+    /// requiring a parsed [`AnalyzerDb`].
+    pub fn validate_sidecar_file_with_source_fingerprints<I, P>(
+        path: &Path,
+        fingerprints: I,
+    ) -> std::io::Result<usize>
+    where
+        I: IntoIterator<Item = (P, u64)>,
+        P: AsRef<Path>,
+    {
+        let content = workspace_content_fingerprint_from_paths(fingerprints);
+        let reader = FactStoreReader::open(
+            path,
+            VALUE_FLOW_TABLE_ID,
+            value_flow_pipeline_hash_for_content(content, path),
+        )
+        .map_err(map_factstore_io)?;
+        Ok(reader.len())
     }
 
     /// In-memory snapshot of the cache for tests, daemon checkpoints,

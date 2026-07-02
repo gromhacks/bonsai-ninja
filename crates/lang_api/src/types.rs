@@ -525,6 +525,19 @@ pub enum CallKind {
     Indirect,
 }
 
+impl CallKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            CallKind::Function => "function",
+            CallKind::Method => "method",
+            CallKind::Constructor => "constructor",
+            CallKind::Macro => "macro",
+            CallKind::Indirect => "indirect",
+        }
+    }
+}
+
 /// Shape classification of an assignment's RHS for Phase-5
 /// const-propagation. The adapter sets this when the CST shape
 /// is unambiguous; the engine uses it to skip name-bridging when
@@ -591,6 +604,611 @@ pub struct CallArg {
     /// interpolation syntax out of `value_text`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_names: Vec<String>,
+}
+
+/// A language-neutral syntactic operation derived from [`FlowEvent`].
+///
+/// Operations are use-site facts: they make reads, writes, calls,
+/// returns, throws, awaits, resource scopes, and lifecycle transitions
+/// visible without each consumer re-walking the flow-event tree. They
+/// are still syntax facts: this layer does not invent edges, resolve
+/// call targets, or parse raw file text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Operation {
+    pub span: Span,
+    pub kind: OperationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operands: Vec<OperationOperand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Shared operation vocabulary used by browse, SDK, security, and future
+/// abstract-interpretation consumers.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    Read,
+    Write,
+    Call,
+    Index,
+    Deref,
+    FieldAccess,
+    Cast,
+    ResourceUse,
+    Allocate,
+    Release,
+    Lifecycle,
+    Return,
+    Throw,
+    Await,
+    Yield,
+    BranchCondition,
+    CatchBinding,
+    ExternalBoundary,
+}
+
+impl OperationKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OperationKind::Read => "read",
+            OperationKind::Write => "write",
+            OperationKind::Call => "call",
+            OperationKind::Index => "index",
+            OperationKind::Deref => "deref",
+            OperationKind::FieldAccess => "field_access",
+            OperationKind::Cast => "cast",
+            OperationKind::ResourceUse => "resource_use",
+            OperationKind::Allocate => "allocate",
+            OperationKind::Release => "release",
+            OperationKind::Lifecycle => "lifecycle",
+            OperationKind::Return => "return",
+            OperationKind::Throw => "throw",
+            OperationKind::Await => "await",
+            OperationKind::Yield => "yield",
+            OperationKind::BranchCondition => "branch_condition",
+            OperationKind::CatchBinding => "catch_binding",
+            OperationKind::ExternalBoundary => "external_boundary",
+        }
+    }
+}
+
+/// Named input/output of an [`Operation`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationOperand {
+    pub name: String,
+    pub role: OperationOperandRole,
+}
+
+/// Role a named operand plays within an operation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationOperandRole {
+    Read,
+    Write,
+    Receiver,
+    Argument,
+    Callee,
+    Condition,
+    Returned,
+    Thrown,
+    Resource,
+    Transition,
+}
+
+impl OperationOperandRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OperationOperandRole::Read => "read",
+            OperationOperandRole::Write => "write",
+            OperationOperandRole::Receiver => "receiver",
+            OperationOperandRole::Argument => "argument",
+            OperationOperandRole::Callee => "callee",
+            OperationOperandRole::Condition => "condition",
+            OperationOperandRole::Returned => "returned",
+            OperationOperandRole::Thrown => "thrown",
+            OperationOperandRole::Resource => "resource",
+            OperationOperandRole::Transition => "transition",
+        }
+    }
+}
+
+/// Convert a flow-event tree into first-class operation facts.
+///
+/// The conversion is deliberately conservative. It only uses the
+/// normalized fields already carried by [`FlowEvent`] and [`CallArg`];
+/// when an adapter has not surfaced an operand, this function leaves it
+/// absent instead of deriving it from raw source text.
+#[must_use]
+pub fn operations_from_flow_events(events: &[FlowEvent]) -> Vec<Operation> {
+    let mut out = Vec::new();
+    collect_operations(events, &mut out);
+    for op in &mut out {
+        dedup_operands(&mut op.operands);
+    }
+    out
+}
+
+fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                call_kind,
+                args,
+                ..
+            } => {
+                let mut operands = vec![OperationOperand {
+                    name: name.clone(),
+                    role: OperationOperandRole::Callee,
+                }];
+                if let Some(receiver) = non_empty(receiver.as_deref()) {
+                    operands.push(OperationOperand {
+                        name: receiver.to_string(),
+                        role: OperationOperandRole::Receiver,
+                    });
+                }
+                for arg in args {
+                    push_call_arg_operands(&mut operands, arg);
+                }
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Call,
+                    target: Some(name.clone()),
+                    operands,
+                    detail: Some(call_kind.as_str().to_string()),
+                });
+                if matches!(call_kind, CallKind::Constructor) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Allocate,
+                        target: Some(name.clone()),
+                        operands: vec![OperationOperand {
+                            name: name.clone(),
+                            role: OperationOperandRole::Callee,
+                        }],
+                        detail: Some("constructor".to_string()),
+                    });
+                }
+                if let Some(receiver) = non_empty(receiver.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(receiver.to_string()),
+                        operands: vec![OperationOperand {
+                            name: receiver.to_string(),
+                            role: OperationOperandRole::Receiver,
+                        }],
+                        detail: Some("call_receiver".to_string()),
+                    });
+                    push_place_shape_operations(*span, receiver, OperationOperandRole::Receiver, out);
+                }
+                for arg in args {
+                    push_call_arg_read_operations(*span, arg, out);
+                }
+            }
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+            } => {
+                if let Some(condition) = non_empty(condition.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::BranchCondition,
+                        target: Some(condition.to_string()),
+                        operands: vec![OperationOperand {
+                            name: condition.to_string(),
+                            role: OperationOperandRole::Condition,
+                        }],
+                        detail: None,
+                    });
+                }
+                collect_operations(then_events, out);
+                collect_operations(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } => collect_operations(body, out),
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                let mut operands = vec![OperationOperand {
+                    name: target.clone(),
+                    role: OperationOperandRole::Write,
+                }];
+                push_optional_operand(&mut operands, source_name.as_deref(), OperationOperandRole::Read);
+                push_optional_operand(
+                    &mut operands,
+                    source_call.as_deref(),
+                    OperationOperandRole::Callee,
+                );
+                for source in source_names {
+                    push_optional_operand(&mut operands, Some(source.as_str()), OperationOperandRole::Read);
+                }
+                for arg in source_call_args {
+                    push_optional_operand(&mut operands, Some(arg.as_str()), OperationOperandRole::Argument);
+                }
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Write,
+                    target: Some(target.clone()),
+                    operands,
+                    detail: None,
+                });
+                push_place_shape_operations(*span, target, OperationOperandRole::Write, out);
+                if let Some(source) = non_empty(source_name.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(source.to_string()),
+                        operands: vec![OperationOperand {
+                            name: source.to_string(),
+                            role: OperationOperandRole::Read,
+                        }],
+                        detail: Some("assign_source".to_string()),
+                    });
+                    push_place_shape_operations(*span, source, OperationOperandRole::Read, out);
+                }
+                for source in source_names {
+                    if let Some(source) = non_empty(Some(source.as_str())) {
+                        out.push(Operation {
+                            span: *span,
+                            kind: OperationKind::Read,
+                            target: Some(source.to_string()),
+                            operands: vec![OperationOperand {
+                                name: source.to_string(),
+                                role: OperationOperandRole::Read,
+                            }],
+                            detail: Some("assign_source".to_string()),
+                        });
+                        push_place_shape_operations(*span, source, OperationOperandRole::Read, out);
+                    }
+                }
+                if let Some(call) = non_empty(source_call.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Call,
+                        target: Some(call.to_string()),
+                        operands: source_call_args
+                            .iter()
+                            .filter_map(|arg| non_empty(Some(arg.as_str())))
+                            .map(|arg| OperationOperand {
+                                name: arg.to_string(),
+                                role: OperationOperandRole::Argument,
+                            })
+                            .collect(),
+                        detail: Some("assignment_source".to_string()),
+                    });
+                }
+            }
+            FlowEvent::Return {
+                span,
+                value_text,
+                value_name,
+            } => {
+                let target = value_name
+                    .as_ref()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| value_text.as_ref().filter(|s| !s.trim().is_empty()))
+                    .cloned();
+                let mut operands = Vec::new();
+                push_optional_operand(
+                    &mut operands,
+                    value_name.as_deref(),
+                    OperationOperandRole::Returned,
+                );
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Return,
+                    target,
+                    operands,
+                    detail: None,
+                });
+                if let Some(value) = non_empty(value_name.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(value.to_string()),
+                        operands: vec![OperationOperand {
+                            name: value.to_string(),
+                            role: OperationOperandRole::Returned,
+                        }],
+                        detail: Some("return_value".to_string()),
+                    });
+                }
+            }
+            FlowEvent::Throw {
+                span,
+                value_name,
+                thrown_type,
+            } => {
+                let mut operands = Vec::new();
+                push_optional_operand(&mut operands, value_name.as_deref(), OperationOperandRole::Thrown);
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Throw,
+                    target: value_name.clone().or_else(|| thrown_type.clone()),
+                    operands,
+                    detail: thrown_type.clone(),
+                });
+                if let Some(value) = non_empty(value_name.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(value.to_string()),
+                        operands: vec![OperationOperand {
+                            name: value.to_string(),
+                            role: OperationOperandRole::Thrown,
+                        }],
+                        detail: Some("throw_value".to_string()),
+                    });
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                collect_operations(body, out);
+                if let Some(catch_param) = non_empty(catch_param.as_deref()) {
+                    out.push(Operation {
+                        span: event.span(),
+                        kind: OperationKind::CatchBinding,
+                        target: Some(catch_param.to_string()),
+                        operands: vec![OperationOperand {
+                            name: catch_param.to_string(),
+                            role: OperationOperandRole::Write,
+                        }],
+                        detail: None,
+                    });
+                }
+                collect_operations(catch_events, out);
+                collect_operations(finally_events, out);
+            }
+            FlowEvent::Yield { span, value_text } => {
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Yield,
+                    target: value_text.clone().filter(|s| !s.trim().is_empty()),
+                    operands: Vec::new(),
+                    detail: None,
+                });
+                if let Some(value) = operation_place_from_text(value_text.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(value.to_string()),
+                        operands: vec![OperationOperand {
+                            name: value.to_string(),
+                            role: OperationOperandRole::Returned,
+                        }],
+                        detail: Some("yield_value".to_string()),
+                    });
+                    push_place_shape_operations(*span, value, OperationOperandRole::Returned, out);
+                }
+            }
+            FlowEvent::Await { span, value_name } => {
+                let mut operands = Vec::new();
+                push_optional_operand(&mut operands, value_name.as_deref(), OperationOperandRole::Read);
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Await,
+                    target: value_name.clone(),
+                    operands,
+                    detail: None,
+                });
+                if let Some(value) = non_empty(value_name.as_deref()) {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(value.to_string()),
+                        operands: vec![OperationOperand {
+                            name: value.to_string(),
+                            role: OperationOperandRole::Read,
+                        }],
+                        detail: Some("await_value".to_string()),
+                    });
+                }
+            }
+            FlowEvent::Defer { body, .. } => collect_operations(body, out),
+            FlowEvent::Using { span, body } => {
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::ResourceUse,
+                    target: None,
+                    operands: Vec::new(),
+                    detail: Some("using_scope".to_string()),
+                });
+                collect_operations(body, out);
+            }
+            FlowEvent::Lifecycle {
+                span,
+                name,
+                transition,
+            } => {
+                let kind = if is_release_transition(transition) {
+                    OperationKind::Release
+                } else {
+                    OperationKind::Lifecycle
+                };
+                out.push(Operation {
+                    span: *span,
+                    kind,
+                    target: Some(name.clone()),
+                    operands: vec![
+                        OperationOperand {
+                            name: name.clone(),
+                            role: OperationOperandRole::Resource,
+                        },
+                        OperationOperand {
+                            name: transition.clone(),
+                            role: OperationOperandRole::Transition,
+                        },
+                    ],
+                    detail: Some(transition.clone()),
+                });
+            }
+            FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {}
+        }
+    }
+}
+
+fn push_call_arg_operands(out: &mut Vec<OperationOperand>, arg: &CallArg) {
+    if let Some(place) = non_empty(arg.place.as_deref()) {
+        out.push(OperationOperand {
+            name: place.to_string(),
+            role: OperationOperandRole::Argument,
+        });
+    }
+    for source in &arg.source_names {
+        push_optional_operand(out, Some(source.as_str()), OperationOperandRole::Read);
+    }
+}
+
+fn push_call_arg_read_operations(span: Span, arg: &CallArg, out: &mut Vec<Operation>) {
+    if let Some(place) = non_empty(arg.place.as_deref()) {
+        out.push(Operation {
+            span,
+            kind: OperationKind::Read,
+            target: Some(place.to_string()),
+            operands: vec![OperationOperand {
+                name: place.to_string(),
+                role: OperationOperandRole::Argument,
+            }],
+            detail: Some("call_argument".to_string()),
+        });
+        push_place_shape_operations(span, place, OperationOperandRole::Argument, out);
+    }
+    for source in &arg.source_names {
+        if let Some(source) = non_empty(Some(source.as_str())) {
+            out.push(Operation {
+                span,
+                kind: OperationKind::Read,
+                target: Some(source.to_string()),
+                operands: vec![OperationOperand {
+                    name: source.to_string(),
+                    role: OperationOperandRole::Argument,
+                }],
+                detail: Some("call_argument".to_string()),
+            });
+            push_place_shape_operations(span, source, OperationOperandRole::Argument, out);
+        }
+    }
+}
+
+fn push_place_shape_operations(
+    span: Span,
+    place: &str,
+    role: OperationOperandRole,
+    out: &mut Vec<Operation>,
+) {
+    if place_has_index_shape(place) {
+        out.push(Operation {
+            span,
+            kind: OperationKind::Index,
+            target: Some(place.to_string()),
+            operands: vec![OperationOperand {
+                name: place.to_string(),
+                role,
+            }],
+            detail: Some("normalized_place".to_string()),
+        });
+    }
+    if place_has_deref_shape(place) {
+        out.push(Operation {
+            span,
+            kind: OperationKind::Deref,
+            target: Some(place.to_string()),
+            operands: vec![OperationOperand {
+                name: place.to_string(),
+                role,
+            }],
+            detail: Some("normalized_place".to_string()),
+        });
+    }
+    if place_has_field_shape(place) {
+        out.push(Operation {
+            span,
+            kind: OperationKind::FieldAccess,
+            target: Some(place.to_string()),
+            operands: vec![OperationOperand {
+                name: place.to_string(),
+                role,
+            }],
+            detail: Some("normalized_place".to_string()),
+        });
+    }
+}
+
+fn place_has_index_shape(place: &str) -> bool {
+    place.contains('[') && place.contains(']')
+}
+
+fn place_has_deref_shape(place: &str) -> bool {
+    let trimmed = place.trim_start();
+    trimmed.starts_with('*') || trimmed.starts_with('&')
+}
+
+fn place_has_field_shape(place: &str) -> bool {
+    place.contains('.') || place.contains("::") || place.contains("->")
+}
+
+fn push_optional_operand(out: &mut Vec<OperationOperand>, name: Option<&str>, role: OperationOperandRole) {
+    if let Some(name) = non_empty(name) {
+        out.push(OperationOperand {
+            name: name.to_string(),
+            role,
+        });
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.and_then(|s| {
+        let trimmed = s.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+fn operation_place_from_text(value: Option<&str>) -> Option<&str> {
+    let trimmed = non_empty(value)?;
+    let mut has_name_char = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '@') {
+            has_name_char = true;
+            continue;
+        }
+        if matches!(ch, '.' | ':' | '-' | '>' | '[' | ']' | '*' | '&') {
+            continue;
+        }
+        return None;
+    }
+    has_name_char.then_some(trimmed)
+}
+
+fn is_release_transition(transition: &str) -> bool {
+    matches!(
+        transition,
+        "freed" | "closed" | "unlocked" | "cancelled" | "canceled" | "moved"
+    )
+}
+
+fn dedup_operands(operands: &mut Vec<OperationOperand>) {
+    let mut seen = std::collections::HashSet::new();
+    operands.retain(|operand| seen.insert((operand.role, operand.name.clone())));
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -681,7 +1299,22 @@ impl CommentKind {
         let upper = body.trim_start().to_ascii_uppercase();
         // Check security first so a "TODO: SECURITY" still surfaces
         // via the more attention-grabbing tag.
-        if upper.contains("SECURITY:") || upper.contains("CVE-") || upper.contains("XXX SECURITY") {
+        if upper.contains("SECURITY:")
+            || upper.contains("CVE-")
+            || upper.contains("XXX SECURITY")
+            || upper.contains("VULN:")
+            || upper.contains("VULNERAB")
+            || upper.contains(" INJECTION")
+            || upper.contains("TAINT")
+            || upper.starts_with("SOURCE:")
+            || upper.contains(" SOURCE:")
+            || upper.starts_with("SINK:")
+            || upper.contains(" SINK:")
+            || upper.starts_with("SANITIZER:")
+            || upper.contains(" SANITIZER:")
+            || upper.starts_with("UNSANITIZED")
+            || upper.contains(" UNSANITIZED")
+        {
             return Self::Security;
         }
         if upper.starts_with("TODO") || upper.contains(" TODO:") || upper.contains(" TODO ") {
@@ -795,9 +1428,12 @@ pub enum ImportScope {
     #[default]
     Module,
     /// Resolution-only binding — a local name bound by a destructuring
-    /// shorthand / default-import form whose presence would add noise to
-    /// browse output. Still feeds the resolver's alias map and the
-    /// security matcher's `callee.attribute` expansion path.
+    /// shorthand / default-import form, or a synthetic adapter binding
+    /// needed to resolve language/module conventions. These entries do
+    /// not mean "this file imports this module" and must not appear as
+    /// public import inventory rows. They still feed the resolver's
+    /// alias map and the security matcher's `callee.attribute`
+    /// expansion path.
     Local,
 }
 
@@ -882,4 +1518,179 @@ pub struct UnsupportedConstruct {
     pub span: Span,
     pub note: String,
     pub precision: Precision,
+}
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+
+    fn span(start: u64) -> Span {
+        Span::new(FileId::new(0), start, start + 1)
+    }
+
+    fn kinds(ops: &[Operation]) -> Vec<OperationKind> {
+        ops.iter().map(|op| op.kind).collect()
+    }
+
+    #[test]
+    fn comment_security_classification_covers_review_markers() {
+        for text in [
+            "source: user input",
+            "sink: SQL injection",
+            "flows to command injection",
+            "VULN: insecure deserialization",
+            "unsanitized request parameter",
+        ] {
+            assert_eq!(
+                CommentKind::classify(text, false),
+                CommentKind::Security,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_security_classification_does_not_match_generic_source_word() {
+        assert_eq!(
+            CommentKind::classify("source file generated by build", false),
+            CommentKind::Generic
+        );
+    }
+
+    #[test]
+    fn operations_capture_assignment_reads_writes_and_place_shapes() {
+        let ops = operations_from_flow_events(&[FlowEvent::Assign {
+            span: span(10),
+            target: "user.name".to_string(),
+            source_name: Some("payload[0]".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["request.body".to_string()],
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Compound),
+        }]);
+
+        assert!(ops.iter().any(|op| {
+            op.kind == OperationKind::Write
+                && op.target.as_deref() == Some("user.name")
+                && op
+                    .operands
+                    .iter()
+                    .any(|operand| operand.name == "payload[0]" && operand.role == OperationOperandRole::Read)
+        }));
+        assert!(ops
+            .iter()
+            .any(|op| op.kind == OperationKind::Read && op.target.as_deref() == Some("request.body")));
+        assert!(ops
+            .iter()
+            .any(|op| op.kind == OperationKind::FieldAccess && op.target.as_deref() == Some("user.name")));
+        assert!(ops
+            .iter()
+            .any(|op| op.kind == OperationKind::Index && op.target.as_deref() == Some("payload[0]")));
+    }
+
+    #[test]
+    fn operations_capture_calls_arguments_and_allocations() {
+        let ops = operations_from_flow_events(&[FlowEvent::Call {
+            span: span(20),
+            name: "Widget".to_string(),
+            receiver: Some("factory".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: vec![CallArg {
+                span: span(21),
+                name: None,
+                value_text: "config".to_string(),
+                place: Some("opts.value".to_string()),
+                source_names: vec!["config".to_string()],
+            }],
+        }]);
+
+        assert!(ops.iter().any(|op| {
+            op.kind == OperationKind::Call
+                && op.target.as_deref() == Some("Widget")
+                && op.detail.as_deref() == Some("constructor")
+        }));
+        assert!(ops
+            .iter()
+            .any(|op| op.kind == OperationKind::Allocate && op.target.as_deref() == Some("Widget")));
+        assert!(ops
+            .iter()
+            .any(|op| op.kind == OperationKind::Read && op.target.as_deref() == Some("config")));
+        assert!(ops
+            .iter()
+            .any(|op| op.kind == OperationKind::FieldAccess && op.target.as_deref() == Some("opts.value")));
+    }
+
+    #[test]
+    fn operations_recurse_through_structured_flow_and_lifecycle() {
+        let ops = operations_from_flow_events(&[FlowEvent::Branch {
+            span: span(30),
+            condition: Some("allowed".to_string()),
+            then_events: vec![FlowEvent::Try {
+                span: span(31),
+                body: vec![FlowEvent::Lifecycle {
+                    span: span(32),
+                    name: "fd".to_string(),
+                    transition: "closed".to_string(),
+                }],
+                catch_events: vec![FlowEvent::Throw {
+                    span: span(33),
+                    value_name: Some("err".to_string()),
+                    thrown_type: Some("Error".to_string()),
+                }],
+                finally_events: vec![FlowEvent::Return {
+                    span: span(34),
+                    value_text: None,
+                    value_name: Some("result".to_string()),
+                }],
+                catch_param: Some("err".to_string()),
+                catch_types: Vec::new(),
+            }],
+            else_events: Vec::new(),
+        }]);
+
+        let observed = kinds(&ops);
+        for expected in [
+            OperationKind::BranchCondition,
+            OperationKind::Release,
+            OperationKind::CatchBinding,
+            OperationKind::Throw,
+            OperationKind::Return,
+        ] {
+            assert!(
+                observed.contains(&expected),
+                "missing {expected:?} in {observed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_capture_yield_value_reads_conservatively() {
+        let ops = operations_from_flow_events(&[
+            FlowEvent::Yield {
+                span: span(40),
+                value_text: Some("payload[0]".to_string()),
+            },
+            FlowEvent::Yield {
+                span: span(50),
+                value_text: Some("left + right".to_string()),
+            },
+        ]);
+
+        assert!(ops
+            .iter()
+            .any(|op| { op.kind == OperationKind::Yield && op.target.as_deref() == Some("payload[0]") }));
+        assert!(ops.iter().any(|op| {
+            op.kind == OperationKind::Read
+                && op.target.as_deref() == Some("payload[0]")
+                && op.detail.as_deref() == Some("yield_value")
+        }));
+        assert!(ops
+            .iter()
+            .any(|op| { op.kind == OperationKind::Index && op.target.as_deref() == Some("payload[0]") }));
+        assert!(!ops
+            .iter()
+            .any(|op| { op.kind == OperationKind::Read && op.target.as_deref() == Some("left + right") }));
+    }
 }

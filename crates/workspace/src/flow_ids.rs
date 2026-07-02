@@ -16,7 +16,7 @@
 
 use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
-    workspace_content_fingerprint,
+    workspace_content_fingerprint, workspace_content_fingerprint_from_paths,
 };
 use crate::flow_ids_disk::{decode as decode_flow_id_entry, encode as encode_flow_id_entry, FlowIdEntry};
 use ahash::{AHashMap, AHashSet};
@@ -36,8 +36,8 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 
 /// On-disk format version. Bump when the encoding changes so old
 /// sidecars are rejected on open.
-// v6 (2026-05-27): downstream of the IDG/adapter semantic changes this
-// WIP introduced — enumerated chains can differ, so reject older sidecars.
+// v6 (2026-05-27): downstream of IDG/adapter semantic changes,
+// enumerated chains can differ, so reject older sidecars.
 pub const FLOW_IDS_CACHE_VERSION: u32 = 6;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
@@ -45,11 +45,15 @@ pub const FLOW_IDS_CACHE_VERSION: u32 = 6;
 /// content fingerprint so source changes cannot reuse stale FuncId-
 /// keyed labels.
 fn flow_ids_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
+    flow_ids_pipeline_hash_for_content(workspace_content_fingerprint(db), sidecar_path)
+}
+
+fn flow_ids_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &Path) -> u64 {
     let raw = MATCHER_POLICY_FINGERPRINT;
     (raw as u64)
         ^ ((raw >> 64) as u64)
         ^ u64::from(FLOW_IDS_CACHE_VERSION)
-        ^ workspace_content_fingerprint(db)
+        ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
         ^ crate::build_fingerprint_hash()
 }
@@ -667,6 +671,45 @@ impl FlowIdCache {
         let mut inner = self.inner.write();
         inner.disk = Some(Arc::new(reader));
         Ok(entries)
+    }
+
+    /// Validate that a flow-id factstore is structurally readable and
+    /// carries the expected table id. This does not prove freshness for a
+    /// workspace; callers combine it with manifest/source freshness checks.
+    pub fn validate_sidecar_file(path: &Path) -> std::io::Result<usize> {
+        let reader = FactStoreReader::open_relaxed(path).map_err(map_factstore_io)?;
+        if reader.header().table_id != FLOW_IDS_TABLE_ID {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "flow-id factstore table id mismatch: file={} expected={}",
+                    reader.header().table_id,
+                    FLOW_IDS_TABLE_ID
+                ),
+            ));
+        }
+        Ok(reader.len())
+    }
+
+    /// Validate a flow-id factstore against the exact source path/hash set
+    /// currently on disk. This mirrors [`Self::load_from_disk`] without
+    /// requiring a parsed [`AnalyzerDb`].
+    pub fn validate_sidecar_file_with_source_fingerprints<I, P>(
+        path: &Path,
+        fingerprints: I,
+    ) -> std::io::Result<usize>
+    where
+        I: IntoIterator<Item = (P, u64)>,
+        P: AsRef<Path>,
+    {
+        let content = workspace_content_fingerprint_from_paths(fingerprints);
+        let reader = FactStoreReader::open(
+            path,
+            FLOW_IDS_TABLE_ID,
+            flow_ids_pipeline_hash_for_content(content, path),
+        )
+        .map_err(map_factstore_io)?;
+        Ok(reader.len())
     }
 
     /// Drop every entry. Called by the workspace-wide

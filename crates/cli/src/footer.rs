@@ -358,9 +358,9 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     } else if cmd_line_hint.contains(" read-file ") {
         pluralize("line", "lines")
     } else if cmd_line_hint.contains(" dump-callgraph ") {
-        pluralize("callgraph edge", "callgraph edges")
+        pluralize("function", "functions")
     } else if cmd_line_hint.contains(" dump-edges ") {
-        pluralize("dataflow edge", "dataflow edges")
+        pluralize("semantic call edge", "semantic call edges")
     } else if cmd_line_hint.contains(" dump-ast ") {
         pluralize("AST line", "AST lines")
     } else {

@@ -6,7 +6,10 @@
 //! type's span so callers can answer "which classes implement
 //! `serialize`?" without a separate query.
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{
+    best_textual_relevance_key, file_path_matches_filter, format_span, make_name_filter,
+    textual_relevance_key,
+};
 use bonsai_lang_api::DeclKind;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -103,7 +106,9 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                     }
                 }
                 let (path, line, _) = format_span(&class.name_span, ws);
-                if f.file.is_some_and(|needle| !path.contains(needle)) {
+                if f.file
+                    .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
+                {
                     continue;
                 }
                 per_file.push(ClassOut {
@@ -122,11 +127,28 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
     // each kind clusters, then alphabetical by name, then file/line
     // for disambiguation.
     out.sort_by(|a, b| {
-        a.kind
-            .cmp(&b.kind)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
+        class_relevance_key(a, f)
+            .cmp(&class_relevance_key(b, f))
+            .then_with(|| {
+                a.kind
+                    .cmp(&b.kind)
+                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+            })
     });
     Ok(out)
+}
+
+fn class_relevance_key(row: &ClassOut, f: &ClassesFilters<'_>) -> ((u8, usize), (u8, usize), (u8, usize)) {
+    let kind = f.kind.map_or((u8::MAX, usize::MAX), |kind| {
+        textual_relevance_key(&row.kind, Some(kind), false)
+    });
+    let name = f.name.filter(|_| !f.regex).map_or((u8::MAX, usize::MAX), |name| {
+        textual_relevance_key(&row.name, Some(name), false)
+    });
+    let method = f.has_method.map_or((u8::MAX, usize::MAX), |method| {
+        best_textual_relevance_key(row.methods.iter().map(String::as_str), Some(method), false)
+    });
+    (kind, name, method)
 }

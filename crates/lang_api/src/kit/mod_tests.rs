@@ -1,5 +1,6 @@
 use super::{
-    apply_assign_call_result_types, apply_constructor_result_type_aliases, canonical_simple_type_name,
+    apply_assign_call_result_types, apply_constructor_result_type_aliases, argument_place,
+    canonical_simple_type_name, collect_kinds, extract_return_value_name, language_from_pack, node_text,
     normalize_call_name_whitespace, normalize_call_result_assignment_sources,
     package_module_segments_with_workspace_prefix, receiver_projected_alias_matches,
 };
@@ -106,6 +107,57 @@ fn call_result_assignment_normalization_recovers_adjacent_call_args() {
     };
     assert_eq!(source_call_args.as_slice(), ["x"]);
     assert!(source_names.is_empty());
+}
+
+#[test]
+fn return_value_name_uses_structured_syntax_before_text_fallback() {
+    let language = language_from_pack("python").expect("python grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set python grammar");
+    let src = b"def a(token):\n    return token\n\ndef b():\n    return None\n";
+    let tree = parser.parse(src, None).expect("parse python");
+    let mut returns = collect_kinds(&tree, &["return_statement"]);
+    returns.sort_by_key(tree_sitter::Node::start_byte);
+
+    assert_eq!(returns.len(), 2);
+    assert_eq!(
+        extract_return_value_name(&returns[0], src).as_deref(),
+        Some("token")
+    );
+    assert_eq!(
+        extract_return_value_name(&returns[1], src),
+        None,
+        "literal return nodes must not become value-bearing identifier reads"
+    );
+}
+
+#[test]
+fn literal_keywords_are_not_argument_places_or_return_value_names() {
+    let swift = language_from_pack("swift").expect("swift grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&swift).expect("set swift grammar");
+    let src = b"func f() -> String? { g(nil); return nil }\n";
+    let tree = parser.parse(src, None).expect("parse swift");
+
+    let returns = collect_kinds(&tree, &["control_transfer_statement"]);
+    assert_eq!(returns.len(), 1);
+    assert_eq!(extract_return_value_name(&returns[0], src), None);
+    let nil_arg = collect_kinds(&tree, &["value_argument"])
+        .into_iter()
+        .find(|node| node_text(node, src).trim() == "nil")
+        .expect("nil value_argument");
+    assert_eq!(argument_place(&nil_arg, src), None);
+
+    let cpp = language_from_pack("cpp").expect("cpp grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&cpp).expect("set cpp grammar");
+    let src = b"void f() { g(nullptr); }\n";
+    let tree = parser.parse(src, None).expect("parse cpp");
+    let null_arg = collect_kinds(&tree, &["null"])
+        .into_iter()
+        .next()
+        .expect("nullptr null node");
+    assert_eq!(argument_place(&null_arg, src), None);
 }
 
 fn assign_call(target: &str, source_call: &str, args: &[&str], sources: &[&str]) -> FlowEvent {

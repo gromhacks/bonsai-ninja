@@ -1286,6 +1286,26 @@ impl IdgQueryService {
         &self,
         max_precision: Option<Precision>,
     ) -> Vec<(FuncId, FuncId)> {
+        let mut out: Vec<(FuncId, FuncId)> = self
+            .semantic_cross_call_edges_with_max_precision(max_precision)
+            .into_iter()
+            .map(|row| (row.caller, row.callee))
+            .collect();
+        out.sort_by_key(|(caller, callee)| (caller.raw(), callee.raw()));
+        out.dedup();
+        out
+    }
+
+    /// Every semantic cross-call dataflow edge known to the IDG.
+    ///
+    /// This is the renderable counterpart to
+    /// [`Self::semantic_function_edges_with_max_precision`]: callers that
+    /// need call-site spans, precision, and edge kind can consume these rows
+    /// directly instead of reducing the graph to `(caller, callee)` pairs.
+    pub fn semantic_cross_call_edges_with_max_precision(
+        &self,
+        max_precision: Option<Precision>,
+    ) -> Vec<CrossCallEdge> {
         let unified = self.ensure_unified();
         let cross_calls_by_from = self.ensure_cross_calls_by_from(&unified);
         let mut out = Vec::new();
@@ -1294,10 +1314,20 @@ impl IdgQueryService {
                 if max_precision.is_some_and(|precision| row.precision > precision) {
                     continue;
                 }
-                out.push((row.caller, row.callee));
+                out.push(*row);
             }
         }
-        out.sort_by_key(|(caller, callee)| (caller.raw(), callee.raw()));
+        out.sort_by_key(|row| {
+            (
+                row.caller.raw(),
+                row.callee.raw(),
+                row.call_span.file.raw(),
+                row.call_span.start,
+                row.call_span.end,
+                row.arg_idx,
+                row.param_idx,
+            )
+        });
         out.dedup();
         out
     }

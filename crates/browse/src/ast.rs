@@ -4,6 +4,7 @@
 //! `--function`). The first place to look when `dump-hir` /
 //! `inspect` silently miss a construct.
 
+use crate::common::file_path_matches_filter;
 use bonsai_hash::fnv1a_names_low32;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -85,7 +86,7 @@ pub fn dump_ast(ws: &Workspace, f: &AstFilters<'_>) -> AstOutcome {
                 .path(file_id)
                 .map_or_else(|_| "<unknown>".to_string(), |p| p.display().to_string());
             if let Some(needle) = f.file {
-                if !display_path.contains(needle) {
+                if !file_path_matches_filter(ws, &display_path, needle) {
                     return None;
                 }
             }

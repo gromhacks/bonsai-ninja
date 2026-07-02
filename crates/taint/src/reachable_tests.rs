@@ -73,6 +73,116 @@ fn taint_entry_flow_facts_include_short_call_tail() {
 }
 
 #[test]
+fn graph_seed_skips_call_target_components_but_keeps_value_carriers() {
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "restored".to_string(),
+        source_name: None,
+        source_call: Some("pickle.loads".to_string()),
+        source_call_args: vec!["decoded".to_string()],
+        source_names: vec![
+            "pickle".to_string(),
+            "pickle.loads".to_string(),
+            "loads".to_string(),
+            "decoded".to_string(),
+        ],
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let mut seed = TokenSet::default();
+    collect_assign_targets(&events, &mut seed, false);
+    collect_graph_seed_tokens(&events, &mut seed);
+
+    assert!(
+        seed.contains("restored"),
+        "assignment target remains a graph carrier"
+    );
+    assert!(seed.contains("decoded"), "argument/value carrier remains seeded");
+    for call_component in ["pickle", "pickle.loads", "loads"] {
+        assert!(
+            !seed.contains(call_component),
+            "call target component `{call_component}` must not become a taint source"
+        );
+    }
+}
+
+#[test]
+fn graph_seed_skips_singular_call_target_source_name() {
+    for source_name in ["pickle", "pickle.loads", "loads"] {
+        let events = vec![FlowEvent::Assign {
+            span: span(),
+            target: "restored".to_string(),
+            source_name: Some(source_name.to_string()),
+            source_call: Some("pickle.loads".to_string()),
+            source_call_args: vec!["decoded".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        }];
+
+        let mut seed = TokenSet::default();
+        collect_assign_targets(&events, &mut seed, false);
+        collect_graph_seed_tokens(&events, &mut seed);
+
+        assert!(seed.contains("restored"));
+        assert!(seed.contains("decoded"));
+        assert!(
+            !seed.contains(source_name),
+            "`source_name={source_name}` is a callable target component, not a value carrier"
+        );
+    }
+}
+
+#[test]
+fn graph_seed_keeps_singular_non_call_source_name() {
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "decoded".to_string(),
+        source_name: Some("session_data".to_string()),
+        source_call: Some("base64.b64decode".to_string()),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let mut seed = TokenSet::default();
+    collect_assign_targets(&events, &mut seed, false);
+    collect_graph_seed_tokens(&events, &mut seed);
+
+    assert!(seed.contains("decoded"));
+    assert!(
+        seed.contains("session_data"),
+        "non-call RHS names remain graph value carriers"
+    );
+    assert!(!seed.contains("base64"));
+    assert!(!seed.contains("b64decode"));
+}
+
+#[test]
+fn call_target_component_filter_handles_common_qualified_forms() {
+    for (source, call) in [
+        ("os", "os.path.join"),
+        ("os.path", "os.path.join"),
+        ("join", "os.path.join"),
+        ("pkg", "pkg::run"),
+        ("run", "pkg::run"),
+        ("obj", "obj->method"),
+        ("method", "obj->method"),
+    ] {
+        assert!(
+            source_name_is_call_target_component(source, Some(call)),
+            "`{source}` should be recognized as a component of `{call}`"
+        );
+    }
+    assert!(
+        !source_name_is_call_target_component("decoded", Some("pickle.loads")),
+        "real argument/value carriers must not be filtered as call target components"
+    );
+}
+
+#[test]
 fn default_source_return_idg_query_is_semantic_only() {
     let func = FuncId::new(7);
     let mut segment = IdgSegment::new();
@@ -268,6 +378,85 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
                     .is_some_and(|point| point.span == anchor)
         }),
         "anchored output-arg sources must not directly seed later carrier writes"
+    );
+}
+
+#[test]
+fn anchored_empty_source_seed_does_not_fallback_to_all_params() {
+    let func = FuncId::new(8);
+    let anchor = Span {
+        file: FileId::new(0),
+        start: 10,
+        end: 20,
+    };
+    let mut segment = IdgSegment::new();
+    let param_place = segment.intern_place(Place::Param { idx: 0 });
+    segment.intern_node(func, param_place);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+    let db = empty_db();
+
+    let nodes = source_seed_nodes_from_idg(
+        func,
+        &TokenSet::default(),
+        Some(anchor),
+        &[],
+        db.global_index().as_ref(),
+        &service,
+    );
+
+    assert!(
+        nodes.is_empty(),
+        "a concrete anchored source with no resolved source node must not widen to every parameter"
+    );
+}
+
+#[test]
+fn anchored_call_return_seed_does_not_include_same_name_reads_or_writes() {
+    let func = FuncId::new(9);
+    let anchor = Span {
+        file: FileId::new(0),
+        start: 10,
+        end: 20,
+    };
+    let later = Span {
+        file: FileId::new(0),
+        start: 40,
+        end: 60,
+    };
+    let mut segment = IdgSegment::new();
+    let source_name = segment.strings.intern("request.args.get");
+    let call_ret = segment.intern_place(Place::CallRet {
+        site: CallSiteId(anchor),
+    });
+    let same_name_read = segment.intern_place(Place::Read {
+        name: source_name,
+        path: Vec::new().into(),
+    });
+    let same_name_write = segment.intern_place(Place::write(source_name, later));
+    segment.intern_node(func, call_ret);
+    segment.intern_node(func, same_name_read);
+    segment.intern_node(func, same_name_write);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+    let db = empty_db();
+    let seeds = TokenSet::from_iter(["request.args.get".to_string()]);
+
+    let nodes = source_seed_nodes_from_idg(
+        func,
+        &seeds,
+        Some(anchor),
+        &[],
+        db.global_index().as_ref(),
+        &service,
+    );
+    let ret_ws = service.call_ret_node_at_site(func, anchor).expect("ret node");
+    let same_name_nodes = service.read_or_write_nodes_for_names(func, &["request.args.get".to_string()]);
+
+    assert!(nodes.contains(&ret_ws), "anchor CallRet remains a source seed");
+    assert!(
+        same_name_nodes.iter().all(|node| !nodes.contains(node)),
+        "anchored call-return sources must not widen to same-named reads/writes elsewhere in the function"
     );
 }
 

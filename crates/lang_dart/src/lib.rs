@@ -521,7 +521,7 @@ fn dart_dotted_member_access_call_parts(body: &str) -> Option<(String, String)> 
             return None;
         }
     }
-    let last_dot = inner.rfind('.').unwrap();
+    let last_dot = inner.rfind('.')?;
     Some((inner[..last_dot].to_string(), inner.to_string()))
 }
 

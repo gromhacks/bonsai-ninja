@@ -12,10 +12,16 @@ use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
     run_taint_analysis, ConstraintKind, FindingStatus, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
-    RuleTarget, Rulepack, TaintAnalysisOptions, TrustClass,
+    RuleTarget, Rulepack, SourceAnalysisOptions, TaintAnalysisOptions, TrustClass,
 };
 use bonsai_workspace::Workspace;
-use std::{collections::BTreeSet, fmt::Write as _, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    fmt::Write as _,
+    path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const ALL_LANGS: &[&str] = &[
     "c",
@@ -267,8 +273,72 @@ fn index_real_fixture(lang: &str, suite: &str) -> Workspace {
         .unwrap_or_else(|err| panic!("{lang}/{suite}: index workspace failed: {err}"))
 }
 
+fn temp_real_workspace(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let base = std::env::temp_dir();
+    for attempt in 0..100 {
+        let path = base.join(format!(
+            "bonsai-security-{tag}-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("create temp workspace {}: {e}", path.display()),
+        }
+    }
+    panic!("could not allocate temp workspace for {tag}");
+}
+
 fn rules_root() -> PathBuf {
     repo_root().join("security-patterns")
+}
+
+#[test]
+fn inferred_class_field_sources_require_receiver_field_write() {
+    let ws = workspace(&[(
+        "app.py",
+        r#"
+class Holder:
+    pass
+
+class ReceiverState:
+    def seed(self, value):
+        self.value = value
+
+    def receiver_leak(self):
+        return self.value
+
+class LocalOnly:
+    def seed(self, value):
+        holder = Holder()
+        holder.value = value
+
+    def local_leak(self):
+        return holder.value
+"#,
+    )]);
+
+    let sources = bonsai_security::infer_entry_point_sources(&ws);
+    assert!(
+        sources.iter().any(|source| {
+            source.rule_id == "entry-point.class_field.inherited"
+                && source.enclosing_fn.as_deref() == Some("receiver_leak")
+                && source.match_text == "self.value"
+        }),
+        "receiver field should create inferred class-field source: {sources:#?}"
+    );
+    assert!(
+        !sources.iter().any(|source| {
+            source.rule_id == "entry-point.class_field.inherited"
+                && source.enclosing_fn.as_deref() == Some("local_leak")
+                && source.match_text == "holder.value"
+        }),
+        "local object field must not create inferred class-field source: {sources:#?}"
+    );
 }
 
 fn required_mega_flow_event_kinds(lang: &str) -> &'static [&'static str] {
@@ -809,6 +879,7 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
     let mut current_phase: Option<&'static str> = None;
     let mut taint_chain_total = None;
     let mut taint_chain_ticks = 0u64;
+    let mut notes: Vec<(&'static str, String)> = Vec::new();
     let report = bonsai_security::run_taint_analysis_with_phase_progress(
         &ws,
         &rulepack("java", "source", "sink"),
@@ -828,12 +899,37 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
             bonsai_security::AnalysisProgress::PhaseFinished => {
                 current_phase = None;
             }
+            bonsai_security::AnalysisProgress::Note { label, detail } => {
+                notes.push((label, detail));
+            }
         },
     )
     .expect("taint analysis");
 
     assert_eq!(taint_chain_total, Some(1));
     assert_eq!(taint_chain_ticks, 1);
+    assert!(
+        notes
+            .iter()
+            .any(|(label, detail)| *label == "scope" && detail.contains("taint-analysis files=")),
+        "taint-analysis should report scan scope through SDK progress notes: {notes:#?}"
+    );
+    assert!(
+        notes.iter().any(|(label, detail)| {
+            *label == "scope"
+                && detail.contains("taint-analysis source_matches=")
+                && detail.contains("static_evidence=exact+narrowed")
+                && !detail.contains("max_precision")
+        }),
+        "taint-analysis should report the public static-evidence contract through SDK progress notes: {notes:#?}"
+    );
+    assert!(
+        notes.iter().any(|(label, detail)| {
+            *label == "taint-cache"
+                && (detail.contains("miss") || detail.contains("hit") || detail.contains("config changed"))
+        }),
+        "taint-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
+    );
     assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
     assert!(
         report.findings[0].finding.source.file.contains("Real.java"),
@@ -868,6 +964,7 @@ fn taint_analysis_source_to_sink_scheduler_filters_unreachable_sources_for_every
                 bonsai_security::AnalysisProgress::PhaseFinished => {
                     current_phase = None;
                 }
+                bonsai_security::AnalysisProgress::Note { .. } => {}
             },
         )
         .unwrap_or_else(|err| panic!("{lang}: taint analysis failed: {err}"));
@@ -895,6 +992,118 @@ fn taint_analysis_source_to_sink_scheduler_filters_unreachable_sources_for_every
             report.findings
         );
     }
+}
+
+#[test]
+fn source_analysis_progress_emits_scope_and_cache_notes_to_sdk() {
+    let ws = workspace(&[(
+        "/app/app.py",
+        "def source():\n    return input()\n\n\
+         def handle():\n    value = source()\n    return value\n",
+    )]);
+    let mut notes: Vec<(&'static str, String)> = Vec::new();
+    let report = bonsai_security::run_source_analysis_with_phase_progress(
+        &ws,
+        &rulepack("python", "source", "sink"),
+        SourceAnalysisOptions::default(),
+        |event| {
+            if let bonsai_security::AnalysisProgress::Note { label, detail } = event {
+                notes.push((label, detail));
+            }
+        },
+    )
+    .expect("source analysis");
+
+    assert!(
+        !report.candidates.is_empty(),
+        "fixture should produce at least one source-analysis candidate"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|(label, detail)| *label == "scope" && detail.contains("source-analysis files=")),
+        "source-analysis should report scan scope through SDK progress notes: {notes:#?}"
+    );
+    assert!(
+        notes.iter().any(|(label, detail)| {
+            *label == "taint-cache"
+                && (detail.contains("miss") || detail.contains("hit") || detail.contains("config changed"))
+        }),
+        "source-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
+    );
+}
+
+#[test]
+fn taint_analysis_taint_graph_sidecar_is_default_on_and_reused_from_disk() {
+    let root = temp_real_workspace("taint-sidecar-default");
+    std::fs::write(
+        root.join("app.py"),
+        r#"
+def source():
+    return input()
+
+def sink(value):
+    return value
+
+def handle():
+    value = source()
+    return sink(value)
+"#,
+    )
+    .expect("write python fixture");
+    let pack = rulepack("python", "source", "sink");
+
+    let run_once = || {
+        let ws =
+            Workspace::index(&root, bonsai_adapters::all_languages_registry()).expect("index real workspace");
+        let mut notes: Vec<(&'static str, String)> = Vec::new();
+        let report = bonsai_security::run_taint_analysis_with_phase_progress(
+            &ws,
+            &pack,
+            TaintAnalysisOptions::default(),
+            |event| {
+                if let bonsai_security::AnalysisProgress::Note { label, detail } = event {
+                    notes.push((label, detail));
+                }
+            },
+        )
+        .expect("taint analysis");
+        (report.findings.len(), notes)
+    };
+
+    let (first_findings, first_notes) = run_once();
+    let sidecar = bonsai_workspace::taint_index::TaintGraphIndex::latest_sidecar_path(&root);
+    assert!(
+        first_findings > 0,
+        "initial run should find the fixture; notes={first_notes:#?}"
+    );
+    assert!(
+        sidecar.is_file(),
+        "default taint analysis should write the taint graph sidecar at {}",
+        sidecar.display()
+    );
+    assert!(
+        std::fs::metadata(&sidecar).map_or(0, |meta| meta.len()) > 0,
+        "taint graph sidecar should not be empty"
+    );
+    assert!(
+        first_notes
+            .iter()
+            .any(|(label, detail)| { *label == "taint-cache" && detail.contains("write-through on") }),
+        "initial run should report write-through persistence through SDK progress notes: {first_notes:#?}"
+    );
+
+    let (second_findings, second_notes) = run_once();
+    assert_eq!(
+        second_findings, first_findings,
+        "warm sidecar reuse must not change findings"
+    );
+    assert!(
+        second_notes.iter().any(|(label, detail)| {
+            *label == "taint-cache" && detail.contains("disk hit") && !detail.contains("disk_entries=0")
+        }),
+        "second run should report taint graph sidecar reuse through SDK progress notes: {second_notes:#?}"
+    );
 }
 
 fn scheduler_filter_fixture(lang: &str, unreachable_count: usize) -> Vec<(String, String)> {

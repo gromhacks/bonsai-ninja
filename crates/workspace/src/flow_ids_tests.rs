@@ -194,6 +194,33 @@ fn sidecar_rejects_changed_workspace_content() {
 }
 
 #[test]
+fn sidecar_file_validator_rejects_corrupt_payload_even_when_size_matches() {
+    let tmp = std::env::temp_dir().join(format!(
+        "flow_ids_corrupt_validator_{}.factstore",
+        std::process::id()
+    ));
+    let writer = FactStoreWriter::create(&tmp, FLOW_IDS_TABLE_ID, 42).expect("create flow-id factstore");
+    writer
+        .add(7, 11, b"flow-id payload")
+        .expect("write factstore row");
+    let entries = writer.finish().expect("finish flow-id factstore");
+    assert_eq!(entries, 1);
+    assert_eq!(
+        FlowIdCache::validate_sidecar_file(&tmp).expect("validate fresh flow-id factstore"),
+        1
+    );
+
+    let bytes = std::fs::metadata(&tmp).expect("flow-id metadata").len();
+    std::fs::write(&tmp, vec![0_u8; bytes as usize]).expect("overwrite same-size corrupt factstore");
+    assert!(
+        FlowIdCache::validate_sidecar_file(&tmp).is_err(),
+        "same-size corrupt flow-id factstore must not validate"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn sidecar_rejects_changed_dependency_metadata() {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
     let db = build_db_with(
