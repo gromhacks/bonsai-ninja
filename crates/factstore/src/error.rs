@@ -76,6 +76,12 @@ pub enum FactStoreError {
     #[error("corrupt index: entries are not sorted by key ascending")]
     UnsortedIndex,
 
+    /// Index contained the same key more than once. Fact stores are
+    /// deterministic key-value sidecars; duplicate keys make lookup
+    /// results ambiguous.
+    #[error("corrupt index: duplicate key {0}")]
+    DuplicateKey(u64),
+
     /// Caller asked for a string id that's outside the pool.
     #[error("string id out of range: id={id}, pool has {count} strings")]
     BadStringId {

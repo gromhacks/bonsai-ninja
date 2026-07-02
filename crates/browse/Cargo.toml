@@ -10,6 +10,7 @@ description = "Browse + dump command data layer — the SDK powering `bonsai-nin
 [dependencies]
 bonsai_common = { workspace = true }
 bonsai_hash = { workspace = true }
+bonsai_diagnostics = { workspace = true }
 bonsai_callgraph = { workspace = true }
 bonsai_cfg = { workspace = true }
 bonsai_index = { workspace = true }
@@ -17,6 +18,7 @@ bonsai_lang_api = { workspace = true }
 bonsai_resolve = { workspace = true }
 bonsai_taint = { workspace = true }
 bonsai_idg = { workspace = true }
+bonsai_retrieval = { workspace = true }
 bonsai_workspace = { workspace = true }
 bonsai_inspect = { workspace = true }
 ahash = { workspace = true }
@@ -26,6 +28,11 @@ serde_json = { workspace = true }
 regex = { workspace = true }
 tree-sitter = { workspace = true }
 rayon = { workspace = true }
+
+[dev-dependencies]
+bonsai_adapters = { workspace = true }
+bonsai_lang_python = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

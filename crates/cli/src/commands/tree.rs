@@ -9,6 +9,7 @@
 //! one-line-per-entry tree.
 
 use anyhow::Result;
+use bonsai_common::is_bonsai_case_probe_path;
 use bonsai_sdk::{
     CrossEdge, IndexedStatus, Locator, MostSevereFlowSummary, NodeKind, Severity, SeverityHistogram,
     TreeFilters, TreeNode, TreeOut, TreeSummary, TreeTruncation,
@@ -42,7 +43,10 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
     let filters_hash = tree_filters_hash(&args);
     let fast_filesystem_tree = args.rules_dir.is_none() && severity.is_none() && !args.all;
     let out = if fast_filesystem_tree {
-        build_fast_filesystem_tree(&args)?
+        let stage = progress::ScopedSpinner::new("scanning filesystem tree");
+        let out = build_fast_filesystem_tree(&args)?;
+        stage.finish();
+        out
     } else {
         let (project, _footer) = open_project_index_only_with_rulepack(args.workspace, args.rules_dir)?;
         let filters = TreeFilters {
@@ -56,9 +60,9 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
             max_flow_ids_per_file: args.all.then_some(0),
             max_cross_file_edges_per_file: args.all.then_some(0),
         };
-        let spin = progress::spinner("building tree");
+        let spin = progress::ScopedSpinner::new("building semantic tree");
         let out = project.browse().tree(filters)?;
-        spin.finish_and_clear();
+        spin.finish();
         out
     };
 
@@ -81,6 +85,7 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
 }
 
 struct FastTreeBuild {
+    root: PathBuf,
     max_depth: usize,
     child_limit: usize,
     file_filter: Option<String>,
@@ -98,6 +103,7 @@ fn build_fast_filesystem_tree(args: &TreeArgs<'_>) -> Result<TreeOut> {
         .canonicalize()
         .unwrap_or_else(|_| args.workspace.to_path_buf());
     let mut build = FastTreeBuild {
+        root: root.clone(),
         max_depth: if args.file.is_some() {
             usize::MAX
         } else {
@@ -192,10 +198,10 @@ fn build_fast_dir_node(
                 children.push(child);
             }
         } else if entry_path.is_file() {
-            build.files_scanned += 1;
             if !fast_tree_file_matches(&entry_path, build) {
                 continue;
             }
+            build.files_scanned += 1;
             if children.len() >= build.child_limit {
                 node.truncated.children_dropped += 1;
                 build.children_dropped += 1;
@@ -249,11 +255,13 @@ fn visible_child_count(path: &Path, build: &FastTreeBuild) -> Result<usize> {
 }
 
 fn fast_tree_should_skip(path: &Path, build: &FastTreeBuild) -> bool {
-    let path_text = path.to_string_lossy();
+    if is_bonsai_case_probe_path(path) {
+        return true;
+    }
     if build
         .exclude_files
         .iter()
-        .any(|needle| path_text.contains(needle))
+        .any(|needle| fast_tree_path_matches_filter(&build.root, path, needle))
     {
         return true;
     }
@@ -267,7 +275,36 @@ fn fast_tree_file_matches(path: &Path, build: &FastTreeBuild) -> bool {
     build
         .file_filter
         .as_deref()
-        .is_none_or(|needle| path.to_string_lossy().contains(needle))
+        .is_none_or(|needle| fast_tree_path_matches_filter(&build.root, path, needle))
+}
+
+fn fast_tree_path_matches_filter(root: &Path, path: &Path, filter: &str) -> bool {
+    let relative = path
+        .strip_prefix(root)
+        .map(|relative| normalize_path_for_filter(&relative.to_string_lossy()))
+        .unwrap_or_else(|_| normalize_path_for_filter(&path.to_string_lossy()));
+    if normalized_path_contains(&relative, filter) {
+        return true;
+    }
+    filter_looks_like_absolute_path(filter)
+        && normalized_path_contains(&normalize_path_for_filter(&path.to_string_lossy()), filter)
+}
+
+fn normalized_path_contains(path: &str, filter: &str) -> bool {
+    let filter = normalize_path_for_filter(filter);
+    !filter.is_empty() && normalize_path_for_filter(path).contains(&filter)
+}
+
+fn filter_looks_like_absolute_path(filter: &str) -> bool {
+    let normalized = normalize_path_for_filter(filter);
+    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
+        return true;
+    }
+    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
+}
+
+fn normalize_path_for_filter(value: &str) -> String {
+    value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn tree_filters_hash(args: &TreeArgs<'_>) -> u64 {

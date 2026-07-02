@@ -19,6 +19,7 @@ use crate::cli_println;
 use crate::footer::render_paging_footer;
 use crate::page_cache;
 use crate::paging::{self, FormatClass};
+use crate::progress;
 use crate::ui;
 use crate::ui::extension_for;
 
@@ -39,7 +40,9 @@ pub(crate) struct ReadFileArgs<'a> {
 }
 
 pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
+    let target_stage = progress::ScopedSpinner::new("resolving file target");
     let resolved_path = resolve_read_file_target(args.workspace, args.path, args.symbol)?;
+    target_stage.finish();
     let path = resolved_path.as_str();
     let needs_workspace_analysis = args.from.is_some()
         || args.to.is_some()
@@ -63,7 +66,9 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
             args.max_inlined_bodies
         },
     };
+    let stage = progress::ScopedSpinner::new("building file view");
     let out = project.browse().read_file(filters)?;
+    stage.finish();
 
     match args.format {
         "json" => {
@@ -150,10 +155,12 @@ fn resolve_read_file_target(workspace: &Path, path: Option<&str>, symbol: Option
 
 fn resolve_symbol_path(workspace: &Path, symbol: &str) -> Result<String> {
     let (project, _footer) = open_project_index_only(workspace)?;
+    let stage = progress::ScopedSpinner::new("resolving symbol path");
     let defs = project.browse().defs(bonsai_sdk::DefsFilters {
         name: Some(symbol),
         ..Default::default()
     })?;
+    stage.finish();
     let exact: Vec<&bonsai_sdk::DefOut> = defs
         .iter()
         .filter(|def| def.name == symbol || def.qualified_name.as_deref() == Some(symbol))
@@ -194,7 +201,9 @@ fn nearest_symbol_suggestions(
     symbol: &str,
     limit: usize,
 ) -> Result<Vec<String>> {
+    let stage = progress::ScopedSpinner::new("collecting symbol suggestions");
     let defs = project.browse().defs(Default::default())?;
+    stage.finish();
     let mut ranked: Vec<(usize, String)> = defs
         .into_iter()
         .map(|def| {
@@ -280,8 +289,6 @@ fn ranked_path_matches<'a>(
             Some(1)
         } else if file == query_file && !query_file.is_empty() {
             Some(2)
-        } else if rel.contains(&query) {
-            Some(3)
         } else {
             None
         };

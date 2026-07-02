@@ -77,23 +77,19 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     // --- C++: has templates/generics, RAII, but no async/await language keyword (std::async is library)
     (
         "cpp",
-        &["R_11", "R_12", "I_16", "I_17", "X_07", "X_08"],
+        &["R_11", "R_12", "I_16", "I_17", "X_08"],
         Status::NotApplicable,
     ),
     // --- C#: full OO, async, generics, attributes. No macros.
-    ("csharp", &["I_20", "X_07", "X_08"], Status::NotApplicable),
+    ("csharp", &["I_20", "X_08"], Status::NotApplicable),
     // --- Dart: async/await, generics, futures. No macros, no reflection, no out-params.
-    (
-        "dart",
-        &["R_08", "X_07", "X_08", "OT_05", "OT_06"],
-        Status::NotApplicable,
-    ),
+    ("dart", &["R_08", "X_08", "OT_05", "OT_06"], Status::NotApplicable),
     // --- Elixir: functional, pattern-match, no exceptions per se, no generics.
     (
         "elixir",
         &[
             "I_03", "I_05", "I_13", "I_14", "I_15", "R_05", "R_06", "R_08", "R_11", "R_14", "R_18", "X_05",
-            "X_07", "X_08", "X_10", "X_11", "X_12", "X_13", "X_14", "OT_05", "OT_06",
+            "X_08", "X_10", "X_11", "X_12", "X_13", "X_14", "OT_05", "OT_06",
         ],
         Status::NotApplicable,
     ),
@@ -111,7 +107,7 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     (
         "go",
         &[
-            "I_13", "I_14", "I_15", "I_16", "I_17", "R_11", "X_05", "X_07", "X_08", "X_10", "X_15", "OT_18",
+            "I_13", "I_14", "I_15", "I_16", "I_17", "R_11", "X_05", "X_08", "X_10", "X_15", "OT_18",
         ],
         Status::NotApplicable,
     ),
@@ -119,7 +115,7 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     // no coroutines, and no out-params.
     (
         "java",
-        &["R_08", "R_11", "R_12", "X_05", "X_07", "X_08", "X_10"],
+        &["R_08", "R_11", "R_12", "X_05", "X_08", "X_10"],
         Status::NotApplicable,
     ),
     // --- JavaScript: dynamic OO, async, generators. No out-params, no generics, no macros, no pattern match.
@@ -129,11 +125,7 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
         Status::NotApplicable,
     ),
     // --- Kotlin: like Java + suspend (coroutines). No out-params, no macros.
-    (
-        "kotlin",
-        &["R_08", "X_05", "X_07", "X_08", "X_10"],
-        Status::NotApplicable,
-    ),
+    ("kotlin", &["R_08", "X_05", "X_08", "X_10"], Status::NotApplicable),
     // --- Lua: minimal language. No exceptions per se, no async, no generics.
     (
         "lua",
@@ -164,7 +156,7 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     (
         "php",
         &[
-            "I_16", "R_08", "R_11", "R_12", "X_05", "X_07", "X_08", "X_10", "OT_05", "OT_06", "OT_18",
+            "I_16", "R_08", "R_11", "R_12", "X_05", "X_08", "X_10", "OT_05", "OT_06", "OT_18",
         ],
         Status::NotApplicable,
     ),
@@ -172,31 +164,23 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     // no formal generics on funcs.
     (
         "python",
-        &["R_08", "X_05", "X_07", "X_08", "X_10", "OT_05", "OT_06"],
+        &["R_08", "X_05", "X_08", "X_10", "OT_05", "OT_06"],
         Status::NotApplicable,
     ),
     // --- Ruby: blocks, fibers (coroutines), no async/await, no out-params, no generics.
     (
         "ruby",
-        &[
-            "R_08", "R_11", "X_05", "X_07", "X_08", "X_10", "OT_05", "OT_06", "OT_18",
-        ],
+        &["R_08", "R_11", "X_05", "X_08", "X_10", "OT_05", "OT_06", "OT_18"],
         Status::NotApplicable,
     ),
     // --- Rust: traits, generics, async. No exceptions (Result), no coroutines (unstable).
     (
         "rust",
-        &[
-            "I_13", "I_14", "I_15", "R_12", "X_05", "X_07", "X_08", "X_10", "X_15",
-        ],
+        &["I_13", "I_14", "I_15", "R_12", "X_05", "X_08", "X_10", "X_15"],
         Status::NotApplicable,
     ),
     // --- Scala: full FP/OO mix. Generics, pattern match, async via library, no out-params.
-    (
-        "scala",
-        &["R_08", "X_05", "X_07", "X_08", "X_10"],
-        Status::NotApplicable,
-    ),
+    ("scala", &["R_08", "X_05", "X_08", "X_10"], Status::NotApplicable),
     // --- Solidity: contracts only. No async, no generics, no FFI, very limited stdlib.
     (
         "solidity",

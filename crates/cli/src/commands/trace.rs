@@ -34,14 +34,14 @@ pub(crate) fn cmd_trace(
     let ws = project.workspace();
     let trace_seed = function.as_deref().or(from.as_deref());
     {
-        let spin = progress::spinner("loading taint graph");
+        let spin = progress::ScopedSpinner::new("loading taint graph");
         load_trace_taint_graph(ws, trace_seed);
-        spin.finish_and_clear();
+        spin.finish();
     }
     // Path enumeration walks the resolved call graph from the seed; on
     // big workspaces this can take many seconds before the first line
     // of output appears, so spin during traversal.
-    let spin = progress::spinner("walking call paths");
+    let spin = progress::ScopedSpinner::new("walking call paths");
     let trace = match (&function, &from, &to) {
         (Some(f), None, None) => project
             .trace()
@@ -53,7 +53,7 @@ pub(crate) fn cmd_trace(
             .map_err(|e| augment_source_or_sink_not_found(e, ws, f, t))?,
         _ => anyhow::bail!("specify a function as a positional arg, --function, or --from + --to"),
     };
-    spin.finish_and_clear();
+    spin.finish();
     // Filter-signature hash is format-agnostic so a `P:xxxxxxxx`
     // cursor minted in text mode resolves in JSON mode and vice
     // versa (and reproduces across runs of the same query).
@@ -230,11 +230,7 @@ fn trace_text_lines(
         } else {
             reasons.join(", ")
         };
-        lines.push(format!(
-            "  {} {}",
-            ui.label("analysis incomplete"),
-            ui.warn(&reasons),
-        ));
+        lines.extend(ui.wrapped_warn_labeled_lines("analysis incomplete", &reasons));
     }
     let ws_root = workspace_root
         .canonicalize()

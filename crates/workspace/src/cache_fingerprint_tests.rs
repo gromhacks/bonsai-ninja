@@ -52,6 +52,38 @@ fn dependency_metadata_fingerprint_tracks_common_project_manifests() {
 }
 
 #[test]
+fn dependency_metadata_fingerprint_tracks_project_manifests_case_insensitively() {
+    let root = tempdir("metadata-case");
+    std::fs::write(root.join("SERVICE.CSPROJ"), "<Project />\n").expect("write uppercase csproj");
+    std::fs::write(root.join("APP.SLN"), "Microsoft Visual Studio Solution File\n")
+        .expect("write uppercase solution");
+
+    let before = dependency_metadata_fingerprint(&root);
+    std::fs::write(
+        root.join("SERVICE.CSPROJ"),
+        "<Project><PackageReference Include=\"Newtonsoft.Json\" /></Project>\n",
+    )
+    .expect("rewrite uppercase csproj");
+    let after_csproj = dependency_metadata_fingerprint(&root);
+    assert_ne!(
+        before, after_csproj,
+        "uppercase .CSPROJ files must be tracked as dependency metadata"
+    );
+
+    std::fs::write(
+        root.join("APP.SLN"),
+        "Microsoft Visual Studio Solution File\nProject(\"demo\") = \"demo\", \"demo.csproj\", \"{GUID}\"\n",
+    )
+    .expect("rewrite uppercase solution");
+    let after_sln = dependency_metadata_fingerprint(&root);
+    assert_ne!(
+        after_csproj, after_sln,
+        "uppercase .SLN files must be tracked as dependency metadata"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn dependency_metadata_fingerprint_tracks_deep_nested_manifest() {
     let root = tempdir("metadata-deep");
     let manifest_dir = root

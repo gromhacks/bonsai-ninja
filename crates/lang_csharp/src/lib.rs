@@ -721,7 +721,7 @@ fn dotted_member_access_call_parts(body: &str) -> Option<(String, String)> {
     // Receiver = everything up to the last dot; call_name = full dotted
     // form mirroring Java's `data.cmd` pattern (`receiver="data",
     // name="data.cmd"`).
-    let last_dot = inner.rfind('.').unwrap();
+    let last_dot = inner.rfind('.')?;
     let receiver = inner[..last_dot].to_string();
     Some((receiver, inner.to_string()))
 }

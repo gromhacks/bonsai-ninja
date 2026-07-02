@@ -7,7 +7,7 @@ scenario / applicability tables there, then rebless via:
 BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint --test matrix_coverage_report -- --nocapture
 ```
 
-**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1267
+**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1279
 
 ## What this matrix actually measures
 
@@ -24,23 +24,23 @@ test. Cells without executable fixture coverage must stay explicit as
 `n/a`; the adapter-deferred status is kept as a historical guardrail
 and must remain zero in a clean tree.
 
-Two sister documents look pessimistic by comparison and that is
-intentional - they measure different things:
+Two sister documents can look pessimistic by comparison because they
+measure different internal contracts:
 
 - [`COVERAGE_BASELINE.md`](COVERAGE_BASELINE.md) reports per-construct
-  *modeling level*. Cells say `Partial` because that is the engine's
-  healthy default - common case modeled precisely, rare forms emit
-  `Precision::OverApproximate`. `Partial` does NOT mean the scenario
-  fails; it means precision is honestly flagged.
+  static-evidence availability. `Partial` is not a user-facing accuracy
+  mode; it means the engine emits proven static evidence for recognized
+  forms and treats the rest as incompleteness/diagnostics instead of
+  guessed findings.
 - [`adapter-capabilities.mdx`](contributing/adapter-capabilities.mdx) tracks which
   *optional* `Decl` fields each adapter populates. `-` cells are
   precision-booster backlog (e.g. tighter virtual dispatch); none of
   them gate taint analysis.
 
 If a cell here passes but a sister-doc cell shows `Partial` /
-`-`, the engine still produces the correct taint answer - it just
-flags lower precision on the rarer shapes. The behavioural truth
-lives in this matrix.
+`-`, the user-facing contract is still one level of accuracy:
+only exact/narrowed semantic evidence is reported. Lower-quality
+over-approximate or unknown facts remain diagnostic-only.
 
 ## Legend
 
@@ -109,7 +109,7 @@ lives in this matrix.
 | `X_04` | Re-export chain A->B->C | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
 | `X_05` | Default export (JS/TS) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
 | `X_06` | Namespace import (import * as X) | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | pass | pass | n/a | n/a | pass |
-| `X_07` | Star import (from x import *) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| `X_07` | Wildcard import/load exposes bare symbol | n/a | pass | pass | pass | pass | n/a | pass | pass | n/a | pass | n/a | n/a | n/a | pass | pass | pass | pass | pass | n/a | n/a | n/a |
 | `X_08` | Dynamic import (string-driven) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
 | `X_09` | CommonJS require + assign | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
 | `X_10` | ES module <-> CommonJS interop | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
@@ -150,23 +150,23 @@ lives in this matrix.
 | Language | Applicable cells | Tests passing | Adapter-deferred |
 |---|---:|---:|---:|
 | c | 45 | 45 | 0 |
-| cpp | 65 | 65 | 0 |
-| csharp | 70 | 70 | 0 |
-| dart | 66 | 66 | 0 |
-| elixir | 49 | 49 | 0 |
+| cpp | 66 | 66 | 0 |
+| csharp | 71 | 71 | 0 |
+| dart | 67 | 67 | 0 |
+| elixir | 50 | 50 | 0 |
 | erlang | 43 | 43 | 0 |
-| go | 55 | 55 | 0 |
-| java | 65 | 65 | 0 |
+| go | 56 | 56 | 0 |
+| java | 66 | 66 | 0 |
 | javascript | 69 | 69 | 0 |
-| kotlin | 70 | 70 | 0 |
+| kotlin | 71 | 71 | 0 |
 | lua | 50 | 50 | 0 |
 | objc | 64 | 64 | 0 |
 | perl | 52 | 52 | 0 |
-| php | 63 | 63 | 0 |
-| python | 65 | 65 | 0 |
-| ruby | 64 | 64 | 0 |
-| rust | 60 | 60 | 0 |
-| scala | 68 | 68 | 0 |
+| php | 64 | 64 | 0 |
+| python | 66 | 66 | 0 |
+| ruby | 65 | 65 | 0 |
+| rust | 61 | 61 | 0 |
+| scala | 69 | 69 | 0 |
 | solidity | 46 | 46 | 0 |
 | swift | 67 | 67 | 0 |
 | typescript | 71 | 71 | 0 |

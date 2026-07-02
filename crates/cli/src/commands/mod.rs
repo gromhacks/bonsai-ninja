@@ -1,14 +1,14 @@
 //! Per-subcommand handlers and renderers.
 //!
-//! Sub-modules: [`browse`] (10 browse commands), [`dump`] (structural
+//! Sub-modules: [`browse`] (browse commands), [`dump`] (structural
 //! dumps), [`trace`], [`inspect`], [`export`]. Shared helpers
 //! (project open, symbol resolution, paging plumbing) live here.
 
 use anyhow::Result;
 use bonsai_sdk::Workspace;
-use bonsai_sdk::{Project, WorkspaceOpenEvent};
+use bonsai_sdk::{Project, WorkspaceCacheStatus, WorkspaceOpenEvent};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -21,30 +21,38 @@ pub(crate) mod diagnostics;
 pub(crate) mod dump;
 pub(crate) mod export;
 pub(crate) mod inspect;
+pub(crate) mod path;
 pub(crate) mod read_file;
 pub(crate) mod security;
 pub(crate) mod show;
+pub(crate) mod slice;
 pub(crate) mod trace;
 pub(crate) mod tree;
 
 pub(crate) use bonsai_sdk::{
     ArgsFilters, CallsFilters, ClassesFilters, CommentsFilters, DefsFilters, EntryPointsFilters,
-    ImportsFilters, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
+    ImportsFilters, OperationsFilters, RefsFilters, SearchFilters, StringsFilters, VarsFilters,
 };
 pub(crate) use browse::{
     apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_entrypoints, cmd_imports,
-    cmd_refs, cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached, emit_json_value_paged_cached,
-    page_info_to_json, paged_json_incomplete_reasons, paging_from_cli, paging_from_cli_output, short_file,
-    truncate,
+    cmd_operations, cmd_refs, cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached,
+    emit_json_value_paged_cached, page_info_to_json, paged_json_incomplete_reasons, paging_from_cli,
+    paging_from_cli_output, short_file, truncate,
 };
 pub(crate) use cache::cmd_cache;
-pub(crate) use diagnostics::{cmd_diagnostics, cmd_dump_cfg, cmd_dump_hir, cmd_index};
-pub(crate) use dump::{cmd_dump_ast, cmd_dump_callgraph, cmd_dump_edges, cmd_dump_resolve, cmd_dump_taint};
+pub(crate) use diagnostics::{
+    cmd_context, cmd_diagnostics, cmd_dump_cfg, cmd_dump_hir, cmd_index, IndexCommandOptions,
+};
+pub(crate) use dump::{
+    cmd_dump_ast, cmd_dump_callgraph, cmd_dump_edges, cmd_dump_resolution, cmd_dump_resolve, cmd_dump_taint,
+};
 pub(crate) use export::cmd_export;
 pub(crate) use inspect::{
     cmd_inspect, render_flow_block_with_heading, render_flow_with_cached_call_spans, BodySet,
     InspectCommandOptions, InspectFilters, InspectFlowRendered, InspectRenderOptions,
 };
+pub(crate) use path::{cmd_path, PathCommandOptions};
+pub(crate) use slice::cmd_slice;
 pub(crate) use trace::{cmd_trace, nearest_names, not_found_with_suggestions};
 
 /// Resolve the symbol for commands that accept either a positional
@@ -87,6 +95,12 @@ pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(P
     open_project_with_options(root, options)
 }
 
+pub(crate) fn open_project_semantic_prewarm(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
+    let (project, footer) = open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())?;
+    let _ = project.cache().warm_structural()?;
+    Ok((project, footer))
+}
+
 pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
     open_project_with_options(root, bonsai_sdk::OpenOptions::query_only())
 }
@@ -100,12 +114,14 @@ pub(crate) fn open_workspace_syntax_filtered_paths(
     options.load_dataflow_sidecar = false;
     options.load_value_flow_sidecar = false;
     options.eager_decl_index = false;
-    let ws = Workspace::open_query_filtered_paths_with_options(
+    let progress = workspace_open_progress();
+    let ws = Workspace::open_query_filtered_paths_with_options_and_events(
         root,
         bonsai_adapters::all_languages_registry(),
         include_filters,
         exclude_filters,
         options,
+        &progress,
     )
     .map_err(|err| anyhow::anyhow!("opening workspace at {}: {err}", root.display()))?;
     let footer = WorkspaceFooter::new();
@@ -120,8 +136,9 @@ pub(crate) fn open_project_index_matching_literal(
     root: &std::path::Path,
     literal: &str,
 ) -> Result<(Project, WorkspaceFooter)> {
+    let progress = workspace_open_progress();
     let project = bonsai_for_cli()
-        .open_query_matching_literal(root, literal)?
+        .open_query_matching_literal_with_progress(root, literal, progress)?
         .with_auto_refresh(false);
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     let footer = WorkspaceFooter::new();
@@ -133,8 +150,9 @@ pub(crate) fn open_project_index_filtered_paths(
     include_filters: &[String],
     exclude_filters: &[String],
 ) -> Result<(Project, WorkspaceFooter)> {
+    let progress = workspace_open_progress();
     let project = bonsai_for_cli()
-        .open_query_filtered_paths(root, include_filters, exclude_filters)?
+        .open_query_filtered_paths_with_progress(root, include_filters, exclude_filters, progress)?
         .with_auto_refresh(false);
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     let footer = WorkspaceFooter::new();
@@ -145,8 +163,9 @@ pub(crate) fn open_project_index_matching_path(
     root: &std::path::Path,
     path: &std::path::Path,
 ) -> Result<(Project, WorkspaceFooter)> {
+    let progress = workspace_open_progress();
     let project = bonsai_for_cli()
-        .open_query_matching_path(root, path)?
+        .open_query_matching_path_with_progress(root, path, progress)?
         .with_auto_refresh(false);
     crate::page_cache::remember_workspace_fingerprint(root, project.source_content_fingerprint());
     let footer = WorkspaceFooter::new();
@@ -203,7 +222,7 @@ fn bonsai_with_rulepack(
     }
 }
 
-fn bonsai_for_cli() -> bonsai_sdk::Bonsai {
+pub(crate) fn bonsai_for_cli() -> bonsai_sdk::Bonsai {
     let bonsai = bonsai_sdk::Bonsai::new();
     match crate::PARSE_TIMEOUT_MS.get().copied().flatten() {
         Some(ms) => bonsai.with_parse_timeout(Duration::from_millis(ms)),
@@ -220,61 +239,108 @@ fn workspace_open_progress() -> impl Fn(WorkspaceOpenEvent) + Sync {
 
     move |event| match event {
         WorkspaceOpenEvent::IngestStarted => {
-            *ingest.lock().expect("ingest progress lock") = Some(progress::spinner("ingesting workspace"));
+            replace_progress(&ingest, progress::spinner("ingesting workspace"));
         }
         WorkspaceOpenEvent::IngestFinished { .. } => {
-            if let Some(bar) = ingest.lock().expect("ingest progress lock").take() {
-                bar.finish_and_clear();
-            }
+            finish_progress(&ingest);
         }
         WorkspaceOpenEvent::ParseStarted { files } => {
-            *parse.lock().expect("parse progress lock") =
-                Some(progress::progress_bar("parsing", files as u64));
+            finish_progress(&ingest);
+            replace_progress(&parse, progress::progress_bar("parsing", files as u64));
         }
         WorkspaceOpenEvent::ParseFileIndexed => {
-            if let Some(bar) = parse.lock().expect("parse progress lock").as_ref() {
+            if let Some(bar) = lock_progress_slot(&parse).as_ref() {
                 bar.inc(1);
             }
         }
         WorkspaceOpenEvent::ParseFinished => {
-            if let Some(bar) = parse.lock().expect("parse progress lock").take() {
-                bar.finish_and_clear();
-            }
+            finish_progress(&parse);
         }
         WorkspaceOpenEvent::DataflowPrewarmStarted { pending } => {
+            finish_progress(&parse);
             if pending > 0 {
-                *dataflow.lock().expect("dataflow progress lock") =
-                    Some(progress::progress_bar("building dataflow graph", pending as u64));
+                replace_progress(
+                    &dataflow,
+                    progress::progress_bar("building dataflow graph", pending as u64),
+                );
             }
         }
         WorkspaceOpenEvent::DataflowEntryBuilt => {
-            if let Some(bar) = dataflow.lock().expect("dataflow progress lock").as_ref() {
+            if let Some(bar) = lock_progress_slot(&dataflow).as_ref() {
                 bar.inc(1);
             }
         }
         WorkspaceOpenEvent::DataflowPrewarmFinished => {
-            if let Some(bar) = dataflow.lock().expect("dataflow progress lock").take() {
-                bar.finish_and_clear();
-            }
+            finish_progress(&dataflow);
         }
         WorkspaceOpenEvent::ValueFlowPrewarmStarted => {
-            *value_flow.lock().expect("value-flow progress lock") =
-                Some(progress::spinner("building value-flow graph"));
+            finish_progress(&dataflow);
+            replace_progress(&value_flow, progress::spinner("building value-flow graph"));
         }
         WorkspaceOpenEvent::ValueFlowPrewarmFinished => {
-            if let Some(bar) = value_flow.lock().expect("value-flow progress lock").take() {
-                bar.finish_and_clear();
-            }
+            finish_progress(&value_flow);
         }
         WorkspaceOpenEvent::FlowIdsPrewarmStarted => {
-            *flow_ids.lock().expect("flow-ids progress lock") = Some(progress::spinner("building flow ids"));
+            finish_progress(&value_flow);
+            replace_progress(&flow_ids, progress::spinner("building flow ids"));
         }
         WorkspaceOpenEvent::FlowIdsPrewarmFinished => {
-            if let Some(bar) = flow_ids.lock().expect("flow-ids progress lock").take() {
-                bar.finish_and_clear();
+            finish_progress(&flow_ids);
+        }
+        WorkspaceOpenEvent::CacheChecked {
+            cache,
+            status,
+            entries,
+        } => {
+            if progress::debug_category_enabled("workspace-cache") {
+                eprintln!(
+                    "  [workspace-cache] {}",
+                    render_workspace_cache_note(cache, status, entries)
+                );
             }
         }
     }
+}
+
+fn replace_progress(slot: &Mutex<Option<indicatif::ProgressBar>>, bar: indicatif::ProgressBar) {
+    let mut guard = lock_progress_slot(slot);
+    if let Some(previous) = guard.take() {
+        previous.finish_and_clear();
+    }
+    *guard = Some(bar);
+}
+
+fn finish_progress(slot: &Mutex<Option<indicatif::ProgressBar>>) {
+    if let Some(bar) = lock_progress_slot(slot).take() {
+        bar.finish_and_clear();
+    }
+}
+
+fn lock_progress_slot(
+    slot: &Mutex<Option<indicatif::ProgressBar>>,
+) -> MutexGuard<'_, Option<indicatif::ProgressBar>> {
+    slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn workspace_cache_status_label(status: WorkspaceCacheStatus) -> &'static str {
+    match status {
+        WorkspaceCacheStatus::Hit => "hit",
+        WorkspaceCacheStatus::Miss => "miss",
+        WorkspaceCacheStatus::Skipped => "skipped",
+        WorkspaceCacheStatus::Error => "error",
+    }
+}
+
+fn render_workspace_cache_note(cache: &str, status: WorkspaceCacheStatus, entries: usize) -> String {
+    format!(
+        "{cache}: {} · {}",
+        workspace_cache_status_label(status),
+        counted_usize(entries, "entry", "entries")
+    )
+}
+
+fn counted_usize(value: usize, singular: &str, plural: &str) -> String {
+    format!("{value} {}", if value == 1 { singular } else { plural })
 }
 
 /// Render a span as `(path, line, column)`. Used by every browse /
@@ -293,4 +359,47 @@ pub(crate) fn format_span(span: &bonsai_common::Span, ws: &Workspace) -> (String
         (0, 0)
     };
     (path, line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Mutex as StdMutex;
+
+    static PANIC_HOOK_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn poison_slot(slot: &Mutex<Option<indicatif::ProgressBar>>) {
+        let _hook_guard = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let old_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = slot.lock().expect("initial progress lock");
+            panic!("poison progress lock");
+        }));
+        std::panic::set_hook(old_hook);
+        assert!(result.is_err(), "slot poisoning helper must panic while locked");
+    }
+
+    #[test]
+    fn finish_progress_recovers_poisoned_slot() {
+        let slot = Mutex::new(Some(indicatif::ProgressBar::hidden()));
+        poison_slot(&slot);
+
+        finish_progress(&slot);
+
+        assert!(lock_progress_slot(&slot).is_none());
+    }
+
+    #[test]
+    fn replace_progress_recovers_poisoned_slot() {
+        let slot = Mutex::new(Some(indicatif::ProgressBar::hidden()));
+        poison_slot(&slot);
+
+        replace_progress(&slot, indicatif::ProgressBar::hidden());
+
+        assert!(lock_progress_slot(&slot).is_some());
+    }
 }

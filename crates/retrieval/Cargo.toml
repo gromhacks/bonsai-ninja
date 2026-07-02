@@ -1,0 +1,27 @@
+[package]
+name = "bonsai_retrieval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fact-backed candidate retrieval sidecar for bonsai-ninja."
+
+[dependencies]
+bonsai_callgraph = { workspace = true }
+bonsai_common = { workspace = true }
+bonsai_factstore = { workspace = true }
+bonsai_hash = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_workspace = { workspace = true }
+ahash = { workspace = true }
+bincode = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+bonsai_adapters = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

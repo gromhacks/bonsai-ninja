@@ -22,9 +22,10 @@ case "${1:-}" in
     --check) CHECK_MODE=1 ;;
 esac
 
-# FlowEvent variants surveyed. Add to this list when the engine grows
-# a new event kind.
-declare -a EVENTS=(Call Assign Return Throw Catch Branch ForEach Param)
+# FlowEvent variants surveyed. Keep this list in enum order with
+# `crates/lang_api/src/types.rs`. Loop sub-kinds and catch params are
+# fields on `FlowEvent::Loop` / `FlowEvent::Try`, not separate events.
+declare -a EVENTS=(Call Branch Loop Assign Return Throw Try Break Continue Yield Await Defer Using Lifecycle)
 
 generate_table() {
     printf '%-20s' "Adapter"

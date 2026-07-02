@@ -25,7 +25,8 @@ behavioural contract; cross-cutting details live in
 3. Make the primary output machine-consumable JSON with a stable schema;
    render text / DOT / SARIF on top.
 4. Degrade explicitly — every step carries `Precision::{Exact, Narrowed,
-   OverApproximate, Unknown}`. Never silently invent precision.
+   OverApproximate, Unknown}`. Semantic call edges also carry resolver
+   stage, evidence, and confidence. Never silently invent precision.
 5. Scale incrementally after edits — parser cache keyed on `(FileId,
    version)`, dataflow sidecar keyed on content hash + matcher policy
    fingerprint.

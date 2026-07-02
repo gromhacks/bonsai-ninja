@@ -1,7 +1,7 @@
 //! Browse + dump command data layer.
 //!
 //! Every CLI browse command (`defs`, `calls`, `imports`, `vars`,
-//! `strings`, `args`, `classes`, `refs`, `search`) and dump command
+//! `strings`, `args`, `operations`, `classes`, `refs`, `search`) and dump command
 //! (`dump-hir`, `dump-cfg`, `dump-callgraph`, `dump-edges`,
 //! `dump-resolve`, `dump-taint`, `dump-ast`) gets its data through
 //! a function exposed here. The CLI binary is a renderer over this
@@ -31,19 +31,27 @@ pub(crate) mod flows;
 pub(crate) mod graph_export;
 pub(crate) mod imports;
 pub(crate) mod native_export;
+pub(crate) mod operations;
+pub(crate) mod paths;
 pub mod refs;
+pub(crate) mod resolution;
 pub(crate) mod resolve;
 pub(crate) mod search;
+pub(crate) mod slice;
 pub mod strings;
 pub(crate) mod taint;
 pub(crate) mod vars;
 
 pub use args::{args, ArgOut, ArgsFilters};
 pub use ast::{compute_node_id, dump_ast, AstFileDump, AstFilters, AstNode, AstOutcome};
+pub use bonsai_workspace::decl_decorator_names;
 pub use calls::{calls, CallOut, CallsFilters};
 pub use classes::{classes, ClassOut, ClassesFilters};
 pub use comments::{comments, CommentOut, CommentsFilters};
-pub use common::{collect_callee_names, format_span, make_name_filter, Locator, NameFilter, Span};
+pub use common::{
+    collect_callee_names, file_path_excluded_by_filters, file_path_matches_filter, format_span,
+    make_name_filter, Locator, NameFilter, Span,
+};
 pub use defs::{defs, DefOut, DefsFilters};
 pub use dumps::{
     callgraph_summary, dump_callgraph, dump_cfg, dump_hir, CallgraphRow, DumpCallableCandidate,
@@ -61,11 +69,17 @@ pub use native_export::{
     native_export_json, native_export_json_with_config, render_native_export_json,
     render_native_export_json_with_config, write_native_export_json_with_config, NativeExportConfig,
 };
+pub use operations::{operations, OperationOperandOut, OperationOut, OperationsFilters};
+pub use paths::{paths, PathFilters, PathFunctionRow, PathOutcome, PathRow};
 pub use refs::{refs, RefOut, RefsFilters};
+pub use resolution::{
+    resolution_coverage, ResolutionCoverageDeclRow, ResolutionCoverageFileRow, ResolutionCoverageFilters,
+};
 pub use resolve::{
     compute_candidate_id, dump_resolve, ResolveCandidate, ResolveFilters, ResolveOutcome, ResolveTrace,
 };
 pub use search::{search, SearchFilters, SearchHit};
+pub use slice::{slices, SliceFilters, SliceOutcome, SliceRow, SliceStep};
 pub use strings::{strings, StringOut, StringsFilters};
 pub use taint::{
     compute_taint_id, dump_taint, precision_display, TaintFilters, TaintOutcome, TaintRecord, TaintReport,

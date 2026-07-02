@@ -975,7 +975,11 @@ fn propagate_taint_through_events(
 ) {
     for (event_index, event) in events.iter().enumerate() {
         let suppress_container_taint = assignment_has_precise_field_projection(events, event_index, event);
-        let adjacent_source_call_args = adjacent_call_args_for_assignment(events, event_index);
+        let adjacent_source_call = adjacent_call_for_assignment(events, event_index);
+        let adjacent_source_call_args = adjacent_source_call
+            .as_ref()
+            .map(|call| call.args.as_slice())
+            .unwrap_or(&[]);
         let split_call_assignment = split_call_assignment_event(events, event_index);
         let destructure_index = destructuring_target_index(events, event_index, event, ctx.db);
         let return_tainted_assignment =
@@ -997,7 +1001,7 @@ fn propagate_taint_through_events(
             } else {
                 apply_return_taint(
                     event,
-                    &adjacent_source_call_args,
+                    adjacent_source_call_args,
                     destructure_index,
                     state,
                     ctx.config,
@@ -1059,8 +1063,11 @@ fn propagate_taint_through_events(
                     record_tainted_assignment_call_event(
                         source_call.as_deref(),
                         source_call_args,
-                        &adjacent_source_call_args,
-                        *span,
+                        adjacent_source_call_args,
+                        adjacent_source_call
+                            .as_ref()
+                            .map(|call| call.span)
+                            .unwrap_or(*span),
                         state,
                         ctx,
                     );
@@ -1311,7 +1318,13 @@ impl EffectiveCallArg {
     }
 }
 
-fn adjacent_call_args_for_assignment(events: &[FlowEvent], event_index: usize) -> Vec<EffectiveCallArg> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdjacentAssignmentCall {
+    span: Span,
+    args: Vec<EffectiveCallArg>,
+}
+
+fn adjacent_call_for_assignment(events: &[FlowEvent], event_index: usize) -> Option<AdjacentAssignmentCall> {
     let Some(FlowEvent::Assign {
         source_call: Some(source_call),
         source_call_args,
@@ -1319,7 +1332,7 @@ fn adjacent_call_args_for_assignment(events: &[FlowEvent], event_index: usize) -
         ..
     }) = events.get(event_index)
     else {
-        return Vec::new();
+        return None;
     };
 
     // Some adapters can identify that an assignment's RHS is a call
@@ -1345,11 +1358,13 @@ fn adjacent_call_args_for_assignment(events: &[FlowEvent], event_index: usize) -
                             arg.name.is_some() || arg.place.is_some() || !arg.source_names.is_empty()
                         })) =>
             {
-                Some(args.iter().map(EffectiveCallArg::from_call_arg).collect())
+                Some(AdjacentAssignmentCall {
+                    span: *span,
+                    args: args.iter().map(EffectiveCallArg::from_call_arg).collect(),
+                })
             }
             _ => None,
         })
-        .unwrap_or_default()
 }
 
 fn split_call_assignment_event(
@@ -3428,7 +3443,11 @@ fn walk_events_for_sink(
 ) -> (TokenSet, bool) {
     for (event_index, event) in events.iter().enumerate() {
         let suppress_container_taint = assignment_has_precise_field_projection(events, event_index, event);
-        let adjacent_source_call_args = adjacent_call_args_for_assignment(events, event_index);
+        let adjacent_source_call = adjacent_call_for_assignment(events, event_index);
+        let adjacent_source_call_args = adjacent_source_call
+            .as_ref()
+            .map(|call| call.args.as_slice())
+            .unwrap_or(&[]);
         let split_call_assignment = split_call_assignment_event(events, event_index);
         let destructure_index = destructuring_target_index(events, event_index, event, ctx.db);
         let return_tainted_assignment =
@@ -3450,7 +3469,7 @@ fn walk_events_for_sink(
             } else {
                 apply_return_taint(
                     event,
-                    &adjacent_source_call_args,
+                    adjacent_source_call_args,
                     destructure_index,
                     &mut state,
                     ctx.config,

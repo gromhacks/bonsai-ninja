@@ -8,7 +8,7 @@
 //! (catches module-level / non-decl calls the flow-event walker
 //! doesn't reach).
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -136,7 +136,9 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
             larger
         });
     out.retain(|call| {
-        if f.file.is_some_and(|needle| !call.file.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !file_path_matches_filter(ws, &call.file, needle))
+        {
             return false;
         }
         if !callee_match(&call.callee) {
@@ -206,12 +208,33 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
     let mut out = collapsed;
     // Final display order: group by callee, then by caller for
     // readable per-target clustering, then file/line tiebreakers.
+    let callee_rank = |call: &CallOut| {
+        if f.callee.is_some() && !f.regex {
+            textual_relevance_key(&call.callee, f.callee, false)
+        } else {
+            (u8::MAX, usize::MAX)
+        }
+    };
+    let caller_rank = |call: &CallOut| {
+        if f.caller.is_some() && !f.regex {
+            call.caller.as_deref().map_or((u8::MAX, usize::MAX), |caller| {
+                textual_relevance_key(caller, f.caller, false)
+            })
+        } else {
+            (u8::MAX, usize::MAX)
+        }
+    };
     out.sort_by(|a, b| {
-        a.callee
-            .cmp(&b.callee)
-            .then_with(|| a.caller.cmp(&b.caller))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
+        callee_rank(a)
+            .cmp(&callee_rank(b))
+            .then_with(|| caller_rank(a).cmp(&caller_rank(b)))
+            .then_with(|| {
+                a.callee
+                    .cmp(&b.callee)
+                    .then_with(|| a.caller.cmp(&b.caller))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+            })
     });
     Ok(out)
 }

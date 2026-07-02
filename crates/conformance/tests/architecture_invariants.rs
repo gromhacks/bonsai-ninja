@@ -87,6 +87,15 @@ fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("unterminated body for {name}");
 }
 
+fn live_code(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -2457,18 +2466,145 @@ fn inspect_taint_flow_uses_workspace_syntax_flow_query_facade() {
     let inspect = read(&root.join("crates/cli/src/commands/inspect.rs"));
     let body = function_body(&inspect, "inspect_taint_flows");
     assert!(
-        body.contains("SyntaxFlowQuery::new") && body.contains("ws.syntax_flow_graph"),
-        "inspect_taint_flows must ask the workspace syntax-flow facade for taint graphs"
+        body.contains("SyntaxFlowQuery::new")
+            && body.contains("ws.syntax_flow_graph")
+            && body.contains("semantic_flow_stats.record_plan(&graph.plan)"),
+        "inspect_taint_flows must ask the workspace syntax-flow facade for taint graphs and retain planner metadata"
+    );
+    assert!(
+        inspect.contains("SyntaxFlowPlan")
+            && inspect.contains("semantic_flow_backend_counts")
+            && inspect.contains("semantic_flow_cache_hits")
+            && inspect.contains("semantic_flow_fallback_reasons"),
+        "inspect must surface syntax-flow planner backend/cache/fallback metadata"
     );
     for forbidden in [
         "dataflow().graph_for",
+        "idg_service().is_some",
         "inspect_entry_taint_graph_from_idg",
         "entry_taint_graph_from_idg",
         "build_and_seed_idg_service",
     ] {
         assert!(
             !body.contains(forbidden),
-            "inspect_taint_flows must not bypass the syntax-flow facade with `{forbidden}`"
+        "inspect_taint_flows must not bypass the syntax-flow facade or pre-check planner internals with `{forbidden}`"
+    );
+    }
+}
+
+#[test]
+fn entrypoints_command_uses_canonical_semantic_callgraph_path() {
+    let root = repo_root();
+    let browse = read(&root.join("crates/cli/src/commands/browse.rs"));
+    let body = function_body(&browse, "cmd_entrypoints");
+    assert!(
+        body.contains("open_project(root)")
+            && body.contains("project")
+            && body.contains(".browse()")
+            && body.contains(".entrypoints(f)"),
+        "entrypoints must use the canonical browse entrypoint API backed by the resolved semantic callgraph"
+    );
+    for forbidden in [
+        "open_project_parse_only",
+        "decl_index_uncached",
+        "semantic_callers_not_loaded",
+        "semantic caller exclusion omitted",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "entrypoints must not render approximate syntax-only roots via `{forbidden}`"
+        );
+    }
+    assert!(
+        !browse.contains("render_entrypoints_streaming_first_page"),
+        "entrypoints must not keep an approximate large-workspace first-page renderer"
+    );
+}
+
+#[test]
+fn first_class_path_and_slice_use_syntax_derived_indexes_only() {
+    let root = repo_root();
+    let paths_rs = read(&root.join("crates/browse/src/paths.rs"));
+    let path_body = live_code(function_body(&paths_rs, "paths"));
+    let path_graph_body = live_code(function_body(&paths_rs, "semantic_path_graph"));
+    let path_finalize_body = live_code(function_body(&paths_rs, "finalize_outcome"));
+    assert!(
+        path_body.contains("semantic_path_graph(ws)") && path_body.contains("enumerate_paths_resolved("),
+        "path queries must enumerate the shared semantic path graph and report resolution coverage"
+    );
+    assert!(
+        path_graph_body.contains("ws.cached_resolved_call_graph()")
+            && path_graph_body.contains("idg.semantic_cross_call_edges_with_max_precision(")
+            && path_graph_body.contains("call_edge_from_idg_cross_call("),
+        "path semantic graph must start from the cached resolved callgraph and augment with warmed IDG cross-call edges"
+    );
+    assert!(
+        path_finalize_body.contains("resolution_coverage(")
+            && path_finalize_body.contains("unresolved call site(s)"),
+        "path query completeness must include resolver coverage gaps"
+    );
+    for forbidden in [
+        "read_to_string",
+        "std::fs",
+        "source_text",
+        "raw_text",
+        ".contents(",
+        ".text(",
+    ] {
+        assert!(
+            !path_body.contains(forbidden),
+            "path queries must not fall back to raw source/text search via `{forbidden}`"
+        );
+    }
+    let idg_service = read(&root.join("crates/idg/src/service.rs"));
+    assert!(
+        idg_service.contains("semantic_cross_call_edges_with_max_precision")
+            && idg_service.contains("Every semantic cross-call dataflow edge known to the IDG"),
+        "IDG must expose renderable semantic cross-call edges for path/security/export consumers"
+    );
+    let cli_reference = read(&root.join("docs/cli-reference.mdx"));
+    let sdk_reference = read(&root.join("docs/contributing/sdk.mdx"));
+    let architecture = read(&root.join("docs/contributing/architecture.mdx"));
+    assert!(
+        cli_reference.contains("idg_semantic_edges")
+            && sdk_reference.contains("PathOutcome.backends")
+            && architecture.contains("warmed IDG cross-call edges"),
+        "path docs must describe warmed-IDG backend metadata and semantic graph augmentation"
+    );
+
+    let slice_rs = read(&root.join("crates/browse/src/slice.rs"));
+    let slice_body = live_code(function_body(&slice_rs, "slices"));
+    let slice_decl_body = live_code(function_body(&slice_rs, "slice_decl"));
+    assert!(
+        slice_body.contains("global.decls_in(file)") && slice_decl_body.contains("decl.flow_events"),
+        "slice queries must start from indexed declarations and adapter-emitted FlowEvent facts"
+    );
+    assert!(
+        slice_decl_body.contains("backward_slice_from_facts(")
+            && slice_decl_body.contains("semantic_slice_from_value_flow(")
+            && slice_decl_body.contains("analysis_incomplete_reasons"),
+        "slice queries must merge local FlowEvent evidence with shared semantic value-flow evidence and expose bounded completeness"
+    );
+    let semantic_slice_body = live_code(function_body(&slice_rs, "semantic_slice_from_value_flow"));
+    assert!(
+        semantic_slice_body.contains("ws.value_flow()")
+            && semantic_slice_body.contains("graph_for_with_caches(")
+            && semantic_slice_body.contains("graph.backward_closure("),
+        "slice semantic evidence must come from the shared value-flow graph, not command-local traversal"
+    );
+    let slice_live = live_code(&slice_rs);
+    for forbidden in [
+        "read_to_string",
+        "std::fs",
+        "source_text",
+        "raw_text",
+        ".contents(",
+        ".text(",
+        "regex::Regex",
+    ] {
+        assert!(
+            !slice_live.contains(forbidden),
+            "slice queries must not fall back to raw source/text search via `{forbidden}`"
         );
     }
 }
@@ -2531,6 +2667,7 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     let taint_index = read(&root.join("crates/workspace/src/taint_index.rs"));
     let callgraph_sidecar = read(&root.join("crates/workspace/src/callgraph_sidecar.rs"));
     let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let taint_cache = read(&root.join("crates/security/src/analysis/taint_cache.rs"));
     let sdk = read(&root.join("crates/sdk/src/lib.rs"));
     let page_cache = read(&root.join("crates/cli/src/page_cache.rs"));
 
@@ -2556,7 +2693,13 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
             && taint_graph_body.contains("config_fingerprint"),
         "taint graph sidecar must bind matcher policy, source content, dependency metadata, and rule/config fingerprint"
     );
-    let taint_config_body = function_body(&security_analysis, "taint_graph_config_fingerprint");
+    assert!(
+        security_analysis.contains("mod taint_cache;")
+            && security_analysis.contains("taint_cache::config_fingerprint(pack, \"source-analysis\"")
+            && security_analysis.contains("taint_cache::config_fingerprint(pack, \"taint-analysis\""),
+        "security analysis must route source and taint analysis through the shared taint cache fingerprint"
+    );
+    let taint_config_body = function_body(&taint_cache, "config_fingerprint");
     assert!(
         taint_config_body.contains("pack.all_rules()")
             && taint_config_body.contains("rule.enabled")
@@ -2597,12 +2740,11 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     );
 }
 
-/// `bonsai-ninja index <workspace>` is the cheap structural pass from
-/// `docs/goal.md`, not a hidden full-workspace exact dataflow solve.
-/// Whole-workspace prewarm remains available, but only behind an
-/// explicit opt-in flag or full-prewarm SDK option.
+/// `bonsai-ninja index <workspace>` is the syntax/construct warm-up path.
+/// Semantic and dataflow prewarm are explicit modes; cache rebuild remains
+/// bounded and must not become an accidental full semantic/dataflow prewarm.
 #[test]
-fn default_index_path_stays_structural_without_eager_dataflow_prewarm() {
+fn default_index_path_stays_structural_with_explicit_warm_modes() {
     let root = repo_root();
     let args = read(&root.join("crates/cli/src/args.rs"));
     let main = read(&root.join("crates/cli/src/main.rs"));
@@ -2612,33 +2754,44 @@ fn default_index_path_stays_structural_without_eager_dataflow_prewarm() {
     let cache_cmd = read(&root.join("crates/cli/src/commands/cache.rs"));
 
     assert!(
-        args.contains("By default this is a structural parse/index pass only")
+        args.contains("By default this is syntax/construct index-up-front behavior")
             && args.contains("prewarm_dataflow: bool")
-            && args.contains("#[arg(long)]\n        prewarm_dataflow: bool"),
-        "index CLI must document structural default and expose prewarm_dataflow only as an explicit flag"
+            && args.contains("semantic: bool")
+            && args.contains("structural_only: bool")
+            && args.contains("conflicts_with = \"structural_only\""),
+        "index CLI must document semantic prewarm default and expose structural/dataflow alternatives explicitly"
     );
 
     let index_body = function_body(&diagnostics, "cmd_index");
     assert!(
-        index_body.contains("if prewarm_dataflow")
+        diagnostics.contains("struct IndexCommandOptions")
+            && diagnostics.contains("structural_only: bool")
+            && index_body.contains("if options.prewarm_dataflow")
             && index_body.contains("open_project_dataflow_prewarm(root)?")
-            && index_body.contains("open_project_parse_only(root)?"),
-        "cmd_index must route default runs through parse-only open and reserve dataflow prewarm for the explicit flag"
+            && index_body.contains("else if options.semantic")
+            && index_body.contains("open_project_semantic_prewarm(root)?")
+            && index_body.contains("open_project_parse_only(root)?")
+            && index_body.contains("if options.prewarm_dataflow || options.semantic")
+            && index_body.contains("write_manifest()"),
+        "cmd_index must keep default/structural-only runs parse-only and publish manifests only for explicit warmed modes"
     );
     assert!(
-        main.contains(
-            "prewarm_dataflow,\n        } => cmd_index(&workspace, watch, interval_ms, prewarm_dataflow)"
-        ),
-        "CLI dispatch must pass only the parsed index prewarm flag into cmd_index"
+        main.contains("structural_only,")
+            && main.contains("prewarm_dataflow,")
+            && main.contains("semantic,")
+            && main.contains("cmd_index("),
+        "CLI dispatch must pass all index mode flags into cmd_index"
     );
 
     let parse_only_body = function_body(&workspace, "parse_only");
     assert!(
-        parse_only_body.contains("load_dataflow_sidecar: false")
+        parse_only_body.contains("load_callgraph_sidecar: false")
+            && parse_only_body.contains("load_dataflow_sidecar: false")
             && parse_only_body.contains("prewarm_dataflow: false")
             && parse_only_body.contains("save_dataflow_sidecar: false")
             && parse_only_body.contains("load_value_flow_sidecar: false")
             && parse_only_body.contains("prewarm_value_flow: false")
+            && parse_only_body.contains("load_idg_sidecar: false")
             && parse_only_body.contains("prewarm_flow_ids: false"),
         "WorkspaceOpenOptions::parse_only must not load or prewarm semantic analysis sidecars"
     );
@@ -2656,7 +2809,8 @@ fn default_index_path_stays_structural_without_eager_dataflow_prewarm() {
     assert!(
         cache_cmd.contains("Open structurally, then refresh bounded reusable")
             && cache_cmd.contains("Do not route through a full")
-            && cache_cmd.contains("workspace prewarm path here"),
+            && cache_cmd.contains("workspace prewarm path here")
+            && cache_cmd.contains("build_and_seed_persisted_idg_service()"),
         "cache rebuild must not regress to full-workspace taint/value-flow/flow-id prewarm"
     );
 }

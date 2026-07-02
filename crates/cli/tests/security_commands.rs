@@ -27,8 +27,12 @@ fn bin_path() -> Option<PathBuf> {
     None
 }
 
-fn run(args: &[&str]) -> Option<String> {
-    let bin = bin_path()?;
+struct CommandOutput {
+    stdout: String,
+    stderr: String,
+}
+
+fn normalized_args(args: &[&str]) -> Vec<String> {
     // `--rules-dir` is now a per-subcommand flag, but the older tests
     // in this file pass it at the parent-`security` position
     // (`security <ws> --rules-dir <dir> <subcmd>`). Rewrite to
@@ -64,17 +68,31 @@ fn run(args: &[&str]) -> Option<String> {
         without
     };
     full.push("--no-color");
-    let out = Command::new(&bin)
-        .args(&full)
-        .env("COLUMNS", "200")
-        .output()
-        .expect("run bonsai-ninja");
+    full.into_iter().map(str::to_string).collect()
+}
+
+fn run_command(args: &[&str], envs: &[(&str, &str)]) -> Option<CommandOutput> {
+    let bin = bin_path()?;
+    let full = normalized_args(args);
+    let mut cmd = Command::new(&bin);
+    cmd.args(&full).env("COLUMNS", "200");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().expect("run bonsai-ninja");
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         panic!("args={args:?}\nstderr={stderr}\nstdout={stdout}");
     }
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
+    Some(CommandOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    })
+}
+
+fn run(args: &[&str]) -> Option<String> {
+    Some(run_command(args, &[])?.stdout)
 }
 
 fn rules_dir() -> String {
@@ -916,6 +934,177 @@ fn main() {
 }
 
 #[test]
+fn project_local_rule_override_warning_is_clean_stderr() {
+    let ws = temp_workspace("local-rule-warning");
+    std::fs::write(
+        ws.join("app.py"),
+        r"
+import os
+
+def run(cmd):
+    os.system(cmd)
+",
+    )
+    .expect("write python fixture");
+    let sink_dir = ws.join(".bonsai/rules/python/sinks");
+    std::fs::create_dir_all(&sink_dir).expect("create project-local sink dir");
+    std::fs::write(
+        sink_dir.join("cmdi.yml"),
+        r"- id: python.cmdi.os_system
+  enabled: true
+  tag: command-injection
+  severity: critical
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  description: project-local os.system override.
+",
+    )
+    .expect("write project-local sink override");
+
+    let out = run_command(
+        &[
+            "security",
+            ws.to_str().unwrap(),
+            "sinks",
+            "--rules-dir",
+            &rules_dir(),
+            "--all",
+        ],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        out.stderr
+            .contains("warning: project-local rule `python.cmdi.os_system` overrides global rule"),
+        "project-local override should produce a readable warning on stderr:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("loading security rules")
+            && !out.stderr.contains("[workspace-cache]")
+            && !out.stderr.contains("[security-progress]"),
+        "override warning should not be mixed with progress/debug chrome:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("python.cmdi.os_system"),
+        "project-local override should still leave sink inventory usable:\n{}",
+        out.stdout
+    );
+    let _ = std::fs::remove_dir_all(ws);
+}
+
+#[test]
+fn security_progress_notes_stay_off_json_stdout_when_disabled() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let rules = rules_dir();
+    for subcommand in ["taint-analysis", "source-analysis"] {
+        let out = Command::new(&bin)
+            .args([
+                "security",
+                ws.to_str().unwrap(),
+                subcommand,
+                "--rules-dir",
+                &rules,
+                "--format",
+                "json",
+                "--all",
+                "--no-color",
+                "--no-progress",
+            ])
+            .output()
+            .expect("run bonsai-ninja");
+        assert!(
+            out.status.success(),
+            "{subcommand} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{subcommand} stdout must stay valid JSON when progress is disabled: {error}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("taint-cache:") && !stderr.contains("scope:") && !stderr.contains("cache "),
+            "{subcommand} should not render progress notes with --no-progress, got stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn debug_progress_notes_respect_no_progress_and_do_not_leak_raw_engine_dumps() {
+    let ws = temp_workspace("debug-progress-style");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write vulnerable fixture");
+
+    let rules = rules_dir();
+    let out = run_command(
+        &[
+            "--no-cache",
+            "security",
+            ws.to_str().unwrap(),
+            "taint-analysis",
+            "--context",
+            "32k",
+            "--no-progress",
+        ],
+        &[
+            ("BONSAI_DEBUG", "workspace-cache,security-progress"),
+            ("BONSAI_RULES_DIR", &rules),
+        ],
+    )
+    .unwrap();
+
+    assert!(
+        out.stderr
+            .contains("[workspace-cache] dataflow factstore: miss · 0 entries"),
+        "workspace cache debug line should use CLI status grammar:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("[security-progress]"),
+        "security progress notes should be muted by --no-progress even in debug mode:\n{}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("files=")
+            && !out.stderr.contains("source_rules=")
+            && !out.stderr.contains("max_precision")
+            && !out.stderr.contains("disk_entries=")
+            && !out.stderr.contains("resident_before=")
+            && !out.stderr.contains("entries=0")
+            && !out.stderr.contains("scope: taint-analysis")
+            && !out.stderr.contains("taint-cache:")
+            && !out.stderr.contains(&ws.to_string_lossy().to_string()),
+        "debug progress should not leak raw engine key/value dumps or absolute sidecar paths:\n{}",
+        out.stderr
+    );
+    let _ = std::fs::remove_dir_all(ws);
+}
+
+#[test]
 fn sources_enumerate_for_python() {
     let ws = micro_path("python");
     if !ws.exists() {
@@ -1524,6 +1713,129 @@ def handle():
 }
 
 #[test]
+fn taint_analysis_flow_filter_and_show_round_trip_security_flow_id() {
+    let ws = temp_workspace("security-flow-id");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write fixture");
+
+    let initial = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--source",
+        "^python\\.flask\\.request_args$",
+        "--sink",
+        "^python\\.cmdi\\.os_system$",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&initial).expect("taint-analysis JSON");
+    let rows = parsed["rows"].as_array().expect("paged rows");
+    assert_eq!(rows.len(), 1, "fixture should emit one finding:\n{initial}");
+    let flow_id = rows[0]["representative_flow_id"]
+        .as_str()
+        .expect("representative flow id")
+        .to_string();
+    let group_id = rows[0]["group_id"]
+        .as_str()
+        .expect("security group id")
+        .to_string();
+    assert!(
+        flow_id.starts_with("F:"),
+        "security flow id should use F: stable-id prefix: {flow_id}"
+    );
+    assert!(
+        group_id.starts_with("G:"),
+        "security group id should use G: stable-id prefix: {group_id}"
+    );
+
+    let filtered = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--flow",
+        &flow_id,
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let filtered: serde_json::Value = serde_json::from_str(&filtered).expect("filtered taint JSON");
+    let filtered_rows = filtered["rows"].as_array().expect("filtered rows");
+    assert_eq!(filtered_rows.len(), 1);
+    assert_eq!(
+        filtered_rows[0]["representative_flow_id"].as_str(),
+        Some(flow_id.as_str())
+    );
+
+    let group_filtered = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--group",
+        &group_id,
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let group_filtered: serde_json::Value =
+        serde_json::from_str(&group_filtered).expect("group-filtered taint JSON");
+    let group_rows = group_filtered["rows"].as_array().expect("group-filtered rows");
+    assert_eq!(group_rows.len(), 1);
+    assert_eq!(group_rows[0]["group_id"].as_str(), Some(group_id.as_str()));
+
+    let shown = run(&[
+        "show",
+        ws.to_str().unwrap(),
+        &flow_id,
+        "--rules-dir",
+        &rules_dir(),
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&shown).expect("show security flow JSON");
+    let shown_rows = shown["rows"].as_array().expect("show rows");
+    assert_eq!(shown_rows.len(), 1);
+    assert_eq!(
+        shown_rows[0]["representative_flow_id"].as_str(),
+        Some(flow_id.as_str())
+    );
+
+    let shown_group = run(&[
+        "show",
+        ws.to_str().unwrap(),
+        &group_id,
+        "--rules-dir",
+        &rules_dir(),
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let shown_group: serde_json::Value =
+        serde_json::from_str(&shown_group).expect("show security group JSON");
+    let shown_group_rows = shown_group["rows"].as_array().expect("show group rows");
+    assert_eq!(shown_group_rows.len(), 1);
+    assert_eq!(shown_group_rows[0]["group_id"].as_str(), Some(group_id.as_str()));
+}
+
+#[test]
 fn taint_analysis_does_not_treat_source_lookup_key_literal_as_tainted() {
     let ws = temp_workspace("lookup-key-literal");
     std::fs::write(
@@ -1941,6 +2253,250 @@ def handle():
     assert!(
         !out.contains("total   0 tainted flow sections"),
         "summary cache must not poison full text pagination:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_all_text_reuses_cached_render_payload() {
+    let ws = temp_workspace("all-text-cache-taint");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write vulnerable fixture");
+
+    let base = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--context",
+        "32k",
+    ];
+    let first = run(&base).unwrap();
+    assert!(
+        first.contains("FINDING 1"),
+        "initial render should find the fixture:\n{first}"
+    );
+
+    let mut all_args = base.to_vec();
+    all_args.push("--all");
+    let replay = run_command(&all_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        replay.stderr.contains("rendering cached taint report"),
+        "text --all should replay the semantic render payload:\n{}",
+        replay.stderr
+    );
+    assert!(
+        !replay.stderr.contains("matching source rules"),
+        "text --all should not rerun taint analysis after a compatible cached render:\n{}",
+        replay.stderr
+    );
+    assert!(
+        replay.stdout.contains("TAINT FLOW"),
+        "cached text --all render should still rebuild flow bodies lazily:\n{}",
+        replay.stdout
+    );
+}
+
+#[test]
+fn taint_analysis_identical_second_run_reuses_cached_render_payload() {
+    let ws = temp_workspace("repeat-cache-taint");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write vulnerable fixture");
+
+    let args = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--context",
+        "32k",
+    ];
+    let first = run_command(&args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        first.stdout.contains("FINDING 1"),
+        "initial render should find the fixture:\n{}",
+        first.stdout
+    );
+    assert!(
+        first.stderr.contains("semantic graph scope"),
+        "first run should execute semantic graph phases:\n{}",
+        first.stderr
+    );
+
+    let second = run_command(&args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        second.stderr.contains("rendering cached taint report"),
+        "second identical run should replay the semantic render payload:\n{}",
+        second.stderr
+    );
+    assert_eq!(
+        second
+            .stderr
+            .matches("[security-phase] rendering cached taint report:")
+            .count(),
+        1,
+        "cached render progress/timing should be emitted exactly once:\n{}",
+        second.stderr
+    );
+    assert!(
+        !second.stderr.contains("semantic graph scope"),
+        "second identical run should not rebuild semantic graph scope after cache replay:\n{}",
+        second.stderr
+    );
+    assert!(
+        !second.stderr.contains("matching sink rules"),
+        "second identical run should not rerun sink matching after cache replay:\n{}",
+        second.stderr
+    );
+    assert!(
+        second.stdout.contains("FINDING 1"),
+        "cached second render should preserve finding bodies:\n{}",
+        second.stdout
+    );
+}
+
+#[test]
+fn taint_analysis_json_all_reuses_only_bulk_flow_cache() {
+    let ws = temp_workspace("json-all-cache-taint");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write vulnerable fixture");
+
+    let compact_args = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--context",
+        "32k",
+    ];
+    let compact = run(&compact_args).unwrap();
+    assert!(
+        compact.contains("FINDING 1"),
+        "initial render should find the fixture:\n{compact}"
+    );
+
+    let json_all_args = [
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--format",
+        "json",
+        "--all",
+    ];
+    let first_json_all = run_command(&json_all_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        first_json_all.stderr.contains("semantic graph scope"),
+        "JSON --all must not reuse compact text cache without bulk flow evidence:\n{}",
+        first_json_all.stderr
+    );
+    let rows: serde_json::Value =
+        serde_json::from_str(&first_json_all.stdout).expect("first JSON --all output");
+    assert!(
+        rows.as_array().is_some_and(|items| !items.is_empty()),
+        "JSON --all should emit findings:\n{}",
+        first_json_all.stdout
+    );
+
+    let second_json_all = run_command(&json_all_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        second_json_all.stderr.contains("rendering cached taint report"),
+        "second JSON --all should reuse the bulk-flow render payload:\n{}",
+        second_json_all.stderr
+    );
+    assert!(
+        !second_json_all.stderr.contains("semantic graph scope"),
+        "second JSON --all should not rebuild semantic graph scope once bulk flow evidence is cached:\n{}",
+        second_json_all.stderr
+    );
+}
+
+#[test]
+fn security_paged_renderers_do_not_wrap_shared_page_cache_progress() {
+    let ws = temp_workspace("security-page-cache-progress");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#,
+    )
+    .expect("write vulnerable fixture");
+
+    let rules = rules_dir();
+    let common = ["security", ws.to_str().unwrap(), "--rules-dir", rules.as_str()];
+
+    let mut sources_args = common.to_vec();
+    sources_args.extend(["sources", "--context", "1k"]);
+    let sources = run_command(&sources_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        !sources.stderr.contains("rendering sources page:"),
+        "security sources must not wrap shared page-cache progress:\n{}",
+        sources.stderr
+    );
+
+    let mut deps_args = common.to_vec();
+    deps_args.extend(["deps", "--context", "1k"]);
+    let deps = run_command(&deps_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        !deps.stderr.contains("rendering deps page:"),
+        "security deps must not wrap shared page-cache progress:\n{}",
+        deps.stderr
+    );
+
+    let mut source_text_args = common.to_vec();
+    source_text_args.extend(["source-analysis", "--context", "1k"]);
+    let source_text = run_command(&source_text_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        !source_text.stderr.contains("rendering source page:"),
+        "source-analysis text should rely on its granular render/save phases:\n{}",
+        source_text.stderr
+    );
+
+    let mut source_json_args = common.to_vec();
+    source_json_args.extend(["source-analysis", "--format", "json", "--context", "1k"]);
+    let source_json = run_command(&source_json_args, &[("BONSAI_DEBUG", "security-phase")]).unwrap();
+    assert!(
+        !source_json.stderr.contains("rendering source JSON:"),
+        "wrapped source-analysis JSON must not wrap shared page-cache progress:\n{}",
+        source_json.stderr
     );
 }
 
@@ -2451,6 +3007,36 @@ fn deps_inventory_runs() {
 }
 
 #[test]
+fn pack_inventory_text_keeps_long_rule_ids_readable() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "pack",
+        "--lang",
+        "python",
+        "--category",
+        "insecure-deserialization",
+        "--limit",
+        "6",
+    ])
+    .unwrap();
+    assert!(
+        out.contains("[RULE 4]  python.deser.celery_pickle_serializer"),
+        "pack inventory should render long rule ids as intact block headings:\n{out}"
+    );
+    assert!(
+        !out.contains("celery_pickle_s\n"),
+        "pack inventory must not table-wrap rule ids across lines:\n{out}"
+    );
+}
+
+#[test]
 fn taint_analysis_json_paginates() {
     let ws = micro_path("python");
     if !ws.exists() {
@@ -2541,6 +3127,48 @@ def handle():
             "production profile leaked excluded path `{excluded}`:\n{out}"
         );
     }
+}
+
+#[test]
+fn production_profile_filters_are_workspace_relative() {
+    let outer = temp_workspace("production-profile-root-under-target");
+    let ws = outer.join("target").join("chosen-workspace");
+    std::fs::create_dir_all(ws.join("target")).expect("create workspace under target");
+    let vulnerable = r#"
+import os
+from flask import request
+
+def handle():
+    cmd = request.args.get("cmd")
+    os.system(cmd)
+"#;
+    std::fs::write(ws.join("app.py"), vulnerable).expect("write first-party app");
+    std::fs::write(ws.join("target/generated.py"), vulnerable).expect("write generated fixture");
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--profile",
+        "production",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("production profile JSON");
+    let rows = parsed.as_array().expect("finding array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "production profile should keep first-party code when only an ancestor is target:\n{out}"
+    );
+    assert!(
+        out.contains("app.py") && !out.contains("target/generated.py"),
+        "production profile should still exclude target/ inside the workspace:\n{out}"
+    );
 }
 
 #[test]
@@ -3131,6 +3759,26 @@ fn pack_audit_marks_solidity_as_ecosystem_specific() {
     assert!(
         out.contains("\"security_model\": \"smart-contract\""),
         "solidity should report the smart-contract security model:\n{out}"
+    );
+}
+
+#[test]
+fn pack_audit_filtered_text_omits_hidden_language_not_applicable_legend() {
+    let rules = rules_dir();
+    let out = run(&[
+        "security",
+        &rules,
+        "--rules-dir",
+        &rules,
+        "pack",
+        "--audit",
+        "--lang",
+        "python",
+    ])
+    .unwrap();
+    assert!(
+        !out.contains("c/deserialization") && !out.contains("c/dser"),
+        "filtered python audit should not describe hidden C-only n/a cells:\n{out}"
     );
 }
 

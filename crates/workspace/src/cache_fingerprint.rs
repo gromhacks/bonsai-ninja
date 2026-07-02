@@ -11,16 +11,31 @@ use bonsai_hash::fnv1a_bytes64;
 use std::path::Path;
 
 pub(crate) fn workspace_content_fingerprint(db: &AnalyzerDb) -> u64 {
-    let mut entries: Vec<(String, u64)> = db
-        .vfs()
-        .all_files()
-        .into_iter()
-        .filter_map(|file| {
-            let path = db.vfs().path(file).ok()?.display().to_string();
-            let snap = db.vfs().snapshot(file).ok()?;
-            Some((path, fnv1a_bytes64(snap.text.as_bytes())))
-        })
-        .collect();
+    let entries = db.vfs().all_files().into_iter().filter_map(|file| {
+        let path = db.vfs().path(file).ok()?.display().to_string();
+        let snap = db.vfs().snapshot(file).ok()?;
+        Some((path, fnv1a_bytes64(snap.text.as_bytes())))
+    });
+    workspace_content_fingerprint_from_entries(entries)
+}
+
+pub(crate) fn workspace_content_fingerprint_from_paths<I, P>(fingerprints: I) -> u64
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    workspace_content_fingerprint_from_entries(
+        fingerprints
+            .into_iter()
+            .map(|(path, hash)| (path.as_ref().display().to_string(), hash)),
+    )
+}
+
+fn workspace_content_fingerprint_from_entries<I>(entries: I) -> u64
+where
+    I: IntoIterator<Item = (String, u64)>,
+{
+    let mut entries: Vec<(String, u64)> = entries.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let mut h = bonsai_hash::Hasher::new();
     for (path, content) in &entries {
@@ -70,6 +85,7 @@ pub(crate) fn factstore_sidecar_error_is_discardable(err: &FactStoreError) -> bo
             | FactStoreError::BadStringPool(_)
             | FactStoreError::BadIndexEntry { .. }
             | FactStoreError::UnsortedIndex
+            | FactStoreError::DuplicateKey(_)
     )
 }
 

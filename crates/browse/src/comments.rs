@@ -1,6 +1,6 @@
 //! `bonsai-ninja comments` data layer.
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
 use crate::strings::enclosing_fn_for_file_line;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -12,7 +12,8 @@ pub struct CommentsFilters<'a> {
     /// Substring (or regex when `regex=true`) that must appear in
     /// the comment text.
     pub contains: Option<&'a str>,
-    /// File-path substring filter.
+    /// Workspace-relative file path filter. Explicit absolute paths are
+    /// also accepted.
     pub file: Option<&'a str>,
     /// Restrict to comments whose enclosing function matches this
     /// substring.
@@ -59,7 +60,9 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
                     }
                 }
                 let (path, line, column) = format_span(&comment.span, ws);
-                if f.file.is_some_and(|needle| !path.contains(needle)) {
+                if f.file
+                    .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
+                {
                     continue;
                 }
                 if let Some(needle) = f.in_fn {
@@ -93,11 +96,28 @@ pub fn comments(ws: &Workspace, f: &CommentsFilters<'_>) -> Result<Vec<CommentOu
         }
     };
     out.sort_by(|a, b| {
-        kind_priority(&a.kind)
-            .cmp(&kind_priority(&b.kind))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| a.text.cmp(&b.text))
+        comment_relevance_key(a, f)
+            .cmp(&comment_relevance_key(b, f))
+            .then_with(|| {
+                kind_priority(&a.kind)
+                    .cmp(&kind_priority(&b.kind))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+                    .then_with(|| a.text.cmp(&b.text))
+            })
     });
     Ok(out)
+}
+
+fn comment_relevance_key(row: &CommentOut, f: &CommentsFilters<'_>) -> ((u8, usize), (u8, usize)) {
+    let kind = f.kind.map_or((u8::MAX, usize::MAX), |kind| {
+        textual_relevance_key(&row.kind, Some(kind), false)
+    });
+    let text = f
+        .contains
+        .filter(|_| !f.regex)
+        .map_or((u8::MAX, usize::MAX), |contains| {
+            textual_relevance_key(&row.text, Some(contains), false)
+        });
+    (kind, text)
 }

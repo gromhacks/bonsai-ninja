@@ -3,7 +3,7 @@
 #[path = "lang_common.rs"]
 mod common;
 
-use bonsai_lang_api::LoopKind;
+use bonsai_lang_api::{LoopKind, RefKind};
 use common::*;
 use std::sync::Arc;
 
@@ -94,6 +94,24 @@ fn constructor_method() {
 fn decorator_extraction() {
     let w = make("@audited\ndef f():\n    pass\n");
     assert!(has_decorator(&w, "audited"));
+}
+
+#[test]
+fn attribute_access_is_not_decorator_ref() {
+    let w = make("import pickle\n\ndef f(data):\n    return pickle.loads(data)\n");
+    assert!(has_call_containing(&w, "f", "pickle.loads"));
+    let global = w.db().global_index();
+    for file in global.all_files() {
+        let Some(index) = global.file_index(file) else {
+            continue;
+        };
+        for reference in &index.refs {
+            assert!(
+                !(reference.kind == RefKind::Decorator && reference.name == "pickle"),
+                "ordinary attribute access must not be reported as a decorator: {reference:?}"
+            );
+        }
+    }
 }
 
 #[test]

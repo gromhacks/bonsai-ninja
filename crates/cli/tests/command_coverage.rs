@@ -43,6 +43,10 @@ fn ws() -> PathBuf {
     repo_root().join("examples/python/micro")
 }
 
+fn complex_ws() -> PathBuf {
+    repo_root().join("examples/python/complex")
+}
+
 fn run(args: &[&str]) -> Option<String> {
     let bin = bin_path()?;
     let mut full: Vec<&str> = args.to_vec();
@@ -90,6 +94,22 @@ fn assert_contains(out: &str, needle: &str, cmd: &str) {
         out.contains(needle),
         "{cmd}: expected output to contain `{needle}`. Got:\n{out}"
     );
+}
+
+fn first_stable_id(rendered: &str, prefix: char, hex_len: usize) -> Option<String> {
+    rendered.split_whitespace().find_map(|token| {
+        let trimmed = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':');
+        let (got_prefix, body) = trimmed.split_once(':')?;
+        if got_prefix.len() == 1
+            && got_prefix.starts_with(prefix)
+            && body.len() == hex_len
+            && body.chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            Some(format!("{got_prefix}:{body}"))
+        } else {
+            None
+        }
+    })
 }
 
 fn temp_output_path(name: &str) -> PathBuf {
@@ -241,9 +261,18 @@ fn diagnostics_exits_clean_with_no_errors() {
         return;
     };
     // python micro is a clean fixture — every file parses.
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("diagnostics JSON");
     assert!(
-        out.trim() == "[]" || out.trim().starts_with("[]"),
-        "diagnostics expected empty [] on clean fixture; got:\n{out}"
+        parsed["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics.is_empty()),
+        "diagnostics expected empty diagnostics[] on clean fixture; got:\n{out}"
+    );
+    assert!(
+        parsed["adapter_capabilities"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["language"].as_str() == Some("python"))),
+        "diagnostics report must include adapter capabilities; got:\n{out}"
     );
 }
 
@@ -432,6 +461,22 @@ fn args_shows_tainted_sinks() {
     }
 }
 
+// -------- operations --------
+
+#[test]
+fn operations_shows_calls_and_writes() {
+    let Some(out) = run(&["operations", ws().to_str().unwrap(), "--kind", "write"]) else {
+        return;
+    };
+    assert_contains(&out, "action", "operations --kind write");
+    assert_contains(&out, "handle_request", "operations --kind write");
+
+    let Some(out) = run(&["operations", ws().to_str().unwrap(), "--kind", "call"]) else {
+        return;
+    };
+    assert_contains(&out, "update_user", "operations --kind call");
+}
+
 // -------- classes --------
 
 #[test]
@@ -452,6 +497,27 @@ fn refs_verify_token_returns_two_callsites() {
     assert_contains(&out, "(2 references)", "refs verify_token");
     assert_contains(&out, "get_user", "refs verify_token");
     assert_contains(&out, "update_user", "refs verify_token");
+}
+
+#[test]
+fn refs_receiver_prefix_and_source_reads_are_visible() {
+    let complex = complex_ws();
+    let Some(calls) = run(&["refs", complex.to_str().unwrap(), "pickle", "--kind", "call"]) else {
+        return;
+    };
+    assert_contains(&calls, "pickle.loads", "refs pickle --kind call");
+    assert_contains(&calls, "pickle.load", "refs pickle --kind call");
+
+    let Some(reads) = run(&["refs", complex.to_str().unwrap(), "pickle", "--kind", "read"]) else {
+        return;
+    };
+    assert_contains(&reads, "pickle", "refs pickle --kind read");
+    assert_contains(&reads, "restore_session", "refs pickle --kind read");
+
+    let Some(decorators) = run(&["refs", complex.to_str().unwrap(), "pickle", "--kind", "decorator"]) else {
+        return;
+    };
+    assert_contains(&decorators, "(0 references)", "refs pickle --kind decorator");
 }
 
 // -------- search --------
@@ -486,6 +552,106 @@ fn trace_handle_request_shows_sink_path() {
     // And must hit both known sinks.
     assert_contains(&out, "cursor.execute", "trace handle_request");
     assert_contains(&out, "os.system", "trace handle_request");
+}
+
+// -------- path --------
+
+#[test]
+fn path_handle_request_to_admin_command_reports_ranked_semantic_path() {
+    let Some(out) = run(&[
+        "path",
+        ws().to_str().unwrap(),
+        "--from",
+        "handle_request",
+        "--to",
+        "run_admin_command",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&out).expect("path JSON");
+    assert_eq!(value["from"], "handle_request");
+    assert_eq!(value["to"], "run_admin_command");
+    for field in ["backends", "idg_available", "idg_semantic_edges"] {
+        assert!(value.get(field).is_some(), "path JSON missing `{field}`: {out}");
+    }
+    assert!(
+        value["path_count"].as_u64().unwrap_or(0) >= 1,
+        "path command should find handle_request -> run_admin_command:\n{out}"
+    );
+    let first = value["paths"]
+        .as_array()
+        .and_then(|paths| paths.first())
+        .unwrap_or_else(|| panic!("path JSON missing first path:\n{out}"));
+    for field in ["path_id", "hops", "precision", "functions", "edges"] {
+        assert!(first.get(field).is_some(), "path row missing `{field}`: {first}");
+    }
+    let names: Vec<&str> = first["functions"]
+        .as_array()
+        .expect("path functions")
+        .iter()
+        .filter_map(|func| func["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"handle_request")
+            && names.contains(&"update_user")
+            && names.contains(&"run_admin_command"),
+        "path should include the semantic chain through update_user: {names:?}\n{out}"
+    );
+}
+
+// -------- slice --------
+
+#[test]
+fn slice_result_at_update_user_call_reports_local_influences() {
+    let Some(out) = run(&[
+        "slice",
+        ws().to_str().unwrap(),
+        "--symbol",
+        "result",
+        "--line",
+        "15",
+        "--file",
+        "gateway.py",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&out).expect("slice JSON");
+    assert_eq!(value["symbol"], "result");
+    assert_eq!(value["line"], 15);
+    assert_eq!(value["candidate_count"], 1);
+    assert!(
+        value["slice_count"].as_u64().unwrap_or(0) >= 1,
+        "slice command should find handle_request result slice:\n{out}"
+    );
+    let first = value["slices"]
+        .as_array()
+        .and_then(|slices| slices.first())
+        .unwrap_or_else(|| panic!("slice JSON missing first slice:\n{out}"));
+    for field in [
+        "slice_id",
+        "file",
+        "function",
+        "target_line",
+        "target_symbol",
+        "influencing_symbols",
+        "steps",
+    ] {
+        assert!(first.get(field).is_some(), "slice row missing `{field}`: {first}");
+    }
+    let influences: Vec<&str> = first["influencing_symbols"]
+        .as_array()
+        .expect("slice influences")
+        .iter()
+        .filter_map(|symbol| symbol.as_str())
+        .collect();
+    assert!(
+        influences.contains(&"token") && influences.contains(&"action"),
+        "slice should report call-argument influences token/action: {influences:?}\n{out}"
+    );
 }
 
 // -------- inspect --------
@@ -602,6 +768,60 @@ fn dump_edges_rejects_broad_precision() {
     assert_contains(&stderr, "semantic-only", "dump-edges");
 }
 
+// -------- dump-resolution --------
+
+#[test]
+fn dump_resolution_reports_per_file_call_coverage() {
+    let Some(out) = run(&[
+        "dump-resolution",
+        ws().to_str().unwrap(),
+        "--format",
+        "json",
+        "--all",
+    ]) else {
+        return;
+    };
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-resolution JSON");
+    let rows = rows.as_array().expect("dump-resolution rows");
+    assert!(!rows.is_empty(), "dump-resolution returned no rows:\n{out}");
+    let gateway = rows
+        .iter()
+        .find(|row| {
+            row.get("file")
+                .and_then(|v| v.as_str())
+                .is_some_and(|path| path.ends_with("gateway.py"))
+        })
+        .unwrap_or_else(|| panic!("dump-resolution missing gateway.py row:\n{out}"));
+    for field in [
+        "functions",
+        "call_sites",
+        "resolved_call_sites",
+        "unresolved_call_sites",
+        "direct_edges",
+        "virtual_edges",
+        "indirect_edges",
+        "dynamic_call_sites",
+        "macro_call_sites",
+        "external_call_sites",
+        "receiver_type_gaps",
+        "coverage_percent",
+        "analysis_complete",
+        "decls",
+    ] {
+        assert!(
+            gateway.get(field).is_some(),
+            "dump-resolution gateway row missing `{field}`: {gateway}"
+        );
+    }
+    assert!(
+        gateway
+            .get("decls")
+            .and_then(|v| v.as_array())
+            .is_some_and(|decls| !decls.is_empty()),
+        "dump-resolution gateway.py should include per-decl rows: {gateway}"
+    );
+}
+
 // -------- dump-resolve --------
 
 #[test]
@@ -645,6 +865,65 @@ fn dump_taint_from_update_user_propagates_to_verify_token() {
         !out.contains("propagations: 0"),
         "dump-taint should show ≥1 propagation for update_user/token; got:\n{out}"
     );
+}
+
+// -------- show --------
+
+#[test]
+fn show_raw_taint_id_reopens_inspect_view() {
+    let Some(full) = run(&["inspect", ws().to_str().unwrap(), "--query", "os.system"]) else {
+        return;
+    };
+    let target = first_stable_id(&full, 'T', 8)
+        .unwrap_or_else(|| panic!("inspect should emit a raw T:<8-hex> id:\n{full}"));
+    let Some(out) = run(&["show", ws().to_str().unwrap(), &target]) else {
+        return;
+    };
+    assert_contains(&out, &target, "show raw T:");
+    assert_contains(&out, "TAINT FLOWS", "show raw T:");
+}
+
+#[test]
+fn show_dump_taint_id_reopens_source_seeded_view() {
+    let Some(full) = run(&[
+        "dump-taint",
+        ws().to_str().unwrap(),
+        "--source",
+        "update_user",
+        "--seed",
+        "token",
+        "--seed",
+        "action",
+    ]) else {
+        return;
+    };
+    let target = first_stable_id(&full, 'T', 8)
+        .unwrap_or_else(|| panic!("dump-taint should emit a structured T:<8-hex> id:\n{full}"));
+    let Some(out) = run(&[
+        "show",
+        ws().to_str().unwrap(),
+        &target,
+        "--taint-source",
+        "update_user",
+        "--taint-seed",
+        "token",
+        "--taint-seed",
+        "action",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("show dump-taint JSON failed: {e}\n{out}"));
+    let records = parsed["records"].as_array().expect("records array");
+    assert_eq!(
+        records.len(),
+        1,
+        "show should reopen exactly one propagation: {out}"
+    );
+    assert_eq!(records[0]["taint_id"].as_str(), Some(target.as_str()));
+    assert_eq!(parsed["source"].as_str(), Some("update_user"));
 }
 
 // -------- dump-ast --------

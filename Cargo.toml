@@ -18,6 +18,7 @@ members = [
     "crates/workspace",
     "crates/inspect",
     "crates/browse",
+    "crates/retrieval",
     "crates/sdk",
     "crates/testkit",
     "crates/conformance",
@@ -110,6 +111,7 @@ bonsai_db = { path = "crates/db" }
 bonsai_workspace = { path = "crates/workspace" }
 bonsai_inspect = { path = "crates/inspect" }
 bonsai_browse = { path = "crates/browse" }
+bonsai_retrieval = { path = "crates/retrieval" }
 bonsai_sdk = { path = "crates/sdk" }
 bonsai_testkit = { path = "crates/testkit" }
 bonsai_conformance = { path = "crates/conformance" }

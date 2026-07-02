@@ -140,6 +140,15 @@ to `.snapshots/ADAPTER_CAPABILITIES.snapshot`. The CI gate
 (`hardening-checks.yml::capabilities`) runs `--check` which fails on
 drift between the script's live output and the snapshot.
 
+The behavioral conformance gate
+`cargo test -p bonsai_conformance capability_matrix_report` probes every
+registered adapter and writes generated docs/data to
+`build/capability-matrix.md` and `build/capability-matrix.json`. Those
+generated files are the machine-readable view; the table above is the
+review-oriented summary. `bonsai-ninja diagnostics <workspace>` and
+`Project::diagnostics_report()` expose the same registered adapter
+capability declarations that the engine consults.
+
 ```sh
 # detect drift
 scripts/audit-adapter-capabilities.sh --check
@@ -148,10 +157,8 @@ scripts/audit-adapter-capabilities.sh --check
 scripts/audit-adapter-capabilities.sh > .snapshots/ADAPTER_CAPABILITIES.snapshot
 ```
 
-The Markdown table above is a hand-curated rendering of the snapshot
-plus per-language applicability. If you change an adapter to populate
-a new `Decl` field, the count in the snapshot moves and you also
-update the table cell.
+If you change an adapter to populate a new `Decl` field, regenerate the
+snapshot, run the conformance report, and update the review table cell.
 
 ## `LanguageCapabilities` per-adapter token slices
 

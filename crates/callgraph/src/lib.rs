@@ -8,7 +8,8 @@
 pub mod chains;
 
 pub use chains::{
-    downstream_funcs_set, enumerate_chains_resolved, is_precise_chain, ChainTruncation, ResolvedChain,
+    downstream_funcs_set, enumerate_chains_resolved, enumerate_paths_resolved, is_precise_chain,
+    ChainTruncation, PathTruncation, ResolvedChain, ResolvedPath,
 };
 
 use ahash::{AHashMap, AHashSet};
@@ -57,7 +58,7 @@ pub enum EdgeKind {
 }
 
 /// One resolved edge in the call graph: a single
-/// `FuncId → FuncId` link with the kind / precision tag the
+/// `FuncId → FuncId` link with the kind, precision, and provenance the
 /// resolver assigned at build time.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CallEdge {
@@ -66,6 +67,70 @@ pub struct CallEdge {
     pub span: Span,
     pub kind: EdgeKind,
     pub precision: Precision,
+    #[serde(default)]
+    pub provenance: EdgeProvenance,
+}
+
+/// Why the resolver accepted a call edge.
+///
+/// Kept as strings instead of a closed enum so downstream JSON stays
+/// forwards-compatible when new resolver stages land. `confidence` is a
+/// coarse 0-100 score for ranking/debugging; precision remains the formal
+/// lattice used by analysis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeProvenance {
+    pub resolver_stage: String,
+    pub evidence: String,
+    pub confidence: u8,
+}
+
+impl Default for EdgeProvenance {
+    fn default() -> Self {
+        Self::new("unknown", "legacy edge without resolver provenance", 0)
+    }
+}
+
+impl EdgeProvenance {
+    #[must_use]
+    pub fn new(stage: impl Into<String>, evidence: impl Into<String>, confidence: u8) -> Self {
+        Self {
+            resolver_stage: stage.into(),
+            evidence: evidence.into(),
+            confidence: confidence.min(100),
+        }
+    }
+
+    #[must_use]
+    pub fn direct_symbol() -> Self {
+        Self::new(
+            "exact_symbol",
+            "unique callable resolved in caller visibility/module/import context",
+            90,
+        )
+    }
+
+    #[must_use]
+    pub fn receiver_dispatch() -> Self {
+        Self::new(
+            "receiver_type",
+            "receiver type, assigned receiver, or class ancestry evidence narrowed dispatch",
+            82,
+        )
+    }
+
+    #[must_use]
+    pub fn callable_value(evidence: impl Into<String>) -> Self {
+        Self::new("callable_value", evidence, 86)
+    }
+
+    #[must_use]
+    pub fn decl_family() -> Self {
+        Self::new(
+            "decl_family",
+            "multiple candidates share a semantic declaration family",
+            72,
+        )
+    }
 }
 
 /// Generic callgraph container — a multi-graph of `FuncId → FuncId`
@@ -1205,20 +1270,13 @@ fn add_resolved_call_edges(
                     folded_call_name_receiver_is_instance(name, candidate, receiver_types)
                 });
                 let semantic_receiver = receiver.as_deref().or(folded_receiver);
-                let mut candidates = if semantic_receiver.is_none() {
-                    local_bindings
-                        .get(name.as_str())
-                        .or_else(|| {
-                            (!alias_qualified_call)
-                                .then(|| local_bindings.get(short))
-                                .flatten()
-                        })
-                        .copied()
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
+                let mut candidates = collect_local_callable_binding_targets(
+                    local_bindings,
+                    name,
+                    semantic_receiver,
+                    alias_qualified_call,
+                );
+                let candidates_from_callable_binding = !candidates.is_empty();
                 if candidates.is_empty() && semantic_receiver.is_none() && !alias_qualified_call {
                     candidates = collect_nested_local_callable_targets(global, caller_decl, name, *span);
                 }
@@ -1423,7 +1481,7 @@ fn add_resolved_call_edges(
                         &mut candidates,
                     );
                 }
-                if !candidates.is_empty() {
+                if !candidates.is_empty() && !candidates_from_callable_binding {
                     retain_assigned_receiver_method_candidates(
                         global,
                         caller_decl,
@@ -1434,7 +1492,7 @@ fn add_resolved_call_edges(
                         &mut candidates,
                     );
                 }
-                if !candidates.is_empty() {
+                if !candidates.is_empty() && !candidates_from_callable_binding {
                     retain_semantic_receiver_evidenced_candidates(
                         global,
                         caller_decl,
@@ -1451,7 +1509,8 @@ fn add_resolved_call_edges(
                     );
                 }
                 if !candidates.is_empty() {
-                    let receiver_supplied = semantic_receiver.is_some() || *call_kind == CallKind::Method;
+                    let receiver_supplied = !candidates_from_callable_binding
+                        && (semantic_receiver.is_some() || *call_kind == CallKind::Method);
                     retain_signature_compatible_candidates(
                         global,
                         caller_decl,
@@ -1487,6 +1546,17 @@ fn add_resolved_call_edges(
                     else {
                         continue;
                     };
+                    let provenance = edge_provenance_for_resolved_call(
+                        kind,
+                        semantic_virtual
+                            || (!candidates_from_callable_binding
+                                && *call_kind == CallKind::Method
+                                && semantic_receiver.is_some()),
+                        same_decl_family,
+                        candidates_from_callable_binding.then_some(
+                            "local or receiver-projected callable binding matched call expression",
+                        ),
+                    );
                     for to in candidates {
                         cg.add_edge(CallEdge {
                             from,
@@ -1494,6 +1564,7 @@ fn add_resolved_call_edges(
                             span: *span,
                             kind,
                             precision,
+                            provenance: provenance.clone(),
                         });
                     }
                 }
@@ -1518,6 +1589,13 @@ fn add_resolved_call_edges(
                 if assign_source_call_shadowed_by_explicit_call(events, name, *span) {
                     continue;
                 }
+                let source_call_from_callable_binding = !collect_local_callable_binding_targets(
+                    local_bindings,
+                    name,
+                    receiver_name_from_call_name(name),
+                    false,
+                )
+                .is_empty();
                 let mut candidates = collect_assign_source_call_targets(
                     global,
                     name,
@@ -1566,7 +1644,10 @@ fn add_resolved_call_edges(
                         &mut candidates,
                     );
                 }
-                if !candidates.is_empty() && assign_source_call_member_like(name) {
+                if !candidates.is_empty()
+                    && assign_source_call_member_like(name)
+                    && !source_call_from_callable_binding
+                {
                     let receiver = receiver_name_from_call_name(name);
                     let alias_qualified_call =
                         qualified_alias_target_entry_tail(name, alias_targets).is_some();
@@ -1586,7 +1667,8 @@ fn add_resolved_call_edges(
                     );
                 }
                 if !candidates.is_empty() {
-                    let receiver_supplied = assign_source_call_member_like(name);
+                    let receiver_supplied =
+                        assign_source_call_member_like(name) && !source_call_from_callable_binding;
                     retain_raw_signature_compatible_candidates(
                         global,
                         caller_decl,
@@ -1604,6 +1686,14 @@ fn add_resolved_call_edges(
                     else {
                         continue;
                     };
+                    let provenance = edge_provenance_for_resolved_call(
+                        kind,
+                        assign_source_call_member_like(name) && !source_call_from_callable_binding,
+                        same_decl_family,
+                        source_call_from_callable_binding.then_some(
+                            "local or receiver-projected callable binding matched assignment call",
+                        ),
+                    );
                     for to in candidates {
                         cg.add_edge(CallEdge {
                             from,
@@ -1611,6 +1701,7 @@ fn add_resolved_call_edges(
                             span: *span,
                             kind,
                             precision,
+                            provenance: provenance.clone(),
                         });
                     }
                 }
@@ -1843,6 +1934,7 @@ fn add_callback_arg_edges(
             span: arg.span,
             kind: EdgeKind::Indirect,
             precision: Precision::Narrowed,
+            provenance: EdgeProvenance::callable_value("call argument resolved as callable reference"),
         });
     }
 }
@@ -1910,17 +2002,9 @@ fn collect_assign_source_call_targets(
         return Vec::new();
     }
     let member_like = assign_source_call_member_like(trimmed);
+    let receiver = receiver_name_from_call_name(trimmed);
     let short = short_callee(trimmed);
-    let mut targets = if member_like {
-        Vec::new()
-    } else {
-        local_bindings
-            .get(trimmed)
-            .or_else(|| local_bindings.get(short))
-            .copied()
-            .into_iter()
-            .collect::<Vec<_>>()
-    };
+    let mut targets = collect_local_callable_binding_targets(local_bindings, trimmed, receiver, false);
     if targets.is_empty() && !member_like {
         targets = collect_nested_local_callable_targets(global, caller_decl, trimmed, call_span);
     }
@@ -2204,6 +2288,24 @@ fn semantic_edge_shape(
     }
 }
 
+fn edge_provenance_for_resolved_call(
+    kind: EdgeKind,
+    receiver_dispatch: bool,
+    same_decl_family: bool,
+    callable_value_evidence: Option<&'static str>,
+) -> EdgeProvenance {
+    if let Some(evidence) = callable_value_evidence {
+        return EdgeProvenance::callable_value(evidence);
+    }
+    if receiver_dispatch {
+        return EdgeProvenance::receiver_dispatch();
+    }
+    if same_decl_family || kind == EdgeKind::Virtual {
+        return EdgeProvenance::decl_family();
+    }
+    EdgeProvenance::direct_symbol()
+}
+
 fn call_arg_lookup_text(arg: &CallArg) -> String {
     arg.place
         .as_deref()
@@ -2454,16 +2556,15 @@ fn resolve_callable_arg(
         if original_alias_qualified && !alias_qualified_reference {
             continue;
         }
-        if let Some(local) = local_bindings
-            .get(trimmed)
-            .or_else(|| {
-                (!alias_qualified_reference)
-                    .then(|| local_bindings.get(short))
-                    .flatten()
-            })
-            .copied()
-        {
-            return vec![local];
+        let receiver = receiver_name_from_call_name(trimmed);
+        let local_targets = collect_local_callable_binding_targets(
+            local_bindings,
+            trimmed,
+            receiver,
+            alias_qualified_reference,
+        );
+        if !local_targets.is_empty() {
+            return local_targets;
         }
         let mut targets =
             collect_callable_targets_with_context_and_aliases(global, trimmed, caller_decl, alias_targets);
@@ -2699,6 +2800,12 @@ fn collect_local_callable_binding_uses(events: &[FlowEvent], out: &mut AHashSet<
                         insert_local_callable_binding_use(out, source_name);
                     }
                 }
+            }
+            FlowEvent::Assign {
+                source_call: Some(source_call),
+                ..
+            } => {
+                insert_local_callable_binding_use(out, source_call);
             }
             FlowEvent::Branch {
                 then_events,
@@ -2940,6 +3047,53 @@ fn collect_local_callable_bindings_into(
 fn local_callable_binding_target_is_used(target: &str, callable_uses: &AHashSet<String>) -> bool {
     let trimmed = target.trim();
     !trimmed.is_empty() && (callable_uses.contains(trimmed) || callable_uses.contains(short_callee(trimmed)))
+}
+
+fn collect_local_callable_binding_targets(
+    local_bindings: &AHashMap<String, FuncId>,
+    name: &str,
+    receiver: Option<&str>,
+    alias_qualified_call: bool,
+) -> Vec<FuncId> {
+    let mut targets = Vec::new();
+    for key in local_callable_binding_lookup_keys(name, receiver, alias_qualified_call) {
+        if let Some(func) = local_bindings.get(&key) {
+            push_unique_func(&mut targets, *func);
+        }
+    }
+    targets
+}
+
+fn local_callable_binding_lookup_keys(
+    name: &str,
+    receiver: Option<&str>,
+    alias_qualified_call: bool,
+) -> Vec<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut keys = Vec::new();
+    let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
+        push_unique_string(&mut keys, trimmed.to_string());
+        let short = short_callee(trimmed).trim();
+        if !alias_qualified_call && short != trimmed {
+            push_unique_string(&mut keys, short.to_string());
+        }
+        return keys;
+    };
+
+    if assign_source_call_member_like(trimmed) || receiver_name_from_call_name(trimmed).is_some() {
+        push_unique_string(&mut keys, trimmed.to_string());
+    }
+    let short = short_callee(trimmed).trim();
+    if short.is_empty() {
+        return keys;
+    }
+    for sep in [".", "->", "::"] {
+        push_unique_string(&mut keys, format!("{receiver}{sep}{short}"));
+    }
+    keys
 }
 
 fn resolve_assigned_lambda_binding(
@@ -5311,11 +5465,31 @@ pub fn call_resolves_to_func(
     call_name: &str,
     target_func: FuncId,
 ) -> bool {
+    call_resolves_to_func_with_receiver(
+        global,
+        aliases,
+        local_bindings,
+        caller_decl,
+        call_name,
+        None,
+        target_func,
+    )
+}
+
+fn call_resolves_to_func_with_receiver(
+    global: &GlobalIndex,
+    aliases: &AHashMap<String, AliasTarget>,
+    local_bindings: &AHashMap<String, FuncId>,
+    caller_decl: &Decl,
+    call_name: &str,
+    receiver: Option<&str>,
+    target_func: FuncId,
+) -> bool {
     let short = short_qualified_tail(call_name);
-    if local_bindings
-        .get(call_name)
-        .or_else(|| local_bindings.get(short))
-        .is_some_and(|func| *func == target_func)
+    let alias_qualified_call = qualified_alias_target_entry_tail(call_name, aliases).is_some();
+    if collect_local_callable_binding_targets(local_bindings, call_name, receiver, alias_qualified_call)
+        .into_iter()
+        .any(|func| func == target_func)
     {
         return true;
     }
@@ -5488,7 +5662,15 @@ fn call_event_matches_target_func(
     local_bindings: &AHashMap<String, FuncId>,
     caller_decl: &Decl,
 ) -> bool {
-    if call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func) {
+    if call_resolves_to_func_with_receiver(
+        global,
+        aliases,
+        local_bindings,
+        caller_decl,
+        name,
+        receiver,
+        target_func,
+    ) {
         return true;
     }
     receiver.is_some()

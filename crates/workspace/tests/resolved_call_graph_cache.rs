@@ -88,6 +88,66 @@ fn callgraph_sidecar_rejects_changed_dependency_metadata() {
 }
 
 #[test]
+fn callgraph_sidecar_file_validator_rejects_corrupt_payload() {
+    let root = tempdir("corrupt-sidecar-validator");
+    std::fs::write(
+        root.join("app.py"),
+        "def helper():\n    return 1\n\ndef main():\n    return helper()\n",
+    )
+    .expect("write app");
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::parse_only())
+        .expect("open workspace");
+    ws.save_callgraph_sidecar(&root).expect("save callgraph sidecar");
+    let sidecar = bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&root);
+    assert!(
+        bonsai_workspace::callgraph_sidecar::validate_callgraph_sidecar_file(&sidecar)
+            .expect("valid callgraph sidecar")
+            > 0,
+        "fixture should produce at least one callgraph edge"
+    );
+
+    let len = std::fs::metadata(&sidecar).expect("metadata").len();
+    std::fs::write(&sidecar, vec![0_u8; len as usize]).expect("corrupt same-size sidecar");
+    assert!(
+        bonsai_workspace::callgraph_sidecar::validate_callgraph_sidecar_file(&sidecar).is_err(),
+        "same-size corrupt callgraph sidecar must not validate"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn scoped_literal_workspace_does_not_write_whole_workspace_callgraph_sidecar() {
+    let root = tempdir("scoped-callgraph-sidecar");
+    std::fs::write(
+        root.join("app.py"),
+        "# needle\ndef helper():\n    return 1\n\ndef main():\n    return helper()\n",
+    )
+    .expect("write matching app");
+    std::fs::write(root.join("other.py"), "def hidden():\n    return 2\n").expect("write skipped app");
+
+    let ws = Workspace::open_query_matching_literal(&root, registry(), "needle")
+        .expect("open scoped literal workspace");
+    assert!(
+        !ws.is_complete_workspace_index(),
+        "literal query workspace should be marked incomplete"
+    );
+
+    let err = ws
+        .save_callgraph_sidecar(&root)
+        .expect_err("scoped workspaces must not save whole-workspace callgraph sidecars");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    let sidecar = bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&root);
+    assert!(
+        !sidecar.exists(),
+        "scoped workspace must not publish {}",
+        sidecar.display()
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn editing_a_file_drops_cached_graph() {
     let ws = ws_with(
         "app.py",

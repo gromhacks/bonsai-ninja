@@ -9,8 +9,10 @@ use crate::ClassOut;
 use bonsai_common::{FileId, FuncId, Precision, Span, SpanMap, SymbolId};
 use bonsai_idg::CrossCallEdge;
 use bonsai_inspect::{chain_to_names, func_display_name, ChainCache};
-use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
-use bonsai_workspace::{flow_ids::FlowIdLabelOptions, Workspace};
+use bonsai_lang_api::{DeclKind, FlowEvent};
+use bonsai_workspace::{
+    decl_decorator_names, flow_ids::FlowIdLabelOptions, receiver_field_target, Workspace,
+};
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use std::io::Write;
@@ -206,6 +208,9 @@ struct ExportCallEdge {
     to: u32,
     kind: String,
     precision: String,
+    resolver_stage: String,
+    evidence: String,
+    confidence: u8,
 }
 
 #[derive(Serialize)]
@@ -448,8 +453,14 @@ struct ExportDecl {
 struct ExportImport {
     module: String,
     alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_name: Option<String>,
     is_wildcard: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
     line: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    local_bindings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -479,6 +490,9 @@ struct CallEdgeOut {
     call_site_line: u32,
     call_site_column: u32,
     precision: &'static str,
+    resolver_stage: String,
+    evidence: String,
+    confidence: u8,
 }
 
 /// Per-export cache of `(path, SpanMap)` keyed on FileId. We
@@ -521,6 +535,18 @@ impl ExportSpanCache {
         };
         let line_col = map.line_col(span.start);
         (line_col.line, line_col.column)
+    }
+
+    fn end_line(&self, span: Span) -> u32 {
+        let Some((_, map)) = self.files.get(&span.file) else {
+            return 0;
+        };
+        let end = if span.end > span.start {
+            span.end.saturating_sub(1)
+        } else {
+            span.start
+        };
+        map.line_col(end).line
     }
 }
 
@@ -848,7 +874,7 @@ fn build_export_structural_sections(
                 _ => {}
             }
             let (_, line, col) = spans.format(d.name_span);
-            let (_, end_line, _) = spans.format(d.body_span.unwrap_or(d.span));
+            let end_line = spans.end_line(d.body_span.unwrap_or(d.span));
             count_call_sites_for_export(&d.flow_events, &mut call_site_count);
             decls_out.push(ExportDecl {
                 symbol_id: d.symbol.raw(),
@@ -910,16 +936,39 @@ fn build_export_structural_sections(
                     })
                     .unwrap_or_default()
             });
-        import_count += imports_vec.len();
+        let mut local_bindings_by_span: ahash::AHashMap<u64, Vec<String>> = ahash::AHashMap::default();
+        for imp in &imports_vec {
+            if !imp.scope.is_local() {
+                continue;
+            }
+            let Some(name) = imp.alias.as_deref().or(imp.original_name.as_deref()) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let bindings = local_bindings_by_span.entry(imp.span.start).or_default();
+            if !bindings.iter().any(|existing| existing == name) {
+                bindings.push(name.to_string());
+            }
+        }
+        import_count += imports_vec.iter().filter(|imp| !imp.scope.is_local()).count();
         let imports_out: Vec<ExportImport> = imports_vec
             .iter()
+            .filter(|imp| !imp.scope.is_local())
             .map(|imp| {
                 let (_, line, _) = spans.format(imp.span);
                 ExportImport {
                     module: imp.module.clone(),
                     alias: imp.alias.clone(),
+                    original_name: imp.original_name.clone(),
                     is_wildcard: imp.is_wildcard,
+                    scope: (!imp.scope.is_module()).then(|| format!("{:?}", imp.scope).to_lowercase()),
                     line,
+                    local_bindings: local_bindings_by_span
+                        .get(&imp.span.start)
+                        .cloned()
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -1031,17 +1080,13 @@ fn return_taint_indices_from_idg(
 }
 
 fn export_phase_enabled() -> bool {
-    std::env::var("BONSAI_DEBUG").ok().is_some_and(|value| {
-        value
-            .split(',')
-            .map(str::trim)
-            .any(|part| matches!(part, "all" | "export-phase"))
-    })
+    bonsai_diagnostics::debug::is_enabled("export-phase")
 }
 
 fn export_phase_log(args: std::fmt::Arguments<'_>) {
     if export_phase_enabled() {
-        eprintln!("[export-phase] {args}");
+        let message = bonsai_diagnostics::debug::render_message(&args.to_string());
+        eprintln!("[export-phase] {message}");
     }
 }
 
@@ -1569,6 +1614,9 @@ fn export_structural_callgraph(
             call_site_line,
             call_site_column,
             precision: export_precision_label(edge.precision),
+            resolver_stage: edge.provenance.resolver_stage.clone(),
+            evidence: edge.provenance.evidence.clone(),
+            confidence: edge.provenance.confidence,
         });
     }
     out.sort_by(|a, b| {
@@ -1602,6 +1650,9 @@ fn export_taint_call_edges(ws: &Workspace) -> Vec<ExportCallEdge> {
             to: e.to.raw(),
             kind: format!("{:?}", e.kind).to_lowercase(),
             precision: format!("{:?}", e.precision).to_lowercase(),
+            resolver_stage: e.provenance.resolver_stage.clone(),
+            evidence: e.provenance.evidence.clone(),
+            confidence: e.provenance.confidence,
         })
         .collect();
     call_edges.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.to.cmp(&b.to)));
@@ -2513,7 +2564,7 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
                 continue;
             }
             let has_callers = callees_seen.contains(&decl.symbol);
-            let decorator_entry = detect_framework_decorator(ws, file, decl.name_span);
+            let decorator_entry = detect_framework_decorator(ws, file, decl.span, decl.name_span);
             let entry_kind = if decorator_entry {
                 Some("decorator")
             } else if !has_callers && matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
@@ -2746,50 +2797,6 @@ fn collect_receiver_field_writes_from_events(
     }
 }
 
-/// True when `target` looks like a write to a receiver field —
-/// `this.x`, `self.x`, `$this->x` (PHP), `@x` (Ruby), nested
-/// member access. Used to detect class-field taint when one method
-/// writes a field from a parameter.
-///
-/// Implicit-receiver prefixes (`this.`, `self.`, `this->`) are
-/// derived from `IMPLICIT_RECEIVER_PREFIXES` / `IMPLICIT_RECEIVER_TOKENS`.
-/// PHP's `$this->` is the same `this->` shape with the `$` sigil
-/// the PHP adapter keeps on receiver text. Ruby's `@field` instance
-/// variable is recognised on its own; bare PHP `$x` / Perl `%x`
-/// scalars are *not* treated as receiver fields. Nested member
-/// access falls through to the generic `.` / `->` separator check.
-fn receiver_field_target(target: &str) -> bool {
-    let target = target.trim();
-    if bonsai_common::IMPLICIT_RECEIVER_PREFIXES
-        .iter()
-        .any(|prefix| target.starts_with(*prefix))
-    {
-        return true;
-    }
-    if bonsai_common::IMPLICIT_RECEIVER_TOKENS
-        .iter()
-        .any(|token| target.starts_with(&format!("{token}->")))
-    {
-        return true;
-    }
-    // PHP `$this->field` and Ruby `@field` are the only sigil-led
-    // shapes that denote receiver-field writes; other sigil-leading
-    // identifiers (PHP `$user`, Perl `%opts`) are scalars/hashes
-    // unrelated to instance state.
-    if let Some(rest) = target.strip_prefix('$') {
-        if bonsai_common::IMPLICIT_RECEIVER_TOKENS
-            .iter()
-            .any(|token| rest.starts_with(&format!("{token}->")))
-        {
-            return true;
-        }
-    }
-    if target.starts_with('@') {
-        return true;
-    }
-    target.contains('.') || target.contains("->")
-}
-
 /// Case-insensitive-ish param matcher: strips PHP `$`, Rust /
 /// C++ reference / pointer prefixes (`&`, `*`) so an adapter
 /// emitting raw source text still matches the canonical param
@@ -2809,55 +2816,16 @@ fn normalize_param_name(name: &str) -> &str {
         .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
 }
 
-/// True when a Decorator ref appears immediately before
-/// `decl_span` with no statement-terminator in between — the same
-/// signal `security` uses to call a function "framework-exposed".
-fn detect_framework_decorator(ws: &Workspace, file: FileId, decl_span: Span) -> bool {
+/// True when a Decorator ref is statically attached to `decl_span`.
+///
+/// Keep this routed through the same helper as `defs --has-decorator`
+/// so export entrypoint inference cannot drift into a broader
+/// file-scoped or gap-only heuristic.
+fn detect_framework_decorator(ws: &Workspace, file: FileId, decl_span: Span, decl_name_span: Span) -> bool {
     let Some(idx) = ws.db().decl_index(file) else {
         return false;
     };
-    idx.refs.iter().any(|reference| {
-        if reference.kind != RefKind::Decorator || reference.span.end > decl_span.start {
-            return false;
-        }
-        // Bound the decorator-to-decl gap so an unrelated decorator
-        // higher up in the file doesn't wrongly attach.
-        if decl_span.start.saturating_sub(reference.span.end) > 512 {
-            return false;
-        }
-        if !decorator_is_attached_to_decl(ws, file, reference.span, decl_span) {
-            return false;
-        }
-        true
-    })
-}
-
-/// Confirm the bytes between the decorator and the decl don't
-/// contain any statement-terminator signals (`{ } ;` or stray
-/// control chars). Without this check we'd attach a decorator to
-/// the wrong decl when the file has structural braces between
-/// them.
-fn decorator_is_attached_to_decl(
-    ws: &Workspace,
-    file: FileId,
-    decorator_span: Span,
-    decl_span: Span,
-) -> bool {
-    let Ok(snapshot) = ws.vfs().snapshot(file) else {
-        // Snapshot failure: fall through optimistically — a missed
-        // attach is worse than a false attach for this signal.
-        return true;
-    };
-    let text = snapshot.text.as_bytes();
-    let start = decorator_span.end as usize;
-    let end = decl_span.start as usize;
-    if start >= end || end > text.len() {
-        return false;
-    }
-    let gap = &text[start..end];
-    !gap.iter().any(|b| {
-        matches!(*b, b'{' | b'}' | b';') || b.is_ascii_control() && *b != b'\n' && *b != b'\r' && *b != b'\t'
-    })
+    !decl_decorator_names(ws, file, &idx, decl_span, decl_name_span).is_empty()
 }
 
 fn count_call_sites_for_export(events: &[bonsai_lang_api::FlowEvent], call_site_count: &mut usize) {

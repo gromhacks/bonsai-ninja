@@ -65,9 +65,43 @@ fn run(args: &[&str]) -> Option<(String, String, i32)> {
         .expect("spawn bonsai-ninja");
     Some((
         String::from_utf8_lossy(&out.stdout).to_string(),
-        String::from_utf8_lossy(&out.stderr).to_string(),
+        {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert_success_stderr_is_polished(args, &stderr, out.status.code().unwrap_or(-1));
+            stderr
+        },
         out.status.code().unwrap_or(-1),
     ))
+}
+
+fn assert_success_stderr_is_polished(args: &[&str], stderr: &str, code: i32) {
+    if code != 0 {
+        return;
+    }
+    let forbidden = [
+        "[security-progress]",
+        "[workspace-cache]",
+        "[security-phase]",
+        "taint-cache:",
+        "scope:",
+        "cache dataflow",
+        "cache callgraph",
+        "cache IDG",
+        "files=",
+        "source_rules=",
+        "sink_rules=",
+        "sanitizer_rules=",
+        "disk_entries=",
+        "resident_before=",
+        "entries=0",
+        "ticks=",
+    ];
+    for needle in forbidden {
+        assert!(
+            !stderr.contains(needle),
+            "successful CLI matrix command leaked raw/progress stderr `{needle}` for args {args:?}:\n{stderr}"
+        );
+    }
 }
 
 /// Extract the rows array from a JSON response. Browse commands
@@ -889,7 +923,16 @@ fn check_dump_edges(ws: &str, lang: &str, require_edges: bool) {
     }
     assert!(!rows.is_empty(), "[{lang}] dump-edges empty");
     for row in &rows {
-        for field in ["edge_id", "caller_name", "callee_name", "kind", "precision"] {
+        for field in [
+            "edge_id",
+            "caller_name",
+            "callee_name",
+            "kind",
+            "precision",
+            "resolver_stage",
+            "evidence",
+            "confidence",
+        ] {
             assert!(
                 row.get(field).is_some(),
                 "[{lang}] dump-edges row missing `{field}`: {row}"
@@ -900,7 +943,155 @@ fn check_dump_edges(ws: &str, lang: &str, require_edges: bool) {
             id.starts_with("E:") && id.len() == 10,
             "[{lang}] edge_id malformed: {id}"
         );
+        assert!(
+            row.get("confidence")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|confidence| confidence <= 100),
+            "[{lang}] dump-edges confidence malformed: {row}"
+        );
     }
+}
+
+/// Assert `dump-resolution` exposes language-agnostic coverage fields.
+fn check_dump_resolution(ws: &str, lang: &str) {
+    let Some((out, _, code)) = run(&["dump-resolution", ws, "--format", "json", "--all"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] dump-resolution ec={code}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = rows_of(&parsed);
+    assert!(!rows.is_empty(), "[{lang}] dump-resolution empty");
+    for row in &rows {
+        for field in [
+            "file",
+            "functions",
+            "call_sites",
+            "resolved_call_sites",
+            "unresolved_call_sites",
+            "coverage_percent",
+            "analysis_complete",
+        ] {
+            assert!(
+                row.get(field).is_some(),
+                "[{lang}] dump-resolution row missing `{field}`: {row}"
+            );
+        }
+        let functions = row.get("functions").and_then(|v| v.as_u64()).unwrap_or(0);
+        if functions > 0 {
+            assert!(
+                row.get("decls")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|decls| !decls.is_empty()),
+                "[{lang}] dump-resolution callable row missing decl detail: {row}"
+            );
+        }
+    }
+}
+
+/// Assert `path` finds a semantic handler -> verifier route.
+fn check_path(ws: &str, lang: &str, handler: &str, verifier: &str) {
+    let Some((out, _, code)) = run(&[
+        "path", ws, "--from", handler, "--to", verifier, "--format", "json",
+    ]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] path ec={code}: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        parsed
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .is_some_and(|paths| !paths.is_empty()),
+        "[{lang}] path returned no paths: {out}"
+    );
+    let first = parsed["paths"]
+        .as_array()
+        .and_then(|paths| paths.first())
+        .unwrap();
+    for field in ["path_id", "hops", "precision", "functions", "edges"] {
+        assert!(
+            first.get(field).is_some(),
+            "[{lang}] path row missing `{field}`: {first}"
+        );
+    }
+}
+
+/// Assert `slice` can explain the action argument at the update call.
+fn check_slice(ws: &str, lang: &str, update_user: &str) {
+    let Some((args_out, _, code)) = run(&["args", ws, "--callee", update_user, "--format", "json"]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] args --callee {update_user} ec={code}");
+    let args_json: serde_json::Value = serde_json::from_str(&args_out).unwrap();
+    let args_rows = rows_of(&args_json);
+    let action_arg = args_rows
+        .iter()
+        .find(|row| {
+            let value = row.get("value").and_then(|v| v.as_str()).unwrap_or_default();
+            let file = row.get("file").and_then(|v| v.as_str()).unwrap_or_default();
+            value.to_ascii_lowercase().contains("action") && file.to_ascii_lowercase().contains("gateway")
+        })
+        .unwrap_or_else(|| panic!("[{lang}] update call missing action arg: {args_out}"));
+    let symbol = action_arg
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("[{lang}] action arg missing value: {action_arg}"));
+    let line = action_arg
+        .get("line")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| panic!("[{lang}] action arg missing line: {action_arg}"))
+        .to_string();
+    let file = action_arg
+        .get("file")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("[{lang}] action arg missing file: {action_arg}"));
+    let Some((out, _, code)) = run(&[
+        "slice",
+        ws,
+        "--symbol",
+        symbol,
+        "--line",
+        line.as_str(),
+        "--file",
+        file,
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[{lang}] slice ec={code}: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        parsed
+            .get("slices")
+            .and_then(|v| v.as_array())
+            .is_some_and(|slices| !slices.is_empty()),
+        "[{lang}] slice returned no slices for {symbol}@{line}: {out}"
+    );
+    let first = parsed["slices"]
+        .as_array()
+        .and_then(|slices| slices.first())
+        .unwrap();
+    for field in [
+        "slice_id",
+        "function",
+        "target_line",
+        "target_symbol",
+        "influencing_symbols",
+        "steps",
+    ] {
+        assert!(
+            first.get(field).is_some(),
+            "[{lang}] slice row missing `{field}`: {first}"
+        );
+    }
+    assert!(
+        first
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .is_some_and(|steps| !steps.is_empty()),
+        "[{lang}] slice row has no steps: {first}"
+    );
 }
 
 /// Assert `dump-callgraph` lists at least one node.
@@ -1671,7 +1862,7 @@ fn check_classes(ws: &str, lang: &str) {
     assert!(!rows.is_empty(), "[{lang}] classes empty");
 }
 
-/// Assert `imports`, `vars`, `strings`, `args` JSON shape.
+/// Assert browse command JSON shape.
 fn check_json_browse_shape(cmd: &str, ws: &str, lang: &str, required_fields: &[&str]) {
     let Some((out, _, code)) = run(&[cmd, ws, "--format", "json"]) else {
         return;
@@ -1794,6 +1985,21 @@ macro_rules! lang_matrix_tests {
                 }
 
                 #[test]
+                fn micro_dump_resolution() {
+                    check_dump_resolution(&ws(EXP.lang, "micro"), EXP.lang);
+                }
+
+                #[test]
+                fn micro_path_handler_to_verifier() {
+                    check_path(&ws(EXP.lang, "micro"), EXP.lang, EXP.handle_request, EXP.verify_token);
+                }
+
+                #[test]
+                fn micro_slice_action_at_update_call() {
+                    check_slice(&ws(EXP.lang, "micro"), EXP.lang, EXP.update_user);
+                }
+
+                #[test]
                 fn micro_dump_callgraph() {
                     check_dump_callgraph(&ws(EXP.lang, "micro"), EXP.lang);
                 }
@@ -1902,6 +2108,11 @@ macro_rules! lang_matrix_tests {
                 #[test]
                 fn micro_args_shape() {
                     check_json_browse_shape("args", &ws(EXP.lang, "micro"), EXP.lang, &["resolution_scope", "callee", "value", "file", "line"]);
+                }
+
+                #[test]
+                fn micro_operations_shape() {
+                    check_json_browse_shape("operations", &ws(EXP.lang, "micro"), EXP.lang, &["kind", "name", "file", "line", "in_function", "operands"]);
                 }
 
                 #[test]
@@ -3039,6 +3250,7 @@ fn nonexistent_workspace_is_rejected() {
         &["vars", bogus],
         &["strings", bogus],
         &["args", bogus],
+        &["operations", bogus],
         &["classes", bogus],
         &["search", bogus, "a"],
         &["index", bogus],
@@ -3073,6 +3285,7 @@ fn invalid_regex_errors_readably() {
         vec!["inspect", &w, "--query", "[bad", "--regex"],
         vec!["search", &w, "[bad", "--regex"],
         vec!["calls", &w, "--callee", "[bad", "--regex"],
+        vec!["operations", &w, "--name", "[bad", "--regex"],
     ] {
         let Some((_out, err, code)) = run(&args) else {
             return;

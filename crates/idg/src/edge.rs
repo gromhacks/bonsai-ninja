@@ -12,6 +12,7 @@
 
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{Precision, Span};
+use bonsai_lang_api::FlowEdgeKind;
 use serde::{Deserialize, Serialize};
 
 use crate::node::NodeId;
@@ -60,6 +61,88 @@ pub enum IdgEdgeKind {
 }
 
 impl IdgEdgeKind {
+    /// Taxonomy classes that this coarse IDG edge kind can carry.
+    ///
+    /// IDG edge kinds are intentionally compact for storage. Several
+    /// language-neutral taxonomy entries share one edge kind; the exact
+    /// source construct is still available from the originating FlowEvent,
+    /// Operation, place shape, callgraph edge, or rulepack fact.
+    #[must_use]
+    pub const fn taxonomy(self) -> &'static [FlowEdgeKind] {
+        match self {
+            Self::IntraAssign => &[
+                FlowEdgeKind::LocalAssign,
+                FlowEdgeKind::ExprPropagation,
+                FlowEdgeKind::DefUse,
+                FlowEdgeKind::Alias,
+                FlowEdgeKind::ObjectConstruction,
+                FlowEdgeKind::Destructuring,
+                FlowEdgeKind::GlobalAccess,
+                FlowEdgeKind::HeapStore,
+                FlowEdgeKind::ContainerStore,
+                FlowEdgeKind::Serialize,
+                FlowEdgeKind::Deserialize,
+            ],
+            Self::IntraRead => &[
+                FlowEdgeKind::DefUse,
+                FlowEdgeKind::ExprPropagation,
+                FlowEdgeKind::FieldRead,
+                FlowEdgeKind::IndexRead,
+                FlowEdgeKind::Dereference,
+                FlowEdgeKind::HeapLoad,
+                FlowEdgeKind::ContainerLoad,
+                FlowEdgeKind::DynamicPropertyAccess,
+                FlowEdgeKind::Sink,
+            ],
+            Self::IntraReturn => &[
+                FlowEdgeKind::ExprPropagation,
+                FlowEdgeKind::ReturnToCaller,
+                FlowEdgeKind::Serialize,
+                FlowEdgeKind::Deserialize,
+            ],
+            Self::IntraThrow => &[FlowEdgeKind::ThrowToCatch],
+            Self::InterCallArg => &[
+                FlowEdgeKind::ArgToParam,
+                FlowEdgeKind::ReceiverToThis,
+                FlowEdgeKind::CallbackInvocation,
+                FlowEdgeKind::EventDispatch,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
+            Self::InterReturn => &[
+                FlowEdgeKind::ReturnToCaller,
+                FlowEdgeKind::AwaitResolution,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
+            Self::InterThrow => &[
+                FlowEdgeKind::ThrowToCatch,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
+            Self::IntraFieldRead => &[
+                FlowEdgeKind::FieldRead,
+                FlowEdgeKind::IndexRead,
+                FlowEdgeKind::HeapLoad,
+                FlowEdgeKind::ContainerLoad,
+                FlowEdgeKind::DynamicPropertyAccess,
+            ],
+            Self::IntraFieldWrite => &[
+                FlowEdgeKind::FieldWrite,
+                FlowEdgeKind::IndexWrite,
+                FlowEdgeKind::HeapStore,
+                FlowEdgeKind::ContainerStore,
+                FlowEdgeKind::DynamicPropertyAccess,
+            ],
+            Self::IntraYield => &[
+                FlowEdgeKind::Yield,
+                FlowEdgeKind::Iteration,
+                FlowEdgeKind::CallbackInvocation,
+            ],
+            Self::IntraAwait => &[FlowEdgeKind::AwaitResolution],
+        }
+    }
+
     /// True iff this kind is an inter-procedural edge built during
     /// Phase 3 stitching. Lets queries filter intra-only flows.
     #[must_use]

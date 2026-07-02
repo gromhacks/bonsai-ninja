@@ -189,6 +189,64 @@ fn build_graph_with_paths(
     )
 }
 
+#[test]
+fn direct_call_edges_carry_exact_symbol_provenance() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(file, 0, "entry", vec![call(file, "handler")]),
+            decl(file, 1, "handler", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let handler = FuncId::new(global.find_by_name("handler")[0].raw());
+    let edge = cg
+        .callees_of(entry)
+        .find(|edge| edge.to == handler)
+        .expect("entry -> handler edge");
+
+    assert_eq!(edge.provenance.resolver_stage, "exact_symbol");
+    assert!(edge.provenance.evidence.contains("unique callable"));
+    assert!(edge.provenance.confidence >= 90);
+}
+
+#[test]
+fn typed_receiver_edges_carry_receiver_type_provenance() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl_with(file, 0, "Service", DeclKind::Class, None, Vec::new()),
+            decl_with(file, 1, "run", DeclKind::Method, Some(0), Vec::new()),
+            decl(
+                file,
+                2,
+                "entry",
+                vec![method_call(file, "service.run", "service", &["Service"])],
+            ),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let run = FuncId::new(global.find_by_name("run")[0].raw());
+    let edge = cg
+        .callees_of(entry)
+        .find(|edge| edge.to == run)
+        .expect("entry -> Service.run edge");
+
+    assert_eq!(edge.provenance.resolver_stage, "receiver_type");
+    assert!(edge.provenance.evidence.contains("receiver"));
+    assert!(edge.provenance.confidence >= 80);
+}
+
 fn func_id_by_name_and_parent(global: &GlobalIndex, name: &str, parent_name: &str) -> FuncId {
     let symbol = global
         .find_by_name(name)
@@ -218,6 +276,7 @@ fn callgraph_dedupes_exact_duplicate_edges() {
         span,
         kind: EdgeKind::Direct,
         precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
     };
 
     graph.add_edge(edge.clone());
@@ -228,6 +287,7 @@ fn callgraph_dedupes_exact_duplicate_edges() {
         span: Span::new(file, 10, 25),
         kind: EdgeKind::Direct,
         precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
     });
     graph.add_edge(CallEdge {
         from,
@@ -235,11 +295,189 @@ fn callgraph_dedupes_exact_duplicate_edges() {
         span: Span::new(file, 30, 40),
         kind: EdgeKind::Direct,
         precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
     });
 
     assert_eq!(graph.edges.len(), 2, "exact duplicate edge should be stored once");
     assert_eq!(graph.callees(from).count(), 2);
     assert_eq!(graph.callers(to).count(), 2);
+}
+
+#[test]
+fn resolved_path_enumeration_ranks_shortest_semantic_paths() {
+    let file = FileId::new(1);
+    let entry = FuncId::new(1);
+    let mid = FuncId::new(2);
+    let alt = FuncId::new(3);
+    let sink = FuncId::new(4);
+    let mut graph = CallGraph::new();
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: mid,
+        span: Span::new(file, 10, 11),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: mid,
+        to: sink,
+        span: Span::new(file, 20, 21),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: alt,
+        span: Span::new(file, 30, 31),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: alt,
+        to: sink,
+        span: Span::new(file, 40, 41),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: sink,
+        span: Span::new(file, 50, 51),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 8, 8, 64);
+
+    assert_eq!(truncation, PathTruncation::None);
+    assert_eq!(paths.len(), 3);
+    assert_eq!(paths[0].funcs, vec![entry, sink]);
+    assert_eq!(paths[1].funcs, vec![entry, alt, sink]);
+    assert_eq!(paths[1].precision, Precision::Exact);
+    assert_eq!(paths[2].funcs, vec![entry, mid, sink]);
+    assert_eq!(paths[2].precision, Precision::Narrowed);
+}
+
+#[test]
+fn resolved_path_enumeration_ignores_nonsemantic_edges() {
+    let file = FileId::new(1);
+    let entry = FuncId::new(1);
+    let sink = FuncId::new(2);
+    let mut graph = CallGraph::new();
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: sink,
+        span: Span::new(file, 10, 11),
+        kind: EdgeKind::Unknown,
+        precision: Precision::OverApproximate,
+        provenance: EdgeProvenance::default(),
+    });
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 8, 8, 64);
+
+    assert!(paths.is_empty());
+    assert_eq!(truncation, PathTruncation::None);
+}
+
+#[test]
+fn resolved_path_enumeration_exact_path_cap_is_not_truncated() {
+    let file = FileId::new(1);
+    let entry = FuncId::new(1);
+    let sink = FuncId::new(2);
+    let mut graph = CallGraph::new();
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: sink,
+        span: Span::new(file, 10, 11),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 1, 8, 64);
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].funcs, vec![entry, sink]);
+    assert_eq!(truncation, PathTruncation::None);
+}
+
+#[test]
+fn resolved_path_enumeration_reports_max_paths_only_when_extra_path_exists() {
+    let file = FileId::new(1);
+    let entry = FuncId::new(1);
+    let mid = FuncId::new(2);
+    let sink = FuncId::new(3);
+    let mut graph = CallGraph::new();
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: sink,
+        span: Span::new(file, 10, 11),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: mid,
+        span: Span::new(file, 20, 21),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: mid,
+        to: sink,
+        span: Span::new(file, 30, 31),
+        kind: EdgeKind::Direct,
+        precision: Precision::Exact,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 1, 8, 64);
+
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].funcs, vec![entry, sink]);
+    assert_eq!(truncation, PathTruncation::MaxPaths);
+}
+
+#[test]
+fn resolved_path_enumeration_reports_depth_truncation() {
+    let file = FileId::new(1);
+    let entry = FuncId::new(1);
+    let mid = FuncId::new(2);
+    let sink = FuncId::new(3);
+    let mut graph = CallGraph::new();
+    graph.add_edge(CallEdge {
+        from: entry,
+        to: mid,
+        span: Span::new(file, 10, 11),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+    graph.add_edge(CallEdge {
+        from: mid,
+        to: sink,
+        span: Span::new(file, 20, 21),
+        kind: EdgeKind::Direct,
+        precision: Precision::Narrowed,
+        provenance: EdgeProvenance::direct_symbol(),
+    });
+
+    let resolved = ResolvedCallGraph::from_call_graph(graph);
+    let (paths, truncation) = enumerate_paths_resolved(&resolved, entry, sink, 8, 1, 64);
+
+    assert!(paths.is_empty());
+    assert_eq!(truncation, PathTruncation::MaxDepth);
 }
 
 #[test]
@@ -1993,6 +2231,116 @@ fn receiver_method_does_not_resolve_through_same_named_local_callable_binding() 
 
     assert_eq!(cg.callees_of(entry).count(), 0);
     assert_eq!(cg.callers_of(handler).count(), 0);
+}
+
+#[test]
+fn receiver_projected_callable_binding_resolves_receiver_form_invocation() {
+    let caller_file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![
+            decl(
+                caller_file,
+                0,
+                "entry",
+                vec![
+                    callable_binding(caller_file, "service.execute", "handler"),
+                    method_call(caller_file, "execute", "service", &[]),
+                ],
+            ),
+            decl(caller_file, 1, "handler", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let handler = FuncId::new(global.find_by_name("handler")[0].raw());
+    let entry_decl = global
+        .decl_of(global.find_by_name("entry")[0])
+        .expect("entry decl");
+    let bindings = collect_local_callable_bindings(&entry_decl.flow_events, &global, entry_decl);
+    assert_eq!(
+        bindings.get("service.execute"),
+        Some(&handler),
+        "projected callable assignment should be collected as a local callable binding"
+    );
+    assert_eq!(
+        collect_local_callable_binding_targets(&bindings, "execute", Some("service"), false),
+        vec![handler],
+        "receiver-form invocation should look up the projected callable binding"
+    );
+    let alias_index = WorkspaceAliasIndex::build(&global);
+    let callable_index = WorkspaceCallableBindingIndex::build(&global);
+    let indexed_bindings = collect_local_callable_bindings_with_alias_index(
+        &entry_decl.flow_events,
+        &global,
+        entry_decl,
+        &AHashMap::new(),
+        &alias_index,
+        Some(&callable_index),
+    );
+    assert_eq!(
+        indexed_bindings.get("service.execute"),
+        Some(&handler),
+        "indexed callgraph collector should preserve projected callable bindings"
+    );
+
+    let edge = cg
+        .callees_of(entry)
+        .find(|edge| edge.to == handler)
+        .unwrap_or_else(|| {
+            panic!(
+                "callable stored in receiver-projected storage should resolve when invoked as receiver.method(); got {:?}",
+                cg.callees_of(entry).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(edge.provenance.resolver_stage, "callable_value");
+    assert!(edge.provenance.evidence.contains("projected callable binding"));
+    assert!(edge.provenance.confidence >= 80);
+}
+
+#[test]
+fn receiver_projected_callable_binding_resolves_assignment_rhs_invocation() {
+    let caller_file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        caller_file,
+        vec![
+            decl(
+                caller_file,
+                0,
+                "entry",
+                vec![
+                    callable_binding(caller_file, "service.execute", "handler"),
+                    FlowEvent::Assign {
+                        span: Span::new(caller_file, 30, 60),
+                        target: "result".to_string(),
+                        source_name: None,
+                        source_call: Some("service.execute".to_string()),
+                        source_call_args: Vec::new(),
+                        source_names: Vec::new(),
+                        declares_new_binding: false,
+                        value_kind: Some(AssignValueKind::CallResult),
+                    },
+                ],
+            ),
+            decl(caller_file, 1, "handler", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let handler = FuncId::new(global.find_by_name("handler")[0].raw());
+
+    let edge = cg.callees_of(entry).find(|edge| edge.to == handler).expect(
+        "callable stored in receiver-projected storage should resolve when invoked in Assign::source_call",
+    );
+    assert_eq!(edge.provenance.resolver_stage, "callable_value");
+    assert!(edge.provenance.evidence.contains("projected callable binding"));
+    assert!(edge.provenance.confidence >= 80);
 }
 
 #[test]

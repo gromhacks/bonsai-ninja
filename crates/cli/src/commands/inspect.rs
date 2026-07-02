@@ -7,13 +7,14 @@ use anyhow::{Context, Result};
 use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
 use bonsai_sdk::Workspace;
 use bonsai_sdk::{
-    chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id,
-    find_call_span_to_func_uncached, func_display_name, CallEdgeResolver, CallPathTruncation, ChainCache,
-    EntryTaintGraph, ResolvedChain, SyntaxFlowQuery, TaintFlowIdentityStep, TaintedCall, TaintedCallEdge,
-    TaintedCallKind,
+    compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id,
+    file_path_matches_filter, find_call_span_to_func_uncached, func_display_name, CallEdgeResolver,
+    CallPathTruncation, ChainCache, EntryTaintGraph, ResolvedChain, SyntaxFlowPlan, SyntaxFlowQuery,
+    TaintFlowIdentityStep, TaintedCall, TaintedCallEdge, TaintedCallKind,
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::args::{BrowseFormat, InspectView, GROUPED_VIEW_AUTO_THRESHOLD};
 use crate::footer::render_paging_footer;
@@ -28,8 +29,9 @@ use bonsai_sdk::refs::read_snippet;
 use bonsai_sdk::RefOut;
 
 use super::{
-    format_span, nearest_names, open_project_index_matching_literal, open_project_index_only as open_project,
-    page_info_to_json, paged_json_incomplete_reasons, short_file, truncate,
+    format_span, nearest_names, open_project_index_filtered_paths, open_project_index_matching_literal,
+    open_project_index_only as open_project, page_info_to_json, paged_json_incomplete_reasons, short_file,
+    truncate,
 };
 
 /// Above this size, default inspect stays on the indexed syntax
@@ -40,6 +42,7 @@ use super::{
 const INSPECT_GRAPH_FLOW_FILE_LIMIT: usize = 5_000;
 const INSPECT_DEFAULT_TAINT_ENTRY_LIMIT: usize = 8;
 const INSPECT_DEFAULT_TAINT_FLOW_LIMIT: usize = 100;
+const FLOW_LABEL_PLACEHOLDER: &str = "__BONSAI_FLOW_LABEL__";
 
 #[derive(Serialize, Clone)]
 struct InspectOut {
@@ -154,7 +157,7 @@ struct InspectReport {
     /// Raw taint-engine paths matching the inspect query / filters.
     /// Populated by default for normal inspect queries; no rulepack
     /// source/sink/sanitizer semantics are involved.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default)]
     taint_flows: Vec<InspectTaintFlow>,
     summary: InspectReportSummary,
 }
@@ -174,7 +177,7 @@ enum InspectJsonPageUnit<'a> {
 struct InspectReportSummary {
     total_decl_hits: usize,
     total_hits: usize,
-    #[serde(skip_serializing_if = "is_zero_usize", default)]
+    #[serde(default)]
     total_taint_flows: usize,
     hit_counts_by_kind: serde_json::Value,
     /// Number of non-decl hits whose flow evidence is known to be a
@@ -226,6 +229,32 @@ struct InspectReportSummary {
     /// when the taint overlay is truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
     taint_flow_cap: Option<usize>,
+    /// Number of entry graphs requested through the shared semantic flow
+    /// facade while building raw inspect taint-flow evidence.
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
+    semantic_flow_entry_queries: usize,
+    /// Backend counts reported by `Workspace::syntax_flow_graph`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    semantic_flow_backend_counts: BTreeMap<String, usize>,
+    /// Number of semantic flow queries answered from an already-hot
+    /// backend.
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
+    semantic_flow_cache_hits: usize,
+    /// Number of semantic flow queries that computed a missing graph.
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
+    semantic_flow_cache_misses: usize,
+    /// Target-cut size used by the semantic flow planner when it is
+    /// stable across the inspected entry set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_flow_target_cut_size: Option<usize>,
+    /// Planner fallback reasons, such as a preferred warmed-IDG query
+    /// falling back to cached dataflow.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    semantic_flow_fallback_reasons: Vec<String>,
+    /// Explicit incompleteness reasons reported by the shared semantic
+    /// flow planner.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    semantic_flow_incomplete_reasons: Vec<String>,
     /// Present when default inspect intentionally skipped the raw
     /// taint overlay to keep a large, broad syntax query bounded.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,6 +265,8 @@ struct InspectReportSummary {
 struct InspectTaintFlow {
     taint_id: String,
     entry: String,
+    #[serde(skip)]
+    entry_kind: Option<DeclKind>,
     terminal: String,
     terminal_kind: String,
     precision: String,
@@ -469,6 +500,55 @@ fn workspace_file_count_exceeds(root: &std::path::Path, limit: usize) -> bool {
     false
 }
 
+fn retrieval_prefilter_for_inspect(
+    root: &std::path::Path,
+    pattern: Option<&str>,
+    is_regex: bool,
+    filters: InspectFilters<'_>,
+    graph_flows_enabled: bool,
+    group_id_filter_active: bool,
+) -> Result<Option<Vec<String>>> {
+    retrieval_prefilter_for_inspect_with_limit(
+        root,
+        pattern,
+        is_regex,
+        filters,
+        graph_flows_enabled,
+        group_id_filter_active,
+        INSPECT_GRAPH_FLOW_FILE_LIMIT,
+    )
+}
+
+fn retrieval_prefilter_for_inspect_with_limit(
+    root: &std::path::Path,
+    pattern: Option<&str>,
+    is_regex: bool,
+    filters: InspectFilters<'_>,
+    graph_flows_enabled: bool,
+    group_id_filter_active: bool,
+    large_workspace_limit: usize,
+) -> Result<Option<Vec<String>>> {
+    let Some(pattern) = pattern else {
+        return Ok(None);
+    };
+    if is_regex
+        || pattern.len() < 3
+        || graph_flows_enabled
+        || group_id_filter_active
+        || !workspace_file_count_exceeds(root, large_workspace_limit)
+    {
+        return Ok(None);
+    }
+    super::bonsai_for_cli().retrieval_hydration_include_filters(
+        root,
+        pattern,
+        bonsai_sdk::SearchFilters {
+            file: filters.file,
+            ..Default::default()
+        },
+    )
+}
+
 pub(crate) struct InspectCommandOptions<'a> {
     pub(crate) pattern: Option<&'a str>,
     pub(crate) is_regex: bool,
@@ -540,11 +620,23 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             && render.group_id_filter.is_none()
             && workspace_file_count_exceeds(root, INSPECT_GRAPH_FLOW_FILE_LIMIT)
     });
-    let (project, _footer) = if let Some(literal) = literal_prefilter {
+    let retrieval_prefilter = retrieval_prefilter_for_inspect(
+        root,
+        pattern,
+        is_regex,
+        filters,
+        graph_flows_enabled,
+        render.group_id_filter.is_some(),
+    )?;
+    let partial_workspace = retrieval_prefilter.is_some() || literal_prefilter.is_some();
+    let (project, _footer) = if let Some(include_filters) = retrieval_prefilter {
+        open_project_index_filtered_paths(root, &include_filters, &[])?
+    } else if let Some(literal) = literal_prefilter {
         open_project_index_matching_literal(root, literal)?
     } else {
         open_project(root)?
     };
+    let prepare_stage = progress::ScopedSpinner::new("preparing inspect query");
     let ws = project.workspace();
     let global = ws.db().global_index();
     let full_source_for_large_bodies =
@@ -569,13 +661,31 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let mut edge_resolver = CallEdgeResolver::new(ws);
 
     // When no query is supplied, `inspect` becomes a filter-driven
-    // enumeration: every fact matches the primary matcher, and the
-    // `--from` / `--to` / `--file` / `--in-fn` / `--kind` filters do
-    // the narrowing.
+    // enumeration. Declaration hits stay opt-in in this mode, but
+    // occurrence hits should still be seeded by the concrete endpoint
+    // when the user provides one. Otherwise `inspect --to pickle`
+    // treats every string/arg/var in any function that reaches pickle
+    // as a match point.
     let matcher: Matcher = match pattern {
         Some(p) => build_matcher(p, is_regex)?,
         None => Matcher::MatchAll,
     };
+    let filter_only_occurrence_pattern = if pattern.is_none() {
+        filters.to.or(filters.from)
+    } else {
+        None
+    };
+    let occurrence_matcher: Matcher = match filter_only_occurrence_pattern {
+        Some(p) => build_matcher(p, false)?,
+        None => matcher.clone(),
+    };
+    let filter_only_target_scan = filter_only_occurrence_pattern.is_some();
+    let filter_only_occurrence_kind = if pattern.is_none() {
+        filters.to_kind.or(filters.from_kind).map(FactKindFilter::to_sdk)
+    } else {
+        None
+    };
+    prepare_stage.finish();
     let kinds: ahash::AHashSet<String> = kind_filter.iter().map(|s| s.to_lowercase()).collect();
     // When a `--query` is active but `--kind` is left unset, exclude
     // purely lexical hit kinds (`decorator`, `ref`) from the default
@@ -588,12 +698,15 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     // / `--kind ref` and get them back. When no query is supplied
     // we keep every kind available — the filter-driven enumeration
     // mode deliberately surfaces everything the matchers let through.
-    let default_exclude_kinds: &[&str] = if pattern.is_some() {
+    let default_exclude_kinds: &[&str] = if pattern.is_some() || filter_only_target_scan {
         &["decorator", "ref"]
     } else {
         &[]
     };
     let want = |k: &str| {
+        if filter_only_occurrence_kind.is_some_and(|kind| !inspect_kind_matches_filter(k, kind)) {
+            return false;
+        }
         if kinds.is_empty() {
             !default_exclude_kinds.contains(&k)
         } else {
@@ -621,32 +734,35 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             || render.flow_id_filter.is_some()
             || render.group_id_filter.is_some());
     let mut decl_hits: Vec<InspectOut> = Vec::new();
-    // Global flow counter — advances as each hit's flows are labeled so
-    // "FLOW 1", "FLOW 2", "FLOW 3", … stay sequential across every hit
-    // in the output rather than every hit restarting at "FLOW 1".
-    let mut flow_counter: u32 = 1;
     // Iterate files by PATH order (not FileId). This matches the final
-    // display sort, so the flow counter advances in the same order hits
-    // are displayed — keeping `FLOW 1`, `FLOW 2`, … sequential top-to-
-    // bottom in the output.
+    // display sort, which keeps discovery and final label assignment
+    // deterministic across cache state and hash-map iteration order.
     let files_in_path_order: Vec<bonsai_common::FileId> = {
         let mut v: Vec<(String, bonsai_common::FileId)> = global
             .all_files()
-            .map(|f| {
+            .filter_map(|f| {
                 let path = ws
                     .vfs()
                     .path(f)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                (path, f)
+                Some((path, f))
             })
             .collect();
         v.sort();
         v.into_iter().map(|(_, f)| f).collect()
     };
-    let large_syntax_scan =
-        literal_prefilter.is_some() || files_in_path_order.len() > INSPECT_GRAPH_FLOW_FILE_LIMIT;
+    let large_syntax_scan = partial_workspace || files_in_path_order.len() > INSPECT_GRAPH_FLOW_FILE_LIMIT;
     let syntax_fast_path = !graph_flows_enabled;
+    let structural_id_only_lookup = structural_flow_lookup
+        && pattern.is_none()
+        && kind_filter.is_empty()
+        && filters.from.is_none()
+        && filters.from_kind.is_none()
+        && filters.to.is_none()
+        && filters.to_kind.is_none()
+        && filters.file.is_none()
+        && filters.in_fn.is_none();
     // Raw inspect taint-flow is query-bounded by default: syntax hits add
     // their enclosing callable to this set, then we ask the taint graph
     // only for those entries. The only workspace-wide fallback is a
@@ -705,7 +821,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             // `--file` filters out decl hits whose file path doesn't
             // match; skip early so we don't enumerate chains for dropped
             // decls.
-            if filters.file.is_some_and(|f| !path.contains(f)) {
+            if filters
+                .file
+                .is_some_and(|f| !file_path_matches_filter(ws, &path, f))
+            {
                 continue;
             }
             // Resolved-graph traversal: enumerate chains in `FuncId`
@@ -834,8 +953,11 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                     // leakage while still allowing kind filters to land
                     // on args/calls/reads/writes in intermediate hops.
                     let taint_facts_fn = || chain_cache.chain_structural_tokens(path);
-                    bonsai_sdk::chain_matches_filters(
-                        Some(&decl.name),
+                    bonsai_sdk::chain_matches_filters_for_hit(
+                        Some(bonsai_sdk::FilterHit::new(
+                            &decl.name,
+                            bonsai_sdk::FactKindFilter::Decl,
+                        )),
                         &chain_names,
                         &taint_facts_fn,
                         filters.to_sdk(),
@@ -857,13 +979,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                     }
                 }
             }
-            // Compute flow labels on display-name projections so
-            // branch-split grouping stays stable with what users see.
-            let extended_names_for_labels: Vec<Vec<String>> = extended_chains_r
-                .iter()
-                .map(|(c, _)| chain_to_names(ws, c))
-                .collect();
-            let labels = compute_flow_labels_from(&extended_names_for_labels, &mut flow_counter);
             let call_spans: Vec<Vec<Option<bonsai_common::Span>>> = extended_chains_r
                 .iter()
                 .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
@@ -875,18 +990,16 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             // workspace VFS (`Sync`), writes no shared state — so
             // rayon's `par_iter` gives a near-linear core speedup.
             //
-            // Determinism: flow labels were assigned serially above
-            // (`compute_flow_labels_from` increments a counter in
-            // order), and `.collect()` on a parallel iterator
-            // preserves iteration order. Output is byte-identical
-            // to the serial loop regardless of thread count.
+            // Determinism: flow labels are assigned after the report
+            // has its final filtered shape. This pass renders with a
+            // placeholder, and `.collect()` on a parallel iterator
+            // preserves iteration order for the later label fill.
             use rayon::prelude::*;
             let flows: Vec<InspectFlowRendered> = extended_chains_r
                 .par_iter()
-                .zip(labels.par_iter())
                 .zip(call_spans.par_iter())
                 .enumerate()
-                .filter_map(|(i, (((extended_r, prec), label), spans))| {
+                .filter_map(|(_i, ((extended_r, prec), spans))| {
                     let match_idx = extended_r
                         .iter()
                         .position(|&f| f == target_func)
@@ -896,14 +1009,15 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                         MatchOverride {
                             span: decl.name_span,
                             label: format!("MATCH: enter {}", decl.name),
+                            marker_subjects: vec![decl.name.clone()],
                         },
                     ));
                     render_flow_with_cached_call_spans(
                         ws,
                         extended_r,
                         spans,
-                        (i + 1) as u32,
-                        label,
+                        0,
+                        FLOW_LABEL_PLACEHOLDER,
                         *prec,
                         match_at,
                         filters,
@@ -994,7 +1108,10 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         }
         let (path, line, col) = format_span(&span, ws);
         // `--file` filter (substring) on the hit's source path.
-        if filters.file.is_some_and(|f| !path.contains(f)) {
+        if filters
+            .file
+            .is_some_and(|f| !file_path_matches_filter(ws, &path, f))
+        {
             return;
         }
         // `--in-fn` filter: hit must live inside a function whose name
@@ -1004,12 +1121,22 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                 return;
             }
         }
+        let containing_name: Option<&str> = containing.as_ref().map(|(_, n)| n.as_str());
+        let containing_id: Option<bonsai_common::FuncId> = containing.as_ref().map(|(f, _)| *f);
+        if out.iter().any(|hit| {
+            hit.kind == kind
+                && hit.text == text
+                && hit.file == path
+                && hit.line == line
+                && hit.column == col
+                && hit.in_function.as_deref() == containing_name
+        }) {
+            return;
+        }
         // Count this candidate toward the cap regardless of whether
         // the chain filter accepts or rejects it. See the
         // `hits_attempted` declaration for why.
         hits_attempted.set(hits_attempted.get() + 1);
-        let containing_name: Option<&str> = containing.as_ref().map(|(_, n)| n.as_str());
-        let containing_id: Option<bonsai_common::FuncId> = containing.as_ref().map(|(f, _)| *f);
         if taint_flow {
             if let Some(entry) = containing_id {
                 insert_taint_candidate_entry(
@@ -1025,12 +1152,23 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         }
 
         if !graph_flows_enabled {
-            let visible_match = |needle: &str| -> bool {
-                name_token_match(&text, needle)
-                    || containing_name.is_some_and(|name| name_token_match(name, needle))
+            let filter_hit = inspect_filter_hit(&text, kind);
+            let visible_match = |needle: &str, requested_kind: Option<bonsai_sdk::FactKindFilter>| -> bool {
+                let hit_matches = filter_hit.is_some_and(|hit| {
+                    requested_kind.is_none_or(|kind| hit.kind == Some(kind))
+                        && name_token_match(hit.text, needle)
+                });
+                let containing_matches = requested_kind
+                    .is_none_or(|kind| kind == bonsai_sdk::FactKindFilter::Decl)
+                    && containing_name.is_some_and(|name| name_token_match(name, needle));
+                hit_matches || containing_matches
             };
-            if filters.from.is_some_and(|from| !visible_match(from))
-                || filters.to.is_some_and(|to| !visible_match(to))
+            if filters
+                .from
+                .is_some_and(|from| !visible_match(from, filters.from_kind.map(FactKindFilter::to_sdk)))
+                || filters
+                    .to
+                    .is_some_and(|to| !visible_match(to, filters.to_kind.map(FactKindFilter::to_sdk)))
             {
                 return;
             }
@@ -1179,8 +1317,8 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                         let chain_names: Vec<String> =
                             extended.iter().map(|&f| func_display_name(ws, f)).collect();
                         let taint_facts_fn = || chain_cache.chain_taint_facts(&extended);
-                        if !bonsai_sdk::chain_matches_filters(
-                            Some(&text),
+                        if !bonsai_sdk::chain_matches_filters_for_hit(
+                            inspect_filter_hit(&text, kind),
                             &chain_names,
                             &taint_facts_fn,
                             filters.to_sdk(),
@@ -1229,30 +1367,28 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                         }
                         if seen_to.is_none() {
                             if let Some(needle) = filters.to {
-                                seen_to = reachable_r
-                                    .iter()
-                                    .zip(func_names.iter())
-                                    .find(|(_, n)| name_token_match(n, needle))
-                                    .map(|(&f, n)| build_filter_match(ws, Some(f), n.clone()))
-                                    .or_else(|| {
-                                        let taint = taint_facts_fn();
-                                        let mut tokens: Vec<&String> =
-                                            taint.by_kind.values().flat_map(|t| t.iter()).collect();
-                                        tokens.sort();
-                                        tokens
-                                            .into_iter()
-                                            .find(|t| name_token_match(t, needle))
-                                            .map(|t| build_filter_match(ws, None, t.clone()))
-                                    })
-                                    .or_else(|| {
-                                        // `--to` also matches the hit
-                                        // text itself.
-                                        if name_token_match(&text, needle) {
-                                            Some(build_filter_match(ws, None, text.clone()))
-                                        } else {
-                                            None
-                                        }
-                                    });
+                                seen_to = if name_token_match(&text, needle) {
+                                    Some(build_filter_match(ws, None, needle.to_string()))
+                                } else {
+                                    None
+                                }
+                                .or_else(|| {
+                                    let taint = taint_facts_fn();
+                                    let mut tokens: Vec<&String> =
+                                        taint.by_kind.values().flat_map(|t| t.iter()).collect();
+                                    tokens.sort();
+                                    tokens
+                                        .into_iter()
+                                        .find(|t| name_token_match(t, needle))
+                                        .map(|t| build_filter_match(ws, None, t.clone()))
+                                })
+                                .or_else(|| {
+                                    reachable_r
+                                        .iter()
+                                        .zip(func_names.iter())
+                                        .find(|(_, n)| name_token_match(n, needle))
+                                        .map(|(&f, n)| build_filter_match(ws, Some(f), n.clone()))
+                                });
                             }
                         }
                         true
@@ -1276,7 +1412,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         let chains_preview: Vec<String> = chains_r
             .iter()
             .take(6)
-            .map(|c| chain_to_names(ws, &c.funcs).join(" -> "))
+            .map(|c| disambiguated_func_names_for_output(ws, &c.funcs).join(" -> "))
             .collect();
         // Build full source-inlined flows for this hit, overriding the
         // target function's MATCH annotation to point at the hit span.
@@ -1291,6 +1427,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         let match_override = MatchOverride {
             span,
             label: sink_label,
+            marker_subjects: vec![text.clone()],
         };
         // If there are no upstream chains (the containing function is a
         // root, or there's no enclosing function) still emit one flow
@@ -1359,8 +1496,8 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                 // leakage while preserving kind-filter matches on
                 // intermediate arguments/calls.
                 let taint_facts_fn = || chain_cache.chain_structural_tokens(path);
-                bonsai_sdk::chain_matches_filters(
-                    Some(&text),
+                bonsai_sdk::chain_matches_filters_for_hit(
+                    inspect_filter_hit(&text, kind),
                     &chain_names,
                     &taint_facts_fn,
                     filters.to_sdk(),
@@ -1382,11 +1519,6 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                 }
             }
         }
-        let extended_names_for_labels: Vec<Vec<String>> = extended_chains_r
-            .iter()
-            .map(|(c, _)| chain_to_names(ws, c))
-            .collect();
-        let labels = compute_flow_labels_from(&extended_names_for_labels, &mut flow_counter);
         let call_spans: Vec<Vec<Option<bonsai_common::Span>>> = extended_chains_r
             .iter()
             .map(|(chain, _)| edge_resolver.call_spans_for_chain(chain))
@@ -1396,10 +1528,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         use rayon::prelude::*;
         let flows: Vec<InspectFlowRendered> = extended_chains_r
             .par_iter()
-            .zip(labels.par_iter())
             .zip(call_spans.par_iter())
             .enumerate()
-            .filter_map(|(i, (((extended_r, prec), label), spans))| {
+            .filter_map(|(_i, ((extended_r, prec), spans))| {
                 let match_idx = containing_id
                     .and_then(|f| extended_r.iter().position(|&g| g == f))
                     .unwrap_or(extended_r.len().saturating_sub(1));
@@ -1407,8 +1538,8 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                     ws,
                     extended_r,
                     spans,
-                    (i + 1) as u32,
-                    label,
+                    0,
+                    FLOW_LABEL_PLACEHOLDER,
                     *prec,
                     Some((match_idx, match_override.clone())),
                     filters,
@@ -1437,119 +1568,139 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         });
     };
 
-    let hit_bar = progress::progress_bar("scanning files", files_in_path_order.len() as u64);
-    for file in files_in_path_order.iter().copied() {
-        if syntax_fast_path && hits_attempted.get() >= attempt_cap {
-            hits_truncated_by_attempt_cap.set(true);
-            break;
-        }
-        if syntax_fast_path && !taint_flow && hits.len() >= max_hits {
-            hits_truncated_by_output_cap.set(true);
-            break;
-        }
-        hit_bar.inc(1);
-        let Some(idx) = global.file_index(file) else {
-            continue;
+    if !structural_id_only_lookup {
+        let hit_phase = if partial_workspace {
+            "hydrating verified facts"
+        } else {
+            "scanning files"
         };
-        // Preload decls in this file for enclosing-function lookup.
-        let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
-
-        // Calls + Assigns + Args live in flow_events.
-        for d in &decls_in_file {
-            if !matches!(
-                d.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-            ) {
+        let hit_bar = progress::progress_bar(hit_phase, files_in_path_order.len() as u64);
+        for file in files_in_path_order.iter().copied() {
+            if syntax_fast_path && hits_attempted.get() >= attempt_cap {
+                hits_truncated_by_attempt_cap.set(true);
+                break;
+            }
+            if syntax_fast_path && !taint_flow && hits.len() >= max_hits {
+                hits_truncated_by_output_cap.set(true);
+                break;
+            }
+            hit_bar.inc(1);
+            let Some(idx) = global.file_index(file) else {
                 continue;
-            }
-            walk_flow_hits(
-                &d.flow_events,
-                bonsai_common::FuncId::new(d.symbol.raw()),
-                &d.name,
-                &matcher,
-                &kinds,
-                &mut hits,
-                &mut push_hit,
-            );
-        }
+            };
+            // Preload decls in this file for enclosing-function lookup.
+            let decls_in_file: Vec<&bonsai_lang_api::Decl> = idx.defs.iter().collect();
 
-        // Strings.
-        if want("string") {
-            for s in &idx.strings {
-                if matcher.is_match(&s.text) {
-                    let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
-                    push_hit("string", s.text.clone(), s.span, enclosing, false, &mut hits);
-                }
-            }
-        }
-
-        // Refs (covers decorators via RefKind::Decorator, plus residual
-        // module-level call refs). On large syntax-fast inspections,
-        // call facts from function bodies already came from flow_events
-        // above; avoid an O(refs × enclosing lookup) pass just to
-        // rediscover the same calls.
-        let scan_refs =
-            want("decorator") || want("ref") || (want("call") && (!syntax_fast_path || !large_syntax_scan));
-        if scan_refs {
-            for r in &idx.refs {
-                let kind_tag = match r.kind {
-                    RefKind::Decorator => "decorator",
-                    RefKind::Call => {
-                        // Skip call-refs that correspond to a call already
-                        // surfaced by the flow-event walker above. Module-
-                        // level calls (JS `const x = require(...)` at file
-                        // top, Python top-level script statements, etc.)
-                        // have NO enclosing function — they're not in any
-                        // decl's flow_events — so we must emit them here or
-                        // they become invisible to inspect.
-                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                        if enclosing.is_some() {
-                            continue;
-                        }
-                        "call"
-                    }
-                    _ => "ref",
-                };
-                if !want(kind_tag) {
+            // Calls + Assigns + Args live in flow_events.
+            for d in &decls_in_file {
+                if !matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
                     continue;
                 }
-                if matcher.is_match(&r.name) {
-                    let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                    push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, &mut hits);
-                }
+                walk_flow_hits(
+                    &d.flow_events,
+                    bonsai_common::FuncId::new(d.symbol.raw()),
+                    &d.name,
+                    FlowHitWalkContext {
+                        workspace: Some(ws),
+                        matcher: &occurrence_matcher,
+                        endpoint_kind_filter: filter_only_occurrence_kind,
+                        kinds: &kinds,
+                    },
+                    &mut hits,
+                    &mut push_hit,
+                );
             }
-        }
 
-        // Imports (fallback to generic scan when the adapter didn't provide any).
-        if want("import") {
-            let imports_vec = ws
-                .db()
-                .import_index(file)
-                .map(|i| i.imports.clone())
-                .filter(|i| !i.is_empty())
-                .unwrap_or_else(|| {
-                    ws.db()
-                        .parse(file)
-                        .ok()
-                        .and_then(|parsed| {
-                            ws.vfs().snapshot(file).ok().map(|snap| {
-                                bonsai_lang_api::kit::extract_generic_imports(
-                                    &parsed.tree,
-                                    file,
-                                    snap.text.as_bytes(),
-                                )
+            // Strings.
+            if want("string") {
+                for s in &idx.strings {
+                    if occurrence_matcher.is_match(&s.text) {
+                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
+                        push_hit("string", s.text.clone(), s.span, enclosing, false, &mut hits);
+                    }
+                }
+            }
+
+            // Refs (covers decorators via RefKind::Decorator, plus residual
+            // module-level call refs). On large syntax-fast inspections,
+            // call facts from function bodies already came from flow_events
+            // above; avoid an O(refs × enclosing lookup) pass just to
+            // rediscover the same calls.
+            let scan_refs = want("decorator")
+                || want("ref")
+                || (want("call") && (!syntax_fast_path || !large_syntax_scan));
+            if scan_refs {
+                for r in &idx.refs {
+                    let kind_tag = match r.kind {
+                        RefKind::Decorator => "decorator",
+                        RefKind::Call => {
+                            // Skip call-refs that correspond to a call already
+                            // surfaced by the flow-event walker above. Module-
+                            // level calls (JS `const x = require(...)` at file
+                            // top, Python top-level script statements, etc.)
+                            // have NO enclosing function — they're not in any
+                            // decl's flow_events — so we must emit them here or
+                            // they become invisible to inspect.
+                            let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
+                            if enclosing.is_some() {
+                                continue;
+                            }
+                            "call"
+                        }
+                        _ => "ref",
+                    };
+                    if !want(kind_tag) {
+                        continue;
+                    }
+                    if occurrence_matcher.is_match(&r.name) {
+                        let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
+                        push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, &mut hits);
+                    }
+                }
+            }
+
+            // Imports (fallback to generic scan when the adapter didn't provide any).
+            if want("import") {
+                let imports_vec = ws
+                    .db()
+                    .import_index(file)
+                    .map(|i| i.imports.clone())
+                    .filter(|i| !i.is_empty())
+                    .unwrap_or_else(|| {
+                        ws.db()
+                            .parse(file)
+                            .ok()
+                            .and_then(|parsed| {
+                                ws.vfs().snapshot(file).ok().map(|snap| {
+                                    bonsai_lang_api::kit::extract_generic_imports(
+                                        &parsed.tree,
+                                        file,
+                                        snap.text.as_bytes(),
+                                    )
+                                })
                             })
-                        })
-                        .unwrap_or_default()
-                });
-            for imp in &imports_vec {
-                if matcher.is_match(&imp.module) {
-                    push_hit("import", imp.module.clone(), imp.span, None, false, &mut hits);
+                            .unwrap_or_default()
+                    });
+                for imp in &imports_vec {
+                    let alias_match = imp
+                        .alias
+                        .as_deref()
+                        .is_some_and(|alias| occurrence_matcher.is_match(alias));
+                    let original_match = imp
+                        .original_name
+                        .as_deref()
+                        .is_some_and(|original| occurrence_matcher.is_match(original));
+                    if occurrence_matcher.is_match(&imp.module) || alias_match || original_match {
+                        push_hit("import", import_hit_text(imp), imp.span, None, false, &mut hits);
+                    }
                 }
             }
         }
+        hit_bar.finish_and_clear();
     }
-    hit_bar.finish_and_clear();
 
     // Determinism: `global.all_files()` iterates an AHashMap, so discovery
     // order varies run-to-run. Sort hits and decl_hits by a stable key
@@ -1597,6 +1748,13 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             .then_some(taint_candidate_entry_cap),
         taint_flows_truncated: false,
         taint_flow_cap: None,
+        semantic_flow_entry_queries: 0,
+        semantic_flow_backend_counts: BTreeMap::new(),
+        semantic_flow_cache_hits: 0,
+        semantic_flow_cache_misses: 0,
+        semantic_flow_target_cut_size: None,
+        semantic_flow_fallback_reasons: Vec::new(),
+        semantic_flow_incomplete_reasons: Vec::new(),
         taint_overlay_skipped_reason: None,
     };
 
@@ -1631,12 +1789,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
             "large broad query; use --taint-flow, --all, or narrower filters for raw taint paths".to_string(),
         );
     } else if taint_flow {
-        // Use the target-cut IDG path only when this workspace already has a
-        // seeded service from an explicit prewarm/cache flow. Building IDG
-        // here would make cold broad inspect queries on large repos slower
-        // than the cached dataflow path.
-        let use_targeted_taint_graph = ws.db().idg_service().is_some();
-        let (taint_flows, taint_flows_truncated) = inspect_taint_flows(
+        let (taint_flows, taint_flows_truncated, semantic_flow_stats) = inspect_taint_flows(
             ws,
             &taint_candidate_entries,
             InspectTaintFlowOptions {
@@ -1645,13 +1798,14 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                 filters,
                 kind_filter,
                 flow_cap: taint_flow_cap,
-                use_targeted_idg: use_targeted_taint_graph,
+                prefer_warmed_idg: true,
             },
         )?;
         report.taint_flows = taint_flows;
         report.summary.total_taint_flows = report.taint_flows.len();
         report.summary.taint_flows_truncated = taint_flows_truncated;
         report.summary.taint_flow_cap = taint_flows_truncated.then_some(taint_flow_cap);
+        apply_semantic_flow_stats(&mut report.summary, semantic_flow_stats);
     }
     refresh_inspect_completeness(&mut report);
 
@@ -1707,25 +1861,28 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         report.hits.retain(|hit| !hit.flows.is_empty());
         rebuild_report_summary(&mut report);
     }
+    finalize_report_flow_labels(&mut report);
     // No matches? Print a friendly zero-hits line with close-name
     // suggestions — don't raise an error. Zero hits is a legit outcome
     // for a substring / regex query; only commands that take a concrete
     // symbol (trace, dump-hir, refs) should treat it as usage error.
     //
-    // JSON / SARIF output stays machine-parseable: emit `[]` (or the
-    // empty wrapped page) instead of the human-readable
-    // "no matches for ..." line so downstream tools that pipe through
-    // `jq` / programmatic consumers don't have to special-case empty
-    // results.
+    // JSON output stays machine-parseable with the same InspectReport
+    // shape used for non-empty results. SARIF still returns an empty
+    // array here because inspect does not synthesize SARIF runs.
     if report.decl_hits.is_empty() && report.hits.is_empty() && report.taint_flows.is_empty() {
-        if matches!(format, BrowseFormat::Json | BrowseFormat::Sarif) {
+        if matches!(format, BrowseFormat::Sarif) {
             cli_println!("[]");
+            return Ok(());
+        }
+        if matches!(format, BrowseFormat::Json) {
+            cli_println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
         let kind_label = if kind_filter.is_empty() {
             String::new()
         } else {
-            format!("kinds={:?} ", kind_filter)
+            format!("kinds: {} ", format_kind_filter(kind_filter))
         };
         // Build a human label for the active filter set — when there's
         // no query we still want the message to explain what the user
@@ -1881,13 +2038,22 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     Ok(())
 }
 
+fn import_hit_text(imp: &bonsai_lang_api::ImportSpec) -> String {
+    match (imp.original_name.as_deref(), imp.alias.as_deref()) {
+        (Some(original), Some(alias)) => format!("{original} from {} as {alias}", imp.module),
+        (Some(original), None) => format!("{original} from {}", imp.module),
+        (None, Some(alias)) => format!("{} as {alias}", imp.module),
+        (None, None) => imp.module.clone(),
+    }
+}
+
 struct InspectTaintFlowOptions<'a> {
     pattern: Option<&'a str>,
     is_regex: bool,
     filters: InspectFilters<'a>,
     kind_filter: &'a [String],
     flow_cap: usize,
-    use_targeted_idg: bool,
+    prefer_warmed_idg: bool,
 }
 
 struct TaintFlowMatchContext<'a> {
@@ -1897,18 +2063,51 @@ struct TaintFlowMatchContext<'a> {
     flow_cap: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct InspectSemanticFlowStats {
+    entry_queries: usize,
+    backend_counts: BTreeMap<String, usize>,
+    cache_hits: usize,
+    cache_misses: usize,
+    target_cut_size: Option<usize>,
+    fallback_reasons: Vec<String>,
+    incomplete_reasons: Vec<String>,
+}
+
+impl InspectSemanticFlowStats {
+    fn record_plan(&mut self, plan: &SyntaxFlowPlan) {
+        self.entry_queries += 1;
+        *self
+            .backend_counts
+            .entry(plan.backend.label().to_string())
+            .or_default() += 1;
+        match plan.cache_status {
+            bonsai_sdk::SyntaxFlowCacheStatus::Hit => self.cache_hits += 1,
+            bonsai_sdk::SyntaxFlowCacheStatus::MissComputed => self.cache_misses += 1,
+        }
+        match (self.target_cut_size, plan.target_cut_size) {
+            (None, Some(size)) => self.target_cut_size = Some(size),
+            (Some(existing), Some(size)) if existing == size => {}
+            (Some(_), Some(_) | None) => self.target_cut_size = None,
+            (None, None) => {}
+        }
+        extend_unique_sorted(&mut self.fallback_reasons, &plan.fallback_reasons);
+        extend_unique_sorted(&mut self.incomplete_reasons, &plan.analysis_incomplete_reasons);
+    }
+}
+
 fn inspect_taint_flows(
     ws: &Workspace,
     candidate_entries: &ahash::AHashSet<bonsai_common::FuncId>,
     options: InspectTaintFlowOptions<'_>,
-) -> Result<(Vec<InspectTaintFlow>, bool)> {
+) -> Result<(Vec<InspectTaintFlow>, bool, InspectSemanticFlowStats)> {
     let InspectTaintFlowOptions {
         pattern,
         is_regex,
         filters,
         kind_filter,
         flow_cap,
-        use_targeted_idg,
+        prefer_warmed_idg,
     } = options;
     let matcher = pattern.map(|p| build_matcher(p, is_regex)).transpose()?;
     let kind_filter: Vec<String> = kind_filter.iter().map(|kind| kind.to_lowercase()).collect();
@@ -1920,13 +2119,14 @@ fn inspect_taint_flows(
     };
     let mut entries: Vec<bonsai_common::FuncId> = candidate_entries.iter().copied().collect();
     entries.sort_by_key(|func| func.raw());
-    let target_funcs = if use_targeted_idg && ws.db().idg_service().is_some() {
+    let target_funcs = if prefer_warmed_idg {
         Some(candidate_entries.clone())
     } else {
         None
     };
     let mut flows = Vec::new();
     let mut truncated = false;
+    let mut semantic_flow_stats = InspectSemanticFlowStats::default();
     for entry in entries {
         if flows.len() >= flow_cap {
             truncated = true;
@@ -1934,8 +2134,9 @@ fn inspect_taint_flows(
         }
         let query = SyntaxFlowQuery::new(entry)
             .target_funcs(target_funcs.as_ref())
-            .prefer_warmed_idg(use_targeted_idg);
+            .prefer_warmed_idg(prefer_warmed_idg);
         let graph = ws.syntax_flow_graph(query);
+        semantic_flow_stats.record_plan(&graph.plan);
         let entry_truncated =
             collect_taint_flows_for_entry(ws, entry, graph.graph.as_ref(), &match_context, &mut flows);
         if entry_truncated {
@@ -1953,7 +2154,7 @@ fn inspect_taint_flows(
             .then(a.terminal.cmp(&b.terminal))
             .then(a.taint_id.cmp(&b.taint_id))
     });
-    Ok((flows, truncated))
+    Ok((flows, truncated, semantic_flow_stats))
 }
 
 fn all_callable_entries(
@@ -1995,6 +2196,7 @@ fn collect_taint_flows_for_entry(
     for call in &graph.tainted_calls {
         if let Some(flow) = taint_flow_for_terminal_call(ws, entry, &trace_index, call, graph.precision) {
             if taint_flow_matches(
+                ws,
                 &flow,
                 match_context.matcher,
                 match_context.filters,
@@ -2010,6 +2212,7 @@ fn collect_taint_flows_for_entry(
     for record in &graph.call_records {
         if let Some(flow) = taint_flow_for_terminal_edge(ws, entry, &trace_index, record) {
             if taint_flow_matches(
+                ws,
                 &flow,
                 match_context.matcher,
                 match_context.filters,
@@ -2102,12 +2305,13 @@ fn build_inspect_taint_flow(
         }
     }
     let func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
-    let chain_display: Vec<String> = funcs
-        .into_iter()
-        .map(|func| func_display_name(ws, func))
-        .filter(|name| !name.is_empty())
-        .collect();
+    let chain_display = disambiguated_func_names_for_output(ws, &funcs);
     let entry_name = func_display_name(ws, entry);
+    let entry_kind = ws
+        .db()
+        .global_index()
+        .decl_of(bonsai_common::SymbolId::new(entry.raw()))
+        .map(|decl| decl.kind);
     let terminal = terminal_call
         .map(|call| call.name.clone())
         .or_else(|| steps.last().map(|step| step.callee.clone()))
@@ -2116,6 +2320,7 @@ fn build_inspect_taint_flow(
     InspectTaintFlow {
         taint_id,
         entry: entry_name,
+        entry_kind,
         terminal,
         terminal_kind: terminal_kind.to_string(),
         precision: precision_label(precision).to_string(),
@@ -2214,6 +2419,7 @@ fn lineage_records_for_trace_id_inspect<'a>(
 }
 
 fn taint_flow_matches(
+    ws: &Workspace,
     flow: &InspectTaintFlow,
     matcher: Option<&Matcher>,
     filters: InspectFilters<'_>,
@@ -2228,7 +2434,11 @@ fn taint_flow_matches(
         }
     }
     if let Some(file) = filters.file {
-        if !flow.steps.iter().any(|step| step.file.contains(file)) {
+        if !flow
+            .steps
+            .iter()
+            .any(|step| file_path_matches_filter(ws, &step.file, file))
+        {
             return false;
         }
     }
@@ -2371,15 +2581,12 @@ fn taint_flow_contains_needle_with_kind(
 
 fn taint_flow_contains_needle(flow: &InspectTaintFlow, needle: &str) -> bool {
     name_token_match(&flow.taint_id, needle)
-        || name_token_match(&flow.entry, needle)
+        || (!matches!(flow.entry_kind, Some(DeclKind::Constructor)) && name_token_match(&flow.entry, needle))
         || name_token_match(&flow.terminal, needle)
-        || flow
-            .chain_display
-            .iter()
-            .any(|name| name_token_match(name, needle))
         || flow.steps.iter().any(|step| {
-            name_token_match(&step.caller, needle)
-                || name_token_match(&step.callee, needle)
+            let step_name_match = taint_step_exposes_untyped_name(step)
+                && (name_token_match(&step.caller, needle) || name_token_match(&step.callee, needle));
+            step_name_match
                 || step.tainted_args.iter().any(|arg| {
                     name_token_match(&arg.value_text, needle)
                         || arg
@@ -2388,6 +2595,10 @@ fn taint_flow_contains_needle(flow: &InspectTaintFlow, needle: &str) -> bool {
                             .is_some_and(|param| name_token_match(param, needle))
                 })
         })
+}
+
+fn taint_step_exposes_untyped_name(step: &InspectTaintStep) -> bool {
+    !step.tainted_args.is_empty() || step.kind != "propagation"
 }
 
 fn tainted_arg_values_match(flow: &InspectTaintFlow, needle: &str) -> bool {
@@ -2719,6 +2930,98 @@ fn rebuild_report_summary(report: &mut InspectReport) {
     refresh_inspect_completeness(report);
 }
 
+/// Assign final human-facing flow labels once the report has its
+/// filtered shape. Structural flow rendering intentionally uses
+/// `FLOW_LABEL_PLACEHOLDER` in annotations so duplicate discoveries of
+/// the same stable `F:` id cannot produce conflicting labels and this
+/// pass never has to parse or rewrite an already-rendered label.
+fn finalize_report_flow_labels(report: &mut InspectReport) {
+    let order = final_flow_label_order(report);
+    if order.is_empty() {
+        return;
+    }
+
+    let chains: Vec<Vec<String>> = order.iter().map(|(_, chain)| chain.clone()).collect();
+    let mut next_number = 1_u32;
+    let labels = compute_flow_labels_from(&chains, &mut next_number);
+    let mut label_by_id: ahash::AHashMap<String, (u32, String)> = ahash::AHashMap::default();
+    for ((flow_id, _), label) in order.into_iter().zip(labels.into_iter()) {
+        let ordinal = label_by_id.len() as u32 + 1;
+        label_by_id.insert(flow_id, (ordinal, label));
+    }
+
+    for decl_hit in &mut report.decl_hits {
+        assign_flow_labels(&mut decl_hit.flows, &label_by_id);
+        decl_hit.groups = group_flows_by_suffix(&decl_hit.flows);
+    }
+    for hit in &mut report.hits {
+        assign_flow_labels(&mut hit.flows, &label_by_id);
+        hit.groups = group_flows_by_suffix(&hit.flows);
+    }
+}
+
+fn final_flow_label_order(report: &InspectReport) -> Vec<(String, Vec<String>)> {
+    let mut seen: ahash::AHashSet<String> = ahash::AHashSet::default();
+    let mut order: Vec<(String, Vec<String>)> = Vec::new();
+    for decl_hit in &report.decl_hits {
+        for flow in &decl_hit.flows {
+            if seen.insert(flow.flow_id.clone()) {
+                order.push((flow.flow_id.clone(), flow.chain.clone()));
+            }
+        }
+    }
+    for hit in &report.hits {
+        for flow in &hit.flows {
+            if seen.insert(flow.flow_id.clone()) {
+                order.push((flow.flow_id.clone(), flow.chain.clone()));
+            }
+        }
+    }
+    order
+}
+
+fn assign_flow_labels(
+    flows: &mut [InspectFlowRendered],
+    label_by_id: &ahash::AHashMap<String, (u32, String)>,
+) {
+    for flow in flows {
+        let Some((flow_number, flow_label)) = label_by_id.get(&flow.flow_id) else {
+            continue;
+        };
+        flow.flow_number = *flow_number;
+        flow.flow_label.clone_from(flow_label);
+        for function in &mut flow.functions {
+            for line in &mut function.lines {
+                if let Some(annotation) = line.annotation.as_mut() {
+                    *annotation = fill_flow_label_placeholder(annotation, flow_label);
+                }
+            }
+        }
+    }
+}
+
+fn fill_flow_label_placeholder(annotation: &str, flow_label: &str) -> String {
+    debug_assert!(
+        !annotation.contains("[FLOW ") || annotation.contains(FLOW_LABEL_PLACEHOLDER),
+        "structural inspect flow annotation was rendered with a concrete label before final assignment: {annotation}"
+    );
+    if annotation.contains(FLOW_LABEL_PLACEHOLDER) {
+        annotation.replace(FLOW_LABEL_PLACEHOLDER, flow_label)
+    } else {
+        annotation.to_string()
+    }
+}
+
+fn apply_semantic_flow_stats(summary: &mut InspectReportSummary, stats: InspectSemanticFlowStats) {
+    summary.semantic_flow_entry_queries = stats.entry_queries;
+    summary.semantic_flow_backend_counts = stats.backend_counts;
+    summary.semantic_flow_cache_hits = stats.cache_hits;
+    summary.semantic_flow_cache_misses = stats.cache_misses;
+    summary.semantic_flow_target_cut_size = stats.target_cut_size;
+    summary.semantic_flow_fallback_reasons = stats.fallback_reasons;
+    summary.semantic_flow_incomplete_reasons = stats.incomplete_reasons;
+}
+
 fn refresh_inspect_completeness(report: &mut InspectReport) {
     let mut reasons = Vec::new();
     for reason in &report.summary.hit_truncation_reasons {
@@ -2732,6 +3035,9 @@ fn refresh_inspect_completeness(report: &mut InspectReport) {
     }
     if report.summary.taint_flows_truncated {
         reasons.push("inspect taint flow overlay capped by default taint row limit".to_string());
+    }
+    for reason in &report.summary.semantic_flow_incomplete_reasons {
+        reasons.push(format!("inspect semantic flow query incomplete: {reason}"));
     }
     if let Some(reason) = report.summary.taint_overlay_skipped_reason.as_deref() {
         reasons.push(format!("inspect taint flow overlay skipped: {reason}"));
@@ -2747,6 +3053,12 @@ fn refresh_inspect_completeness(report: &mut InspectReport) {
     reasons.dedup();
     report.analysis_complete = reasons.is_empty();
     report.analysis_incomplete_reasons = reasons;
+}
+
+fn extend_unique_sorted(out: &mut Vec<String>, items: &[String]) {
+    out.extend(items.iter().filter(|item| !item.trim().is_empty()).cloned());
+    out.sort();
+    out.dedup();
 }
 
 /// Concrete view mode after [`InspectView::Auto`] has been resolved
@@ -2785,6 +3097,10 @@ fn resolve_view(render: &InspectRenderOptions, report: &InspectReport) -> Resolv
             }
         }
     }
+}
+
+fn format_kind_filter(kinds: &[String]) -> String {
+    kinds.join(", ")
 }
 
 /// Render an `InspectReport` to stdout in text mode and return the
@@ -2831,17 +3147,44 @@ fn render_inspect_report_text(
         cli_println!("  {} grouped", u.dim("view:"));
     }
     if !report.kind_filter.is_empty() {
-        cli_println!("  {} {:?}", u.dim("kinds:"), report.kind_filter);
+        cli_println!(
+            "  {} {}",
+            u.dim("kinds:"),
+            format_kind_filter(&report.kind_filter)
+        );
     }
     if let Some(by_kind_obj) = report.summary.hit_counts_by_kind.as_object() {
         if !by_kind_obj.is_empty() {
             let mut kind_count_parts: Vec<String> = by_kind_obj
                 .iter()
-                .map(|(kind, count)| format!("{}={}", u.kind(kind), u.name(&count.to_string())))
+                .map(|(kind, count)| format!("{}: {}", u.kind(kind), u.name(&count.to_string())))
                 .collect();
             kind_count_parts.sort();
             cli_println!("  {} {}", u.dim("by kind:"), kind_count_parts.join(", "));
         }
+    }
+    if report.summary.semantic_flow_entry_queries > 0 {
+        let backend_counts = report
+            .summary
+            .semantic_flow_backend_counts
+            .iter()
+            .map(|(backend, count)| format!("{backend} {count}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let target_cut = report
+            .summary
+            .semantic_flow_target_cut_size
+            .map(|size| format!(" · target cut {size}"))
+            .unwrap_or_default();
+        cli_println!(
+            "  {} {} entries · cache {} hit / {} miss · backends {}{}",
+            u.dim("semantic flow:"),
+            report.summary.semantic_flow_entry_queries,
+            report.summary.semantic_flow_cache_hits,
+            report.summary.semantic_flow_cache_misses,
+            backend_counts,
+            target_cut
+        );
     }
     if !report.analysis_complete {
         let reasons = if report.analysis_incomplete_reasons.is_empty() {
@@ -2916,6 +3259,9 @@ fn render_inspect_report_text(
     }
     if let Some(reason) = report.summary.taint_overlay_skipped_reason.as_deref() {
         cli_println!("  {}", u.warn(&format!("[skipped] taint flow overlay: {reason}")));
+    }
+    for reason in &report.summary.semantic_flow_fallback_reasons {
+        cli_println!("  {}", u.dim(&format!("[semantic-flow] {reason}")));
     }
     // Paginate over a UNIFIED render-unit list: every decl_hit
     // followed by every unique folded occurrence flow. This way
@@ -3490,16 +3836,63 @@ fn simulate_page_starts(
 }
 
 fn collect_folded_flow_order(hits: &[HitOut]) -> Vec<&InspectFlowRendered> {
-    let mut seen: ahash::AHashSet<String> = ahash::AHashSet::new();
-    let mut order: Vec<&InspectFlowRendered> = Vec::new();
+    struct Candidate<'a> {
+        flow: &'a InspectFlowRendered,
+        kind_rank: u8,
+        discovery_index: usize,
+    }
+
+    let mut best_by_id: ahash::AHashMap<String, Candidate<'_>> = ahash::AHashMap::default();
+    let mut discovery_index = 0usize;
     for hit in hits {
+        let kind_rank = folded_flow_hit_kind_rank(&hit.kind);
         for flow in &hit.flows {
-            if seen.insert(flow.flow_id.clone()) {
-                order.push(flow);
+            let candidate = Candidate {
+                flow,
+                kind_rank,
+                discovery_index,
+            };
+            match best_by_id.get_mut(&flow.flow_id) {
+                Some(existing)
+                    if (candidate.kind_rank, candidate.discovery_index)
+                        < (existing.kind_rank, existing.discovery_index) =>
+                {
+                    *existing = candidate;
+                }
+                None => {
+                    best_by_id.insert(flow.flow_id.clone(), candidate);
+                }
+                _ => {}
             }
+            discovery_index += 1;
         }
     }
+    let mut candidates: Vec<Candidate<'_>> = best_by_id.into_values().collect();
+    candidates.sort_by(|a, b| {
+        a.flow
+            .flow_number
+            .cmp(&b.flow.flow_number)
+            .then(a.flow.flow_label.cmp(&b.flow.flow_label))
+            .then(a.discovery_index.cmp(&b.discovery_index))
+    });
+    let order: Vec<&InspectFlowRendered> = candidates.into_iter().map(|candidate| candidate.flow).collect();
     order
+}
+
+fn folded_flow_hit_kind_rank(kind: &str) -> u8 {
+    match kind {
+        // If a call fact and its enclosing assignment both match the
+        // same endpoint, render the direct call as the folded body
+        // annotation. The assignment remains visible in match points.
+        "call" => 0,
+        "arg" => 1,
+        "var" => 2,
+        "string" => 3,
+        "import" => 4,
+        "decorator" => 5,
+        "ref" => 6,
+        _ => 7,
+    }
 }
 
 fn render_taint_flows_table(u: &Ui, flows: &[InspectTaintFlow], text_limit: usize) {
@@ -3730,8 +4123,12 @@ pub(crate) fn render_flow_block_with_heading(
         u.name(header_name),
         precision_header_suffix(u, flow.precision),
     );
-    let chain_line = flow
-        .chain
+    let chain_hops: Vec<&str> = if flow.chain_display.is_empty() {
+        flow.chain.iter().map(String::as_str).collect()
+    } else {
+        flow.chain_display.split(" -> ").collect()
+    };
+    let chain_line = chain_hops
         .iter()
         .map(|hop_name| u.name(hop_name))
         .collect::<Vec<_>>()
@@ -4037,11 +4434,28 @@ fn render_full_source_bodies(u: &Ui, flow: &InspectFlowRendered, seen: &mut Body
                 None => "   ".to_string(),
             };
             let highlighted_text = u.highlight(&line.text, file_extension);
-            let annotation_suffix = match line.annotation.as_deref() {
-                Some(a) => format!("  {}", u.annotation(&format!("# {a}"))),
-                None => String::new(),
-            };
-            cli_println!("  {step_label}  {highlighted_text}{annotation_suffix}");
+            if let Some(annotation) = line.annotation.as_deref() {
+                let inline_annotation = format!("# {annotation}");
+                if line.text.len().saturating_add(inline_annotation.len()) <= 110 {
+                    cli_println!(
+                        "  {step_label}  {}  {}",
+                        highlighted_text,
+                        u.annotation(&inline_annotation)
+                    );
+                } else {
+                    cli_println!("  {step_label}  {highlighted_text}");
+                    for wrapped in u.wrapped_annotation_prefixed_lines(
+                        "       ",
+                        "       ",
+                        "       ",
+                        &inline_annotation,
+                    ) {
+                        cli_println!("{wrapped}");
+                    }
+                }
+            } else {
+                cli_println!("  {step_label}  {highlighted_text}");
+            }
         }
     }
 }
@@ -4097,15 +4511,29 @@ fn render_compact_step_list(u: &Ui, flow: &InspectFlowRendered) {
         };
         let location = u.loc(&format!("{}:{}", short_file(&func.module_path), line.line_no));
         let annotation = line.annotation.as_deref().unwrap_or("");
-        cli_println!(
-            "  {} {} {}{}  {}  {}",
-            step_label,
-            u.kind("line"),
-            compact_owner_prefix(func),
-            u.name(&func.signature),
-            location,
-            u.dim(annotation),
-        );
+        if annotation.len() > 90 {
+            cli_println!(
+                "  {} {} {}{}  {}",
+                step_label,
+                u.kind("line"),
+                compact_owner_prefix(func),
+                u.name(&func.signature),
+                location,
+            );
+            for wrapped in u.wrapped_annotation_prefixed_lines("       ", "       ", "       ", annotation) {
+                cli_println!("{wrapped}");
+            }
+        } else {
+            cli_println!(
+                "  {} {} {}{}  {}  {}",
+                step_label,
+                u.kind("line"),
+                compact_owner_prefix(func),
+                u.name(&func.signature),
+                location,
+                u.dim(annotation),
+            );
+        }
         let text = line.text.trim();
         if !text.is_empty() && text != "..." {
             cli_println!("       {}", u.dim(&truncate(text, 140)));
@@ -4117,30 +4545,18 @@ fn render_compact_step_list(u: &Ui, flow: &InspectFlowRendered) {
 /// for a rendered line. `subjects` are the identifiers the line's
 /// existing annotation is about (decl name at SOURCE, advance callee
 /// at `->` lines, sink text at MATCH). A filter fires on a line only
-/// when one of its subjects contains the needle — NOT when the raw
-/// line text happens to mention it — so the marker lands precisely on
-/// the hop the filter targeted and doesn't scatter across every line
-/// of the enclosing function.
+/// when one of its subjects contains the needle, so the marker lands
+/// precisely on the hop the filter targeted and does not scatter
+/// across every line whose raw source happens to mention the word.
 ///
 /// Returns `""` when no filter is set or none of the filter needles
 /// appear on this line.
-fn build_filter_marker(
-    filters: InspectFilters<'_>,
-    subjects: &[&str],
-    line_text: &str,
-    flow_label: &str,
-) -> String {
-    // Token-boundary match — mirrors `chain_matches_filters`. Also
-    // scans the raw `line_text` so a TO/FROM marker can land on
-    // ANY source line where the needle naturally appears (e.g. the
-    // `os.system(...)` line inside `run_admin_command` gets a
-    // `[TO: os]` marker even when the hit being inspected is
-    // upstream in `handle_request`). Users want to see *both* the
-    // FROM and TO markers somewhere in every flow, pinned to the
-    // exact lines that motivated each needle.
-    let matches = |needle: &str| -> bool {
-        subjects.iter().any(|s| name_token_match(s, needle)) || name_token_match(line_text, needle)
-    };
+fn build_filter_marker(filters: InspectFilters<'_>, subjects: &[&str], flow_label: &str) -> String {
+    // Token-boundary match — mirrors `chain_matches_filters` without
+    // falling back to arbitrary raw source text. Raw line matching made
+    // `--to pickle` label `def load_from_pickle(...)` and unrelated
+    // string/arg lines as destination evidence.
+    let matches = |needle: &str| -> bool { subjects.iter().any(|s| name_token_match(s, needle)) };
     let mut pieces: Vec<String> = Vec::new();
     if let Some(from) = filters.from {
         if matches(from) {
@@ -4153,6 +4569,28 @@ fn build_filter_marker(
         }
     }
     pieces.join(" ")
+}
+
+fn inspect_filter_hit<'a>(text: &'a str, kind: &str) -> Option<bonsai_sdk::FilterHit<'a>> {
+    inspect_hit_kind(kind).map(|kind| bonsai_sdk::FilterHit::new(text, kind))
+}
+
+fn inspect_hit_kind(kind: &str) -> Option<bonsai_sdk::FactKindFilter> {
+    match kind {
+        "decl" => Some(bonsai_sdk::FactKindFilter::Decl),
+        "call" => Some(bonsai_sdk::FactKindFilter::Call),
+        "arg" => Some(bonsai_sdk::FactKindFilter::Arg),
+        "var" => Some(bonsai_sdk::FactKindFilter::Write),
+        "string" => Some(bonsai_sdk::FactKindFilter::StringLit),
+        "import" => Some(bonsai_sdk::FactKindFilter::Import),
+        "class" => Some(bonsai_sdk::FactKindFilter::Class),
+        "ref" => Some(bonsai_sdk::FactKindFilter::Read),
+        _ => None,
+    }
+}
+
+fn inspect_kind_matches_filter(kind: &str, filter: bonsai_sdk::FactKindFilter) -> bool {
+    inspect_hit_kind(kind) == Some(filter)
 }
 
 fn display_query_colored(q: &str, is_regex: bool) -> String {
@@ -4180,12 +4618,83 @@ fn build_matcher(pattern: &str, is_regex: bool) -> Result<Matcher> {
 // CLI doesn't reach for it directly today — the cache surface
 // (`ChainCache::enclosing_func`) is what every code path uses.
 
+#[derive(Copy, Clone)]
+struct FlowHitWalkContext<'a> {
+    workspace: Option<&'a Workspace>,
+    matcher: &'a Matcher,
+    endpoint_kind_filter: Option<bonsai_sdk::FactKindFilter>,
+    kinds: &'a ahash::AHashSet<String>,
+}
+
+impl FlowHitWalkContext<'_> {
+    fn want(self, kind: &str) -> bool {
+        self.endpoint_kind_filter
+            .is_none_or(|filter| inspect_kind_matches_filter(kind, filter))
+            && (self.kinds.is_empty() || self.kinds.contains(kind))
+    }
+}
+
+fn refine_hit_span(
+    workspace: Option<&Workspace>,
+    span: bonsai_common::Span,
+    text: &str,
+) -> bonsai_common::Span {
+    let Some(workspace) = workspace else {
+        return span;
+    };
+    if text.is_empty() {
+        return span;
+    }
+    let Ok(snapshot) = workspace.vfs().snapshot(span.file) else {
+        return span;
+    };
+    let bytes = snapshot.text.as_bytes();
+    if bytes.is_empty() {
+        return span;
+    }
+    let span_start = (span.start as usize).min(bytes.len());
+    let span_end = (span.end as usize).min(bytes.len()).max(span_start);
+    let line_start = bytes[..span_start]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |idx| idx + 1);
+    let line_end = bytes[span_end..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(bytes.len(), |idx| span_end + idx);
+    let line = &snapshot.text[line_start..line_end];
+    let Some(offset) = find_hit_text_offset(line, text) else {
+        return span;
+    };
+    bonsai_common::Span {
+        file: span.file,
+        start: (line_start + offset) as u64,
+        end: (line_start + offset + text.len()) as u64,
+    }
+}
+
+fn find_hit_text_offset(line: &str, text: &str) -> Option<usize> {
+    for (offset, _) in line.match_indices(text) {
+        let before = line[..offset].chars().next_back();
+        let after = line[offset + text.len()..].chars().next();
+        let before_boundary = before.is_none_or(|ch| !is_hit_ident_char(ch));
+        let after_boundary = after.is_none_or(|ch| !is_hit_ident_char(ch));
+        if before_boundary && after_boundary {
+            return Some(offset);
+        }
+    }
+    line.find(text)
+}
+
+fn is_hit_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
 fn walk_flow_hits<F>(
     events: &[FlowEvent],
     in_fn_id: bonsai_common::FuncId,
     in_fn: &str,
-    matcher: &Matcher,
-    kinds: &ahash::AHashSet<String>,
+    context: FlowHitWalkContext<'_>,
     out: &mut Vec<HitOut>,
     push_hit: &mut F,
 ) where
@@ -4198,12 +4707,11 @@ fn walk_flow_hits<F>(
         &mut Vec<HitOut>,
     ),
 {
-    let want = |k: &str| kinds.is_empty() || kinds.contains(k);
     let containing = |id: bonsai_common::FuncId, name: &str| Some((id, name.to_string()));
     for e in events {
         match e {
             FlowEvent::Call { span, name, args, .. } => {
-                if want("call") && matcher.is_match(name) {
+                if context.want("call") && context.matcher.is_match(name) {
                     push_hit(
                         "call",
                         name.clone(),
@@ -4213,10 +4721,10 @@ fn walk_flow_hits<F>(
                         out,
                     );
                 }
-                if want("arg") {
+                if context.want("arg") {
                     for a in args {
-                        if matcher.is_match(&a.value_text)
-                            || a.name.as_deref().is_some_and(|n| matcher.is_match(n))
+                        if context.matcher.is_match(&a.value_text)
+                            || a.name.as_deref().is_some_and(|n| context.matcher.is_match(n))
                         {
                             // Hit text stays semantic: just the value for
                             // positional args, `name=value` for named. The
@@ -4244,29 +4752,42 @@ fn walk_flow_hits<F>(
                 ..
             } => {
                 if let Some(call) = source_call {
-                    if want("call") && matcher.is_match(call) {
+                    if context.want("call") && context.matcher.is_match(call) {
+                        let call_span = refine_hit_span(context.workspace, *span, call);
                         push_hit(
                             "call",
                             call.clone(),
-                            *span,
+                            call_span,
                             containing(in_fn_id, in_fn),
                             true,
                             out,
                         );
                     }
-                    if want("arg") {
+                    if context.want("arg") {
                         for arg in source_call_args {
-                            if matcher.is_match(arg) {
-                                push_hit("arg", arg.clone(), *span, containing(in_fn_id, in_fn), false, out);
+                            if context.matcher.is_match(arg) {
+                                let arg_span = refine_hit_span(context.workspace, *span, arg);
+                                push_hit(
+                                    "arg",
+                                    arg.clone(),
+                                    arg_span,
+                                    containing(in_fn_id, in_fn),
+                                    false,
+                                    out,
+                                );
                             }
                         }
                     }
                 }
-                if want("var")
-                    && (matcher.is_match(target)
-                        || source_name.as_deref().is_some_and(|s| matcher.is_match(s))
-                        || source_names.iter().any(|s| matcher.is_match(s))
-                        || source_call.as_deref().is_some_and(|s| matcher.is_match(s)))
+                if context.want("var")
+                    && (context.matcher.is_match(target)
+                        || source_name
+                            .as_deref()
+                            .is_some_and(|s| context.matcher.is_match(s))
+                        || source_names.iter().any(|s| context.matcher.is_match(s))
+                        || source_call
+                            .as_deref()
+                            .is_some_and(|s| context.matcher.is_match(s)))
                 {
                     let display_source = source_name
                         .as_deref()
@@ -4290,11 +4811,11 @@ fn walk_flow_hits<F>(
                 else_events,
                 ..
             } => {
-                walk_flow_hits(then_events, in_fn_id, in_fn, matcher, kinds, out, push_hit);
-                walk_flow_hits(else_events, in_fn_id, in_fn, matcher, kinds, out, push_hit);
+                walk_flow_hits(then_events, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits(else_events, in_fn_id, in_fn, context, out, push_hit);
             }
             FlowEvent::Loop { body, .. } => {
-                walk_flow_hits(body, in_fn_id, in_fn, matcher, kinds, out, push_hit);
+                walk_flow_hits(body, in_fn_id, in_fn, context, out, push_hit);
             }
             // Recurse into every event that carries nested flow events.
             // Previously this list stopped at Branch/Loop so any call /
@@ -4306,12 +4827,12 @@ fn walk_flow_hits<F>(
                 finally_events,
                 ..
             } => {
-                walk_flow_hits(body, in_fn_id, in_fn, matcher, kinds, out, push_hit);
-                walk_flow_hits(catch_events, in_fn_id, in_fn, matcher, kinds, out, push_hit);
-                walk_flow_hits(finally_events, in_fn_id, in_fn, matcher, kinds, out, push_hit);
+                walk_flow_hits(body, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits(catch_events, in_fn_id, in_fn, context, out, push_hit);
+                walk_flow_hits(finally_events, in_fn_id, in_fn, context, out, push_hit);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_flow_hits(body, in_fn_id, in_fn, matcher, kinds, out, push_hit);
+                walk_flow_hits(body, in_fn_id, in_fn, context, out, push_hit);
             }
             _ => {}
         }
@@ -4531,11 +5052,14 @@ fn build_filter_match(
 
 /// Where the search term is actually located within the flow.
 /// Carries the exact span inside the containing function and a
-/// human label like `"call os.system"`.
+/// human label like `"call os.system"`. `marker_subjects` are the
+/// structured fact strings allowed to satisfy FROM/TO markers on this
+/// rendered line; callers must not pass raw source lines.
 #[derive(Clone)]
 pub(crate) struct MatchOverride {
     pub(crate) span: bonsai_common::Span,
     pub(crate) label: String,
+    pub(crate) marker_subjects: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -4622,7 +5146,7 @@ pub(crate) fn render_flow_with_cached_call_spans(
         functions.push(rendered);
     }
 
-    let chain_display = chain_names.join(" -> ");
+    let chain_display = disambiguate_func_display_names(ws, chain, &chain_names).join(" -> ");
     let flow_id = compute_flow_id(&chain_names);
     Some(InspectFlowRendered {
         flow_number,
@@ -4633,6 +5157,71 @@ pub(crate) fn render_flow_with_cached_call_spans(
         chain_display,
         functions,
     })
+}
+
+fn disambiguated_func_names_for_output(ws: &Workspace, funcs: &[bonsai_common::FuncId]) -> Vec<String> {
+    let short_names: Vec<String> = funcs.iter().map(|&func| func_display_name(ws, func)).collect();
+    disambiguate_func_display_names(ws, funcs, &short_names)
+}
+
+fn disambiguate_func_display_names(
+    ws: &Workspace,
+    funcs: &[bonsai_common::FuncId],
+    short_names: &[String],
+) -> Vec<String> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for name in short_names.iter().filter(|name| !name.is_empty()) {
+        *counts.entry(name.as_str()).or_default() += 1;
+    }
+    funcs
+        .iter()
+        .zip(short_names.iter())
+        .filter_map(|(&func, short_name)| {
+            if short_name.is_empty() {
+                None
+            } else if counts.get(short_name.as_str()).copied().unwrap_or(0) > 1 {
+                Some(func_disambiguated_display_name(ws, func, short_name))
+            } else {
+                Some(short_name.clone())
+            }
+        })
+        .collect()
+}
+
+fn func_disambiguated_display_name(ws: &Workspace, func: bonsai_common::FuncId, fallback: &str) -> String {
+    let global = ws.db().global_index();
+    let symbol = bonsai_common::SymbolId::new(func.raw());
+    let Some(decl) = global.decl_of(symbol) else {
+        return fallback.to_string();
+    };
+    if let Some(owner_name) = owner_qualified_decl_name(ws, decl) {
+        return owner_name;
+    }
+    decl.qualified_name
+        .as_ref()
+        .filter(|qualified| qualified.as_str() != decl.name)
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn owner_qualified_decl_name(ws: &Workspace, decl: &bonsai_lang_api::Decl) -> Option<String> {
+    let global = ws.db().global_index();
+    let mut owner_names: Vec<String> = Vec::new();
+    let mut parent = decl.parent;
+    while let Some(parent_symbol) = parent {
+        let Some(parent_decl) = global.decl_of(parent_symbol) else {
+            break;
+        };
+        if is_renderable_owner(parent_decl.kind) {
+            owner_names.push(parent_decl.name.clone());
+        }
+        parent = parent_decl.parent;
+    }
+    if owner_names.is_empty() {
+        return None;
+    }
+    owner_names.reverse();
+    Some(format!("{}.{}", owner_names.join("."), decl.name))
 }
 
 /// Stable `F:` flow_id from a chain's display names (joined with
@@ -4880,13 +5469,14 @@ fn render_function_source(
             if let Some(ov) = sink_override.as_ref() {
                 // Sub-hit MATCH (var / call / arg / string / decorator /
                 // import): the target function's name is not the
-                // subject of this line — only the hit's own label
-                // (`MATCH: var user_id`) and the hit text are. Pushing
-                // `target_name` here would cause `--from update` to
-                // fire on every body line of `update_user`, scattering
-                // the marker across unrelated lines.
-                subjects.push(&ov.label);
-                subjects.push(&text);
+                // subject of this line — only the hit's own structured
+                // fact text is. Pushing `target_name` or the raw source
+                // line here would cause filters to fire on incidental
+                // text in the containing function instead of the
+                // matched fact.
+                for subject in &ov.marker_subjects {
+                    subjects.push(subject.as_str());
+                }
             } else {
                 // Full-function entry MATCH — the target name IS the
                 // subject.
@@ -4946,7 +5536,7 @@ fn render_function_source(
         // match something on this line. Works even if `annotation` is
         // None (we emit a standalone `[FLOW N FROM: X]` bracket), so
         // users can see exactly which line each filter landed on.
-        let filter_marker = build_filter_marker(filters, &subjects, &text, flow_label);
+        let filter_marker = build_filter_marker(filters, &subjects, flow_label);
         if !filter_marker.is_empty() {
             annotation = Some(match annotation {
                 Some(existing) => format!("{existing} {filter_marker}"),

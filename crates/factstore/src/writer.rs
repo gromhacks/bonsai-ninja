@@ -411,6 +411,14 @@ fn finalize_writer(
 ) -> FactStoreResult<usize> {
     // Sort by key for binary-search lookup at read time.
     entries.sort_by_key(|e| e.key);
+    if let Some(duplicate_key) = entries
+        .windows(2)
+        .find_map(|pair| (pair[0].key == pair[1].key).then_some(pair[0].key))
+    {
+        drop(buf);
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(FactStoreError::DuplicateKey(duplicate_key));
+    }
 
     let payload_section_offset = HEADER_SIZE as u64;
     let payload_section_len = payload_section_end - payload_section_offset;

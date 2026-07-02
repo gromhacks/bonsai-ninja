@@ -17,6 +17,7 @@ use bonsai_security::{
 };
 use bonsai_workspace::Workspace;
 use serde::Serialize;
+use std::path::Path;
 
 use crate::tree::{CrossEdge, IndexedStatus};
 
@@ -205,8 +206,7 @@ fn read_file_with_taint_options(
             ws.vfs()
                 .path(*fid)
                 .ok()
-                .map(|p| p.display().to_string())
-                .is_some_and(|s| s == path || s.ends_with(path))
+                .is_some_and(|p| file_path_matches_requested(ws, &p.display().to_string(), path))
         })
         .ok_or_else(|| anyhow::anyhow!("file not found in workspace: {path}"))?;
 
@@ -562,6 +562,47 @@ fn match_site_matches_needle(site: &FindingMatch, needle: &str) -> bool {
 
 fn text_matches_needle(value: &str, needle: &str) -> bool {
     value.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+}
+
+fn file_path_matches_requested(ws: &Workspace, file_path: &str, requested: &str) -> bool {
+    let requested = normalize_locator_path(requested);
+    if requested.is_empty() {
+        return false;
+    }
+    let file_path = normalize_locator_path(file_path);
+    if file_path == requested {
+        return true;
+    }
+    let relative = workspace_relative_locator_path(ws, &file_path);
+    if relative == requested {
+        return true;
+    }
+    !Path::new(&requested).is_absolute() && file_path.ends_with(&format!("/{requested}"))
+}
+
+fn workspace_relative_locator_path(ws: &Workspace, path: &str) -> String {
+    let Some(root) = ws.db().workspace_root() else {
+        return normalize_locator_path(path);
+    };
+    if let Ok(relative) = Path::new(path).strip_prefix(&root) {
+        return normalize_locator_path(&relative.to_string_lossy());
+    }
+    let path = normalize_locator_path(path);
+    let root = normalize_locator_path(&root.to_string_lossy());
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return path;
+    }
+    if path == root {
+        return String::new();
+    }
+    path.strip_prefix(&format!("{root}/"))
+        .map(ToOwned::to_owned)
+        .unwrap_or(path)
+}
+
+fn normalize_locator_path(value: &str) -> String {
+    value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn dedupe_inlined_decls(decls: &mut Vec<InlinedDecl>) {

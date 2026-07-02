@@ -1,7 +1,8 @@
 //! `bonsai-ninja refs` data layer.
 
-use crate::common::format_span;
+use crate::common::{file_path_matches_filter, format_span, textual_relevance_key};
 use crate::strings::enclosing_fn_for_file_line;
+use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -51,7 +52,8 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
     } else {
         let needle = symbol.to_string();
         let dotted_suffix = format!(".{needle}");
-        Box::new(move |s: &str| s == needle || s.ends_with(&dotted_suffix))
+        let dotted_prefix = format!("{needle}.");
+        Box::new(move |s: &str| s == needle || s.ends_with(&dotted_suffix) || s.starts_with(&dotted_prefix))
     };
     // Refs at a span where both a Read AND a Call exist are the DSL
     // subscript-synthesis signature (see `extract_call_refs` in
@@ -142,21 +144,14 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
             .collect();
         out.append(&mut extra);
     }
-    // Group by ref kind (read / write / call / decorator / type) so
-    // each kind clusters, then alphabetical by symbol, then
-    // file/line for disambiguation.
-    out.sort_by(|a, b| {
-        a.kind
-            .cmp(&b.kind)
-            .then_with(|| a.symbol.cmp(&b.symbol))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-    });
+    append_flow_source_read_refs(ws, &*symbol_match, &mut out);
     out.retain(|reference| {
         if f.kind.is_some_and(|k| !reference.kind.eq_ignore_ascii_case(k)) {
             return false;
         }
-        if f.file.is_some_and(|needle| !reference.file.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !file_path_matches_filter(ws, &reference.file, needle))
+        {
             return false;
         }
         if let Some(needle) = f.in_fn {
@@ -168,7 +163,192 @@ pub fn refs(ws: &Workspace, symbol: &str, f: &RefsFilters<'_>) -> Result<Vec<Ref
         }
         true
     });
+    let mut seen = ahash::AHashSet::default();
+    out.retain(|reference| {
+        seen.insert((
+            reference.symbol.clone(),
+            reference.file.clone(),
+            reference.line,
+            reference.column,
+            reference.kind.clone(),
+        ))
+    });
+    // Rank the queried symbol before deterministic kind/file grouping
+    // so exact and prefix hits survive small render budgets first.
+    let symbol_rank = |reference: &RefOut| {
+        if !f.regex {
+            textual_relevance_key(&reference.symbol, Some(symbol), false)
+        } else {
+            (u8::MAX, usize::MAX)
+        }
+    };
+    out.sort_by(|a, b| {
+        symbol_rank(a)
+            .cmp(&symbol_rank(b))
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.symbol.cmp(&b.symbol))
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.line.cmp(&b.line))
+    });
     Ok(out)
+}
+
+fn append_flow_source_read_refs(
+    ws: &Workspace,
+    symbol_match: &(dyn Fn(&str) -> bool + Send + Sync),
+    out: &mut Vec<RefOut>,
+) {
+    let global = ws.db().global_index();
+    for file in global.all_files() {
+        let Some(index) = global.file_index(file) else {
+            continue;
+        };
+        for decl in &index.defs {
+            walk_flow_source_reads(&decl.flow_events, &mut |name, span| {
+                if !symbol_match(name) {
+                    return;
+                }
+                let span = refine_span_to_name(ws, span, name);
+                let (path, line, column) = format_span(&span, ws);
+                if out.iter().any(|reference| {
+                    reference.kind == "read"
+                        && reference.symbol == name
+                        && reference.file == path
+                        && reference.line == line
+                }) {
+                    return;
+                }
+                out.push(RefOut {
+                    symbol: name.to_string(),
+                    file: path,
+                    line,
+                    column,
+                    kind: "read".to_string(),
+                    snippet: read_snippet(ws, &span),
+                });
+            });
+        }
+    }
+}
+
+fn refine_span_to_name(ws: &Workspace, span: bonsai_common::Span, name: &str) -> bonsai_common::Span {
+    if name.is_empty() {
+        return span;
+    }
+    let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
+        return span;
+    };
+    let bytes = snapshot.text.as_bytes();
+    if bytes.is_empty() {
+        return span;
+    }
+    let span_start = (span.start as usize).min(bytes.len());
+    let span_end = (span.end as usize).min(bytes.len()).max(span_start);
+    let line_start = bytes[..span_start]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |idx| idx + 1);
+    let line_end = bytes[span_end..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(bytes.len(), |idx| span_end + idx);
+    let line = &snapshot.text[line_start..line_end];
+    let Some(offset) = find_token_offset(line, name) else {
+        return span;
+    };
+    bonsai_common::Span {
+        file: span.file,
+        start: (line_start + offset) as u64,
+        end: (line_start + offset + name.len()) as u64,
+    }
+}
+
+fn find_token_offset(line: &str, name: &str) -> Option<usize> {
+    for (offset, _) in line.match_indices(name) {
+        let before = line[..offset].chars().next_back();
+        let after = line[offset + name.len()..].chars().next();
+        let before_boundary = before.is_none_or(|ch| !is_ident_char(ch));
+        let after_boundary = after.is_none_or(|ch| !is_ident_char(ch));
+        if before_boundary && after_boundary {
+            return Some(offset);
+        }
+    }
+    line.find(name)
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn walk_flow_source_reads(events: &[FlowEvent], visit: &mut impl FnMut(&str, bonsai_common::Span)) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span, receiver, args, ..
+            } => {
+                if let Some(receiver) = receiver.as_deref() {
+                    visit(receiver, *span);
+                }
+                for arg in args {
+                    if let Some(place) = arg.place.as_deref() {
+                        visit(place, arg.span);
+                    }
+                    for source in &arg.source_names {
+                        visit(source, arg.span);
+                    }
+                }
+            }
+            FlowEvent::Assign {
+                span,
+                source_name,
+                source_names,
+                source_call_args,
+                ..
+            } => {
+                if let Some(source) = source_name.as_deref() {
+                    visit(source, *span);
+                }
+                for source in source_names {
+                    visit(source, *span);
+                }
+                for arg in source_call_args {
+                    visit(arg, *span);
+                }
+            }
+            FlowEvent::Return { span, value_name, .. }
+            | FlowEvent::Throw { span, value_name, .. }
+            | FlowEvent::Await { span, value_name } => {
+                if let Some(value) = value_name.as_deref() {
+                    visit(value, *span);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                walk_flow_source_reads(then_events, visit);
+                walk_flow_source_reads(else_events, visit);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                walk_flow_source_reads(body, visit)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                walk_flow_source_reads(body, visit);
+                walk_flow_source_reads(catch_events, visit);
+                walk_flow_source_reads(finally_events, visit);
+            }
+            FlowEvent::Yield { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
 }
 
 /// Read the source line(s) covering `span`, widened to line edges.

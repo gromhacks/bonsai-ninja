@@ -160,6 +160,80 @@ pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<Res
     Some(snap.graph)
 }
 
+/// Validate that a callgraph sidecar is structurally readable and was
+/// produced by the current callgraph/matcher/build pipeline. This does not
+/// compare workspace source hashes; callers combine it with their manifest
+/// source/dependency freshness checks or use
+/// [`Workspace::load_callgraph_sidecar`](crate::Workspace::load_callgraph_sidecar)
+/// when an [`AnalyzerDb`] is available.
+pub fn validate_callgraph_sidecar_file(path: &Path) -> std::io::Result<usize> {
+    let bytes = std::fs::read(path)?;
+    let snap: CallgraphSnapshot = bincode::deserialize(&bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    validate_snapshot_metadata(path, &snap)?;
+    Ok(snap.graph.inner().edges.len())
+}
+
+/// Validate that a callgraph sidecar is structurally readable, was produced
+/// by the current pipeline, and was written for the exact source path/hash
+/// set currently on disk.
+pub fn validate_callgraph_sidecar_file_with_source_fingerprints<I, P>(
+    path: &Path,
+    fingerprints: I,
+) -> std::io::Result<usize>
+where
+    I: IntoIterator<Item = (P, u64)>,
+    P: AsRef<Path>,
+{
+    let bytes = std::fs::read(path)?;
+    let snap: CallgraphSnapshot = bincode::deserialize(&bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    validate_snapshot_metadata(path, &snap)?;
+    let mut current: Vec<(String, u64)> = fingerprints
+        .into_iter()
+        .map(|(path, hash)| (path.as_ref().display().to_string(), hash))
+        .collect();
+    current.sort();
+    if current != snap.files {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar source fingerprint mismatch",
+        ));
+    }
+    Ok(snap.graph.inner().edges.len())
+}
+
+fn validate_snapshot_metadata(path: &Path, snap: &CallgraphSnapshot) -> std::io::Result<()> {
+    if snap.version != CALLGRAPH_CACHE_VERSION {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "callgraph sidecar version mismatch: file={} expected={}",
+                snap.version, CALLGRAPH_CACHE_VERSION
+            ),
+        ));
+    }
+    if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar matcher policy fingerprint mismatch",
+        ));
+    }
+    if snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar dependency metadata fingerprint mismatch",
+        ));
+    }
+    if snap.build_fingerprint != crate::build_fingerprint_hash() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "callgraph sidecar build fingerprint mismatch",
+        ));
+    }
+    Ok(())
+}
+
 fn unique_tmp_path(target: &Path) -> PathBuf {
     use std::ffi::OsString;
     let counter = CALLGRAPH_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);

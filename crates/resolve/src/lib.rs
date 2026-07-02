@@ -795,7 +795,7 @@ pub fn module_target_matches_decl_module_path(
     let target_segments: Vec<&str> = normalized
         .split(['.', '/', '\\'])
         .map(str::trim)
-        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != ".." && *seg != "*")
         .collect();
     if target_segments.is_empty() {
         return false;
@@ -804,6 +804,11 @@ pub fn module_target_matches_decl_module_path(
     if try_suffix_match(&target_segments, decl_segments) {
         return true;
     }
+    for stripped in absolute_module_prefix_str_variants(&target_segments) {
+        if try_suffix_match(stripped, decl_segments) {
+            return true;
+        }
+    }
     if target_segments.len() > 1 {
         let trimmed = &target_segments[..target_segments.len() - 1];
         if try_suffix_match(trimmed, decl_segments) {
@@ -811,6 +816,21 @@ pub fn module_target_matches_decl_module_path(
         }
     }
     false
+}
+
+fn absolute_module_prefix_str_variants<'a>(parts: &'a [&'a str]) -> Vec<&'a [&'a str]> {
+    let mut out = Vec::new();
+    if matches!(parts.first().copied(), Some("crate" | "self")) {
+        out.push(&parts[1..]);
+    }
+    let mut start = 0usize;
+    while parts.get(start).is_some_and(|part| *part == "super") {
+        start += 1;
+    }
+    if start > 0 {
+        out.push(&parts[start..]);
+    }
+    out
 }
 
 fn try_suffix_match(target: &[&str], decl: &[String]) -> bool {
@@ -1810,7 +1830,8 @@ pub fn module_import_parts(text: &str) -> Vec<String> {
         .into_iter()
         .filter_map(|part| {
             let part = part.trim();
-            (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
+            (!part.is_empty() && part != "." && part != ".." && part != "*")
+                .then(|| strip_extension(part).to_string())
         })
         .collect()
 }

@@ -26,6 +26,18 @@ fn require_relative_emits_statement_import_and_local_wildcard_binding() {
             && spec.original_name.is_none()
             && spec.scope == ImportScope::Local
     }));
+    assert!(imports.iter().any(|spec| {
+        spec.module == "helpers"
+            && spec.alias.as_deref() == Some("Helpers")
+            && spec.is_wildcard
+            && spec.original_name.is_none()
+            && spec.scope == ImportScope::Local
+    }));
+    assert!(!imports.iter().any(|spec| {
+        spec.module == "helpers"
+            && spec.alias.as_deref() == Some("Helpers")
+            && spec.scope == ImportScope::Module
+    }));
 }
 
 #[test]

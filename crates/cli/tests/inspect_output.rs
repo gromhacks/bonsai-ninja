@@ -138,6 +138,334 @@ fn inspect_qualified_call_name_preserved() {
 }
 
 #[test]
+fn inspect_json_no_matches_keeps_report_shape() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let ws = ws_path();
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "definitely_not_in_fixture_9f13e0",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    assert!(v.is_object(), "inspect JSON no-match must be an object: {out}");
+    assert_eq!(v["decl_hits"].as_array().map(Vec::len), Some(0));
+    assert_eq!(v["hits"].as_array().map(Vec::len), Some(0));
+    assert_eq!(v["taint_flows"].as_array().map(Vec::len), Some(0));
+    assert!(
+        v["summary"].is_object(),
+        "inspect JSON no-match must keep summary field: {out}"
+    );
+}
+
+#[test]
+fn inspect_filter_only_to_does_not_promote_unrelated_function_facts_to_matches() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let td = tempdir_for_test("inspect-to-filter-precision");
+    std::fs::write(
+        td.join("app.py"),
+        r#"import os
+import pickle
+
+def restore_session(data):
+    """VULN: Insecure deserialization"""
+    default_dir = os.environ.get("MODEL_DIR", "/var/models")
+    restored = pickle.loads(data)
+    return restored
+
+def load_from_pickle(data):
+    """VULN: Insecure deserialization"""
+    model = pickle.loads(data)
+    return model
+"#,
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "inspect",
+        td.to_str().unwrap(),
+        "--to",
+        "pickle",
+        "--all",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    let hits = v["hits"].as_array().expect("hits array");
+
+    assert!(!hits.is_empty(), "expected pickle occurrence hits: {out}");
+    assert!(
+        hits.iter().all(|hit| {
+            let kind = hit["kind"].as_str().unwrap_or_default();
+            let text = hit["text"].as_str().unwrap_or_default();
+            matches!(kind, "call" | "var") && text.contains("pickle")
+        }),
+        "filter-only --to pickle should only promote direct pickle facts, got:\n{out}"
+    );
+
+    let rendered_annotations: Vec<String> = hits
+        .iter()
+        .flat_map(|hit| hit["flows"].as_array().into_iter().flatten())
+        .flat_map(|flow| flow["functions"].as_array().into_iter().flatten())
+        .flat_map(|function| function["lines"].as_array().into_iter().flatten())
+        .filter_map(|line| line["annotation"].as_str())
+        .map(str::to_string)
+        .collect();
+
+    assert!(
+        rendered_annotations.iter().all(|annotation| {
+            annotation.contains("pickle")
+                && !annotation.contains("VULN")
+                && !annotation.contains("MODEL_DIR")
+                && !annotation.contains("/var/models")
+        }),
+        "filter markers must stay on pickle evidence, got annotations:\n{rendered_annotations:#?}"
+    );
+
+    let mut labels_by_flow = std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut numbers_by_flow = std::collections::BTreeMap::<String, std::collections::BTreeSet<u64>>::new();
+    for flow in hits
+        .iter()
+        .flat_map(|hit| hit["flows"].as_array().into_iter().flatten())
+    {
+        let flow_id = flow["flow_id"].as_str().unwrap_or_default().to_string();
+        labels_by_flow
+            .entry(flow_id.clone())
+            .or_default()
+            .insert(flow["flow_label"].as_str().unwrap_or_default().to_string());
+        numbers_by_flow
+            .entry(flow_id)
+            .or_default()
+            .insert(flow["flow_number"].as_u64().unwrap_or_default());
+    }
+    assert!(
+        labels_by_flow.values().all(|labels| labels.len() == 1),
+        "the same F: flow must not render with multiple labels:\n{labels_by_flow:#?}\n{out}"
+    );
+    assert!(
+        numbers_by_flow.values().all(|numbers| numbers.len() == 1),
+        "the same F: flow must not render with multiple flow_number values:\n{numbers_by_flow:#?}\n{out}"
+    );
+
+    let text_out = run(&[
+        "inspect",
+        td.to_str().unwrap(),
+        "--to",
+        "pickle",
+        "--all",
+        "--no-progress",
+    ]);
+    let annotated_pickle_lines: Vec<&str> = text_out
+        .lines()
+        .filter(|line| line.contains("pickle.loads(data)  # [FLOW"))
+        .collect();
+    assert!(
+        !annotated_pickle_lines.is_empty()
+            && annotated_pickle_lines
+                .iter()
+                .all(|line| line.contains("MATCH: call pickle.loads")),
+        "folded FLOW bodies should annotate the direct call fact, not the assignment wrapper:\n{annotated_pickle_lines:#?}\n{text_out}"
+    );
+
+    let taint_flows = v["taint_flows"].as_array().expect("taint flows array");
+    assert!(
+        taint_flows
+            .iter()
+            .flat_map(|flow| flow["steps"].as_array().into_iter().flatten())
+            .all(|step| {
+                step["tainted_args"].as_array().into_iter().flatten().all(|arg| {
+                    !(arg["param_name"].as_str() == Some("receiver")
+                        && arg["value_text"].as_str() == Some("pickle"))
+                })
+            }),
+        "module/callee target components must not be reported as tainted receivers:\n{out}"
+    );
+    assert!(
+        taint_flows
+            .iter()
+            .flat_map(|flow| flow["steps"].as_array().into_iter().flatten())
+            .filter(|step| {
+                step["kind"].as_str() == Some("call")
+                    && step["callee"].as_str().is_some_and(|callee| callee.starts_with("pickle."))
+            })
+            .all(|step| step["column"].as_u64().is_some_and(|column| column > 5)),
+        "assignment-RHS raw taint terminal calls must point at the call token, not the assignment start:\n{out}"
+    );
+
+    let call_only = run(&[
+        "inspect",
+        td.to_str().unwrap(),
+        "--to",
+        "pickle",
+        "--to-kind",
+        "call",
+        "--all",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let call_only_v: serde_json::Value = serde_json::from_str(&call_only).expect("valid inspect JSON");
+    let call_only_hits = call_only_v["hits"].as_array().expect("hits array");
+    assert!(
+        !call_only_hits.is_empty()
+            && call_only_hits
+                .iter()
+                .all(|hit| hit["kind"].as_str() == Some("call")),
+        "--to-kind call must not promote var/string facts as call endpoints:\n{call_only}"
+    );
+    let mut seen_call_locations = std::collections::BTreeSet::new();
+    for hit in call_only_hits {
+        let key = (
+            hit["text"].as_str().unwrap_or_default(),
+            hit["file"].as_str().unwrap_or_default(),
+            hit["line"].as_u64().unwrap_or_default(),
+            hit["column"].as_u64().unwrap_or_default(),
+        );
+        assert!(
+            seen_call_locations.insert(key),
+            "--to-kind call must not duplicate the same call hit location:\n{call_only}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(td);
+}
+
+#[test]
+fn inspect_syntax_fast_path_respects_endpoint_kind_filters() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let td = tempdir_for_test("inspect-syntax-endpoint-kind");
+    std::fs::write(
+        td.join("app.py"),
+        r#"import pickle
+
+def load(data):
+    model = pickle.loads(data)
+    return model
+"#,
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "inspect",
+        td.to_str().unwrap(),
+        "--query",
+        "pickle",
+        "--to",
+        "pickle",
+        "--to-kind",
+        "call",
+        "--syntax-only",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    let hits = v["hits"].as_array().expect("hits array");
+    assert!(!hits.is_empty(), "expected direct pickle call hit:\n{out}");
+    assert!(
+        hits.iter().all(|hit| {
+            hit["kind"].as_str() == Some("call")
+                && hit["text"].as_str().is_some_and(|text| text.contains("pickle"))
+        }),
+        "syntax fast path must use typed endpoint evidence, not assignment text:\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(td);
+}
+
+#[test]
+fn inspect_text_disambiguates_duplicate_chain_hop_names() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let mut ws = std::env::current_dir().expect("cwd");
+    ws.push("../../examples/python");
+    let ws = ws.canonicalize().expect("examples/python not found");
+
+    let out = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--to",
+        "pickle",
+        "--all",
+        "--no-progress",
+    ]);
+    let bad_chain_lines: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            *line == "predict → predict → load_model" || *line == "predict -> predict -> load_model"
+        })
+        .collect();
+    assert!(
+        bad_chain_lines.is_empty(),
+        "duplicate same-name chain lines should be display-disambiguated:\n{bad_chain_lines:#?}\n{out}"
+    );
+    assert!(
+        out.contains("complex.app.predict → InferenceEngine.predict → load_model")
+            || out.contains("complex.app.predict -> InferenceEngine.predict -> load_model"),
+        "expected owner/module-qualified display for duplicate predict hops:\n{out}"
+    );
+}
+
+#[test]
+fn inspect_small_workspace_does_not_build_retrieval_sidecar_as_truth_filter() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let td = tempdir_for_test("inspect-no-query-time-retrieval");
+    std::fs::write(td.join("a.py"), "def alpha_target():\n    return 1\n").expect("write a");
+    std::fs::write(td.join("b.py"), "def beta_target():\n    return 2\n").expect("write b");
+
+    let out = run(&[
+        "inspect",
+        td.to_str().unwrap(),
+        "--query",
+        "beta_target",
+        "--syntax-only",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    assert_eq!(
+        v["decl_hits"].as_array().map(Vec::len),
+        Some(1),
+        "inspect should hydrate the canonical decl hit without requiring retrieval:\n{out}"
+    );
+    assert_eq!(
+        v["decl_hits"][0]["symbol"].as_str(),
+        Some("beta_target"),
+        "unexpected inspect hit:\n{out}"
+    );
+
+    let bonsai_dir = td.join(".bonsai");
+    if bonsai_dir.exists() {
+        let retrieval_sidecars: Vec<_> = std::fs::read_dir(&bonsai_dir)
+            .expect("read .bonsai")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("retrieval.v"))
+            .collect();
+        assert!(
+            retrieval_sidecars.is_empty(),
+            "inspect should not build retrieval sidecars during small-workspace query-time hydration"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(td);
+}
+
+#[test]
 fn inspect_default_includes_rulepack_free_taint_flows() {
     if require_binary_built().is_none() {
         return;
@@ -401,7 +729,7 @@ fn inspect_kind_filter_restricts_output() {
         "run_admin_command",
     ]);
     assert!(
-        out.contains("by kind:") && out.contains("call="),
+        out.contains("by kind:") && out.contains("call: 1"),
         "missing call-kind summary: {out}"
     );
     assert!(

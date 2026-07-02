@@ -15,9 +15,11 @@
 //! tag — still better than no automatic invalidation, since version
 //! bumps still flip the value.
 
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 
 fn main() {
+    emit_source_rerun_inputs();
+
     // Re-run when git refs/index move so the fingerprint stays
     // current across commits, staging, and checkout. Cargo skips
     // build.rs re-execution when nothing observable changed.
@@ -54,6 +56,18 @@ fn main() {
     emit_fingerprint(&fingerprint);
 }
 
+fn emit_source_rerun_inputs() {
+    let Some(root) = repo_root() else {
+        return;
+    };
+    for relative in ["Cargo.toml", "Cargo.lock", "crates"] {
+        let path = root.join(relative);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
+
 /// Emit the fingerprint string and its 64-bit hash as `rustc-env` vars
 /// so they're available to library code via `env!("BONSAI_BUILD_FINGERPRINT_HASH")`.
 fn emit_fingerprint(value: &str) {
@@ -78,8 +92,7 @@ fn run_git(args: &[&str]) -> Option<String> {
 /// Submodule case (`.git` is a file, not a dir) intentionally returns
 /// `None` — the build falls back to the ungitted fingerprint.
 fn locate_git_dir() -> Option<std::path::PathBuf> {
-    let start = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let mut path: std::path::PathBuf = start.into();
+    let mut path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").ok()?);
     // Bound the walk — bonsai's deepest crate is four levels under
     // the repo root; 8 leaves headroom for nested workspaces.
     for _ in 0..8 {
@@ -92,6 +105,11 @@ fn locate_git_dir() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+fn repo_root() -> Option<PathBuf> {
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").ok()?);
+    manifest.parent()?.parent().map(PathBuf::from)
 }
 
 /// Tiny FNV-1a 64-bit — kept inline so build.rs has no external deps.

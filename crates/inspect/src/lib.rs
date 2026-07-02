@@ -26,7 +26,10 @@ pub use call_edges::{
 };
 pub use chain_cache::{find_enclosing_func, ChainCache};
 pub use chains::{downstream_funcs_set, enumerate_chains_resolved, ChainTruncation, ResolvedChain};
-pub use filter::{chain_matches_filters, name_token_match, FactKindFilter, InspectFilters, PrecisionFilter};
+pub use filter::{
+    chain_matches_filters, chain_matches_filters_for_hit, name_token_match, FactKindFilter, FilterHit,
+    InspectFilters, PrecisionFilter,
+};
 pub use flow_id::{
     compute_flow_id, compute_flow_labels_from, compute_group_id, compute_taint_flow_id, fnv1a_names64,
     fnv1a_names_low32, TaintFlowIdentityStep,

@@ -65,6 +65,77 @@ Do not duplicate the params/assignment-target/bare-call-argument seed logic
 in command crates. Add new event container handling in the shared helper so
 inspect, cached dataflow, and dump-taint stay aligned.
 
+## Whole-program data-flow edge taxonomy
+
+The language-neutral contract is
+`bonsai_lang_api::taxonomy::FLOW_EDGE_TAXONOMY`. Adapters emit syntax facts
+(`FlowEvent`, `Operation`, imports/exports, declarations, receiver facts);
+the engine maps those facts onto shared IDG, resolver, rulepack, and control
+facts. Audit classes are:
+
+- `PASS` - implemented and backed by real tests where the language has the syntax.
+- `ENGINE_ONLY` - shared engine/resolver/rulepack/control behavior, not a per-adapter syntax obligation.
+- `STATIC_LIMIT` - represented conservatively, but precise static propagation needs runtime/config/framework facts.
+
+Language-specific `N/A` belongs in the taint matrix, not this global table.
+
+| Edge kind | Audit class | Primary carrier |
+| --- | --- | --- |
+| `LOCAL_ASSIGN` | `PASS` | `FlowEvent::Assign`, `IdgEdgeKind::IntraAssign` |
+| `EXPR_PROPAGATION` | `PASS` | assignment/call/return operands, interpolation operands |
+| `DEF_USE` | `PASS` | `TransferCtx::last_writer`, `IdgEdgeKind::IntraRead` |
+| `ARG_TO_PARAM` | `PASS` | `Place::CallArg` to `Place::Param`, `IdgEdgeKind::InterCallArg` |
+| `RECEIVER_TO_THIS` | `PASS` | call receiver facts, receiver param index, inter-call stitching |
+| `RETURN_TO_CALLER` | `PASS` | `Place::Return` to `Place::CallRet`, `IdgEdgeKind::InterReturn` |
+| `FIELD_WRITE` | `PASS` | field-sensitive writes, receiver field writes |
+| `FIELD_READ` | `PASS` | field-sensitive reads, `IdgEdgeKind::IntraFieldRead` |
+| `INDEX_WRITE` | `PASS` | normalized subscript writes |
+| `INDEX_READ` | `PASS` | normalized subscript reads |
+| `OBJECT_CONSTRUCTION` | `PASS` | constructor calls and receiver field writes |
+| `DESTRUCTURING` | `PASS` | pattern/unpacking bindings from RHS operands |
+| `CLOSURE_CAPTURE` | `STATIC_LIMIT` | syntactic closure/callback capture facts; dynamic closure factories stay conservative |
+| `GLOBAL_ACCESS` | `PASS` | module/global places and bridge reads |
+| `IMPORT_EXPORT` | `PASS` | `ImportSpec`, aliases, module exports, resolved callgraph facts |
+| `ALIAS` | `PASS` | assignment aliases and import aliases |
+| `DEREFERENCE` | `PASS` | dereference/address/borrow operations and normalized places |
+| `HEAP_STORE` | `PASS` | field/constructor/container writes to allocated state |
+| `HEAP_LOAD` | `PASS` | field/return projections from allocated state |
+| `CONTAINER_STORE` | `PASS` | append/initializer/content writes |
+| `CONTAINER_LOAD` | `PASS` | subscript/content reads |
+| `ITERATION` | `PASS` | `LoopKind::ForEach`, generator/iterator carriers |
+| `YIELD` | `PASS` | `FlowEvent::Yield`, `IdgEdgeKind::IntraYield` |
+| `THROW_TO_CATCH` | `PASS` | intra-function `FlowEvent::Throw`/`Try`, `IdgEdgeKind::IntraThrow` |
+| `AWAIT_RESOLUTION` | `PASS` | `FlowEvent::Await`, `IdgEdgeKind::IntraAwait` |
+| `CALLBACK_INVOCATION` | `PASS` | resolved callback bindings and source callback specs |
+| `EVENT_DISPATCH` | `ENGINE_ONLY` | framework/message source callback specs |
+| `DYNAMIC_PROPERTY_ACCESS` | `STATIC_LIMIT` | normalized dynamic member/index facts, static best effort |
+| `SERIALIZE` | `ENGINE_ONLY` | configured passthrough/source/sink semantics |
+| `DESERIALIZE` | `ENGINE_ONLY` | configured passthrough/source/sink semantics |
+| `SANITIZE` | `ENGINE_ONLY` | sanitizer rules and sanitizer credit |
+| `SINK` | `ENGINE_ONLY` | sink rules and finding construction |
+| `CONTROL_DEPENDENCE` | `ENGINE_ONLY` | branch conditions and CFG control facts |
+| `IMPLICIT_FLOW` | `STATIC_LIMIT` | branch-condition influence is reported as a control fact, not default taint |
+| `INTER_FILE` | `PASS` | cross-file IDG edges, imports/exports, resolved callgraph facts |
+| `INTER_PACKAGE` | `ENGINE_ONLY` | dependency/package metadata and resolver facts |
+
+The IDG edge enum stays intentionally compact. One `IdgEdgeKind` can carry
+several taxonomy families; the precise construct remains available from the
+originating syntax fact, place shape, resolver edge, or rulepack rule. The
+edge-kind-to-taxonomy mapping is pinned by `crates/idg/src/edge_tests.rs`.
+
+Static-analysis limits are explicit:
+
+- `IdgEdgeKind::InterThrow` is reserved for future caller-context
+  cross-function throw-to-catch stitching. Current exception propagation is
+  native inside one function via `FlowEvent::Throw`/`Try` and
+  `IdgEdgeKind::IntraThrow`; interprocedural exception evidence should not be
+  claimed from the IDG until an `InterThrow` producer exists.
+- Wildcard import (`X_07`, for example `from x import *`,
+  `import static x.*`, `use x::*`, or `using namespace x`) is covered for every
+  adapter that emits an unqualified wildcard `ImportSpec`. Namespace-qualified
+  forms such as JavaScript / TypeScript `import * as ns` stay under `X_06`
+  because the call site remains `ns.member(...)`, not a bare imported symbol.
+
 The workspace exposes the canonical `InterTaintCaches` singleton via
 `Workspace::inter_taint_caches()`. Production and diagnostic drivers borrow
 that one instance so resolver answers per `(caller_func, call_span)`, file
@@ -285,8 +356,8 @@ lookup instead of a fresh propagation pass.
 - **`DataFlowCache`** (`crates/workspace/src/dataflow.rs`) — per-`FuncId`
   `KindedTokens` + `EntryTaintGraph`. Loaded from a valid persisted
   sidecar when present, computed on demand for exact query scopes, and
-  fully rebuilt only by explicit prewarm paths such as
-  `index --prewarm-dataflow`; persisted to
+  fully rebuilt by explicit full-prewarm SDK opens or by the legacy
+  dataflow-only path, `index --prewarm-dataflow`; persisted to
   `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
   readable for warm reopens). The cache carries each entry's transitive
   dependency file set, so an edit to any callee invalidates only the
@@ -299,14 +370,21 @@ lookup instead of a fresh propagation pass.
   reaches a `Return` node in the same function. Security-analysis
   answers "does this seed reach a return?" with a single hash-set
   intersection. Persisted to
-  `.bonsai/value_flow.v3.factstore`.
+  `.bonsai/value_flow.v*.factstore`.
 - **`TaintGraphIndex`** (`crates/workspace/src/taint_index.rs`) —
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map in `build_findings_chain_aware` so
   a second `taint-analysis` against the same workspace + rulepack
   reuses the cached graph. Persisted to
-  `.bonsai/taint_graph.v2.factstore` with version + config-fingerprint
-  guard; mismatched fingerprints invalidate.
+  `.bonsai/taint_graph.v9.<mode>.<config>.factstore` with version +
+  config-fingerprint guard; mismatched fingerprints invalidate and distinct
+  source/taint analysis configurations do not overwrite each other.
+  Write-through persistence is
+  default-on and can be disabled with `BONSAI_TAINT_GRAPH_PERSIST=0`.
+  `security taint-analysis` and `security source-analysis` publish the
+  prepare/finish decision through `AnalysisProgress::Note` so callers can
+  see scope, memory/disk hit or miss, config invalidation, and
+  write-through status.
 - **`TransitiveCallersIndex`** (`crates/workspace/src/transitive_callers.rs`) —
   depth-bounded transitive caller closures on the resolved call
   graph. The closure is rulepack-independent; security-analysis

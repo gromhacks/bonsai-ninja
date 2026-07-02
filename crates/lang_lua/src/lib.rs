@@ -217,7 +217,11 @@ impl LanguageAdapter for LuaAdapter {
                     alias: Some(table_name),
                     is_wildcard: false,
                     original_name: None,
-                    scope: ImportScope::Module,
+                    // Resolver-only self-module binding for the
+                    // `local M = {}; ...; return M` export idiom.
+                    // It is not an import statement and must not
+                    // appear in browse/export import inventories.
+                    scope: ImportScope::Local,
                 });
             }
         }

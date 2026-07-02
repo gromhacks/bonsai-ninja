@@ -420,9 +420,11 @@ pub fn default_entry_taint_seed(decl: Option<&bonsai_lang_api::Decl>) -> TokenSe
 }
 
 /// Default entry seed for graph materialization: the fact seed plus
-/// source-call names, return/yield values, and other graph-visible
-/// tokens. This wider seed ensures cached syntax-flow graphs contain
-/// every edge a downstream renderer might filter to.
+/// RHS value operands, return/yield values, and other graph-visible
+/// tokens. Callable target/module components are deliberately not
+/// promoted to value carriers; receiver/callable taint must arrive
+/// through real params, assignment targets, arguments, or explicit
+/// source evidence.
 #[must_use]
 pub fn default_entry_graph_seed(decl: Option<&bonsai_lang_api::Decl>) -> TokenSet {
     let mut seed: TokenSet = decl
@@ -435,7 +437,7 @@ pub fn default_entry_graph_seed(decl: Option<&bonsai_lang_api::Decl>) -> TokenSe
         })
         .unwrap_or_default();
     if let Some(decl) = decl {
-        collect_assign_targets(&decl.flow_events, &mut seed, true);
+        collect_assign_targets(&decl.flow_events, &mut seed, false);
         collect_graph_seed_tokens(&decl.flow_events, &mut seed);
     }
     seed
@@ -720,14 +722,20 @@ fn collect_graph_seed_tokens(events: &[bonsai_lang_api::FlowEvent], out: &mut To
         match event {
             FlowEvent::Assign {
                 source_name,
+                source_call,
                 source_names,
                 source_call_args,
                 ..
             } => {
                 if let Some(name) = source_name.as_deref() {
-                    insert_graph_seed(out, name);
+                    if !source_name_is_call_target_component(name, source_call.as_deref()) {
+                        insert_graph_seed(out, name);
+                    }
                 }
                 for name in source_names {
+                    if source_name_is_call_target_component(name, source_call.as_deref()) {
+                        continue;
+                    }
                     insert_graph_seed(out, name);
                 }
                 for arg in source_call_args {
@@ -789,6 +797,33 @@ fn collect_graph_seed_tokens(events: &[bonsai_lang_api::FlowEvent], out: &mut To
             _ => {}
         }
     }
+}
+
+fn source_name_is_call_target_component(source_name: &str, source_call: Option<&str>) -> bool {
+    let source_name = normalise_qualified_text(source_name);
+    let source_name = source_name.trim();
+    let Some(source_call) = source_call.map(normalise_qualified_text) else {
+        return false;
+    };
+    let source_call = source_call.trim();
+    if source_name.is_empty() || source_call.is_empty() {
+        return false;
+    }
+    if source_name == source_call || source_name == short_callee(source_call) {
+        return true;
+    }
+    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
+        if source_call
+            .strip_prefix(source_name)
+            .is_some_and(|rest| rest.starts_with(sep))
+        {
+            return true;
+        }
+    }
+    source_call
+        .split(['.', ':'])
+        .flat_map(|part| part.split("->"))
+        .any(|component| component == source_name)
 }
 
 /// Insert `token` into the graph seed set, but only when it looks
@@ -977,9 +1012,6 @@ fn source_seed_nodes_from_idg(
             }
         } else {
             seed_nodes.extend(anchor_nodes);
-            if anchor_has_call_return && !seed_names.is_empty() {
-                seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
-            }
         }
     }
     if !output_arg_names.is_empty() && source_anchor.is_none() {
@@ -990,7 +1022,9 @@ fn source_seed_nodes_from_idg(
     }
     if seed_nodes.is_empty() {
         if seed_names.is_empty() {
-            seed_nodes.extend(idg.param_nodes_of(source_func));
+            if source_anchor.is_none() {
+                seed_nodes.extend(idg.param_nodes_of(source_func));
+            }
         } else {
             let narrowed = idg.param_nodes_for_names(source_func, &seed_names, global);
             seed_nodes.extend(narrowed);

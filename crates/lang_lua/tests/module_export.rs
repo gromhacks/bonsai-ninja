@@ -5,7 +5,7 @@
 //! cross-file candidate sets.
 
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{LanguageRegistry, Visibility};
+use bonsai_lang_api::{ImportScope, LanguageRegistry, Visibility};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -103,4 +103,32 @@ return M
         "local functions stay Private (chunk-scoped)"
     );
     assert_eq!(visibility_of(&db, "api"), Visibility::Public);
+}
+
+#[test]
+fn module_table_export_binding_is_resolver_only_import_scope() {
+    let src = r#"
+local M = {}
+function M.api(x) return x end
+return M
+"#;
+    let db = db_with(src);
+    let file = db.vfs().all_files()[0];
+    let imports = db.imports_for(file);
+
+    assert!(
+        imports.iter().any(|imp| {
+            imp.module == "m"
+                && imp.alias.as_deref() == Some("M")
+                && !imp.is_wildcard
+                && imp.scope == ImportScope::Local
+        }),
+        "Lua module table export must stay as resolver-only local binding: {imports:?}"
+    );
+    assert!(
+        !imports.iter().any(|imp| {
+            imp.module == "m" && imp.alias.as_deref() == Some("M") && imp.scope == ImportScope::Module
+        }),
+        "Lua module table export is not an import statement and must not be Module-scope: {imports:?}"
+    );
 }

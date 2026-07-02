@@ -5,7 +5,7 @@ description: "Run bonsai-ninja in GitHub Actions, GitLab CI, and CircleCI."
 
 # CI Integration
 
-Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts. Run `index` first when you want structural parse/index validation as a separate CI step; scan commands also open the workspace and compute their exact required scope on demand. Use `index --prewarm-dataflow` only for workflows that intentionally warm the legacy full-workspace dataflow sidecar.
+Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts. Run `index` first when you want to validate syntax/construct indexing before later commands; scan commands also open the workspace and compute any missing exact scope on demand. Use `index --semantic` only for workflows that intentionally warm structural semantic sidecars up front, and use `index --prewarm-dataflow` only for workflows that intentionally warm the legacy full-workspace dataflow sidecar by itself.
 
 ## GitHub Release Artifacts
 

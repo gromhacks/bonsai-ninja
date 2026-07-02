@@ -10,7 +10,7 @@ Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST
   - Do not present partial, capped, timed-out, stale, or approximate analysis as complete.
   - Any command that reports flows, taint, source reachability, security findings, debug taint data, or exported analysis facts must compute its requested scope exactly to
   completion before returning.
-  - `index <workspace>` should be a fast structural index pass, not an eager exact taint solve for every callable.
+  - `index <workspace>` should warm syntax/construct indexes up front; explicit semantic prewarm jobs should build reusable sidecars when a workflow deliberately wants to front-load that cost.
   - Avoid duplicated work through reusable structural indexes, call graphs, summaries, SCC solving, IDG/value-flow facts, and correctly invalidated persisted factstores.
   - Keep memory bounded by streaming large artifacts and avoiding retention of every full per-entry graph in RAM.
   - Expensive full-workspace audit/export/prewarm work is allowed when the command scope requires it, but it must be explicit, observable, exact, and engineered to avoid
@@ -41,18 +41,18 @@ Make bonsai-ninja a production-grade, highly accurate, fast code review and SAST
 
   Implementation approach:
   1. Audit current indexing, dataflow, value-flow, IDG, cache, refresh, export, debug, and security-analysis paths.
-  2. Remove accidental eager exact full-workspace taint work from default `index` and ordinary open/watch paths.
+  2. Make default `index` an intentional semantic warm-up that reuses compositional sidecars, while keeping `--structural-only` as the cheap parse/index path.
   3. Build or strengthen reusable compositional summaries and SCC-based solving so exact command scopes avoid recomputing the same callees repeatedly.
   4. Ensure all taint/source/security/export/debug commands compute their requested scopes exactly before rendering.
   5. Fix cache freshness and invalidation for source content, rulepack content, matcher policy, pipeline versions, and file dependencies.
   6. Make expensive rebuild/prewarm/audit operations explicit, observable, and exact.
-  7. Add regression tests proving default indexing is fast/structural, exact analysis remains accurate, caches are not stale, and repeated work is avoided.
+  7. Add regression tests proving default indexing warms reusable sidecars without duplicating downstream work, structural-only indexing remains cheap, exact analysis remains accurate, caches are not stale, and repeated work is avoided.
   8. Run targeted tests for affected crates and CLI smoke/regression commands against `examples/`.
   9. When available locally, test Redis and Java OWASP Benchmark and document commands, timings, memory behavior, and finding counts.
   10. Keep changes scoped, deterministic, professional, and consistent with the existing codebase.
 
   Important starting note:
-  Before editing, run `git status` and inspect any existing WIP diff. There may be partial indexing/dataflow changes already present from prior work; preserve useful parts,
+  Before editing, run `git status` and inspect any existing in-progress diff. There may be partial indexing/dataflow changes already present from prior work; preserve useful parts,
   revise anything that conflicts with this goal, and do not discard unrelated user changes.
 
 ## Current Deployment Readiness - 2026-06-19
@@ -228,7 +228,7 @@ Repeated warnings about too many open unified exec processes. Use strictly seque
    a future precision boost (it would tighten labels in OTHER PHP
    shapes), but mega_flow attribution is correct now.
 
-2. **Inherited WIP source-seeding regression** - closed in
+2. **Inherited source-seeding regression** - closed in
    `crates/idg/src/service.rs::source_seed_nodes_at_span` by falling
    back to the `from`-node of any intra edge whose `via_span` overlaps
    the anchor when no span-bearing `Write`/`CallRet`/`CallArg` is found.
@@ -251,7 +251,7 @@ Repeated warnings about too many open unified exec processes. Use strictly seque
 5. **Larger audit (§A/§C/§D)** - see the roadmap below; every
    listed item is now marked DONE with the commit/file pointers.
 
-### Files changed across this multi-session WIP (chain `5c341a0 -> 9f5da3a -> 8a44464 -> e134f28`)
+### Files changed across this multi-session change set (chain `5c341a0 -> 9f5da3a -> 8a44464 -> e134f28`)
 - `crates/idg/src/transfer.rs`: ruby fix - `collect_method_receiver_bases` + `method_receiver_bases` on `TransferCtx` + method-projection exemption in `SemanticSourceFilter::from_sources` (4 call sites). solidity fix - `suppress_broad_container_inputs` now links field-writes to the bare container assign by span CONTAINMENT (`span_contains_or_equal`) instead of equality.
 - `crates/lang_solidity/src/lib.rs`: solidity fix - struct-literal field-write `Assign` events anchored at the field VALUE span (precise source-seeding) instead of the container span.
 - `crates/security/src/analysis/mod.rs`: go fix (concrete-vs-inferred param subsumption filter); `drop_field_mismatched_inferred_findings` (§C over-approximation collapse); `source_preference_rank_for_sink` (sink-aware source attribution); deterministic combine-sort.
@@ -268,7 +268,7 @@ This was the investigated inventory of everything standing between the prior sta
 
 ### Definition of done ("perfect")
 - Every supported language detects its `mega_flow` source->sink flow with accurate, narrowed-or-exact source attribution (no FN, no mis-attribution, no sibling-field overtaint).
-- Every command (`inspect`, `security` {taint-analysis, source-analysis}, `dump-taint`, `trace`, `export`, `dump-ast/hir/cfg/callgraph/edges/resolve`, `diagnostics`, `read-file` flow context) computes its exact requested scope to fixpoint before rendering, with zero silent capping; `index` is structural-only.
+- Every command (`inspect`, `security` {taint-analysis, source-analysis}, `dump-taint`, `trace`, `export`, `dump-ast/hir/cfg/callgraph/edges/resolve`, `diagnostics`, `read-file` flow context) computes its exact requested scope to fixpoint before rendering, with zero silent capping; `index` warms syntax/construct indexes and explicit semantic prewarm jobs warm reusable sidecars for repeated queries.
 - `cargo test --workspace` is fully green (no inherited or new failures).
 - Caches validated by source + rulepack + matcher + pipeline-version + deps; warm runs reuse valid facts only.
 - Benchmarked on `examples/` (cold/warm) and validated on Redis + Java OWASP Benchmark without hangs / unbounded memory / whole-program recompute.
@@ -278,7 +278,7 @@ This was the investigated inventory of everything standing between the prior sta
 2. **§A** per-language FN gaps - **DONE** (2026-05-27/28). Java + csharp + dart + scala + swift all now detect their mega_flow chain end-to-end. See per-language details below.
 3. **§C** field-precision - **DONE** (2026-05-28). PHP attribution fixed by sink-aware `source_preference_rank_for_sink`; java/python over-approximations collapsed by `drop_field_mismatched_inferred_findings` (Java 3->1, Python 5->4). See §C below.
 4. **§E.2** legacy engine - **DONE** (2026-05-28). Two deprecated `interprocedural_constructs.rs` tests retired with documented rationale; canonical IDG coverage preserved in `security_pipeline_regressions::mega_flow`.
-5. **§D** cache pipeline-version validation - **DONE** (2026-05-28). `crates/workspace/build.rs` emits `BONSAI_BUILD_FINGERPRINT_HASH` from git HEAD + dirty-tree hash; folded into every sidecar's pipeline hash + `CallgraphSnapshot.build_fingerprint`. Closes the manual-bump foot-gun.
+5. **§D** cache pipeline-version validation - **DONE** (2026-05-28, tightened 2026-07-01). `crates/workspace/build.rs` emits `BONSAI_BUILD_FINGERPRINT_HASH` from git HEAD + dirty-tree hash; analyzer source dirs are explicit build-script inputs so unstaged source edits refresh the hash. Folded into every sidecar's pipeline hash + `CallgraphSnapshot.build_fingerprint`. Closes the manual-bump foot-gun.
 6. **§B / §F / §G follow-up labels** - superseded by later readiness passes documented above, including Redis, OWASP Benchmark, large Java, and full-workspace test verification.
 
 ### A. Per-language detection completeness (the mega_flow matrix)
@@ -311,7 +311,7 @@ The `examples/<lang>/mega_flow` fixtures are structurally identical POSITIVE flo
 Every command runs (exit 0) on working fixtures. Remaining work:
 - `trace`, `dump-hir`, `export` emit `analysis_incomplete_reasons` / `unresolved-call` (e.g. `ENV.fetch` in ruby). This is correct per the goal (mark incomplete, don't fake), but **each unresolved call is a resolver gap**: enumerate every `analysis_incomplete` reason across `examples/` and either resolve it or justify it as a true external boundary.
 - Confirm `inspect` / `security` / `dump-taint` / `export` compute their exact requested scope with **no silent capping/timeout** on large inputs (the goal forbids presenting capped analysis as complete).
-- Confirm `index <workspace>` is a fast **structural** pass (no eager full-workspace taint solve) per the goal - measure and assert.
+- Confirm `index <workspace>` remains the measured syntax/construct parse/index path, while `index --semantic` warms structural semantic sidecars without duplicating downstream work.
 - `read-file` flow context / flow columns (goal mentions these) - verify they compute exact flow facts before rendering.
 
 ### C. Accuracy / precision - field-precision (CLOSED 2026-05-28 via the post-finding filter + sink-aware combiner)
@@ -329,19 +329,20 @@ The csharp/dart/scala/swift mega_flows funnel through a method/getter that reads
 
 ### D. Cache & invalidation
 - Source-content invalidation: **WORKS** (verified - see note above).
-- Pipeline/code-version invalidation: **MECHANISM CONFIRMED + this WIP's versions bumped (2026-05-27).** Each sidecar's `expected_pipeline_hash` (factstore header) / snapshot version folds in `MATCHER_POLICY_FINGERPRINT` + `workspace_content_fingerprint` + `dependency_metadata_fingerprint` + a **manual** per-sidecar semantic-version constant. Reader rejects on `FactStoreError::{VersionMismatch, PipelineMismatch}` (`cache_fingerprint::factstore_sidecar_error_is_discardable` -> delete + recompute). The 6 constants and their fold sites:
+- Pipeline/code-version invalidation: **MECHANISM CONFIRMED + this change set's versions bumped (2026-05-27).** Each sidecar's `expected_pipeline_hash` (factstore header) / snapshot version folds in `MATCHER_POLICY_FINGERPRINT` + `workspace_content_fingerprint` + `dependency_metadata_fingerprint` + a **manual** per-sidecar semantic-version constant. Reader rejects on `FactStoreError::{VersionMismatch, PipelineMismatch}` (`cache_fingerprint::factstore_sidecar_error_is_discardable` -> delete + recompute). The 6 constants and their fold sites:
   - `IDG_STITCHING_SEMANTIC_VERSION` (`workspace/src/lib.rs::idg_pipeline_hash`) - **22->23**
   - `CALLGRAPH_CACHE_VERSION` (`callgraph_sidecar.rs`) - **10->11**
   - `DATAFLOW_CACHE_VERSION` (`dataflow.rs`) - **27->28**
   - `VALUE_FLOW_CACHE_VERSION` (`value_flow.rs`) - **7->8**
   - `FLOW_IDS_CACHE_VERSION` (`flow_ids.rs`) - **5->6**
   - `TAINT_GRAPH_CACHE_VERSION` (`taint_index.rs`) - **8->9**
-  - Bumped because this WIP changed decl extraction (adapter member synthesis -> callgraph + IDG) and IDG seeding/side-effects (transfer.rs / service.rs -> all derived taint caches). Verified safe: version lives in the sidecar filename (`value_flow.v{N}.factstore`, `callgraph.v{N}.bin`) or the factstore header (`idg`/`dataflow` use a fixed `.v3.factstore` filename + header pipeline-hash), so a bump cleanly orphans/-rejects old files; no test hardcodes the bumped constants.
-- **§D automation foot-gun closed (2026-05-28):** `crates/workspace/build.rs` now emits `BONSAI_BUILD_FINGERPRINT_HASH` per build - composed from `CARGO_PKG_VERSION @ git rev-parse HEAD : {clean|dirty} : <fnv1a64-of-porcelain>`. `cargo:rerun-if-changed=.git/HEAD`, `.git/index`, and `.git/packed-refs` keep it current across commits / staging / refs changes; `BONSAI_BUILD_FINGERPRINT_OVERRIDE` lets release engineers pin reproducible builds. The hash is folded into every sidecar's pipeline hash (`idg_pipeline_hash`, `dataflow_pipeline_hash`, `value_flow_pipeline_hash`, `flow_ids_pipeline_hash`, `taint_graph_pipeline_hash`) AND added as a `#[serde(default)] pub build_fingerprint: u64` field on `CallgraphSnapshot` with load-time validation. Any analyzer-code change at HEAD or in the working tree now auto-invalidates every sidecar - the 6 manual per-sidecar constants stay as a belt-and-suspenders safety net for layout changes but no longer need to be bumped per semantic change.
+  - Bumped because this change set changed decl extraction (adapter member synthesis -> callgraph + IDG) and IDG seeding/side-effects (transfer.rs / service.rs -> all derived taint caches). Verified safe: version lives in the sidecar filename (`value_flow.v{N}.factstore`, `callgraph.v{N}.bin`) or the factstore header (`idg`/`dataflow` use a fixed `.v3.factstore` filename + header pipeline-hash), so a bump cleanly orphans/-rejects old files; no test hardcodes the bumped constants.
+- **§D automation foot-gun closed (2026-05-28, tightened 2026-07-01):** `crates/workspace/build.rs` now emits `BONSAI_BUILD_FINGERPRINT_HASH` per build - composed from `CARGO_PKG_VERSION @ git rev-parse HEAD : {clean|dirty} : <fnv1a64-of-porcelain>`. `cargo:rerun-if-changed=.git/HEAD`, `.git/index`, `.git/packed-refs`, `Cargo.toml`, `Cargo.lock`, and the analyzer `crates/` tree keep it current across commits, staging, refs changes, and unstaged source edits; `BONSAI_BUILD_FINGERPRINT_OVERRIDE` lets release engineers pin reproducible builds. The hash is folded into every sidecar's pipeline hash (`idg_pipeline_hash`, `dataflow_pipeline_hash`, `value_flow_pipeline_hash`, `flow_ids_pipeline_hash`, `taint_graph_pipeline_hash`) AND added as a `#[serde(default)] pub build_fingerprint: u64` field on `CallgraphSnapshot` with load-time validation. Any analyzer-code change at HEAD or in the working tree now auto-invalidates every sidecar - the 6 manual per-sidecar constants stay as a belt-and-suspenders safety net for layout changes but no longer need to be bumped per semantic change.
+- **§D inspect/taint-flow cache bump (2026-07-01):** `DATAFLOW_CACHE_VERSION` **28->29** and `TAINT_GRAPH_CACHE_VERSION` **9->10** because graph materialization no longer seeds callee/module target components as value carriers and assignment-RHS terminal calls now keep the exact RHS call span instead of the broad assignment span. This rejects stale sidecars that can otherwise render duplicate/raw inspect flows such as `pickle->receiver` or assignment-column terminal calls.
 - TODO: confirm changed-file precision (only affected facts + dependents recompute) and that watch/refresh doesn't recompute the whole workspace.
 
 ### E. Known regressions / failures to fix
-1. **§E.1 inherited WIP regression - DONE (2026-05-27).** Implemented fix option (a): `source_seed_nodes_at_span` in `crates/idg/src/service.rs` falls back to the `from`-node of any intra edge whose `meta.via_span` overlaps the anchor when no span-bearing `Write`/`CallRet`/`CallArg` place is found. `rulepack_conformance::caller_scheduling_preserves_source_attribution` passes.
+1. **§E.1 inherited regression - DONE (2026-05-27).** Implemented fix option (a): `source_seed_nodes_at_span` in `crates/idg/src/service.rs` falls back to the `from`-node of any intra edge whose `meta.via_span` overlaps the anchor when no span-bearing `Write`/`CallRet`/`CallArg` place is found. `rulepack_conformance::caller_scheduling_preserves_source_attribution` passes.
 2. **§E.2 legacy engine - DONE (2026-05-28).** The 2 deprecated `interprocedural_constructs.rs` tests (go/ruby mega_flow) retired with documented rationale in-file; canonical IDG coverage is `security_pipeline_regressions::mega_flow` (14/14 green, go=1 ruby=2 with `--inferred-sources`).
 3. **§E.3 full-workspace test - RESOLVED (2026-05-29).** `cargo test --workspace --no-fail-fast` run to completion exposed **5704 passed / 40 failed**; prior session's "all gates green" claim was wrong (only the three touched suites had been re-run). All 40 are fixed (§H) across `d4131ff -> e5546be`. A follow-up verification sweep then surfaced one **second-order regression** - `dedup_matrix` (the §H.1/H.2 kit changes made `repo.run()` resolve to two same-named overrides, so source-analysis emitted two rows that render identically) - fixed in `cd63e7c` by keying the source-analysis dedup on the rendered chain. Re-verified: dedup_matrix 15/0, per_lang_cli_matrix 971/0, security_commands 38/0, security --lib 111/0, validate-mega-cli all-pass, and a cross-language source-analysis sweep reports 0 duplicate keys across all 21 mega_flows.
 

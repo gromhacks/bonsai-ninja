@@ -486,6 +486,83 @@ fn field_argument_forwarding_preserves_matching_field_path() {
 }
 
 #[test]
+fn field_argument_forwarding_worklist_deduplicates_pending_writes() {
+    let key = FieldPlaceKey {
+        seg_id: SegmentId(0),
+        func: FuncId::new(1),
+        base: "box".to_string(),
+        writes: true,
+    };
+    let hit = FieldPlaceHit {
+        field: "cmd".to_string(),
+        node: NodeId(7),
+        span: Some(span(10, 18)),
+    };
+    let mut pending = VecDeque::new();
+    let mut enqueued = AHashSet::default();
+
+    enqueue_field_write(key.clone(), hit.clone(), &mut pending, &mut enqueued);
+    enqueue_field_write(key, hit, &mut pending, &mut enqueued);
+
+    assert_eq!(pending.len(), 1);
+    assert_eq!(enqueued.len(), 1);
+}
+
+#[test]
+fn method_without_receiver_field_consumers_does_not_synthesize_receiver_field_forwarding() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["src".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 20),
+            target: "obj.secret".to_string(),
+            source_name: Some("src".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(30, 45),
+            name: "noop".to_string(),
+            receiver: Some("obj".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    let callee = empty_decl(2, "noop");
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(1));
+    let f2s = StaticF2S(f2s_map);
+
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "noop", vec![FuncId::new(2)]);
+
+    let ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&callee)],
+        &resolver,
+        &f2s,
+    );
+    let callee_segment = ws.segment(SegmentId(1)).expect("callee segment");
+    let callee_places = callee_segment
+        .places
+        .places
+        .iter()
+        .filter_map(|place| place_storage_name(callee_segment, place))
+        .collect::<Vec<_>>();
+
+    assert!(
+        !callee_places.iter().any(|place| place == "receiver.secret"),
+        "ordinary method calls without receiver-field consumers must not synthesize receiver field writes: {callee_places:?}"
+    );
+}
+
+#[test]
 fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_inputs() {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["src".to_string()];
@@ -518,20 +595,32 @@ fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_input
 
     let mut helper = empty_decl(2, "helper");
     helper.params = vec!["arg".to_string()];
-    helper.flow_events = vec![FlowEvent::Call {
-        span: span(20, 35),
-        name: "sink".to_string(),
-        receiver: None,
-        receiver_types: Vec::new(),
-        call_kind: CallKind::Function,
-        args: vec![CallArg {
-            span: span(27, 30),
-            name: None,
-            value_text: "arg".to_string(),
-            place: Some("arg".to_string()),
-            source_names: Vec::new(),
-        }],
-    }];
+    helper.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 18),
+            target: "tmp".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["arg.cmd".to_string()],
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(20, 35),
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(27, 30),
+                name: None,
+                value_text: "arg".to_string(),
+                place: Some("arg".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
 
     let mut sink = empty_decl(3, "sink");
     sink.params = vec!["value".to_string()];
@@ -567,5 +656,18 @@ fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_input
     assert!(
         forwards_cmd_field,
         "expected helper arg.cmd to forward to sink value.cmd despite caller call span ordering"
+    );
+
+    let forwards_cmd_read = segment.edges.iter().any(|edge| {
+        edge.meta.kind == IdgEdgeKind::IntraFieldRead
+            && place_storage_name(segment, node_place(segment, edge.from).expect("from place")).as_deref()
+                == Some("arg.cmd")
+            && place_storage_name(segment, node_place(segment, edge.to).expect("to place")).as_deref()
+                == Some("arg.cmd")
+    });
+
+    assert!(
+        forwards_cmd_read,
+        "synthetic param field writes must connect to matching field reads with IntraFieldRead"
     );
 }

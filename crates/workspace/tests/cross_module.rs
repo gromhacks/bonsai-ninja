@@ -164,6 +164,56 @@ fn python_cross_file_trace() {
 }
 
 #[test]
+fn python_trace_assignment_steps_preserve_source_evidence_and_exit_header_span() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/app.py",
+            concat!(
+                "def entry():\n",
+                "    token = request.args.get(\"token\")\n",
+                "    cursor = conn.cursor()\n",
+                "    return token\n",
+            ),
+        )],
+    );
+
+    let trace = ws.trace_from("entry").expect("trace_from entry");
+    let token_assigns: Vec<_> = trace
+        .steps
+        .iter()
+        .filter(|step| step.kind == TraceStepKind::Assign && step.message.starts_with("Assign token"))
+        .map(|step| step.message.as_str())
+        .collect();
+    assert!(
+        token_assigns.contains(&"Assign token = request.args.get(\"token\")"),
+        "call-result assignment must name its RHS call; assigns={token_assigns:#?}"
+    );
+    assert!(
+        token_assigns.contains(&"Assign token = request.args.token"),
+        "projected source assignment must stay distinguishable; assigns={token_assigns:#?}"
+    );
+    assert!(
+        trace.steps.iter().any(|step| {
+            step.kind == TraceStepKind::Assign && step.message == "Assign cursor = conn.cursor()"
+        }),
+        "no-arg call assignments must render with parentheses; steps={:#?}",
+        trace.steps
+    );
+
+    let exit = trace
+        .steps
+        .iter()
+        .find(|step| step.kind == TraceStepKind::Return && step.message == "Exit entry")
+        .unwrap_or_else(|| panic!("missing synthetic Exit entry step; steps={:#?}", trace.steps));
+    assert_eq!(
+        exit.span.start_line, 1,
+        "synthetic function exit should point at the function header, not the first body line"
+    );
+    assert_eq!(exit.code.trim(), "def entry():");
+}
+
+#[test]
 fn javascript_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),

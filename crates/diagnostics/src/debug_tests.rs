@@ -31,3 +31,11 @@ fn parse_matches_exact_name() {
     assert!(set.contains("idg-closure"));
     assert!(!set.contains("idg-resolve"));
 }
+
+#[test]
+fn render_message_humanizes_key_value_tokens() {
+    assert_eq!(
+        render_message("matcher scan stats: files=8 funcs=2 source_funcs=1 text_skipped=0 enabled=true"),
+        "matcher scan stats: files 8 · functions 2 · source functions 1 · text skipped 0 · enabled on"
+    );
+}

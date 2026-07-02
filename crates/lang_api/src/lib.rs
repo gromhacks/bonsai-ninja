@@ -7,6 +7,7 @@
 pub mod capabilities;
 pub mod kit;
 pub mod registry;
+pub mod taxonomy;
 pub mod types;
 
 pub use capabilities::{
@@ -24,10 +25,12 @@ pub use kit::{
     ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER, WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
+pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
-    AssignValueKind, CallArg, CallKind, Comment, CommentKind, Decl, DeclIndex, DeclKind, FieldWrite,
-    FlowEvent, ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, ModulePath, Ref, RefKind,
-    StringCategory, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
+    operations_from_flow_events, AssignValueKind, CallArg, CallKind, Comment, CommentKind, Decl, DeclIndex,
+    DeclKind, FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, ModulePath,
+    Operation, OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind, StringCategory,
+    StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;

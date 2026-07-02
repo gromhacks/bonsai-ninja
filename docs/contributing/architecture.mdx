@@ -16,6 +16,7 @@ work in one or two layers at a time, so this doc is organised the same way.
         ┌──────────────┴──────────────┐
         │  Query / browse / trace     │
         │  bonsai_inspect  browse  trace
+        │  bonsai_retrieval
         └──────────────▲──────────────┘
         ┌──────────────┴──────────────┐
         │  Security                   │
@@ -116,6 +117,40 @@ adapter handles precisely versus partially.
 **`crates/db`** is the in-memory facts database. Every other analysis crate
 reads from it and writes back through it.
 
+**`crates/retrieval`** is a fact-backed candidate index, not an evidence
+engine. It persists `FactDoc` records under `.bonsai/` with stable fact ids,
+source spans, language/file/symbol metadata, provenance, precision,
+static-limit/incomplete metadata, normalized search text, content
+fingerprints, and pipeline fingerprints. Source files are first-class
+`kind=file` documents in the same sidecar, so file lookup is cached without
+turning filenames into evidence. It builds deterministic indexes for
+stable ids, kind, file, symbol/name, prefixes, lexical terms/trigrams,
+caller/callee edges, and source/sink/finding keys.
+
+Exact indexes decide candidates; canonical facts and semantic graph
+verification decide truth. Vector similarity is never evidence. Future vector
+rankers may return candidate `fact_id`s only; renderers must hydrate those ids
+through browse, resolver, graph, value-flow, IDG, or taint APIs before showing
+public analysis facts. Search and literal-filtered browse commands can use
+retrieval to narrow repeated candidate lookup, then render the same canonical
+rows/chains they rendered before retrieval existed. Large-workspace inspect
+can use a warmed retrieval sidecar only before opening a scoped workspace; it
+does not apply a second retrieval gate after canonical facts are loaded.
+Retrieval candidate docs include declaration parameters, operation facts,
+imports, refs, comments, strings, variables, calls, files, and edge metadata;
+those docs select files/fact ids only and are not rendered as evidence.
+User-facing file filters are applied relative to the selected workspace, even
+when persisted candidate docs carry canonical or absolute paths for stable
+identity. Retrieval sidecars are only persisted for complete workspace indexes.
+Literal-, file-, and filter-scoped query workspaces may render exact canonical
+facts, but they never publish partial retrieval factstores as reusable
+whole-workspace cache state. Large complete workspaces also avoid surprise
+query-time retrieval builds. Query frontends can validate a warmed sidecar from
+disk source fingerprints and use its candidate file/fact ids before opening a
+scoped workspace; stale or missing sidecars fall back to canonical syntax-backed
+collection. Use `index --semantic` or `cache rebuild` when you want to
+front-load that candidate index.
+
 **`crates/index`** drives the parallel indexing pipeline: walk files,
 dispatch to adapters, populate the db, prewarm dataflow.
 
@@ -127,13 +162,63 @@ edges.
 Used by `taint` and by `dump-cfg`.
 
 **`crates/callgraph`** walks the resolved graph and surfaces
-`(caller, callee, precision)` edges, with virtual-dispatch expansion via
-the bases facts. It also binds local callable aliases and uniquely
-returned closure factories so indirect callback calls stay resolver-backed
-instead of becoming name-only fan-out.
+`(caller, callee, precision, provenance)` edges, with virtual-dispatch
+expansion via the bases facts. Provenance records the resolver stage,
+evidence, and confidence for each accepted edge; dump, SDK, and export
+surfaces forward that metadata without re-resolving. It also binds local
+callable aliases, receiver-projected callable storage (`obj.cb`,
+`self.cb`, `obj->cb`), and uniquely returned closure factories so
+indirect callback calls stay resolver-backed instead of becoming
+name-only fan-out.
 
-**`crates/abstract_interp`** is a tiny abstract-interpretation runtime
-the engine uses for constant propagation and a few narrowing tricks.
+`path` builds a shared semantic path graph from the cached resolved
+callgraph plus warmed IDG cross-call edges when an IDG sidecar has been
+hydrated. It then uses `enumerate_paths_resolved`: a bounded, ranked
+source-to-target walk over exact/narrowed edges only. It carries edge
+precision through each path and reports truncation, missing IDG facts, or
+resolution gaps as incompleteness rather than widening missing calls into
+guessed evidence. When the target pattern matches an indexed call site but
+no callable declaration (for example an external API), `path` resolves the
+semantic path only to the enclosing callable and attaches `terminal_call`
+evidence for the call site. It never fabricates a callee node for the
+external API.
+
+`slice` is the backwards-slice counterpart for "what influences this
+symbol at this line?" It consumes the shared value-flow/IDG graph when a
+semantic sidecar has been hydrated, then merges adapter-emitted
+`FlowEvent` facts for local syntax detail: assignments, call arguments,
+returns, structured branches/loops, and lifecycle/use-site events. It does
+not parse raw source or invent missing edges; unavailable semantic graphs,
+parameter boundaries, and caller caps are reported through
+`analysis_incomplete_reasons`, and rows expose their `backends` so users
+can see whether evidence came from `value-flow`, `flow-events`, or both.
+
+`operations` promotes those same `FlowEvent` facts into first-class
+use-site rows: reads, writes, calls, constructor allocations, returns,
+throws, awaits, branch conditions, catch bindings, resource scopes,
+lifecycle releases, and normalized place shapes such as field access,
+indexing, and dereference-like use. The conversion lives in
+`bonsai_lang_api::operations_from_flow_events`, so browse, SDK, security,
+and future abstract-interpretation consumers all share the same
+syntax-derived operation vocabulary instead of re-parsing source text.
+
+`dump-resolution` audits the same layer without adding a second resolver:
+it compares adapter-emitted `FlowEvent::Call` sites with the canonical
+resolved call graph and reports per-file / per-decl resolution coverage,
+known external/library call sites, unresolved call sites, dynamic calls, macro
+calls, and receiver-type fact gaps. The output is syntax-derived and
+completeness-oriented; it never widens a missing edge into guessed evidence,
+and it does not treat import-proven external API calls as receiver-type gaps.
+
+**`crates/abstract_interp`** is the shared abstract-interpretation
+runtime. Its value lattice now carries constants, bounded integer ranges,
+boolean domains, string length ranges, nullness / nullable values, bounded
+literal sets, and simple path relations such as `idx < len` or `ptr !=
+null`. The trace runner uses the same lattice at CFG joins, so branch-local
+numeric facts widen into ranges instead of collapsing straight to unknown.
+Security, browse, and export consumers should add precision by consuming
+these shared facts rather than inventing command- or language-specific
+domains.
 
 **`crates/taint`** owns taint reachability and source-specific graph
 construction. Production security surfaces are IDG-backed: source seeds are
@@ -166,29 +251,63 @@ params/assignment-target/bare-call-argument seed logic. Sub-modules:
 `security`. It hides the orchestration: index a directory, run analysis,
 return facts.
 
+Workspace semantic context also lives here. `Workspace::semantic_context`
+and SDK `Project::semantic_context()` expose one language-neutral model
+for module roots, dependency/generated/excluded roots, toolchain
+manifests, configured-source hints, and source-transformation evidence;
+adapters consume normalized context instead of inventing local workspace
+rules.
+
 The workspace owns a battery of lazy caches and explicit prewarm paths.
 Default CLI query commands parse/index structurally, load valid persisted
 sidecars when present, and compute missing facts for the requested scope
-before rendering:
+before rendering. The workspace open path emits SDK-visible
+`WorkspaceOpenEvent::CacheChecked` records for sidecar hits, misses,
+skips, and errors; the CLI renders those as stderr notes while progress
+is enabled, and clears any previous phase bar before replacing it so
+interactive output does not accumulate duplicate wheels.
+
+The reuse path is binary factstores, not JSON re-parsing. Explicit cache
+producers such as `index --semantic`, SDK `Bonsai::index_semantic`, and
+`cache rebuild` also write `.bonsai/manifest.json`: a descriptive JSON
+inventory of sidecar coverage, producer fingerprints, and missing reasons.
+Commands still validate each sidecar's own header, payload index, and
+pipeline fingerprint before reuse; the manifest is for diagnostics, SDK
+consumers, and downstream tooling that need to understand what was produced.
+The retrieval factstore is
+part of the structural semantic coverage set: it speeds candidate lookup for
+search/inspect/browse surfaces but cannot create calls, edges, flows,
+findings, or refs by itself. Large query commands may validate the retrieval
+factstore from source/dependency/build fingerprints before workspace open,
+but they still hydrate through canonical APIs before rendering.
+`cache stats` and `WorkspaceCache::stats()` validate the manifest against the
+current workspace and decode reported sidecar payloads where possible, so
+diagnostics report reusable facts rather than raw file presence or stale
+same-size artifacts. Retrieval payload validation uses the same query-time
+source/dependency/build pipeline fingerprint, which rejects copied or moved
+candidate indexes before they can narrow a query.
 
 - `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
   `EntryTaintGraph` + transitive-dependency file set. Loaded when a
   persisted sidecar is present, computed on demand for exact queries, and
-  fully rebuilt only by explicit prewarm paths such as
-  `index --prewarm-dataflow`; persisted to
+  fully rebuilt by explicit full-prewarm SDK opens or by the legacy
+  dataflow-only path, `index --prewarm-dataflow`; persisted to
   `.bonsai/dataflow.v3.factstore` (legacy `dataflow.v2.bin` is still
   readable for warm reopens).
 - `SyntaxFlowQuery` (`flow_query.rs`) — the command-facing facade for
   rulepack-free entry taint graphs. It uses a warmed IDG target cut when
   one is already seeded, otherwise it returns the canonical
-  `DataFlowCache` graph. Interactive commands use this instead of
-  open-coding IDG/dataflow selection.
+  `DataFlowCache` graph. Each result carries a `SyntaxFlowPlan` with the
+  selected backend, cache hit/miss status, target-cut scope, IDG
+  availability, and fallback/incompleteness reasons. Interactive commands
+  use this instead of open-coding IDG/dataflow selection or hiding planner
+  decisions in render-only logic.
 - `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
   `ValueFlowGraph` plus a `returning_seed_names` set
   (precomputed at graph-build time so security-analysis answers
   "does this seed reach a Return?" with a hash-set intersection).
   Loaded when present and computed for the requested scope; persisted to
-  `.bonsai/value_flow.v3.factstore`.
+  `.bonsai/value_flow.v*.factstore`.
 - `FlowIdCache` (`flow_ids.rs`) — per-`FuncId` flow labels for
   browse-row F-IDs. Computed for the rendered browse scope; shares the
   workspace-cached resolved call graph via `seed_call_graph` when that
@@ -197,7 +316,13 @@ before rendering:
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map so a second `taint-analysis` /
   `source-analysis` run reuses the cached graph. Persisted to
-  `.bonsai/taint_graph.v2.factstore` with version + fingerprint guard.
+  `.bonsai/taint_graph.v9.<mode>.<config>.factstore` with version + fingerprint
+  guard, so different analysis configurations do not evict each other.
+  Write-through persistence is default-on and can be disabled with
+  `BONSAI_TAINT_GRAPH_PERSIST=0` when cache I/O is undesirable.
+  Security analysis reports the cache decision through
+  `AnalysisProgress::Note`, including whether the run was a memory hit,
+  disk hit, miss, or config invalidation.
 - `TransitiveCallersIndex` (`transitive_callers.rs`) — depth-bounded
   caller closures on the resolved call graph. Rulepack-independent,
   so the closure survives across rulepack swaps.
@@ -247,9 +372,13 @@ source-inlined with numbered annotations. Backed by a chain cache so
 repeated invocations stay fast.
 
 **`crates/browse`** powers the browse commands (`defs`, `calls`,
-`imports`, `refs`, `vars`, `strings`, `args`, `classes`, `comments`,
-`search`, `read-file`, `tree`). Most commands share the same plumbing:
-read facts from the db, paginate, format.
+`imports`, `refs`, `vars`, `strings`, `args`, `operations`, `classes`,
+`comments`, `search`, `path`, `slice`, `read-file`, `tree`). Most commands
+share the same plumbing: read facts from the db, rank query-shaped rows
+before pagination, paginate, format. The shared textual relevance helper
+ranks plain filters as exact > prefix > substring while regex filters
+retain the deterministic structural order; the ranking happens in the
+browse data layer so CLI and SDK ordering cannot drift.
 
 **`crates/trace`** powers `trace`: walk a flow from source to sink as a
 call tree. Supports text, JSON, and DOT.
@@ -263,6 +392,11 @@ sit alongside.
 **`crates/sdk`** is the Rust API. Same surface as the CLI, just exposed as
 a `Bonsai` builder. Tests under `crates/sdk/tests/` exercise the public
 shape.
+
+The CLI is a renderer over the SDK-facing engines. Long-running security
+analysis emits `AnalysisProgress` events; the CLI turns phases into progress
+bars and notes into stderr lines, while SDK consumers receive the same
+scope/cache facts directly.
 
 **`crates/adapters`** registers all 21 language adapters into a
 `LanguageRegistry`. Used by `cli`, `sdk`, and the conformance suite.
@@ -302,7 +436,7 @@ When the CLI runs `index`:
    function summaries, and local bindings across source groups.
 9. `DataFlowCache::prewarm_all` and `ValueFlowCache::prewarm_all`
    fan out across rayon, persist to
-   `.bonsai/dataflow.v3.factstore` / `.bonsai/value_flow.v3.factstore`.
+   `.bonsai/dataflow.v3.factstore` / `.bonsai/value_flow.v*.factstore`.
 10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
     using the same shared call graph.
 

@@ -54,6 +54,16 @@ fn sample_finding() -> Finding {
     }
 }
 
+fn temp_root(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("create temp root");
+    path
+}
+
 #[test]
 fn sarif_render_top_level_shape() {
     let report = SecurityReport::new(vec![sample_finding()]);
@@ -219,6 +229,50 @@ fn sarif_paths_relative_when_workspace_root_supplied() {
     let sink_loc = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"];
     assert_eq!(sink_loc["uri"], "auth.py");
     assert_eq!(sink_loc["uriBaseId"], "%SRCROOT%");
+}
+
+#[cfg(unix)]
+#[test]
+fn sarif_paths_relative_when_file_reaches_workspace_through_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("bonsai-sarif-symlink");
+    std::fs::write(root.join("auth.py"), "os.system(cmd)\n").expect("write auth");
+    std::fs::write(root.join("app.py"), "request.args['cmd']\n").expect("write app");
+    let link = root.with_file_name(format!(
+        "{}-link",
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("bonsai-sarif")
+    ));
+    let _ = std::fs::remove_file(&link);
+    symlink(&root, &link).expect("symlink workspace");
+
+    let mut f = sample_finding();
+    f.sink.file = link.join("auth.py").to_string_lossy().to_string();
+    f.source.file = link.join("app.py").to_string_lossy().to_string();
+    let report = SecurityReport::new(vec![f]);
+    let workspace_root = root
+        .canonicalize()
+        .expect("canonical root")
+        .to_string_lossy()
+        .to_string();
+    let s = render_sarif_with_provenance(&report, Some(&workspace_root), None);
+    let v: Value = serde_json::from_str(&s).unwrap();
+    let sink_loc = &v["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"];
+
+    assert_eq!(sink_loc["uri"], "auth.py");
+    assert_eq!(sink_loc["uriBaseId"], "%SRCROOT%");
+    assert!(
+        !sink_loc["uri"]
+            .as_str()
+            .unwrap()
+            .contains(root.to_string_lossy().as_ref()),
+        "SARIF artifact uri should not leak the host workspace path: {sink_loc:#?}"
+    );
+
+    let _ = std::fs::remove_file(link);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

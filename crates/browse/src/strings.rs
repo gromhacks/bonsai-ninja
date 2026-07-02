@@ -1,6 +1,6 @@
 //! `bonsai-ninja strings` data layer.
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -62,7 +62,9 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
                     }
                 }
                 let (path, line, col) = format_span(&s.span, ws);
-                if f.file.is_some_and(|needle| !path.contains(needle)) {
+                if f.file
+                    .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
+                {
                     continue;
                 }
                 if let Some(needle) = f.in_fn {
@@ -86,13 +88,30 @@ pub fn strings(ws: &Workspace, f: &StringsFilters<'_>) -> Result<Vec<StringOut>,
     // strings cluster together, then alphabetical by text, then
     // file/line for stability.
     out.sort_by(|a, b| {
-        a.category
-            .cmp(&b.category)
-            .then_with(|| a.text.cmp(&b.text))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
+        string_relevance_key(a, f)
+            .cmp(&string_relevance_key(b, f))
+            .then_with(|| {
+                a.category
+                    .cmp(&b.category)
+                    .then_with(|| a.text.cmp(&b.text))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+            })
     });
     Ok(out)
+}
+
+fn string_relevance_key(row: &StringOut, f: &StringsFilters<'_>) -> ((u8, usize), (u8, usize)) {
+    let category = f.category.map_or((u8::MAX, usize::MAX), |category| {
+        textual_relevance_key(&row.category, Some(category), false)
+    });
+    let text = f
+        .contains
+        .filter(|_| !f.regex)
+        .map_or((u8::MAX, usize::MAX), |contains| {
+            textual_relevance_key(&row.text, Some(contains), false)
+        });
+    (category, text)
 }
 
 /// Cache-aware shortcut over the workspace's snapshot + span-map

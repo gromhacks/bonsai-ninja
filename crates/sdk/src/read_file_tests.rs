@@ -98,6 +98,47 @@ fn read_file_from_to_filters_match_source_and_sink_sides() {
 }
 
 #[test]
+fn read_file_path_resolution_requires_path_boundary() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bonsai-read-file-path-boundary-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).expect("create temp dir");
+    std::fs::write(root.join("myapp.py"), "def myapp_marker():\n    return 1\n").expect("write fixture");
+
+    let ws = Workspace::index(&root, bonsai_adapters::all_languages_registry()).expect("index workspace");
+    let err = read_file(
+        &ws,
+        None,
+        &ReadFileFilters {
+            path: "app.py",
+            ..Default::default()
+        },
+    )
+    .expect_err("app.py must not resolve to myapp.py by string suffix");
+    assert!(
+        err.to_string().contains("file not found in workspace"),
+        "unexpected read-file error: {err}"
+    );
+
+    let out = read_file(
+        &ws,
+        None,
+        &ReadFileFilters {
+            path: "myapp.py",
+            ..Default::default()
+        },
+    )
+    .expect("exact file should resolve");
+    assert!(out.source.contains("myapp_marker"));
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn read_file_taint_options_are_semantic_only() {
     let defaulted = semantic_read_file_taint_options(TaintAnalysisOptions::default());
     assert_eq!(defaulted.max_precision, Some(Precision::Narrowed));

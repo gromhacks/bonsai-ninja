@@ -560,6 +560,30 @@ impl IdgWorkspace {
         );
         Ok(Some(ws))
     }
+
+    /// Validate that a workspace IDG sidecar is structurally readable and
+    /// decodes with the pipeline hash stamped in its factstore header.
+    /// This does not prove the sidecar is fresh for a specific workspace;
+    /// callers combine it with source/dependency/build freshness checks or
+    /// use [`Self::load_from_disk`] when they have an expected pipeline hash.
+    pub fn validate_sidecar_file(path: &std::path::Path) -> crate::IdgResult<usize> {
+        let reader = bonsai_factstore::FactStoreReader::open_relaxed(path)?;
+        if reader.header().table_id != IDG_WORKSPACE_TABLE_ID {
+            return Err(crate::IdgError::WrongTable {
+                got: reader.header().table_id,
+                expected: IDG_WORKSPACE_TABLE_ID,
+            });
+        }
+        let pipeline_hash = reader.header().pipeline_hash;
+        drop(reader);
+        let Some(workspace) = Self::load_from_disk(path, pipeline_hash)? else {
+            return Err(crate::IdgError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "workspace IDG sidecar did not decode to a valid workspace",
+            )));
+        };
+        Ok(workspace.segment_count())
+    }
 }
 
 /// Per-workspace metadata written at entry 0 of the streamed IDG

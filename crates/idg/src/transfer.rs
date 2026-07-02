@@ -234,6 +234,9 @@ pub struct CallSiteRef {
     /// Number of arguments at the site. Phase 3 uses this to bound
     /// the param-index edges it stitches.
     pub args_count: u8,
+    /// Number of source-level arguments before the transfer pass adds
+    /// synthetic carrier args for flattened no-arg expressions.
+    pub explicit_args_count: u8,
     /// Caller-side `CallRet(site)` node interned in the function's
     /// segment. Phase 3 connects each candidate callee's
     /// `Return` node to this node.
@@ -2819,6 +2822,7 @@ fn walk_assign(
                     receiver_types: Vec::new(),
                     call_kind: CallKind::Function,
                     args_count: u8::try_from(source_call_args.len()).unwrap_or(u8::MAX),
+                    explicit_args_count: u8::try_from(source_call_args.len()).unwrap_or(u8::MAX),
                     call_ret_node: ret_node,
                     call_arg_nodes: arg_nodes,
                     receiver_arg_node: None,
@@ -3234,6 +3238,7 @@ fn walk_call(
         receiver_types: receiver_types.to_vec(),
         call_kind,
         args_count: u8::try_from(arg_nodes.len()).unwrap_or(u8::MAX),
+        explicit_args_count: u8::try_from(args.len()).unwrap_or(u8::MAX),
         call_ret_node: ret_node,
         call_arg_nodes: arg_nodes,
         receiver_arg_node,

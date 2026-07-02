@@ -3,7 +3,7 @@
 //! Returns every assignment captured in any function's flow events,
 //! filtered by name / file / enclosing-fn / source-identifier.
 
-use crate::common::{format_span, make_name_filter};
+use crate::common::{file_path_matches_filter, format_span, make_name_filter, textual_relevance_key};
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -66,7 +66,9 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
         if !name_match(&var.name) {
             return false;
         }
-        if f.file.is_some_and(|needle| !var.file.contains(needle)) {
+        if f.file
+            .is_some_and(|needle| !file_path_matches_filter(ws, &var.file, needle))
+        {
             return false;
         }
         if let Some(needle) = f.in_fn {
@@ -102,13 +104,32 @@ pub fn vars(ws: &Workspace, f: &VarsFilters<'_>) -> Result<Vec<VarOut>, regex::E
     });
     // Final display order matches the old grouping.
     out.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.in_function.cmp(&b.in_function))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
+        var_relevance_key(a, f)
+            .cmp(&var_relevance_key(b, f))
+            .then_with(|| {
+                a.name
+                    .cmp(&b.name)
+                    .then_with(|| a.in_function.cmp(&b.in_function))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+            })
     });
     Ok(out)
+}
+
+fn var_relevance_key(row: &VarOut, f: &VarsFilters<'_>) -> ((u8, usize), (u8, usize), (u8, usize)) {
+    let name = f.name.filter(|_| !f.regex).map_or((u8::MAX, usize::MAX), |name| {
+        textual_relevance_key(&row.name, Some(name), false)
+    });
+    let source = f.source.map_or((u8::MAX, usize::MAX), |source| {
+        row.source_name.as_deref().map_or((u8::MAX, usize::MAX), |value| {
+            textual_relevance_key(value, Some(source), false)
+        })
+    });
+    let in_fn = f.in_fn.map_or((u8::MAX, usize::MAX), |in_fn| {
+        textual_relevance_key(&row.in_function, Some(in_fn), false)
+    });
+    (name, source, in_fn)
 }
 
 /// Walk a decl's flow events and emit one [`VarOut`] per

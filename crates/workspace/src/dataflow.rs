@@ -14,7 +14,7 @@
 
 use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
-    workspace_content_fingerprint,
+    workspace_content_fingerprint, workspace_content_fingerprint_from_paths,
 };
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FileId, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
@@ -40,11 +40,14 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
+// v29 (2026-07-01): graph materialization no longer seeds callee/module
+// target components as taint carriers and assignment-RHS tainted call
+// terminals store the exact call span instead of the broader assignment span.
 // v28 (2026-05-27): IDG seeding / side-effect changes (transfer.rs
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 28;
+pub const DATAFLOW_CACHE_VERSION: u32 = 29;
 static SIDECAR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
@@ -128,11 +131,15 @@ const DATAFLOW_FACTSTORE_TABLE_ID: u32 = 2;
 /// fingerprint so a matcher policy or source-tree change invalidates
 /// the cache file before any stale FuncId-keyed entries can hydrate.
 fn dataflow_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
+    dataflow_pipeline_hash_for_content(workspace_content_fingerprint(db), sidecar_path)
+}
+
+fn dataflow_pipeline_hash_for_content(content_fingerprint: u64, sidecar_path: &Path) -> u64 {
     let raw = MATCHER_POLICY_FINGERPRINT;
     (raw as u64)
         ^ ((raw >> 64) as u64)
         ^ u64::from(DATAFLOW_CACHE_VERSION)
-        ^ workspace_content_fingerprint(db)
+        ^ content_fingerprint
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
         ^ crate::build_fingerprint_hash()
 }
@@ -326,6 +333,19 @@ impl DataFlowCache {
 
     pub fn graph_for(&self, func: FuncId, db: &AnalyzerDb) -> Arc<EntryTaintGraph> {
         self.graph_for_with_sanitizers(func, db, &TokenSet::default())
+    }
+
+    /// Return whether this cache can satisfy `func` from an already
+    /// resident in-memory entry or an open disk sidecar.
+    #[must_use]
+    pub fn has_entry(&self, func: FuncId) -> bool {
+        if self.inner.read().facts.contains_key(&func) {
+            return true;
+        }
+        self.disk
+            .read()
+            .as_ref()
+            .is_some_and(|reader| reader.get(u64::from(func.raw())).ok().flatten().is_some())
     }
 
     /// Compatibility entry point for older callers. Sanitizers are
@@ -1075,6 +1095,45 @@ impl DataFlowCache {
         let entries = reader.len();
         *self.disk.write() = Some(Arc::new(reader));
         Ok(entries)
+    }
+
+    /// Validate that a dataflow factstore is structurally readable and
+    /// carries the expected table id. Freshness is checked separately by
+    /// cache manifests and workspace fingerprints.
+    pub fn validate_factstore_sidecar_file(path: &Path) -> std::io::Result<usize> {
+        let reader = bonsai_factstore::FactStoreReader::open_relaxed(path).map_err(map_factstore_io)?;
+        if reader.header().table_id != DATAFLOW_FACTSTORE_TABLE_ID {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "dataflow factstore table id mismatch: file={} expected={}",
+                    reader.header().table_id,
+                    DATAFLOW_FACTSTORE_TABLE_ID
+                ),
+            ));
+        }
+        Ok(reader.len())
+    }
+
+    /// Validate a dataflow factstore against the exact source path/hash set
+    /// currently on disk. This mirrors [`Self::load_factstore_sidecar`]
+    /// without requiring a parsed [`AnalyzerDb`].
+    pub fn validate_factstore_sidecar_file_with_source_fingerprints<I, P>(
+        path: &Path,
+        fingerprints: I,
+    ) -> std::io::Result<usize>
+    where
+        I: IntoIterator<Item = (P, u64)>,
+        P: AsRef<Path>,
+    {
+        let content = workspace_content_fingerprint_from_paths(fingerprints);
+        let reader = bonsai_factstore::FactStoreReader::open(
+            path,
+            DATAFLOW_FACTSTORE_TABLE_ID,
+            dataflow_pipeline_hash_for_content(content, path),
+        )
+        .map_err(map_factstore_io)?;
+        Ok(reader.len())
     }
 
     /// Compatibility accessor. Sanitizers are reporting evidence and

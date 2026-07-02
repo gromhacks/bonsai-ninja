@@ -8,8 +8,8 @@
 pub(crate) mod state;
 pub(crate) mod value;
 
-pub use state::{Constraint, ExecState, Frame};
-pub use value::AbstractValue;
+pub use state::{Constraint, ExecState, Frame, RelationOp, RelationTerm, ValueRelation};
+pub use value::{AbstractValue, BoolDomain, IntRange, Nullness};
 
 use bonsai_cfg::{Cfg, Terminator};
 use bonsai_common::{BasicBlockId, FuncId, Precision, Span, TraceStepId};
@@ -433,7 +433,25 @@ fn value_from_text(state: &ExecState, raw: &str) -> AbstractValue {
 fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
     match event {
         FlowEvent::Call { name, .. } => (StepKind::Call, Precision::Exact, format!("call {name}")),
-        FlowEvent::Assign { target, .. } => (StepKind::Assign, Precision::Exact, format!("assign {target}")),
+        FlowEvent::Assign {
+            target,
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            ..
+        } => (
+            StepKind::Assign,
+            Precision::Exact,
+            assignment_trace_message(
+                "assign",
+                target,
+                source_name.as_deref(),
+                source_call.as_deref(),
+                source_call_args,
+                source_names,
+            ),
+        ),
         FlowEvent::Return { .. } => (StepKind::Return, Precision::Exact, "return".into()),
         FlowEvent::Throw { .. } => (StepKind::Throw, Precision::Exact, "throw".into()),
         FlowEvent::Await { .. } => (StepKind::Await, Precision::Exact, "await".into()),
@@ -449,6 +467,46 @@ fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
         FlowEvent::Continue { .. } => (StepKind::Diagnostic, Precision::Exact, "continue".into()),
         other => (StepKind::Diagnostic, Precision::Exact, format!("{other:?}")),
     }
+}
+
+fn assignment_trace_message(
+    prefix: &str,
+    target: &str,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+) -> String {
+    let rhs = assignment_trace_rhs(source_name, source_call, source_call_args, source_names);
+    match rhs {
+        Some(rhs) => format!("{prefix} {target} = {rhs}"),
+        None => format!("{prefix} {target}"),
+    }
+}
+
+fn assignment_trace_rhs(
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+) -> Option<String> {
+    if let Some(name) = source_name.map(str::trim).filter(|name| !name.is_empty()) {
+        return Some(name.to_string());
+    }
+    if let Some(call) = source_call.map(str::trim).filter(|call| !call.is_empty()) {
+        return Some(if source_call_args.is_empty() {
+            format!("{call}()")
+        } else {
+            format!("{call}({})", source_call_args.join(", "))
+        });
+    }
+    if !source_names.is_empty() {
+        return Some(source_names.join(" + "));
+    }
+    if !source_call_args.is_empty() {
+        return Some(source_call_args.join(", "));
+    }
+    None
 }
 
 /// Surface the span carried by any [`FlowEvent`] variant.

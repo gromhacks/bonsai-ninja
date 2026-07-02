@@ -1505,6 +1505,26 @@ def handler(user_input):
 }
 
 #[test]
+fn deser_python_flask_request_data_pickle_loads_reports() {
+    let src = r#"
+from flask import request
+import base64
+import pickle
+
+def restore_session():
+    session_data = request.data
+    decoded = base64.b64decode(session_data)
+    return pickle.loads(decoded)
+"#;
+    let outcome = analyse(&python_ws(src));
+    assert_tag_reported(
+        &outcome,
+        "insecure-deserialization",
+        "deser Flask request.data -> pickle.loads",
+    );
+}
+
+#[test]
 fn deser_python_json_loads_clean() {
     // json.loads is the safe alternative; not a registered sink at all.
     let src = r#"

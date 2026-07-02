@@ -1,4 +1,6 @@
-use super::{process_is_alive, unique_sidecar_tmp_path, DataFlowCache, SidecarWriteLock};
+use super::{
+    process_is_alive, unique_sidecar_tmp_path, DataFlowCache, SidecarWriteLock, DATAFLOW_FACTSTORE_TABLE_ID,
+};
 use bonsai_common::FuncId;
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{AdapterArc, DeclKind, LanguageRegistry};
@@ -71,6 +73,34 @@ fn sidecar_tmp_paths_are_unique_per_write() {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with("dataflow.v2.bin.tmp.")));
+}
+
+#[test]
+fn factstore_sidecar_file_validator_rejects_corrupt_payload_even_when_size_matches() {
+    let tmp = std::env::temp_dir().join(format!(
+        "dataflow_corrupt_validator_{}.factstore",
+        std::process::id()
+    ));
+    let writer = bonsai_factstore::FactStoreWriter::create(&tmp, DATAFLOW_FACTSTORE_TABLE_ID, 42)
+        .expect("create dataflow factstore");
+    writer
+        .add(7, 11, b"dataflow payload")
+        .expect("write factstore row");
+    let entries = writer.finish().expect("finish dataflow factstore");
+    assert_eq!(entries, 1);
+    assert_eq!(
+        DataFlowCache::validate_factstore_sidecar_file(&tmp).expect("validate fresh dataflow factstore"),
+        1
+    );
+
+    let bytes = std::fs::metadata(&tmp).expect("dataflow metadata").len();
+    std::fs::write(&tmp, vec![0_u8; bytes as usize]).expect("overwrite same-size corrupt factstore");
+    assert!(
+        DataFlowCache::validate_factstore_sidecar_file(&tmp).is_err(),
+        "same-size corrupt dataflow factstore must not validate"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
 }
 
 #[cfg(unix)]

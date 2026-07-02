@@ -145,6 +145,37 @@ pub const SELF_CONSTRUCTOR_HEADS: &[&str] = &["Self(", "Self {", "self(", "stati
 /// - `new` — Ruby idiom, PHP factory convention.
 pub const CONSTRUCTOR_METHOD_NAMES: &[&str] = &["__init__", "constructor", "__construct", "init", "new"];
 
+/// Filename prefix used by the VFS case-sensitivity probe.
+///
+/// The probe is a short-lived filesystem artifact, not source code. Consumers
+/// that render raw filesystem views may hide files matching
+/// [`is_bonsai_case_probe_path`], but source ingest should not broadly ignore
+/// arbitrary user files that merely share this prefix.
+pub const BONSAI_CASE_PROBE_PREFIX: &str = ".bonsai_case_probe_";
+
+/// True when `path` is the exact temporary file shape created by the VFS
+/// case-sensitivity probe: `.bonsai_case_probe_<pid>_<nanos>`.
+///
+/// This intentionally rejects names with extensions or non-numeric suffixes so
+/// a user-owned file such as `.bonsai_case_probe_notes.py` is not hidden.
+#[must_use]
+pub fn is_bonsai_case_probe_path(path: &std::path::Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let Some(rest) = name.strip_prefix(BONSAI_CASE_PROBE_PREFIX) else {
+        return false;
+    };
+    let Some((pid, nanos)) = rest.split_once('_') else {
+        return false;
+    };
+    !pid.is_empty()
+        && !nanos.is_empty()
+        && pid.chars().all(|c| c.is_ascii_digit())
+        && nanos.chars().all(|c| c.is_ascii_digit())
+}
+
 /// True when `value_text` returns a self-typed constructor
 /// expression — Rust `Self(...)` / `Self { ... }` / `self(...)`,
 /// PHP `new static(...)` late static binding. Both the taint

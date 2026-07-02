@@ -14,6 +14,7 @@ pub struct ExecState {
     /// names the taint engine consumes.
     pub locals: AHashMap<String, AbstractValue>,
     pub path_constraints: Vec<Constraint>,
+    pub relations: Vec<ValueRelation>,
     pub call_stack: Vec<Frame>,
     pub current_func: FuncId,
     pub current_bb: BasicBlockId,
@@ -26,6 +27,7 @@ impl ExecState {
         Self {
             locals: AHashMap::new(),
             path_constraints: Vec::new(),
+            relations: Vec::new(),
             call_stack: Vec::new(),
             current_func: func,
             current_bb: entry,
@@ -51,13 +53,22 @@ impl ExecState {
                 }
             }
         }
-        for constraint in &other.path_constraints {
-            if !self.path_constraints.contains(constraint) {
-                self.path_constraints.push(constraint.clone());
-                changed = true;
-            }
-        }
+        let before_constraints = self.path_constraints.len();
+        self.path_constraints
+            .retain(|constraint| other.path_constraints.contains(constraint));
+        changed |= self.path_constraints.len() != before_constraints;
+
+        let before_relations = self.relations.len();
+        self.relations
+            .retain(|relation| other.relations.contains(relation));
+        changed |= self.relations.len() != before_relations;
         changed
+    }
+
+    pub fn assume_relation(&mut self, relation: ValueRelation) {
+        if !self.relations.contains(&relation) {
+            self.relations.push(relation);
+        }
     }
 }
 
@@ -66,6 +77,37 @@ impl ExecState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Constraint {
     pub text: String,
+}
+
+/// A simple value relationship accumulated along a path. The core
+/// interpreter treats these as language-neutral facts; higher-level
+/// analyses decide whether a relationship discharges a bounds,
+/// nullness, sanitizer, or reachability question.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueRelation {
+    pub left: String,
+    pub op: RelationOp,
+    pub right: RelationTerm,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationOp {
+    Eq,
+    NotEq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationTerm {
+    Var(String),
+    Int(i64),
+    Bool(bool),
+    Null,
 }
 
 /// One activation record on the symbolic call stack.

@@ -506,6 +506,7 @@ fn factstore_sidecar_rejects_dependency_metadata_change() {
     let registry = Arc::new(LanguageRegistry::new());
     registry.register(python_adapter());
     let options = WorkspaceOpenOptions {
+        load_callgraph_sidecar: false,
         load_dataflow_sidecar: false,
         prewarm_dataflow: true,
         save_dataflow_sidecar: true,
@@ -513,6 +514,7 @@ fn factstore_sidecar_rejects_dependency_metadata_change() {
         prewarm_value_flow: false,
         save_value_flow_sidecar: false,
         prewarm_flow_ids: false,
+        load_idg_sidecar: false,
         eager_decl_index: true,
         parse_timeout_ms: None,
     };

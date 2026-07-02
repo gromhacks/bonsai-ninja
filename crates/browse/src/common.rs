@@ -15,6 +15,7 @@
 use bonsai_lang_api::DeclKind;
 use bonsai_workspace::Workspace;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Re-export of the common span type so callers don't need a
 /// separate `bonsai_common` dependency.
@@ -45,6 +46,163 @@ pub fn make_name_filter(needle: Option<&str>, is_regex: bool) -> Result<NameFilt
         let owned = pattern.to_string();
         Ok(Box::new(move |s: &str| s.contains(&owned)))
     }
+}
+
+/// Match a user-facing file/path filter against the path relative to
+/// the selected workspace. Explicit absolute filters are still
+/// accepted for callers that pass a full path.
+#[must_use]
+pub fn file_path_matches_filter(ws: &Workspace, path: &str, filter: &str) -> bool {
+    let relative = workspace_relative_filter_path(ws, path);
+    if path_filter_matches(&relative, filter) {
+        return true;
+    }
+    filter_looks_like_absolute_path(filter) && normalized_path_contains(path, filter)
+}
+
+#[must_use]
+pub fn file_path_excluded_by_filters(ws: &Workspace, path: &str, filters: &[String]) -> bool {
+    filters
+        .iter()
+        .any(|filter| file_path_matches_filter(ws, path, filter))
+}
+
+fn workspace_relative_filter_path(ws: &Workspace, path: &str) -> String {
+    let normalized_path = normalize_path_for_filter(path);
+    let Some(root) = ws.db().workspace_root() else {
+        return normalized_path;
+    };
+    let path_obj = Path::new(path);
+    if let Ok(relative) = path_obj.strip_prefix(&root) {
+        return normalize_path_for_filter(&relative.to_string_lossy());
+    }
+    if let Some(canonical_path) = canonicalize_path_or_existing_parent(path_obj) {
+        if let Ok(relative) = canonical_path.strip_prefix(&root) {
+            return normalize_path_for_filter(&relative.to_string_lossy());
+        }
+        if let Some(canonical_root) = canonicalize_path_or_existing_parent(&root) {
+            if let Ok(relative) = canonical_path.strip_prefix(canonical_root) {
+                return normalize_path_for_filter(&relative.to_string_lossy());
+            }
+        }
+    }
+    let normalized_root = normalize_path_for_filter(&root.to_string_lossy());
+    let normalized_root = normalized_root.trim_end_matches('/');
+    if normalized_root.is_empty() {
+        return normalized_path;
+    }
+    if normalized_path == normalized_root {
+        return String::new();
+    }
+    let root_prefix = format!("{normalized_root}/");
+    normalized_path
+        .strip_prefix(&root_prefix)
+        .map(ToOwned::to_owned)
+        .unwrap_or(normalized_path)
+}
+
+fn normalized_path_contains(path: &str, filter: &str) -> bool {
+    let filter = normalize_path_for_filter(filter);
+    !filter.is_empty() && normalize_path_for_filter(path).contains(&filter)
+}
+
+fn path_filter_matches(path: &str, filter: &str) -> bool {
+    let path = normalize_path_for_filter(path);
+    let filter = normalize_path_for_filter(filter);
+    if filter.is_empty() {
+        return false;
+    }
+    if filter.contains('/') {
+        return path_filter_with_separator_matches(&path, &filter);
+    }
+    path.contains(filter.as_str())
+}
+
+fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
+    let trimmed = filter.trim_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    let is_component_filter = filter.starts_with('/') || filter.ends_with('/');
+    if is_component_filter {
+        return path == trimmed
+            || path.starts_with(&format!("{trimmed}/"))
+            || path.contains(&format!("/{trimmed}/"));
+    }
+    path.contains(filter)
+}
+
+fn filter_looks_like_absolute_path(filter: &str) -> bool {
+    let normalized = normalize_path_for_filter(filter);
+    if normalized.len() >= 3 && normalized.as_bytes()[1] == b':' && normalized.as_bytes()[2] == b'/' {
+        return true;
+    }
+    Path::new(filter).is_absolute() && normalized.trim_matches('/').contains('/')
+}
+
+fn normalize_path_for_filter(value: &str) -> String {
+    value.replace('\\', "/").trim_start_matches("./").to_string()
+}
+
+fn canonicalize_path_or_existing_parent(path: &Path) -> Option<std::path::PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let parent = path.parent()?;
+    let canonical_parent = parent.canonicalize().ok()?;
+    Some(match path.file_name() {
+        Some(file_name) => canonical_parent.join(file_name),
+        None => canonical_parent,
+    })
+}
+
+/// Query relevance key for browse rows. Lower is better.
+///
+/// Regex filters keep the pre-existing deterministic sort because a
+/// regex does not have a stable notion of prefix/exact relevance
+/// without re-running capture analysis per row. Plain-text filters
+/// rank exact matches first, then prefix matches, then substring
+/// matches, with shorter candidates winning inside each bucket.
+#[must_use]
+pub(crate) fn textual_relevance_key(candidate: &str, query: Option<&str>, regex: bool) -> (u8, usize) {
+    let Some(query) = query.filter(|q| !q.is_empty()) else {
+        return (u8::MAX, candidate.len());
+    };
+    if regex {
+        return (u8::MAX, candidate.len());
+    }
+    let candidate_lower = candidate.to_lowercase();
+    let query_lower = query.to_lowercase();
+    let bucket = if candidate == query {
+        0
+    } else if candidate_lower == query_lower {
+        1
+    } else if candidate.starts_with(query) {
+        2
+    } else if candidate_lower.starts_with(&query_lower) {
+        3
+    } else if candidate.contains(query) {
+        4
+    } else if candidate_lower.contains(&query_lower) {
+        5
+    } else {
+        6
+    };
+    (bucket, candidate.len())
+}
+
+/// Best relevance key across a row's candidate strings. Lower is better.
+#[must_use]
+pub(crate) fn best_textual_relevance_key<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    query: Option<&str>,
+    regex: bool,
+) -> (u8, usize) {
+    candidates
+        .into_iter()
+        .map(|candidate| textual_relevance_key(candidate, query, regex))
+        .min()
+        .unwrap_or((u8::MAX, usize::MAX))
 }
 
 /// Canonical locator carried by every cross-row connection in
@@ -290,6 +448,10 @@ pub(crate) fn collect_callees(events: &[bonsai_lang_api::FlowEvent], out: &mut V
         }
     }
 }
+
+#[cfg(test)]
+#[path = "common_relevance_tests.rs"]
+mod relevance_tests;
 
 #[cfg(test)]
 #[path = "common_truncate_tests.rs"]

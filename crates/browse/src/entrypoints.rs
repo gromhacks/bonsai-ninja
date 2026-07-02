@@ -4,7 +4,10 @@
 //! semantic in-workspace callers. This is intentionally rulepack-free:
 //! it is a deterministic callgraph root view for code navigation.
 
-use crate::common::{collect_callee_names, format_span, make_name_filter};
+use crate::common::{
+    best_textual_relevance_key, collect_callee_names, file_path_matches_filter, format_span,
+    make_name_filter, textual_relevance_key,
+};
 use bonsai_common::FuncId;
 use bonsai_lang_api::DeclKind;
 use bonsai_workspace::Workspace;
@@ -57,7 +60,9 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
                 continue;
             }
             let (path, line, column) = format_span(&decl.name_span, ws);
-            if f.file.is_some_and(|needle| !path.contains(needle)) {
+            if f.file
+                .is_some_and(|needle| !file_path_matches_filter(ws, &path, needle))
+            {
                 continue;
             }
             let qualified_matches = decl.qualified_name.as_deref().is_some_and(&name_match);
@@ -85,14 +90,34 @@ pub fn entrypoints(ws: &Workspace, f: &EntryPointsFilters<'_>) -> Result<Vec<Ent
         }
     }
     out.sort_by(|a, b| {
-        a.kind
-            .cmp(&b.kind)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| a.column.cmp(&b.column))
+        entrypoint_relevance_key(a, f)
+            .cmp(&entrypoint_relevance_key(b, f))
+            .then_with(|| {
+                a.kind
+                    .cmp(&b.kind)
+                    .then_with(|| a.name.cmp(&b.name))
+                    .then_with(|| a.file.cmp(&b.file))
+                    .then_with(|| a.line.cmp(&b.line))
+                    .then_with(|| a.column.cmp(&b.column))
+            })
     });
     Ok(out)
+}
+
+fn entrypoint_relevance_key(row: &EntryPointOut, f: &EntryPointsFilters<'_>) -> ((u8, usize), (u8, usize)) {
+    let kind = f.kind.filter(|_| !f.regex).map_or((u8::MAX, usize::MAX), |kind| {
+        textual_relevance_key(&row.kind, Some(kind), false)
+    });
+    let name = f.name.filter(|_| !f.regex).map_or((u8::MAX, usize::MAX), |name| {
+        best_textual_relevance_key(
+            [Some(row.name.as_str()), row.qualified_name.as_deref()]
+                .into_iter()
+                .flatten(),
+            Some(name),
+            false,
+        )
+    });
+    (kind, name)
 }
 
 fn is_callable_entry_kind(kind: DeclKind) -> bool {

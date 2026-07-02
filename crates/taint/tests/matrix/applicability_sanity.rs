@@ -1,7 +1,208 @@
 use super::*;
 use crate::scenarios::{Category, Polarity};
+use bonsai_lang_api::FlowEdgeKind;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+enum TaxonomyAuditClass {
+    Pass,
+    EngineOnly,
+    StaticLimit,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct TaxonomyScenarioContract {
+    edge: &'static str,
+    class: TaxonomyAuditClass,
+    scenarios: &'static [&'static str],
+}
+
+const TAXONOMY_SCENARIO_CONTRACTS: &[TaxonomyScenarioContract] = &[
+    TaxonomyScenarioContract {
+        edge: "LOCAL_ASSIGN",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_01", "I_02"],
+    },
+    TaxonomyScenarioContract {
+        edge: "EXPR_PROPAGATION",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_03", "I_04", "I_06"],
+    },
+    TaxonomyScenarioContract {
+        edge: "DEF_USE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_01", "I_02", "OT_17"],
+    },
+    TaxonomyScenarioContract {
+        edge: "ARG_TO_PARAM",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_01", "R_04", "R_19", "R_20"],
+    },
+    TaxonomyScenarioContract {
+        edge: "RECEIVER_TO_THIS",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_03", "OT_16"],
+    },
+    TaxonomyScenarioContract {
+        edge: "RETURN_TO_CALLER",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_02", "R_10", "OT_11"],
+    },
+    TaxonomyScenarioContract {
+        edge: "FIELD_WRITE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_05", "OT_01", "OT_09", "OT_10"],
+    },
+    TaxonomyScenarioContract {
+        edge: "FIELD_READ",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_03", "OT_01", "OT_09", "OT_10"],
+    },
+    TaxonomyScenarioContract {
+        edge: "INDEX_WRITE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_04", "OT_13"],
+    },
+    TaxonomyScenarioContract {
+        edge: "INDEX_READ",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_04", "I_11", "OT_13"],
+    },
+    TaxonomyScenarioContract {
+        edge: "OBJECT_CONSTRUCTION",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_05"],
+    },
+    TaxonomyScenarioContract {
+        edge: "DESTRUCTURING",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_05", "R_13"],
+    },
+    TaxonomyScenarioContract {
+        edge: "CLOSURE_CAPTURE",
+        class: TaxonomyAuditClass::StaticLimit,
+        scenarios: &["I_18", "I_19"],
+    },
+    TaxonomyScenarioContract {
+        edge: "GLOBAL_ACCESS",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["X_15", "OT_20"],
+    },
+    TaxonomyScenarioContract {
+        edge: "IMPORT_EXPORT",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &[
+            "X_01", "X_02", "X_03", "X_04", "X_05", "X_06", "X_07", "X_08", "X_09", "X_10", "X_11", "X_12",
+            "X_13", "X_14", "X_15", "X_16",
+        ],
+    },
+    TaxonomyScenarioContract {
+        edge: "ALIAS",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["X_02", "R_17", "I_01"],
+    },
+    TaxonomyScenarioContract {
+        edge: "DEREFERENCE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_08", "OT_05", "OT_06"],
+    },
+    TaxonomyScenarioContract {
+        edge: "HEAP_STORE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_05", "R_08", "OT_01"],
+    },
+    TaxonomyScenarioContract {
+        edge: "HEAP_LOAD",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_02", "OT_01", "OT_09"],
+    },
+    TaxonomyScenarioContract {
+        edge: "CONTAINER_STORE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_04", "I_11", "R_13"],
+    },
+    TaxonomyScenarioContract {
+        edge: "CONTAINER_LOAD",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_11", "R_13", "OT_13"],
+    },
+    TaxonomyScenarioContract {
+        edge: "ITERATION",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_10", "I_11", "I_12"],
+    },
+    TaxonomyScenarioContract {
+        edge: "YIELD",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_12"],
+    },
+    TaxonomyScenarioContract {
+        edge: "THROW_TO_CATCH",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["I_13", "I_14", "I_15"],
+    },
+    TaxonomyScenarioContract {
+        edge: "AWAIT_RESOLUTION",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_11"],
+    },
+    TaxonomyScenarioContract {
+        edge: "CALLBACK_INVOCATION",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["R_09", "R_10", "R_17"],
+    },
+    TaxonomyScenarioContract {
+        edge: "EVENT_DISPATCH",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &["R_10"],
+    },
+    TaxonomyScenarioContract {
+        edge: "DYNAMIC_PROPERTY_ACCESS",
+        class: TaxonomyAuditClass::StaticLimit,
+        scenarios: &["X_08", "OT_13"],
+    },
+    TaxonomyScenarioContract {
+        edge: "SERIALIZE",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &[],
+    },
+    TaxonomyScenarioContract {
+        edge: "DESERIALIZE",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &[],
+    },
+    TaxonomyScenarioContract {
+        edge: "SANITIZE",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &[],
+    },
+    TaxonomyScenarioContract {
+        edge: "SINK",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &["I_01", "OT_07"],
+    },
+    TaxonomyScenarioContract {
+        edge: "CONTROL_DEPENDENCE",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &["I_06", "I_07", "I_08", "I_16", "I_17", "OT_08"],
+    },
+    TaxonomyScenarioContract {
+        edge: "IMPLICIT_FLOW",
+        class: TaxonomyAuditClass::StaticLimit,
+        scenarios: &["I_12", "OT_08"],
+    },
+    TaxonomyScenarioContract {
+        edge: "INTER_FILE",
+        class: TaxonomyAuditClass::Pass,
+        scenarios: &["X_01", "X_04", "X_07", "X_16"],
+    },
+    TaxonomyScenarioContract {
+        edge: "INTER_PACKAGE",
+        class: TaxonomyAuditClass::EngineOnly,
+        scenarios: &[],
+    },
+];
 
 fn taint_tests_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
@@ -107,6 +308,20 @@ fn scenario_construct_markers(id: &str) -> Option<&'static [&'static str]> {
         ]),
         "R_19" => Some(&["*p", "...", "String...", "String*", "vararg", "params ", "@_"]),
         "R_20" => Some(&["name=", "name =", "name:", "Name:"]),
+        "X_07" => Some(&[
+            "using namespace",
+            "using static",
+            "import '",
+            "import Util",
+            "import .",
+            "import static",
+            "import util.*",
+            "require_once",
+            "from util import *",
+            "require_relative",
+            "::*",
+            "._",
+        ]),
         _ => None,
     }
 }
@@ -302,6 +517,123 @@ fn every_applicable_cell_has_an_executable_fixture() {
          mark truly unsupported cells NotApplicable or unimplemented cells AdapterDeferred:\n{}",
         missing.join("\n")
     );
+}
+
+#[test]
+fn no_scenario_is_not_applicable_for_every_language() {
+    let mut dead_rows = Vec::new();
+    for scenario in SCENARIOS {
+        let is_all_not_applicable = LANGUAGES
+            .iter()
+            .all(|lang| status(lang, scenario.id) == Status::NotApplicable);
+        if is_all_not_applicable {
+            dead_rows.push(format!(
+                "{} ({}) is n/a for every language",
+                scenario.id, scenario.description
+            ));
+        }
+    }
+
+    assert!(
+        dead_rows.is_empty(),
+        "a matrix scenario with no applicable language is not coverage; remove it or add real fixtures:\n{}",
+        dead_rows.join("\n")
+    );
+}
+
+#[test]
+fn taxonomy_contracts_are_backed_by_real_matrix_scenarios() {
+    let taxonomy_names: HashSet<_> = FlowEdgeKind::ALL.iter().map(|kind| kind.as_str()).collect();
+    let mut contract_names = HashSet::new();
+    let mut unsupported_edges = Vec::new();
+    let mut missing_scenarios = Vec::new();
+    let mut untested_contracts = Vec::new();
+    let mut classes = HashSet::new();
+
+    for contract in TAXONOMY_SCENARIO_CONTRACTS {
+        classes.insert(contract.class);
+
+        if !taxonomy_names.contains(contract.edge) {
+            unsupported_edges.push(contract.edge);
+            continue;
+        }
+        if !contract_names.insert(contract.edge) {
+            unsupported_edges.push(contract.edge);
+        }
+
+        if contract.class != TaxonomyAuditClass::EngineOnly && contract.scenarios.is_empty() {
+            untested_contracts.push(format!(
+                "{} is {:?} but does not name any matrix scenario",
+                contract.edge, contract.class
+            ));
+        }
+
+        for id in contract.scenarios {
+            let Some(scenario) = crate::scenarios::scenario(id) else {
+                missing_scenarios.push(format!("{} references unknown scenario `{id}`", contract.edge));
+                continue;
+            };
+
+            let path = scenario_file(scenario.category, scenario.id);
+            let body =
+                std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            let mut fixture_languages = Vec::new();
+            for &lang in LANGUAGES {
+                if status(lang, scenario.id) != Status::Applicable {
+                    continue;
+                }
+                let name = scenario_test_name(scenario.id, lang);
+                if body.contains(&name) {
+                    fixture_languages.push(lang);
+                }
+            }
+
+            if fixture_languages.is_empty() {
+                untested_contracts.push(format!(
+                    "{} -> {} ({}) has no applicable executable fixture",
+                    contract.edge, scenario.id, scenario.description
+                ));
+            }
+        }
+    }
+
+    let undocumented_edges: Vec<_> = taxonomy_names
+        .iter()
+        .filter(|edge| !contract_names.contains(**edge))
+        .copied()
+        .collect();
+
+    assert!(
+        unsupported_edges.is_empty(),
+        "taxonomy scenario contracts reference unknown or duplicate edge names:\n{}",
+        unsupported_edges.join("\n")
+    );
+    assert!(
+        undocumented_edges.is_empty(),
+        "taxonomy entries must be classified in the matrix contract:\n{}",
+        undocumented_edges.join("\n")
+    );
+    assert!(
+        missing_scenarios.is_empty(),
+        "taxonomy scenario contracts reference unknown scenarios:\n{}",
+        missing_scenarios.join("\n")
+    );
+    assert!(
+        untested_contracts.is_empty(),
+        "PASS and STATIC_LIMIT taxonomy contracts must be backed by real applicable fixtures; \
+         ENGINE_ONLY entries may stay scenario-free when implemented by shared engine/rulepack/control layers:\n{}",
+        untested_contracts.join("\n")
+    );
+    for class in [
+        TaxonomyAuditClass::Pass,
+        TaxonomyAuditClass::EngineOnly,
+        TaxonomyAuditClass::StaticLimit,
+    ] {
+        assert!(
+            classes.contains(&class),
+            "taxonomy contract must include {class:?}"
+        );
+    }
 }
 
 #[test]
