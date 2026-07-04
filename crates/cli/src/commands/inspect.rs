@@ -451,6 +451,12 @@ pub(crate) struct InspectRenderOptions {
     /// Like `flow_id_filter` but one level up: selects every
     /// member of a suffix-cluster rather than a single chain.
     pub(crate) group_id_filter: Option<String>,
+    /// True when a `show F:` / `show G:` structural drilldown invoked
+    /// this render. The id IS the query there, so the whole-workspace
+    /// occurrence scan is skipped regardless of workspace size —
+    /// `show` stays a pure structural-chain view. `inspect --flow`
+    /// keeps the folded occurrence context on small workspaces.
+    pub(crate) structural_drilldown: bool,
 }
 
 impl Default for InspectRenderOptions {
@@ -464,6 +470,7 @@ impl Default for InspectRenderOptions {
             flow_id_filter: None,
             view: InspectView::Trace,
             group_id_filter: None,
+            structural_drilldown: false,
         }
     }
 }
@@ -740,13 +747,13 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
     let files_in_path_order: Vec<bonsai_common::FileId> = {
         let mut v: Vec<(String, bonsai_common::FileId)> = global
             .all_files()
-            .filter_map(|f| {
+            .map(|f| {
                 let path = ws
                     .vfs()
                     .path(f)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                Some((path, f))
+                (path, f)
             })
             .collect();
         v.sort();
@@ -763,6 +770,21 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         && filters.to_kind.is_none()
         && filters.file.is_none()
         && filters.in_fn.is_none();
+    // A bare `--flow F:` / `--group G:` open skips the whole-workspace
+    // occurrence scan only when that scan would be expensive: with a
+    // MatchAll matcher every var/call/arg in the workspace becomes a
+    // hit whose chains get enumerated — the exact blowup direct id
+    // lookups exist to avoid. Small workspaces keep the folded
+    // occurrence context (vars/calls sharing the flow id); dropping it
+    // everywhere lost render context the folding contract pins. The
+    // large-workspace skip is announced via `hit_truncation_reasons`,
+    // never silent.
+    // `show F:` / `show G:` drilldowns skip the occurrence scan
+    // unconditionally — they are pure structural-chain views; the id
+    // IS the query. `inspect --flow` keeps the folded occurrence
+    // context except on large workspaces (announced, never silent).
+    let occurrence_scan_skipped_for_id_lookup =
+        structural_id_only_lookup && (large_syntax_scan || render.structural_drilldown);
     // Raw inspect taint-flow is query-bounded by default: syntax hits add
     // their enclosing callable to this set, then we ask the taint graph
     // only for those entries. The only workspace-wide fallback is a
@@ -1568,7 +1590,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         });
     };
 
-    if !structural_id_only_lookup {
+    if !occurrence_scan_skipped_for_id_lookup {
         let hit_phase = if partial_workspace {
             "hydrating verified facts"
         } else {
@@ -1724,7 +1746,9 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
 
     // ----- 3. Summary.
     let (flow_truncated_hits, flow_truncation_reasons) = occurrence_flow_truncation_summary(&hits);
-    let hits_truncated = hits_truncated_by_output_cap.get() || hits_truncated_by_attempt_cap.get();
+    let hits_truncated = hits_truncated_by_output_cap.get()
+        || hits_truncated_by_attempt_cap.get()
+        || occurrence_scan_skipped_for_id_lookup;
     let summary = InspectReportSummary {
         total_decl_hits: decl_hits.len(),
         total_hits: hits.len(),
@@ -1736,6 +1760,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
         hit_truncation_reasons: inspect_hit_truncation_reasons(
             hits_truncated_by_output_cap.get(),
             hits_truncated_by_attempt_cap.get(),
+            occurrence_scan_skipped_for_id_lookup,
         ),
         hit_candidates_attempted: hits_truncated.then_some(hits_attempted.get()),
         hit_attempt_cap: hits_truncated.then_some(attempt_cap),
@@ -2671,13 +2696,23 @@ fn is_zero_usize(n: &usize) -> bool {
     usize::eq(n, &0)
 }
 
-fn inspect_hit_truncation_reasons(output_cap: bool, attempt_cap: bool) -> Vec<String> {
+fn inspect_hit_truncation_reasons(
+    output_cap: bool,
+    attempt_cap: bool,
+    id_lookup_scan_skipped: bool,
+) -> Vec<String> {
     let mut reasons = Vec::new();
     if output_cap {
         reasons.push("max-hits output cap".to_string());
     }
     if attempt_cap {
         reasons.push("candidate-attempt cap derived from max-hits".to_string());
+    }
+    if id_lookup_scan_skipped {
+        reasons.push(
+            "direct id lookup on a large workspace skips the occurrence scan; add --query/--from/--to to scope one"
+                .to_string(),
+        );
     }
     reasons
 }
@@ -3383,31 +3418,44 @@ fn render_inspect_report_text(
             let idx = (*n as usize).saturating_sub(1).min(total_pages.saturating_sub(1));
             page_starts.get(idx).copied().unwrap_or(0)
         }
-        paging::PageArg::Cursor(c) => page_starts
-            .iter()
-            .copied()
+        // Cursors are minted from the ACTUAL unit the previous render
+        // stopped at (`unit_cursor`), which lands mid-page whenever the
+        // real render outpaces `simulate_page_starts`' estimates. Resolve
+        // against every unit offset — matching only simulated page starts
+        // silently replayed page 1 whenever the two disagreed.
+        paging::PageArg::Cursor(c) => (0..=total_units)
             .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == *c)
             .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0)),
         paging::PageArg::Next => {
             // `--page next` advances past the page recorded in the
             // last-cursor history; falls back to page 1 with no history.
-            // (The hand-rolled resolver here must mirror
-            // `paging::paginate`'s Next handling.)
+            // The recorded cursor can sit mid-page (see Cursor arm), so
+            // resolve it over unit offsets and advance to the first
+            // simulated page start after it.
             paging::last_cursor("inspect", filters_hash)
                 .and_then(|cur| {
-                    page_starts
-                        .iter()
-                        .position(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == cur)
-                        .and_then(|idx| page_starts.get(idx + 1).copied())
+                    (0..=total_units)
+                        .find(|off| paging::cursor_id("inspect", filters_hash, *off as u64) == cur)
+                        .map(|off| {
+                            page_starts
+                                .iter()
+                                .copied()
+                                .find(|&s| s > off)
+                                .unwrap_or(total_units)
+                        })
                 })
                 .unwrap_or_else(|| page_starts.first().copied().unwrap_or(0))
         }
     };
-    let page_number = page_starts
+    // 1-based page number for display. Exact page starts get their
+    // canonical number; a mid-page cursor-resume offset rounds UP to
+    // the next page number so cursor-following readers always see the
+    // number advance instead of repeating the page they just left.
+    let page_number = (page_starts
         .iter()
-        .position(|&s| s == requested_start_offset)
-        .map(|i| (i + 1) as u64)
-        .unwrap_or(1);
+        .take_while(|&&s| s < requested_start_offset)
+        .count()
+        + 1) as u64;
     let start_offset = requested_start_offset;
     // Persist this page's cursor so a subsequent `--page next` advances
     // from here, matching `paging::paginate`'s behavior.
@@ -3618,26 +3666,33 @@ fn render_inspect_report_text(
     let strict_remaining =
         || -> Option<u64> { strict_budget_bytes.map(|b| b.saturating_sub(strict_emitted())) };
     for unit_index in start_offset..page_end_unit {
-        if let Some(b) = unit_budget_bytes {
-            if emitted_so_far(bytes_before_units as u64) >= b {
-                break;
-            }
-        }
-        if let Some(strict) = strict_budget_bytes {
-            if strict_emitted() >= strict {
-                break;
-            }
-        }
         let is_first_on_page = rendered_units == 0;
+        // Budget-exhaustion breaks only apply after the first unit.
+        // A page must always advance the cursor by at least one unit
+        // (rendered, compact, or a stub) — when the taint/hits tables
+        // consume the whole budget before any unit renders, breaking
+        // here minted a next-cursor equal to this page's own start:
+        // an infinite pagination loop, with numeric page walkers
+        // silently skipping the never-rendered units.
+        if !is_first_on_page {
+            if let Some(b) = unit_budget_bytes {
+                if emitted_so_far(bytes_before_units as u64) >= b {
+                    break;
+                }
+            }
+            if let Some(strict) = strict_budget_bytes {
+                if strict_emitted() >= strict {
+                    break;
+                }
+            }
+        }
         let full_estimate = unit_full_cost(unit_index);
         let compact_estimate = unit_compact_cost(unit_index);
         let mut effective_render = render.clone();
         let fits_unit_slice = fits(full_estimate);
         let fits_strict_page = strict_remaining().is_none_or(|rem| full_estimate <= rem);
         if !fits_unit_slice || !fits_strict_page {
-            let oversized_vs_total = unit_budget_bytes.is_some_and(|b| full_estimate > b);
-            let oversized_vs_strict_total = strict_budget_bytes.is_some_and(|b| full_estimate > b);
-            if is_first_on_page && (oversized_vs_total || oversized_vs_strict_total) {
+            if is_first_on_page {
                 // Pre-render proactive check: even compact must
                 // fit the strict remaining budget. If it doesn't,
                 // emit a one-line "too large" stub so the user
@@ -3936,12 +3991,7 @@ fn should_render_raw_taint_bodies(render: &InspectRenderOptions, structural_unit
 }
 
 fn render_raw_taint_flow_bodies(ws: &Workspace, u: &Ui, flows: &[InspectTaintFlow], text_limit: usize) {
-    let render_opts = InspectRenderOptions {
-        compact: false,
-        flow_id_filter: None,
-        view: InspectView::Trace,
-        group_id_filter: None,
-    };
+    let render_opts = InspectRenderOptions::default();
     for (idx, flow) in flows.iter().take(text_limit).enumerate() {
         let Some(rendered) = rendered_flow_from_raw_taint(ws, flow, (idx + 1) as u32) else {
             continue;
@@ -4539,6 +4589,116 @@ fn render_compact_step_list(u: &Ui, flow: &InspectFlowRendered) {
             cli_println!("       {}", u.dim(&truncate(text, 140)));
         }
     }
+}
+
+/// Recursively find the smallest source line whose structured flow
+/// event mentions `needle`. Matches the same per-event fact fields as
+/// `bonsai_taint`'s chain-token collector (call names, keyword/arg
+/// text, assign writes/reads/call args) — never raw line text — so a
+/// chain selected via a propagated taint fact can anchor its filter
+/// marker on the exact line that carries the fact.
+fn find_fact_anchor_line(
+    events: &[bonsai_lang_api::FlowEvent],
+    needle: &str,
+    span_map: &bonsai_common::SpanMap,
+    best: &mut Option<u32>,
+) {
+    use bonsai_lang_api::FlowEvent as E;
+    for event in events {
+        let matched_span = match event {
+            E::Call { span, name, args, .. } => (name_token_match(name, needle)
+                || args.iter().any(|arg| {
+                    arg.name.as_deref().is_some_and(|n| name_token_match(n, needle))
+                        || name_token_match(&arg.value_text, needle)
+                }))
+            .then_some(*span),
+            E::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } => (name_token_match(target, needle)
+                || source_name
+                    .as_deref()
+                    .is_some_and(|s| name_token_match(s, needle))
+                || source_call
+                    .as_deref()
+                    .is_some_and(|c| name_token_match(c, needle))
+                || source_call_args.iter().any(|a| name_token_match(a, needle))
+                || source_names.iter().any(|s| name_token_match(s, needle)))
+            .then_some(*span),
+            E::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                find_fact_anchor_line(then_events, needle, span_map, best);
+                find_fact_anchor_line(else_events, needle, span_map, best);
+                None
+            }
+            E::Loop { body, .. } => {
+                find_fact_anchor_line(body, needle, span_map, best);
+                None
+            }
+            E::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                find_fact_anchor_line(body, needle, span_map, best);
+                find_fact_anchor_line(catch_events, needle, span_map, best);
+                find_fact_anchor_line(finally_events, needle, span_map, best);
+                None
+            }
+            E::Defer { body, .. } | E::Using { body, .. } => {
+                find_fact_anchor_line(body, needle, span_map, best);
+                None
+            }
+            _ => None,
+        };
+        if let Some(span) = matched_span {
+            let line = span_map.line_col(span.start).line;
+            if best.is_none_or(|b| line < b) {
+                *best = Some(line);
+            }
+        }
+    }
+}
+
+/// Append a `[FLOW N FROM: X]` / `[FLOW N TO: Y]` marker to the
+/// rendered line at `anchor_line` when no line in this def render
+/// already carries that exact marker. Post-pass companion to
+/// [`build_filter_marker`] for chains selected via structured taint
+/// facts, which have no decl-name / hit subject for the marker to
+/// land on during the main loop.
+fn attach_fact_anchored_marker(
+    lines: &mut [InspectLine],
+    tag: &str,
+    needle: Option<&str>,
+    anchor_line: Option<u32>,
+    flow_label: &str,
+) {
+    let (Some(needle), Some(anchor)) = (needle, anchor_line) else {
+        return;
+    };
+    let marker = format!("[FLOW {flow_label} {tag} {needle}]");
+    if lines
+        .iter()
+        .any(|l| l.annotation.as_deref().is_some_and(|a| a.contains(&marker)))
+    {
+        return;
+    }
+    let Some(line) = lines.iter_mut().find(|l| l.line_no == anchor && l.text != "...") else {
+        return;
+    };
+    line.annotation = Some(match line.annotation.take() {
+        Some(existing) => format!("{existing} {marker}"),
+        None => marker,
+    });
 }
 
 /// Build the `[FLOW N FROM: X]` / `[FLOW N TO: Y]` annotation suffix
@@ -5387,6 +5547,29 @@ fn render_function_source(
     // Clamp to file size.
     let end_clamped = end_line.min(lines_in_src.len() as u32);
 
+    // Structured-fact anchor lines for `--from` / `--to` markers.
+    // Chain selection can match a needle via a propagated taint fact
+    // that no SOURCE/MATCH/advance subject carries (a parameter read,
+    // a concat operand, a call arg). Resolve the first in-range line
+    // whose structured events mention the needle so the post-pass can
+    // land the marker there. Nested decls are scanned too — for a
+    // rendered `__module__` body the facts live in the functions the
+    // module encloses. FROM anchors only on the chain's entry def and
+    // TO only on the target def, so markers never scatter across hops.
+    let fact_anchor = |needle: Option<&str>| -> Option<u32> {
+        let needle = needle?;
+        let mut best: Option<u32> = None;
+        for nested in ws.db().global_index().decls_in(file) {
+            if nested.span.start < decl.span.start || nested.span.end > decl.span.end {
+                continue;
+            }
+            find_fact_anchor_line(&nested.flow_events, needle, &span_map, &mut best);
+        }
+        best.filter(|line| *line >= first_line && *line <= end_clamped)
+    };
+    let from_anchor = if is_root { fact_anchor(filters.from) } else { None };
+    let to_anchor = if is_target { fact_anchor(filters.to) } else { None };
+
     let large_body_elision = !full_source_for_large_bodies
         && end_clamped.saturating_sub(first_line) as usize > LARGE_BODY_LINE_THRESHOLD;
     let line_plan: Vec<Option<u32>> = if large_body_elision {
@@ -5407,6 +5590,12 @@ fn render_function_source(
             mark_window(line);
         }
         if let Some(line) = sink_line {
+            mark_window(line);
+        }
+        if let Some(line) = from_anchor {
+            mark_window(line);
+        }
+        if let Some(line) = to_anchor {
             mark_window(line);
         }
         let mut sorted: Vec<u32> = keep.into_iter().collect();
@@ -5492,6 +5681,12 @@ fn render_function_source(
             step = Some(*step_counter);
             annotation = Some(format!("[FLOW {flow_label} SOURCE: entry {}]", decl.name));
             subjects.push(&decl.name);
+            // The def line also declares the entry's parameters — a
+            // `--from` that selected this chain via a parameter name
+            // must land its marker on the signature that declares it.
+            for param in &decl.params {
+                subjects.push(param.as_str());
+            }
         } else if let (Some(al), Some(next)) = (advance_line, &next_name) {
             if ln == al {
                 *step_counter += 1;
@@ -5555,6 +5750,15 @@ fn render_function_source(
             annotation,
         });
     }
+
+    attach_fact_anchored_marker(
+        &mut rendered_lines,
+        "FROM:",
+        filters.from,
+        from_anchor,
+        flow_label,
+    );
+    attach_fact_anchored_marker(&mut rendered_lines, "TO:", filters.to, to_anchor, flow_label);
 
     // Collapse long runs of blank/unannotated lines between the first and
     // last annotated line: keep 1 blank line maximum between annotations so

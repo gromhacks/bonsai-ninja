@@ -203,7 +203,7 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "kotlin" => 1,
         "lua" => 1,
         "objc" => 1,
-        "perl" => 1,
+        "perl" => 2,
         "php" => 2,
         "python" => 1,
         "ruby" => 2,

@@ -28,7 +28,7 @@ declare -a TIER_3=(
 declare -a TIER_4=(bonsai_index bonsai_resolve bonsai_cfg bonsai_callgraph bonsai_abstract_interp bonsai_idg bonsai_db)
 declare -a TIER_5=(bonsai_taint)
 declare -a TIER_6=(bonsai_workspace)
-declare -a TIER_7=(bonsai_inspect bonsai_browse bonsai_trace bonsai_security)
+declare -a TIER_7=(bonsai_inspect bonsai_retrieval bonsai_browse bonsai_trace bonsai_security)
 declare -a TIER_8=(bonsai_sdk)
 declare -a TIER_9=(bonsai_adapters bonsai_cli bonsai_conformance bonsai_testkit)
 

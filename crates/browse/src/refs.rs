@@ -331,7 +331,7 @@ fn walk_flow_source_reads(events: &[FlowEvent], visit: &mut impl FnMut(&str, bon
                 walk_flow_source_reads(else_events, visit);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                walk_flow_source_reads(body, visit)
+                walk_flow_source_reads(body, visit);
             }
             FlowEvent::Try {
                 body,

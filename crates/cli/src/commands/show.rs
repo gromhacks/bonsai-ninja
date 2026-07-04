@@ -53,7 +53,19 @@ pub(crate) fn cmd_show(args: ShowArgs<'_>) -> Result<()> {
         "F" => show_structural_or_security_flow(&args, id, paging_cfg),
         "G" => show_structural_or_security_group(&args, id, paging_cfg),
         "T" if args.has_dump_taint_context() => show_dump_taint_propagation(args, id, paging_cfg),
-        "T" => show_raw_taint_flow(args.workspace, id, args.compact, paging_cfg, args.format),
+        "T" => {
+            show_raw_taint_flow(args.workspace, id, args.compact, paging_cfg, args.format).map_err(|err| {
+                if err.to_string().contains("no flow matching") {
+                    anyhow::anyhow!(
+                        "{err} `dump-taint` propagation ids share the T: prefix but are \
+                         source-seeded: reopen those with `show {id} --taint-source <function> \
+                         [--taint-seed <param>]`."
+                    )
+                } else {
+                    err
+                }
+            })
+        }
         "E" => cmd_dump_edges(
             args.workspace,
             None,
@@ -129,6 +141,7 @@ fn show_structural_flow(
                 flow_id_filter: Some(id.to_string()),
                 view: InspectView::Trace,
                 group_id_filter: None,
+                structural_drilldown: true,
             },
             graph_flow: true,
             taint_flow: false,
@@ -182,6 +195,7 @@ fn show_flow_group(
                 flow_id_filter: None,
                 view: InspectView::Grouped,
                 group_id_filter: Some(id.to_string()),
+                structural_drilldown: true,
             },
             graph_flow: true,
             taint_flow: false,
@@ -292,6 +306,7 @@ fn show_raw_taint_flow(
                 flow_id_filter: Some(id.to_string()),
                 view: InspectView::Trace,
                 group_id_filter: None,
+                structural_drilldown: true,
             },
             graph_flow: false,
             taint_flow: true,

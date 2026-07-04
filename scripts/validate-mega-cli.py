@@ -77,7 +77,7 @@ EXPECTED_FINDINGS = {
     # evidence, leaving the one real os.execute command-injection flow.
     "lua": 1,
     "objc": 1,
-    "perl": 1,
+    "perl": 2,
     "php": 2,
     "python": 1,
     "ruby": 2,

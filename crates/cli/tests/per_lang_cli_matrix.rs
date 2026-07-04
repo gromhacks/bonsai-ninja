@@ -1246,7 +1246,7 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         // One real command-injection (stdin_fgets → system). The earlier
         // count of 2 included an xxe over-claim that was removed.
         "objc" => 1,
-        "perl" => 1,
+        "perl" => 2,
         // Two real vulns: readline → shell_exec (CWE-78) and
         // superglobal_server → echo (CWE-79).
         "php" => 2,

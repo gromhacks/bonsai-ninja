@@ -2451,9 +2451,12 @@ impl Workspace {
         self.build_semantic_context(true)
     }
 
+    /// Same counts as [`Self::semantic_context`], including bounded
+    /// filesystem discovery of non-indexed roots — `index` stats and
+    /// `context` must not disagree about the same workspace.
     #[must_use]
     pub fn semantic_context_summary(&self) -> WorkspaceSemanticContextSummary {
-        self.build_semantic_context(false).summary
+        self.build_semantic_context(true).summary
     }
 
     fn build_semantic_context(&self, discover_roots: bool) -> WorkspaceSemanticContext {
@@ -3517,8 +3520,12 @@ fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
         return false;
     }
     if filter.starts_with('/') || filter.ends_with('/') {
-        return path == trimmed
-            || path.starts_with(&format!("{trimmed}/"))
+        // Anchored comparison must strip the path's own leading slash the
+        // same way the filter was trimmed, or an explicit absolute filter
+        // (`/abs/ws/app.py`) can never equal the absolute path it names.
+        let anchored = path.trim_start_matches('/');
+        return anchored == trimmed
+            || anchored.starts_with(&format!("{trimmed}/"))
             || path.contains(&format!("/{trimmed}/"));
     }
     path.contains(filter)

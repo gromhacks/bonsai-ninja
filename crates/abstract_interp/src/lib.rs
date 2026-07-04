@@ -52,6 +52,7 @@ pub enum StepKind {
     Throw,
     Await,
     Yield,
+    Lifecycle,
     Merge,
     Diagnostic,
 }
@@ -465,6 +466,11 @@ fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
         ),
         FlowEvent::Break { .. } => (StepKind::Diagnostic, Precision::Exact, "break".into()),
         FlowEvent::Continue { .. } => (StepKind::Diagnostic, Precision::Exact, "continue".into()),
+        FlowEvent::Lifecycle { name, transition, .. } => (
+            StepKind::Lifecycle,
+            Precision::Exact,
+            format!("lifecycle {name} -> {transition}"),
+        ),
         other => (StepKind::Diagnostic, Precision::Exact, format!("{other:?}")),
     }
 }

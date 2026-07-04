@@ -850,8 +850,11 @@ fn path_and_slice_text_summaries_are_polished() {
     ]) else {
         return;
     };
+    // Status depends on whether the fixture's semantic sidecar is warm
+    // (`index --semantic` flips it to complete) — assert the human label,
+    // not the cache state.
     assert!(
-        path_out.contains("status") && path_out.contains("incomplete"),
+        path_out.contains("status complete") || path_out.contains("status incomplete"),
         "path summary should render a human status label:\n{path_out}"
     );
     assert!(

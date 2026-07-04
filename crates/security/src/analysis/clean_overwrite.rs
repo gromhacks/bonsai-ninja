@@ -1,0 +1,1525 @@
+//! Clean-overwrite false-negative filters.
+//!
+//! Detects when a tainted target is definitively overwritten with a clean
+//! value between its taint point and the sink — same-function and
+//! interprocedurally — so the finding is suppressed. Only the LAST write
+//! before the sink may kill the flow; conditional/partial writes keep it.
+//! Includes the small static evaluators (numeric conditions, literal-list
+//! state, ternaries) used to prove a write is clean.
+
+#[allow(clippy::wildcard_imports)]
+use super::*;
+
+pub(super) fn same_function_clean_overwrite_kills_sink_arg(
+    ws: &Workspace,
+    src_func: FuncId,
+    sink_func: FuncId,
+    source_span: Span,
+    sink_span: Span,
+    tainted_args: &[bonsai_taint::TaintedArgAtCall],
+    tainted_receiver: Option<&str>,
+) -> bool {
+    if src_func != sink_func || (tainted_args.is_empty() && tainted_receiver.is_none()) {
+        return false;
+    }
+    let mut targets: Vec<String> = tainted_args
+        .iter()
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .collect();
+    if let Some(receiver) = tainted_receiver {
+        targets.extend(clean_overwrite_target_keys(receiver));
+    }
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+        return false;
+    };
+    clean_overwrite_between(
+        ws,
+        &decl.flow_events,
+        &decl.flow_events,
+        source_span,
+        sink_span,
+        &targets,
+        true,
+    ) || targets.iter().any(|target| {
+        clean_assignment_from_clean_inputs_between(
+            ws,
+            &decl.flow_events,
+            &decl.flow_events,
+            source_span,
+            sink_span,
+            target,
+        )
+    })
+}
+
+pub(super) fn interprocedural_clean_overwrite_kills_lineage_arg(
+    ws: &Workspace,
+    src_func: FuncId,
+    source_span: Span,
+    trace_index: &AHashMap<u64, &TaintedCallEdge>,
+    terminal_call: &TaintedCall,
+) -> bool {
+    let Some(records) = lineage_records_for_call_indexed(trace_index, terminal_call) else {
+        return false;
+    };
+    records
+        .iter()
+        .any(|record| propagation_record_clean_overwrite_kills_edge(ws, src_func, source_span, record))
+}
+
+fn propagation_record_clean_overwrite_kills_edge(
+    ws: &Workspace,
+    src_func: FuncId,
+    source_span: Span,
+    record: &TaintedCallEdge,
+) -> bool {
+    if record.tainted_args.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(record.caller.raw())) else {
+        return false;
+    };
+    if record.caller == src_func && source_span.file != record.call_span.file {
+        return false;
+    }
+    let edge_source_span = if record.caller == src_func {
+        source_span
+    } else {
+        Span::empty(decl.span.file, decl.span.start)
+    };
+    if record.call_span.file != edge_source_span.file || record.call_span.start <= edge_source_span.start {
+        return false;
+    }
+    record.tainted_args.iter().any(|arg| {
+        let targets = clean_overwrite_targets_for_edge_arg(&decl.flow_events, record.call_span, arg);
+        if targets.is_empty() {
+            return false;
+        }
+        targets.iter().any(|target| {
+            let clean_overwrite = clean_overwrite_between(
+                ws,
+                &decl.flow_events,
+                &decl.flow_events,
+                edge_source_span,
+                record.call_span,
+                std::slice::from_ref(target),
+                true,
+            );
+            let clean_assignment = clean_assignment_from_clean_inputs_between(
+                ws,
+                &decl.flow_events,
+                &decl.flow_events,
+                edge_source_span,
+                record.call_span,
+                target,
+            );
+            if clean_overwrite || clean_assignment {
+                bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "inter_clean_overwrite_edge caller={} callee={} call_span={:?} edge_source_span={:?} arg={:?} target={} clean_overwrite={} clean_assignment={}",
+                    record.caller.raw(),
+                    record.callee.raw(),
+                    record.call_span,
+                    edge_source_span,
+                    arg,
+                    target,
+                    clean_overwrite,
+                    clean_assignment
+                );
+            }
+            clean_overwrite || clean_assignment
+        })
+    })
+}
+
+fn clean_overwrite_targets_for_edge_arg(
+    events: &[bonsai_lang_api::FlowEvent],
+    call_span: Span,
+    tainted_arg: &bonsai_taint::TaintedArg,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    if let Some(arg) = find_call_arg_at(events, call_span, tainted_arg.index) {
+        for source_name in &arg.source_names {
+            targets.extend(clean_overwrite_target_keys(source_name));
+        }
+        if targets.is_empty() {
+            if let Some(place) = arg.place.as_deref() {
+                targets.extend(clean_overwrite_target_keys(place));
+            }
+        }
+    }
+    if targets.is_empty() {
+        targets.extend(clean_overwrite_target_keys(&tainted_arg.value_text));
+    }
+    targets.retain(|target| {
+        !clean_conditional_helper_identifier(target)
+            && !looks_like_clean_constant(target)
+            && target != "f"
+            && target != "r"
+            && target != "b"
+            && target != "u"
+    });
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn find_call_arg_at(
+    events: &[bonsai_lang_api::FlowEvent],
+    call_span: Span,
+    arg_index: usize,
+) -> Option<&bonsai_lang_api::CallArg> {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } => {
+                if *span == call_span || spans_overlap(*span, call_span) {
+                    if let Some(arg) = args.get(arg_index) {
+                        return Some(arg);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(arg) = find_call_arg_at(then_events, call_span, arg_index)
+                    .or_else(|| find_call_arg_at(else_events, call_span, arg_index))
+                {
+                    return Some(arg);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(arg) = find_call_arg_at(body, call_span, arg_index) {
+                    return Some(arg);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(arg) = find_call_arg_at(body, call_span, arg_index)
+                    .or_else(|| find_call_arg_at(catch_events, call_span, arg_index))
+                    .or_else(|| find_call_arg_at(finally_events, call_span, arg_index))
+                {
+                    return Some(arg);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn clean_overwrite_between(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    func_events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    sink_span: Span,
+    targets: &[String],
+    allow_direct_assign: bool,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_names,
+                source_call_args,
+                value_kind,
+                ..
+            } => {
+                if allow_direct_assign
+                    && span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= sink_span.start
+                    && targets.iter().any(|target_key| {
+                        clean_overwrite_target_key(target).as_deref() == Some(target_key)
+                            && assignment_cleanly_overwrites_target(
+                                ws,
+                                *span,
+                                source_name.as_deref(),
+                                source_call.as_deref(),
+                                source_names,
+                                source_call_args,
+                                *value_kind,
+                            )
+                            // A clean overwrite only kills the sink arg
+                            // when it is the LAST write to the target
+                            // before the sink. If the target is written
+                            // again after this overwrite (e.g.
+                            // `cmd = ""; cmd = user_input; sink(cmd)` or a
+                            // conditional re-taint), the later write
+                            // supersedes it and the IDG closure already
+                            // accounts for the live value — suppressing
+                            // here would drop a real finding.
+                            && !target_written_between(func_events, target_key, *span, sink_span)
+                    })
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                if span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= sink_span.start
+                    && !else_events.is_empty()
+                    && targets.iter().any(|target| {
+                        if let Some(takes_then) = condition
+                            .as_deref()
+                            .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                        {
+                            if takes_then {
+                                branch_arm_clean_overwrites_target(ws, then_events, target)
+                            } else {
+                                branch_arm_clean_overwrites_target(ws, else_events, target)
+                            }
+                        } else {
+                            branch_arm_clean_overwrites_target(ws, then_events, target)
+                                && branch_arm_clean_overwrites_target(ws, else_events, target)
+                        }
+                    })
+                {
+                    return true;
+                }
+                if clean_overwrite_between(
+                    ws,
+                    then_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    false,
+                ) || clean_overwrite_between(
+                    ws,
+                    else_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    false,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if clean_overwrite_between(
+                    ws,
+                    body,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    allow_direct_assign,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if clean_overwrite_between(
+                    ws,
+                    finally_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    targets,
+                    allow_direct_assign,
+                ) {
+                    return true;
+                }
+                let try_before_sink = span.file == source_span.file && span.end <= sink_span.start;
+                let try_after_source =
+                    try_before_sink && span.start > source_span.start && span.end <= sink_span.start;
+                if try_after_source
+                    && targets.iter().any(|target| {
+                        try_region_clean_overwrites_target(ws, body, catch_events, finally_events, target)
+                    })
+                {
+                    return true;
+                }
+                let source_inside_try =
+                    try_before_sink && span.start <= source_span.start && source_span.start <= span.end;
+                if source_inside_try {
+                    for target in targets {
+                        let single_target = [target.clone()];
+                        let body_cleans_after_source = clean_overwrite_between(
+                            ws,
+                            body,
+                            func_events,
+                            source_span,
+                            sink_span,
+                            &single_target,
+                            allow_direct_assign,
+                        );
+                        let catch_cleans_after_source = clean_overwrite_between(
+                            ws,
+                            catch_events,
+                            func_events,
+                            source_span,
+                            sink_span,
+                            &single_target,
+                            allow_direct_assign,
+                        );
+                        let body_always_clean = branch_arm_clean_overwrites_target(ws, body, target);
+                        let catch_always_clean = catch_events.is_empty()
+                            || branch_arm_clean_overwrites_target(ws, catch_events, target);
+                        if (body_cleans_after_source && catch_always_clean)
+                            || (catch_cleans_after_source && body_always_clean)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn clean_assignment_from_clean_inputs_between(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    func_events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    sink_span: Span,
+    target_key: &str,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                source_names,
+                source_call_args,
+                ..
+            } => {
+                if span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= sink_span.start
+                    && clean_overwrite_target_key(target).as_deref() == Some(target_key)
+                    && source_call.is_none()
+                    && source_call_args.is_empty()
+                    && !target_written_between(func_events, target_key, *span, sink_span)
+                    && assignment_source_names_are_clean_before(
+                        ws,
+                        func_events,
+                        source_span,
+                        *span,
+                        source_names,
+                    )
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if clean_assignment_from_clean_inputs_between(
+                    ws,
+                    then_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) || clean_assignment_from_clean_inputs_between(
+                    ws,
+                    else_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if clean_assignment_from_clean_inputs_between(
+                    ws,
+                    body,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if clean_assignment_from_clean_inputs_between(
+                    ws,
+                    body,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) || clean_assignment_from_clean_inputs_between(
+                    ws,
+                    catch_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) || clean_assignment_from_clean_inputs_between(
+                    ws,
+                    finally_events,
+                    func_events,
+                    source_span,
+                    sink_span,
+                    target_key,
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn assignment_source_names_are_clean_before(
+    ws: &Workspace,
+    func_events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    assign_span: Span,
+    source_names: &[String],
+) -> bool {
+    let mut source_keys: Vec<String> = source_names
+        .iter()
+        .filter_map(|name| clean_overwrite_target_key(name))
+        .filter(|name| !looks_like_clean_constant(name))
+        .collect();
+    source_keys.sort();
+    source_keys.dedup();
+    !source_keys.is_empty()
+        && source_keys.iter().all(|source_key| {
+            clean_overwrite_between(
+                ws,
+                func_events,
+                func_events,
+                source_span,
+                assign_span,
+                std::slice::from_ref(source_key),
+                true,
+            ) || target_only_has_clean_writes_between(ws, func_events, source_span, assign_span, source_key)
+        })
+}
+
+fn target_only_has_clean_writes_between(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    limit_span: Span,
+    target_key: &str,
+) -> bool {
+    let mut cleanliness = TargetWriteCleanliness::default();
+    collect_target_write_cleanliness(
+        ws,
+        events,
+        source_span,
+        limit_span,
+        target_key,
+        0,
+        &mut cleanliness,
+    );
+    cleanliness.saw_unconditional_clean && !cleanliness.saw_dirty
+}
+
+#[derive(Default)]
+struct TargetWriteCleanliness {
+    saw_clean: bool,
+    saw_unconditional_clean: bool,
+    saw_dirty: bool,
+}
+
+fn collect_target_write_cleanliness(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    limit_span: Span,
+    target_key: &str,
+    conditional_depth: usize,
+    out: &mut TargetWriteCleanliness,
+) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call,
+                source_names,
+                source_call_args,
+                value_kind,
+                ..
+            } => {
+                if span.file == source_span.file
+                    && span.start > source_span.start
+                    && span.end <= limit_span.start
+                    && clean_overwrite_target_key(target).as_deref() == Some(target_key)
+                {
+                    if assignment_cleanly_overwrites_target(
+                        ws,
+                        *span,
+                        source_name.as_deref(),
+                        source_call.as_deref(),
+                        source_names,
+                        source_call_args,
+                        *value_kind,
+                    ) {
+                        out.saw_clean = true;
+                        if conditional_depth == 0 {
+                            out.saw_unconditional_clean = true;
+                        }
+                    } else {
+                        out.saw_dirty = true;
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(takes_then) = condition
+                    .as_deref()
+                    .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+                {
+                    collect_target_write_cleanliness(
+                        ws,
+                        if takes_then { then_events } else { else_events },
+                        source_span,
+                        limit_span,
+                        target_key,
+                        conditional_depth + 1,
+                        out,
+                    );
+                } else {
+                    collect_target_write_cleanliness(
+                        ws,
+                        then_events,
+                        source_span,
+                        limit_span,
+                        target_key,
+                        conditional_depth + 1,
+                        out,
+                    );
+                    collect_target_write_cleanliness(
+                        ws,
+                        else_events,
+                        source_span,
+                        limit_span,
+                        target_key,
+                        conditional_depth + 1,
+                        out,
+                    );
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_target_write_cleanliness(
+                    ws,
+                    body,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth + 1,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_target_write_cleanliness(
+                    ws,
+                    body,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth,
+                    out,
+                );
+                collect_target_write_cleanliness(
+                    ws,
+                    catch_events,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth + 1,
+                    out,
+                );
+                collect_target_write_cleanliness(
+                    ws,
+                    finally_events,
+                    source_span,
+                    limit_span,
+                    target_key,
+                    conditional_depth,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// True when `target_key` is assigned again at a span strictly after
+/// `after_span` and at/before the sink. A later write supersedes an
+/// earlier clean overwrite of the same variable, so the earlier
+/// overwrite is dead and must not be treated as the value that reaches
+/// the sink. Recurses through control-flow regions so a conditional
+/// re-taint (`v = ""; if c { v = user }; sink(v)`) is also seen as a
+/// later write. Scans the whole function body, not just the current
+/// statement list, because the later write may live in a nested arm.
+fn target_written_between(
+    events: &[bonsai_lang_api::FlowEvent],
+    target_key: &str,
+    after_span: Span,
+    sink_span: Span,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    events.iter().any(|event| match event {
+        FlowEvent::Assign { span, target, .. } => {
+            span.file == after_span.file
+                && span.start > after_span.start
+                && span.end <= sink_span.start
+                && clean_overwrite_target_key(target).as_deref() == Some(target_key)
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            target_written_between(then_events, target_key, after_span, sink_span)
+                || target_written_between(else_events, target_key, after_span, sink_span)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            target_written_between(body, target_key, after_span, sink_span)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            target_written_between(body, target_key, after_span, sink_span)
+                || target_written_between(catch_events, target_key, after_span, sink_span)
+                || target_written_between(finally_events, target_key, after_span, sink_span)
+        }
+        _ => false,
+    })
+}
+
+fn assignment_cleanly_overwrites_target(
+    ws: &Workspace,
+    span: Span,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_names: &[String],
+    source_call_args: &[String],
+    value_kind: Option<AssignValueKind>,
+) -> bool {
+    (source_call.is_none()
+        && source_call_args.is_empty()
+        && (value_kind
+            .as_ref()
+            .is_some_and(|kind| matches!(kind, AssignValueKind::Literal))
+            || clean_constant_assignment(source_name, source_names)
+            || assignment_rhs_is_clean_conditional(ws, span)))
+        || literal_list_get_assignment_is_clean(ws, span, source_call, source_call_args)
+        || local_call_returns_clean_value(ws, span, source_call)
+}
+
+fn local_call_returns_clean_value(ws: &Workspace, call_span: Span, source_call: Option<&str>) -> bool {
+    let Some(source_call) = source_call else {
+        return false;
+    };
+    let callee_tail = clean_overwrite_callee_tail(source_call);
+    if callee_tail.is_empty() {
+        return false;
+    }
+    let global = ws.db().global_index();
+    let candidates: Vec<_> = global
+        .decls_in(call_span.file)
+        .iter()
+        .filter(|decl| {
+            clean_overwrite_callee_tail(&decl.name) == callee_tail
+                && !(call_span.start >= decl.span.start && call_span.start < decl.span.end)
+        })
+        .collect();
+    if candidates.len() != 1 {
+        return false;
+    }
+    function_returns_clean_value(ws, candidates[0])
+}
+
+fn function_returns_clean_value(ws: &Workspace, decl: &bonsai_lang_api::Decl) -> bool {
+    let mut returns = Vec::new();
+    collect_return_values(&decl.flow_events, &mut returns);
+    !returns.is_empty()
+        && returns.iter().all(|(span, value_text, value_name)| {
+            return_value_is_clean(ws, decl, *span, *value_text, *value_name)
+        })
+}
+
+fn collect_return_values<'a>(
+    events: &'a [bonsai_lang_api::FlowEvent],
+    out: &mut Vec<(Span, Option<&'a str>, Option<&'a str>)>,
+) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_text,
+                value_name,
+                ..
+            } => out.push((*span, value_text.as_deref(), value_name.as_deref())),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_values(then_events, out);
+                collect_return_values(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_values(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_values(body, out);
+                collect_return_values(catch_events, out);
+                collect_return_values(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn return_value_is_clean(
+    ws: &Workspace,
+    decl: &bonsai_lang_api::Decl,
+    return_span: Span,
+    value_text: Option<&str>,
+    value_name: Option<&str>,
+) -> bool {
+    if value_text.is_some_and(value_part_contains_only_clean_literals) {
+        return true;
+    }
+    let Some(target) = value_name
+        .and_then(clean_overwrite_target_key)
+        .or_else(|| value_text.and_then(clean_overwrite_target_key))
+    else {
+        return false;
+    };
+    let entry_span = Span::empty(return_span.file, decl.span.start);
+    clean_overwrite_between(
+        ws,
+        &decl.flow_events,
+        &decl.flow_events,
+        entry_span,
+        return_span,
+        std::slice::from_ref(&target),
+        true,
+    ) || target_only_has_clean_writes_between(ws, &decl.flow_events, entry_span, return_span, &target)
+}
+
+fn branch_arm_clean_overwrites_target(
+    ws: &Workspace,
+    events: &[bonsai_lang_api::FlowEvent],
+    target: &str,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    events.iter().any(|event| match event {
+        FlowEvent::Assign {
+            span,
+            target: assigned,
+            source_name,
+            source_call,
+            source_names,
+            source_call_args,
+            value_kind,
+            ..
+        } => {
+            clean_overwrite_target_key(assigned).as_deref() == Some(target)
+                && assignment_cleanly_overwrites_target(
+                    ws,
+                    *span,
+                    source_name.as_deref(),
+                    source_call.as_deref(),
+                    source_names,
+                    source_call_args,
+                    *value_kind,
+                )
+        }
+        FlowEvent::Branch {
+            span,
+            condition,
+            then_events,
+            else_events,
+            ..
+        } => {
+            if let Some(takes_then) = condition
+                .as_deref()
+                .and_then(|condition| static_numeric_condition_value(ws, *span, condition))
+            {
+                if takes_then {
+                    branch_arm_clean_overwrites_target(ws, then_events, target)
+                } else {
+                    branch_arm_clean_overwrites_target(ws, else_events, target)
+                }
+            } else {
+                !else_events.is_empty()
+                    && branch_arm_clean_overwrites_target(ws, then_events, target)
+                    && branch_arm_clean_overwrites_target(ws, else_events, target)
+            }
+        }
+        FlowEvent::Call { name, args, .. } => clean_output_call_overwrites_target(name, args, target),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            branch_arm_clean_overwrites_target(ws, body, target)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => try_region_clean_overwrites_target(ws, body, catch_events, finally_events, target),
+        _ => false,
+    })
+}
+
+pub(super) fn try_region_clean_overwrites_target(
+    ws: &Workspace,
+    body: &[bonsai_lang_api::FlowEvent],
+    catch_events: &[bonsai_lang_api::FlowEvent],
+    finally_events: &[bonsai_lang_api::FlowEvent],
+    target: &str,
+) -> bool {
+    branch_arm_clean_overwrites_target(ws, finally_events, target)
+        || (branch_arm_clean_overwrites_target(ws, body, target)
+            && (catch_events.is_empty() || branch_arm_clean_overwrites_target(ws, catch_events, target)))
+}
+
+pub(super) fn clean_output_call_overwrites_target(
+    name: &str,
+    args: &[bonsai_lang_api::CallArg],
+    target: &str,
+) -> bool {
+    if !matches!(
+        clean_overwrite_callee_tail(name).as_str(),
+        "snprintf" | "snprintf_s" | "sprintf_s" | "strcpy_s" | "strncpy_s"
+    ) {
+        return false;
+    }
+    let Some(first) = args.first() else {
+        return false;
+    };
+    if clean_overwrite_target_key(&first.value_text).as_deref() != Some(target) {
+        return false;
+    }
+    args.iter()
+        .skip(1)
+        .all(|arg| clean_output_overwrite_arg_is_clean(&arg.value_text, target))
+}
+
+pub(super) fn clean_overwrite_callee_tail(name: &str) -> String {
+    name.rsplit(['.', ':'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn clean_output_overwrite_arg_is_clean(value: &str, target: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if quoted_literal(trimmed) || numeric_literal(trimmed) {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("sizeof(") && lower.ends_with(')') {
+        return true;
+    }
+    clean_overwrite_target_key(trimmed).as_deref() != Some(target) && looks_like_clean_constant(trimmed)
+}
+
+pub(super) fn quoted_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+}
+
+pub(super) fn numeric_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '_' | 'x' | 'X' | 'a'..='f' | 'A'..='F'))
+        && trimmed.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn clean_constant_assignment(source_name: Option<&str>, source_names: &[String]) -> bool {
+    source_name
+        .into_iter()
+        .chain(source_names.iter().map(String::as_str))
+        .all(looks_like_clean_constant)
+        && (source_name.is_some() || !source_names.is_empty())
+}
+
+fn assignment_rhs_is_clean_conditional(ws: &Workspace, span: Span) -> bool {
+    let Some(rhs) = assignment_rhs_text(ws, span) else {
+        return false;
+    };
+    if clean_conditional_value_part(&rhs).is_some_and(value_part_contains_only_clean_literals) {
+        return true;
+    }
+    if let Some((then_value, condition, else_value)) = split_python_conditional_parts(&rhs) {
+        return python_membership_allowlist_condition_cleans_value(condition, then_value)
+            && value_part_contains_only_clean_literals(else_value);
+    }
+    let Some((condition, then_value, else_value)) = split_ternary_parts(&rhs) else {
+        return false;
+    };
+    match static_numeric_condition_value(ws, span, condition) {
+        Some(true) => value_part_contains_only_clean_literals(then_value),
+        Some(false) => value_part_contains_only_clean_literals(else_value),
+        None => false,
+    }
+}
+
+fn assignment_rhs_text(ws: &Workspace, span: Span) -> Option<String> {
+    let snapshot = ws.vfs().snapshot(span.file).ok()?;
+    let raw = snapshot.text.get(span.start as usize..span.end as usize)?;
+    let rhs = raw.split_once('=').map_or(raw, |(_, rhs)| rhs);
+    Some(rhs.trim().trim_end_matches(';').trim().to_string())
+}
+
+fn literal_list_get_assignment_is_clean(
+    ws: &Workspace,
+    span: Span,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+) -> bool {
+    let Some(receiver) = source_call.and_then(|call| call.strip_suffix(".get")) else {
+        return false;
+    };
+    let Some(list_name) = clean_overwrite_target_key(receiver) else {
+        return false;
+    };
+    let Some(index) = source_call_args
+        .first()
+        .and_then(|arg| arg.trim().parse::<usize>().ok())
+    else {
+        return false;
+    };
+    let Some(values) = literal_list_state_before_span(ws, span, &list_name) else {
+        return false;
+    };
+    values
+        .get(index)
+        .is_some_and(|value| value_part_contains_only_clean_literals(value))
+}
+
+fn literal_list_state_before_span(ws: &Workspace, span: Span, list_name: &str) -> Option<Vec<String>> {
+    let snapshot = ws.vfs().snapshot(span.file).ok()?;
+    let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
+    let start = end.saturating_sub(4096);
+    let prefix = snapshot.text.get(start..end)?;
+    let mut values: Option<Vec<String>> = None;
+    let new_marker = format!("{list_name} = new ");
+    let add_marker = format!("{list_name}.add");
+    let remove_marker = format!("{list_name}.remove");
+    for line in prefix.lines() {
+        let statement = line.split("//").next().unwrap_or(line).trim();
+        if statement.contains(&new_marker) {
+            values = Some(Vec::new());
+            continue;
+        }
+        if statement.contains(&add_marker) {
+            let value = call_first_argument(statement)?;
+            values.as_mut()?.push(value.to_string());
+            continue;
+        }
+        if statement.contains(&remove_marker) {
+            let index = call_first_argument(statement)?.trim().parse::<usize>().ok()?;
+            let values = values.as_mut()?;
+            if index >= values.len() {
+                return None;
+            }
+            values.remove(index);
+        }
+    }
+    values
+}
+
+fn call_first_argument(statement: &str) -> Option<&str> {
+    let open = statement.find('(')?;
+    let close = statement[open + 1..].find(')')? + open + 1;
+    let args = &statement[open + 1..close];
+    let comma = find_top_level_char(args, ',').unwrap_or(args.len());
+    Some(args[..comma].trim())
+}
+
+fn split_ternary_parts(rhs: &str) -> Option<(&str, &str, &str)> {
+    let trimmed = rhs.trim();
+    let question = find_top_level_char(trimmed, '?')?;
+    let colon = find_top_level_char(&trimmed[question + 1..], ':')? + question + 1;
+    Some((
+        trimmed[..question].trim(),
+        trimmed[question + 1..colon].trim(),
+        trimmed[colon + 1..].trim(),
+    ))
+}
+
+fn split_python_conditional_parts(rhs: &str) -> Option<(&str, &str, &str)> {
+    let trimmed = rhs.trim();
+    let if_idx = find_top_level_keyword(trimmed, "if")?;
+    let else_idx = find_top_level_keyword(&trimmed[if_idx + 2..], "else")? + if_idx + 2;
+    let then_value = trimmed[..if_idx].trim();
+    let condition = trimmed[if_idx + 2..else_idx].trim();
+    let else_value = trimmed[else_idx + 4..].trim();
+    (!then_value.is_empty() && !condition.is_empty() && !else_value.is_empty())
+        .then_some((then_value, condition, else_value))
+}
+
+fn python_membership_allowlist_condition_cleans_value(condition: &str, then_value: &str) -> bool {
+    let Some(target) = clean_overwrite_target_key(then_value) else {
+        return false;
+    };
+    let condition = strip_balanced_outer_parens(condition);
+    if find_top_level_keyword(condition, "not").is_some() {
+        return false;
+    }
+    let Some(in_idx) = find_top_level_keyword(condition, "in") else {
+        return false;
+    };
+    let left = condition[..in_idx].trim();
+    let right = condition[in_idx + 2..].trim();
+    clean_overwrite_target_key(left).as_deref() == Some(target.as_str())
+        && value_part_contains_only_clean_literals(right)
+}
+
+fn find_top_level_keyword(text: &str, keyword: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut idx = 0usize;
+    while idx < text.len() {
+        let ch = text[idx..].chars().next()?;
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            idx += ch.len_utf8();
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && text[idx..].starts_with(keyword) && keyword_has_boundary(text, idx, keyword.len()) {
+            return Some(idx);
+        }
+        idx += ch.len_utf8();
+    }
+    None
+}
+
+fn keyword_has_boundary(text: &str, start: usize, len: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[start + len..].chars().next();
+    !before.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !after.is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn find_top_level_char(text: &str, needle: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == needle && depth == 0 => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn static_numeric_condition_value(ws: &Workspace, span: Span, condition: &str) -> Option<bool> {
+    let vars = numeric_constant_assignments_before_span(ws, span);
+    eval_numeric_condition(condition, &vars)
+}
+
+fn numeric_constant_assignments_before_span(ws: &Workspace, span: Span) -> AHashMap<String, i64> {
+    let mut out = AHashMap::new();
+    let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
+        return out;
+    };
+    let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
+    let start = end.saturating_sub(4096);
+    let Some(prefix) = snapshot.text.get(start..end) else {
+        return out;
+    };
+    for line in prefix.lines() {
+        let trimmed = line.trim().trim_end_matches(';').trim();
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let rhs = rhs.trim();
+        let Ok(value) = rhs.parse::<i64>() else {
+            continue;
+        };
+        let Some(name) = lhs
+            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .filter(|part| !part.is_empty())
+            .next_back()
+        else {
+            continue;
+        };
+        if name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        {
+            out.insert(name.to_string(), value);
+        }
+    }
+    out
+}
+
+fn eval_numeric_condition(condition: &str, vars: &AHashMap<String, i64>) -> Option<bool> {
+    let condition = strip_balanced_outer_parens(condition.trim());
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        if let Some(idx) = find_top_level_operator(condition, op) {
+            let left = eval_int_expr(&condition[..idx], vars)?;
+            let right = eval_int_expr(&condition[idx + op.len()..], vars)?;
+            return Some(match op {
+                ">=" => left >= right,
+                "<=" => left <= right,
+                "==" => left == right,
+                "!=" => left != right,
+                ">" => left > right,
+                "<" => left < right,
+                _ => return None,
+            });
+        }
+    }
+    None
+}
+
+fn find_top_level_operator(text: &str, op: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut depth = 0usize;
+    let mut idx = 0usize;
+    while idx + op_bytes.len() <= bytes.len() {
+        match bytes[idx] {
+            b'(' | b'[' | b'{' => depth = depth.saturating_add(1),
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && &bytes[idx..idx + op_bytes.len()] == op_bytes {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn eval_int_expr(expr: &str, vars: &AHashMap<String, i64>) -> Option<i64> {
+    let mut parser = IntExprParser::new(expr, vars);
+    let value = parser.parse_expr()?;
+    parser.skip_ws();
+    (parser.peek().is_none()).then_some(value)
+}
+
+struct IntExprParser<'a> {
+    input: &'a str,
+    pos: usize,
+    vars: &'a AHashMap<String, i64>,
+}
+
+impl<'a> IntExprParser<'a> {
+    fn new(input: &'a str, vars: &'a AHashMap<String, i64>) -> Self {
+        Self { input, pos: 0, vars }
+    }
+
+    fn parse_expr(&mut self) -> Option<i64> {
+        let mut value = self.parse_term()?;
+        loop {
+            self.skip_ws();
+            if self.consume('+') {
+                value = value.checked_add(self.parse_term()?)?;
+            } else if self.consume('-') {
+                value = value.checked_sub(self.parse_term()?)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn parse_term(&mut self) -> Option<i64> {
+        let mut value = self.parse_factor()?;
+        loop {
+            self.skip_ws();
+            if self.consume('*') {
+                value = value.checked_mul(self.parse_factor()?)?;
+            } else if self.consume('/') {
+                let divisor = self.parse_factor()?;
+                if divisor == 0 {
+                    return None;
+                }
+                value = value.checked_div(divisor)?;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+
+    fn parse_factor(&mut self) -> Option<i64> {
+        self.skip_ws();
+        if self.consume('(') {
+            let value = self.parse_expr()?;
+            self.skip_ws();
+            return self.consume(')').then_some(value);
+        }
+        if self.consume('-') {
+            return self.parse_factor()?.checked_neg();
+        }
+        if self.peek()?.is_ascii_digit() {
+            return self.parse_number();
+        }
+        self.parse_identifier()
+            .and_then(|name| self.vars.get(name).copied())
+    }
+
+    fn parse_number(&mut self) -> Option<i64> {
+        let start = self.pos;
+        while self.peek().is_some_and(|ch| ch.is_ascii_digit() || ch == '_') {
+            self.pos += self.peek()?.len_utf8();
+        }
+        self.input[start..self.pos].replace('_', "").parse().ok()
+    }
+
+    fn parse_identifier(&mut self) -> Option<&'a str> {
+        let start = self.pos;
+        let first = self.peek()?;
+        if !(first == '_' || first.is_ascii_alphabetic()) {
+            return None;
+        }
+        self.pos += first.len_utf8();
+        while self
+            .peek()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            self.pos += self.peek()?.len_utf8();
+        }
+        Some(&self.input[start..self.pos])
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.pos += self.peek().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+
+    fn consume(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.pos += expected.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+}
+
+fn strip_balanced_outer_parens(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim();
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+            return trimmed;
+        }
+        let mut depth = 0isize;
+        let mut wraps = true;
+        for (idx, ch) in trimmed.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && idx + ch.len_utf8() < trimmed.len() {
+                        wraps = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if wraps {
+            text = &trimmed[1..trimmed.len() - 1];
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+pub(super) fn clean_conditional_value_part(rhs: &str) -> Option<&str> {
+    let trimmed = rhs.trim();
+    if let Some(question) = trimmed.find('?') {
+        if trimmed[question + 1..].contains(':') {
+            return Some(&trimmed[question + 1..]);
+        }
+    }
+    if trimmed.starts_with("if ") || trimmed.starts_with("if(") || trimmed.starts_with("if (") {
+        if let Some(first_value_block) = trimmed.find('{') {
+            return Some(&trimmed[first_value_block..]);
+        }
+        if let Some(else_idx) = trimmed.find(" else ") {
+            return Some(&trimmed[else_idx..]);
+        }
+    }
+    None
+}
+
+pub(super) fn value_part_contains_only_clean_literals(value_part: &str) -> bool {
+    if !value_part.contains('"') && !value_part.contains('\'') && !value_part.contains('`') {
+        return false;
+    }
+    identifier_tokens_outside_strings(value_part)
+        .into_iter()
+        .all(|token| clean_conditional_helper_identifier(&token))
+}
+
+pub(super) fn clean_conditional_helper_identifier(token: &str) -> bool {
+    matches!(
+        token,
+        "if" | "else"
+            | "true"
+            | "false"
+            | "nil"
+            | "null"
+            | "None"
+            | "none"
+            | "to_string"
+            | "toString"
+            | "to_s"
+            | "String"
+            | "string"
+    )
+}
+
+pub(super) fn looks_like_clean_constant(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        && trimmed.chars().any(|ch| ch.is_ascii_uppercase())
+}
+
+pub(super) fn clean_overwrite_target_key(text: &str) -> Option<String> {
+    let trimmed = text
+        .trim()
+        .trim_start_matches(&['$', '@', '%', '&', '*'][..])
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+    if trimmed.is_empty()
+        || trimmed.contains(' ')
+        || trimmed.contains('.')
+        || trimmed.contains("::")
+        || trimmed.contains('(')
+        || trimmed.contains('[')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+pub(super) fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(key) = clean_overwrite_target_key(text) {
+        out.push(key);
+    }
+    for token in identifier_tokens_outside_strings(text) {
+        if let Some(key) = clean_overwrite_target_key(&token) {
+            out.push(key);
+        }
+    }
+    for token in interpolation_identifier_tokens(text) {
+        if let Some(key) = clean_overwrite_target_key(&token) {
+            out.push(key);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
