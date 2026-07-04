@@ -335,6 +335,7 @@ fn short_step_kind(kind: TraceStepKind) -> &'static str {
         K::Catch => "catch",
         K::Await => "await",
         K::Yield => "yield",
+        K::Lifecycle => "lifecycle",
         K::Merge => "merge",
         K::Diagnostic => "diag",
     }

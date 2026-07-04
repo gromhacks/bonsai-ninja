@@ -1838,12 +1838,7 @@ fn render_taint_analysis_text_unit(
                 item.finding.additional_sinks.len()
             )
         };
-        let render_opts = crate::commands::InspectRenderOptions {
-            compact: false,
-            flow_id_filter: None,
-            view: crate::args::InspectView::Trace,
-            group_id_filter: None,
-        };
+        let render_opts = crate::commands::InspectRenderOptions::default();
         let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
         crate::commands::render_flow_block_with_heading(
             u,
@@ -2867,12 +2862,7 @@ fn render_source_analysis_text_page(
             cli_println!("{line}");
         }
     }
-    let render_opts = crate::commands::InspectRenderOptions {
-        compact: false,
-        flow_id_filter: None,
-        view: crate::args::InspectView::Trace,
-        group_id_filter: None,
-    };
+    let render_opts = crate::commands::InspectRenderOptions::default();
     for item in rendered.iter() {
         render_source_analysis_header(u, item.flow.flow_number as usize, item, pack);
         let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
@@ -3915,6 +3905,7 @@ fn render_match_table(
                     let block_label: String = match label {
                         "sources" => "SOURCE".to_string(),
                         "sinks" => "SINK".to_string(),
+                        "sanitizers" => "SANITIZER".to_string(),
                         other => other.to_ascii_uppercase(),
                     };
                     cli_println!(

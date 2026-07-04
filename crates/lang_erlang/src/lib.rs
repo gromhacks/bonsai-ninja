@@ -37,7 +37,10 @@ const HANDLER: GrammarHandler = GrammarHandler {
     lambda_kinds: &["fun_expr", "anonymous_fun"],
     try_kinds: &["try_expr"],
     catch_kinds: &["catch_clause"],
-    finally_kinds: &["after_block"],
+    // tree-sitter-erlang names the `after` region `try_after` (not the
+    // Elixir `after_block`); with the wrong name the always-run cleanup
+    // was misfiled into the try body instead of `finally_events`.
+    finally_kinds: &["try_after"],
     break_kinds: &[],
     continue_kinds: &[],
     yield_kinds: &[],

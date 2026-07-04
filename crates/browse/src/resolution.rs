@@ -204,6 +204,7 @@ fn coverage_for_decl(
     row
 }
 
+#[allow(clippy::too_many_arguments)] // cohesive per-decl call-site scan state
 fn collect_decl_call_sites(
     ws: &Workspace,
     decl: &Decl,
@@ -546,11 +547,9 @@ fn normalize_module_key(module: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let mut out = trimmed
-        .replace('\\', "/")
-        .replace("::", "/")
-        .replace(':', "/")
-        .replace('.', "/");
+    // `::` first so a scope separator collapses to a single `/`, then the
+    // remaining single-char separators together.
+    let mut out = trimmed.replace("::", "/").replace(['\\', ':', '.'], "/");
     out = strip_known_extension(&out).to_string();
     Some(
         out.split('/')

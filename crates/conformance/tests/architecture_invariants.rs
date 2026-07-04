@@ -171,21 +171,21 @@ fn production_analysis_complete_true_sites_are_reviewed() {
     let expected = BTreeSet::from([
         "crates/browse/src/dumps.rs:analysis_complete: true,".to_string(),
         "crates/cfg/src/builder.rs:analysis_complete: true,".to_string(),
-        "crates/security/src/analysis/mod.rs:analysis_complete: true,".to_string(),
+        "crates/security/src/analysis/findings_build.rs:analysis_complete: true,".to_string(),
     ]);
     assert_eq!(
         occurrences, expected,
         "new production `analysis_complete=true` sites require explicit audit; derive completion from real analysis metadata unless the fact is exact-local"
     );
 
-    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let findings_build = read(&root.join("crates/security/src/analysis/findings_build.rs"));
     assert!(
-        function_body(&security_analysis, "make_finding")
+        function_body(&findings_build, "make_finding")
             .contains("analysis_complete: context.analysis_incomplete_reasons.is_empty()"),
         "taint/source security findings must derive completeness from analysis context"
     );
     assert!(
-        function_body(&security_analysis, "make_pattern_finding")
+        function_body(&findings_build, "make_pattern_finding")
             .contains("Pattern-only findings are exact local rule matches"),
         "the pattern-only completeness exception must stay documented at the construction site"
     );
@@ -2362,7 +2362,8 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         "dump-taint must not request unscoped diagnostic reachability"
     );
 
-    let make_finding_body = function_body(&security_analysis, "make_finding");
+    let findings_build = read(&root.join("crates/security/src/analysis/findings_build.rs"));
+    let make_finding_body = function_body(&findings_build, "make_finding");
     assert!(
         make_finding_body.contains("analysis_complete: context.analysis_incomplete_reasons.is_empty()"),
         "security findings must not hard-code analysis_complete=true"
@@ -2676,7 +2677,15 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
         ("value-flow", value_flow.as_str(), "value_flow_pipeline_hash"),
         ("flow-ids", flow_ids.as_str(), "flow_ids_pipeline_hash"),
     ] {
-        let body = function_body(source, function);
+        // The hash is split across `X_pipeline_hash` (binds source
+        // content) and `X_pipeline_hash_for_content` (binds matcher
+        // policy + dependency metadata); check the combined body so the
+        // invariant survives that refactor.
+        let body = format!(
+            "{} {}",
+            function_body(source, function),
+            function_body(source, &format!("{function}_for_content"))
+        );
         assert!(
             body.contains("MATCHER_POLICY_FINGERPRINT")
                 && body.contains("workspace_content_fingerprint(db)")

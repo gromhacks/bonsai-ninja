@@ -112,10 +112,13 @@ fn split_foreach_lhs_rhs(text: &str) -> Option<(&str, &str)> {
         .or_else(|| text.split_once(" : "))
         .or_else(|| text.split_once(" <- "))
         .or_else(|| {
-            text.split_once(" as ").map(|(iterable, binding)| {
-                let binding = binding.rsplit_once("=>").map_or(binding, |(_, value)| value);
-                (binding, iterable)
-            })
+            // PHP `foreach ($xs as $x)` reverses the written order. Keep
+            // the WHOLE binding, including a `$k => $v` key/value pair —
+            // the downstream token extractor binds both names, so
+            // key-taint (`foreach ($_GET as $k => $v)`) is no longer
+            // dropped. A value-only `as $v` binding is unaffected.
+            text.split_once(" as ")
+                .map(|(iterable, binding)| (binding, iterable))
         })
 }
 

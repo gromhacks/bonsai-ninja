@@ -1061,6 +1061,7 @@ fn main() -> Result<()> {
                 flow_id_filter: flow,
                 view,
                 group_id_filter: group,
+                structural_drilldown: false,
             };
             let paging = paging_from_cli(context.as_deref(), page.as_deref(), all, format)?;
             let taint_flow_explicit = taint_flow;

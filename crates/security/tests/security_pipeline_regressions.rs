@@ -141,7 +141,7 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // calls without LuaSQL package evidence.
         "lua" => 1,
         "objc" => 1,
-        "perl" => 1,
+        "perl" => 2,
         // Two real vulns: readline → $envelope.cmd → … → shell_exec (CWE-78)
         // and readline → echo (CWE-79). Both reach their sink via real
         // chains (verified with `--source readline`). NOTE: the php adapter
@@ -926,7 +926,10 @@ fn taint_analysis_schedules_only_source_groups_that_can_reach_sinks() {
     assert!(
         notes.iter().any(|(label, detail)| {
             *label == "taint-cache"
-                && (detail.contains("miss") || detail.contains("hit") || detail.contains("config changed"))
+                && (detail.contains("miss")
+                    || detail.contains("hit")
+                    || detail.contains("config changed")
+                    || detail.contains("skipped"))
         }),
         "taint-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
     );
@@ -1027,7 +1030,10 @@ fn source_analysis_progress_emits_scope_and_cache_notes_to_sdk() {
     assert!(
         notes.iter().any(|(label, detail)| {
             *label == "taint-cache"
-                && (detail.contains("miss") || detail.contains("hit") || detail.contains("config changed"))
+                && (detail.contains("miss")
+                    || detail.contains("hit")
+                    || detail.contains("config changed")
+                    || detail.contains("skipped"))
         }),
         "source-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
     );

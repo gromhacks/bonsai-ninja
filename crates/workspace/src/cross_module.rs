@@ -540,7 +540,7 @@ impl<'a> TraceBuilder<'a> {
                 name,
                 transition,
             } => self.emit(
-                StepKind::Yield,
+                StepKind::Lifecycle,
                 func,
                 *span,
                 Precision::Exact,

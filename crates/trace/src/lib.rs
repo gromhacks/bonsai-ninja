@@ -129,6 +129,7 @@ pub enum TraceStepKind {
     Catch,
     Await,
     Yield,
+    Lifecycle,
     Merge,
     Diagnostic,
 }
@@ -545,6 +546,7 @@ fn map_step_kind(kind: StepKind) -> TraceStepKind {
         StepKind::Throw => TraceStepKind::Throw,
         StepKind::Await => TraceStepKind::Await,
         StepKind::Yield => TraceStepKind::Yield,
+        StepKind::Lifecycle => TraceStepKind::Lifecycle,
         StepKind::Merge => TraceStepKind::Merge,
         StepKind::Diagnostic => TraceStepKind::Diagnostic,
     }

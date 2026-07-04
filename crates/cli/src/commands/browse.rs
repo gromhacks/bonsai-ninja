@@ -1286,7 +1286,7 @@ pub(crate) fn cmd_imports(
         }
         let alias = import.alias.as_deref().unwrap_or("-");
         let symbol = import.original_name.as_deref().unwrap_or("-");
-        let kind = if import.is_wildcard { "wildcard" } else { "named" };
+        let kind = import_kind_label(import.is_wildcard, import.original_name.as_deref());
         let loc_len = short_file(&import.file).len() + 16;
         let flow_cost = flow_cost_ann
             .as_ref()
@@ -1330,7 +1330,7 @@ pub(crate) fn cmd_imports(
                         // multi-symbol `from x import a, b` rendered as two
                         // visually identical rows (same module, same span).
                         let symbol = import.original_name.clone().unwrap_or_else(|| "-".to_string());
-                        let kind = if import.is_wildcard { "wildcard" } else { "named" };
+                        let kind = import_kind_label(import.is_wildcard, import.original_name.as_deref());
                         let loc = format!("{}:{}", short_file(&import.file), import.line);
                         let ext = extension_for(&import.file);
                         let line_text = read_line(ws, &import.file, import.line);
@@ -1366,6 +1366,19 @@ pub(crate) fn cmd_imports(
         }
     }
     Ok(())
+}
+
+/// Text-table `kind` label for an import row: `wildcard` for
+/// `from x import *`, `module` for whole-module imports that bind no
+/// specific symbol (`import os`), `named` otherwise.
+fn import_kind_label(is_wildcard: bool, original_name: Option<&str>) -> &'static str {
+    if is_wildcard {
+        "wildcard"
+    } else if original_name.is_none() {
+        "module"
+    } else {
+        "named"
+    }
 }
 
 fn render_imports_streaming_first_page(
@@ -1420,7 +1433,7 @@ fn render_imports_streaming_first_page(
             let line = line_for_span(ws, file_id, imp.span);
             let alias = imp.alias.clone().unwrap_or_else(|| "-".to_string());
             let symbol = imp.original_name.clone().unwrap_or_else(|| "-".to_string());
-            let kind = if imp.is_wildcard { "wildcard" } else { "named" };
+            let kind = import_kind_label(imp.is_wildcard, imp.original_name.as_deref());
             let loc = format!("{}:{}", short_file(&path), line);
             let line_text = read_line_by_file_id(ws, file_id, line);
             let row_cost =

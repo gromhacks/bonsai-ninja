@@ -356,7 +356,9 @@ fn paging_total_label(cmd_line_hint: &str, total: u64) -> &'static str {
     } else if cmd_line_hint.contains(" tree ") {
         pluralize("tree line", "tree lines")
     } else if cmd_line_hint.contains(" read-file ") {
-        pluralize("line", "lines")
+        // Rendered output rows (header/frame chrome included), not the
+        // file's source line count — that lives in the read-file header.
+        pluralize("rendered line", "rendered lines")
     } else if cmd_line_hint.contains(" dump-callgraph ") {
         pluralize("function", "functions")
     } else if cmd_line_hint.contains(" dump-edges ") {
