@@ -3071,6 +3071,10 @@ fn idg_pipeline_hash() -> u64 {
     // on-disk layout change. This rejects old `idg.v*.factstore`
     // files whose shape can still decode but whose edges/lineage are
     // no longer semantically equivalent.
+    // v28 (2026-07-04): `bridge_return_expression_calls` now forwards
+    // the return-expression's span node into the scalar `Return` place,
+    // restoring interprocedural taint for `return <source-expr>` (e.g.
+    // `return os.environ["CMD"]`) that had no call in the return span.
     // v26 (2026-06-05): Constructor-like assignment RHS calls now
     // propagate argument taint into the constructed receiver state
     // for receiver-tainted sink checks.
@@ -3086,7 +3090,7 @@ fn idg_pipeline_hash() -> u64 {
     // synthesis (C# expression-bodied-property getters / record members,
     // Java records, Solidity struct-literal field writes) all change the
     // built IDG without an on-disk layout change.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 27;
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 28;
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
