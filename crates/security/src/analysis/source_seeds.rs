@@ -153,6 +153,26 @@ pub(super) fn collect_source_seed_targets(
                 {
                     insert_taint_aliases(out, name);
                 }
+                // A source READ used *directly* as (or inside) an
+                // argument of this call — e.g. `exec(req.params.x)`,
+                // `exec(req.params.x + "-a")`. Here the call is NOT the
+                // source: its callee name (`exec`) and its event span
+                // (just the callee token) neither match nor overlap the
+                // source read span, so none of the `call_matches` seeding
+                // above fires and the split-assign form
+                // (`t = req.params.x; exec(t)`) is the only shape that
+                // seeds. Seed the matching source carriers from the
+                // argument that fully contains the source span, exactly
+                // as the Assign branch seeds `source_names` — the
+                // `span_contains(arg.span, src.span)` gate localises to
+                // the argument holding the source read (so a source
+                // *call*, whose match span spans the whole call and is
+                // therefore wider than any single arg, never trips this)
+                // and the strict source-text filter keeps sibling
+                // operands (`a` in `exec(a + req.params.x)`) untainted.
+                if source_output_args.is_empty() && source_callback_args.is_empty() {
+                    seed_source_arg_reads(out, args, src);
+                }
             }
             FlowEvent::Branch {
                 then_events,
@@ -251,6 +271,36 @@ fn seed_source_output_text_args(out: &mut TokenSet, args: &[String], source_outp
         }
         insert_taint_aliases(out, text);
         insert_descendant_taint_aliases(out, text);
+    }
+}
+
+/// Seed the taint source when the matched source read is used
+/// *directly* as a call argument (`sink(req.params.x)`), rather than
+/// first bound to a local (`t = req.params.x; sink(t)`). Only the
+/// argument whose span fully contains the source match span is
+/// considered, and within it only carriers that strictly match the
+/// source text (plus their qualified descendants) are seeded — this is
+/// the argument-position analogue of the `FlowEvent::Assign` branch's
+/// `source_names` seeding, and it inherits that branch's precision:
+/// sibling operands of a compound argument (`a` in `sink(a + req.x)`)
+/// never match the source text and so stay untainted.
+fn seed_source_arg_reads(out: &mut TokenSet, args: &[bonsai_lang_api::CallArg], src: &RuleMatch) {
+    for arg in args {
+        if !span_contains(arg.span, src.span) {
+            continue;
+        }
+        seed_descendant_aliases_for_qualified_source_reads(out, &arg.source_names, &src.match_text);
+        if let Some(place) = arg.place.as_deref() {
+            if security_text_matches_source_strict(place, &src.match_text) {
+                insert_taint_aliases(out, place);
+                insert_descendant_taint_aliases(out, place);
+            }
+        }
+        for name in &arg.source_names {
+            if security_text_matches_source_strict(name, &src.match_text) {
+                insert_taint_aliases(out, name);
+            }
+        }
     }
 }
 
