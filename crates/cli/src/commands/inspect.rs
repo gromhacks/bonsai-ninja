@@ -1824,6 +1824,7 @@ pub(crate) fn cmd_inspect(root: &std::path::Path, options: InspectCommandOptions
                 kind_filter,
                 flow_cap: taint_flow_cap,
                 prefer_warmed_idg: true,
+                flow_id_filter: render.flow_id_filter.as_deref(),
             },
         )?;
         report.taint_flows = taint_flows;
@@ -2079,6 +2080,7 @@ struct InspectTaintFlowOptions<'a> {
     kind_filter: &'a [String],
     flow_cap: usize,
     prefer_warmed_idg: bool,
+    flow_id_filter: Option<&'a str>,
 }
 
 struct TaintFlowMatchContext<'a> {
@@ -2086,6 +2088,9 @@ struct TaintFlowMatchContext<'a> {
     filters: InspectFilters<'a>,
     kind_filter: &'a [String],
     flow_cap: usize,
+    /// When reopening a single raw taint id (`show T:`), skip building
+    /// the expensive display for every candidate whose id doesn't match.
+    flow_id_filter: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2133,6 +2138,7 @@ fn inspect_taint_flows(
         kind_filter,
         flow_cap,
         prefer_warmed_idg,
+        flow_id_filter,
     } = options;
     let matcher = pattern.map(|p| build_matcher(p, is_regex)).transpose()?;
     let kind_filter: Vec<String> = kind_filter.iter().map(|kind| kind.to_lowercase()).collect();
@@ -2141,6 +2147,7 @@ fn inspect_taint_flows(
         filters,
         kind_filter: &kind_filter,
         flow_cap,
+        flow_id_filter,
     };
     let mut entries: Vec<bonsai_common::FuncId> = candidate_entries.iter().copied().collect();
     entries.sort_by_key(|func| func.raw());
@@ -2219,7 +2226,14 @@ fn collect_taint_flows_for_entry(
 ) -> bool {
     let trace_index = trace_record_index_for_inspect(&graph.call_records);
     for call in &graph.tainted_calls {
-        if let Some(flow) = taint_flow_for_terminal_call(ws, entry, &trace_index, call, graph.precision) {
+        if let Some(flow) = taint_flow_for_terminal_call(
+            ws,
+            entry,
+            &trace_index,
+            call,
+            graph.precision,
+            match_context.flow_id_filter,
+        ) {
             if taint_flow_matches(
                 ws,
                 &flow,
@@ -2235,7 +2249,9 @@ fn collect_taint_flows_for_entry(
         }
     }
     for record in &graph.call_records {
-        if let Some(flow) = taint_flow_for_terminal_edge(ws, entry, &trace_index, record) {
+        if let Some(flow) =
+            taint_flow_for_terminal_edge(ws, entry, &trace_index, record, match_context.flow_id_filter)
+        {
             if taint_flow_matches(
                 ws,
                 &flow,
@@ -2259,6 +2275,7 @@ fn taint_flow_for_terminal_call(
     trace_index: &ahash::AHashMap<u64, &TaintedCallEdge>,
     call: &TaintedCall,
     graph_precision: bonsai_common::Precision,
+    flow_id_filter: Option<&str>,
 ) -> Option<InspectTaintFlow> {
     let records = match call.parent_trace_id {
         Some(trace_id) => lineage_records_for_trace_id_inspect(trace_index, trace_id)?,
@@ -2269,7 +2286,7 @@ fn taint_flow_for_terminal_call(
         .filter_map(|record| taint_step_for_edge(ws, record))
         .collect();
     steps.push(taint_step_for_terminal_call(ws, call, graph_precision));
-    Some(build_inspect_taint_flow(
+    build_inspect_taint_flow(
         ws,
         entry,
         &records,
@@ -2277,7 +2294,8 @@ fn taint_flow_for_terminal_call(
         terminal_kind_label(&call.kind),
         graph_precision,
         steps,
-    ))
+        flow_id_filter,
+    )
 }
 
 fn taint_flow_for_terminal_edge(
@@ -2285,6 +2303,7 @@ fn taint_flow_for_terminal_edge(
     entry: bonsai_common::FuncId,
     trace_index: &ahash::AHashMap<u64, &TaintedCallEdge>,
     record: &TaintedCallEdge,
+    flow_id_filter: Option<&str>,
 ) -> Option<InspectTaintFlow> {
     let records = if record.trace_id == 0 {
         vec![record]
@@ -2295,7 +2314,7 @@ fn taint_flow_for_terminal_edge(
         .iter()
         .filter_map(|record| taint_step_for_edge(ws, record))
         .collect();
-    Some(build_inspect_taint_flow(
+    build_inspect_taint_flow(
         ws,
         entry,
         &records,
@@ -2303,9 +2322,11 @@ fn taint_flow_for_terminal_edge(
         "propagation",
         record.precision,
         steps,
-    ))
+        flow_id_filter,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_inspect_taint_flow(
     ws: &Workspace,
     entry: bonsai_common::FuncId,
@@ -2314,7 +2335,8 @@ fn build_inspect_taint_flow(
     terminal_kind: &str,
     precision: bonsai_common::Precision,
     steps: Vec<InspectTaintStep>,
-) -> InspectTaintFlow {
+    flow_id_filter: Option<&str>,
+) -> Option<InspectTaintFlow> {
     let mut funcs = vec![entry];
     for record in records {
         if funcs.last().copied() != Some(record.caller) {
@@ -2329,20 +2351,31 @@ fn build_inspect_taint_flow(
             funcs.push(call.caller);
         }
     }
+    let entry_name = func_display_name(ws, entry);
+    let terminal = terminal_call
+        .map(|call| call.name.clone())
+        .or_else(|| steps.last().map(|step| step.callee.clone()))
+        .unwrap_or_default();
+    // The taint id depends only on entry / terminal / steps — NOT on the
+    // (expensive, per-chain) name disambiguation below. When reopening a
+    // single id (`show T:`), compute the id first and skip the
+    // disambiguation for every non-matching candidate. This is what keeps
+    // `show T:` from disambiguating every flow in the workspace just to
+    // keep one — an O(flows × chain) sweep that hangs on wide/deep graphs.
+    let taint_id = compute_taint_flow_id(&entry_name, &terminal, &steps);
+    if let Some(target) = flow_id_filter {
+        if taint_id != target {
+            return None;
+        }
+    }
     let func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
     let chain_display = disambiguated_func_names_for_output(ws, &funcs);
-    let entry_name = func_display_name(ws, entry);
     let entry_kind = ws
         .db()
         .global_index()
         .decl_of(bonsai_common::SymbolId::new(entry.raw()))
         .map(|decl| decl.kind);
-    let terminal = terminal_call
-        .map(|call| call.name.clone())
-        .or_else(|| steps.last().map(|step| step.callee.clone()))
-        .unwrap_or_default();
-    let taint_id = compute_taint_flow_id(&entry_name, &terminal, &steps);
-    InspectTaintFlow {
+    Some(InspectTaintFlow {
         taint_id,
         entry: entry_name,
         entry_kind,
@@ -2352,7 +2385,7 @@ fn build_inspect_taint_flow(
         func_ids,
         chain_display,
         steps,
-    }
+    })
 }
 
 fn taint_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> Option<InspectTaintStep> {

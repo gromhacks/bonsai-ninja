@@ -2004,11 +2004,37 @@ fn walk_into(
             }
             let mut cursor = container.walk();
             for arg in container.named_children(&mut cursor) {
-                if is_closure_arg(arg.kind(), handler) {
+                // Several grammars wrap each argument in a dedicated
+                // node (C# `argument`, Kotlin `value_argument`, Python
+                // `keyword_argument`, C# `named_argument`). A closure
+                // hidden inside such a wrapper would otherwise recurse
+                // into `walk_into`, hit the lambda short-circuit, and
+                // vanish — while the standalone-decl pass ALSO skips it
+                // (it sees a call ancestor and assumes it was inlined
+                // here). Unwrap one level so wrapped closures inline
+                // exactly like direct positional ones. `pair` /
+                // object-literal values stay decl-owned on purpose —
+                // unwrapping those would create double ownership with
+                // the standalone-decl pass.
+                let closure_node = if is_closure_arg(arg.kind(), handler) {
+                    Some(arg)
+                } else if matches!(
+                    arg.kind(),
+                    "argument" | "keyword_argument" | "named_argument" | "value_argument"
+                ) {
+                    arg.child_by_field_name("value")
+                        .or_else(|| arg.child_by_field_name("expression"))
+                        .or_else(|| last_named_child(&arg))
+                        .filter(|inner| is_closure_arg(inner.kind(), handler))
+                } else {
+                    None
+                };
+                if let Some(closure) = closure_node {
                     walked_closures.insert(arg.id());
-                    let extra_sources = inline_closure_param_extra_sources(call_event.as_ref(), arg, src);
+                    walked_closures.insert(closure.id());
+                    let extra_sources = inline_closure_param_extra_sources(call_event.as_ref(), closure, src);
                     emit_inline_closure_param_bindings_with_extra_sources(
-                        arg,
+                        closure,
                         file,
                         src,
                         &closure_source_names,
@@ -2018,7 +2044,7 @@ fn walk_into(
                     // Inline the lambda body so its calls belong to
                     // the enclosing function. Walks via a helper that
                     // bypasses the is_lambda short-circuit.
-                    walk_lambda_body(arg, file, src, handler, class_names, out);
+                    walk_lambda_body(closure, file, src, handler, class_names, out);
                 } else {
                     walk_into(arg, file, src, handler, class_names, out, false);
                 }
@@ -2626,6 +2652,27 @@ fn implicit_return_expression_node<'tree>(
     if matches!(first.kind(), "function_body" | "statements") {
         return implicit_return_expression_node(&first, handler);
     }
+    // A statement-shaped single child is control flow, not a tail
+    // expression. Swift `func f() { if … }`, Kotlin `fun f() { when … }`,
+    // and Solidity `function f() { if (…) {…} }` must NOT synthesize a
+    // Return whose `value_text` unions the whole block — that fabricates
+    // an over-tainted return (and a bogus return in a void function). The
+    // `_statement` suffix rule fails closed for unseen statement kinds;
+    // `statement` alone is Solidity's generic per-statement wrapper; the
+    // `statements`-only expression list catches Kotlin control-flow
+    // expressions in block-statement position while leaving
+    // `fun f() = if (c) a else b` (which reaches the `if_expression`
+    // directly, without a `statements` wrapper) with its legitimate Return.
+    if first.kind() == "statement"
+        || first.kind().ends_with("_statement")
+        || (body.kind() == "statements"
+            && matches!(
+                first.kind(),
+                "if_expression" | "when_expression" | "try_expression"
+            ))
+    {
+        return None;
+    }
     if !body_has_implicit_return(&first, handler) {
         return None;
     }
@@ -2657,6 +2704,13 @@ fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
             .or_else(|| parent.child_by_field_name("lhs"))
             .or_else(|| parent.child_by_field_name("target")),
         "pair" | "pair_pattern" if value_is_node => parent.child_by_field_name("key"),
+        // C/C++ `auto f = [...]` — the closure sits in `init_declarator`'s
+        // `value`; the binding name is the `declarator`. Without this arm
+        // the stored closure's standalone decl is anonymous
+        // (`<lambda@line:col>`) and `f(x)` can never resolve to it.
+        "init_declarator" if value_is_node => parent.child_by_field_name("declarator"),
+        // Rust `let f = |...| ...;` — binding name is the `pattern`.
+        "let_declaration" if value_is_node => parent.child_by_field_name("pattern"),
         _ => None,
     }
 }

@@ -42,6 +42,15 @@ pub const LANG_ID: LanguageId = LanguageId::new("scala");
 const PACK_NAME: &str = "scala";
 const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    // Scala block-bodied `def f() = { …; tailExpr }` returns its tail
+    // expression. The body node kind is `block` (never descended by
+    // implicit-return synthesis), so — like Rust and Ruby — the tail
+    // Return is emitted by the tail-expression path. Without this the
+    // dominant Scala function shape emits NO Return, breaking
+    // interprocedural return-taint. Expression-bodied `def f = expr`
+    // keeps its existing direct-body Return (the caller prefers that
+    // path and both emitters dedupe on span).
+    tail_expression_returns: true,
     ..with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this", "super"], &[])
 };
 

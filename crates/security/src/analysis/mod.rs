@@ -3653,8 +3653,12 @@ fn path_filter_with_separator_matches(path: &str, filter: &str) -> bool {
     // a directory component", not as raw substring.
     let is_component_filter = filter.starts_with('/') || filter.ends_with('/');
     if is_component_filter {
-        return path == trimmed
-            || path.starts_with(&format!("{trimmed}/"))
+        // Anchored comparison must strip the path's own leading slash the
+        // same way the filter was trimmed, or an explicit absolute filter
+        // (`/abs/ws/app.py`) can never equal the absolute path it names.
+        let anchored = path.trim_start_matches('/');
+        return anchored == trimmed
+            || anchored.starts_with(&format!("{trimmed}/"))
             || path.contains(&format!("/{trimmed}/"));
     }
     path.contains(filter)

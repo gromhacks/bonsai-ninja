@@ -851,11 +851,13 @@ fn bridge_return_expression_calls(ctx: &mut TransferCtx<'_>, events: &[FlowEvent
     let return_node = ctx.intern_node(Place::Return);
     for return_span in return_spans {
         let return_base_node = ctx.write_node(RETURN_FIELD_BASE, return_span);
+        let mut contains_call = false;
         for inner in &sites {
             let inner_span = inner.site.0;
             if !span_contains_or_equal(return_span, inner_span) {
                 continue;
             }
+            contains_call = true;
             ctx.emit(IdgEdge {
                 from: inner.call_ret_node,
                 to: return_node,
@@ -869,6 +871,31 @@ fn bridge_return_expression_calls(ctx: &mut TransferCtx<'_>, events: &[FlowEvent
             ctx.emit(IdgEdge {
                 from: inner.call_ret_node,
                 to: return_base_node,
+                meta: crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraReturn,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: return_span,
+                },
+            });
+        }
+        // Forward the return-expression's own span node into the scalar
+        // `Return` place ONLY when the return expression contains no call.
+        // The FN this fixes is `return <source-expr>` with no call in the
+        // span (`return os.environ["CMD"]`): the loop above adds nothing, so
+        // this span node would be a dead orphan that nonetheless wins
+        // span-anchored source seeding over the edge fallback, emptying the
+        // forward cut and dropping the source group. When the return DOES
+        // contain a call (`return exec(req.params.q)`), the call already
+        // bridges `call_ret -> Return`, AND the argument-taint into that call
+        // is seeded from the inner read node — adding a whole-span
+        // `base -> Return` edge there would instead let the span node win the
+        // seed and divert it to the return value, dropping the arg-taint
+        // finding. So gate the edge on the no-call case.
+        if !contains_call {
+            ctx.emit(IdgEdge {
+                from: return_base_node,
+                to: return_node,
                 meta: crate::edge::EdgeMeta {
                     precision: Precision::Exact,
                     kind: IdgEdgeKind::IntraReturn,
