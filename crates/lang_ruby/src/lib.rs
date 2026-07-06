@@ -148,6 +148,13 @@ impl LanguageAdapter for RubyAdapter {
                 },
             ];
             for decl in &mut idx.defs {
+                // Paren-less method calls in value position (`cmd =
+                // get_input`, `v = gets`) parse as bare identifier
+                // reads; promote the ones that name a method (not a
+                // local) into the call-result shape so taint crosses
+                // the call edge. Runs before the call-result
+                // normalizer so the promoted assign is normalized too.
+                rewrite_ruby_bareword_call_result_assigns(decl);
                 bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
                 bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
             }
@@ -278,6 +285,7 @@ impl LanguageAdapter for RubyAdapter {
             Vec::new()
         };
         for decl in &mut defs {
+            rewrite_ruby_bareword_call_result_assigns(decl);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
         }
@@ -1021,6 +1029,180 @@ fn ruby_bare_binding_name(value: &str) -> Option<String> {
         return None;
     }
     ruby_bare_method_candidate(name).then(|| name.to_string())
+}
+
+/// Promote paren-less method calls that sit in an assignment's value
+/// position into call-result assignments.
+///
+/// tree-sitter-ruby parses a receiver-less, argument-less method call
+/// in value position (`cmd = get_input`, `v = gets`) as a bare
+/// `identifier`, syntactically identical to a local-variable read. The
+/// flow walker therefore emits `cmd = get_input` as a simple-rename
+/// `Assign { source_name: Some("get_input"), value_kind: Compound }`
+/// with no `Call` sibling — so the IDG stitches no call edge and the
+/// callee's tainted return never reaches the target. The paren form
+/// (`get_input()`) instead yields `Assign { source_call: "get_input",
+/// value_kind: CallResult }` plus a sibling `Call`, which taints
+/// correctly.
+///
+/// Ruby's own disambiguation rule (the same one its parser uses): a
+/// bareword is a local-variable reference iff a local of that name is
+/// bound in the enclosing scope; otherwise a receiver-less bareword
+/// naming a method is a method call. We apply exactly that rule —
+/// rewriting a simple-rename `Assign` into the call-result shape only
+/// when the RHS bareword is NOT bound as a local/param anywhere in the
+/// method — and emit the sibling arg-less `Call` so the paren-less
+/// form produces the identical shape to the working paren form.
+///
+/// FP-safety: taint reaches the target via the pre-existing
+/// simple-rename path only when the RHS names a *tainted local*, which
+/// must have been bound earlier and is therefore excluded by the local
+/// guard (locals/params always stay reads). When the bareword is never
+/// bound in the method it can carry no variable-level taint today, so
+/// the rewrite is purely additive: it can introduce the (correct)
+/// callee-return edge but never remove a working one. An unresolved
+/// callee yields no return summary, so the engine leaves the target
+/// clean — the same behaviour the paren form already exhibits.
+fn rewrite_ruby_bareword_call_result_assigns(decl: &mut bonsai_lang_api::Decl) {
+    // Method-wide local set (params + every assignment target, including
+    // block params and loop variables, which surface as Assign targets).
+    // Collecting method-wide rather than lexically-before-use is strictly
+    // conservative: it can only keep more barewords as reads, never fewer.
+    let locals = ruby_local_bindings_for_decl(decl);
+    rewrite_ruby_bareword_assigns_in_events(&mut decl.flow_events, &locals);
+}
+
+fn rewrite_ruby_bareword_assigns_in_events(
+    events: &mut Vec<FlowEvent>,
+    locals: &std::collections::BTreeSet<String>,
+) {
+    // Recurse into nested regions with the same method-wide local set.
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_ruby_bareword_assigns_in_events(then_events, locals);
+                rewrite_ruby_bareword_assigns_in_events(else_events, locals);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_ruby_bareword_assigns_in_events(body, locals);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_ruby_bareword_assigns_in_events(body, locals);
+                rewrite_ruby_bareword_assigns_in_events(catch_events, locals);
+                rewrite_ruby_bareword_assigns_in_events(finally_events, locals);
+            }
+            _ => {}
+        }
+    }
+
+    if !events
+        .iter()
+        .any(|event| ruby_bareword_call_result_name(event, locals).is_some())
+    {
+        return;
+    }
+    // Preserve source order and insert each synthetic arg-less Call
+    // immediately after the promoted Assign, mirroring the paren form's
+    // `Assign{CallResult}` + `Call` pairing. Order-preserving, so the
+    // pass is deterministic.
+    let mut rewritten = Vec::with_capacity(events.len() + 1);
+    for event in events.drain(..) {
+        match ruby_bareword_call_result_name(&event, locals) {
+            Some(call_name) => {
+                let span = event.span();
+                rewritten.push(promote_ruby_bareword_assign_to_call_result(event, &call_name));
+                rewritten.push(FlowEvent::Call {
+                    span,
+                    name: call_name,
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args: Vec::new(),
+                });
+            }
+            None => rewritten.push(event),
+        }
+    }
+    *events = rewritten;
+}
+
+/// If `event` is a simple-rename assignment (`target = bareword`) whose
+/// RHS bareword names a method rather than a bound local, return the
+/// method name. `None` for anything else — the guard that keeps locals,
+/// params, literals, compound RHS, and already-a-call assigns as reads.
+fn ruby_bareword_call_result_name(
+    event: &FlowEvent,
+    locals: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let FlowEvent::Assign {
+        source_name: Some(name),
+        source_call: None,
+        source_names,
+        value_kind,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    // Simple-name RHS only: `source_name` is contractually a single bare
+    // identifier and `source_names` must carry nothing beyond it (a
+    // compound RHS leaves `source_name` empty). Anything else is not a
+    // bare paren-less-call candidate.
+    if !source_names.iter().all(|carrier| carrier == name) {
+        return None;
+    }
+    // Never reclassify a literal, an already-resolved call, or a yield
+    // RHS. A bare identifier read is Compound / Unknown / unset.
+    if matches!(
+        value_kind,
+        Some(
+            bonsai_lang_api::AssignValueKind::Literal
+                | bonsai_lang_api::AssignValueKind::CallResult
+                | bonsai_lang_api::AssignValueKind::YieldResult
+        )
+    ) {
+        return None;
+    }
+    // Ruby's rule: a bareword bound as a local/param is a variable read.
+    if locals.contains(name.as_str()) {
+        return None;
+    }
+    // The bareword must have the lexical shape of a Ruby method name.
+    ruby_bare_method_candidate(name).then(|| name.clone())
+}
+
+/// Rewrite a qualifying simple-rename `Assign` into the call-result
+/// shape: drop the read-style `source_name` / `source_names`, set
+/// `source_call` to the callee, and mark the RHS `CallResult`.
+fn promote_ruby_bareword_assign_to_call_result(event: FlowEvent, call_name: &str) -> FlowEvent {
+    let FlowEvent::Assign {
+        span,
+        target,
+        declares_new_binding,
+        ..
+    } = event
+    else {
+        return event;
+    };
+    FlowEvent::Assign {
+        span,
+        target,
+        source_name: None,
+        source_call: Some(call_name.to_string()),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+    }
 }
 
 fn ruby_span_text(src: &[u8], span: Span) -> Option<&str> {
