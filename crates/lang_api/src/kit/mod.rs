@@ -8098,9 +8098,25 @@ fn adjacent_constructor_call_type(
     assign_index: usize,
     assign_span: Span,
 ) -> Option<String> {
+    // The constructor `Call` for `x = new T()` is emitted immediately
+    // adjacent to the `Assign` (its span sits inside the assignment's
+    // RHS), so only a small window around the assign can match. Scanning
+    // the whole event list per assign is O(statements^2) on large
+    // functions — a 60k-statement body spent essentially all its indexing
+    // time here. Cap the scan to a bounded window so alias collection
+    // stays O(statements). The window is far wider than any real
+    // assign->RHS-constructor distance (observed: +1), and the span
+    // checks below still reject anything not inside the assignment span,
+    // so this changes no result on realistic code.
+    const BACK: usize = 4;
+    const FWD: usize = 32;
+    let lo = assign_index.saturating_sub(BACK);
+    let hi = assign_index
+        .saturating_add(FWD)
+        .min(events.len().saturating_sub(1));
     let mut best: Option<(u64, String)> = None;
-    for (idx, event) in events.iter().enumerate() {
-        if idx == assign_index {
+    for (offset, event) in events[lo..=hi].iter().enumerate() {
+        if lo + offset == assign_index {
             continue;
         }
         let FlowEvent::Call { name, span, .. } = event else {

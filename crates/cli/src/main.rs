@@ -279,6 +279,28 @@ pub(crate) fn ui() -> &'static Ui {
 }
 
 fn main() -> Result<()> {
+    // Run the whole CLI on a worker thread with a large stack. The
+    // main thread's default 8 MB stack overflows (SIGABRT, unrecoverable
+    // in Rust) on deeply-nested source — the recursive tree walk in
+    // decl extraction / lowering descends one frame per nesting level,
+    // so ~1300 nested blocks abort the process. Parse/analysis rayon
+    // workers already run with a large stack for the same reason; the
+    // single-file / serial phases run here on `main`, so give this the
+    // same headroom. Errors and exit codes are unchanged: the worker's
+    // `Result` is returned verbatim (std's `Termination` renders it),
+    // and a worker panic keeps the standard 101 exit after its message.
+    let worker = std::thread::Builder::new()
+        .name("bonsai-main".to_string())
+        .stack_size(configured_main_stack_bytes())
+        .spawn(real_main)
+        .expect("spawn bonsai worker thread");
+    match worker.join() {
+        Ok(result) => result,
+        Err(_) => std::process::exit(101),
+    }
+}
+
+fn real_main() -> Result<()> {
     install_global_rayon_pool();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1178,6 +1200,21 @@ fn configured_rayon_stack_bytes() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value >= 1024 * 1024)
         .unwrap_or(DEFAULT_RAYON_STACK_BYTES)
+}
+
+/// Stack size for the worker thread that runs the whole CLI. Larger than
+/// the default 8 MB main-thread stack (and the rayon default) so deeply
+/// nested source — where the recursive tree walk descends one frame per
+/// nesting level — cannot overflow the stack on realistic or adversarial
+/// input. Reserved virtual space, committed lazily, so the cost is ~0 for
+/// normal runs. Override with `BONSAI_MAIN_STACK_BYTES`.
+fn configured_main_stack_bytes() -> usize {
+    const DEFAULT_MAIN_STACK_BYTES: usize = 512 * 1024 * 1024;
+    std::env::var("BONSAI_MAIN_STACK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 8 * 1024 * 1024)
+        .unwrap_or(DEFAULT_MAIN_STACK_BYTES)
 }
 
 fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
