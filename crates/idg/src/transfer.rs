@@ -1907,8 +1907,17 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                         // Use the same expression bridge as assignments so
                         // value-preserving method calls (`return x.upper()`,
                         // `return @cmd.upcase`) carry the receiver while
-                        // string/keyword noise stays out.
-                        bridge_value_expr_to_node(text, return_node, *span, IdgEdgeKind::IntraReturn, ctx);
+                        // string/keyword noise stays out. Shares `bridged`
+                        // with the value_name path above so `return result`
+                        // emits exactly one IntraReturn edge, not two.
+                        bridge_value_expr_to_node_with_bridged(
+                            text,
+                            return_node,
+                            *span,
+                            IdgEdgeKind::IntraReturn,
+                            ctx,
+                            &mut bridged,
+                        );
                     }
                 }
             }
@@ -2144,16 +2153,32 @@ fn bridge_value_expr_to_node(
     kind: IdgEdgeKind,
     ctx: &mut TransferCtx<'_>,
 ) {
+    let mut bridged: ahash::AHashSet<StrId> = ahash::AHashSet::default();
+    bridge_value_expr_to_node_with_bridged(value, target, span, kind, ctx, &mut bridged);
+}
+
+/// Like [`bridge_value_expr_to_node`] but dedups against a caller-owned
+/// `bridged` set. The Return arm bridges `value_name` first and then
+/// tokenises `value_text` through this — sharing the set keeps a
+/// `return result` (where `value_name` and the tokenised text are the
+/// same identifier) at exactly one IntraReturn edge instead of two.
+fn bridge_value_expr_to_node_with_bridged(
+    value: &str,
+    target: NodeId,
+    span: Span,
+    kind: IdgEdgeKind,
+    ctx: &mut TransferCtx<'_>,
+    bridged: &mut ahash::AHashSet<StrId>,
+) {
     let meta = crate::edge::EdgeMeta {
         precision: Precision::Exact,
         kind,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
     };
-    let mut bridged: ahash::AHashSet<StrId> = ahash::AHashSet::default();
-    bridge_value_expr_fragment_to_node(value, target, meta, ctx, &mut bridged);
+    bridge_value_expr_fragment_to_node(value, target, meta, ctx, bridged);
     for expression in template_interpolation_expressions(value) {
-        bridge_value_expr_fragment_to_node(&expression, target, meta, ctx, &mut bridged);
+        bridge_value_expr_fragment_to_node(&expression, target, meta, ctx, bridged);
     }
 }
 

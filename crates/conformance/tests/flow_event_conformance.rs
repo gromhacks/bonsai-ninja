@@ -504,9 +504,10 @@ object Shape {
             function_name: "shapes",
             branch_callee: "F",
             loop_callee: "G",
-            // Scala's value-final expression return: adapter emits no
-            // `Return` event when the last expression is implicit.
-            skip: &[CanonicalShape::BareReturn],
+            // Scala's tail expression now emits a Return event (the
+            // adapter opts into `tail_expression_returns`), so the
+            // value-final `y` conforms to BareReturn like Rust/Ruby.
+            skip: &[],
         },
         "swift" => Conformance {
             lang: "swift",

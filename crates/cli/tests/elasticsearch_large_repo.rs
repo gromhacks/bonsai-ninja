@@ -293,7 +293,12 @@ fn elasticsearch_full_taint_analysis_does_not_regress() {
             "{rules}",
         ],
     );
-    let stdout = assert_success(&bin, &args, Duration::from_secs(240));
+    // Budget: the full-workspace taint analysis on the 6M-LOC checkout
+    // measures ~310-330s wall on an M-series laptop (chain-aware finding
+    // construction + package gates grew the legitimate cost past the
+    // original 240s). 600s keeps the smoke meaningful — a 2x regression
+    // still trips it — without flaking under concurrent-suite load.
+    let stdout = assert_success(&bin, &args, Duration::from_secs(600));
     assert!(
         stdout.trim().is_empty(),
         "taint-analysis with --output-path should keep stdout empty, got:\n{stdout}"

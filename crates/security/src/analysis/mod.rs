@@ -4897,7 +4897,40 @@ where
             sink_by_func.entry(sink_func_id).or_default().push(snk);
         }
     }
+    // Workspace-wide source-seeded graph index. The resident cache is
+    // bounded and guarded by a rule/config fingerprint, so reuse
+    // cannot keep stale graphs alive across rulepack or precision
+    // changes and cannot grow without limit on large scans. Disk
+    // persistence is best-effort and default-on so repeated CLI runs
+    // can hydrate exact graphs from the sidecar instead of replaying
+    // the same taint solve. Set `BONSAI_TAINT_GRAPH_PERSIST=0` to
+    // disable the performance artifact for disk-constrained runs.
+    //
+    // Prepared BEFORE the no-work early return below: the cache
+    // decision (scoped workspaces skip the shared sidecar; unscoped
+    // runs hydrate it) is made per-invocation regardless of whether
+    // any source/sink pairs exist, and callers observe it through the
+    // `taint-cache` note — a scoped run must always be able to prove
+    // it did not touch the shared sidecar.
+    let workspace_taint_index = ws.taint_index();
+    if let Some(resident_cap) = taint_graph_resident_cache_entries {
+        workspace_taint_index.set_resident_capacity(resident_cap);
+    }
+    let taint_graph_fingerprint =
+        taint_cache::config_fingerprint(pack, "taint-analysis", max_precision);
+    let cache_report = taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
+    let cache_persist_started = cache_report.persist_started;
+    on_progress(AnalysisProgress::Note {
+        label: "taint-cache",
+        detail: cache_report.detail(),
+    });
     if source_hits.is_empty() || sink_by_func.is_empty() {
+        // No source/sink work will run, but `prepare_workspace_cache`
+        // may have opened the sidecar write-through — close it so the
+        // temp file never dangles.
+        if cache_persist_started {
+            let _ = taint_cache::finish_workspace_cache(ws);
+        }
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -5217,25 +5250,8 @@ where
     };
     let taint_caches = ws.inter_taint_caches();
     taint_caches.seed_resolved_call_graph(chain_call_graph.as_ref());
-    // Workspace-wide source-seeded graph index. The resident cache is
-    // bounded and guarded by a rule/config fingerprint, so reuse
-    // cannot keep stale graphs alive across rulepack or precision
-    // changes and cannot grow without limit on large scans. Disk
-    // persistence is best-effort and default-on so repeated CLI runs
-    // can hydrate exact graphs from the sidecar instead of replaying
-    // the same taint solve. Set `BONSAI_TAINT_GRAPH_PERSIST=0` to
-    // disable the performance artifact for disk-constrained runs.
-    let workspace_taint_index = ws.taint_index();
-    if let Some(resident_cap) = taint_graph_resident_cache_entries {
-        workspace_taint_index.set_resident_capacity(resident_cap);
-    }
-    let taint_graph_fingerprint =
-        taint_cache::config_fingerprint(pack, "taint-analysis", config.max_edge_precision);
-    let cache_report = taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
-    on_progress(AnalysisProgress::Note {
-        label: "taint-cache",
-        detail: cache_report.detail(),
-    });
+    // (Workspace taint-graph index + sidecar prepare happen at the top
+    // of this function, before the no-work early return.)
     if source_sink_prefilter_enabled {
         on_progress(AnalysisProgress::PhaseStarted {
             label: "building source-sink reachability",

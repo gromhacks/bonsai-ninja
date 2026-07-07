@@ -51,6 +51,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // keeps its existing direct-body Return (the caller prefers that
     // path and both emitters dedupe on span).
     tail_expression_returns: true,
+    // A `def f(...): Unit = { …; log(x) }` returns no value; its tail is a
+    // side-effecting call that consumes `x`, not one that returns it.
+    // Suppress the synthetic tail Return so the argument isn't tokenised
+    // into an over-tainted return that leaks to the caller.
+    void_return_type_names: &["Unit"],
     ..with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this", "super"], &[])
 };
 

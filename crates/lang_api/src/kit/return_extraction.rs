@@ -46,6 +46,16 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
     let value_kind = value_node.kind();
     // Direct identifier — most languages parse `return x` this way.
     if looks_like_identifier(value_kind) {
+        // Dart models a call as a bare `identifier` (the callee) followed by
+        // a sibling `selector` holding the `argument_part` — `return foo(x)`
+        // parses as `identifier "foo"` + `selector((x))`, with no unified
+        // call node. The identifier is the CALLEE, not the returned value:
+        // recording it as `value_name` fabricates a read of the function
+        // name (a spurious `read` ref) and a return-of-a-symbol. The value
+        // is the call's result, carried by the Call event + value_text.
+        if dart_selector_call_callee(&value_node) {
+            return None;
+        }
         let text = node_text(&value_node, src).trim().to_string();
         if !looks_like_literal_value(value_kind, &text) {
             return Some(text);
@@ -97,6 +107,26 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
         return operands.into_iter().next();
     }
     None
+}
+
+/// True when `node` is the callee identifier of a Dart selector call —
+/// a bare `identifier` immediately followed by a sibling `selector` whose
+/// child is an `argument_part` (`foo` `(args)`). tree-sitter-dart has no
+/// unified call node, so this is how `foo(x)` is shaped; the identifier is
+/// the callee, not a value. Property/cascade selectors (`.field`, `..m()`)
+/// carry no `argument_part`, so a pure member read still returns its name.
+fn dart_selector_call_callee(node: &Node<'_>) -> bool {
+    let Some(selector) = node.next_named_sibling() else {
+        return false;
+    };
+    if selector.kind() != "selector" {
+        return false;
+    }
+    let mut cursor = selector.walk();
+    let has_argument_part = selector
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "argument_part");
+    has_argument_part
 }
 
 /// Drill into a catch/rescue/except binding subtree to the actual binding

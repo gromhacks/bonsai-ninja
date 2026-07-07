@@ -695,6 +695,16 @@ pub struct GrammarHandler {
     /// the shared tree-sitter walker can expose that terminal expression as a
     /// normal Return event.
     pub tail_expression_returns: bool,
+
+    /// Return-type annotations that denote "returns no value" (Scala `Unit`).
+    /// A function declared with one of these types cannot return a tainted
+    /// value, so the walker suppresses the synthetic tail-/expression-body
+    /// Return for it — a tail *call* in such a body (`def f(x): Unit = {
+    /// …; log(x) }`) consumes its argument, it does not return it, and
+    /// tokenising that call's args into a Return over-taints the caller.
+    /// Only consulted when the grammar exposes the type via a `return_type`
+    /// field on the callable node; empty for languages without the field.
+    pub void_return_type_names: &'static [&'static str],
 }
 
 /// A reasonable starter grammar handler covering node names most Tree-sitter
@@ -969,6 +979,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: &[],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
+    void_return_type_names: &[],
 };
 
 /// Kinds of Tree-sitter nodes that represent a call-site across most
@@ -1688,17 +1699,38 @@ fn walk_into(
         // so a literal / untainted RHS can't reach the clean-overwrite kill
         // arm and drop `x`'s prior taint.
         let is_compound = assignment_is_compound(&node, kind, src);
-        if !is_compound {
+        // Self-referential assignment: `x = x + a`, `x = x.field`,
+        // `x = cond ? x : y`. When the target appears as an operand of a
+        // NON-call RHS expression, it is genuinely read into the result
+        // (exactly like a compound `x += a`), so it must NOT be stripped as
+        // a clean overwrite — dropping it silently loses `x`'s prior taint,
+        // a universal false negative. A CALL RHS (`x = sanitize(x)`) still
+        // strips: there the target is a consumed argument and the result is
+        // the callee's return, so clean-overwrite / call-result semantics
+        // apply. `rhs` is `None` only for the full-node/text fallback (where
+        // the LHS identifier can leak into the operands), so a missing RHS
+        // also strips.
+        let rhs_is_noncall_expr = rhs
+            .as_ref()
+            .is_some_and(|n| !COMMON_CALL_KINDS.contains(&n.kind()));
+        let target_self_read = is_compound || rhs_is_noncall_expr;
+        if !target_self_read {
             source_names.retain(|name| !same_identifier_name(name, &target));
         }
         if source_names.is_empty() && !rhs_is_large_literal {
             if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
                 source_names.extend(identifier_tokens_from_text(rhs_text));
-                if !is_compound {
+                if !target_self_read {
                     source_names.retain(|name| !same_identifier_name(name, &target));
                 }
             }
         }
+        // Only a compound `x += a` unconditionally reads its target, so only
+        // it re-adds the target when extraction missed it. A plain
+        // `x = a + b` must NOT push `x` — that would fabricate a self-read
+        // and keep `x`'s prior taint through a clean overwrite. The genuine
+        // non-call self-read (`x = x + a`) already carries `x` in
+        // `source_names` (it was never stripped), so it needs no push.
         if is_compound
             && !target.is_empty()
             && !source_names
@@ -2544,6 +2576,24 @@ fn synthesize_assign_components_from_value(
         // engine taint propagation picks up any tainted operand.
         (None, Vec::new(), vec![value_text.to_string()])
     }
+}
+
+/// True when the callable node declares a void/unit return type listed in
+/// `handler.void_return_type_names`. Read syntactically from the grammar's
+/// `return_type` field (Scala `def f(): Unit`), so it fires only for
+/// languages that expose the annotation and opt into a void-type list.
+fn callable_returns_void(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) -> bool {
+    if handler.void_return_type_names.is_empty() {
+        return false;
+    }
+    let Some(return_type) = node.child_by_field_name("return_type") else {
+        return false;
+    };
+    let text = node_text(&return_type, src).trim();
+    handler
+        .void_return_type_names
+        .iter()
+        .any(|name| *name == text)
 }
 
 fn append_tail_expression_return(
@@ -4160,6 +4210,7 @@ pub const fn with_fn_kinds_and_implicit_receivers(
         implicit_receiver_names,
         implicit_receiver_prefixes,
         tail_expression_returns: GENERIC_HANDLER.tail_expression_returns,
+        void_return_type_names: GENERIC_HANDLER.void_return_type_names,
     }
 }
 
@@ -4360,9 +4411,16 @@ pub fn decl_index_with_handler(
         let syntax_broken = file_has_syntax_errors && callable_has_syntax_error(&node, body_node.as_ref());
         let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
         let body_implicit_returns = implicit_return_node.is_some();
+        // A function declared to return a void/unit type carries no return
+        // value, so synthesizing an implicit Return for its tail expression
+        // would tokenize that expression (often a side-effecting call whose
+        // args are consumed, not returned) into a bogus tainted return.
+        let returns_void = callable_returns_void(&node, src, handler);
         let mut flow_events = if let Some(b) = body_node {
             let mut events = walk_flow_events(b, file, src, handler, &class_names);
-            if let Some(return_node) = implicit_return_node {
+            if returns_void {
+                // no synthetic return for a void/unit function
+            } else if let Some(return_node) = implicit_return_node {
                 append_expression_body_return(&mut events, &return_node, file, src);
             } else if handler.tail_expression_returns {
                 append_tail_expression_return(&mut events, &b, file, src, handler);
@@ -4451,7 +4509,8 @@ pub fn decl_index_with_handler(
             parent: None,
             body_span: body_node.map_or_else(|| Some(span_of(file, &node)), |b| Some(span_of(file, &b))),
             flow_events,
-            has_implicit_returns: handler.tail_expression_returns || body_implicit_returns,
+            has_implicit_returns: !returns_void
+                && (handler.tail_expression_returns || body_implicit_returns),
             params,
             param_annotations,
             type_aliases: Vec::new(),

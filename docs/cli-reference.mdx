@@ -288,8 +288,8 @@ bonsai-ninja show ./src T:aabbccdd --taint-source update_user --taint-seed token
 
 | Prefix | Owner view | Required context |
 |---|---|---|
-| `F:` | Structural `inspect --flow` drilldown or security `taint-analysis --flow` drilldown | Rulepack via `--rules-dir` only when the id belongs to a security finding |
-| `G:` | Structural `inspect --group` drilldown or security `taint-analysis --group` drilldown | Rulepack via `--rules-dir` only when the id belongs to a security finding |
+| `F:` | `inspect --flow` structural drilldown or security `taint-analysis --flow` drilldown | Rulepack via `--rules-dir` only when the id belongs to a security finding |
+| `G:` | `inspect --group` structural drilldown or security `taint-analysis --group` drilldown | Rulepack via `--rules-dir` only when the id belongs to a security finding |
 | `T:` | raw inspect taint path, or structured `dump-taint` propagation | `--taint-source` plus original dump-taint filters for structured propagation ids |
 | `E:` | `dump-edges --edge` call-edge provenance | None |
 | `N:` | `dump-ast --node` AST-node drilldown | Optional AST scope inherited by the delegated command |
