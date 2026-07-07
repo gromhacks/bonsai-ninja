@@ -50,6 +50,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: bonsai_lang_api::kit::GENERIC_HANDLER.implicit_receiver_names,
     implicit_receiver_prefixes: bonsai_lang_api::kit::GENERIC_HANDLER.implicit_receiver_prefixes,
     tail_expression_returns: bonsai_lang_api::kit::GENERIC_HANDLER.tail_expression_returns,
+    void_return_type_names: bonsai_lang_api::kit::GENERIC_HANDLER.void_return_type_names,
 };
 
 /// Tree-sitter adapter for Perl 5.

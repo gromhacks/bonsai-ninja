@@ -89,6 +89,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: GENERIC_HANDLER.implicit_receiver_prefixes,
     tail_expression_returns: GENERIC_HANDLER.tail_expression_returns,
+    void_return_type_names: GENERIC_HANDLER.void_return_type_names,
 };
 
 #[derive(Debug, Default, Copy, Clone)]

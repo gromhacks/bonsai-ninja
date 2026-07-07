@@ -21,6 +21,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // wrapper methods such as `def wrap(data); new(data); end`.
     constructor_names: &["initialize", "new"],
     tail_expression_returns: true,
+    void_return_type_names: &[],
     // tree-sitter-ruby parses `buf += data`, `x ||= y`, `arr <<= e`
     // as `operator_assignment`, which is absent from the generic
     // assignment_kinds list (audit H24). Without it `is_assignment`
@@ -104,8 +105,10 @@ impl LanguageAdapter for RubyAdapter {
             // Ruby has only single-inheritance; mixins via `include`
             // are call statements (handled by the matcher's existing
             // include path), not parent-clauses.
+            let mut block_param_names = std::collections::BTreeSet::new();
             if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
                 let src = snapshot.text.as_bytes();
+                block_param_names = collect_ruby_block_param_names(&tree, src);
                 let bases_by_span = collect_ruby_class_bases(&tree, file, src);
                 for decl in &mut idx.defs {
                     if !is_class_like(decl.kind) {
@@ -151,10 +154,10 @@ impl LanguageAdapter for RubyAdapter {
                 // Paren-less method calls in value position (`cmd =
                 // get_input`, `v = gets`) parse as bare identifier
                 // reads; promote the ones that name a method (not a
-                // local) into the call-result shape so taint crosses
-                // the call edge. Runs before the call-result
+                // local or block variable) into the call-result shape so
+                // taint crosses the call edge. Runs before the call-result
                 // normalizer so the promoted assign is normalized too.
-                rewrite_ruby_bareword_call_result_assigns(decl);
+                rewrite_ruby_bareword_call_result_assigns(decl, &block_param_names);
                 bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
                 bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
             }
@@ -284,8 +287,9 @@ impl LanguageAdapter for RubyAdapter {
         } else {
             Vec::new()
         };
+        let block_param_names = collect_ruby_block_param_names(&tree, src);
         for decl in &mut defs {
-            rewrite_ruby_bareword_call_result_assigns(decl);
+            rewrite_ruby_bareword_call_result_assigns(decl, &block_param_names);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
         }
@@ -1063,13 +1067,53 @@ fn ruby_bare_binding_name(value: &str) -> Option<String> {
 /// callee-return edge but never remove a working one. An unresolved
 /// callee yields no return summary, so the engine leaves the target
 /// clean — the same behaviour the paren form already exhibits.
-fn rewrite_ruby_bareword_call_result_assigns(decl: &mut bonsai_lang_api::Decl) {
-    // Method-wide local set (params + every assignment target, including
-    // block params and loop variables, which surface as Assign targets).
-    // Collecting method-wide rather than lexically-before-use is strictly
-    // conservative: it can only keep more barewords as reads, never fewer.
-    let locals = ruby_local_bindings_for_decl(decl);
+fn rewrite_ruby_bareword_call_result_assigns(
+    decl: &mut bonsai_lang_api::Decl,
+    block_param_names: &std::collections::BTreeSet<String>,
+) {
+    // Method-wide local set (params + every assignment target). Block and
+    // lambda parameters (`each do |x|`, `->(x){}`) do NOT surface as Assign
+    // targets — a block variable is bound by the loop, not written — so they
+    // are folded in from `block_param_names` (collected from the tree by the
+    // caller). Without this, a block variable that shares a method name
+    // (`each do |line| ...`, with a `def line`) is wrongly promoted to a call
+    // (a false positive). Collecting method-wide rather than
+    // lexically-before-use is strictly conservative: it can only keep more
+    // barewords as reads, never fewer.
+    let mut locals = ruby_local_bindings_for_decl(decl);
+    locals.extend(block_param_names.iter().cloned());
     rewrite_ruby_bareword_assigns_in_events(&mut decl.flow_events, &locals);
+}
+
+/// Names bound as block / lambda parameters anywhere in the file
+/// (`xs.each do |item|`, `xs.map { |x| }`, `->(y){}`). These shadow method
+/// names inside their block, so a value-position bareword naming one must
+/// stay a variable read, never be promoted to a method call. Collected
+/// file-wide (a conservative over-set) so the promotion never mistakes a
+/// block variable for a paren-less call.
+fn collect_ruby_block_param_names(tree: &Tree, src: &[u8]) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for params in collect_kinds(tree, &["block_parameters", "lambda_parameters"]) {
+        collect_ruby_param_identifiers(params, src, &mut names);
+    }
+    names
+}
+
+fn collect_ruby_param_identifiers(
+    node: tree_sitter::Node<'_>,
+    src: &[u8],
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    if node.kind() == "identifier" {
+        if let Some(name) = ruby_bare_binding_name(node_text(&node, src).trim()) {
+            out.insert(name);
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ruby_param_identifiers(child, src, out);
+    }
 }
 
 fn rewrite_ruby_bareword_assigns_in_events(

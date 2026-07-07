@@ -1445,7 +1445,13 @@ fn return_with_value_name_emits_intra_return_edge() {
         value_text: Some("result".to_string()),
     }];
     let out = transfer_function_for(&decl);
-    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraReturn), 1);
+    // Two intentional IntraReturn edges: the `value_name` read bridge
+    // (`Read(result) -> Return`) plus the span-anchored return-base edge
+    // (`__return__@span -> Return`) that `bridge_return_expression_calls`
+    // emits for call-free return expressions so span-anchored source
+    // seeding (`return os.environ["CMD"]`) lands on a live node instead
+    // of a dead orphan.
+    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraReturn), 2);
 }
 
 #[test]

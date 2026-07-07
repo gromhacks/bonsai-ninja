@@ -69,6 +69,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     implicit_receiver_names: &["self", "super"],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
+    void_return_type_names: &[],
 };
 
 /// Zero-sized adapter handle; all state lives in the shared parser pack.
