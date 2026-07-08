@@ -158,6 +158,9 @@ impl LanguageAdapter for RubyAdapter {
                 // taint crosses the call edge. Runs before the call-result
                 // normalizer so the promoted assign is normalized too.
                 rewrite_ruby_bareword_call_result_assigns(decl, &block_param_names);
+                // Same promotion for tail position: `def get_input; gets;
+                // end` is a call to `gets`, not an identifier read.
+                inject_ruby_bare_tail_return_calls(decl, &block_param_names);
                 bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
                 bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
             }
@@ -290,6 +293,7 @@ impl LanguageAdapter for RubyAdapter {
         let block_param_names = collect_ruby_block_param_names(&tree, src);
         for decl in &mut defs {
             rewrite_ruby_bareword_call_result_assigns(decl, &block_param_names);
+            inject_ruby_bare_tail_return_calls(decl, &block_param_names);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
         }
@@ -1083,6 +1087,96 @@ fn rewrite_ruby_bareword_call_result_assigns(
     let mut locals = ruby_local_bindings_for_decl(decl);
     locals.extend(block_param_names.iter().cloned());
     rewrite_ruby_bareword_assigns_in_events(&mut decl.flow_events, &locals);
+}
+
+/// Paren-less method calls in TAIL position: `def get_input; gets; end`
+/// parses the bare `gets` as an identifier, so the tail-return synthesis
+/// records `Return { value_name: "gets" }` and NO Call event exists — the
+/// source matcher never sees a `gets` call and the wrapper's taint is
+/// silently lost. Mirror of [`inject_ruby_bare_method_arg_calls`] for the
+/// return position: when a Return's value is a bare word that is not a
+/// local, param, or block variable, it IS a method call under Ruby
+/// semantics — synthesize the Call event at the tail span so matching and
+/// the call-ret→Return stitch both see it.
+fn inject_ruby_bare_tail_return_calls(
+    decl: &mut bonsai_lang_api::Decl,
+    block_param_names: &std::collections::BTreeSet<String>,
+) {
+    let mut locals = ruby_local_bindings_for_decl(decl);
+    locals.extend(block_param_names.iter().cloned());
+    let mut sites = Vec::new();
+    collect_ruby_bare_tail_call_sites(&decl.flow_events, &locals, &mut sites);
+    if sites.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for (span, name) in sites {
+        let event = FlowEvent::Call {
+            span,
+            name,
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Method,
+            args: Vec::new(),
+        };
+        if !decl.flow_events.iter().any(|existing| existing == &event) {
+            decl.flow_events.push(event);
+            changed = true;
+        }
+    }
+    if changed {
+        decl.flow_events
+            .sort_by_key(|event| (event.span().start, event.span().end));
+    }
+}
+
+fn collect_ruby_bare_tail_call_sites(
+    events: &[FlowEvent],
+    locals: &std::collections::BTreeSet<String>,
+    out: &mut Vec<(Span, String)>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                span,
+                value_name: Some(name),
+                value_text,
+            } => {
+                // Only the exact bare-word shape: the whole return value
+                // is the identifier itself. Compound returns
+                // (`gets.chomp`, `a + b`) already carry real Call events
+                // or operand reads.
+                if value_text.as_deref().map(str::trim) == Some(name.as_str())
+                    && ruby_bare_method_candidate(name)
+                    && !locals.contains(name.as_str())
+                {
+                    out.push((*span, name.clone()));
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_ruby_bare_tail_call_sites(then_events, locals, out);
+                collect_ruby_bare_tail_call_sites(else_events, locals, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_ruby_bare_tail_call_sites(body, locals, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_ruby_bare_tail_call_sites(body, locals, out);
+                collect_ruby_bare_tail_call_sites(catch_events, locals, out);
+                collect_ruby_bare_tail_call_sites(finally_events, locals, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Names bound as block / lambda parameters anywhere in the file

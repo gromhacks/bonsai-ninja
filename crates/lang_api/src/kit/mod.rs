@@ -837,6 +837,10 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "augmented_assignment",
         "augmented_assignment_expression",
         "compound_assignment_expr",
+        // PHP `$ref =& $src;` — reference aliasing is value-carrying:
+        // taint on the RHS must reach the alias. The node kind is
+        // PHP-specific, so listing it generically cannot collide.
+        "reference_assignment_expression",
         "short_var_declaration",
         // Scala `val x = ...` and `var x = ...` bindings.
         "val_definition",
@@ -1229,6 +1233,22 @@ fn is_comprehension_kind(kind: &str) -> bool {
             | "set_comprehension"
             | "generator_expression"
             | "array_comprehension"
+            // Erlang `<< <<X>> || <<X>> <= Bin >>` (its list form shares
+            // Python's `list_comprehension` kind name).
+            | "binary_comprehension"
+            // Erlang OTP 26+ map comprehension `#{K => V || ...}`.
+            | "map_comprehension"
+    )
+}
+
+/// Node kinds that bind a comprehension's loop variable from its
+/// iterable. Python/JS: `for_in_clause` / `comp_for` (direct children of
+/// the comprehension). Erlang: `generator` / `b_generator` / `m_generator`
+/// (`X <- List`, `<<X>> <= Bin`), nested under wrapper nodes.
+fn is_comprehension_binding_clause(kind: &str) -> bool {
+    matches!(
+        kind,
+        "for_in_clause" | "comp_for" | "generator" | "b_generator" | "m_generator"
     )
 }
 
@@ -1291,25 +1311,39 @@ fn walk_into(
     // common `for_in_clause` / `comp_for` shape that all three
     // grammars expose.
     if is_comprehension_kind(kind) {
-        // Emit the `for_in_clause` loop-variable bindings BEFORE the body,
-        // regardless of AST order (python lays the body out first). This
-        // gives the natural flow order — bindings then body — so a NESTED
+        // Emit the loop-variable bindings BEFORE the body, regardless of
+        // AST order (python lays the body out first). This gives the
+        // natural flow order — bindings then body — so a NESTED
         // comprehension's chained bindings resolve: `[f(t) for row in rows
         // for t in row]` emits `row<-rows` then `t<-row` then the body, so
         // taint flows rows -> row -> t into the sink. (A single-clause comp
         // worked even body-first since its binding is a direct param, but
         // the two-hop nested chain needs binding-before-body.)
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            let child_kind = child.kind();
-            if child_kind == "for_in_clause" || child_kind == "comp_for" {
-                out.extend(extract_comprehension_for_clause_assigns(file, &child, src));
+        //
+        // Binding clauses are found by DESCENDANT search, not direct
+        // children: Python/JS expose `for_in_clause` directly, but Erlang
+        // nests its `generator` under `lc_exprs > lc_or_zc_expr`
+        // (`[E || X <- List]`), so a direct-children scan never saw the
+        // binding and the iterable's taint could not reach the body.
+        let mut clauses: Vec<Node<'_>> = Vec::new();
+        let mut stack: Vec<Node<'_>> = vec![node];
+        while let Some(current) = stack.pop() {
+            let mut cursor = current.walk();
+            for child in current.named_children(&mut cursor) {
+                if is_comprehension_binding_clause(child.kind()) {
+                    clauses.push(child);
+                } else {
+                    stack.push(child);
+                }
             }
+        }
+        clauses.sort_by_key(|clause| clause.start_byte());
+        for clause in &clauses {
+            out.extend(extract_comprehension_for_clause_assigns(file, clause, src));
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            let child_kind = child.kind();
-            if child_kind != "for_in_clause" && child_kind != "comp_for" {
+            if !is_comprehension_binding_clause(child.kind()) {
                 walk_into(child, file, src, handler, class_names, out, false);
             }
         }
@@ -1912,6 +1946,54 @@ fn walk_into(
                     for arg in args.named_children(&mut cursor) {
                         walk_into(arg, file, src, handler, class_names, out, false);
                     }
+                }
+            }
+            return;
+        }
+    }
+
+    // Dart cascades: `w..configure(cmd)..enable()` (method form) and
+    // `b..name = cmd` (field-write form). tree-sitter-dart emits each
+    // `..segment` as a `cascade_section` sibling of the base expression —
+    // neither a call node nor an assignment node — so without this branch
+    // the idiomatic Flutter builder pattern is invisible to sink rules
+    // (no Call) and cascade field writes vanish (no Assign).
+    if kind == "cascade_section" {
+        if let Some(events) = build_dart_cascade_events(node, file, src) {
+            out.extend(events);
+            // Descend into call arguments / the written value for
+            // nested calls, mirroring the selector branch above.
+            if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
+                if let Some(args) = first_named_child_of_kind(&arg_part, "arguments") {
+                    let mut cursor = args.walk();
+                    for arg in args.named_children(&mut cursor) {
+                        walk_into(arg, file, src, handler, class_names, out, false);
+                    }
+                }
+            } else {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if child.kind() != "cascade_selector" {
+                        walk_into(child, file, src, handler, class_names, out, false);
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    // Dart explicit constructor invocations: `new T(args)` /
+    // `const T(args)`. These node kinds are not call-shaped (no
+    // callee/arguments fields the generic builder recognises), so the
+    // implicit `T(args)` form worked while the explicit forms emitted
+    // nothing.
+    if kind == "new_expression" || kind == "const_object_expression" {
+        if let Some(event) = build_dart_object_expression_call(node, file, src) {
+            out.push(event);
+            if let Some(args) = first_named_child_of_kind(&node, "arguments") {
+                let mut cursor = args.walk();
+                for arg in args.named_children(&mut cursor) {
+                    walk_into(arg, file, src, handler, class_names, out, false);
                 }
             }
             return;
@@ -6430,78 +6512,10 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
     let name = parts.join(".");
 
     // Build arg list from `selector > argument_part > arguments`.
-    // Dart splits named args (`runInShell: true`) into a sibling
-    // `named_argument` node with a `label` child; we surface those
-    // with `name` populated so `keyword_arg_equals` constraints fire.
     let mut args: Vec<CallArg> = Vec::new();
     if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
         if let Some(arg_list) = first_named_child_of_kind(&arg_part, "arguments") {
-            let mut cursor = arg_list.walk();
-            for arg in arg_list.named_children(&mut cursor) {
-                if arg.kind() == "named_argument" {
-                    // Named (labeled) argument: `name: value`.
-                    let mut lbl_cursor = arg.walk();
-                    let label_node = arg.named_children(&mut lbl_cursor).find(|c| c.kind() == "label");
-                    let name = label_node.and_then(|lbl| {
-                        lbl.named_children(&mut lbl.walk())
-                            .next()
-                            .map(|id| node_text(&id, src).to_string())
-                    });
-                    // The value is the first named sibling AFTER the
-                    // label (tree-sitter-dart named_argument is
-                    // `label expr` — value has no field name). Dart splits
-                    // a member value like `AESMode.ecb` into a base
-                    // identifier plus trailing `selector` siblings, so the
-                    // base alone truncates to `AESMode`; extend the value
-                    // span through any trailing selectors to capture the
-                    // whole chain (so `keyword_arg_equals: AESMode.ecb`
-                    // can distinguish ECB from CBC/CTR).
-                    let (value_node, value_text) = {
-                        let mut kids = arg.walk();
-                        let all: Vec<_> = arg.named_children(&mut kids).collect();
-                        let label_idx = all.iter().position(|c| c.kind() == "label").unwrap_or(0);
-                        let base = all.get(label_idx + 1).copied().unwrap_or(arg);
-                        let mut chain_end = base.end_byte();
-                        for sib in all.iter().skip(label_idx + 2) {
-                            if sib.kind() == "selector" {
-                                chain_end = sib.end_byte();
-                            } else {
-                                break;
-                            }
-                        }
-                        let text = if chain_end > base.end_byte() {
-                            normalize_call_name_whitespace(
-                                std::str::from_utf8(&src[base.start_byte()..chain_end]).unwrap_or(""),
-                            )
-                        } else {
-                            normalize_call_name_whitespace(node_text(&base, src))
-                        };
-                        (base, text)
-                    };
-                    if value_text.is_empty() {
-                        continue;
-                    }
-                    args.push(CallArg {
-                        span: span_of(file, &arg),
-                        name,
-                        place: argument_place(&value_node, src),
-                        source_names: extract_rhs_expr_operands(&value_node, src),
-                        value_text,
-                    });
-                    continue;
-                }
-                let value_text = normalize_call_name_whitespace(node_text(&arg, src));
-                if value_text.is_empty() {
-                    continue;
-                }
-                args.push(CallArg {
-                    span: span_of(file, &arg),
-                    name: None,
-                    place: argument_place(&arg, src),
-                    source_names: extract_rhs_expr_operands(&arg, src),
-                    value_text,
-                });
-            }
+            args = dart_call_args_from_arguments(&arg_list, file, src);
         }
     }
 
@@ -6515,6 +6529,190 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
         } else {
             CallKind::Function
         },
+        args,
+    })
+}
+
+/// Build [`CallArg`]s from a Dart `arguments` node. Dart splits named
+/// args (`runInShell: true`) into a `named_argument` node with a `label`
+/// child; those surface with `name` populated so `keyword_arg_equals`
+/// constraints fire.
+fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
+    let mut args: Vec<CallArg> = Vec::new();
+    let mut cursor = arg_list.walk();
+    for arg in arg_list.named_children(&mut cursor) {
+        if arg.kind() == "named_argument" {
+            // Named (labeled) argument: `name: value`.
+            let mut lbl_cursor = arg.walk();
+            let label_node = arg.named_children(&mut lbl_cursor).find(|c| c.kind() == "label");
+            let name = label_node.and_then(|lbl| {
+                lbl.named_children(&mut lbl.walk())
+                    .next()
+                    .map(|id| node_text(&id, src).to_string())
+            });
+            // The value is the first named sibling AFTER the
+            // label (tree-sitter-dart named_argument is
+            // `label expr` — value has no field name). Dart splits
+            // a member value like `AESMode.ecb` into a base
+            // identifier plus trailing `selector` siblings, so the
+            // base alone truncates to `AESMode`; extend the value
+            // span through any trailing selectors to capture the
+            // whole chain (so `keyword_arg_equals: AESMode.ecb`
+            // can distinguish ECB from CBC/CTR).
+            let (value_node, value_text) = {
+                let mut kids = arg.walk();
+                let all: Vec<_> = arg.named_children(&mut kids).collect();
+                let label_idx = all.iter().position(|c| c.kind() == "label").unwrap_or(0);
+                let base = all.get(label_idx + 1).copied().unwrap_or(arg);
+                let mut chain_end = base.end_byte();
+                for sib in all.iter().skip(label_idx + 2) {
+                    if sib.kind() == "selector" {
+                        chain_end = sib.end_byte();
+                    } else {
+                        break;
+                    }
+                }
+                let text = if chain_end > base.end_byte() {
+                    normalize_call_name_whitespace(
+                        std::str::from_utf8(&src[base.start_byte()..chain_end]).unwrap_or(""),
+                    )
+                } else {
+                    normalize_call_name_whitespace(node_text(&base, src))
+                };
+                (base, text)
+            };
+            if value_text.is_empty() {
+                continue;
+            }
+            args.push(CallArg {
+                span: span_of(file, &arg),
+                name,
+                place: argument_place(&value_node, src),
+                source_names: extract_rhs_expr_operands(&value_node, src),
+                value_text,
+            });
+            continue;
+        }
+        let value_text = normalize_call_name_whitespace(node_text(&arg, src));
+        if value_text.is_empty() {
+            continue;
+        }
+        args.push(CallArg {
+            span: span_of(file, &arg),
+            name: None,
+            place: argument_place(&arg, src),
+            source_names: extract_rhs_expr_operands(&arg, src),
+            value_text,
+        });
+    }
+    args
+}
+
+/// The receiver a Dart `cascade_section` applies to: the variable the
+/// whole cascade expression is bound to (`var b = Builder()..name = x`
+/// → `b`), or — for statement-position cascades (`w..m(x);`) — the base
+/// identifier that opens the sibling chain.
+fn dart_cascade_receiver(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "initialized_variable_definition" | "initialized_identifier"
+        ) {
+            if let Some(name) = parent.child_by_field_name("name") {
+                let text = node_text(&name, src).trim().to_string();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    let mut cursor = node.prev_named_sibling();
+    while let Some(prev) = cursor {
+        match prev.kind() {
+            "cascade_section" | "selector" | "argument_part" => cursor = prev.prev_named_sibling(),
+            "identifier" | "this" | "super" => {
+                return Some(node_text(&prev, src).trim().to_string());
+            }
+            _ => break,
+        }
+    }
+    None
+}
+
+/// Events for one Dart `cascade_section`:
+/// - `..method(args)` (has an `argument_part`) → a Method `Call` on the
+///   cascade receiver.
+/// - `..field = value` (selector + trailing value expression) → an
+///   `Assign` to `receiver.field` carrying the value's operands.
+fn build_dart_cascade_events(node: Node<'_>, file: FileId, src: &[u8]) -> Option<Vec<FlowEvent>> {
+    let selector = first_named_child_of_kind(&node, "cascade_selector")?;
+    let member = first_identifier_like_child(&selector)
+        .map(|id| node_text(&id, src).trim().to_string())
+        .filter(|name| !name.is_empty())?;
+    let receiver = dart_cascade_receiver(&node, src);
+    if let Some(arg_part) = first_named_child_of_kind(&node, "argument_part") {
+        let args = first_named_child_of_kind(&arg_part, "arguments")
+            .map(|list| dart_call_args_from_arguments(&list, file, src))
+            .unwrap_or_default();
+        let name = match receiver.as_deref() {
+            Some(recv) => format!("{recv}.{member}"),
+            None => member,
+        };
+        return Some(vec![FlowEvent::Call {
+            span: span_of(file, &node),
+            receiver: call_receiver_from_name(&name).or(receiver),
+            receiver_types: Vec::new(),
+            name,
+            call_kind: CallKind::Method,
+            args,
+        }]);
+    }
+    // Field-write form: the value expression is the named child after
+    // the cascade_selector.
+    let mut cursor = node.walk();
+    let value = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() != "cascade_selector" && child.start_byte() > selector.end_byte())?;
+    let target = match receiver.as_deref() {
+        Some(recv) => format!("{recv}.{member}"),
+        None => member,
+    };
+    let value_text = node_text(&value, src).trim();
+    Some(vec![FlowEvent::Assign {
+        span: span_of(file, &node),
+        target,
+        source_name: looks_like_bare_identifier(value_text).then(|| value_text.to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: extract_rhs_expr_operands(&value, src),
+        declares_new_binding: false,
+        value_kind: None,
+    }])
+}
+
+/// Call event for Dart `new T(args)` / `const T(args)` object
+/// expressions — the explicit forms of construction (the implicit
+/// `T(args)` form already goes through the selector-call path).
+///
+/// `new_expression` is a node kind SHARED with C++ (`new Box(args)`),
+/// whose args live in an `argument_list` child and which the generic
+/// walker already handles correctly. Require the Dart-specific
+/// `arguments`-kind child so C++ new-expressions fall through untouched.
+fn build_dart_object_expression_call(node: Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+    let arguments = first_named_child_of_kind(&node, "arguments")?;
+    let type_node = first_named_child_of_kind(&node, "type_identifier")
+        .or_else(|| first_identifier_like_child(&node))?;
+    let name = node_text(&type_node, src).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let args = dart_call_args_from_arguments(&arguments, file, src);
+    Some(FlowEvent::Call {
+        span: span_of(file, &node),
+        receiver: None,
+        receiver_types: Vec::new(),
+        name,
+        call_kind: CallKind::Constructor,
         args,
     })
 }

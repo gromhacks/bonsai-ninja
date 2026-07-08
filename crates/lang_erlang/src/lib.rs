@@ -26,7 +26,11 @@ const HANDLER: GrammarHandler = GrammarHandler {
     constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_expr", "case_expr"],
     for_kinds: &[],
-    foreach_kinds: &["lc_expr", "bc_expr"],
+    // Comprehensions (`[E || X <- L]`, `<< ... >>`) go through the shared
+    // walker's comprehension branch (list_comprehension /
+    // binary_comprehension with nested `generator` binding clauses);
+    // tree-sitter-erlang has no foreach-shaped node kind.
+    foreach_kinds: &[],
     while_kinds: &[],
     do_kinds: &[],
     loop_kinds: &[],
@@ -148,6 +152,7 @@ impl LanguageAdapter for ErlangAdapter {
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             augment_erlang_collection_transform_flow_events(&mut decl.flow_events);
+            inject_erlang_comprehension_generator_bindings(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ERLANG_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -766,6 +771,109 @@ fn erlang_comprehension_generator_sources(rhs_text: &str) -> Vec<String> {
         }
     }
     sources
+}
+
+/// The `(binding_var, source_names)` pairs of every generator in an
+/// Erlang comprehension text. `[os:cmd(X) || X <- [Cmd]]` yields
+/// `[("X", ["Cmd"])]` — the loop variable and the iterable's operands.
+fn erlang_comprehension_generator_bindings(rhs_text: &str) -> Vec<(String, Vec<String>)> {
+    let Some((_, qualifiers)) = split_top_level_erlang_comprehension(rhs_text) else {
+        return Vec::new();
+    };
+    let mut bindings = Vec::new();
+    for qualifier in split_top_level_args(qualifiers) {
+        let Some((pattern, generator_source)) = split_top_level_erlang_generator(&qualifier) else {
+            continue;
+        };
+        // The binding is the LEFT of `X <- List` (or `<<X>> <= Bin`).
+        // Take its single value-bearing variable; skip compound
+        // patterns we can't reduce to one carrier.
+        let vars = erlang_value_source_names(pattern);
+        let Some(var) = vars.into_iter().next() else {
+            continue;
+        };
+        let mut sources = Vec::new();
+        for source in erlang_value_source_names(generator_source) {
+            push_unique_string(&mut sources, source);
+        }
+        if !sources.is_empty() {
+            bindings.push((var, sources));
+        }
+    }
+    bindings
+}
+
+/// Erlang comprehensions in tail/return position — `handler() -> [os:cmd(X)
+/// || X <- [Cmd]]` — bind the loop variable (`X`) to the iterable, but the
+/// shared walker records only the body call (`os:cmd(X)`) and a Return
+/// whose text is the whole comprehension; no binding event links `X` to
+/// `Cmd`, so the iterable's taint never reaches the body. Synthesize an
+/// `Assign { target: X, source_names: [Cmd] }` for each generator so the
+/// loop variable inherits the iterable's taint. Inserted just before the
+/// comprehension-bearing event so it follows any assignment that taints the
+/// iterable (`Cmd = os:getenv(...)` earlier in the body).
+fn inject_erlang_comprehension_generator_bindings(events: &mut Vec<FlowEvent>) {
+    // Collect the comprehension-bearing Return spans + their generator
+    // bindings first (immutable borrow), then insert.
+    let mut plans: Vec<(bonsai_common::Span, Vec<(String, Vec<String>)>)> = Vec::new();
+    for event in events.iter() {
+        if let FlowEvent::Return {
+            span,
+            value_text: Some(text),
+            ..
+        } = event
+        {
+            let bindings = erlang_comprehension_generator_bindings(text);
+            if !bindings.is_empty() {
+                plans.push((*span, bindings));
+            }
+        }
+    }
+    if plans.is_empty() {
+        return;
+    }
+    let mut inserts: Vec<(usize, FlowEvent)> = Vec::new();
+    for (comp_span, bindings) in plans {
+        // The comprehension BODY (`os:cmd(X)`) is emitted as its own
+        // event nested inside `comp_span`, and it appears in the list
+        // BEFORE the Return that carries the whole-comprehension text.
+        // Insert the loop-variable binding before the earliest event
+        // whose span falls inside the comprehension, so the body's read
+        // of `X` sees the binding's write. Fall back to the first event
+        // at/after the comprehension start when no nested body exists.
+        let insert_idx = events
+            .iter()
+            .position(|e| {
+                let s = e.span();
+                s.start >= comp_span.start && s.end <= comp_span.end
+            })
+            .or_else(|| events.iter().position(|e| e.span().start >= comp_span.start))
+            .unwrap_or(events.len());
+        for (var, sources) in bindings {
+            if var.is_empty() {
+                continue;
+            }
+            inserts.push((
+                insert_idx,
+                FlowEvent::Assign {
+                    span: comp_span,
+                    target: var,
+                    source_name: None,
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: sources,
+                    declares_new_binding: true,
+                    value_kind: None,
+                },
+            ));
+        }
+    }
+    // Insert from the back so earlier indices stay valid.
+    inserts.sort_by_key(|(idx, _)| *idx);
+    for (idx, event) in inserts.into_iter().rev() {
+        let idx = idx.min(events.len());
+        events.insert(idx, event);
+    }
 }
 
 fn split_top_level_erlang_comprehension(text: &str) -> Option<(&str, &str)> {
