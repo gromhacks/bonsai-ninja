@@ -1407,6 +1407,42 @@ fn walk_into(
             }
         }
         repair_branch_events_by_else_keyword(&mut then_events, &mut else_events, &node, src);
+        // Go type switch `switch t := v.(type) { ... }` binds `t` to the
+        // switched value `v` inside every arm. tree-sitter-go exposes the
+        // bound name as an `alias` field and the value as a `value` field,
+        // with no assignment node — so without this the arms' `t` never
+        // links to `v` and the switched value's taint is lost. Prepend the
+        // `t <- v` binding to both arms.
+        let mut type_switch_binding: Vec<FlowEvent> = Vec::new();
+        if let (Some(alias), Some(value)) =
+            (node.child_by_field_name("alias"), node.child_by_field_name("value"))
+        {
+            let alias_text = first_identifier_like_child(&alias)
+                .map(|id| node_text(&id, src))
+                .unwrap_or_else(|| node_text(&alias, src));
+            let target = alias_text.trim().to_string();
+            let value_text = node_text(&value, src).trim().to_string();
+            if !target.is_empty() && !value_text.is_empty() && target != value_text {
+                type_switch_binding.push(FlowEvent::Assign {
+                    span: span_of(file, &node),
+                    target,
+                    source_name: looks_like_bare_identifier(&value_text).then(|| value_text.clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: extract_rhs_expr_operands(&value, src),
+                    declares_new_binding: true,
+                    value_kind: None,
+                });
+            }
+        }
+        if !type_switch_binding.is_empty() {
+            let mut prefixed = type_switch_binding.clone();
+            prefixed.extend(then_events);
+            then_events = prefixed;
+            let mut prefixed_else = type_switch_binding;
+            prefixed_else.extend(else_events);
+            else_events = prefixed_else;
+        }
         let match_bindings = extract_match_binding_assigns(file, &node, src);
         if !match_bindings.is_empty() {
             let mut prefixed = match_bindings.clone();
@@ -1572,6 +1608,24 @@ fn walk_into(
 
     if handler.is_assignment(kind) {
         if kind == "binary_operator" && !binary_operator_is_assignment(&node, src) {
+            // Elixir pipe `lhs |> call(args)` desugars to `call(lhs,
+            // args)` — the piped value becomes the callee's FIRST
+            // argument. Without threading it in, `conn.params |>
+            // System.cmd()` leaves `System.cmd` with no args and the
+            // piped taint never reaches the sink (the dominant Elixir
+            // dataflow idiom). Walk the RHS call, then prepend the LHS as
+            // its arg 0.
+            if binary_operator_is_pipe(&node, src) {
+                if let (Some(left), Some(right)) =
+                    (node.child_by_field_name("left"), node.child_by_field_name("right"))
+                {
+                    walk_into(left, file, src, handler, class_names, out, false);
+                    let before = out.len();
+                    walk_into(right, file, src, handler, class_names, out, false);
+                    prepend_pipe_arg_to_call(out, before, &right, &left, file, src);
+                    return;
+                }
+            }
             // G3 follow-up: synthesizing a Call event for every
             // binary_operator broke the C interproc-empty-seed
             // invariant (every `int x = a + b;` produced a synthetic
@@ -2090,6 +2144,27 @@ fn walk_into(
         // closure as part of the caller's behavior, so their calls
         // are flow-relevant and shouldn't be lost to the usual
         // is_lambda short-circuit.
+        // Objective-C message sends carry their arguments as direct
+        // children interleaved with `method:` keyword selectors, not in an
+        // `arguments` container — so `call_argument_containers` finds none
+        // and a call nested in an arg position (`[self run:[self wrap:s]]`,
+        // `[self sink:strlen(s)]`) never surfaced its inner call. Walk each
+        // non-receiver, non-method child so nested message/function calls
+        // emit their own Call events.
+        if node.kind() == "message_expression" {
+            let mut cur = node.walk();
+            if cur.goto_first_child() {
+                loop {
+                    let child = cur.node();
+                    if child.is_named() && !matches!(cur.field_name(), Some("receiver" | "method")) {
+                        walk_into(child, file, src, handler, class_names, out, false);
+                    }
+                    if !cur.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
         let arg_containers = call_argument_containers(node);
         let mut walked_closures = std::collections::HashSet::new();
         for container in arg_containers {
@@ -6771,6 +6846,71 @@ fn walk_named_children(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         walk_into(child, file, src, handler, class_names, out, false);
+    }
+}
+
+/// True when a `binary_operator` node is an Elixir/F#-style pipe (`|>`).
+/// The operator is an unnamed child between `left` and `right`.
+fn binary_operator_is_pipe(node: &Node<'_>, src: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return false;
+    }
+    loop {
+        let child = cursor.node();
+        if !child.is_named() && node_text(&child, src).trim() == "|>" {
+            return true;
+        }
+        if !cursor.goto_next_sibling() {
+            return false;
+        }
+    }
+}
+
+/// Prepend the piped value (`left`) as argument 0 of the RHS call event
+/// emitted by an Elixir pipe. Finds the Call event in `out[before..]`
+/// whose span matches the `right` call node and inserts the LHS CallArg
+/// at the front of its argument list, so `lhs |> f(a)` reads as `f(lhs,
+/// a)`. If the RHS produced no Call (e.g. `x |> Enum.map(&f/1)` bare
+/// capture, or a non-call RHS) the pipe is left as-is.
+fn prepend_pipe_arg_to_call(
+    out: &mut [FlowEvent],
+    before: usize,
+    right: &Node<'_>,
+    left: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+) {
+    let right_span = span_of(file, right);
+    let value_text = normalize_call_name_whitespace(node_text(left, src));
+    if value_text.is_empty() {
+        return;
+    }
+    let piped_arg = CallArg {
+        span: span_of(file, left),
+        name: None,
+        place: argument_place(left, src),
+        source_names: extract_rhs_expr_operands(left, src),
+        value_text,
+    };
+    // Prefer the outermost call at the RHS span (the pipe targets the
+    // top-level RHS call, not a nested one inside its args).
+    for event in out[before..].iter_mut() {
+        if let FlowEvent::Call { span, args, .. } = event {
+            if *span == right_span {
+                args.insert(0, piped_arg);
+                return;
+            }
+        }
+    }
+    // Fallback: the first call whose span is contained in the RHS span.
+    for event in out[before..].iter_mut() {
+        if let FlowEvent::Call { span, args, .. } = event {
+            if span.start >= right_span.start && span.end <= right_span.end {
+                args.insert(0, piped_arg);
+                return;
+            }
+        }
     }
 }
 
