@@ -689,6 +689,7 @@ impl IdgQueryService {
             }
         }
         let mut out = Vec::new();
+        let mut local_seeds = Vec::new();
         for (pid_idx, place) in segment.places.places.iter().enumerate() {
             let span = match place {
                 Place::Write { span, .. } => *span,
@@ -708,6 +709,7 @@ impl IdgQueryService {
             if let Some(local_node) = segment.nodes.lookup(func, pid) {
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
+                    local_seeds.push(local_node);
                 }
             }
         }
@@ -723,10 +725,26 @@ impl IdgQueryService {
         // `meta.via_span`. So when no place anchored at the span, seed
         // the `from`-node of every intra edge whose `via_span` overlaps
         // the anchor — that is the read of the source expression, whose
-        // forward closure reaches the return / sink argument. Purely
-        // additive (only runs when the span loop produced no seed), so
-        // it cannot perturb sources that already anchor on a span node.
-        if out.is_empty() {
+        // forward closure reaches the return / sink argument.
+        //
+        // The fallback also fires when every span-anchored seed is DEAD
+        // (no outgoing intra edge). A method chain on a source receiver
+        // in tail position (`def get_input; gets.chomp; end`) anchors
+        // the rule on the receiver (`gets`), whose span overlaps only
+        // the whole-return `__return__` write-base — a node that is
+        // deliberately left without a `-> Return` edge when the return
+        // contains a call (see `bridge_return_expression_calls`). A seed
+        // set with no outgoing edges can never reach anything, so
+        // union-ing in the via-span reads (`Read(gets) -> Return`)
+        // restores the source without perturbing anchors that already
+        // propagate: the fallback stays OFF whenever any anchored seed
+        // has at least one outgoing edge, and it only ever ADDS seeds.
+        let anchored_seeds_dead = !local_seeds.is_empty()
+            && !segment
+                .edges
+                .iter()
+                .any(|edge| local_seeds.contains(&edge.from));
+        if out.is_empty() || anchored_seeds_dead {
             for edge in &segment.edges {
                 if !spans_overlap(edge.meta.via_span, match_span) {
                     continue;
