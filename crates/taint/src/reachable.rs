@@ -1494,6 +1494,22 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
         return graph;
     }
 
+    // Call sites whose RETURN is a tainted seed — i.e. the source is a
+    // call (`getenv(...)`, `input(...)`, `request.getParameter(...)`).
+    // A nested call at one of these spans IS the source, so its return
+    // is intrinsically tainted regardless of its own arguments. Without
+    // this, `sink(source(arg))` (the single most common vuln shape) is
+    // dropped: `tainted_arg_is_clean_nested_call_return` presumes an
+    // unresolved nested call with args returns clean, and wrongly
+    // filters the source's return out of the sink's tainted args.
+    let source_call_spans: ahash::AHashSet<bonsai_common::Span> = seed_nodes
+        .iter()
+        .filter_map(|node| {
+            let point = idg.resolve_point(*node)?;
+            (point.kind == bonsai_idg::PointKind::CallRet).then_some(point.span)
+        })
+        .collect();
+
     if bonsai_diagnostics::debug::is_enabled("idg-closure") {
         let n = global
             .decl_of(bonsai_common::SymbolId::new(source_func.raw()))
@@ -1707,6 +1723,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
                     &mut function_summary_cache,
                     &compiled_call_result_passthroughs,
                     &mut passthrough_callee_cache,
+                    &source_call_spans,
                 ) {
                     return None;
                 }
@@ -3467,6 +3484,7 @@ fn tainted_arg_is_clean_nested_call_return(
     function_summary_cache: &mut ahash::AHashMap<FuncId, crate::inter::FunctionSummary>,
     call_result_passthroughs: &[CompiledCallResultPassthrough<'_>],
     callee_name_cache: &mut CalleeNameCache,
+    source_call_spans: &ahash::AHashSet<bonsai_common::Span>,
 ) -> bool {
     let idx = usize::from(arg_idx);
     let Some(value_text) = call_summary.args_value_text.get(idx).map(String::as_str) else {
@@ -3475,6 +3493,15 @@ fn tainted_arg_is_clean_nested_call_return(
     let Some(arg_span) = call_summary.args_span.get(idx).copied() else {
         return false;
     };
+    // The nested call is itself a tainted source (`sink(getenv(x))`):
+    // its return is tainted no matter what its arguments are, so it is
+    // never a "clean" nested return.
+    if source_call_spans
+        .iter()
+        .any(|source_span| span_contains_or_equals(arg_span, *source_span))
+    {
+        return false;
+    }
     let Some((callee_text, nested_args)) = crate::inter::direct_call_expression_parts(value_text) else {
         return false;
     };
