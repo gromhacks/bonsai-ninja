@@ -56,6 +56,9 @@ pub(super) fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: 
             continue;
         };
         let pattern = pattern.split_once(':').map_or(pattern, |(p, _)| p);
+        // Drop the guard: `case x if x > limit:` binds only `x`; the guard
+        // condition's identifiers (`limit`) are reads, not bindings.
+        let pattern = pattern.split_once(" if ").map_or(pattern, |(p, _)| p);
         for ident in identifier_tokens_from_text(pattern) {
             if !matches!(
                 ident.as_str(),
@@ -336,10 +339,18 @@ fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8])
                 .child_by_field_name("pattern")
                 .or_else(|| first_named_child(&current))
             {
-                let pattern_text = node_text(&pattern, src);
-                for target in binding_tokens_from_pattern(pattern_text) {
-                    if !targets.iter().any(|seen| same_identifier_name(seen, &target)) {
-                        targets.push(target);
+                // Ruby pin pattern `in ^expected` (`variable_reference_
+                // pattern`) is an equality READ against an existing
+                // variable, not a new binding — skip it.
+                if !matches!(
+                    pattern.kind(),
+                    "variable_reference_pattern" | "reference_pattern" | "pin_pattern" | "pin"
+                ) {
+                    let pattern_text = node_text(&pattern, src);
+                    for target in binding_tokens_from_pattern(pattern_text) {
+                        if !targets.iter().any(|seen| same_identifier_name(seen, &target)) {
+                            targets.push(target);
+                        }
                     }
                 }
             }
@@ -412,6 +423,12 @@ fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8
                     }
                 }
             }
+            // Do NOT descend into this arm's body. A nested `match`/`case`
+            // inside the arm binds its own arms to ITS subject (extracted
+            // by its own call); walking into the body here would bind those
+            // nested arm variables to the OUTER subject (false taint) and
+            // grow work quadratically on deep nesting.
+            continue;
         }
         for child in current.named_children(&mut cursor) {
             stack.push(child);
@@ -425,6 +442,16 @@ pub(super) fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) 
     let mut cursor = pattern.walk();
     let mut stack = vec![*pattern];
     while let Some(current) = stack.pop() {
+        // Ruby pin `in ^expected` (`variable_reference_pattern`) and
+        // equivalent reference/pin patterns are equality READS against an
+        // existing variable, not new bindings — don't capture their
+        // identifier as an assignment target.
+        if matches!(
+            current.kind(),
+            "variable_reference_pattern" | "reference_pattern" | "pin_pattern" | "pin"
+        ) {
+            continue;
+        }
         if current.kind() == "var" {
             push_binding_target(&mut targets, node_text(&current, src));
         }
@@ -455,7 +482,15 @@ pub(super) fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) 
             stack.push(child);
         }
     }
-    if targets.is_empty() {
+    // Text-fallback only when the structural walk found nothing AND the
+    // whole pattern is not a pin/reference read (`in ^expected`) — else
+    // the fallback would re-extract the pinned identifier the walk above
+    // deliberately skipped as a binding target.
+    let pattern_is_reference = matches!(
+        pattern.kind(),
+        "variable_reference_pattern" | "reference_pattern" | "pin_pattern" | "pin"
+    );
+    if targets.is_empty() && !pattern_is_reference {
         for target in binding_tokens_from_pattern(node_text(pattern, src)) {
             push_binding_target(&mut targets, &target);
         }

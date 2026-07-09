@@ -1970,18 +1970,28 @@ pub fn apply_configured_transfer_fixpoint(
     max_precision: Option<Precision>,
     func_filter: Option<&AHashSet<FuncId>>,
 ) {
-    if !receiver_state_propagations.is_empty() {
-        apply_receiver_state_fixpoint(
-            seed_nodes,
-            receiver_state_propagations,
-            global,
-            idg,
-            max_precision,
-            func_filter,
-        );
-    }
+    // All three fixpoints run inside ONE outer loop: receiver-state
+    // propagation must re-run after a passthrough / output-arg flow grows
+    // the seed set, otherwise taint that only exists post-passthrough
+    // (`uri = URI.create(input); pb.command(uri); pb.start()`) never
+    // triggers a `taint_receiver_from_args` propagation (`pb.start()`'s
+    // tainted-receiver sink is missed). `apply_receiver_state_fixpoint`
+    // has its own internal fixpoint and only ADDS unique seeds, so
+    // re-running it is idempotent once nothing new appears.
     loop {
         let mut grew = false;
+        if !receiver_state_propagations.is_empty() {
+            let before = seed_nodes.len();
+            apply_receiver_state_fixpoint(
+                seed_nodes,
+                receiver_state_propagations,
+                global,
+                idg,
+                max_precision,
+                func_filter,
+            );
+            grew |= seed_nodes.len() != before;
+        }
         if !call_result_passthroughs.is_empty() {
             grew |= apply_call_result_passthrough_fixpoint(
                 seed_nodes,
@@ -3517,6 +3527,22 @@ fn tainted_arg_is_clean_nested_call_return(
         return false;
     }
 
+    // A nested call whose own RETURN is tainted — a source-bearing helper,
+    // `sink(helper(x))` where `helper` returns a source or forwards a
+    // tainted value out — is NOT a clean return, no matter what its own
+    // arguments are. Such a return carries a synthetic `Return -> CallRet`
+    // edge (sentinel `arg_idx == u8::MAX`) whose call site sits inside this
+    // argument's span. The `param`-transit loop below deliberately skips
+    // those sentinel edges (it models arg->return transit only), so
+    // without this check the single-hop cross-function `sink(source())`
+    // shape is dropped exactly like the direct case was.
+    let nested_return_is_tainted = cross_calls
+        .iter()
+        .any(|edge| edge.arg_idx == u8::MAX && span_contains_or_equals(arg_span, edge.call_span));
+    if nested_return_is_tainted {
+        return false;
+    }
+
     let mut tainted_params_by_callee: ahash::AHashMap<FuncId, ahash::AHashSet<usize>> =
         ahash::AHashMap::default();
     for edge in cross_calls {
@@ -3610,7 +3636,12 @@ fn function_summary_returns_any_tainted_param(
 }
 
 fn span_contains_or_equals(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    inner.start >= outer.start && inner.end <= outer.end
+    // Byte offsets are per-file, so containment is only meaningful within
+    // the same file — otherwise a coincidental byte-range overlap across
+    // two files falsely reports containment (e.g. exempting a sink arg
+    // from the clean-nested-call filter because a source call in ANOTHER
+    // file happens to share its byte range).
+    outer.file == inner.file && inner.start >= outer.start && inner.end <= outer.end
 }
 
 fn call_names_match_direct_callee(event_name: &str, callee_text: &str) -> bool {

@@ -729,6 +729,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
     let mut call_summary_cache = AHashMap::default();
     let mut function_summary_cache = AHashMap::default();
     let mut callee_name_cache = CalleeNameCache::default();
+    let source_call_spans: ahash::AHashSet<Span> = ahash::AHashSet::default();
 
     assert!(
         !tainted_arg_is_clean_nested_call_return(
@@ -742,6 +743,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
             &mut function_summary_cache,
             &compiled,
             &mut callee_name_cache,
+            &source_call_spans,
         ),
         "configured passthrough calls preserve taint and must remain visible to sink arg constraints"
     );
@@ -761,6 +763,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
     let mut call_summary_cache = AHashMap::default();
     let mut function_summary_cache = AHashMap::default();
     let mut callee_name_cache = CalleeNameCache::default();
+    let source_call_spans: ahash::AHashSet<Span> = ahash::AHashSet::default();
 
     assert!(
         tainted_arg_is_clean_nested_call_return(
@@ -774,6 +777,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
             &mut function_summary_cache,
             &[],
             &mut callee_name_cache,
+            &source_call_spans,
         ),
         "unresolved and unmodeled nested call returns should still be treated as clean"
     );

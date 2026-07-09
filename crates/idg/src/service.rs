@@ -752,6 +752,24 @@ impl IdgQueryService {
                 if segment.nodes.get(edge.from).is_none_or(|node| node.func != func) {
                     continue;
                 }
+                // Don't seed a read that feeds the SOURCE call's OWN
+                // argument (`os.getenv(y)` — `y` is an INPUT to the
+                // source, not its tainted return). The `to` node is the
+                // source call's arg slot; `sibling_arg_sites` already
+                // marks those. Without this, the fallback re-taints the
+                // source's inputs and a later use of `y` (`os.system(y)`)
+                // becomes a false positive.
+                let feeds_source_own_arg = segment
+                    .nodes
+                    .get(edge.to)
+                    .and_then(|node| segment.places.get(node.place))
+                    .is_some_and(|place| match place {
+                        Place::CallArg { site, .. } => sibling_arg_sites.contains(&site.0),
+                        _ => false,
+                    });
+                if feeds_source_own_arg {
+                    continue;
+                }
                 if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.from) {
                     out.push(ws_node);
                 }

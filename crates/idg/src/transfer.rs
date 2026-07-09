@@ -452,6 +452,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         method_receiver_projections: collect_method_receiver_projections(&decl.flow_events),
         yield_callback_names: collect_yield_callback_names(&decl.flow_events),
         pattern_bindings: collect_pattern_bindings(&decl.flow_events),
+        loop_depth: 0,
     };
 
     // Seed the function's `Return` place defensively. Every
@@ -492,6 +493,15 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
 
     emit_receiver_field_writes(decl, &mut ctx);
     walk_events(&decl.flow_events, &mut ctx);
+    // A call at a given span is one call; the loop double-walk (and any
+    // re-entry) pushes a duplicate `CallSiteRef` per visit with no
+    // interning. Dedup by site span so the O(sites^2) compound-expression
+    // bridge below scales with the number of DISTINCT calls, not the
+    // (potentially exponential) number of re-walks.
+    ctx.out
+        .call_sites
+        .sort_by_key(|site| (site.site.0.file.raw(), site.site.0.start, site.site.0.end));
+    ctx.out.call_sites.dedup_by_key(|site| site.site.0);
     bridge_return_expression_calls(&mut ctx, &decl.flow_events);
     bridge_compound_expression_calls(&mut ctx);
     bridge_inline_call_result_receivers(&mut ctx);
@@ -1318,7 +1328,20 @@ struct TransferCtx<'a> {
     /// enclosing assignment before the branch condition, so the
     /// binding must be materialized before lowering that assignment.
     pattern_bindings: Vec<PatternBinding>,
+    /// Current loop-nesting depth. The loop arm double-walks its body to
+    /// establish loop-carried edges; nested loops would compound that to
+    /// 2^depth body visits (a hard hang on deeply-nested generated code).
+    /// Beyond `LOOP_DOUBLE_WALK_MAX_DEPTH` the second pass is skipped —
+    /// the inner loops' loop-carried edges are already established by the
+    /// first pass, so this only forgoes a bounded set of deep-nesting
+    /// carry edges (an under-approximation) rather than blowing up.
+    loop_depth: usize,
 }
+
+/// Max loop-nesting depth at which the loop body is double-walked for
+/// loop-carried edges. Keeps nested-loop transfer polynomial rather than
+/// 2^depth.
+const LOOP_DOUBLE_WALK_MAX_DEPTH: usize = 6;
 
 #[derive(Clone, Debug)]
 struct PatternBinding {
@@ -1991,8 +2014,19 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             // pass completes the loop-carried structural edges.
             // `emit` suppresses duplicate edges from rewalking the
             // same statements.
+            //
+            // The second (loop-carried) pass is skipped past
+            // `LOOP_DOUBLE_WALK_MAX_DEPTH` of nesting: recursively
+            // double-walking nested loops is 2^depth body visits and hangs
+            // on deeply-nested generated code. Deeper loops still get their
+            // first pass (all nodes/edges), forgoing only some carry edges.
+            ctx.loop_depth += 1;
+            let double_walk = ctx.loop_depth <= LOOP_DOUBLE_WALK_MAX_DEPTH;
             walk_events(body, ctx);
-            walk_events(body, ctx);
+            if double_walk {
+                walk_events(body, ctx);
+            }
+            ctx.loop_depth -= 1;
         }
         FlowEvent::Try {
             span,

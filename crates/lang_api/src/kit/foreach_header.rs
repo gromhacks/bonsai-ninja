@@ -37,6 +37,13 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
         .strip_prefix("async for ")
         .or_else(|| trimmed.strip_prefix("for "))
         .or_else(|| trimmed.strip_prefix("foreach "))
+        // Compact style with no space before the paren — `for(const x of
+        // xs)`, `foreach($xs as $v)`. Strip only the keyword word and keep
+        // the `(` so the paren-body parse below still fires. `foreach`
+        // must be checked before `for` (else `for` eats `foreach`'s
+        // prefix, leaving `each(`).
+        .or_else(|| trimmed.strip_prefix("foreach").filter(|rest| rest.starts_with('(')))
+        .or_else(|| trimmed.strip_prefix("for").filter(|rest| rest.starts_with('(')))
         .or_else(|| trimmed.find("for ").map(|idx| &trimmed[idx + 4..]))?;
     after_for = after_for.trim_start();
     if let Some(rest) = after_for.strip_prefix("await ") {
@@ -57,15 +64,39 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
     // `do ... end` (no `{`), so this leaves Lua headers untouched.
     let mut depth = 0i32;
     let mut body_open = None;
+    let mut prev_boundary = true; // start-of-string is a word boundary
     for (idx, ch) in after_for.char_indices() {
         match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
+            '(' | '[' => {
+                depth += 1;
+                prev_boundary = false;
+            }
+            ')' | ']' => {
+                depth -= 1;
+                prev_boundary = false;
+            }
             '{' if depth <= 0 => {
                 body_open = Some(idx);
                 break;
             }
-            _ => {}
+            _ => {
+                // Lua bodies open with the `do` keyword (no `{`). Truncate
+                // at a whole-word `do` at paren-depth 0 so `for k,v in
+                // pairs(t) do system(x) end` doesn't leak its body into the
+                // iterable text (which over-taints the loop variables).
+                if depth <= 0
+                    && prev_boundary
+                    && after_for[idx..].starts_with("do")
+                    && after_for[idx + 2..]
+                        .chars()
+                        .next()
+                        .is_none_or(char::is_whitespace)
+                {
+                    body_open = Some(idx);
+                    break;
+                }
+                prev_boundary = ch.is_whitespace();
+            }
         }
     }
     if let Some(idx) = body_open {
@@ -109,7 +140,12 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
 fn split_foreach_lhs_rhs(text: &str) -> Option<(&str, &str)> {
     text.split_once(" in ")
         .or_else(|| text.split_once(" of "))
-        .or_else(|| text.split_once(" : "))
+        // Java/C++ range-for `Type x : xs`. A C-style `for(init; cond;
+        // upd)` header never contains a top-level range-for colon but CAN
+        // contain a ternary (`i = a ? 0 : 1`); the `;` separators are the
+        // reliable discriminant, so only split on ` : ` when there is no
+        // `;` (otherwise `a ? 0 : 1` fabricates a bogus `Assign a <- [i]`).
+        .or_else(|| (!text.contains(';')).then(|| text.split_once(" : ")).flatten())
         .or_else(|| text.split_once(" <- "))
         .or_else(|| {
             // PHP `foreach ($xs as $x)` reverses the written order. Keep

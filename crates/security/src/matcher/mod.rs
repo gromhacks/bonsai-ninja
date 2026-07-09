@@ -20,7 +20,7 @@ use std::{
     cell::RefCell,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, OnceLock,
     },
     time::Instant,
 };
@@ -466,13 +466,25 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
     factory: &FactoryReturns,
+    // Run-scoped memo for the workspace-wide receiver→base-type map. This
+    // function is called once per sink candidate; `workspace_receiver_base_map`
+    // scans every decl in the workspace, so rebuilding it per candidate is a
+    // candidates×workspace blowup. The caller owns a `OnceLock` shared across
+    // all candidates (and parallel source groups) so the scan happens at most
+    // once per analysis run — and only if some rule actually needs it.
+    receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
 ) -> bool {
     let Some(prepared) = PreparedRule::new(rule) else {
         return false;
     };
-    if let Some(verdict) =
-        exact_rule_match_passes_constraints_at_expected_hit(ws, &prepared, expected, taint_view, factory)
-    {
+    if let Some(verdict) = exact_rule_match_passes_constraints_at_expected_hit(
+        ws,
+        &prepared,
+        expected,
+        taint_view,
+        factory,
+        receiver_base_map_cell,
+    ) {
         return verdict;
     }
     match_rule_against_facts_with_taint_view(ws, rule, taint_view)
@@ -486,6 +498,7 @@ fn exact_rule_match_passes_constraints_at_expected_hit(
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
     factory: &FactoryReturns,
+    receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
 ) -> Option<bool> {
     // Taint-analysis already has the exact endpoint span from the
     // constraint-agnostic sink scan. Rebuild the same per-fact
@@ -496,7 +509,12 @@ fn exact_rule_match_passes_constraints_at_expected_hit(
     }
     match prepared.rule.match_spec.kind {
         MatchKind::Call | MatchKind::New => Some(call_rule_match_passes_constraints_at_expected_hit(
-            ws, prepared, expected, taint_view, factory,
+            ws,
+            prepared,
+            expected,
+            taint_view,
+            factory,
+            receiver_base_map_cell,
         )),
         MatchKind::Write => Some(write_rule_match_passes_constraints_at_expected_hit(
             ws, prepared, expected, taint_view,
@@ -511,16 +529,22 @@ fn call_rule_match_passes_constraints_at_expected_hit(
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
     factory: &FactoryReturns,
+    receiver_base_map_cell: &OnceLock<AHashMap<String, Vec<String>>>,
 ) -> bool {
     let file = expected.span.file;
     let global = ws.db().global_index();
     let file_packages =
         file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
     let bundle = decl_match_facts_for(ws, file, factory);
-    let receiver_base_map = if prepared_rule_needs_receiver_base_map(prepared) {
-        workspace_receiver_base_map(ws, FactRetention::Cached)
+    let empty_receiver_base_map = AHashMap::new();
+    // Initialise the workspace scan lazily and exactly once across every
+    // candidate that reaches this path (see the cell's owner). Candidates
+    // whose rule doesn't consult receiver types skip the scan entirely.
+    let receiver_base_map: &AHashMap<String, Vec<String>> = if prepared_rule_needs_receiver_base_map(prepared)
+    {
+        receiver_base_map_cell.get_or_init(|| workspace_receiver_base_map(ws, FactRetention::Cached))
     } else {
-        AHashMap::new()
+        &empty_receiver_base_map
     };
     let constructor_names = if prepared.rule.match_spec.kind == MatchKind::New {
         collect_constructor_names(global.as_ref())
@@ -544,7 +568,7 @@ fn call_rule_match_passes_constraints_at_expected_hit(
             .iter()
             .filter(|call| call.span == expected.span || spans_overlap(call.span, expected.span))
         {
-            let receiver_types = expanded_receiver_types(&call.receiver_types, &receiver_base_map);
+            let receiver_types = expanded_receiver_types(&call.receiver_types, receiver_base_map);
             let Some(matched_callee) = callee_or_alias_matches(
                 &call.callee,
                 &receiver_types,
