@@ -536,15 +536,27 @@ pub struct FunctionSeed {
     pub func: FuncId,
     pub seed: Vec<String>,
     pub consts: Vec<(String, ConstValue)>,
+    /// Sorted `(param, callee.raw())` dynamic-dispatch bindings in effect
+    /// for this work item. Part of the dedup key: two work items with the
+    /// same `(func, seed, consts)` but different dynamic-dispatch
+    /// resolutions (e.g. `repo.Run()` where `repo` is `Repository` vs
+    /// `AuditedRepository`, or a delegate param bound to different lambdas)
+    /// produce DIFFERENT taint facts and must both be analyzed. Before the
+    /// diamond-collapse fix this dimension was kept distinct only
+    /// incidentally by `lineage`; dropping `lineage` from the key requires
+    /// carrying `dyn_callees` explicitly, or deep dynamic-dispatch chains
+    /// (C# inheritance, delegate factories) silently stop propagating.
+    pub dyn_callees: Vec<(String, u32)>,
     pub lineage: Option<u64>,
 }
 
 impl FunctionSeed {
-    fn new(base: FunctionSeedBase, lineage: Option<u64>) -> Self {
+    fn new(base: FunctionSeedBase, dyn_callees: Vec<(String, u32)>, lineage: Option<u64>) -> Self {
         Self {
             func: base.func,
             seed: base.seed,
             consts: base.consts,
+            dyn_callees,
             lineage,
         }
     }
@@ -804,7 +816,23 @@ fn run_interprocedural_worklist(
             mut lineage_history,
         } = item;
         let base_key = FunctionSeedBase::new(func, &seed, &const_bindings);
-        let key = FunctionSeed::new(base_key.clone(), lineage);
+        // Dedup on (func, seed, const bindings, dynamic-dispatch bindings) —
+        // everything that affects the taint FACTS this work item produces —
+        // but NOT on `lineage`. `lineage` is a unique trace id per call edge,
+        // so keying `seen` on it never collapses diamond fan-in (A→B→D and
+        // A→C→D) and yields 2^N work items — a memory blowup. Dropping
+        // `lineage` alone would over-collapse: two items sharing the base key
+        // but resolving a virtual/delegate call differently (`dyn_bindings`)
+        // produce different facts, and `lineage` was incidentally keeping them
+        // apart. So fold `dyn_bindings` into the key explicitly — this stays
+        // linear (dynamic-dispatch cardinality is bounded, unlike per-edge
+        // lineage) while preserving deep dynamic-dispatch propagation.
+        let mut dyn_callees: Vec<(String, u32)> = dyn_bindings
+            .iter()
+            .map(|(param, callee)| (param.clone(), callee.raw()))
+            .collect();
+        dyn_callees.sort();
+        let key = FunctionSeed::new(base_key.clone(), dyn_callees, None);
         if seen.contains(&key) {
             continue;
         }

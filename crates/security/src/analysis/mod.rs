@@ -39,7 +39,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 mod clean_overwrite;
@@ -1581,7 +1581,14 @@ where
                                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                             }
                         }
-                        groups = Some(worker.join().unwrap_or_default());
+                        // A panicking worker must surface, not silently yield zero
+                    // findings: `unwrap_or_default()` would turn a crashed scan
+                    // into a clean "nothing found" result. Re-raise the payload
+                    // on the scope thread so the failure is visible.
+                    groups = Some(match worker.join() {
+                        Ok(result) => result,
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    });
                         while completed < total_source_path_ticks {
                             on_progress(AnalysisProgress::PhaseTicked);
                             completed += 1;
@@ -4557,27 +4564,30 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
     group.finding.sink = sinks[0].clone();
     group.additional_sinks = sinks.into_iter().skip(1).collect();
 
-    let mut sources = Vec::with_capacity(1 + group.additional_sources.len());
-    sources.push(group.finding.source.clone());
-    sources.extend(group.additional_sources.iter().cloned());
-    let primary_sink = group.finding.sink.clone();
-    sources.sort_by(|a, b| {
-        source_preference_rank_for_sink(a, Some(&primary_sink))
-            .cmp(&source_preference_rank_for_sink(b, Some(&primary_sink)))
-            .then_with(|| source_specificity_rank(a).cmp(&source_specificity_rank(b)))
-            .then_with(|| (a.file.as_str(), a.line, a.column).cmp(&(b.file.as_str(), b.line, b.column)))
+    // The primary source stays pinned to the first-seen bucket member.
+    // `combine_findings_by_source_flow` pre-sorts findings so the preferred
+    // source (concrete rulepack sources rank ahead of inferred entry-point
+    // placeholders via `source_preference_rank_for_sink`) is seen first, and
+    // `merge_finding_into_group` retains that same member's flow evidence
+    // (`taint_path`, `representative_flow_id`, `chain_display`). Re-deriving a
+    // different primary here — as an earlier version did by re-ranking every
+    // co-tainted source against the group's severity-max sink — can promote a
+    // source whose evidence was NOT retained, so the reported source would
+    // never appear on the reported taint path (the exact "mixed row" the
+    // grouping key is designed to prevent). Keep the primary and only surface
+    // co-tainted sources that alias the primary's exact call site, in a stable
+    // display order.
+    let primary_source = group.finding.source.clone();
+    let mut additional_sources: Vec<FindingMatch> = std::mem::take(&mut group.additional_sources)
+        .into_iter()
+        .filter(|source| same_source_location(&primary_source, source))
+        .collect();
+    additional_sources.sort_by(|a, b| {
+        (a.file.as_str(), a.line, a.column)
+            .cmp(&(b.file.as_str(), b.line, b.column))
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
-    group.finding.source = sources[0].clone();
-    // Distinct source sites can collapse onto the same conservative
-    // field/container lineage. Prefer concrete rulepack sources over
-    // inferred entry-point placeholders, then do not surface other
-    // source sites unless they are aliases for the same exact call site.
-    group.additional_sources = sources
-        .into_iter()
-        .skip(1)
-        .filter(|source| same_source_location(&group.finding.source, source))
-        .collect();
+    group.additional_sources = additional_sources;
 
     let group_id = group
         .finding
@@ -4880,6 +4890,13 @@ where
 {
     // ---- Phase 1: resolve rule matches to enclosing FuncIds ----
     let global = ws.db().global_index();
+    // Run-scoped memo for the workspace-wide receiver→base-type map. Sink
+    // constraint re-checks (`rule_match_passes_constraints_with_taint_view`)
+    // run once per candidate; without this the whole-workspace scan that
+    // feeds `receiver_type_in` constraints would be rebuilt per candidate.
+    // `OnceLock` is `Sync`, so the parallel source-group workers below share
+    // one lazily-built map. Only populated if some sink rule needs it.
+    let receiver_base_map_cell: OnceLock<AHashMap<String, Vec<String>>> = OnceLock::new();
     // Use the concrete source span to resolve each matcher hit to the
     // declaration that contains it. Name-only keys (`file + get`) can
     // conflate unrelated methods such as `Handler.get` and
@@ -5733,6 +5750,7 @@ where
                             snk,
                             &current_call_taint_view,
                             factory_returns,
+                            &receiver_base_map_cell,
                         ) {
                             bonsai_diagnostics::debug_log!(
                                 "security-taint",
@@ -5897,7 +5915,14 @@ where
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         }
                     }
-                    groups = Some(worker.join().unwrap_or_default());
+                    // A panicking worker must surface, not silently yield zero
+                    // findings: `unwrap_or_default()` would turn a crashed scan
+                    // into a clean "nothing found" result. Re-raise the payload
+                    // on the scope thread so the failure is visible.
+                    groups = Some(match worker.join() {
+                        Ok(result) => result,
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    });
                     while completed < expected_groups {
                         on_progress(AnalysisProgress::PhaseTicked);
                         completed += 1;
@@ -6996,6 +7021,7 @@ fn source_can_precede_sink(
     }
     (src.line == snk.line && same_statement_between(ws, snk.span, src.span))
         || source_is_sink_call_argument(ws, sink_func, src.span, snk.span)
+        || spans_share_enclosing_loop(ws, sink_func, src.span, snk.span)
 }
 
 fn interpolation_identifier_tokens(text: &str) -> Vec<String> {
@@ -7187,6 +7213,77 @@ fn source_is_sink_call_argument_in_events(
                 if source_is_sink_call_argument_in_events(body, source_span, sink_span)
                     || source_is_sink_call_argument_in_events(catch_events, source_span, sink_span)
                     || source_is_sink_call_argument_in_events(finally_events, source_span, sink_span)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when `source_span` and `sink_span` both sit inside the body of
+/// one common loop in `sink_func`. A loop's back-edge makes intra-function
+/// ordering non-linear: a source that textually follows the sink can still
+/// taint the *next* iteration's sink, e.g.
+/// `for (…) { exec(v); v = req.query.q; }`. `source_can_precede_sink`
+/// otherwise rejects `src.line > snk.line`, dropping these loop-carried
+/// flows as "backwards in time". Detecting a shared enclosing loop restores
+/// them without loosening the strict forward-order rule elsewhere.
+fn spans_share_enclosing_loop(ws: &Workspace, sink_func: FuncId, source_span: Span, sink_span: Span) -> bool {
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(sink_func.raw())) else {
+        return false;
+    };
+    spans_share_enclosing_loop_in_events(&decl.flow_events, source_span, sink_span)
+}
+
+fn spans_share_enclosing_loop_in_events(
+    events: &[bonsai_lang_api::FlowEvent],
+    source_span: Span,
+    sink_span: Span,
+) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Loop { span, body, .. } => {
+                // A loop whose span brackets both endpoints carries the flow
+                // across its back-edge. Recurse first so the *innermost*
+                // shared loop is what we credit (harmless either way, but
+                // keeps the match tight and lets deeper loops win).
+                if spans_share_enclosing_loop_in_events(body, source_span, sink_span) {
+                    return true;
+                }
+                if span_contains(*span, source_span) && span_contains(*span, sink_span) {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if spans_share_enclosing_loop_in_events(then_events, source_span, sink_span)
+                    || spans_share_enclosing_loop_in_events(else_events, source_span, sink_span)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if spans_share_enclosing_loop_in_events(body, source_span, sink_span) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if spans_share_enclosing_loop_in_events(body, source_span, sink_span)
+                    || spans_share_enclosing_loop_in_events(catch_events, source_span, sink_span)
+                    || spans_share_enclosing_loop_in_events(finally_events, source_span, sink_span)
                 {
                     return true;
                 }

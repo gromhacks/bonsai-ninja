@@ -2131,7 +2131,7 @@ fn local_value_binding_shadows_callable(events: &[FlowEvent], name: &str, call_s
     }
     events.iter().any(|event| match event {
         FlowEvent::Assign { target, span, .. } => {
-            span.end <= call_span.start && normalize_receiver_alias_text(target) == target_name
+            span.end <= call_span.start && normalized_receiver_alias_matches(target, &target_name)
         }
         FlowEvent::Branch {
             then_events,
@@ -4354,7 +4354,7 @@ fn collect_assigned_receiver_type_names(
                 if call_span.is_some_and(|call_span| span.start > call_span.start) {
                     continue;
                 }
-                if !receiver.is_empty() && normalize_receiver_alias_text(target) != receiver {
+                if !receiver.is_empty() && !normalized_receiver_alias_matches(target, receiver) {
                     continue;
                 }
                 let distance = call_span.map(|call_span| call_span.start.saturating_sub(span.start));
@@ -4535,6 +4535,32 @@ fn normalize_receiver_alias_text(receiver: &str) -> String {
         .trim()
         .trim_matches('.')
         .to_string()
+}
+
+/// Allocation-free equivalent of
+/// `normalize_receiver_alias_text(candidate) == expected`, where
+/// `expected` is an already-normalized alias key. The recursive
+/// per-event walkers (`local_value_binding_shadows_callable`,
+/// `collect_assigned_receiver_type_names`) run once per call site and
+/// visit every flow event in the enclosing function, so normalizing each
+/// assignment target into a fresh `String` is an O(calls × assignments)
+/// allocation storm on large functions. This mirrors the normalizer's
+/// trim/paren/sigil steps over borrowed slices and only falls back to the
+/// owning path for the rare `->` (arrow-receiver) case that actually needs
+/// a substitution.
+fn normalized_receiver_alias_matches(candidate: &str, expected: &str) -> bool {
+    if candidate.contains("->") {
+        return normalize_receiver_alias_text(candidate) == expected;
+    }
+    let mut text = candidate.trim();
+    while text.starts_with('(') && text.ends_with(')') && text.len() > 1 {
+        text = text[1..text.len() - 1].trim();
+    }
+    let normalized = text
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim()
+        .trim_matches('.');
+    normalized == expected
 }
 
 fn caller_decl_file(global: &GlobalIndex, caller_decl: &Decl) -> Option<FileId> {

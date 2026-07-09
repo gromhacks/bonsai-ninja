@@ -1151,10 +1151,17 @@ fn walk_deep_sequence_executable_nodes(
     class_names: &[String],
     out: &mut Vec<FlowEvent>,
 ) {
-    let mut stack = Vec::new();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        stack.push(child);
+    // Iterative pre-order over the sequence's executable nodes. Children
+    // are pushed in REVERSE so the LIFO stack pops them in source order —
+    // otherwise a comma/sequence expression (`(a = gets(s), system(a))`)
+    // emits its events backwards, so the sink appears "before" the
+    // assignment that taints it (breaks ordered intra-analysis and the
+    // last-write clean-overwrite accounting).
+    let mut stack: Vec<Node<'_>> = Vec::new();
+    {
+        let mut cursor = root.walk();
+        let children: Vec<Node<'_>> = root.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
     }
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -1169,9 +1176,8 @@ fn walk_deep_sequence_executable_nodes(
                 || kind == "selector")
         {
             let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                stack.push(child);
-            }
+            let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+            stack.extend(children.into_iter().rev());
             continue;
         }
         walk_into(node, file, src, handler, class_names, out, false);
@@ -1399,10 +1405,22 @@ fn walk_into(
         }
         // Switch/match/when don't expose consequence/alternative fields: if
         // neither path produced any events, walk all named children so the
-        // calls inside case arms still surface in the flow.
+        // calls inside case arms still surface in the flow. Skip the
+        // discriminant/condition field child — it is walked separately into
+        // the OUTER flow below; walking it here too double-emits its calls
+        // (`if (check(x)) {}` with empty arms emitted two `check` events).
         if then_events.is_empty() && else_events.is_empty() {
+            let discriminant_ids: [Option<usize>; 4] = [
+                node.child_by_field_name("condition").map(|n| n.id()),
+                node.child_by_field_name("subject").map(|n| n.id()),
+                node.child_by_field_name("value").map(|n| n.id()),
+                node.child_by_field_name("discriminant").map(|n| n.id()),
+            ];
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
+                if discriminant_ids.iter().any(|id| *id == Some(child.id())) {
+                    continue;
+                }
                 walk_into(child, file, src, handler, class_names, &mut then_events, false);
             }
         }
@@ -2040,8 +2058,12 @@ fn walk_into(
     // `const T(args)`. These node kinds are not call-shaped (no
     // callee/arguments fields the generic builder recognises), so the
     // implicit `T(args)` form worked while the explicit forms emitted
-    // nothing.
-    if kind == "new_expression" || kind == "const_object_expression" {
+    // nothing. Gated on `!handler.is_call(kind)` so grammars that DO
+    // model `new_expression` as a call (JS/TS list it in `call_kinds`)
+    // fall through to the generic call branch below — which inlines
+    // closure arguments (`new Promise((r) => { sink(x) })`). Dart's
+    // `call_kinds` is empty, so only Dart takes this branch.
+    if (kind == "new_expression" || kind == "const_object_expression") && !handler.is_call(kind) {
         if let Some(event) = build_dart_object_expression_call(node, file, src) {
             out.push(event);
             if let Some(args) = first_named_child_of_kind(&node, "arguments") {
@@ -2372,9 +2394,15 @@ fn walk_into(
                 prev_was_catch_marker = false;
                 continue;
             } else if body_node.is_none() {
-                walk_into(child, file, src, handler, class_names, &mut body, false);
+                // Blocks are DEFERRED to `block_children` and assigned
+                // after the loop (first = try body, second = catch body).
+                // Walking them into `body` here as well would duplicate the
+                // catch block, which the fallback below also routes into
+                // `catch_events` (Perl-shape grammars with no catch kind).
                 if ck == "block" || ck == "compound_statement" {
                     block_children.push(child);
+                } else {
+                    walk_into(child, file, src, handler, class_names, &mut body, false);
                 }
             } else if ck == "block" || ck == "compound_statement" {
                 block_children.push(child);
@@ -2387,6 +2415,14 @@ fn walk_into(
                 walk_into(child, file, src, handler, class_names, &mut body, false);
             }
             prev_was_catch_marker = false;
+        }
+        // When the body came from deferred blocks (no `body` field), the
+        // FIRST block child is the try body — walk it now (the loop only
+        // collected it, to keep the second block for the catch body).
+        if body_node.is_none() {
+            if let Some(first_block) = block_children.first() {
+                walk_into(*first_block, file, src, handler, class_names, &mut body, false);
+            }
         }
         // Fallback for grammars (e.g. Perl) that don't label the catch
         // block with a dedicated kind: when we saw zero catch/finally
@@ -2760,7 +2796,12 @@ fn append_tail_expression_return(
     src: &[u8],
     handler: &GrammarHandler,
 ) {
-    let Some(tail) = last_named_child(body) else {
+    // The tail expression is the last *value-bearing* child — skip
+    // trailing comments, which tree-sitter exposes as named children.
+    // Without this, a trailing `// done` / `# note` becomes the
+    // synthesized Return's value and the real tail expression's
+    // implicit-return taint is dropped.
+    let Some(tail) = last_non_comment_named_child(body) else {
         return;
     };
     let kind = tail.kind();
@@ -2889,6 +2930,15 @@ fn implicit_return_expression_node<'tree>(
 fn last_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).last()
+}
+
+/// Last named child that is not a comment. Used by tail-expression
+/// return synthesis: a trailing comment is not the returned value.
+fn last_non_comment_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| !child.kind().contains("comment"))
+        .last()
 }
 
 fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
@@ -6688,28 +6738,42 @@ fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) 
 /// → `b`), or — for statement-position cascades (`w..m(x);`) — the base
 /// identifier that opens the sibling chain.
 fn dart_cascade_receiver(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if let Some(parent) = node.parent() {
-        if matches!(
-            parent.kind(),
-            "initialized_variable_definition" | "initialized_identifier"
-        ) {
-            if let Some(name) = parent.child_by_field_name("name") {
-                let text = node_text(&name, src).trim().to_string();
-                if !text.is_empty() {
-                    return Some(text);
-                }
+    let Some(parent) = node.parent() else {
+        return None;
+    };
+    if matches!(
+        parent.kind(),
+        "initialized_variable_definition" | "initialized_identifier"
+    ) {
+        if let Some(name) = parent.child_by_field_name("name") {
+            let text = node_text(&name, src).trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
             }
         }
     }
-    let mut cursor = node.prev_named_sibling();
-    while let Some(prev) = cursor {
-        match prev.kind() {
-            "cascade_section" | "selector" | "argument_part" => cursor = prev.prev_named_sibling(),
+    // Statement-position cascade (`w..a()..b()`): the receiver is the
+    // base identifier that opens the chain — the last identifier-like
+    // node BEFORE the first `cascade_section`. Resolve it by a single
+    // FORWARD scan of the parent's children (which stops at the first
+    // cascade_section), NOT a per-section backward `prev_named_sibling`
+    // walk: tree-sitter's prev_sibling is O(child-index), so walking
+    // back once per section over an n-section chain is O(n^2)+ and hangs
+    // on long generated cascades.
+    let mut cursor = parent.walk();
+    let mut base: Option<String> = None;
+    for child in parent.named_children(&mut cursor) {
+        match child.kind() {
             "identifier" | "this" | "super" => {
-                return Some(node_text(&prev, src).trim().to_string());
+                base = Some(node_text(&child, src).trim().to_string());
             }
-            _ => break,
+            "selector" | "argument_part" => {}
+            "cascade_section" => break,
+            _ => {}
         }
+    }
+    if let Some(base) = base.filter(|b| !b.is_empty()) {
+        return Some(base);
     }
     None
 }

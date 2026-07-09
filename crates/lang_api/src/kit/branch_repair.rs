@@ -301,8 +301,51 @@ fn find_keyword_outside_identifier(text: &str, keyword: &str) -> Option<usize> {
         return None;
     }
     let mut byte_idx = 0usize;
-    while byte_idx + needle.len() <= haystack.len() {
-        if &haystack[byte_idx..byte_idx + needle.len()] == needle {
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while byte_idx < haystack.len() {
+        let b = haystack[byte_idx];
+        // Inside a string literal: consume until the closing quote. A
+        // control-flow keyword (`else`) inside a string is data, not
+        // syntax — without this an `else` in a string fabricates a
+        // branch arm and its calls become spurious flow events.
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == q {
+                quote = None;
+            }
+            byte_idx += 1;
+            continue;
+        }
+        // Line comment (`//` or `#`) — skip to end of line.
+        if b == b'#' || (b == b'/' && haystack.get(byte_idx + 1) == Some(&b'/')) {
+            while byte_idx < haystack.len() && haystack[byte_idx] != b'\n' {
+                byte_idx += 1;
+            }
+            continue;
+        }
+        // Block comment `/* ... */`.
+        if b == b'/' && haystack.get(byte_idx + 1) == Some(&b'*') {
+            byte_idx += 2;
+            while byte_idx + 1 < haystack.len()
+                && !(haystack[byte_idx] == b'*' && haystack[byte_idx + 1] == b'/')
+            {
+                byte_idx += 1;
+            }
+            byte_idx = (byte_idx + 2).min(haystack.len());
+            continue;
+        }
+        if b == b'\'' || b == b'"' || b == b'`' {
+            quote = Some(b);
+            byte_idx += 1;
+            continue;
+        }
+        if byte_idx + needle.len() <= haystack.len()
+            && &haystack[byte_idx..byte_idx + needle.len()] == needle
+        {
             // Whole-word: neither neighbour byte is an identifier-continue.
             let prev_byte_ok = byte_idx == 0 || !is_ident_continue_byte(haystack[byte_idx - 1]);
             let after_idx = byte_idx + needle.len();
