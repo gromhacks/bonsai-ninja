@@ -470,6 +470,13 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
     // `Param(idx) → Write(param_name, entry_span)` plus per-use
     // bridges from this Write to each consumer.
     for (idx, param_name) in decl.params.iter().enumerate() {
+        // Strip a rest/spread sigil so the param binds to the name the
+        // body reads: TypeScript `function f(...p)` surfaces the param as
+        // `"...p"` while the body reads `"p"` (the JS adapter already
+        // normalises this). Without stripping, `Param(idx) → Write("...p")`
+        // never reaches any `Read("p")`, so a variadic tainted arg
+        // dead-ends at the parameter.
+        let param_name = param_name.strip_prefix("...").unwrap_or(param_name);
         if param_name.is_empty() {
             continue;
         }

@@ -6963,6 +6963,7 @@ fn exact_source_seed_graph(
         config.max_edge_precision,
         db,
         idg,
+        &[],
     )
 }
 

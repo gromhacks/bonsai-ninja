@@ -972,6 +972,37 @@ impl IdgQueryService {
         None
     }
 
+    /// Return the `Place::Write` nodes in `func` whose span equals
+    /// `write_span`. Each assignment interns a distinct span-tagged Write
+    /// node, so this addresses one specific assignment (used to seed the
+    /// entry-most definition of a token-API seed name without seeding its
+    /// later reassignments).
+    pub fn write_node_at_span(&self, func: FuncId, write_span: Span) -> Vec<WsNodeId> {
+        let unified = self.ensure_unified();
+        let Some(seg_id) = self.workspace.segment_for_func(func) else {
+            return Vec::new();
+        };
+        let Some(segment) = self.workspace.segment(seg_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (pid_idx, place) in segment.places.places.iter().enumerate() {
+            let Place::Write { span, .. } = place else {
+                continue;
+            };
+            if *span != write_span {
+                continue;
+            }
+            let pid = crate::node::PlaceId(pid_idx as u32);
+            if let Some(local_node) = segment.nodes.lookup(func, pid) {
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
+                    out.push(ws_node);
+                }
+            }
+        }
+        out
+    }
+
     /// Return every write target fed directly by the call site's
     /// `CallRet` node. Used by semantic call-result transfer to prove
     /// a concrete assignment target before seeding a constructed

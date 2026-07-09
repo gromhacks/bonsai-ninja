@@ -318,6 +318,15 @@ struct WorkspaceCalleeResolver<'a> {
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
     class_symbols_by_name_scope: &'a AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
     class_constructors_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<FuncId>>,
+    /// Per-caller local callable bindings (`let f = <lambda/function>`),
+    /// keyed caller → binding name → bound FuncId. Lets `resolve` connect
+    /// invocation-shaped calls on a locally-bound callable — `f(args)`,
+    /// `f.accept(args)`, `f.call(args)`, `f.(args)` — to the bound
+    /// function when no callgraph edge exists at the site. The legacy
+    /// worklist engine resolved these through its own local-binding scan;
+    /// without this fallback, lambda bodies are unreachable for adapters
+    /// whose functional-invocation forms the callgraph doesn't model.
+    local_callable_bindings: &'a AHashMap<FuncId, AHashMap<String, FuncId>>,
     callback_cache: RwLock<AHashMap<(FuncId, u8), Vec<ResolvedCallee>>>,
 }
 
@@ -495,6 +504,46 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         // stitcher (Phase 3c) has nothing to chain off.
         if out.is_empty() {
             self.resolve_class_constructor_fallback(caller, callee_name, receiver, receiver_types, &mut out);
+        }
+        // Local-callable-binding fallback: `let f = <lambda>` then
+        // `f(args)` / `f.accept(args)` / `f.call(args)` / `f.(args)`.
+        // The callgraph models these for some adapters but not all
+        // functional-invocation forms; when nothing else resolved and
+        // the receiver (method form) or the bare callee name (direct
+        // form) is a local callable binding of this caller, route to
+        // the bound function. Indirect + Narrowed mirrors how the
+        // callgraph classifies value-typed dispatch.
+        if out.is_empty() {
+            if let Some(bindings) = self.local_callable_bindings.get(&caller) {
+                // Elixir/Erlang dot-call `f.(args)` reaches here as
+                // `callee_name = "f."` with no receiver; strip the trailing
+                // dot/parens (mirrors builder.rs:1056) so `f.` looks up the
+                // binding `f`. The `.`/`:` guard then only rejects genuinely
+                // qualified names (`mod.fun`, `Mod::fun`).
+                let stripped_callee = callee_name.trim().trim_end_matches(['.', '(', ')']);
+                let binding_name = receiver
+                    .map(str::trim)
+                    .filter(|receiver| !receiver.is_empty())
+                    .or_else(|| {
+                        (!stripped_callee.is_empty()
+                            && !stripped_callee.contains(['.', ':'])
+                            && !stripped_callee.contains("->"))
+                        .then_some(stripped_callee)
+                    });
+                if let Some(name) = binding_name {
+                    if let Some(&func) = bindings.get(name) {
+                        if self.funcs_share_language(caller, func) {
+                            Self::push_resolved_edge(
+                                &mut out,
+                                &mut seen,
+                                func,
+                                bonsai_callgraph::EdgeKind::Indirect,
+                                bonsai_common::Precision::Narrowed,
+                            );
+                        }
+                    }
+                }
+            }
         }
         out
     }
@@ -1776,6 +1825,7 @@ where
         class_symbols_by_name: &class_symbols_by_name,
         class_symbols_by_name_scope: &class_symbols_by_name_scope,
         class_constructors_by_parent: &class_constructors_by_parent,
+        local_callable_bindings: &local_callable_bindings,
         callback_cache: RwLock::new(AHashMap::new()),
     };
     let f2s = WorkspaceFuncToSegment {
