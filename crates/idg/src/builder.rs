@@ -794,6 +794,35 @@ fn collect_receiver_consumer_nodes(
             push_call_arg_node(segment, func, site.site, 0, &mut out);
         }
     }
+    // A callee that consumes its implicit receiver as a VALUE — passes
+    // `this`/`self` as a call argument (`sink(this)`), returns it, or
+    // reads it into an assignment — surfaces as a bare `Read` place on
+    // the implicit-receiver name. Languages with an explicit receiver
+    // parameter (Python `self`) route this through `receiver_param_index`
+    // instead; for implicit-`this` languages (Java/Kotlin/JS/C#/…) these
+    // Read nodes are the only endpoint that lets a tainted caller
+    // receiver (`args.method()`) flow into the method body.
+    for (pid_idx, place) in segment.places.places.iter().enumerate() {
+        let Place::Read { name, path } = place else {
+            continue;
+        };
+        if !path.is_empty() {
+            continue;
+        }
+        let Some(name_text) = segment.strings.get(*name) else {
+            continue;
+        };
+        if !is_implicit_receiver_name(name_text) && !is_super_receiver(name_text.trim()) {
+            continue;
+        }
+        let pid = crate::node::PlaceId(pid_idx as u32);
+        let Some(node) = segment.nodes.lookup(func, pid) else {
+            continue;
+        };
+        if !node.is_sentinel() {
+            out.push(node);
+        }
+    }
     out.sort_by_key(|node| node.0);
     out.dedup();
     out

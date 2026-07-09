@@ -684,8 +684,128 @@ pub fn interprocedural_taint(
     config: &InterTaintConfig,
     db: &AnalyzerDb,
 ) -> InterTaintResult {
-    let caches = InterTaintCaches::default();
-    interprocedural_taint_with_caches(entry_func, entry_sources, config, db, &caches)
+    idg_backed_interprocedural_taint(entry_func, entry_sources, config, db)
+}
+
+/// Single-engine implementation of the interprocedural taint API.
+///
+/// Builds (or reuses) the workspace IDG from `db` and derives the
+/// `InterTaintResult` from ONE graph closure — the same IDG engine that
+/// `security` and `dump-taint` already query — instead of replaying the
+/// legacy per-source worklist. This is what collapses the two taint
+/// engines into one: the public `interprocedural_taint*` /
+/// `call_site_receives_taint` surface now routes through the IDG.
+///
+/// The IDG computes the exact precision-scoped closure in a single pass,
+/// so there is no chunking or continuation: the result always has
+/// `continuation: None` and `saturated: false`.
+fn idg_backed_interprocedural_taint(
+    entry_func: FuncId,
+    entry_sources: &TokenSet,
+    config: &InterTaintConfig,
+    db: &AnalyzerDb,
+) -> InterTaintResult {
+    // Engine contract: an empty seed means NOTHING is tainted — no
+    // propagation. (The span-anchored security path has its own
+    // param-seeding fallbacks; the token API must not inherit them.)
+    if entry_sources.is_empty() {
+        return InterTaintResult::default();
+    }
+    let idg = crate::idg_build::ensure_idg_service(db);
+    let global = db.global_index();
+    // Token seeds resolved with the legacy engine's matching semantics
+    // (sigil'd bindings, source-call names). See `legacy_token_seed_nodes`.
+    let seed_nodes =
+        crate::reachable::legacy_token_seed_nodes(entry_func, entry_sources, global.as_ref(), idg.as_ref());
+    let graph = crate::reachable::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
+        entry_func,
+        entry_sources,
+        None, // legacy API seeds by token names, not a source anchor span
+        &[],  // output-arg carrier names come from source rules, not this API
+        &config.receiver_state_propagations,
+        &config.call_result_passthroughs,
+        &config.output_arg_flows,
+        None,
+        None,
+        None,
+        config.max_edge_precision,
+        db,
+        idg.as_ref(),
+        &seed_nodes,
+    );
+    entry_taint_graph_to_inter_result(graph, entry_func, entry_sources)
+}
+
+/// Adapt the IDG-derived [`crate::reachable::EntryTaintGraph`] to the
+/// public [`InterTaintResult`] shape. The two carry the same evidence
+/// (`tainted_calls`, caller→callee `call_records` with trace lineage);
+/// this reshapes edges into [`CallPropagation`] and synthesizes the
+/// `per_function` key set. Consumers enumerate `per_function.keys()` not
+/// just to discover reached functions but to read each callee's SEED
+/// TOKENS (the worklist keyed entries by `(func, seed)`), so each
+/// callee's key carries the tainted param names its incoming call
+/// records establish, and the entry function carries the original entry
+/// seed.
+fn entry_taint_graph_to_inter_result(
+    graph: crate::reachable::EntryTaintGraph,
+    entry_func: FuncId,
+    entry_sources: &TokenSet,
+) -> InterTaintResult {
+    let mut seeds_by_func: AHashMap<FuncId, AHashSet<String>> = AHashMap::default();
+    let mut entry_seed: AHashSet<String> = AHashSet::default();
+    entry_seed.extend(entry_sources.iter().cloned());
+    seeds_by_func.insert(entry_func, entry_seed);
+    for edge in &graph.call_records {
+        seeds_by_func.entry(edge.caller).or_default();
+        let callee_seed = seeds_by_func.entry(edge.callee).or_default();
+        for arg in &edge.tainted_args {
+            let param = arg.param_name.trim();
+            if !param.is_empty() && param != "receiver" {
+                callee_seed.insert(param.to_string());
+            }
+        }
+    }
+    for call in &graph.tainted_calls {
+        seeds_by_func.entry(call.caller).or_default();
+    }
+    let mut per_function: AHashMap<FunctionSeed, crate::intra::IntraTaintResult> = AHashMap::default();
+    for (func, seed) in seeds_by_func {
+        let mut seed: Vec<String> = seed.into_iter().collect();
+        seed.sort();
+        per_function.insert(
+            FunctionSeed {
+                func,
+                seed,
+                ..Default::default()
+            },
+            crate::intra::IntraTaintResult::default(),
+        );
+    }
+
+    let call_records = graph
+        .call_records
+        .into_iter()
+        .map(|edge| CallPropagation {
+            trace_id: edge.trace_id,
+            parent_trace_id: edge.parent_trace_id,
+            caller: edge.caller,
+            callee: edge.callee,
+            call_span: edge.call_span,
+            tainted_args: edge.tainted_args,
+            edge_kind: EdgeKind::Direct,
+            edge_precision: edge.precision,
+        })
+        .collect();
+
+    InterTaintResult {
+        per_function,
+        call_records,
+        tainted_calls: graph.tainted_calls,
+        precision: graph.precision,
+        pairs_analyzed: graph.pairs_analyzed,
+        saturated: graph.saturated,
+        continuation: None,
+    }
 }
 
 /// Run interprocedural taint for one budget chunk and return the
@@ -706,24 +826,13 @@ pub fn interprocedural_taint_with_caches(
     entry_sources: &TokenSet,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &InterTaintCaches,
+    _caches: &InterTaintCaches,
 ) -> InterTaintResult {
-    let worklist = vec![InterTaintWorkItem {
-        func: entry_func,
-        seed: entry_sources.clone(),
-        dyn_bindings: AHashMap::new(),
-        const_bindings: AHashMap::new(),
-        lineage: None,
-        lineage_history: AHashSet::new(),
-    }];
-    run_interprocedural_worklist(
-        InterTaintAccum::default(),
-        worklist,
-        AHashSet::default(),
-        config,
-        db,
-        caches,
-    )
+    // The IDG is workspace-global and self-caching on the db, so the
+    // per-run `InterTaintCaches` (alias maps / summaries / resolved
+    // calls for the legacy worklist) are no longer consulted — kept in
+    // the signature only for source compatibility with existing callers.
+    idg_backed_interprocedural_taint(entry_func, entry_sources, config, db)
 }
 
 /// Continue a previously chunked / saturated interprocedural run
@@ -3396,8 +3505,7 @@ pub fn call_site_receives_taint(
     config: &InterTaintConfig,
     db: &AnalyzerDb,
 ) -> bool {
-    let caches = InterTaintCaches::default();
-    call_site_receives_taint_with_caches(func, sink_span, entry_sources, config, db, &caches)
+    idg_backed_call_site_receives_taint(func, sink_span, entry_sources, config, db)
 }
 
 /// Cached variant of [`call_site_receives_taint`] for batched sink
@@ -3409,47 +3517,62 @@ pub fn call_site_receives_taint_with_caches(
     entry_sources: &TokenSet,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &InterTaintCaches,
+    _caches: &InterTaintCaches,
 ) -> bool {
+    // The IDG is workspace-global and self-caching; the per-run
+    // `InterTaintCaches` are no longer consulted (kept for source compat).
+    idg_backed_call_site_receives_taint(func, sink_span, entry_sources, config, db)
+}
+
+/// IDG-backed call-site-precise predicate. Derives the entry taint graph
+/// for `func`/`entry_sources` and checks whether the call, write, or
+/// return recorded at `sink_span` arrived tainted — a tainted-call/write/
+/// return terminal at that span, or a propagating caller edge whose call
+/// span matches.
+fn idg_backed_call_site_receives_taint(
+    func: FuncId,
+    sink_span: Span,
+    entry_sources: &TokenSet,
+    config: &InterTaintConfig,
+    db: &AnalyzerDb,
+) -> bool {
+    if entry_sources.is_empty() {
+        return false;
+    }
+    let idg = crate::idg_build::ensure_idg_service(db);
     let global = db.global_index();
-    let Some(decl) = global.decl_of(SymbolId::new(func.raw())).cloned() else {
-        return false;
-    };
-    let Some(file) = global.declaring_file(SymbolId::new(func.raw())) else {
-        return false;
-    };
-    let aliases = cache_or_insert_with(&caches.aliases_by_file, file, || {
-        alias_map_for_file(&db.imports_for(file))
-    });
-    let alias_targets = cache_or_insert_with(&caches.alias_targets_by_func, func, || {
-        alias_targets_for_decl(&db.imports_for(file), &decl)
-    });
-    let local_bindings = cache_or_insert_with(&caches.local_bindings_by_func, func, || {
-        bonsai_callgraph::collect_local_callable_bindings_with_aliases(
-            &decl.flow_events,
-            &global,
-            &decl,
-            &alias_targets,
-        )
-    });
-    let const_bindings = AHashMap::new();
-    let ctx = SinkWalkCtx {
-        sink_span,
-        config,
+    let seed_nodes =
+        crate::reachable::legacy_token_seed_nodes(func, entry_sources, global.as_ref(), idg.as_ref());
+    let graph = crate::reachable::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
+        func,
+        entry_sources,
+        None,
+        &[],
+        &config.receiver_state_propagations,
+        &config.call_result_passthroughs,
+        &config.output_arg_flows,
+        None,
+        None,
+        None,
+        config.max_edge_precision,
         db,
-        aliases: &aliases,
-        alias_targets: &alias_targets,
-        local_bindings: &local_bindings,
-        const_bindings: &const_bindings,
-        caller: func,
-    };
-    let (_, found) = walk_events_for_sink(
-        &decl.flow_events,
-        entry_sources.clone(),
-        &ctx,
-        &caches.summaries_by_func,
+        idg.as_ref(),
+        &seed_nodes,
     );
-    found
+    let spans_match = |candidate: Span| -> bool {
+        candidate == sink_span
+            || (candidate.file == sink_span.file
+                && candidate.start <= sink_span.end
+                && sink_span.start <= candidate.end)
+    };
+    graph
+        .tainted_calls
+        .iter()
+        .any(|call| call.caller == func && spans_match(call.call_span))
+        || graph
+            .call_records
+            .iter()
+            .any(|edge| edge.caller == func && spans_match(edge.call_span))
 }
 
 struct SinkWalkCtx<'a> {

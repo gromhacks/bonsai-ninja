@@ -28,6 +28,7 @@
 // unsupported so the inner module structure can refactor without
 // affecting consumers.
 pub(crate) mod assignment;
+pub mod idg_build;
 pub(crate) mod inter;
 pub(crate) mod intra;
 pub(crate) mod reachable;
@@ -36,6 +37,7 @@ mod tokens;
 pub mod value_flow;
 
 pub use assignment::{assign_chain_taints, target_is_tainted};
+pub use idg_build::ensure_idg_service;
 pub use inter::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
     interprocedural_taint_to_completion_with_caches, interprocedural_taint_with_caches,

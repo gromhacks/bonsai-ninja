@@ -1036,6 +1036,178 @@ fn source_seed_nodes_from_idg(
     seed_nodes
 }
 
+/// Seed-node composer for the LEGACY token-name taint API
+/// (`interprocedural_taint` / `call_site_receives_taint`), which seeds by
+/// bare identifier tokens with the worklist engine's matching semantics:
+///
+/// 1. **Sigil tolerance** — a seed `args` must also address the sigil'd
+///    bindings Perl/PHP produce (`$args`, `@args`, `%args`). The IDG's
+///    string-pool lookup is exact, so the variants are expanded here.
+/// 2. **Call-name seeds** — a seed like `ReadLine` names a SOURCE CALL,
+///    not a variable. It seeds the `CallRet` node of every call in the
+///    entry function whose (qualified-tail) name matches, so
+///    `var raw = Console.ReadLine()` taints `raw` through the
+///    `CallRet → Write` edge, and the CallRet lands in
+///    `source_call_spans` so `sink(source(x))` isn't pruned as clean.
+///
+/// This deliberately does NOT replace `source_seed_nodes_from_idg` — the
+/// security path seeds from rule-match spans and already-sigil-correct
+/// token sets; its semantics stay untouched.
+pub(crate) fn legacy_token_seed_nodes(
+    entry_func: FuncId,
+    seeds: &TokenSet,
+    global: &GlobalIndex,
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let mut names: Vec<String> = Vec::new();
+    for seed in seeds.iter() {
+        let seed = seed.trim();
+        if seed.is_empty() {
+            continue;
+        }
+        names.push(seed.to_string());
+        if !seed.starts_with(['$', '@', '%']) {
+            names.push(format!("${seed}"));
+            names.push(format!("@{seed}"));
+            names.push(format!("%{seed}"));
+        }
+    }
+    let expanded = bonsai_idg::expand_bare_seed_names_with_descendants(names.iter());
+    // Seed the PARAMETER binding nodes for the seed names — the entry
+    // value whose forward closure is exactly "what the tainted entry
+    // value reaches." Deliberately NOT `read_or_write_nodes_for_names`:
+    // seeding every write named `cmd` would seed a post-`cmd = "const"`
+    // clean-overwrite write (defeating SSA), and seeding every read would
+    // taint the sink's own `sink(cmd)` read directly. The param node's
+    // closure naturally excludes an independent later overwrite.
+    let mut nodes = idg.param_nodes_for_names(entry_func, &expanded, global);
+    if let Some(decl) = global.decl_of(SymbolId::new(entry_func.raw())) {
+        // Locals that are the entry-most definition of a seed name (e.g.
+        // Perl `my ($args) = @_;` when the adapter models the param as a
+        // local write rather than a `Place::Param`) still need seeding.
+        // Seed the FIRST write of each seed name only — later writes are
+        // reassignments the token seed must not resurrect.
+        if nodes.is_empty() {
+            nodes.extend(first_write_nodes_for_names(entry_func, &expanded, &decl.flow_events, idg));
+        }
+        // Source-call-name seeds (`ReadLine`) taint the call's return.
+        let mut call_spans: Vec<Span> = Vec::new();
+        collect_seed_matching_call_spans(&decl.flow_events, seeds, &mut call_spans);
+        for span in call_spans {
+            nodes.extend(idg.call_ret_node_at_site(entry_func, span));
+        }
+    }
+    nodes.sort();
+    nodes.dedup();
+    nodes
+}
+
+/// Seed nodes for the FIRST write of each seed name in `func`, in source
+/// order. Used when a seed name has no `Place::Param` node (adapters that
+/// model a parameter as an initial local write). Only the earliest write
+/// of a name is seeded — later writes are reassignments a token seed must
+/// not resurrect, preserving clean-overwrite semantics.
+fn first_write_nodes_for_names(
+    func: FuncId,
+    seed_names: &[String],
+    events: &[FlowEvent],
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let mut first_write_span: ahash::AHashMap<String, Span> = ahash::AHashMap::default();
+    collect_first_write_spans(events, seed_names, &mut first_write_span);
+    let mut nodes = Vec::new();
+    for span in first_write_span.values() {
+        nodes.extend(idg.write_node_at_span(func, *span));
+    }
+    nodes
+}
+
+fn collect_first_write_spans(
+    events: &[FlowEvent],
+    seed_names: &[String],
+    out: &mut ahash::AHashMap<String, Span>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, span, .. } => {
+                let target = target.trim();
+                if seed_names.iter().any(|name| name == target) && !out.contains_key(target) {
+                    out.insert(target.to_string(), *span);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_first_write_spans(then_events, seed_names, out);
+                collect_first_write_spans(else_events, seed_names, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_first_write_spans(body, seed_names, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_first_write_spans(body, seed_names, out);
+                collect_first_write_spans(catch_events, seed_names, out);
+                collect_first_write_spans(finally_events, seed_names, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recursively collect the spans of calls whose name matches one of the
+/// seed tokens, using the legacy engine's qualified-tail match:
+/// `ReadLine` matches `Console.ReadLine`, `question` matches
+/// `rl.question`, `get` matches `maps:get`.
+fn collect_seed_matching_call_spans(events: &[FlowEvent], seeds: &TokenSet, out: &mut Vec<Span>) {
+    let name_matches = |name: &str| -> bool {
+        seeds.iter().any(|seed| {
+            let seed = seed.trim();
+            !seed.is_empty()
+                && (name == seed
+                    || (name.ends_with(seed)
+                        && name[..name.len() - seed.len()].ends_with(['.', ':', '>'])))
+        })
+    };
+    for event in events {
+        match event {
+            FlowEvent::Call { span, name, .. } => {
+                if name_matches(name) {
+                    out.push(*span);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_seed_matching_call_spans(then_events, seeds, out);
+                collect_seed_matching_call_spans(else_events, seeds, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_seed_matching_call_spans(body, seeds, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_seed_matching_call_spans(body, seeds, out);
+                collect_seed_matching_call_spans(catch_events, seeds, out);
+                collect_seed_matching_call_spans(finally_events, seeds, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn output_arg_read_seed_nodes(
     func: FuncId,
     output_arg_names: &[String],
@@ -1456,6 +1628,7 @@ pub fn entry_taint_graph_from_idg_with_target_filters_and_max_precision(
         max_precision,
         db,
         idg,
+        &[],
     )
 }
 
@@ -1475,21 +1648,32 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     max_precision: Option<Precision>,
     db: &AnalyzerDb,
     idg: &bonsai_idg::IdgQueryService,
+    extra_seed_nodes: &[bonsai_idg::WsNodeId],
 ) -> EntryTaintGraph {
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
-    // Compose the seed set. Source rules may declare output
-    // arguments; those configured carrier names seed post-call
-    // reads/writes when the span-anchored seed is not enough.
-    let mut seed_nodes = source_seed_nodes_from_idg(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
-        global.as_ref(),
-        idg,
-    );
+    // Compose the seed set. When the caller supplies `extra_seed_nodes`
+    // (the legacy token-seeding API, which resolves sigil'd / call-name /
+    // clean-overwrite-safe seeds ITSELF), use exactly those — mixing in
+    // `source_seed_nodes_from_idg`'s name-based read/write seeding would
+    // re-add post-overwrite writes and the sink's own read, defeating SSA.
+    // The security path passes an empty slice, so it keeps the
+    // span-anchored `source_seed_nodes_from_idg` seeding untouched.
+    let mut seed_nodes = if extra_seed_nodes.is_empty() {
+        source_seed_nodes_from_idg(
+            source_func,
+            seeds,
+            source_anchor,
+            output_arg_names,
+            global.as_ref(),
+            idg,
+        )
+    } else {
+        extra_seed_nodes.to_vec()
+    };
+    seed_nodes.sort();
+    seed_nodes.dedup();
     if seed_nodes.is_empty() {
         return graph;
     }

@@ -4785,6 +4785,9 @@ pub fn decl_index_with_handler(
             .or_else(|| first_named_child_of_kind(&lambda, "block"))
             .or_else(|| first_named_child_of_kind(&lambda, "compound_statement"))
             .or_else(|| first_named_child_of_kind(&lambda, "statement_block"))
+            // Kotlin `lambda_literal` and Swift closure bodies nest their
+            // statements under a `statements` node (after the params).
+            .or_else(|| first_named_child_of_kind(&lambda, "statements"))
             // Erlang `F = fun() -> Body end` (H17): the fun body nests under
             // `clause_body` (directly, or via a `fun_clause` wrapper), the
             // same field the main function-decl path handles.
@@ -4792,7 +4795,19 @@ pub fn decl_index_with_handler(
             .or_else(|| {
                 first_named_child_of_kind(&lambda, "fun_clause")
                     .and_then(|fc| first_named_child_of_kind(&fc, "clause_body"))
-            });
+            })
+            // Elixir `fn x -> BODY end`: `anonymous_function` → `stab_clause`
+            // → `body`/`right` field.
+            .or_else(|| {
+                first_named_child_of_kind(&lambda, "stab_clause").and_then(|sc| {
+                    sc.child_by_field_name("body")
+                        .or_else(|| sc.child_by_field_name("right"))
+                })
+            })
+            // Expression-bodied lambdas with no wrapper node (Scala
+            // `(x) => sink(x)`, Rust `|x| expr`): the body is the last
+            // named child that isn't a parameter / type annotation.
+            .or_else(|| lambda_expression_body_child(&lambda));
         let syntax_broken = file_has_syntax_errors && callable_has_syntax_error(&lambda, body_node.as_ref());
         let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
         let body_implicit_returns = implicit_return_node.is_some();
@@ -7461,6 +7476,20 @@ fn nearest_class_owner_span<'tree>(node: &Node<'tree>, handler: &GrammarHandler)
         parent = candidate.parent();
     }
     None
+}
+
+/// The body of an expression-bodied lambda that has no wrapping
+/// statement/block node — Scala `(x) => sink(x)`, Rust `|x| expr`. The
+/// body is the last named child that is not a parameter list, single
+/// parameter, or type annotation. Returns `None` when every named child
+/// looks like a parameter/type (a param-only or bodyless lambda).
+fn lambda_expression_body_child<'a>(lambda: &Node<'a>) -> Option<Node<'a>> {
+    let mut cursor = lambda.walk();
+    let children: Vec<Node<'a>> = lambda.named_children(&mut cursor).collect();
+    children.into_iter().rev().find(|child| {
+        let kind = child.kind();
+        !kind.contains("param") && !kind.contains("type") && !kind.ends_with("parameters")
+    })
 }
 
 fn lambda_is_inlined_call_argument(node: &Node<'_>, handler: &GrammarHandler) -> bool {

@@ -2651,14 +2651,32 @@ pub fn collect_workspace_local_callable_bindings(
     let empty_file_alias_targets: AHashMap<String, AliasTarget> = AHashMap::new();
     let mut out: AHashMap<FuncId, AHashMap<String, FuncId>> = AHashMap::new();
     for file in global.all_files() {
-        for decl in global.decls_in(file) {
+        let decls = global.decls_in(file);
+        for decl in decls {
             if !matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
             ) {
                 continue;
             }
-            if !flow_events_contain_callable_reference_assignment(&decl.flow_events) {
+            // Cheap pre-filter: only run the binding collector for decls
+            // that can actually bind a callable. A callable-reference
+            // assignment (`let f = some_func`) is detectable from the
+            // events alone; a LAMBDA binding (`let f = x -> sink(x)`) is
+            // not — its Assign often surfaces the lambda body's calls as
+            // `source_call` (a non-callable RHS shape) — so also admit any
+            // decl that hosts a nested function decl inside its span,
+            // which is exactly the shape `resolve_assigned_lambda_binding`
+            // resolves. Without this, locally-bound lambdas invoked as
+            // `f.accept(x)` / `f.call(x)` never enter the workspace
+            // binding map and lambda bodies go unreachable.
+            let hosts_nested_callable = decls.iter().any(|other| {
+                other.symbol != decl.symbol
+                    && other.kind == DeclKind::Function
+                    && span_contains_or_equal(decl.span, other.span)
+            });
+            if !hosts_nested_callable && !flow_events_contain_callable_reference_assignment(&decl.flow_events)
+            {
                 continue;
             }
             let alias_targets = alias_targets_for_decl(&empty_file_alias_targets, decl);
@@ -2682,6 +2700,7 @@ fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bo
     for event in events {
         match event {
             FlowEvent::Assign {
+                target,
                 source_call,
                 source_name,
                 source_names,
@@ -2690,6 +2709,18 @@ fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bo
             } => {
                 if source_call.is_none()
                     && assign_rhs_is_callable_reference(source_name.as_deref(), source_names, *value_kind)
+                {
+                    return true;
+                }
+                // PHP `$cb = 'helper';` — a quoted-string runtime callable.
+                // The inner collector (`collect_local_callable_bindings_into`
+                // → `quoted_runtime_callable_literal`) binds it, but this
+                // pre-filter must admit the decl first or the binding never
+                // reaches the resolver. Keep the pre-filter consistent with
+                // the collector it gates.
+                if source_call.is_none()
+                    && quoted_runtime_callable_literal(target, source_name.as_deref(), source_names, *value_kind)
+                        .is_some()
                 {
                     return true;
                 }
@@ -3549,6 +3580,24 @@ fn collect_type_qualified_method_targets(
     targets
 }
 
+/// For a constructor call written as `Owner.new` / `Owner::new` /
+/// `Owner->new` (Ruby/Crystal/Rust/PHP), return the class-owner head
+/// (`Owner`). Returns `None` when the tail is not a recognised
+/// constructor method, so ordinary `obj.method` calls are not treated as
+/// constructions.
+fn constructor_owner_from_call_name(call_name: &str) -> Option<&str> {
+    for sep in ["::", "->", "."] {
+        if let Some(idx) = call_name.rfind(sep) {
+            let head = &call_name[..idx];
+            let tail = &call_name[idx + sep.len()..];
+            if !head.is_empty() && matches!(tail, "new" | "New") {
+                return Some(head);
+            }
+        }
+    }
+    None
+}
+
 fn collect_constructor_targets_for_class_call(
     global: &GlobalIndex,
     caller_decl: &Decl,
@@ -3569,6 +3618,17 @@ fn collect_constructor_targets_for_class_call(
         let short = short_callee(call_name);
         if short != call_name {
             class_candidates = resolve_class(global, short, &ctx);
+        }
+    }
+    if class_candidates.is_empty() {
+        // Ruby/Crystal `Box.new`, Rust `Box::new`, PHP `Box->new`: the
+        // class is the RECEIVER of the constructor method, not the tail
+        // `new`. Neither `call_name` ("Box.new") nor its short tail
+        // ("new") names a class, so strip the constructor suffix and
+        // resolve the owner ("Box"). Guarded on a known constructor tail
+        // so ordinary `obj.method` calls don't get misrouted.
+        if let Some(owner) = constructor_owner_from_call_name(call_name) {
+            class_candidates = resolve_class(global, owner, &ctx);
         }
     }
     if class_candidates.is_empty() {
