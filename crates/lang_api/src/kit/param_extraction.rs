@@ -288,7 +288,16 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
             }
         });
     if let Some(parameters_container) = parameters_container {
-        if looks_like_identifier(parameters_container.kind()) {
+        // C# implicit single-parameter lambda `x => body`: the
+        // `parameters` field is a lone `implicit_parameter` leaf whose
+        // TEXT is the name, not a list and not an `identifier`-kind node
+        // that `push_param_name` recognises — take its text directly.
+        if parameters_container.kind() == "implicit_parameter" {
+            let text = node_text(&parameters_container, src).trim();
+            if !text.is_empty() {
+                param_names.push(text.to_string());
+            }
+        } else if looks_like_identifier(parameters_container.kind()) {
             push_param_name(parameters_container, src, &mut param_names);
         } else {
             let mut cursor = parameters_container.walk();
