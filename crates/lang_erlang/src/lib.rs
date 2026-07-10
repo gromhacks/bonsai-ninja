@@ -6,7 +6,7 @@ use bonsai_lang_api::{
     AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("erlang");
 const PACK_NAME: &str = "erlang";
@@ -106,7 +106,9 @@ impl LanguageAdapter for ErlangAdapter {
         // Record-pattern destructuring, `maps:get` accesses, and tail
         // returns aren't reachable from the tree-walker alone — they
         // need textual analysis of byte ranges.
-        if let Some((snapshot, _)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            let map_field_assigns =
+                collect_erlang_map_literal_field_assigns(&tree, snapshot.text.as_bytes(), file);
             for decl in &mut decl_index.defs {
                 if let Some(params) = erlang_clause_param_slots(snapshot.text.as_ref(), decl.span, &decl.name)
                 {
@@ -114,7 +116,12 @@ impl LanguageAdapter for ErlangAdapter {
                 }
                 augment_erlang_param_pattern_bindings(decl, snapshot.text.as_ref());
                 normalize_erlang_access_events(&mut decl.flow_events, snapshot.text.as_ref());
+                bonsai_lang_api::kit::annotate_tuple_call_result_bindings(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                );
                 augment_erlang_record_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                insert_erlang_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
                 inject_erlang_fun_ref_aliases(&mut decl.flow_events, snapshot.text.as_ref());
                 rewrite_erlang_throw_calls(&mut decl.flow_events);
                 augment_erlang_tail_return_event(&mut decl.flow_events, decl.span, snapshot.text.as_ref());
@@ -169,6 +176,134 @@ impl LanguageAdapter for ErlangAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ErlangMapFieldAssigns {
+    assign_span: bonsai_common::Span,
+    target: String,
+    fields: Vec<FlowEvent>,
+}
+
+fn collect_erlang_map_literal_field_assigns(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<ErlangMapFieldAssigns> {
+    let mut out = Vec::new();
+    for assignment in collect_kinds(tree, &["match_expr"]) {
+        let Some(left) = assignment.child_by_field_name("lhs") else {
+            continue;
+        };
+        let Some(right) = assignment.child_by_field_name("rhs") else {
+            continue;
+        };
+        if right.kind() != "map_expr" {
+            continue;
+        }
+        let target = node_text(&left, src).trim().to_string();
+        if target.is_empty() {
+            continue;
+        }
+        let mut fields = Vec::new();
+        let mut cursor = right.walk();
+        for field in right.named_children(&mut cursor) {
+            if field.kind() != "map_field" {
+                continue;
+            }
+            let Some(key_node) = field.child_by_field_name("key") else {
+                continue;
+            };
+            let Some(value_node) = field.child_by_field_name("value") else {
+                continue;
+            };
+            let Some(key) = erlang_map_key(key_node, src) else {
+                continue;
+            };
+            let sources = erlang_value_source_names(node_text(&value_node, src));
+            fields.push(FlowEvent::Assign {
+                span: span_of(file, &value_node),
+                target: format!("{target}.{key}"),
+                source_name: (sources.len() == 1).then(|| sources[0].clone()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: sources,
+                declares_new_binding: false,
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            });
+        }
+        if !fields.is_empty() {
+            out.push(ErlangMapFieldAssigns {
+                assign_span: span_of(file, &assignment),
+                target,
+                fields,
+            });
+        }
+    }
+    out
+}
+
+fn erlang_map_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let key = raw.trim_matches(['"', '\'']);
+    if !erlang_atom_name(key) {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+fn insert_erlang_map_field_assigns_in_events(
+    events: &mut Vec<FlowEvent>,
+    field_assigns: &[ErlangMapFieldAssigns],
+) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_erlang_map_field_assigns_in_events(then_events, field_assigns);
+                insert_erlang_map_field_assigns_in_events(else_events, field_assigns);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_erlang_map_field_assigns_in_events(body, field_assigns);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_erlang_map_field_assigns_in_events(body, field_assigns);
+                insert_erlang_map_field_assigns_in_events(catch_events, field_assigns);
+                insert_erlang_map_field_assigns_in_events(finally_events, field_assigns);
+            }
+            _ => {}
+        }
+
+        let inserts = match &events[index] {
+            FlowEvent::Assign { span, target, .. } => field_assigns
+                .iter()
+                .filter(|item| {
+                    item.target == *target
+                        && span.file == item.assign_span.file
+                        && span.start <= item.assign_span.end
+                        && item.assign_span.start <= span.end
+                })
+                .flat_map(|item| item.fields.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        if inserts.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = inserts.len();
+        events.splice((index + 1)..=index, inserts);
+        index += inserted + 1;
     }
 }
 
@@ -253,6 +388,7 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
     for event in events {
         match event {
             FlowEvent::Call { args, .. } => {
+                normalize_erlang_split_dot_args(args);
                 for arg in args {
                     if let Some(source) = erlang_fun_ref_source(&arg.value_text) {
                         arg.value_text.clone_from(&source);
@@ -262,7 +398,9 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                     // Prefer `maps:get` rewrites (they consume a pair of
                     // args), fall back to single record access.
                     if let Some(access) = erlang_maps_get_access(&arg.value_text) {
-                        arg.value_text = access;
+                        arg.value_text.clone_from(&access);
+                        arg.place = Some(access.clone());
+                        push_unique_string(&mut arg.source_names, access);
                     } else if let Some(access) = single_erlang_record_access(&arg.value_text) {
                         arg.value_text.clone_from(&access);
                         arg.place = Some(access);
@@ -271,6 +409,7 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
             }
             FlowEvent::Assign {
                 span,
+                source_name,
                 source_call,
                 source_call_args,
                 source_names,
@@ -308,6 +447,23 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                     for source in erlang_comprehension_generator_sources(rhs_text) {
                         push_unique_string(source_names, source);
                     }
+                    let dot_accesses = erlang_pseudo_dot_accesses(rhs_text);
+                    if !dot_accesses.is_empty() {
+                        let structural_bases = dot_accesses
+                            .iter()
+                            .filter_map(|access| access.split_once('.').map(|(base, _)| base))
+                            .collect::<std::collections::HashSet<_>>();
+                        if source_name
+                            .as_deref()
+                            .is_some_and(|name| structural_bases.contains(name.trim()))
+                        {
+                            *source_name = None;
+                        }
+                        source_names.retain(|name| !structural_bases.contains(name.trim()));
+                        for access in dot_accesses {
+                            push_unique_string(source_names, access);
+                        }
+                    }
                 }
                 // Any record access mentioned anywhere in the assignment
                 // span counts as a source — covers patterns like
@@ -340,6 +496,69 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
             _ => {}
         }
     }
+}
+
+/// The Erlang grammar treats the compatibility fixture spelling
+/// `C.capacity` as two adjacent call arguments (`C.` and `capacity`).
+/// Rejoin that losslessly into the same projected storage path used by
+/// records and maps. This also prevents the structural base `C` from
+/// becoming an independent value source.
+fn normalize_erlang_split_dot_args(args: &mut Vec<bonsai_lang_api::CallArg>) {
+    let mut index = 0usize;
+    while index + 1 < args.len() {
+        let base = args[index].value_text.trim().trim_end_matches('.').trim();
+        let field = args[index + 1].value_text.trim();
+        let is_base = !base.is_empty()
+            && base
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+            && base.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+        let is_field = !field.is_empty()
+            && field
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+            && field.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+        if !args[index].value_text.trim().ends_with('.') || !is_base || !is_field {
+            index += 1;
+            continue;
+        }
+        let access = format!("{base}.{field}");
+        args[index].value_text.clone_from(&access);
+        args[index].place = Some(access.clone());
+        args[index].source_names.clear();
+        args[index].source_names.push(access);
+        args.remove(index + 1);
+        index += 1;
+    }
+}
+
+fn erlang_pseudo_dot_accesses(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split(|ch: char| !(ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())) {
+        let Some((base, field)) = token.split_once('.') else {
+            continue;
+        };
+        if field.contains('.')
+            || base.is_empty()
+            || field.is_empty()
+            || !base
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+            || !field
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+            || !base.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            || !field.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        push_unique_string(&mut out, format!("{base}.{field}"));
+    }
+    out
 }
 
 /// Add exact callback-alias facts for Erlang's function-reference
@@ -812,10 +1031,12 @@ fn erlang_comprehension_generator_bindings(rhs_text: &str) -> Vec<(String, Vec<S
 /// loop variable inherits the iterable's taint. Inserted just before the
 /// comprehension-bearing event so it follows any assignment that taints the
 /// iterable (`Cmd = os:getenv(...)` earlier in the body).
+type ErlangComprehensionBindings = Vec<(String, Vec<String>)>;
+
 fn inject_erlang_comprehension_generator_bindings(events: &mut Vec<FlowEvent>) {
     // Collect the comprehension-bearing Return spans + their generator
     // bindings first (immutable borrow), then insert.
-    let mut plans: Vec<(bonsai_common::Span, Vec<(String, Vec<String>)>)> = Vec::new();
+    let mut plans: Vec<(bonsai_common::Span, ErlangComprehensionBindings)> = Vec::new();
     for event in events.iter() {
         if let FlowEvent::Return {
             span,

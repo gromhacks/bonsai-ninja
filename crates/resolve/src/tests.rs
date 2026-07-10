@@ -502,6 +502,21 @@ fn from_x_import_y_as_z_binds_z_to_y() {
 }
 
 #[test]
+fn semantic_import_binding_retains_member_module_identity() {
+    let direct = semantic_import_binding_map_for_file(&[spec("storage", None, Some("Repository"))]);
+    assert_eq!(
+        direct.get("Repository").map(String::as_str),
+        Some("storage.Repository")
+    );
+
+    let renamed = semantic_import_binding_map_for_file(&[spec("storage", Some("Repo"), Some("Repository"))]);
+    assert_eq!(
+        renamed.get("Repo").map(String::as_str),
+        Some("storage.Repository")
+    );
+}
+
+#[test]
 fn module_only_alias_binds_local_to_module() {
     // Python `import os as o` → o → os.
     let map = alias_map_for_file(&[spec("os", Some("o"), None)]);

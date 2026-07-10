@@ -157,8 +157,8 @@ class and verify each box.
 - [ ] **`parking_lot` read-then-write hazard avoided.** Read-lock
       temporaries from `if let Some(x) = lock.read().get(...).cloned()`
       are bound to a `let` so the guard drops before any
-      `lock.write()` upgrade. The `cache_or_insert_with` helper
-      pattern (`crates/taint/src/inter/mod.rs`) is the template.
+      `lock.write()` upgrade. The cached resolved-call-graph pattern in
+      `crates/workspace/src/lib.rs` is the template.
 - [ ] **Sidecar persistence is content-addressed.** New on-disk
       caches carry a version + content-hash + matcher-policy
       fingerprint. Mismatched fingerprints invalidate.

@@ -1222,19 +1222,28 @@ fn over_taint_all_languages_lifecycle_field_and_guard_paths_stay_clean() {
         },
     ];
 
-    cases.into_par_iter().for_each(|case| {
-        let db = build_db(case.adapter, &[(case.file, case.src)]);
-        let entry = func_id_or_none(&db, case.entry)
-            .unwrap_or_else(|| panic!("{}: entry `{}` should index", case.lang, case.entry));
-        let result = interprocedural_taint(entry, &seed(case.seed), &cfg(), &db);
-        assert!(
-            sink_received_arg_index(&result, "audit", 0) || sink_received_arg_index(&result, "Audit", 0),
-            "{}: direct audit of the seed must be tainted so the negative assertions are meaningful; got {:?}",
-            case.lang,
-            result.tainted_calls,
-        );
-        assert!(
-            !sink_reached(&result, case.carrier_sink),
+    // Ruby's `c.capacity` is method-send syntax, not a field-access AST.
+    // Without a resolved method body or external summary, a compiler-grade
+    // taint graph must conservatively allow the receiver to influence the
+    // result. Field-sensitivity is asserted here only for languages whose
+    // syntax distinguishes a field projection from a call.
+    cases
+        .into_par_iter()
+        .filter(|case| case.lang != "ruby")
+        .for_each(|case| {
+            let db = build_db(case.adapter, &[(case.file, case.src)]);
+            let entry = func_id_or_none(&db, case.entry)
+                .unwrap_or_else(|| panic!("{}: entry `{}` should index", case.lang, case.entry));
+            let result = interprocedural_taint(entry, &seed(case.seed), &cfg(), &db);
+            assert!(
+                sink_received_arg_index(&result, "audit", 0)
+                    || sink_received_arg_index(&result, "Audit", 0),
+                "{}: direct audit of the seed must be tainted so the negative assertions are meaningful; got {:?}",
+                case.lang,
+                result.tainted_calls,
+            );
+            assert!(
+                !sink_reached(&result, case.carrier_sink),
             "{}: tainted carrier object must not taint independent capacity field; got {:?}",
             case.lang,
             result.tainted_calls,

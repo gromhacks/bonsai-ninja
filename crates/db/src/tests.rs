@@ -56,3 +56,30 @@ fn imports_for_treats_empty_adapter_index_as_authoritative() {
         "adapter-returned empty imports must not fall through to generic syntax extraction"
     );
 }
+
+#[test]
+fn configured_idg_services_are_isolated_by_semantic_fingerprint() {
+    let db = AnalyzerDb::new(Arc::new(Vfs::new()), Arc::new(LanguageRegistry::new()));
+    let service = || {
+        Arc::new(bonsai_idg::IdgQueryService::new(
+            Arc::new(bonsai_idg::IdgWorkspace::new()),
+            Arc::new(bonsai_index::GlobalIndex::new()),
+        ))
+    };
+    let first = service();
+    let second = service();
+
+    let cached_first = db.set_idg_service_for_semantics(11, first.clone());
+    let cached_second = db.set_idg_service_for_semantics(22, second.clone());
+    assert!(Arc::ptr_eq(&cached_first, &first));
+    assert!(Arc::ptr_eq(&cached_second, &second));
+    assert!(Arc::ptr_eq(
+        &db.idg_service_for_semantics(11).expect("first semantics"),
+        &first
+    ));
+    assert!(Arc::ptr_eq(&db.set_idg_service_for_semantics(11, second), &first));
+
+    db.invalidate_idg_service();
+    assert!(db.idg_service_for_semantics(11).is_none());
+    assert!(db.idg_service_for_semantics(22).is_none());
+}

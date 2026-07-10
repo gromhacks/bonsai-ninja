@@ -64,9 +64,9 @@ fn configured_resident_entry_cap() -> usize {
 }
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
-/// policy fingerprint, caller config fingerprint, and workspace
-/// content fingerprint into 64 bits so matcher/rule/source changes
-/// invalidate the cache file.
+/// policy fingerprint, IDG semantic fingerprint, caller config fingerprint,
+/// and workspace content fingerprint into 64 bits so matcher, graph,
+/// rule/source, and source-file changes invalidate the cache file.
 fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_path: &Path) -> u64 {
     let raw = MATCHER_POLICY_FINGERPRINT;
     let policy_lo = raw as u64;
@@ -81,9 +81,20 @@ fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_p
     // config-bound check.
     let build_fp = crate::build_fingerprint_hash();
     if config_fingerprint == 0 {
-        policy_lo ^ policy_hi ^ content ^ semantic_version ^ build_fp
+        policy_lo
+            ^ policy_hi
+            ^ content
+            ^ semantic_version
+            ^ crate::idg_stitching_semantic_fingerprint()
+            ^ build_fp
     } else {
-        policy_lo ^ policy_hi ^ content ^ config_fingerprint ^ semantic_version ^ build_fp
+        policy_lo
+            ^ policy_hi
+            ^ content
+            ^ config_fingerprint
+            ^ semantic_version
+            ^ crate::idg_stitching_semantic_fingerprint()
+            ^ build_fp
     }
 }
 

@@ -835,6 +835,7 @@ fn build_python_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> Option<F
                 continue;
             }
             args.push(CallArg {
+                passing_mode: Default::default(),
                 span: span_of(file, &arg),
                 name,
                 place: python_argument_place_from_text(&value_text),

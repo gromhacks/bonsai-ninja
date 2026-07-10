@@ -64,6 +64,7 @@ fn call_with_args(file: FileId, name: &str, args: &[&str]) -> FlowEvent {
             .iter()
             .enumerate()
             .map(|(idx, arg)| CallArg {
+                passing_mode: Default::default(),
                 span: Span::new(
                     file,
                     idx as u64,
@@ -213,6 +214,72 @@ fn direct_call_edges_carry_exact_symbol_provenance() {
     assert_eq!(edge.provenance.resolver_stage, "exact_symbol");
     assert!(edge.provenance.evidence.contains("unique callable"));
     assert!(edge.provenance.confidence >= 90);
+}
+
+#[test]
+fn local_callable_declaration_shadows_same_named_import() {
+    let entry_file = FileId::new(1);
+    let imported_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        entry_file,
+        vec![
+            with_module_path(decl(entry_file, 0, "helper", Vec::new()), &["entry"]),
+            with_module_path(
+                decl(entry_file, 1, "entry", vec![call(entry_file, "helper")]),
+                &["entry"],
+            ),
+        ],
+    );
+    insert_file(
+        &mut global,
+        imported_file,
+        vec![with_module_path(
+            decl(imported_file, 0, "helper", Vec::new()),
+            &["remote"],
+        )],
+    );
+
+    let cg = ResolvedCallGraph::build_with_file_info(
+        &global,
+        |_| AHashMap::new(),
+        |file| {
+            if file == entry_file {
+                AHashMap::from_iter([(
+                    "helper".to_string(),
+                    AliasTarget::Member {
+                        module: "remote".to_string(),
+                        member: "helper".to_string(),
+                    },
+                )])
+            } else {
+                AHashMap::new()
+            }
+        },
+        |_| None,
+        |_| &[],
+        |_| Some("python"),
+    );
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let local_helper = global
+        .find_by_name("helper")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(entry_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("local helper");
+    let imported_helper = global
+        .find_by_name("helper")
+        .iter()
+        .copied()
+        .find(|symbol| global.declaring_file(*symbol) == Some(imported_file))
+        .map(|symbol| FuncId::new(symbol.raw()))
+        .expect("imported helper");
+    let targets = cg.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>();
+
+    assert_eq!(targets, vec![local_helper]);
+    assert!(!targets.contains(&imported_helper));
 }
 
 #[test]
@@ -1395,6 +1462,43 @@ fn bare_method_call_prefers_same_class_implicit_receiver() {
 }
 
 #[test]
+fn bare_implicit_receiver_call_resolves_inherited_base_accessor() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let base = with_module_path(
+        decl_with(file, 0, "Base", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    let accessor = with_module_path(
+        decl_with(file, 1, "cmd", DeclKind::Method, Some(0), Vec::new()),
+        &["app"],
+    );
+    let mut child = with_module_path(
+        decl_with(file, 2, "Repository", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    child.bases = vec!["Base".to_string()];
+    let run = mark_implicit_receiver(
+        with_module_path(
+            decl_with(file, 3, "run", DeclKind::Method, Some(2), vec![call(file, "cmd")]),
+            &["app"],
+        ),
+        "this",
+    );
+    insert_file(&mut global, file, vec![base, accessor, child, run]);
+
+    let cg = build_graph(&global, |_| Some("kotlin"));
+    let run = FuncId::new(global.find_by_name("run")[0].raw());
+    let accessor = FuncId::new(global.find_by_name("cmd")[0].raw());
+    let edges = cg.callees_of(run).collect::<Vec<_>>();
+
+    assert!(
+        edges.iter().any(|edge| edge.to == accessor),
+        "implicit receiver dispatch must traverse adapter-declared class bases: {edges:?}"
+    );
+}
+
+#[test]
 fn typed_child_receiver_resolves_inherited_base_method() {
     let base_file = FileId::new(1);
     let entry_file = FileId::new(2);
@@ -1430,6 +1534,7 @@ fn typed_child_receiver_resolves_inherited_base_method() {
                     receiver_types: vec!["Child".to_string(), "Base".to_string()],
                     call_kind: CallKind::Method,
                     args: vec![CallArg {
+                        passing_mode: Default::default(),
                         span: Span::new(entry_file, 30, 34),
                         name: None,
                         value_text: "args".to_string(),
@@ -1694,6 +1799,69 @@ fn unresolved_untyped_receiver_method_does_not_fall_back_to_bare_workspace_name(
 
     assert_eq!(cg.callees_of(entry).count(), 0);
     assert_eq!(cg.callers_of(equals).count(), 0);
+}
+
+#[test]
+fn dynamic_parameter_receiver_resolves_only_unique_same_file_method() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl_with(file, 0, "Box", DeclKind::Class, None, Vec::new()),
+            decl_with(file, 1, "run", DeclKind::Method, Some(0), Vec::new()),
+            with_params(
+                decl_with(
+                    file,
+                    2,
+                    "entry",
+                    DeclKind::Function,
+                    None,
+                    vec![method_call(file, "arg.run", "arg", &[])],
+                ),
+                &["arg"],
+            ),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("javascript"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let run = FuncId::new(global.find_by_name("run")[0].raw());
+    assert_eq!(
+        cg.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![run]
+    );
+
+    let mut ambiguous = GlobalIndex::new();
+    insert_file(
+        &mut ambiguous,
+        file,
+        vec![
+            decl_with(file, 0, "A", DeclKind::Class, None, Vec::new()),
+            decl_with(file, 1, "run", DeclKind::Method, Some(0), Vec::new()),
+            decl_with(file, 2, "B", DeclKind::Class, None, Vec::new()),
+            decl_with(file, 3, "run", DeclKind::Method, Some(2), Vec::new()),
+            with_params(
+                decl_with(
+                    file,
+                    4,
+                    "entry",
+                    DeclKind::Function,
+                    None,
+                    vec![method_call(file, "arg.run", "arg", &[])],
+                ),
+                &["arg"],
+            ),
+        ],
+    );
+    let cg = build_graph(&ambiguous, |_| Some("javascript"));
+    let entry = FuncId::new(ambiguous.find_by_name("entry")[0].raw());
+    assert_eq!(
+        cg.callees_of(entry).count(),
+        0,
+        "ambiguous local method names must not fan out from an untyped receiver"
+    );
 }
 
 #[test]

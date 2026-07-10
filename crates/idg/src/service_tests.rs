@@ -354,6 +354,7 @@ fn read_or_write_nodes_for_names_locates_local_assign_target() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 33, 38),
                 name: None,
                 value_text: "local".to_string(),
@@ -390,6 +391,7 @@ fn source_seed_span_fallback_does_not_cross_functions_in_same_segment() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 35, 39),
             name: None,
             value_text: "other".to_string(),
@@ -418,6 +420,7 @@ fn read_or_write_nodes_for_names_maps_wildcard_seed_to_projected_read_only() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 27, 33),
             name: None,
             value_text: "args.q".to_string(),
@@ -460,6 +463,7 @@ fn read_or_write_nodes_for_names_maps_dotted_wildcard_seed_to_projected_read() {
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 30, 45),
                 name: None,
                 value_text: "req.query.theme".to_string(),
@@ -467,6 +471,7 @@ fn read_or_write_nodes_for_names_maps_dotted_wildcard_seed_to_projected_read() {
                 source_names: vec!["req.query.theme".to_string(), "req.query".to_string()],
             },
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 46, 55),
                 name: None,
                 value_text: "req.body.theme".to_string(),
@@ -504,6 +509,7 @@ fn nodes_for_name_after_span_resolves_projected_output_arg_carrier() {
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![
                 bonsai_lang_api::CallArg {
+                    passing_mode: Default::default(),
                     span: span(0, 25, 32),
                     name: None,
                     value_text: "env.cmd".to_string(),
@@ -511,6 +517,7 @@ fn nodes_for_name_after_span_resolves_projected_output_arg_carrier() {
                     source_names: vec!["env.cmd".to_string(), "env".to_string()],
                 },
                 bonsai_lang_api::CallArg {
+                    passing_mode: Default::default(),
                     span: span(0, 34, 37),
                     name: None,
                     value_text: "raw".to_string(),
@@ -526,6 +533,7 @@ fn nodes_for_name_after_span_resolves_projected_output_arg_carrier() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 57, 64),
                 name: None,
                 value_text: "env.cmd".to_string(),
@@ -563,6 +571,7 @@ fn cross_call_edges_in_closure_reports_callarg_to_param() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 22, 23),
             name: None,
             value_text: "x".to_string(),
@@ -625,6 +634,7 @@ fn cross_file_call_reaches_callee_from_caller_param() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 22, 23),
             name: None,
             value_text: "x".to_string(),
@@ -701,6 +711,7 @@ fn field_argument_forwarding_preserves_sibling_fields_through_passthrough_calls(
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 43, 49),
                 name: None,
                 value_text: "payload".to_string(),
@@ -719,6 +730,7 @@ fn field_argument_forwarding_preserves_sibling_fields_through_passthrough_calls(
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(1, 64, 68),
             name: None,
             value_text: "envelope".to_string(),
@@ -747,6 +759,7 @@ fn field_argument_forwarding_preserves_sibling_fields_through_passthrough_calls(
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(2, 105, 109),
                 name: None,
                 value_text: "seen".to_string(),
@@ -771,6 +784,7 @@ fn field_argument_forwarding_preserves_sibling_fields_through_passthrough_calls(
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(2, 144, 148),
                 name: None,
                 value_text: "out".to_string(),
@@ -877,6 +891,7 @@ fn sibling_field_taint_does_not_promote_container_argument_to_sink() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 94, 97),
                 name: None,
                 value_text: "&env".to_string(),
@@ -951,6 +966,7 @@ fn sibling_field_taint_does_not_promote_container_argument_to_sink() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 224, 229),
                 name: None,
                 value_text: "valid".to_string(),
@@ -980,6 +996,7 @@ fn sibling_field_taint_does_not_promote_container_argument_to_sink() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(2, 264, 265),
                 name: None,
                 value_text: "c".to_string(),
@@ -998,6 +1015,7 @@ fn sibling_field_taint_does_not_promote_container_argument_to_sink() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(3, 305, 308),
             name: None,
             value_text: "cmd".to_string(),
@@ -1085,6 +1103,7 @@ fn module_path_method_call_forwards_field_precise_argument() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Method,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 50, 54),
                 name: None,
                 value_text: "valid".to_string(),
@@ -1114,6 +1133,7 @@ fn module_path_method_call_forwards_field_precise_argument() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 98, 101),
                 name: None,
                 value_text: "cmd".to_string(),
@@ -1132,6 +1152,7 @@ fn module_path_method_call_forwards_field_precise_argument() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(2, 125, 128),
             name: None,
             value_text: "cmd".to_string(),
@@ -1175,7 +1196,7 @@ fn returned_container_field_forwards_to_assigned_object_argument() {
     entry.flow_events = vec![
         FlowEvent::Assign {
             span: span(0, 10, 20),
-            target: "env".to_string(),
+            target: "env.cmd".to_string(),
             source_name: Some("raw".to_string()),
             source_call: None,
             source_call_args: Vec::new(),
@@ -1210,6 +1231,7 @@ fn returned_container_field_forwards_to_assigned_object_argument() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 78, 83),
                 name: None,
                 value_text: "valid".to_string(),
@@ -1247,6 +1269,7 @@ fn returned_container_field_forwards_to_assigned_object_argument() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(2, 178, 181),
                 name: None,
                 value_text: "cmd".to_string(),
@@ -1265,6 +1288,7 @@ fn returned_container_field_forwards_to_assigned_object_argument() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(3, 205, 208),
             name: None,
             value_text: "cmd".to_string(),
@@ -1407,6 +1431,7 @@ fn returned_container_field_forwards_through_constructor_receiver_state() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(2, 218, 221),
                 name: None,
                 value_text: "cmd".to_string(),
@@ -1425,6 +1450,7 @@ fn returned_container_field_forwards_through_constructor_receiver_state() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(3, 245, 248),
             name: None,
             value_text: "cmd".to_string(),
@@ -1505,6 +1531,7 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
             receiver_types: vec!["Repository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Method,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 47, 50),
                 name: None,
                 value_text: "env".to_string(),
@@ -1551,6 +1578,7 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
             receiver_types: vec!["Repository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Constructor,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 117, 121),
                 name: None,
                 value_text: "data".to_string(),
@@ -1576,6 +1604,7 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 201, 210),
                 name: None,
                 value_text: "$this->cmd()".to_string(),
@@ -1616,6 +1645,7 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(2, 401, 404),
             name: None,
             value_text: "cmd".to_string(),
@@ -1687,6 +1717,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 48, 51),
                 name: None,
                 value_text: "env".to_string(),
@@ -1726,6 +1757,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
             receiver_types: vec!["Repository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Constructor,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 117, 121),
                 name: None,
                 value_text: "data".to_string(),
@@ -1760,6 +1792,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
             receiver_types: vec!["Repository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Method,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 178, 186),
                 name: None,
                 value_text: "envelope".to_string(),
@@ -1796,6 +1829,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 228, 231),
                 name: None,
                 value_text: "cmd".to_string(),
@@ -1823,6 +1857,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(2, 301, 304),
             name: None,
             value_text: "cmd".to_string(),
@@ -1882,6 +1917,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 48, 51),
                 name: None,
                 value_text: "env".to_string(),
@@ -1925,6 +1961,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
             receiver_types: vec!["Repository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Constructor,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 117, 121),
                 name: None,
                 value_text: "data".to_string(),
@@ -1959,6 +1996,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
             receiver_types: vec!["AuditedRepository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Method,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 178, 186),
                 name: None,
                 value_text: "envelope".to_string(),
@@ -2011,6 +2049,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 398, 401),
                 name: None,
                 value_text: "cmd".to_string(),
@@ -2038,6 +2077,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(2, 504, 507),
             name: None,
             value_text: "cmd".to_string(),
@@ -2125,6 +2165,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 48, 51),
                 name: None,
                 value_text: "env".to_string(),
@@ -2165,6 +2206,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
         receiver_types: vec!["BaseRepository".to_string()],
         call_kind: bonsai_lang_api::CallKind::Constructor,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(1, 115, 119),
             name: None,
             value_text: "data".to_string(),
@@ -2188,6 +2230,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
         receiver_types: vec!["Repository".to_string()],
         call_kind: bonsai_lang_api::CallKind::Constructor,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(1, 145, 149),
             name: None,
             value_text: "data".to_string(),
@@ -2207,6 +2250,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             receiver_types: vec!["AuditedRepository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Constructor,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 179, 183),
                 name: None,
                 value_text: "data".to_string(),
@@ -2231,6 +2275,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             receiver_types: vec!["Repository".to_string()],
             call_kind: bonsai_lang_api::CallKind::Method,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 216, 224),
                 name: None,
                 value_text: "envelope".to_string(),
@@ -2293,6 +2338,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(1, 398, 401),
                 name: None,
                 value_text: "c".to_string(),
@@ -2320,6 +2366,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(2, 504, 507),
             name: None,
             value_text: "cmd".to_string(),
@@ -2507,6 +2554,7 @@ fn returned_container_field_forwards_through_super_constructor_receiver_state() 
         receiver_types: vec!["Repository".to_string()],
         call_kind: bonsai_lang_api::CallKind::Method,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(2, 181, 185),
             name: None,
             value_text: "data".to_string(),
@@ -2538,6 +2586,7 @@ fn returned_container_field_forwards_through_super_constructor_receiver_state() 
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(2, 248, 251),
                 name: None,
                 value_text: "cmd".to_string(),
@@ -2556,6 +2605,7 @@ fn returned_container_field_forwards_through_super_constructor_receiver_state() 
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(3, 275, 278),
             name: None,
             value_text: "cmd".to_string(),
@@ -2647,6 +2697,7 @@ fn c_indexed_argv_copy_reaches_address_of_struct_field_read() {
             receiver_types: Vec::new(),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 52, 56),
                 name: None,
                 value_text: "&env".to_string(),
@@ -2665,6 +2716,7 @@ fn c_indexed_argv_copy_reaches_address_of_struct_field_read() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(1, 75, 79),
             name: None,
             value_text: "env->cmd".to_string(),

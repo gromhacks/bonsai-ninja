@@ -13,7 +13,7 @@ fn seed_idg_on(db: &AnalyzerDb) -> Arc<IdgQueryService> {
     let global = db.global_index();
     let cg = ResolvedCallGraph::build_with_file_info(
         global.as_ref(),
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
         |file| {
             bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
                 .into_iter()

@@ -16,6 +16,7 @@ bonsai_factstore.workspace = true
 bonsai_hash.workspace = true
 bonsai_index.workspace = true
 bonsai_lang_api.workspace = true
+bonsai_resolve.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
 regex.workspace = true

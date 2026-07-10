@@ -50,7 +50,7 @@ fn parse_field_reads(src: &str) -> Vec<Ref> {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&language).expect("set elixir grammar");
     let tree = parser.parse(src.as_bytes(), None).expect("parse elixir source");
-    synthesize_elixir_request_field_reads(&tree, src.as_bytes(), FileId::new(0))
+    synthesize_elixir_value_field_reads(&tree, src.as_bytes(), FileId::new(0))
 }
 
 #[test]
@@ -67,16 +67,36 @@ fn conn_field_dot_access_emits_named_read_ref() {
 }
 
 #[test]
-fn non_allowlisted_dot_access_emits_no_read_ref() {
-    // `conn.assigns` is a real Plug.Conn field but is NOT a request-input
-    // source — the synthesizer must stay bounded to the allowlist so it
-    // never invents reads for arbitrary `a.b` dot access.
+fn every_value_dot_access_emits_a_read_ref_without_name_tables() {
     let reads = parse_field_reads(
-        "defmodule App do\n  def index(conn) do\n    a = conn.assigns\n    a\n  end\nend\n",
+        "defmodule App do\n  def index(conn) do\n    a = conn.assigns\n    System.version()\n    a\n  end\nend\n",
     );
     assert!(
-        reads.is_empty(),
-        "non-allowlisted field should emit no Read ref, got {reads:?}"
+        reads
+            .iter()
+            .any(|r| r.name == "assigns" && r.kind == RefKind::Read),
+        "syntax-proven fields should emit Read refs, got {reads:?}"
+    );
+    assert!(
+        reads.iter().all(|r| r.name != "version"),
+        "a remote call must not be reclassified as a field read: {reads:?}"
+    );
+}
+
+#[test]
+fn function_value_dot_call_lowers_from_cst() {
+    let src = "defmodule Main do\n  def run(args) do\n    closure = fn -> sink(args) end\n    closure.()\n  end\nend\n";
+    let language = language_from_pack(PACK_NAME).expect("elixir grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set elixir grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse elixir source");
+
+    let calls = collect_elixir_local_callable_invocations(&tree, src.as_bytes(), FileId::new(0));
+    assert!(
+        calls
+            .iter()
+            .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "closure")),
+        "expected local callable Call fact, got {calls:?}"
     );
 }
 

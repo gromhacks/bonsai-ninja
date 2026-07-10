@@ -3,7 +3,7 @@
 //! Every IDG / dataflow / value-flow / flow-ids / taint-graph
 //! sidecar folds `BONSAI_BUILD_FINGERPRINT` into its on-disk
 //! `pipeline_hash`. The fingerprint changes whenever the local git
-//! HEAD moves OR the working tree is dirty — so an upgraded binary
+//! HEAD moves OR the working-tree content changes — so an upgraded binary
 //! cannot accidentally reuse sidecars produced by a different
 //! analysis version, even if the per-sidecar manual semantic-version
 //! constant wasn't bumped. This converts the previous "remember to
@@ -46,9 +46,13 @@ fn main() {
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
 
     let head = run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "ungitted".to_string());
-    let dirty = run_git(&["status", "--porcelain"]).map_or(String::new(), |out| out);
-    let dirty_marker = if dirty.trim().is_empty() { "clean" } else { "dirty" };
-    let dirty_hash = fnv1a64(dirty.as_bytes());
+    let dirty_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+    let dirty_marker = if dirty_status.trim().is_empty() {
+        "clean"
+    } else {
+        "dirty"
+    };
+    let dirty_hash = dirty_content_hash(&dirty_status);
 
     // Compose deterministically so two builds at the same commit with
     // identical dirty state produce identical fingerprints.
@@ -86,6 +90,32 @@ fn run_git(args: &[&str]) -> Option<String> {
     }
     let stdout = String::from_utf8(out.stdout).ok()?;
     Some(stdout.trim().to_string())
+}
+
+/// Hash the actual dirty payload, not only `git status` paths. Hashing status
+/// alone leaves the fingerprint unchanged when an already-modified file is
+/// edited again, which can make a freshly rebuilt analyzer accept sidecars
+/// produced by older local code.
+fn dirty_content_hash(status: &str) -> u64 {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(status.as_bytes());
+    if let Some(diff) = run_git(&["diff", "--binary", "HEAD", "--", "."]) {
+        bytes.extend_from_slice(diff.as_bytes());
+    }
+    if let (Some(root), Some(untracked)) = (
+        repo_root(),
+        run_git(&["ls-files", "--others", "--exclude-standard"]),
+    ) {
+        for relative in untracked.lines().filter(|path| !path.is_empty()) {
+            bytes.extend_from_slice(relative.as_bytes());
+            bytes.push(0);
+            if let Ok(contents) = std::fs::read(root.join(relative)) {
+                bytes.extend_from_slice(&contents);
+            }
+            bytes.push(0xff);
+        }
+    }
+    fnv1a64(&bytes)
 }
 
 /// Find the repo's `.git` dir by walking up from `CARGO_MANIFEST_DIR`.

@@ -2,7 +2,7 @@ use super::*;
 use crate::edge::IdgEdgeKind;
 use crate::node::NodeId;
 use crate::place::Place;
-use crate::transfer::transfer_function_for;
+use crate::transfer::{transfer_function_for, transfer_function_for_with_options, TransferOptions};
 use bonsai_common::{FileId, SymbolId};
 use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent, ModulePath, Visibility};
 
@@ -41,17 +41,31 @@ fn empty_decl(sym: u32, name: &str) -> Decl {
 /// to candidate FuncIds. All resolved as Direct + Exact.
 struct MockResolver {
     table: AHashMap<(FuncId, String), Vec<FuncId>>,
+    callable_args: AHashMap<(FuncId, String), Vec<FuncId>>,
+    callable_arg_spans: AHashMap<(FuncId, Span), Vec<FuncId>>,
+    local_bindings: AHashSet<(FuncId, FuncId)>,
 }
 
 impl MockResolver {
     fn new() -> Self {
         Self {
             table: AHashMap::new(),
+            callable_args: AHashMap::new(),
+            callable_arg_spans: AHashMap::new(),
+            local_bindings: AHashSet::new(),
         }
     }
 
     fn add(&mut self, caller: FuncId, name: &str, callees: Vec<FuncId>) {
         self.table.insert((caller, name.to_string()), callees);
+    }
+
+    fn add_local_binding(&mut self, caller: FuncId, callee: FuncId) {
+        self.local_bindings.insert((caller, callee));
+    }
+
+    fn add_callable_arg_span(&mut self, caller: FuncId, arg_span: Span, callees: Vec<FuncId>) {
+        self.callable_arg_spans.insert((caller, arg_span), callees);
     }
 }
 
@@ -63,6 +77,7 @@ impl CalleeResolver for MockResolver {
         callee_name: &str,
         _receiver: Option<&str>,
         _receiver_types: &[String],
+        _call_kind: CallKind,
     ) -> Vec<ResolvedCallee> {
         self.table
             .get(&(caller, callee_name.to_string()))
@@ -72,6 +87,36 @@ impl CalleeResolver for MockResolver {
                 func: *f,
                 edge_kind: CallEdgeKind::Direct,
                 precision: Precision::Exact,
+            })
+            .collect()
+    }
+
+    fn is_local_callable_binding(&self, caller: FuncId, callee: FuncId) -> bool {
+        self.local_bindings.contains(&(caller, callee))
+    }
+
+    fn callable_arg(&self, caller: FuncId, arg_text: &str) -> Vec<ResolvedCallee> {
+        self.callable_args
+            .get(&(caller, arg_text.to_string()))
+            .into_iter()
+            .flatten()
+            .map(|func| ResolvedCallee {
+                func: *func,
+                edge_kind: CallEdgeKind::Indirect,
+                precision: Precision::Narrowed,
+            })
+            .collect()
+    }
+
+    fn callable_args_in_span(&self, caller: FuncId, arg_span: Span) -> Vec<ResolvedCallee> {
+        self.callable_arg_spans
+            .get(&(caller, arg_span))
+            .into_iter()
+            .flatten()
+            .map(|func| ResolvedCallee {
+                func: *func,
+                edge_kind: CallEdgeKind::Indirect,
+                precision: Precision::Narrowed,
             })
             .collect()
     }
@@ -151,6 +196,7 @@ fn two_funcs_in_same_segment_call_each_other_no_cross_file_edge() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(22, 23),
             name: None,
             value_text: "x".to_string(),
@@ -180,6 +226,61 @@ fn two_funcs_in_same_segment_call_each_other_no_cross_file_edge() {
 }
 
 #[test]
+fn callable_argument_routes_method_receiver_to_callback_without_outer_callee() {
+    let mut host = empty_decl(1, "host");
+    host.params = vec!["items".to_string()];
+    host.flow_events = vec![FlowEvent::Call {
+        span: span(20, 30),
+        name: "items.traverse".to_string(),
+        receiver: Some("items".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(25, 29),
+            name: None,
+            value_text: "&method(:step)".to_string(),
+            place: Some("&method(:step)".to_string()),
+            source_names: Vec::new(),
+        }],
+    }];
+    let mut callback = empty_decl(2, "step");
+    callback.params = vec!["item".to_string()];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(0));
+    let f2s = StaticF2S(f2s_map);
+    let mut resolver = MockResolver::new();
+    resolver.add_callable_arg_span(FuncId::new(1), span(25, 29), vec![FuncId::new(2)]);
+
+    let ws = stitch_idg(
+        vec![transfer_function_for(&host), transfer_function_for(&callback)],
+        &resolver,
+        &f2s,
+    );
+    let segment = ws.segment(SegmentId(0)).expect("shared segment");
+
+    assert!(
+        segment.edges.iter().any(|edge| {
+            let Some(from) = segment.nodes.get(edge.from) else {
+                return false;
+            };
+            let Some(to) = segment.nodes.get(edge.to) else {
+                return false;
+            };
+            from.func == FuncId::new(1)
+                && to.func == FuncId::new(2)
+                && call_arg_idx(segment, edge.from) == Some(u8::MAX)
+                && param_idx(segment, edge.to) == Some(0)
+                && edge.meta.kind == IdgEdgeKind::InterCallArg
+        }),
+        "AST-resolved callable arguments must route the collection receiver to the callback parameter without resolving the outer library method: {:#?}",
+        segment.edges
+    );
+}
+
+#[test]
 fn two_funcs_in_different_segments_call_creates_cross_file_edges() {
     let mut f = empty_decl(1, "f");
     f.flow_events = vec![FlowEvent::Call {
@@ -189,6 +290,7 @@ fn two_funcs_in_different_segments_call_creates_cross_file_edges() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(22, 23),
             name: None,
             value_text: "x".to_string(),
@@ -253,6 +355,148 @@ fn unresolved_call_emits_no_inter_edge() {
 }
 
 #[test]
+fn compatibility_mode_stitches_unresolved_assignment_args_to_result() {
+    let mut f = empty_decl(1, "f");
+    f.params = vec!["input".to_string()];
+    f.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 40),
+            target: "out".to_string(),
+            source_name: None,
+            source_call: Some("external_transform".to_string()),
+            source_call_args: vec!["input".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(24, 36),
+            name: "external_transform".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(31, 35),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            }],
+        },
+    ];
+    let options = TransferOptions {
+        include_unresolved_call_result_passthrough: true,
+        ..TransferOptions::default()
+    };
+    let out_f = transfer_function_for_with_options(&f, &options);
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    let mut resolver = MockResolver::new();
+    // A declaration-like resolver hit with no transferred function body is
+    // still external from the IDG's perspective and must use the fallback.
+    resolver.add(FuncId::new(1), "external_transform", vec![FuncId::new(99)]);
+    let ws = stitch_idg(vec![out_f], &resolver, &StaticF2S(f2s_map));
+    let segment = ws
+        .segment_for_func(FuncId::new(1))
+        .and_then(|id| ws.segment(id))
+        .expect("segment");
+    assert!(segment.edges.iter().any(|edge| {
+        matches!(
+            node_place(segment, edge.from),
+            Some(Place::CallArg { idx: 0, .. })
+        ) && matches!(node_place(segment, edge.to), Some(Place::CallRet { .. }))
+            && edge.meta.precision == Precision::Narrowed
+    }));
+}
+
+#[test]
+fn receiver_only_policy_stitches_syntax_classified_method_receiver_to_result() {
+    let mut f = empty_decl(1, "f");
+    f.params = vec!["client".to_string()];
+    f.flow_events = vec![FlowEvent::Call {
+        span: span(20, 40),
+        name: "client.capacity".to_string(),
+        receiver: Some("client".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: Vec::new(),
+    }];
+    let options = TransferOptions {
+        include_unresolved_receiver_result_passthrough: true,
+        ..TransferOptions::default()
+    };
+    let out_f = transfer_function_for_with_options(&f, &options);
+    assert_eq!(out_f.call_sites[0].explicit_args_count, 0);
+    assert!(
+        !out_f.call_sites[0].call_arg_nodes.is_empty(),
+        "the adapter-shaped zero-arg method should still expose its synthetic carrier"
+    );
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    let ws = stitch_idg(vec![out_f], &MockResolver::new(), &StaticF2S(f2s_map));
+    let segment = ws
+        .segment_for_func(FuncId::new(1))
+        .and_then(|id| ws.segment(id))
+        .expect("segment");
+    assert!(segment.edges.iter().any(|edge| {
+        matches!(
+            node_place(segment, edge.from),
+            Some(Place::CallArg { idx: u8::MAX, .. })
+        ) && matches!(node_place(segment, edge.to), Some(Place::CallRet { .. }))
+    }));
+}
+
+#[test]
+fn syntax_classified_constructor_stitches_args_to_result_without_compatibility_mode() {
+    let mut f = empty_decl(1, "f");
+    f.params = vec!["input".to_string()];
+    f.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 40),
+            target: "boxed".to_string(),
+            source_name: None,
+            source_call: Some("ExternalBox".to_string()),
+            source_call_args: vec!["input".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::CallResult),
+        },
+        FlowEvent::Call {
+            span: span(24, 36),
+            name: "ExternalBox".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(31, 35),
+                name: None,
+                value_text: "input".to_string(),
+                place: Some("input".to_string()),
+                source_names: vec!["input".to_string()],
+            }],
+        },
+    ];
+    let out_f = transfer_function_for(&f);
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    let ws = stitch_idg(vec![out_f], &MockResolver::new(), &StaticF2S(f2s_map));
+    let segment = ws
+        .segment_for_func(FuncId::new(1))
+        .and_then(|id| ws.segment(id))
+        .expect("segment");
+    assert!(segment.edges.iter().any(|edge| {
+        matches!(
+            node_place(segment, edge.from),
+            Some(Place::CallArg { idx: 0, .. })
+        ) && matches!(node_place(segment, edge.to), Some(Place::CallRet { .. }))
+    }));
+}
+
+#[test]
 fn virtual_dispatch_emits_one_edge_per_candidate() {
     // f calls "method"; resolver returns two candidates (g, h).
     let mut f = empty_decl(1, "f");
@@ -299,6 +543,7 @@ fn method_receiver_param_stitches_without_shifting_explicit_args() {
         receiver_types: vec!["Repository".to_string()],
         call_kind: CallKind::Method,
         args: vec![CallArg {
+            passing_mode: Default::default(),
             span: span(31, 38),
             name: None,
             value_text: "payload".to_string(),
@@ -364,6 +609,7 @@ fn named_arg_stitches_to_matching_param_not_position() {
         receiver_types: Vec::new(),
         call_kind: CallKind::Function,
         args: vec![CallArg {
+            passing_mode: Default::default(),
             span: span(27, 40),
             name: Some("name".to_string()),
             value_text: "payload".to_string(),
@@ -435,6 +681,7 @@ fn field_argument_forwarding_preserves_matching_field_path() {
             receiver_types: Vec::new(),
             call_kind: CallKind::Function,
             args: vec![CallArg {
+                passing_mode: Default::default(),
                 span: span(37, 40),
                 name: None,
                 value_text: "box".to_string(),
@@ -506,6 +753,273 @@ fn field_argument_forwarding_worklist_deduplicates_pending_writes() {
 
     assert_eq!(pending.len(), 1);
     assert_eq!(enqueued.len(), 1);
+}
+
+#[test]
+fn mutable_out_parameter_write_flows_back_to_post_call_consumers() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["src".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(12, 18),
+            target: "out".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(30, 42),
+            name: "helper".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![
+                CallArg {
+                    passing_mode: Default::default(),
+                    span: span(37, 38),
+                    name: None,
+                    value_text: "src".to_string(),
+                    place: Some("src".to_string()),
+                    source_names: Vec::new(),
+                },
+                CallArg {
+                    passing_mode: bonsai_lang_api::ArgumentPassingMode::WriteBack,
+                    span: span(39, 41),
+                    name: None,
+                    value_text: "&mut out".to_string(),
+                    place: Some("out".to_string()),
+                    source_names: Vec::new(),
+                },
+            ],
+        },
+        FlowEvent::Call {
+            span: span(50, 60),
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(55, 58),
+                name: None,
+                value_text: "out".to_string(),
+                place: Some("out".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+
+    let mut helper = empty_decl(2, "helper");
+    helper.params = vec!["p".to_string(), "out".to_string()];
+    helper.flow_events = vec![FlowEvent::Assign {
+        span: span(70, 78),
+        target: "out".to_string(),
+        source_name: Some("p".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    }];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(1));
+    let f2s = StaticF2S(f2s_map);
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
+
+    let ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&helper)],
+        &resolver,
+        &f2s,
+    );
+    let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
+    let callee_segment = ws.segment(SegmentId(1)).expect("callee segment");
+    let write_back = ws.cross_file().edges.iter().find(|edge| {
+        edge.edge.meta.kind == IdgEdgeKind::InterReturn
+            && write_place_storage_and_span(
+                callee_segment,
+                node_place(callee_segment, edge.edge.from).expect("callee write place"),
+            )
+            .is_some_and(|(name, write_span)| name == "out" && write_span == span(70, 78))
+            && write_place_storage_and_span(
+                caller_segment,
+                node_place(caller_segment, edge.edge.to).expect("caller write place"),
+            )
+            .is_some_and(|(name, write_span)| name == "out" && write_span == span(30, 42))
+    });
+    let write_back = write_back.expect("callee out write should stitch to caller out write");
+    let reaches_sink = caller_segment.edges.iter().any(|edge| {
+        edge.from == write_back.edge.to
+            && matches!(
+                node_place(caller_segment, edge.to),
+                Some(Place::CallArg { site, idx: 0 }) if site.0 == span(50, 60)
+            )
+    });
+    assert!(reaches_sink, "write-back must reach the post-call sink consumer");
+}
+
+#[test]
+fn mutable_out_parameter_write_does_not_bypass_later_clean_overwrite() {
+    let mut caller = empty_decl(1, "caller");
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(12, 18),
+            target: "out".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(30, 42),
+            name: "helper".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: bonsai_lang_api::ArgumentPassingMode::WriteBack,
+                span: span(37, 41),
+                name: None,
+                value_text: "&mut out".to_string(),
+                place: Some("out".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+        FlowEvent::Assign {
+            span: span(44, 48),
+            target: "out".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(50, 60),
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                passing_mode: Default::default(),
+                span: span(55, 58),
+                name: None,
+                value_text: "out".to_string(),
+                place: Some("out".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    let ws = stitch_idg(
+        vec![transfer_function_for(&caller)],
+        &MockResolver::new(),
+        &StaticF2S(f2s_map),
+    );
+    let consumers = scalar_post_call_consumer_edges(&ws, SegmentId(0), FuncId::new(1), "out", span(30, 42));
+    assert!(
+        consumers.is_empty(),
+        "a later clean overwrite must kill write-back before the sink: {consumers:?}"
+    );
+}
+
+#[test]
+fn lexical_capture_stitch_is_name_preserving_and_local_binding_scoped() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["args".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(20, 40),
+            target: "closure".to_string(),
+            source_name: Some("args".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+        },
+        FlowEvent::Call {
+            span: span(50, 60),
+            name: "closure".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: Vec::new(),
+        },
+    ];
+    let mut closure = empty_decl(2, "closure");
+    closure.flow_events = vec![FlowEvent::Call {
+        span: span(70, 82),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(75, 79),
+            name: None,
+            value_text: "args".to_string(),
+            place: Some("args".to_string()),
+            source_names: vec!["args".to_string()],
+        }],
+    }];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(1));
+    let f2s = StaticF2S(f2s_map);
+    let mut local_resolver = MockResolver::new();
+    local_resolver.add(FuncId::new(1), "closure", vec![FuncId::new(2)]);
+    local_resolver.add_local_binding(FuncId::new(1), FuncId::new(2));
+    let local_ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&closure)],
+        &local_resolver,
+        &f2s,
+    );
+
+    let has_capture_edge = |ws: &IdgWorkspace| {
+        let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
+        let closure_segment = ws.segment(SegmentId(1)).expect("closure segment");
+        ws.cross_file().edges.iter().any(|edge| {
+            edge.edge.meta.kind == IdgEdgeKind::InterCallArg
+                && write_place_storage_and_span(
+                    caller_segment,
+                    node_place(caller_segment, edge.edge.from).expect("capture source place"),
+                )
+                .is_some_and(|(name, _)| name == "args")
+                && matches!(
+                    node_place(closure_segment, edge.edge.to),
+                    Some(place @ Place::Read { .. })
+                        if place_storage_name(closure_segment, place).as_deref() == Some("args")
+                )
+        })
+    };
+    assert!(
+        has_capture_edge(&local_ws),
+        "resolver-proven local callable must receive its matching captured writer"
+    );
+
+    let mut ordinary_resolver = MockResolver::new();
+    ordinary_resolver.add(FuncId::new(1), "closure", vec![FuncId::new(2)]);
+    let ordinary_ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&closure)],
+        &ordinary_resolver,
+        &f2s,
+    );
+    assert!(
+        !has_capture_edge(&ordinary_ws),
+        "ordinary functions must not capture same-named caller locals"
+    );
 }
 
 #[test]
@@ -584,6 +1098,7 @@ fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_input
             receiver_types: Vec::new(),
             call_kind: CallKind::Function,
             args: vec![CallArg {
+                passing_mode: Default::default(),
                 span: span(87, 90),
                 name: None,
                 value_text: "box".to_string(),
@@ -613,6 +1128,7 @@ fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_input
             receiver_types: Vec::new(),
             call_kind: CallKind::Function,
             args: vec![CallArg {
+                passing_mode: Default::default(),
                 span: span(27, 30),
                 name: None,
                 value_text: "arg".to_string(),

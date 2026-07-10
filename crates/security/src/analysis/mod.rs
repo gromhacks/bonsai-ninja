@@ -30,9 +30,10 @@ use bonsai_common::{FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AssignValueKind, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{
-    apply_configured_transfer_fixpoint, CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph,
-    InterTaintCaches, InterTaintConfig, OutputArgFlow, ReceiverStatePropagation, SourceCallbackArgs,
-    SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet, ValueFlowGraph,
+    apply_configured_transfer_fixpoint, compose_idg_seed_nodes, CallResultPassthrough, CleanOutputOverwrite,
+    EntryTaintGraph, IdgSeedRequest, InterTaintCaches, InterTaintConfig, OutputArgFlow,
+    ReceiverStatePropagation, SourceCallbackArgs, SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
+    ValueFlowGraph,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -1582,13 +1583,13 @@ where
                             }
                         }
                         // A panicking worker must surface, not silently yield zero
-                    // findings: `unwrap_or_default()` would turn a crashed scan
-                    // into a clean "nothing found" result. Re-raise the payload
-                    // on the scope thread so the failure is visible.
-                    groups = Some(match worker.join() {
-                        Ok(result) => result,
-                        Err(payload) => std::panic::resume_unwind(payload),
-                    });
+                        // findings: `unwrap_or_default()` would turn a crashed scan
+                        // into a clean "nothing found" result. Re-raise the payload
+                        // on the scope thread so the failure is visible.
+                        groups = Some(match worker.join() {
+                            Ok(result) => result,
+                            Err(payload) => std::panic::resume_unwind(payload),
+                        });
                         while completed < total_source_path_ticks {
                             on_progress(AnalysisProgress::PhaseTicked);
                             completed += 1;
@@ -4933,8 +4934,7 @@ where
     if let Some(resident_cap) = taint_graph_resident_cache_entries {
         workspace_taint_index.set_resident_capacity(resident_cap);
     }
-    let taint_graph_fingerprint =
-        taint_cache::config_fingerprint(pack, "taint-analysis", max_precision);
+    let taint_graph_fingerprint = taint_cache::config_fingerprint(pack, "taint-analysis", max_precision);
     let cache_report = taint_cache::prepare_workspace_cache(ws, "taint-analysis", taint_graph_fingerprint);
     let cache_persist_started = cache_report.persist_started;
     on_progress(AnalysisProgress::Note {
@@ -6543,8 +6543,11 @@ fn source_index_sink_corridor(
     } else {
         Some(src.span)
     };
-    let mut seed_nodes =
-        effective_source_seed_nodes(*source_func, seeds, anchor, &output_arg_names, global, idg);
+    let mut seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(*source_func, seeds, anchor, &output_arg_names),
+        global,
+        idg,
+    );
     if seed_nodes.is_empty() {
         return None;
     }
@@ -6805,7 +6808,11 @@ fn effective_source_seed_key(
     global: &GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) -> Vec<String> {
-    let seed_nodes = effective_source_seed_nodes(source_func, seeds, anchor, output_arg_names, global, idg);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(source_func, seeds, anchor, output_arg_names),
+        global,
+        idg,
+    );
     if !seed_nodes.is_empty() {
         let node_ids = seed_nodes
             .iter()
@@ -6815,90 +6822,6 @@ fn effective_source_seed_key(
         return vec![format!("__idg_seed_nodes@{node_ids}")];
     }
     sorted_seed_key_with_anchor(seeds, anchor, output_arg_names)
-}
-
-fn effective_source_seed_nodes(
-    source_func: FuncId,
-    seeds: &TokenSet,
-    anchor: Option<bonsai_common::Span>,
-    output_arg_names: &[String],
-    global: &GlobalIndex,
-    idg: &bonsai_idg::IdgQueryService,
-) -> Vec<bonsai_idg::WsNodeId> {
-    let mut seed_nodes = Vec::new();
-    // A source rule whose seed names a bare container (`args`, `env`)
-    // taints every projection of that container: expand each bare name
-    // with its descendant wildcard so `read_or_write_nodes_for_names`
-    // also returns field-precise reads like `args.q`. Projected seeds
-    // (`x.y`) stay as-is — a tainted field must never promote its
-    // container or siblings.
-    let seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(seeds.iter());
-    if anchor.is_none() {
-        if seed_names.is_empty() {
-            seed_nodes.extend(idg.param_nodes_of(source_func));
-        } else {
-            seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
-        }
-        seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
-        seed_nodes.sort();
-        seed_nodes.dedup();
-        return seed_nodes;
-    }
-    let span = anchor.expect("checked above");
-    if !output_arg_names.is_empty() {
-        for arg_name in output_arg_names {
-            if arg_name.is_empty() {
-                continue;
-            }
-            seed_nodes.extend(idg.nodes_for_name_after_span(source_func, arg_name, span));
-            seed_nodes.extend(output_arg_read_seed_nodes(
-                source_func,
-                std::slice::from_ref(arg_name),
-                idg,
-            ));
-        }
-    }
-    if seed_nodes.is_empty() {
-        let anchor_nodes = idg.source_seed_nodes_at_span(source_func, span);
-        let anchor_has_call_return = anchor_nodes.iter().any(|node| {
-            idg.resolve_point(*node)
-                .is_some_and(|point| point.kind == bonsai_idg::PointKind::CallRet)
-        });
-        if anchor_has_call_return {
-            seed_nodes = anchor_nodes;
-        } else {
-            seed_nodes = idg.read_or_write_nodes_for_names(source_func, &seed_names);
-            // A read-kind source whose matched name is a parameter of
-            // the enclosing function taints from the parameter binding.
-            // The IDG routes consumers from the param / last-writer
-            // node (shared `Read` places are span-less introspection
-            // anchors with no forward edges of their own), so the param
-            // node is what connects a bare seed like `args` to its
-            // projected consumers (`args["q"]` → sink-call argument).
-            seed_nodes.extend(idg.param_nodes_for_names(source_func, &seed_names, global));
-            if seed_nodes.is_empty() {
-                seed_nodes = anchor_nodes;
-            }
-        }
-    }
-    seed_nodes.sort();
-    seed_nodes.dedup();
-    seed_nodes
-}
-
-fn output_arg_read_seed_nodes(
-    func: FuncId,
-    output_arg_names: &[String],
-    idg: &bonsai_idg::IdgQueryService,
-) -> Vec<bonsai_idg::WsNodeId> {
-    let output_seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(output_arg_names.iter());
-    idg.read_or_write_nodes_for_names(func, &output_seed_names)
-        .into_iter()
-        .filter(|node| {
-            idg.resolve_point(*node)
-                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Read)
-        })
-        .collect()
 }
 
 fn sorted_seed_key_with_anchor(
@@ -8773,6 +8696,12 @@ fn idg_transfer_options_from_rulepack_shapes(
         include_diagnostic_field_flows: false,
         include_receiver_method_propagation: false,
         include_field_argument_forwarding: true,
+        // When no workspace body resolves, the AST arguments/receiver are
+        // the only available dependency evidence for the result. Preserve
+        // them at narrowed precision, independent of API names; resolved
+        // callees still use their exact parameter/return graph instead.
+        include_unresolved_call_result_passthrough: true,
+        include_unresolved_receiver_result_passthrough: false,
     }
 }
 
@@ -9337,6 +9266,7 @@ mod source_seed_tests {
                 receiver_types: Vec::new(),
                 call_kind: bonsai_lang_api::CallKind::Function,
                 args: vec![bonsai_lang_api::CallArg {
+                    passing_mode: Default::default(),
                     span: Span::new(file, 27, 30),
                     name: None,
                     value_text: "\"token\"".to_string(),
@@ -9406,7 +9336,11 @@ mod source_seed_tests {
         let global = bonsai_index::GlobalIndex::new();
         let seeds = TokenSet::from_iter(["request.args.get".to_string()]);
 
-        let nodes = effective_source_seed_nodes(func, &seeds, Some(anchor), &[], &global, &service);
+        let nodes = compose_idg_seed_nodes(
+            IdgSeedRequest::rule_match(func, &seeds, Some(anchor), &[]),
+            &global,
+            &service,
+        );
         let ret_ws = service.call_ret_node_at_site(func, anchor).expect("ret node");
         let same_name_nodes = service.read_or_write_nodes_for_names(func, &["request.args.get".to_string()]);
 

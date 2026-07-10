@@ -727,6 +727,7 @@ fn write_args_from_source_text(source_text: Option<&str>, span: Span) -> Vec<Cal
         })
         .map(|value_text| {
             vec![CallArg {
+                passing_mode: Default::default(),
                 span,
                 name: None,
                 place: None,
@@ -5512,6 +5513,7 @@ fn arg_regex_texts(
     }
     let nested = arg_regex_texts(
         &CallArg {
+            passing_mode: arg.passing_mode,
             span: arg.span,
             name: arg.name.clone(),
             place: arg.place.clone(),
@@ -5588,6 +5590,7 @@ fn scan_writes_batch(
                 .and_then(|text| text.get(span.start as usize..span.end as usize))
                 .map(|value_text| {
                     vec![CallArg {
+                        passing_mode: Default::default(),
                         span,
                         name: None,
                         place: None,
@@ -5681,6 +5684,7 @@ fn scan_ref_writes_batch(
             .and_then(|text| text.get(r.span.start as usize..r.span.end as usize))
             .map(|value_text: &str| {
                 vec![CallArg {
+                    passing_mode: Default::default(),
                     span: r.span,
                     name: None,
                     place: None,
@@ -6270,6 +6274,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                     args: source_call_args
                         .iter()
                         .map(|value_text| CallArg {
+                            passing_mode: Default::default(),
                             span: *span,
                             name: None,
                             value_text: value_text.clone(),
@@ -6376,6 +6381,7 @@ fn receiver_call_with_args(receiver: &str, span: Span) -> Option<(String, Vec<Ca
         let args = split_balanced_args(&receiver[open + 1..close])
             .into_iter()
             .map(|value_text| CallArg {
+                passing_mode: Default::default(),
                 span,
                 name: None,
                 value_text,
@@ -7673,7 +7679,7 @@ fn collect_called_symbols_for_files(ws: &Workspace, files: &[FileId]) -> ahash::
     let started = infer_debug.then(Instant::now);
     let call_graph = bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens_for_files(
         global.as_ref(),
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
         |file| {
             bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
                 .into_iter()

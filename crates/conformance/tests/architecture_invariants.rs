@@ -1123,32 +1123,21 @@ fn cli_read_file_and_tree_use_sdk_rulepack_attachment() {
 }
 
 #[test]
-fn interprocedural_taint_uses_db_cached_cfgs() {
-    // docs/contributing/review-checklist.mdx BL-2: the interprocedural taint pass revisits the
-    // same function for different seeds, so it must use
-    // AnalyzerDb::cfg instead of rebuilding CFGs from FlowEvents on
-    // every work item.
+fn interprocedural_taint_uses_db_cached_idg_services() {
+    // docs/contributing/review-checklist.mdx BL-2: interprocedural taint must
+    // reuse the database-owned semantic graph instead of rebuilding CFGs from
+    // FlowEvents for each query.
     let root = repo_root();
-    let inter_rs = root
-        .join("crates")
-        .join("taint")
-        .join("src")
-        .join("inter")
-        .join("mod.rs");
+    let inter_rs = root.join("crates/taint/src/inter.rs");
     let text = read(&inter_rs);
-    let scan_end = text.find("#[cfg(test)]").unwrap_or(text.len());
-    let live_text = &text[..scan_end];
-    let mut violations = Vec::new();
-    for (lineno, line) in live_text.lines().enumerate() {
-        let live = line.split("//").next().unwrap_or("").trim();
-        if live.contains("build_cfg_from_flow") {
-            violations.push(format!("taint/src/inter.rs:{}: {live}", lineno + 1));
-        }
-    }
+    let idg_build = read(&root.join("crates/taint/src/idg_build.rs"));
     assert!(
-        violations.is_empty(),
-        "interprocedural taint must use AnalyzerDb::cfg instead of rebuilding CFGs:\n  {}",
-        violations.join("\n  ")
+        text.contains("idg_service_for_inter_config(db, config)")
+            && idg_build.contains("transfer_options.semantic_fingerprint()")
+            && idg_build.contains("db.idg_service_for_semantics(fingerprint)")
+            && idg_build.contains("db.set_idg_service_for_semantics(fingerprint, built)")
+            && !text.contains("build_cfg_from_flow"),
+        "interprocedural taint must query a semantics-keyed database IDG cache instead of rebuilding CFGs"
     );
 }
 
@@ -1510,7 +1499,7 @@ fn flow_surfaces_do_not_reintroduce_loose_resolution_or_fabricated_paths() {
             ][..],
         ),
         (
-            "crates/taint/src/inter/mod.rs",
+            "crates/taint/src/inter.rs",
             &["candidates.first().map(|c| c.func)"][..],
         ),
         (
@@ -1600,27 +1589,16 @@ fn class_constructor_lookup_preserves_ambiguity() {
 #[test]
 fn tainted_args_index_is_call_site_position() {
     let root = repo_root();
-    let inter = root
-        .join("crates")
-        .join("taint")
-        .join("src")
-        .join("inter")
-        .join("mod.rs");
-    let text = read(&inter);
-    // The fix lives at `TaintedArg { index: *arg_index, ... }`.
-    // Catching the regression by string-match is sufficient: the
-    // pre-fix shape was `index: param_index`. If a future refactor
-    // re-introduces that exact line we want to fail before behavior
-    // changes.
+    let text = read(&root.join("crates/taint/src/reachable.rs"));
+    let body = function_body(&text, "tainted_args_for_cross_call_edge");
+    let call_site_branch = body
+        .split_once("`TaintedArg.index` is the call-site argument slot")
+        .map(|(_, branch)| branch)
+        .expect("the IDG conversion must document the call-site argument-slot contract");
     assert!(
-        !text.contains("TaintedArg {\n                index: param_index"),
-        "TaintedArg.index regressed to callee param index — see docs/contributing/review-checklist.mdx::§4 T-5. \
-         The field's docstring and contract require call-site arg index."
-    );
-    assert!(
-        text.contains("// `TaintedArg.index` is the call-site argument slot"),
-        "the regression-prevention comment in inter.rs::propagate_call_event must \
-         remain — it documents the contract and references the drift guard."
+        call_site_branch.contains("index: edge.arg_idx as usize")
+            && !call_site_branch.contains("index: edge.param_idx as usize"),
+        "TaintedArg.index must use the IDG call-site arg index, not the callee param index"
     );
 }
 
@@ -2076,7 +2054,7 @@ fn method_dispatch_does_not_use_span_containment_as_parent_fallback() {
     for rel in [
         "crates/callgraph/src/lib.rs",
         "crates/workspace/src/cross_module.rs",
-        "crates/taint/src/inter/mod.rs",
+        "crates/taint/src/inter.rs",
         "crates/security/src/matcher/mod.rs",
         "crates/browse/src/classes.rs",
         "crates/browse/src/native_export.rs",
@@ -2154,7 +2132,7 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
 
     let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
     let browse_taint = read(&root.join("crates/browse/src/taint.rs"));
-    let taint_inter = read(&root.join("crates/taint/src/inter/mod.rs"));
+    let taint_inter = read(&root.join("crates/taint/src/inter.rs"));
     let taint_value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
     let workspace_trace = read(&root.join("crates/workspace/src/cross_module.rs"));
     let trace_schema = read(&root.join("crates/trace/src/lib.rs"));
@@ -2666,6 +2644,7 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     let value_flow = read(&root.join("crates/workspace/src/value_flow.rs"));
     let flow_ids = read(&root.join("crates/workspace/src/flow_ids.rs"));
     let taint_index = read(&root.join("crates/workspace/src/taint_index.rs"));
+    let workspace_build = read(&root.join("crates/workspace/build.rs"));
     let callgraph_sidecar = read(&root.join("crates/workspace/src/callgraph_sidecar.rs"));
     let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
     let taint_cache = read(&root.join("crates/security/src/analysis/taint_cache.rs"));
@@ -2699,8 +2678,17 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
         taint_graph_body.contains("MATCHER_POLICY_FINGERPRINT")
             && taint_graph_body.contains("workspace_content_fingerprint(db)")
             && taint_graph_body.contains("dependency_metadata_fingerprint_for_sidecar(sidecar_path)")
+            && taint_graph_body.contains("idg_stitching_semantic_fingerprint()")
             && taint_graph_body.contains("config_fingerprint"),
-        "taint graph sidecar must bind matcher policy, source content, dependency metadata, and rule/config fingerprint"
+        "taint graph sidecar must bind matcher policy, IDG semantics, source content, dependency metadata, and rule/config fingerprint"
+    );
+    let dirty_hash_body = function_body(&workspace_build, "dirty_content_hash");
+    assert!(
+        dirty_hash_body.contains("diff")
+            && dirty_hash_body.contains("--binary")
+            && dirty_hash_body.contains("ls-files")
+            && dirty_hash_body.contains("std::fs::read"),
+        "workspace build fingerprint must hash tracked diffs and untracked contents, not only dirty file names"
     );
     assert!(
         security_analysis.contains("mod taint_cache;")

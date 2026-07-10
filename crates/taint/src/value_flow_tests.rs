@@ -44,6 +44,7 @@ fn call(start: u64, name: &str, arg: &str) -> FlowEvent {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(FileId::new(0), start, start + 1),
             name: None,
             value_text: arg.to_string(),

@@ -2,10 +2,9 @@
 //! API knowledge" contract.
 //!
 //! Every fact table that controls library/framework-shaped behavior in
-//! the interprocedural taint engine lives on `InterTaintConfig` and is
-//! empty by default. This file fails compilation if a new field is
-//! added without an empty-by-default test, and fails at test time if
-//! any default field is non-empty.
+//! the IDG compatibility surface lives on `InterTaintConfig` and is
+//! empty by default. The graph engine consumes AST/resolver facts; only
+//! explicit rule/config data may add external API transfer semantics.
 //!
 //! Why a test instead of a doc comment: a future contributor adding
 //! `pub default_callback_invocation_methods: AHashSet<String>` with a
@@ -32,8 +31,20 @@ fn default_config_carries_zero_embedded_library_knowledge() {
         "default clean_output_overwrites must be empty; rulepack `taint_semantics.clean_output_overwrite` populates this list",
     );
     assert!(
+        config.source_output_args.is_empty(),
+        "default source_output_args must be empty; rulepack source semantics populate this list",
+    );
+    assert!(
+        config.source_callback_args.is_empty(),
+        "default source_callback_args must be empty; rulepack source semantics populate this list",
+    );
+    assert!(
+        config.call_result_passthroughs.is_empty(),
+        "default call_result_passthroughs must be empty; rulepack transfer semantics populate this list",
+    );
+    assert!(
         config.callback_invocation_methods.is_empty(),
-        "default callback_invocation_methods must be empty; adapters / rulepack supply method tails",
+        "default callback_invocation_methods must be empty; the compatibility-only inventory must not influence IDG resolution",
     );
     assert!(
         config.receiver_state_propagations.is_empty(),
@@ -46,10 +57,11 @@ fn default_config_carries_zero_embedded_library_knowledge() {
 }
 
 #[test]
-fn default_config_uses_explicit_budget_not_unbounded() {
+fn compatibility_scheduling_defaults_remain_source_compatible() {
     let config = InterTaintConfig::default();
     assert!(
         config.budget > 0,
-        "budget must be a positive default — unbounded propagation breaks the engine's safety contract",
+        "the retained compatibility field must preserve its historical positive default",
     );
+    assert_eq!(config.intra_worklist_cap, None);
 }

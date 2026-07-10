@@ -1,23 +1,21 @@
 //! Per-function return-taint summary types and the public
 //! [`function_summary`] accessor.
 //!
-//! The implementation of `compute_function_summary` and its helpers
-//! (~900 lines of cross-event analysis) lives in `inter/mod.rs`
-//! alongside the rest of the engine because it depends on several
-//! private helpers (`assign_chain_taints`, `insert_value_target_taint`,
-//! `insert_descendant_target_taint`, `arg_text_is_tainted`). The
-//! types themselves are stable and ergonomic to live next to their
-//! documentation.
-//!
-//! Why a separate file: contributors looking for "what is the
-//! function summary returning?" should be able to find the field
-//! definitions without scrolling past 4500 lines of propagation
-//! logic. The implementation is one function-call away (`super::`).
+//! Summaries are derived from the same IDG used by every taint query:
+//! a parameter transits to the return exactly when its node is in the
+//! return node's semantic backward closure.
 
 use bonsai_common::{FuncId, SymbolId};
 use bonsai_db::AnalyzerDb;
 
 /// Per-function return-taint summary.
+///
+/// `returns_taint_of` is derived from the canonical IDG. The remaining fields
+/// are retained for source compatibility with callers that deserialize or
+/// inspect the former worklist summary; the IDG represents those field,
+/// tuple, yield, side-effect, exception, and capture relationships directly
+/// as graph edges, so public taint queries do not consume parallel summary
+/// state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FunctionSummary {
     /// Parameter indices that transit to the function's return value.
@@ -122,9 +120,24 @@ pub struct ParamSideEffect {
 #[must_use]
 pub fn function_summary(db: &AnalyzerDb, func: FuncId) -> FunctionSummary {
     let global = db.global_index();
-    // Missing decl → conservative default (no transit, no side effects).
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return FunctionSummary::default();
     };
-    super::compute_function_summary(decl)
+    let idg = crate::idg_build::ensure_idg_service(db);
+    let Some(return_node) = idg.return_node_of(func) else {
+        return FunctionSummary::default();
+    };
+    let backward: ahash::AHashSet<bonsai_idg::WsNodeId> =
+        idg.backward_closure(&[return_node]).into_iter().collect();
+    let returns_taint_of = idg
+        .param_nodes_of(func)
+        .into_iter()
+        .take(decl.params.len())
+        .enumerate()
+        .filter_map(|(index, param)| backward.contains(&param).then_some(index))
+        .collect();
+    FunctionSummary {
+        returns_taint_of,
+        ..FunctionSummary::default()
+    }
 }

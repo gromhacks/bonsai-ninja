@@ -576,6 +576,7 @@ fn graphql_dispatch_call_events(dispatch: &TsGraphqlResolverDispatch) -> Vec<Flo
             name: resolver.name.clone(),
             call_kind: CallKind::Function,
             args: vec![CallArg {
+                passing_mode: Default::default(),
                 span: dispatch.arg_span,
                 name: None,
                 place: Some(arg_text.clone()),

@@ -5,9 +5,9 @@ use bonsai_lang_api::{
     kit::{
         collect_kinds, foreach_binding_assigns_from_text, language_from_pack, node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModulePath, Ref, RefKind, TypeAliasBinding,
+    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModulePath, Ref, RefKind, TypeAliasBinding,
 };
 use tree_sitter::{Language, Tree};
 
@@ -154,6 +154,7 @@ impl LanguageAdapter for PerlAdapter {
         for decl in &mut idx.defs {
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source);
+            expand_perl_anonymous_hash_field_assigns(&mut decl.flow_events, &source);
             normalize_perl_simple_scalar_renames(&mut decl.flow_events, &source);
             augment_perl_collection_flow_events(&mut decl.flow_events, &source);
             inject_perl_coderef_aliases(&mut decl.flow_events, &source);
@@ -205,6 +206,9 @@ impl LanguageAdapter for PerlAdapter {
         }
         for decl in &mut idx.defs {
             mark_perl_method_receiver_param(decl);
+            if decl.receiver_param_index.is_some() && matches!(decl.kind, DeclKind::Function) {
+                decl.kind = DeclKind::Method;
+            }
             enrich_perl_bless_receiver_field_writes(decl, &source);
             let mut aliases = collect_perl_bless_type_aliases(&decl.flow_events);
             dedup_perl_type_aliases(&mut aliases);
@@ -382,6 +386,102 @@ fn perl_hash_key_name(raw: &str) -> String {
     raw.trim()
         .trim_matches(|ch| matches!(ch, '\'' | '"' | '$' | '{' | '}' | ' '))
         .to_string()
+}
+
+fn expand_perl_anonymous_hash_field_assigns(events: &mut Vec<FlowEvent>, source: &str) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                expand_perl_anonymous_hash_field_assigns(then_events, source);
+                expand_perl_anonymous_hash_field_assigns(else_events, source);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                expand_perl_anonymous_hash_field_assigns(body, source);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                expand_perl_anonymous_hash_field_assigns(body, source);
+                expand_perl_anonymous_hash_field_assigns(catch_events, source);
+                expand_perl_anonymous_hash_field_assigns(finally_events, source);
+            }
+            _ => {}
+        }
+
+        let fields = perl_anonymous_hash_fields_for_event(&events[index], source);
+        if fields.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = fields.len();
+        events.splice((index + 1)..=index, fields);
+        index += inserted + 1;
+    }
+}
+
+fn perl_anonymous_hash_fields_for_event(event: &FlowEvent, source: &str) -> Vec<FlowEvent> {
+    let FlowEvent::Assign { span, target, .. } = event else {
+        return Vec::new();
+    };
+    let target = target.trim();
+    if target.is_empty() || target.contains(['.', '{', '[']) {
+        return Vec::new();
+    }
+    let Some(rhs) = assignment_rhs_text(source, *span) else {
+        return Vec::new();
+    };
+    let rhs = rhs.trim();
+    let Some(body) = rhs.strip_prefix('{').and_then(|body| body.strip_suffix('}')) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for field_init in split_perl_top_level(body, ',') {
+        let Some((key, value)) = field_init.split_once("=>") else {
+            continue;
+        };
+        let key = perl_hash_key_name(key);
+        if key.is_empty() || !key.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let mut sources = Vec::new();
+        for name in perl_anonymous_hash_value_identifiers(value) {
+            push_unique_string(&mut sources, name.clone());
+            push_unique_string(&mut sources, name.trim_start_matches(['$', '@', '%']).to_string());
+        }
+        out.push(FlowEvent::Assign {
+            span: *span,
+            target: format!("{target}.{key}"),
+            source_name: (sources.len() == 1).then(|| sources[0].clone()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: sources.clone(),
+            declares_new_binding: false,
+            value_kind: Some(if sources.is_empty() {
+                AssignValueKind::Literal
+            } else {
+                AssignValueKind::Compound
+            }),
+        });
+    }
+    out
+}
+
+fn perl_anonymous_hash_value_identifiers(value: &str) -> Vec<String> {
+    let value = value.trim();
+    let interpolated_body = value
+        .strip_prefix('"')
+        .and_then(|body| body.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('`').and_then(|body| body.strip_suffix('`')));
+    perl_sigiled_identifiers(interpolated_body.unwrap_or(value), ['$', '@', '%'])
 }
 
 fn perl_param_matches_value(param: &str, value: &str) -> bool {
@@ -1145,7 +1245,14 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                     // `place` should stay in sync.
                     if let Some(access) = perl_hash_deref_access(&arg.value_text) {
                         arg.value_text.clone_from(&access);
-                        arg.place = Some(access);
+                        arg.place = Some(access.clone());
+                        let structural_base = access
+                            .split_once('.')
+                            .map(|(base, _)| base.trim_start_matches(['$', '@', '%']))
+                            .unwrap_or_default();
+                        arg.source_names
+                            .retain(|name| name.trim_start_matches(['$', '@', '%']) != structural_base);
+                        push_unique_string(&mut arg.source_names, access);
                     }
                 }
             }
@@ -1233,8 +1340,16 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
 
         // Final pass: also surface every sigil'd identifier in the
         // textual RHS so taint sees both the variable and its bare
-        // form (`$x` and `x`).
+        // form (`$x` and `x`). A hash-deref root is structural here:
+        // `$c->{capacity}` reads only `$c.capacity`, not the whole `$c`.
+        let projected_bases = perl_hash_deref_accesses(&rhs)
+            .into_iter()
+            .filter_map(|access| access.split_once('.').map(|(base, _)| base.to_string()))
+            .collect::<std::collections::HashSet<_>>();
         for name in perl_sigiled_identifiers(&rhs, ['$', '@', '%']) {
+            if projected_bases.contains(&name) {
+                continue;
+            }
             push_unique_string(&mut source_names, name.clone());
             push_unique_string(
                 &mut source_names,
@@ -1762,6 +1877,7 @@ fn combine_perl_fat_comma_call_args(args: &mut Vec<CallArg>, source: &str) {
                 format!("{key} => {}", value.value_text.trim())
             };
             combined.push(CallArg {
+                passing_mode: Default::default(),
                 span: Span::new(args[idx].span.file, args[idx].span.start, value.span.end),
                 name: (!key.is_empty()).then_some(key),
                 value_text,
@@ -2214,6 +2330,7 @@ fn synthesize_qx_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span
                 let text = node_text(&node, src).to_string();
                 if !text.is_empty() {
                     args.push(CallArg {
+                        passing_mode: Default::default(),
                         span: span_of(file, &node),
                         name: None,
                         value_text: text.clone(),
@@ -2298,6 +2415,7 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
             return Vec::new();
         }
         return vec![CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, node),
             name: None,
             value_text,
@@ -2324,6 +2442,7 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
                     .trim()
                     .to_string();
                 args.push(CallArg {
+                    passing_mode: Default::default(),
                     span: Span::new(
                         file,
                         u64::try_from(child.start_byte()).unwrap_or(u64::MAX),
@@ -2341,6 +2460,7 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
         let value_text = node_text(&child, src).trim().to_string();
         if !value_text.is_empty() {
             args.push(CallArg {
+                passing_mode: Default::default(),
                 span: span_of(file, &child),
                 name: None,
                 value_text,
@@ -2403,6 +2523,7 @@ fn synthesize_builtin_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<
                 let value_text = node_text(&node, src).trim().to_string();
                 if !value_text.is_empty() {
                     args.push(CallArg {
+                        passing_mode: Default::default(),
                         span: span_of(file, &node),
                         name: None,
                         value_text,
@@ -2473,6 +2594,7 @@ fn synthesize_builtin_expression_arg_call_events(
                 receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args: vec![CallArg {
+                    passing_mode: Default::default(),
                     span: span_of(file, &arguments),
                     name: None,
                     value_text,
@@ -2504,6 +2626,7 @@ fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> 
                 receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args: vec![CallArg {
+                    passing_mode: Default::default(),
                     span: span_of(file, &content),
                     name: None,
                     value_text,
@@ -2678,6 +2801,7 @@ fn perl_text_args(src: &[u8], start: usize, end: usize, file: FileId) -> Vec<Cal
                 if part_start < part_end {
                     let value_text = String::from_utf8_lossy(&src[part_start..part_end]).to_string();
                     args.push(CallArg {
+                        passing_mode: Default::default(),
                         span: Span::new(
                             file,
                             u64::try_from(part_start).unwrap_or(u64::MAX),

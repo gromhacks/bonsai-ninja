@@ -42,6 +42,7 @@ fn call(name: &str, args: &[&str]) -> FlowEvent {
         args: args
             .iter()
             .map(|text| CallArg {
+                passing_mode: Default::default(),
                 span: span(),
                 name: None,
                 place: None,

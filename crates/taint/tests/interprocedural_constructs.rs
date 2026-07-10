@@ -18,12 +18,10 @@
 //!    chains, etc., so a single end-to-end run exercises every
 //!    construct that adapter supports.
 
-use bonsai_common::SymbolId;
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
-    assign_chain_taints, call_site_receives_taint, interprocedural_taint, intraprocedural_taint,
-    InterTaintConfig, ReceiverStatePropagation, TaintConfig, TokenSet,
+    call_site_receives_taint, interprocedural_taint, InterTaintConfig, ReceiverStatePropagation, TokenSet,
 };
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
@@ -926,55 +924,6 @@ def middle(x):
         has_propagation(&result, "middle", "sink", &db),
         "interprocedural propagation must revisit loop bodies until loop-carried taint reaches calls",
     );
-}
-
-#[test]
-fn taint_passes_converge_on_loop_carried_identifiers() {
-    let db = python_ws(
-        r"
-def middle(src):
-    while True:
-        a = b
-        b = src
-",
-    );
-    let middle = func_id(&db, "middle");
-    let global = db.global_index();
-    let decl = global.decl_of(SymbolId::new(middle.raw())).expect("middle decl");
-    let seeds = seed(&["src"]);
-    let assign_chain = assign_chain_taints(&seeds, &decl.flow_events);
-    let cfg = db.cfg(middle);
-    let intra = intraprocedural_taint(
-        &cfg,
-        &TaintConfig {
-            sources: seeds.clone(),
-            sanitizers: TokenSet::default(),
-            worklist_cap: None,
-        },
-    );
-    let inter = interprocedural_taint(middle, &seeds, &InterTaintConfig::default(), &db);
-    let inter_exit = inter
-        .per_function
-        .iter()
-        .find(|(key, _)| key.func == middle && key.seed == vec!["src".to_string()])
-        .and_then(|(_, result)| result.block_out.get(&cfg.exit))
-        .expect("interprocedural per-function exit state");
-    let intra_exit = intra
-        .block_out
-        .get(&cfg.exit)
-        .expect("intraprocedural exit state");
-
-    for name in ["src", "b", "a"] {
-        assert!(assign_chain.contains(name), "assign-chain did not taint {name}");
-        assert!(
-            intra_exit.contains(name),
-            "intraprocedural pass did not taint {name}"
-        );
-        assert!(
-            inter_exit.contains(name),
-            "interprocedural pass did not taint {name}"
-        );
-    }
 }
 
 #[test]
@@ -2088,7 +2037,7 @@ fn objc_mega_flow_handle_reaches_execute_from_fgets_value() {
     let result = interprocedural_taint(handle, &seed, &InterTaintConfig::default(), &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
-        "expected ObjC mega flow to propagate into executeCmd; records={:?}",
+        "expected ObjC mega flow to propagate into executeCmd; records={:?}; calls={:?}",
         result
             .call_records
             .iter()
@@ -2103,7 +2052,8 @@ fn objc_mega_flow_handle_reaches_execute_from_fgets_value() {
                     .clone();
                 Some((caller, callee, record.tainted_args.clone()))
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        result.tainted_calls,
     );
 }
 

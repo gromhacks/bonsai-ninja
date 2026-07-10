@@ -119,7 +119,9 @@ use syntax_errors::{
     syntax_error_spans,
 };
 
-use crate::{AdapterContext, AdapterError, CallArg, CallKind, FlowEvent, ImportScope, LoopKind};
+use crate::{
+    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, ImportScope, LoopKind,
+};
 use bonsai_common::{FileId, Span};
 use bonsai_vfs::FileSnapshot;
 use std::sync::Arc;
@@ -132,6 +134,271 @@ use foreach_header::split_foreach_header;
 /// have no user-visible identifier, such as Lua `...` and C-family
 /// `...` parameters. This is syntax semantics, not a security rule.
 pub const SYNTHETIC_VARARGS_PARAM: &str = "__bonsai_varargs";
+pub const SYNTHETIC_TUPLE_RESULT_PREFIX: &str = "__bonsai_tuple_result_";
+
+/// Lower C/C++ variadic ABI builtins into ordinary assignment facts while
+/// they are still in the language-semantic layer. The IDG then sees only
+/// `varargs -> list` and `list -> extracted value` dataflow and carries no
+/// builtin-name inventory.
+pub fn normalize_c_variadic_builtin_flow(events: &mut Vec<FlowEvent>, has_variadic_param: bool) {
+    let original = std::mem::take(events);
+    for mut event in original {
+        match &mut event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_c_variadic_builtin_flow(then_events, has_variadic_param);
+                normalize_c_variadic_builtin_flow(else_events, has_variadic_param);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_c_variadic_builtin_flow(body, has_variadic_param);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_c_variadic_builtin_flow(body, has_variadic_param);
+                normalize_c_variadic_builtin_flow(catch_events, has_variadic_param);
+                normalize_c_variadic_builtin_flow(finally_events, has_variadic_param);
+            }
+            _ => {}
+        }
+
+        if let FlowEvent::Assign {
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut event
+        {
+            if source_call.as_deref().is_some_and(c_variadic_read_builtin) {
+                let list = source_call_args.first().cloned();
+                source_name.clone_from(&list);
+                *source_call = None;
+                source_call_args.clear();
+                source_names.clear();
+                source_names.extend(list);
+                *value_kind = Some(crate::AssignValueKind::Compound);
+            }
+        }
+
+        if has_variadic_param {
+            if let FlowEvent::Call { span, name, args, .. } = &event {
+                if c_variadic_start_builtin(name) {
+                    if let Some(target) = args.first().and_then(|arg| arg.place.as_deref()) {
+                        if !target.trim().is_empty() {
+                            events.push(FlowEvent::Assign {
+                                span: *span,
+                                target: target.trim().to_string(),
+                                source_name: Some(SYNTHETIC_VARARGS_PARAM.to_string()),
+                                source_call: None,
+                                source_call_args: Vec::new(),
+                                source_names: vec![SYNTHETIC_VARARGS_PARAM.to_string()],
+                                declares_new_binding: false,
+                                value_kind: Some(crate::AssignValueKind::Compound),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        events.push(event);
+    }
+}
+
+fn c_variadic_start_builtin(name: &str) -> bool {
+    matches!(short_name_of(name.trim()), "va_start" | "__builtin_va_start")
+}
+
+fn c_variadic_read_builtin(name: &str) -> bool {
+    matches!(short_name_of(name.trim()), "va_arg" | "__builtin_va_arg")
+}
+
+/// Normalize hierarchy-owned bare member calls to explicit receiver calls.
+///
+/// Java/Kotlin CSTs encode `cmd()` exactly like a free function call even
+/// inside an instance method. Once declarations and `bases` are indexed, the
+/// adapter can prove that a bare name belongs to the caller's class hierarchy.
+/// Rewrite only those proven names to `this.cmd`/`CallKind::Method`, giving
+/// downstream graph construction an explicit receiver operand without a
+/// method/API allowlist.
+pub fn qualify_bare_hierarchy_member_calls(index: &mut DeclIndex) {
+    let mut classes_by_name: ahash::AHashMap<String, Vec<bonsai_common::SymbolId>> = ahash::AHashMap::new();
+    let mut bases_by_class: ahash::AHashMap<bonsai_common::SymbolId, Vec<String>> = ahash::AHashMap::new();
+    let mut methods_by_class: ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> =
+        ahash::AHashMap::new();
+    for decl in &index.defs {
+        if matches!(
+            decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        ) {
+            classes_by_name
+                .entry(decl.name.clone())
+                .or_default()
+                .push(decl.symbol);
+            bases_by_class.insert(decl.symbol, decl.bases.clone());
+        }
+        if matches!(decl.kind, DeclKind::Method) {
+            if let Some(parent) = decl.parent {
+                methods_by_class
+                    .entry(parent)
+                    .or_default()
+                    .insert(decl.name.clone());
+            }
+        }
+    }
+
+    let mut rewrites: ahash::AHashMap<bonsai_common::SymbolId, (String, ahash::AHashSet<String>)> =
+        ahash::AHashMap::new();
+    for decl in &index.defs {
+        let (Some(parent), Some(receiver)) = (decl.parent, decl.implicit_receiver_names.first()) else {
+            continue;
+        };
+        let mut names = ahash::AHashSet::new();
+        let mut seen = ahash::AHashSet::new();
+        let mut pending = vec![parent];
+        while let Some(class_symbol) = pending.pop() {
+            if !seen.insert(class_symbol) {
+                continue;
+            }
+            if let Some(methods) = methods_by_class.get(&class_symbol) {
+                names.extend(methods.iter().cloned());
+            }
+            for base in bases_by_class.get(&class_symbol).into_iter().flatten() {
+                let short = base.rsplit(['.', ':', '\\']).next().unwrap_or(base).trim();
+                if let Some(candidates) = classes_by_name.get(short) {
+                    pending.extend(candidates.iter().copied());
+                }
+            }
+        }
+        if !names.is_empty() {
+            rewrites.insert(decl.symbol, (receiver.clone(), names));
+        }
+    }
+
+    for decl in &mut index.defs {
+        let Some((receiver, names)) = rewrites.get(&decl.symbol) else {
+            continue;
+        };
+        qualify_bare_hierarchy_member_events(&mut decl.flow_events, receiver, names);
+    }
+}
+
+fn qualify_bare_hierarchy_member_events(
+    events: &mut [FlowEvent],
+    receiver_name: &str,
+    method_names: &ahash::AHashSet<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                call_kind,
+                ..
+            } if receiver.is_none()
+                && *call_kind == CallKind::Function
+                && looks_like_bare_identifier(name)
+                && method_names.contains(name) =>
+            {
+                let member = std::mem::take(name);
+                *name = format!("{receiver_name}.{member}");
+                *receiver = Some(receiver_name.to_string());
+                *call_kind = CallKind::Method;
+            }
+            FlowEvent::Assign {
+                source_call: Some(source_call),
+                ..
+            } if looks_like_bare_identifier(source_call) && method_names.contains(source_call) => {
+                *source_call = format!("{receiver_name}.{source_call}");
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                qualify_bare_hierarchy_member_events(then_events, receiver_name, method_names);
+                qualify_bare_hierarchy_member_events(else_events, receiver_name, method_names);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                qualify_bare_hierarchy_member_events(body, receiver_name, method_names);
+                qualify_bare_hierarchy_member_events(catch_events, receiver_name, method_names);
+                qualify_bare_hierarchy_member_events(finally_events, receiver_name, method_names);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                qualify_bare_hierarchy_member_events(body, receiver_name, method_names);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Annotate destructured tuple call-result assignments with their
+/// positional result index. Some grammars lower `{a, b} = call()` into
+/// separate Assign events that otherwise carry identical call metadata.
+pub fn annotate_tuple_call_result_bindings(events: &mut [FlowEvent], src: &str) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call: Some(_),
+                source_names,
+                ..
+            } => {
+                if let Some(index) = tuple_call_result_binding_index(src, *span, target) {
+                    let marker = format!("{SYNTHETIC_TUPLE_RESULT_PREFIX}{index}");
+                    if !source_names.iter().any(|source| source == &marker) {
+                        source_names.push(marker);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                annotate_tuple_call_result_bindings(then_events, src);
+                annotate_tuple_call_result_bindings(else_events, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                annotate_tuple_call_result_bindings(body, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                annotate_tuple_call_result_bindings(body, src);
+                annotate_tuple_call_result_bindings(catch_events, src);
+                annotate_tuple_call_result_bindings(finally_events, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn tuple_call_result_binding_index(src: &str, span: Span, target: &str) -> Option<usize> {
+    let text = src.get(span.start as usize..span.end as usize)?;
+    let (lhs, _) = text.split_once('=')?;
+    let body = lhs.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let target = target.trim();
+    split_top_level_commas(body)
+        .iter()
+        .position(|binding| binding.trim().trim_start_matches('^') == target)
+}
 
 /// Look up a language from the pack and wrap any error nicely.
 pub fn language_from_pack(name: &str) -> Result<Language, AdapterError> {
@@ -1432,9 +1699,10 @@ fn walk_into(
         // links to `v` and the switched value's taint is lost. Prepend the
         // `t <- v` binding to both arms.
         let mut type_switch_binding: Vec<FlowEvent> = Vec::new();
-        if let (Some(alias), Some(value)) =
-            (node.child_by_field_name("alias"), node.child_by_field_name("value"))
-        {
+        if let (Some(alias), Some(value)) = (
+            node.child_by_field_name("alias"),
+            node.child_by_field_name("value"),
+        ) {
             let alias_text = first_identifier_like_child(&alias)
                 .map(|id| node_text(&id, src))
                 .unwrap_or_else(|| node_text(&alias, src));
@@ -1634,9 +1902,10 @@ fn walk_into(
             // dataflow idiom). Walk the RHS call, then prepend the LHS as
             // its arg 0.
             if binary_operator_is_pipe(&node, src) {
-                if let (Some(left), Some(right)) =
-                    (node.child_by_field_name("left"), node.child_by_field_name("right"))
-                {
+                if let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                ) {
                     walk_into(left, file, src, handler, class_names, out, false);
                     let before = out.len();
                     walk_into(right, file, src, handler, class_names, out, false);
@@ -1950,6 +2219,7 @@ fn walk_into(
                         call_kind: crate::CallKind::Method,
                         args: vec![
                             crate::CallArg {
+                                passing_mode: Default::default(),
                                 span,
                                 name: None,
                                 place: None,
@@ -1957,6 +2227,7 @@ fn walk_into(
                                 value_text: key_text,
                             },
                             crate::CallArg {
+                                passing_mode: Default::default(),
                                 span,
                                 name: None,
                                 place: rhs.and_then(|n| argument_place(&n, src)),
@@ -2783,10 +3054,7 @@ fn callable_returns_void(node: &Node<'_>, src: &[u8], handler: &GrammarHandler) 
         return false;
     };
     let text = node_text(&return_type, src).trim();
-    handler
-        .void_return_type_names
-        .iter()
-        .any(|name| *name == text)
+    handler.void_return_type_names.contains(&text)
 }
 
 fn append_tail_expression_return(
@@ -2943,11 +3211,33 @@ fn last_non_comment_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 
 fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     let parent = node.parent()?;
+    // Lua wraps the single RHS of `local f = function(...) ... end` in an
+    // `expression_list` before the surrounding `assignment_statement`.
+    // Treat a one-expression list as transparent so the callable can still
+    // recover the local binding instead of disappearing from Pass 2.
+    if matches!(parent.kind(), "expression_list" | "expressions") && parent.named_child_count() == 1 {
+        return binding_name_node(&parent);
+    }
     let value_is_node = parent
         .child_by_field_name("value")
         .or_else(|| parent.child_by_field_name("right"))
         .or_else(|| parent.child_by_field_name("rhs"))
         .is_some_and(|value| value.id() == node.id());
+    // tree-sitter-lua does not field-label the two children of an
+    // `assignment_statement`: the first is a `variable_list`, the second an
+    // `expression_list`. When `node` is the latter, recover the sole LHS
+    // identifier structurally.
+    let structural_assignment_target = if parent.kind() == "assignment_statement" {
+        let mut cursor = parent.walk();
+        let children: Vec<Node<'a>> = parent.named_children(&mut cursor).collect();
+        let rhs_position = children.iter().position(|child| child.id() == node.id());
+        rhs_position
+            .filter(|position| *position > 0)
+            .and_then(|_| children.first().copied())
+            .and_then(|lhs| first_identifier_descendant(lhs).or(Some(lhs)))
+    } else {
+        None
+    };
     match parent.kind() {
         "variable_declarator" | "initialized_variable_definition" | "property_declaration"
             if value_is_node =>
@@ -2956,10 +3246,15 @@ fn binding_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
                 .child_by_field_name("name")
                 .or_else(|| parent.child_by_field_name("pattern"))
         }
-        "assignment_expression" | "assignment" | "assignment_statement" if value_is_node => parent
-            .child_by_field_name("left")
-            .or_else(|| parent.child_by_field_name("lhs"))
-            .or_else(|| parent.child_by_field_name("target")),
+        "assignment_expression" | "assignment" | "assignment_statement"
+            if value_is_node || structural_assignment_target.is_some() =>
+        {
+            parent
+                .child_by_field_name("left")
+                .or_else(|| parent.child_by_field_name("lhs"))
+                .or_else(|| parent.child_by_field_name("target"))
+                .or(structural_assignment_target)
+        }
         "pair" | "pair_pattern" if value_is_node => parent.child_by_field_name("key"),
         // C/C++ `auto f = [...]` — the closure sits in `init_declarator`'s
         // `value`; the binding name is the `declarator`. Without this arm
@@ -3189,6 +3484,7 @@ fn build_call_event(
     if let Some(arg_list) = arg_list {
         let mut cursor = arg_list.walk();
         for arg in arg_list.named_children(&mut cursor) {
+            let argument_node = arg;
             // Swift wraps each arg in `value_argument` with a `value` field.
             let arg = if arg.kind() == "value_argument" || arg.kind() == "tuple_expression_element" {
                 arg.child_by_field_name("value").unwrap_or(arg)
@@ -3246,10 +3542,17 @@ fn build_call_event(
             if value_text.is_empty() {
                 continue;
             }
+            let passing_mode = argument_passing_mode(argument_node, value_node);
+            let place = if matches!(passing_mode, crate::ArgumentPassingMode::WriteBack) {
+                writeback_argument_place(argument_node, value_node, src)
+            } else {
+                argument_place(&value_node, src)
+            };
             args.push(CallArg {
+                passing_mode,
                 span: span_of(file, &arg),
                 name,
-                place: argument_place(&value_node, src),
+                place,
                 source_names: extract_rhs_expr_operands(&value_node, src),
                 value_text,
             });
@@ -3265,6 +3568,7 @@ fn build_call_event(
             continue;
         }
         args.push(CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, arg),
             name: None,
             place: argument_place(&inner, src),
@@ -3285,6 +3589,7 @@ fn build_call_event(
                     continue;
                 }
                 args.push(CallArg {
+                    passing_mode: Default::default(),
                     span: span_of(file, &arg),
                     name: None,
                     place: argument_place(&arg, src),
@@ -3318,6 +3623,7 @@ fn build_call_event(
                         let value_text = normalize_call_name_whitespace(node_text(&child, src));
                         if !value_text.is_empty() {
                             args.push(CallArg {
+                                passing_mode: Default::default(),
                                 span: span_of(file, &child),
                                 name: None,
                                 place: argument_place(&child, src),
@@ -3342,6 +3648,48 @@ fn build_call_event(
         call_kind,
         args,
     })
+}
+
+/// Classify explicit caller-visible write-back syntax from tree-sitter
+/// nodes. The result is a language-neutral compiler fact consumed by the
+/// IDG; downstream engines never inspect `&`, `ref`, `out`, or `inout`
+/// source text.
+fn argument_passing_mode(argument: Node<'_>, value: Node<'_>) -> crate::ArgumentPassingMode {
+    let node_kind_proves_writeback = |node: Node<'_>| {
+        matches!(
+            node.kind(),
+            "reference_expression"
+                | "address_of_expression"
+                | "out_argument"
+                | "ref_expression"
+                | "inout_expression"
+        ) || {
+            let mut cursor = node.walk();
+            let has_writeback_token = node
+                .children(&mut cursor)
+                .any(|child| matches!(child.kind(), "&" | "ref" | "out" | "inout" | "ref_kind_keyword"));
+            has_writeback_token
+        }
+    };
+    if node_kind_proves_writeback(argument) || node_kind_proves_writeback(value) {
+        crate::ArgumentPassingMode::WriteBack
+    } else {
+        crate::ArgumentPassingMode::Value
+    }
+}
+
+fn writeback_argument_place(argument: Node<'_>, value: Node<'_>, src: &[u8]) -> Option<String> {
+    fn addressable_operand(node: Node<'_>) -> Option<Node<'_>> {
+        node.child_by_field_name("argument")
+            .or_else(|| node.child_by_field_name("operand"))
+            .or_else(|| node.child_by_field_name("value"))
+            .or_else(|| node.child_by_field_name("expression"))
+    }
+
+    let operand = addressable_operand(value)
+        .or_else(|| addressable_operand(argument))
+        .unwrap_or(value);
+    argument_place(&operand, src)
 }
 
 /// Extract every bare-identifier operand from a compound RHS
@@ -4716,8 +5064,7 @@ pub fn decl_index_with_handler(
             parent: None,
             body_span: body_node.map_or_else(|| Some(span_of(file, &node)), |b| Some(span_of(file, &b))),
             flow_events,
-            has_implicit_returns: !returns_void
-                && (handler.tail_expression_returns || body_implicit_returns),
+            has_implicit_returns: !returns_void && (handler.tail_expression_returns || body_implicit_returns),
             params,
             param_annotations,
             type_aliases: Vec::new(),
@@ -4768,7 +5115,7 @@ pub fn decl_index_with_handler(
                     lambda.start_position().column + 1
                 )
             },
-            |name_node| callable_binding_name_from_text(node_text(&name_node, src)),
+            |name_node| callable_binding_name_from_node(&name_node, src),
         );
         if name.is_empty() {
             continue;
@@ -5023,6 +5370,22 @@ fn callable_binding_name_from_text(text: &str) -> String {
                 && !matches!(bare, "my" | "our" | "local" | "let" | "var" | "const")
         })
         .unwrap_or_default()
+}
+
+fn callable_binding_name_from_node(node: &Node<'_>, src: &[u8]) -> String {
+    // C-family callable declarators can contain type identifiers after the
+    // actual binding (`void (^f)(NSString *)`). Text-token fallback walks
+    // from the end and would name that block `NSString`; the CST declarator
+    // chain puts the binding identifier first and proves `f` exactly.
+    if node.kind().contains("declarator") {
+        if let Some(identifier) = first_identifier_descendant(*node) {
+            let name = node_text(&identifier, src).trim();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    callable_binding_name_from_text(node_text(node, src))
 }
 
 fn pre_body_call_events(
@@ -6725,6 +7088,7 @@ fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) 
                 continue;
             }
             args.push(CallArg {
+                passing_mode: Default::default(),
                 span: span_of(file, &arg),
                 name,
                 place: argument_place(&value_node, src),
@@ -6738,6 +7102,7 @@ fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) 
             continue;
         }
         args.push(CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, &arg),
             name: None,
             place: argument_place(&arg, src),
@@ -6753,9 +7118,7 @@ fn dart_call_args_from_arguments(arg_list: &Node<'_>, file: FileId, src: &[u8]) 
 /// → `b`), or — for statement-position cascades (`w..m(x);`) — the base
 /// identifier that opens the sibling chain.
 fn dart_cascade_receiver(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    let Some(parent) = node.parent() else {
-        return None;
-    };
+    let parent = node.parent()?;
     if matches!(
         parent.kind(),
         "initialized_variable_definition" | "initialized_identifier"
@@ -6854,8 +7217,8 @@ fn build_dart_cascade_events(node: Node<'_>, file: FileId, src: &[u8]) -> Option
 /// `arguments`-kind child so C++ new-expressions fall through untouched.
 fn build_dart_object_expression_call(node: Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
     let arguments = first_named_child_of_kind(&node, "arguments")?;
-    let type_node = first_named_child_of_kind(&node, "type_identifier")
-        .or_else(|| first_identifier_like_child(&node))?;
+    let type_node =
+        first_named_child_of_kind(&node, "type_identifier").or_else(|| first_identifier_like_child(&node))?;
     let name = node_text(&type_node, src).trim().to_string();
     if name.is_empty() {
         return None;
@@ -6966,6 +7329,7 @@ fn prepend_pipe_arg_to_call(
         return;
     }
     let piped_arg = CallArg {
+        passing_mode: Default::default(),
         span: span_of(file, left),
         name: None,
         place: argument_place(left, src),
@@ -9045,6 +9409,10 @@ fn receiver_types_for_expr(
         push_receiver_type_and_bases(&mut out, projected_type, class_facts);
         return out;
     }
+    if let Some(declared_type) = receiver_declared_class_type(&normalized, class_facts) {
+        push_receiver_type_and_bases(&mut out, declared_type, class_facts);
+        return out;
+    }
     if let Some(type_name) = receiver_type_from_constructor_expr(&normalized) {
         push_receiver_type_and_bases(&mut out, type_name, class_facts);
     }
@@ -9157,6 +9525,25 @@ fn receiver_projected_type_name(receiver: &str, class_facts: &ClassFactsIndex<'_
         .by_canonical_name
         .get(&canonical_tail)
         .map(|(name, _)| name.clone())
+}
+
+/// Resolve class references in a receiver expression against declarations
+/// already emitted by the adapter. This covers immediate construction and
+/// class-side factory syntax without interpreting constructor method names:
+/// punctuation and call delimiters provide candidate identifiers, while the
+/// class index decides whether any candidate is a type.
+fn receiver_declared_class_type(receiver: &str, class_facts: &ClassFactsIndex<'_>) -> Option<String> {
+    receiver
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|candidate| !candidate.is_empty())
+        .rev()
+        .find_map(|candidate| {
+            let canonical = canonical_simple_type_name(candidate);
+            class_facts
+                .by_canonical_name
+                .get(&canonical)
+                .map(|(name, _)| name.clone())
+        })
 }
 
 fn push_receiver_type_and_bases(out: &mut Vec<String>, ty: String, class_facts: &ClassFactsIndex<'_>) {

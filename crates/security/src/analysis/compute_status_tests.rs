@@ -100,6 +100,7 @@ fn clean_conditional_value_part_rejects_value_identifiers() {
 fn clean_output_call_overwrites_only_with_clean_values() {
     let args = vec![
         bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 3),
             name: None,
             value_text: "buf".to_string(),
@@ -107,6 +108,7 @@ fn clean_output_call_overwrites_only_with_clean_values() {
             source_names: vec!["buf".to_string()],
         },
         bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 5, 16),
             name: None,
             value_text: "sizeof(buf)".to_string(),
@@ -114,6 +116,7 @@ fn clean_output_call_overwrites_only_with_clean_values() {
             source_names: Vec::new(),
         },
         bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 18, 22),
             name: None,
             value_text: "\"%s\"".to_string(),
@@ -121,6 +124,7 @@ fn clean_output_call_overwrites_only_with_clean_values() {
             source_names: Vec::new(),
         },
         bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: bonsai_common::Span::new(bonsai_common::FileId::new(0), 24, 31),
             name: None,
             value_text: "\"clean\"".to_string(),
@@ -776,6 +780,7 @@ fn tainted_edge(
         call_span: Span::new(bonsai_common::FileId::new(1), start, start + 1),
         tainted_args: Vec::new(),
         precision: Precision::Narrowed,
+        edge_kind: bonsai_callgraph::EdgeKind::Direct,
     }
 }
 

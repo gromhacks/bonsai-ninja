@@ -1,13 +1,54 @@
 use super::{
-    apply_assign_call_result_types, apply_constructor_result_type_aliases, argument_place,
-    canonical_simple_type_name, collect_kinds, extract_return_value_name, language_from_pack, node_text,
-    normalize_call_name_whitespace, normalize_call_result_assignment_sources,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches,
+    annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
+    apply_constructor_result_type_aliases, argument_place, build_call_event, canonical_simple_type_name,
+    collect_kinds, extract_return_value_name, language_from_pack, node_text, normalize_call_name_whitespace,
+    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
 };
 use bonsai_common::{FileId, Span, SymbolId};
+
+#[test]
+fn tuple_call_result_bindings_keep_source_positions() {
+    let src = "{a, _b} = helper(x)";
+    let span = Span::new(FileId::new(0), 0, src.len() as u64);
+    let mut events = vec![
+        FlowEvent::Assign {
+            span,
+            target: "_b".to_string(),
+            source_name: None,
+            source_call: Some("helper".to_string()),
+            source_call_args: vec!["x".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+        FlowEvent::Assign {
+            span,
+            target: "a".to_string(),
+            source_name: None,
+            source_call: Some("helper".to_string()),
+            source_call_args: vec!["x".to_string()],
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::CallResult),
+        },
+    ];
+
+    annotate_tuple_call_result_bindings(&mut events, src);
+    assert!(matches!(
+        &events[0],
+        FlowEvent::Assign { source_names, .. }
+            if source_names == &[format!("{SYNTHETIC_TUPLE_RESULT_PREFIX}1")]
+    ));
+    assert!(matches!(
+        &events[1],
+        FlowEvent::Assign { source_names, .. }
+            if source_names == &[format!("{SYNTHETIC_TUPLE_RESULT_PREFIX}0")]
+    ));
+}
 
 #[test]
 fn receiver_projected_alias_matches_tuple_field_chains_only() {
@@ -183,6 +224,7 @@ fn call(name: &str, args: &[&str]) -> FlowEvent {
         args: args
             .iter()
             .map(|arg| CallArg {
+                passing_mode: Default::default(),
                 span: Span::new(FileId::INVALID, 0, 0),
                 name: None,
                 value_text: (*arg).to_string(),
@@ -377,6 +419,77 @@ fn constructor_result_typing_handles_source_call_and_adjacent_new_call() {
         "a constructor call outside the assign span must not type the target: {:?}",
         decl.type_aliases
     );
+}
+
+#[test]
+fn receiver_type_uses_declared_class_facts_without_factory_name_knowledge() {
+    let mut idx = DeclIndex::default();
+    let mut child = m9_func_decl(0, "Child", None, Vec::new());
+    child.kind = DeclKind::Class;
+    let arbitrary_factory_call = |receiver: &str| FlowEvent::Call {
+        span: Span::new(FileId::new(0), 10, 20),
+        name: format!("{receiver}.consume"),
+        receiver: Some(receiver.to_string()),
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Method,
+        args: Vec::new(),
+    };
+    idx.defs.push(child);
+    idx.defs.push(m9_func_decl(
+        1,
+        "entry",
+        None,
+        vec![
+            arbitrary_factory_call("Child()"),
+            arbitrary_factory_call("Child.fabricate"),
+            arbitrary_factory_call("package.Child(value)"),
+        ],
+    ));
+
+    apply_call_receiver_types(&mut idx);
+    let entry = idx.defs.iter().find(|decl| decl.name == "entry").unwrap();
+    assert!(entry.flow_events.iter().all(|event| {
+        matches!(
+            event,
+            FlowEvent::Call { receiver_types, .. } if receiver_types == &["Child"]
+        )
+    }));
+}
+
+#[test]
+fn address_arguments_emit_writeback_mode_from_ast_nodes() {
+    for (pack, source) in [
+        ("c", "void f(void) { int out; helper(&out); }"),
+        ("cpp", "void f() { int out; helper(&out); }"),
+        ("go", "package p\nfunc f() { var out string; helper(&out) }"),
+        ("objc", "void f(void) { id out; helper(&out); }"),
+        (
+            "rust",
+            "fn f() { let mut out = String::new(); helper(&mut out); }",
+        ),
+    ] {
+        let language = language_from_pack(pack).expect("language pack");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set language");
+        let tree = parser.parse(source, None).expect("parse");
+        let event = collect_kinds(&tree, &["call_expression", "call"])
+            .into_iter()
+            .filter_map(|node| {
+                build_call_event(node, FileId::new(0), source.as_bytes(), &GENERIC_HANDLER, &[])
+            })
+            .find(|event| matches!(event, FlowEvent::Call { name, .. } if name == "helper"))
+            .unwrap_or_else(|| panic!("{pack}: helper call"));
+        let FlowEvent::Call { args, .. } = event else {
+            unreachable!();
+        };
+        assert_eq!(args.len(), 1, "{pack}: {args:?}");
+        assert_eq!(
+            args[0].passing_mode,
+            crate::ArgumentPassingMode::WriteBack,
+            "{pack}: {args:?}"
+        );
+        assert_eq!(args[0].place.as_deref(), Some("out"), "{pack}: {args:?}");
+    }
 }
 
 fn m9_func_decl(raw: u32, name: &str, return_type: Option<&str>, flow_events: Vec<FlowEvent>) -> Decl {

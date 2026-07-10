@@ -60,6 +60,48 @@ fn functional_loop_case_and_tail_return_are_structured() {
     );
 }
 
+#[test]
+fn map_literal_emits_field_scoped_assignments() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_erlang::ErlangAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.erl".to_string(),
+            "-module(main).\n-export([run/1]).\nrun(Args) -> B = #{tainted => Args, clean => \"safe\"}, sink(maps:get(clean, B)).\n".to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+
+    assert!(run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target == "B.tainted" && source_names == &["Args"]
+    )));
+    assert!(run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target == "B.clean" && source_names.is_empty()
+    )));
+    assert!(run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, args, .. }
+            if name == "sink"
+                && args.first().is_some_and(|arg| {
+                    arg.value_text == "B.clean"
+                        && arg.place.as_deref() == Some("B.clean")
+                        && arg.source_names.iter().any(|source| source == "B.clean")
+                })
+    )));
+}
+
 fn contains_branch(events: &[FlowEvent]) -> bool {
     events.iter().any(|event| match event {
         FlowEvent::Branch { .. } => true,

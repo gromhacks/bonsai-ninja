@@ -6,10 +6,10 @@ use bonsai_lang_api::{
         collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
         node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
+    AdapterContext, AdapterError, AssignValueKind, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("lua");
 const PACK_NAME: &str = "lua";
@@ -188,8 +188,15 @@ impl LanguageAdapter for LuaAdapter {
                 arg_index: 0,
             },
         ];
+        let table_field_assigns = parse_with(PACK_NAME, file, ctx)
+            .map(|(snapshot, tree)| {
+                collect_lua_table_literal_field_assigns(&tree, snapshot.text.as_bytes(), file)
+            })
+            .unwrap_or_default();
         for decl in &mut idx.defs {
+            insert_lua_table_field_assigns_in_events(&mut decl.flow_events, &table_field_assigns);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, LUA_LIFECYCLE_TRANSITIONS);
+            normalize_lua_dot_calls(&mut decl.flow_events);
             enrich_lua_factory_receiver_field_writes(decl);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
@@ -227,6 +234,212 @@ impl LanguageAdapter for LuaAdapter {
             }
         }
         idx
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LuaTableFieldAssigns {
+    assign_span: bonsai_common::Span,
+    target: String,
+    fields: Vec<FlowEvent>,
+}
+
+fn collect_lua_table_literal_field_assigns(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<LuaTableFieldAssigns> {
+    let mut out = Vec::new();
+    for assignment in collect_kinds(tree, &["assignment_statement"]) {
+        let Some(variable_list) = first_named_child_of_kind(&assignment, "variable_list") else {
+            continue;
+        };
+        let Some(expression_list) = first_named_child_of_kind(&assignment, "expression_list") else {
+            continue;
+        };
+        let Some(target_node) = variable_list
+            .child_by_field_name("name")
+            .or_else(|| first_named_child_of_kind(&variable_list, "identifier"))
+        else {
+            continue;
+        };
+        let target = node_text(&target_node, src).trim();
+        if target.is_empty() || !target.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let Some(table) = expression_list
+            .child_by_field_name("value")
+            .filter(|node| node.kind() == "table_constructor")
+            .or_else(|| first_named_child_of_kind(&expression_list, "table_constructor"))
+        else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        let mut cursor = table.walk();
+        for field in table
+            .named_children(&mut cursor)
+            .filter(|node| node.kind() == "field")
+        {
+            let Some(name_node) = field.child_by_field_name("name") else {
+                continue;
+            };
+            let Some(value_node) = field.child_by_field_name("value") else {
+                continue;
+            };
+            let key = node_text(&name_node, src).trim();
+            if key.is_empty() || !key.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+                continue;
+            }
+            let sources = lua_value_source_names(value_node, src);
+            fields.push(FlowEvent::Assign {
+                span: span_of(file, &value_node),
+                target: format!("{target}.{key}"),
+                source_name: (sources.len() == 1).then(|| sources[0].clone()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: sources.clone(),
+                declares_new_binding: false,
+                value_kind: Some(if sources.is_empty() {
+                    AssignValueKind::Literal
+                } else {
+                    AssignValueKind::Compound
+                }),
+            });
+        }
+        if !fields.is_empty() {
+            out.push(LuaTableFieldAssigns {
+                assign_span: span_of(file, &assignment),
+                target: target.to_string(),
+                fields,
+            });
+        }
+    }
+    out
+}
+
+fn lua_value_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+        match node.kind() {
+            "identifier" => {
+                let name = node_text(&node, src).trim();
+                if !name.is_empty() {
+                    out.push(name.to_string());
+                }
+                return;
+            }
+            "dot_index_expression" | "bracket_index_expression" => {
+                let name = node_text(&node, src)
+                    .replace([' ', '\t', '\n', '\r'], "")
+                    .replace('[', ".")
+                    .replace(']', "")
+                    .replace(['\"', '\''], "");
+                if !name.is_empty() {
+                    out.push(name);
+                }
+                return;
+            }
+            "string" | "number" | "nil" | "true" | "false" => return,
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, src, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(node, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn insert_lua_table_field_assigns_in_events(
+    events: &mut Vec<FlowEvent>,
+    field_assigns: &[LuaTableFieldAssigns],
+) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_lua_table_field_assigns_in_events(then_events, field_assigns);
+                insert_lua_table_field_assigns_in_events(else_events, field_assigns);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_lua_table_field_assigns_in_events(body, field_assigns);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_lua_table_field_assigns_in_events(body, field_assigns);
+                insert_lua_table_field_assigns_in_events(catch_events, field_assigns);
+                insert_lua_table_field_assigns_in_events(finally_events, field_assigns);
+            }
+            _ => {}
+        }
+
+        let inserts = match &events[index] {
+            FlowEvent::Assign { span, target, .. } => field_assigns
+                .iter()
+                .filter(|item| {
+                    item.target == *target
+                        && span.file == item.assign_span.file
+                        && span.start <= item.assign_span.end
+                        && item.assign_span.start <= span.end
+                })
+                .flat_map(|item| item.fields.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        if inserts.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = inserts.len();
+        events.splice((index + 1)..=index, inserts);
+        index += inserted + 1;
+    }
+}
+
+fn normalize_lua_dot_calls(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, call_kind, .. } if name.contains('.') => {
+                // Lua's `table.member(args)` syntax does not inject an
+                // implicit receiver. Only `table:member(args)` does, and
+                // the grammar preserves that colon in the call name.
+                *call_kind = bonsai_lang_api::CallKind::Function;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_lua_dot_calls(then_events);
+                normalize_lua_dot_calls(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_lua_dot_calls(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_lua_dot_calls(body);
+                normalize_lua_dot_calls(catch_events);
+                normalize_lua_dot_calls(finally_events);
+            }
+            _ => {}
+        }
     }
 }
 

@@ -2153,6 +2153,7 @@ mod tests {
         ws.ingest_dir(dir.path()).expect("ingest");
         let file = ws.vfs().all_files().into_iter().next().expect("fixture file");
         let arg = bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: Span {
                 file,
                 start: 33,

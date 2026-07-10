@@ -221,21 +221,19 @@ these shared facts rather than inventing command- or language-specific
 domains.
 
 **`crates/taint`** owns taint reachability and source-specific graph
-construction. Production security surfaces are IDG-backed: source seeds are
+construction. All interprocedural taint surfaces are IDG-backed: source seeds are
 resolved to concrete IDG nodes, configured transfer summaries are applied to
 fixpoint, and the resulting closure is cut to a semantic target/lineage
-corridor before call records or findings are rendered. The older
-`interprocedural_taint_to_completion_with_caches` path remains as the
-function-summary engine used by diagnostics and compatibility surfaces; it is
-not the production source-to-sink scheduler. `reachable.rs` also owns the
+corridor before call records or findings are rendered.
+`interprocedural_taint_to_completion_with_caches` is a compatibility façade
+over that same closure, not a second scheduler. `reachable.rs` also owns the
 shared default entry seed helpers used by cached dataflow, inspect, and
 `dump-taint`; command crates should not carry local copies of the
 params/assignment-target/bare-call-argument seed logic. Sub-modules:
 
 - `intra.rs` — single-function taint propagation over `flow_events`.
-- `inter/mod.rs` — interprocedural orchestration, typed-exception rules,
-  pattern-arm forking, async isolation.
-- `inter/summary.rs` / `summary_impl.rs` — function-summary construction.
+- `inter.rs` — IDG-backed public compatibility types and entry points.
+- `inter/summary.rs` — IDG-derived function-return summaries.
 - `assignment.rs` — assignment effect calculation.
 - `reachable.rs` — IDG-backed source-seeded graph builders, filtered
   call-record export, and semantic reachability helpers used by security,

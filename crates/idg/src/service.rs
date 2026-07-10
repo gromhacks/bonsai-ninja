@@ -739,11 +739,8 @@ impl IdgQueryService {
         // restores the source without perturbing anchors that already
         // propagate: the fallback stays OFF whenever any anchored seed
         // has at least one outgoing edge, and it only ever ADDS seeds.
-        let anchored_seeds_dead = !local_seeds.is_empty()
-            && !segment
-                .edges
-                .iter()
-                .any(|edge| local_seeds.contains(&edge.from));
+        let anchored_seeds_dead =
+            !local_seeds.is_empty() && !segment.edges.iter().any(|edge| local_seeds.contains(&edge.from));
         if out.is_empty() || anchored_seeds_dead {
             for edge in &segment.edges {
                 if !spans_overlap(edge.meta.via_span, match_span) {

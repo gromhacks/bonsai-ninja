@@ -77,6 +77,18 @@ fn idg_transfer_fingerprint_is_order_stable() {
                 output_arg_indices: vec![2, 0],
             },
         ],
+        source_callback_args: vec![
+            bonsai_idg::SourceCallbackArgSpec {
+                callee: "source.callback".to_string(),
+                callback_arg_index: 2,
+                source_param_indices: vec![1, 0, 1],
+            },
+            bonsai_idg::SourceCallbackArgSpec {
+                callee: "source.callback".to_string(),
+                callback_arg_index: 2,
+                source_param_indices: vec![0, 1],
+            },
+        ],
         ..bonsai_idg::TransferOptions::default()
     };
     let right = bonsai_idg::TransferOptions {
@@ -102,6 +114,11 @@ fn idg_transfer_fingerprint_is_order_stable() {
                 output_arg_indices: vec![1, 3],
             },
         ],
+        source_callback_args: vec![bonsai_idg::SourceCallbackArgSpec {
+            callee: "source.callback".to_string(),
+            callback_arg_index: 2,
+            source_param_indices: vec![0, 1],
+        }],
         ..bonsai_idg::TransferOptions::default()
     };
 
@@ -109,5 +126,39 @@ fn idg_transfer_fingerprint_is_order_stable() {
         idg_transfer_options_fingerprint(&left),
         idg_transfer_options_fingerprint(&right),
         "equivalent rulepack transfer shapes must reuse the same IDG sidecar"
+    );
+}
+
+#[test]
+fn idg_transfer_fingerprint_tracks_source_callback_shapes() {
+    let plain = bonsai_idg::TransferOptions::default();
+    let with_callback = bonsai_idg::TransferOptions {
+        source_callback_args: vec![bonsai_idg::SourceCallbackArgSpec {
+            callee: "source.callback".to_string(),
+            callback_arg_index: 1,
+            source_param_indices: vec![0],
+        }],
+        ..bonsai_idg::TransferOptions::default()
+    };
+
+    assert_ne!(
+        idg_transfer_options_fingerprint(&plain),
+        idg_transfer_options_fingerprint(&with_callback),
+        "source-callback semantics change graph edges and must invalidate the transfer sidecar"
+    );
+}
+
+#[test]
+fn idg_transfer_fingerprint_tracks_receiver_result_policy() {
+    let plain = bonsai_idg::TransferOptions::default();
+    let with_receiver_flow = bonsai_idg::TransferOptions {
+        include_unresolved_receiver_result_passthrough: true,
+        ..bonsai_idg::TransferOptions::default()
+    };
+
+    assert_ne!(
+        idg_transfer_options_fingerprint(&plain),
+        idg_transfer_options_fingerprint(&with_receiver_flow),
+        "receiver-result semantics change graph edges and must invalidate the transfer sidecar"
     );
 }

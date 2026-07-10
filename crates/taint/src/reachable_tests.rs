@@ -25,6 +25,65 @@ fn service_from_segment(segment: IdgSegment) -> IdgQueryService {
 }
 
 #[test]
+fn legacy_descendant_seeds_require_wildcard_and_exclude_clean_writes() {
+    let func = FuncId::new(1);
+    let mut segment = IdgSegment::new();
+    let base = segment.strings.intern("args");
+    let field = segment.strings.intern("v");
+    let read_place = segment.intern_place(Place::read_field(base, field));
+    let write_place = segment.intern_place(Place::write_field(base, field, span()));
+    let _ = segment.intern_node(func, read_place);
+    let _ = segment.intern_node(func, write_place);
+    segment.record_func(func);
+    let service = service_from_segment(segment);
+
+    assert!(
+        legacy_descendant_read_seed_nodes(func, &["args".to_string()], &service).is_empty(),
+        "a scalar seed must not promote the carrier's fields"
+    );
+    let seeds = legacy_descendant_read_seed_nodes(func, &["args.*".to_string()], &service);
+    assert_eq!(
+        seeds.len(),
+        1,
+        "projected clean writes must not be seeded: {seeds:?}"
+    );
+    let point = service.resolve_point(seeds[0]).expect("seed point");
+    assert_eq!(point.kind, bonsai_idg::PointKind::Read);
+    assert_eq!(point.name, "args.v");
+}
+
+#[test]
+fn legacy_call_and_buffer_seed_pair_identifies_source_output_carrier() {
+    let events = vec![FlowEvent::Call {
+        span: span(),
+        name: "fgets".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(),
+            name: None,
+            value_text: "buf".to_string(),
+            place: Some("buf".to_string()),
+            source_names: vec!["buf".to_string()],
+        }],
+    }];
+    let paired = TokenSet::from_iter(["fgets".to_string(), "buf".to_string()]);
+    let mut names = Vec::new();
+    collect_seed_matching_output_arg_names(&events, &paired, &mut names);
+    assert_eq!(names, ["buf"]);
+
+    let call_only = TokenSet::from_iter(["fgets".to_string()]);
+    names.clear();
+    collect_seed_matching_output_arg_names(&events, &call_only, &mut names);
+    assert!(
+        names.is_empty(),
+        "a call-name seed alone must not invent output-argument semantics"
+    );
+}
+
+#[test]
 fn reachable_assignment_rhs_metadata_is_surfaced() {
     let events = vec![FlowEvent::Assign {
         span: span(),
@@ -321,11 +380,10 @@ fn source_output_arg_names_keep_anchor_seed_precise() {
     let service = service_from_segment(segment);
     let db = empty_db();
 
-    let nodes = source_seed_nodes_from_idg(
-        func,
-        &TokenSet::default(),
-        Some(anchor),
-        &["buf".to_string()],
+    let names = TokenSet::default();
+    let output_args = ["buf".to_string()];
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(func, &names, Some(anchor), &output_args),
         db.global_index().as_ref(),
         &service,
     );
@@ -396,11 +454,9 @@ fn anchored_empty_source_seed_does_not_fallback_to_all_params() {
     let service = service_from_segment(segment);
     let db = empty_db();
 
-    let nodes = source_seed_nodes_from_idg(
-        func,
-        &TokenSet::default(),
-        Some(anchor),
-        &[],
+    let names = TokenSet::default();
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(func, &names, Some(anchor), &[]),
         db.global_index().as_ref(),
         &service,
     );
@@ -442,11 +498,8 @@ fn anchored_call_return_seed_does_not_include_same_name_reads_or_writes() {
     let db = empty_db();
     let seeds = TokenSet::from_iter(["request.args.get".to_string()]);
 
-    let nodes = source_seed_nodes_from_idg(
-        func,
-        &seeds,
-        Some(anchor),
-        &[],
+    let nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(func, &seeds, Some(anchor), &[]),
         db.global_index().as_ref(),
         &service,
     );
@@ -623,6 +676,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
                 call_kind: bonsai_lang_api::CallKind::Function,
                 args: vec![
                     bonsai_lang_api::CallArg {
+                        passing_mode: Default::default(),
                         span: call_span,
                         name: None,
                         value_text: "lambda a, b: f\"{a} {b}\"".to_string(),
@@ -630,6 +684,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
                         source_names: Vec::new(),
                     },
                     bonsai_lang_api::CallArg {
+                        passing_mode: Default::default(),
                         span: call_span,
                         name: None,
                         value_text: "[payload]".to_string(),
@@ -637,6 +692,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
                         source_names: vec!["payload".to_string()],
                     },
                     bonsai_lang_api::CallArg {
+                        passing_mode: Default::default(),
                         span: call_span,
                         name: None,
                         value_text: "\"\"".to_string(),
@@ -713,10 +769,14 @@ fn call_result_passthrough_regex_alternatives_do_not_prefilter_to_last_branch() 
 fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
     let db = empty_db();
     let global = db.global_index();
+    let outer_call_span = Span::new(FileId::new(0), 0, 1);
+    let outer_arg_span = Span::new(FileId::new(0), 0, 20);
+    let nested_call_span = Span::new(FileId::new(0), 2, 12);
     let call_summary = CallEventSummary {
+        call_kind: bonsai_lang_api::CallKind::Function,
         name: ":os.cmd".to_string(),
         args_value_text: vec!["String.to_charlist(cmd)".to_string()],
-        args_span: vec![span()],
+        args_span: vec![outer_arg_span],
         args_place: vec![None],
         receiver: None,
     };
@@ -726,7 +786,20 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
         input_receiver: false,
     }];
     let compiled = compile_call_result_passthroughs(&passthroughs);
-    let mut call_summary_cache = AHashMap::default();
+    let mut call_summary_cache = AHashMap::from_iter([(
+        FuncId::new(0),
+        AHashMap::from_iter([(
+            nested_call_span,
+            CallEventSummary {
+                name: "String.to_charlist".to_string(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args_value_text: vec!["cmd".to_string()],
+                args_span: vec![Span::new(FileId::new(0), 13, 16)],
+                args_place: vec![Some("cmd".to_string())],
+                receiver: Some("String".to_string()),
+            },
+        )]),
+    )]);
     let mut function_summary_cache = AHashMap::default();
     let mut callee_name_cache = CalleeNameCache::default();
     let source_call_spans: ahash::AHashSet<Span> = ahash::AHashSet::default();
@@ -734,6 +807,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
     assert!(
         !tainted_arg_is_clean_nested_call_return(
             FuncId::new(0),
+            outer_call_span,
             0,
             &call_summary,
             &[],
@@ -753,14 +827,31 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
 fn unmodeled_nested_call_return_is_pruned_as_clean() {
     let db = empty_db();
     let global = db.global_index();
+    let outer_call_span = Span::new(FileId::new(0), 0, 1);
+    let outer_arg_span = Span::new(FileId::new(0), 0, 20);
+    let nested_call_span = Span::new(FileId::new(0), 2, 14);
     let call_summary = CallEventSummary {
+        call_kind: bonsai_lang_api::CallKind::Function,
         name: "sink".to_string(),
         args_value_text: vec!["clean_return(cmd)".to_string()],
-        args_span: vec![span()],
+        args_span: vec![outer_arg_span],
         args_place: vec![None],
         receiver: None,
     };
-    let mut call_summary_cache = AHashMap::default();
+    let mut call_summary_cache = AHashMap::from_iter([(
+        FuncId::new(0),
+        AHashMap::from_iter([(
+            nested_call_span,
+            CallEventSummary {
+                name: "clean_return".to_string(),
+                call_kind: bonsai_lang_api::CallKind::Function,
+                args_value_text: vec!["cmd".to_string()],
+                args_span: vec![Span::new(FileId::new(0), 15, 18)],
+                args_place: vec![Some("cmd".to_string())],
+                receiver: None,
+            },
+        )]),
+    )]);
     let mut function_summary_cache = AHashMap::default();
     let mut callee_name_cache = CalleeNameCache::default();
     let source_call_spans: ahash::AHashSet<Span> = ahash::AHashSet::default();
@@ -768,6 +859,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
     assert!(
         tainted_arg_is_clean_nested_call_return(
             FuncId::new(0),
+            outer_call_span,
             0,
             &call_summary,
             &[],
@@ -780,6 +872,74 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
             &source_call_spans,
         ),
         "unresolved and unmodeled nested call returns should still be treated as clean"
+    );
+}
+
+#[test]
+fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
+    let db = empty_db();
+    let global = db.global_index();
+    let call_summary = CallEventSummary {
+        call_kind: bonsai_lang_api::CallKind::Function,
+        name: "sink_cmd".to_string(),
+        args_value_text: vec!["maps:get(cmd, C)".to_string()],
+        args_span: vec![Span::new(FileId::new(0), 0, 20)],
+        args_place: vec![Some("C.cmd".to_string())],
+        receiver: None,
+    };
+
+    assert!(
+        !tainted_arg_is_clean_nested_call_return(
+            FuncId::new(0),
+            Span::new(FileId::new(0), 0, 4),
+            0,
+            &call_summary,
+            &[],
+            &db,
+            global.as_ref(),
+            &mut AHashMap::default(),
+            &mut AHashMap::default(),
+            &[],
+            &mut CalleeNameCache::default(),
+            &ahash::AHashSet::default(),
+        ),
+        "an adapter-proven projection place is direct AST evidence, not an unknown nested return"
+    );
+}
+
+#[test]
+fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
+    let db = empty_db();
+    let global = db.global_index();
+    let call_span = Span::new(FileId::new(0), 10, 30);
+    let call_summary = CallEventSummary {
+        call_kind: bonsai_lang_api::CallKind::Function,
+        name: "semantic_call".to_string(),
+        args_value_text: vec!["interpolated value".to_string()],
+        args_span: vec![call_span],
+        args_place: vec![None],
+        receiver: None,
+    };
+    let mut summaries = AHashMap::default();
+    summaries.insert(call_span, call_summary.clone());
+    let mut call_summary_cache = AHashMap::from_iter([(FuncId::new(0), summaries)]);
+
+    assert!(
+        !tainted_arg_is_clean_nested_call_return(
+            FuncId::new(0),
+            call_span,
+            0,
+            &call_summary,
+            &[],
+            &db,
+            global.as_ref(),
+            &mut call_summary_cache,
+            &mut AHashMap::default(),
+            &[],
+            &mut CalleeNameCache::default(),
+            &ahash::AHashSet::default(),
+        ),
+        "the current call is not a nested call inside its own semantic argument"
     );
 }
 

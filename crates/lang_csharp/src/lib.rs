@@ -478,6 +478,7 @@ fn synthesize_csharp_constructor_implicit_returns(
                         args: args
                             .into_iter()
                             .map(|arg| CallArg {
+                                passing_mode: Default::default(),
                                 span,
                                 name: None,
                                 place: csharp_bare_identifier(&arg).map(str::to_string),

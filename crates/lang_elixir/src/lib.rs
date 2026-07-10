@@ -73,12 +73,14 @@ impl LanguageAdapter for ElixirAdapter {
         // the macro. Walk for `defp` call spans, then mark matching
         // decls private.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            decl_index.refs.extend(synthesize_elixir_request_field_reads(
-                &tree,
-                snapshot.text.as_bytes(),
-                file,
-            ));
-            let module_spans = collect_elixir_module_spans(&tree, snapshot.text.as_bytes(), file);
+            let src = snapshot.text.as_bytes();
+            let map_field_assigns = collect_elixir_map_literal_field_assigns(&tree, src, file);
+            let value_field_access_spans = collect_elixir_value_field_access_spans(&tree, file);
+            let local_callable_invocations = collect_elixir_local_callable_invocations(&tree, src, file);
+            decl_index
+                .refs
+                .extend(synthesize_elixir_value_field_reads(&tree, src, file));
+            let module_spans = collect_elixir_module_spans(&tree, src, file);
             if module_spans.is_empty() {
                 bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
             } else {
@@ -93,12 +95,19 @@ impl LanguageAdapter for ElixirAdapter {
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
                 );
+                inject_elixir_local_callable_invocations(decl, &local_callable_invocations);
+                insert_elixir_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
+                remove_elixir_value_field_access_calls(&mut decl.flow_events, &value_field_access_spans);
                 normalize_elixir_control_expression_assignments(
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
                 );
+                bonsai_lang_api::kit::annotate_tuple_call_result_bindings(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                );
             }
-            let private_spans = collect_elixir_defp_spans(&tree, snapshot.text.as_bytes());
+            let private_spans = collect_elixir_defp_spans(&tree, src);
             for decl in &mut decl_index.defs {
                 let body_start = decl.body_span.map(|s| s.start).unwrap_or(decl.span.start);
                 let body_end = decl.body_span.map(|s| s.end).unwrap_or(decl.span.end);
@@ -169,6 +178,435 @@ impl LanguageAdapter for ElixirAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Elixir invokes a function value as `binding.()`. Tree-sitter represents
+/// the callee as a `dot` node with only a left operand, so the generic call
+/// extractor (which expects a named member on the right) correctly refuses
+/// to invent a method name. Lower that exact CST shape to an ordinary local
+/// call fact here; the callgraph/IDG then resolves `binding` through its
+/// assignment to the nested function declaration.
+fn collect_elixir_local_callable_invocations(tree: &Tree, src: &[u8], file: FileId) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    for call in collect_kinds(tree, &["call"]) {
+        let Some(arguments) = call
+            .child_by_field_name("arguments")
+            .or_else(|| first_named_child_of_kind(&call, "arguments"))
+        else {
+            continue;
+        };
+        let Some(target) = call.child_by_field_name("target").or_else(|| call.named_child(0)) else {
+            continue;
+        };
+        if target.kind() != "dot" || target.child_by_field_name("right").is_some() {
+            continue;
+        }
+        let Some(left) = target
+            .child_by_field_name("left")
+            .or_else(|| target.named_child(0))
+        else {
+            continue;
+        };
+        if left.kind() != "identifier" || target.named_child_count() != 1 {
+            continue;
+        }
+        let name = node_text(&left, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let mut args = Vec::new();
+        let mut cursor = arguments.walk();
+        for argument in arguments.named_children(&mut cursor) {
+            let value_text = node_text(&argument, src).trim().to_string();
+            if value_text.is_empty() {
+                continue;
+            }
+            let place = (argument.kind() == "identifier").then(|| value_text.clone());
+            args.push(bonsai_lang_api::CallArg {
+                span: span_of(file, &argument),
+                passing_mode: bonsai_lang_api::ArgumentPassingMode::Value,
+                name: None,
+                place,
+                source_names: elixir_value_source_names(argument, src),
+                value_text,
+            });
+        }
+        out.push(FlowEvent::Call {
+            span: span_of(file, &target),
+            name,
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args,
+        });
+    }
+    out.sort_by_key(|event| (event.span().start, event.span().end));
+    out.dedup_by_key(|event| event.span());
+    out
+}
+
+fn inject_elixir_local_callable_invocations(decl: &mut bonsai_lang_api::Decl, invocations: &[FlowEvent]) {
+    let owner = decl.body_span.unwrap_or(decl.span);
+    for invocation in invocations {
+        let span = invocation.span();
+        if span.file != owner.file || span.start < owner.start || span.end > owner.end {
+            continue;
+        }
+        let FlowEvent::Call {
+            name,
+            receiver,
+            receiver_types,
+            call_kind,
+            args,
+            ..
+        } = invocation
+        else {
+            continue;
+        };
+        if normalize_elixir_local_callable_call(
+            &mut decl.flow_events,
+            span,
+            name,
+            receiver.as_deref(),
+            receiver_types,
+            *call_kind,
+            args,
+        ) {
+            continue;
+        }
+        if flow_events_contain_call_span(&decl.flow_events, span) {
+            continue;
+        }
+        decl.flow_events.push(invocation.clone());
+    }
+    decl.flow_events
+        .sort_by_key(|event| (event.span().start, event.span().end));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalize_elixir_local_callable_call(
+    events: &mut [FlowEvent],
+    target: bonsai_common::Span,
+    name: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+    call_kind: bonsai_lang_api::CallKind,
+    args: &[bonsai_lang_api::CallArg],
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name: event_name,
+                receiver: event_receiver,
+                receiver_types: event_receiver_types,
+                call_kind: event_call_kind,
+                args: event_args,
+            } if *span == target => {
+                event_name.clear();
+                event_name.push_str(name);
+                *event_receiver = receiver.map(str::to_string);
+                event_receiver_types.clear();
+                event_receiver_types.extend_from_slice(receiver_types);
+                *event_call_kind = call_kind;
+                event_args.clear();
+                event_args.extend_from_slice(args);
+                return true;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if normalize_elixir_local_callable_call(
+                    then_events,
+                    target,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                ) || normalize_elixir_local_callable_call(
+                    else_events,
+                    target,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if normalize_elixir_local_callable_call(
+                    body,
+                    target,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                ) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if normalize_elixir_local_callable_call(
+                    body,
+                    target,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                ) || normalize_elixir_local_callable_call(
+                    catch_events,
+                    target,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                ) || normalize_elixir_local_callable_call(
+                    finally_events,
+                    target,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn flow_events_contain_call_span(events: &[FlowEvent], target: bonsai_common::Span) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call { span, .. } => *span == target,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            flow_events_contain_call_span(then_events, target)
+                || flow_events_contain_call_span(else_events, target)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_events_contain_call_span(body, target)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_events_contain_call_span(body, target)
+                || flow_events_contain_call_span(catch_events, target)
+                || flow_events_contain_call_span(finally_events, target)
+        }
+        _ => false,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct ElixirMapFieldAssigns {
+    assign_span: bonsai_common::Span,
+    target: String,
+    fields: Vec<FlowEvent>,
+}
+
+fn collect_elixir_map_literal_field_assigns(
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) -> Vec<ElixirMapFieldAssigns> {
+    let mut out = Vec::new();
+    for assignment in collect_kinds(tree, &["binary_operator"]) {
+        let Some(left) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        let Some(right) = assignment.child_by_field_name("right") else {
+            continue;
+        };
+        if right.kind() != "map" {
+            continue;
+        }
+        let target = node_text(&left, src).trim().to_string();
+        if target.is_empty() {
+            continue;
+        }
+        let mut fields = Vec::new();
+        for pair in elixir_direct_map_pairs(right) {
+            let Some(key_node) = pair.child_by_field_name("key") else {
+                continue;
+            };
+            let Some(value_node) = pair.child_by_field_name("value") else {
+                continue;
+            };
+            let Some(key) = elixir_map_key(key_node, src) else {
+                continue;
+            };
+            let sources = elixir_value_source_names(value_node, src);
+            fields.push(FlowEvent::Assign {
+                span: span_of(file, &value_node),
+                target: format!("{target}.{key}"),
+                source_name: (sources.len() == 1).then(|| sources[0].clone()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: sources,
+                declares_new_binding: false,
+                value_kind: Some(AssignValueKind::Compound),
+            });
+        }
+        if !fields.is_empty() {
+            out.push(ElixirMapFieldAssigns {
+                assign_span: span_of(file, &assignment),
+                target,
+                fields,
+            });
+        }
+    }
+    out
+}
+
+fn elixir_direct_map_pairs(map: Node<'_>) -> Vec<Node<'_>> {
+    let mut out = Vec::new();
+    let mut pending = vec![map];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "pair" {
+                out.push(child);
+            } else if matches!(child.kind(), "map_content" | "keywords") {
+                pending.push(child);
+            }
+        }
+    }
+    out.sort_by_key(|pair| pair.start_byte());
+    out
+}
+
+fn elixir_map_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let key = raw
+        .trim_end_matches(':')
+        .trim()
+        .trim_start_matches(':')
+        .trim_matches(['"', '\'']);
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch == '_' || ch == '@' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+fn elixir_value_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    fn collect(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+        match node.kind() {
+            "identifier" => {
+                let source = node_text(&node, src).trim();
+                if !source.is_empty() {
+                    out.push(source.to_string());
+                }
+                return;
+            }
+            "string" | "charlist" | "integer" | "float" | "atom" | "true" | "false" | "nil" => {
+                return;
+            }
+            "call" => {
+                if node.child_by_field_name("arguments").is_none() {
+                    if let Some(target) = node.child_by_field_name("target") {
+                        if target.kind() == "dot" {
+                            let source = node_text(&target, src).replace([' ', '\t', '\n', '\r'], "");
+                            if !source.is_empty() {
+                                out.push(source);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect(child, src, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(node, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn insert_elixir_map_field_assigns_in_events(
+    events: &mut Vec<FlowEvent>,
+    field_assigns: &[ElixirMapFieldAssigns],
+) {
+    let mut index = 0usize;
+    while index < events.len() {
+        match &mut events[index] {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                insert_elixir_map_field_assigns_in_events(then_events, field_assigns);
+                insert_elixir_map_field_assigns_in_events(else_events, field_assigns);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                insert_elixir_map_field_assigns_in_events(body, field_assigns);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                insert_elixir_map_field_assigns_in_events(body, field_assigns);
+                insert_elixir_map_field_assigns_in_events(catch_events, field_assigns);
+                insert_elixir_map_field_assigns_in_events(finally_events, field_assigns);
+            }
+            _ => {}
+        }
+
+        let inserts = match &events[index] {
+            FlowEvent::Assign { span, target, .. } => field_assigns
+                .iter()
+                .filter(|item| {
+                    item.target == *target
+                        && span.file == item.assign_span.file
+                        && span.start <= item.assign_span.end
+                        && item.assign_span.start <= span.end
+                })
+                .flat_map(|item| item.fields.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        if inserts.is_empty() {
+            index += 1;
+            continue;
+        }
+        let inserted = inserts.len();
+        events.splice((index + 1)..=index, inserts);
+        index += inserted + 1;
     }
 }
 
@@ -702,58 +1140,52 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     imports
 }
 
-/// Plug.Conn / Oban request fields read via `conn.<field>` dot access.
-/// Elixir parses `conn.query_params` (no parens) as a `call` node whose
-/// `target` is a `dot` — the kit's generic read/write extractor only
-/// recognises member-expression node kinds, so the dotted field name is
-/// never surfaced as a `Read` ref. These are the framework-supplied
-/// request fields the taint sources query; the bare receiver `conn`
-/// remains a separate, intentionally-disabled over-broad source.
-const ELIXIR_REQUEST_FIELD_READS: &[&str] = &[
-    "params",
-    "query_params",
-    "body_params",
-    "cookies",
-    "req_headers",
-    "args",
-];
+/// Elixir parses value-field syntax (`map.field`, with no argument list) as
+/// a `call` node whose target is `dot`. Classify it from the CST shape so the
+/// IDG sees a field projection rather than an unresolved receiver method.
+fn elixir_value_field_nodes<'tree>(call_node: Node<'tree>) -> Option<(Node<'tree>, Node<'tree>)> {
+    if call_node.kind() != "call"
+        || call_node.child_by_field_name("arguments").is_some()
+        || first_named_child_of_kind(&call_node, "arguments").is_some()
+    {
+        return None;
+    }
+    let target = call_node.child_by_field_name("target")?;
+    if target.kind() != "dot" {
+        return None;
+    }
+    let mut cursor = target.walk();
+    let children = target.named_children(&mut cursor).collect::<Vec<_>>();
+    let receiver = target
+        .child_by_field_name("left")
+        .or_else(|| children.first().copied())?;
+    let field = target
+        .child_by_field_name("right")
+        .or_else(|| children.last().copied())?;
+    let receiver_is_value = receiver.kind() == "identifier"
+        || (receiver.kind() == "call" && elixir_value_field_nodes(receiver).is_some());
+    (receiver_is_value && field.kind() == "identifier").then_some((receiver, field))
+}
 
-/// Surface `conn.query_params` / `job.args`-style request-field accesses as
-/// `Read` refs named after the field. Bounded to [`ELIXIR_REQUEST_FIELD_READS`]
-/// so the adapter never emits a read for arbitrary `a.b` dot access — the
-/// same targeted-synthesis convention Ruby (`QUERY_STRING`) and Lua (`arg`)
-/// use, keeping the behavioural blast radius to exactly the field names the
-/// queue/HTTP source rules bind to.
-fn synthesize_elixir_request_field_reads(tree: &Tree, src: &[u8], file: FileId) -> Vec<Ref> {
+fn collect_elixir_value_field_access_spans(tree: &Tree, file: FileId) -> Vec<bonsai_common::Span> {
+    collect_kinds(tree, &["call"])
+        .into_iter()
+        .filter(|call| elixir_value_field_nodes(*call).is_some())
+        .map(|call| span_of(file, &call))
+        .collect()
+}
+
+/// Surface every syntax-proven value-field access as a read reference. Rule
+/// matching decides which field names matter; the adapter does not carry a
+/// framework-specific field-name table.
+fn synthesize_elixir_value_field_reads(tree: &Tree, src: &[u8], file: FileId) -> Vec<Ref> {
     let mut refs = Vec::new();
     for call_node in collect_kinds(tree, &["call"]) {
-        let mut target_cursor = call_node.walk();
-        let target = match call_node.child_by_field_name("target") {
-            Some(target) => target,
-            None => match call_node.named_children(&mut target_cursor).next() {
-                Some(target) => target,
-                None => continue,
-            },
-        };
-        if target.kind() != "dot" {
-            continue;
-        }
-        // `dot` node for `recv.field` exposes the field as its last named
-        // child (the leading `.` is anonymous); older grammar revisions
-        // name it `right`.
-        let mut field_cursor = target.walk();
-        let field = match target.child_by_field_name("right") {
-            Some(field) => Some(field),
-            None => target.named_children(&mut field_cursor).last(),
-        };
-        let Some(field_node) = field else {
+        let Some((_, field_node)) = elixir_value_field_nodes(call_node) else {
             continue;
         };
-        if field_node.kind() != "identifier" {
-            continue;
-        }
         let name = node_text(&field_node, src).trim();
-        if !ELIXIR_REQUEST_FIELD_READS.contains(&name) {
+        if name.is_empty() {
             continue;
         }
         refs.push(Ref {
@@ -765,6 +1197,52 @@ fn synthesize_elixir_request_field_reads(tree: &Tree, src: &[u8], file: FileId) 
         });
     }
     refs
+}
+
+fn remove_elixir_value_field_access_calls(
+    events: &mut Vec<FlowEvent>,
+    field_access_spans: &[bonsai_common::Span],
+) {
+    let original = std::mem::take(events);
+    for mut event in original {
+        match &mut event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                remove_elixir_value_field_access_calls(then_events, field_access_spans);
+                remove_elixir_value_field_access_calls(else_events, field_access_spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                remove_elixir_value_field_access_calls(body, field_access_spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                remove_elixir_value_field_access_calls(body, field_access_spans);
+                remove_elixir_value_field_access_calls(catch_events, field_access_spans);
+                remove_elixir_value_field_access_calls(finally_events, field_access_spans);
+            }
+            _ => {}
+        }
+        let is_value_field_call = matches!(
+            &event,
+            FlowEvent::Call { span, args, .. }
+                if args.is_empty()
+                    && field_access_spans.iter().any(|field_span| {
+                        field_span.file == span.file
+                            && field_span.start < span.end
+                            && span.start < field_span.end
+                    })
+        );
+        if !is_value_field_call {
+            events.push(event);
+        }
+    }
 }
 
 fn call_target_text(call_node: &Node<'_>, src: &[u8]) -> Option<String> {

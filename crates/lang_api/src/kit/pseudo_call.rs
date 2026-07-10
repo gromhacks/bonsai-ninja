@@ -61,6 +61,7 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
             return Some(call);
         }
     }
+    let mut semantic_call_kind = CallKind::Function;
     let (name, args) = match node.kind() {
         // Go `ch <- x` channel send: lower to a synthetic `send(ch,
         // x)` call so the value `x` participates in taint flow as a
@@ -70,10 +71,12 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
         // consumer can still see the name without confusing the
         // synthesized call shape for a real `send` call.
         "send_statement" => {
+            semantic_call_kind = CallKind::ChannelSend;
             let channel = node.child_by_field_name("channel")?;
             let value = node.child_by_field_name("value")?;
             let args = vec![
                 CallArg {
+                    passing_mode: Default::default(),
                     span: span_of(file, &channel),
                     name: None,
                     place: argument_place(&channel, src),
@@ -81,6 +84,7 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
                     value_text: normalize_call_name_whitespace(node_text(&channel, src)),
                 },
                 CallArg {
+                    passing_mode: Default::default(),
                     span: span_of(file, &value),
                     name: None,
                     place: argument_place(&value, src),
@@ -116,7 +120,7 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
         receiver: None,
         receiver_types: Vec::new(),
         name,
-        call_kind: CallKind::Function,
+        call_kind: semantic_call_kind,
         args,
     })
 }
@@ -179,6 +183,7 @@ fn jsx_call_from_opening(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<Fl
             continue;
         }
         args.push(CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, &child),
             name: if attr_name.is_empty() {
                 None
@@ -221,6 +226,7 @@ fn named_child_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         call_args.push(CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, &child),
             name: None,
             place: argument_place(&child, src),
@@ -248,6 +254,7 @@ fn infix_expression_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallA
             continue;
         }
         call_args.push(CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, &child),
             name: None,
             place: argument_place(&child, src),
@@ -281,6 +288,7 @@ fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<
     let right = node.child_by_field_name("right")?;
     // The single infix argument is the right operand.
     let arg = CallArg {
+        passing_mode: Default::default(),
         span: span_of(file, &right),
         name: None,
         place: argument_place(&right, src),
@@ -355,5 +363,25 @@ mod tests {
         assert_eq!(receiver.as_deref(), Some("payload"));
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].value_text, "suffix");
+    }
+
+    #[test]
+    fn go_channel_send_carries_structural_call_kind() {
+        let src = "package p\nfunc f(ch chan string, value string) { ch <- value }";
+        let language = language_from_pack("go").expect("go pack available");
+        let mut parser = Parser::new();
+        parser.set_language(&language).expect("set language");
+        let tree = parser.parse(src, None).expect("parse succeeded");
+        let send = find_kind(tree.root_node(), "send_statement").expect("send node");
+
+        let event = pseudo_call_event(&send, FileId::INVALID, src.as_bytes())
+            .expect("channel send lowered to a Call event");
+        assert!(matches!(
+            event,
+            FlowEvent::Call {
+                call_kind: CallKind::ChannelSend,
+                ..
+            }
+        ));
     }
 }

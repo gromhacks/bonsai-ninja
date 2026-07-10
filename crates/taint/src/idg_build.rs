@@ -33,15 +33,96 @@ use bonsai_idg::IdgQueryService;
 /// removing the need for a fallback engine when the service is absent.
 #[must_use]
 pub fn ensure_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
-    if let Some(service) = db.idg_service() {
+    // Match the semantic graph used by security: diagnostic peer-method
+    // fan-out is intentionally excluded. The one compatibility concession
+    // belongs specifically to this token-level API — unresolved syntax-
+    // classified calls conservatively preserve argument/receiver taint,
+    // matching the retired worklist without changing rulepack-driven
+    // security graphs.
+    let transfer_options = bonsai_idg::TransferOptions {
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
+        include_unresolved_call_result_passthrough: true,
+        include_unresolved_receiver_result_passthrough: true,
+        ..bonsai_idg::TransferOptions::default()
+    };
+    configured_idg_service(db, &transfer_options)
+}
+
+/// Build the compatibility IDG for a public API call that supplied
+/// transfer-time source/overwrite shapes. These shapes change graph edges,
+/// so this variant deliberately does not replace the database's shared
+/// service: a later caller may use a different configuration.
+pub(crate) fn idg_service_for_inter_config(
+    db: &AnalyzerDb,
+    config: &crate::inter::InterTaintConfig,
+) -> Arc<IdgQueryService> {
+    if config.clean_output_overwrites.is_empty()
+        && config.source_output_args.is_empty()
+        && config.source_callback_args.is_empty()
+    {
+        return ensure_idg_service(db);
+    }
+    let transfer_options = bonsai_idg::TransferOptions {
+        clean_output_overwrites: config
+            .clean_output_overwrites
+            .iter()
+            .map(|shape| bonsai_idg::CleanOutputOverwriteSpec {
+                callee: shape.callee.clone(),
+                output_arg_index: shape.output_arg_index,
+                value_start_arg_index: shape.value_start_arg_index,
+            })
+            .collect(),
+        source_output_args: config
+            .source_output_args
+            .iter()
+            .map(|shape| bonsai_idg::SourceOutputArgSpec {
+                callee: shape.callee.clone(),
+                output_arg_indices: shape.output_arg_indices.clone(),
+            })
+            .collect(),
+        source_callback_args: config
+            .source_callback_args
+            .iter()
+            .map(|shape| bonsai_idg::SourceCallbackArgSpec {
+                callee: shape.callee.clone(),
+                callback_arg_index: shape.callback_arg_index,
+                source_param_indices: shape.source_param_indices.clone(),
+            })
+            .collect(),
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
+        include_field_argument_forwarding: true,
+        include_unresolved_call_result_passthrough: true,
+        include_unresolved_receiver_result_passthrough: true,
+    }
+    .canonicalized();
+    configured_idg_service(db, &transfer_options)
+}
+
+fn configured_idg_service(
+    db: &AnalyzerDb,
+    transfer_options: &bonsai_idg::TransferOptions,
+) -> Arc<IdgQueryService> {
+    let transfer_options = transfer_options.clone().canonicalized();
+    let fingerprint = transfer_options.semantic_fingerprint();
+    if let Some(service) = db.idg_service_for_semantics(fingerprint) {
         return service;
     }
+    let built = build_idg_service(db, &transfer_options);
+    db.set_idg_service_for_semantics(fingerprint, built)
+}
+
+fn build_idg_service(
+    db: &AnalyzerDb,
+    transfer_options: &bonsai_idg::TransferOptions,
+) -> Arc<IdgQueryService> {
     let global = db.global_index();
     let call_graph = build_resolved_call_graph_snapshot(db);
-    let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_paths(
+    let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
         global.as_ref(),
         &call_graph,
-        |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
         |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
         |file| {
             db.vfs()
@@ -49,12 +130,9 @@ pub fn ensure_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned())
         },
+        transfer_options,
     );
-    let service = Arc::new(IdgQueryService::new(Arc::new(ws), global));
-    db.set_idg_service(service.clone());
-    // A peer thread may have seeded the slot between our `None` check
-    // and here; prefer the cached service so all callers share one.
-    db.idg_service().unwrap_or(service)
+    Arc::new(IdgQueryService::new(Arc::new(ws), global))
 }
 
 /// Build the resolved call graph from a db. Mirrors the workspace
@@ -88,4 +166,31 @@ fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::Reso
                 .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn compatibility_idg_does_not_reuse_or_replace_default_service() {
+        let db = AnalyzerDb::new(
+            Arc::new(bonsai_vfs::Vfs::new()),
+            Arc::new(bonsai_lang_api::LanguageRegistry::new()),
+        );
+        let default_service = Arc::new(IdgQueryService::new(
+            Arc::new(bonsai_idg::IdgWorkspace::new()),
+            Arc::new(bonsai_index::GlobalIndex::new()),
+        ));
+        db.set_idg_service(default_service.clone());
+
+        let compatibility = ensure_idg_service(&db);
+        assert!(!Arc::ptr_eq(&compatibility, &default_service));
+        assert!(Arc::ptr_eq(
+            &db.idg_service().expect("default service remains seeded"),
+            &default_service
+        ));
+        assert!(Arc::ptr_eq(&ensure_idg_service(&db), &compatibility));
+    }
 }

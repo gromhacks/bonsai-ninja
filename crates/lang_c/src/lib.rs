@@ -128,6 +128,14 @@ impl LanguageAdapter for CAdapter {
         }
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
+            let has_variadic_param = decl
+                .params
+                .iter()
+                .any(|param| param == bonsai_lang_api::kit::SYNTHETIC_VARARGS_PARAM);
+            bonsai_lang_api::kit::normalize_c_variadic_builtin_flow(
+                &mut decl.flow_events,
+                has_variadic_param,
+            );
             inject_c_lifecycle_events(&mut decl.flow_events);
         }
         decl_index

@@ -235,6 +235,14 @@ impl LanguageAdapter for CppAdapter {
         // C++-specific addition.
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
+            let has_variadic_param = decl
+                .params
+                .iter()
+                .any(|param| param == bonsai_lang_api::kit::SYNTHETIC_VARARGS_PARAM);
+            bonsai_lang_api::kit::normalize_c_variadic_builtin_flow(
+                &mut decl.flow_events,
+                has_variadic_param,
+            );
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, CPP_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
