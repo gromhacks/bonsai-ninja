@@ -402,9 +402,7 @@ let mut write = exact_graphs.write();
 write.entry(key).or_insert(computed).clone()
 ```
 
-The `cache_or_insert_with` helper in
-`crates/taint/src/inter/mod.rs` and the workspace cache helpers
-all follow this shape. New cache code should too.
+The workspace cache helpers follow this shape. New cache code should too.
 
 ## 14. Engine entry points are CONTEXTLESS_LOOKUP_JUSTIFICATION marked
 

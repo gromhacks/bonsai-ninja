@@ -98,19 +98,6 @@ pub(crate) fn qualified_access_bases(text: &str) -> Vec<String> {
     bases
 }
 
-/// Return every qualified access expression (`a.b`, `a.b.c`) appearing
-/// in `text`. Used by helpers that need the full dotted path, not just
-/// the base — e.g. for matching a known taint shape like `param.cmd`.
-pub(crate) fn qualified_accesses(text: &str) -> Vec<String> {
-    let mut accesses = Vec::new();
-    // Run the scan twice — once on raw, once on normalised — so we
-    // capture both syntactic forms callers might already have indexed.
-    collect_qualified_accesses(&text.replace("->", "."), &mut accesses);
-    let normalised = normalise_qualified_text(text);
-    collect_qualified_accesses(&normalised, &mut accesses);
-    accesses
-}
-
 /// Tokenise `text` into identifier-like segments and append each
 /// segment's base (everything before its first `.`) to `bases`.
 fn collect_qualified_access_bases(text: &str, bases: &mut Vec<String>) {
@@ -153,59 +140,6 @@ fn push_qualified_base(segment: &str, bases: &mut Vec<String>) {
         && !bases.iter().any(|existing| existing == sigil_stripped)
     {
         bases.push(sigil_stripped.to_string());
-    }
-}
-
-/// Tokenise `text` and append each multi-segment dotted access to `accesses`.
-/// Skips text inside string literals so `"a.b" + c` doesn't yield `a.b`.
-fn collect_qualified_accesses(text: &str, accesses: &mut Vec<String>) {
-    let mut segment = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for ch in text.chars().chain(std::iter::once(' ')) {
-        if let Some(open_quote) = quote {
-            // Inside a string literal — track escapes and the closing quote only.
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == open_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            // Entering a string literal flushes whatever segment was in flight.
-            push_qualified_access(&segment, accesses);
-            segment.clear();
-            quote = Some(ch);
-            continue;
-        }
-        if ch == '.' || ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_ascii_alphanumeric() {
-            segment.push(ch);
-            continue;
-        }
-        push_qualified_access(&segment, accesses);
-        segment.clear();
-    }
-}
-
-/// Push one segment's normalised dotted form when it actually
-/// contains a `.` (single-token segments aren't qualified accesses).
-fn push_qualified_access(segment: &str, accesses: &mut Vec<String>) {
-    if !segment.contains('.') {
-        return;
-    }
-    let cleaned = segment
-        .trim()
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
-        .trim_matches('.');
-    // Re-check the dot after trimming — `.foo.` could be left as `foo`.
-    if cleaned.is_empty() || !cleaned.contains('.') {
-        return;
-    }
-    if !accesses.iter().any(|existing| existing == cleaned) {
-        accesses.push(cleaned.to_string());
     }
 }
 

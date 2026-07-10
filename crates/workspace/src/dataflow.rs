@@ -40,6 +40,8 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
+// v30 (2026-07-09): call arguments carry AST-derived passing modes and
+// destructuring assignments carry an explicit aggregate-binding kind.
 // v29 (2026-07-01): graph materialization no longer seeds callee/module
 // target components as taint carriers and assignment-RHS tainted call
 // terminals store the exact call span instead of the broader assignment span.
@@ -47,7 +49,7 @@ use std::{
 // method-receiver-base source exemption + container-input span
 // containment, service.rs return-position source-seeding fallback) and
 // adapter member synthesis alter propagated taint facts.
-pub const DATAFLOW_CACHE_VERSION: u32 = 29;
+pub const DATAFLOW_CACHE_VERSION: u32 = 31;
 static SIDECAR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);

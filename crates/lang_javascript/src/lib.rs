@@ -624,6 +624,7 @@ enum DefaultExportTarget {
 struct JsDestructureSource {
     assign_span: bonsai_common::Span,
     target: String,
+    base: String,
     source: String,
 }
 
@@ -690,6 +691,7 @@ fn collect_js_object_pattern_sources(
                 if !target.is_empty() {
                     out.push(JsDestructureSource {
                         assign_span,
+                        base: base.to_string(),
                         source: format!("{base}.{target}"),
                         target,
                     });
@@ -708,6 +710,7 @@ fn collect_js_object_pattern_sources(
                 if let Some(target) = js_destructure_target_name(value_node, src) {
                     out.push(JsDestructureSource {
                         assign_span,
+                        base: base.to_string(),
                         source: format!("{base}.{key}"),
                         target,
                     });
@@ -721,6 +724,7 @@ fn collect_js_object_pattern_sources(
                 if !target.is_empty() {
                     out.push(JsDestructureSource {
                         assign_span,
+                        base: base.to_string(),
                         source: format!("{base}.{target}"),
                         target,
                     });
@@ -745,32 +749,10 @@ fn js_destructure_target_name(node: Node<'_>, src: &[u8]) -> Option<String> {
     }
 }
 
-fn rewrite_destructuring_sources_in_events(events: &mut [FlowEvent], rewrites: &[JsDestructureSource]) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                span,
-                target,
-                source_name,
-                source_call,
-                source_call_args,
-                source_names,
-                value_kind,
-                ..
-            } => {
-                let Some(rewrite) = rewrites
-                    .iter()
-                    .find(|item| item.target == *target && spans_overlap_or_contain(*span, item.assign_span))
-                else {
-                    continue;
-                };
-                *source_name = Some(rewrite.source.clone());
-                *source_call = None;
-                source_call_args.clear();
-                source_names.clear();
-                source_names.push(rewrite.source.clone());
-                *value_kind = Some(bonsai_lang_api::AssignValueKind::Compound);
-            }
+fn rewrite_destructuring_sources_in_events(events: &mut Vec<FlowEvent>, rewrites: &[JsDestructureSource]) {
+    let original = std::mem::take(events);
+    for mut event in original {
+        match &mut event {
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -794,7 +776,58 @@ fn rewrite_destructuring_sources_in_events(events: &mut [FlowEvent], rewrites: &
             }
             _ => {}
         }
+
+        let rewrite = match &event {
+            FlowEvent::Assign { span, target, .. } => rewrites
+                .iter()
+                .find(|item| item.target == *target && spans_overlap_or_contain(*span, item.assign_span)),
+            _ => None,
+        };
+        if let Some(rewrite) = rewrite {
+            // Destructuring consumes both the aggregate and one exact field. Keep
+            // those as separate events: the IDG source filter intentionally does
+            // not let a structural `base` source shadow the exact `base.field`
+            // source on the same event. The shared target/span interns one Write
+            // node with both incoming edges.
+            let mut aggregate_event = event.clone();
+            set_destructuring_assignment_source(
+                &mut aggregate_event,
+                &rewrite.base,
+                bonsai_lang_api::AssignValueKind::Destructure,
+            );
+            set_destructuring_assignment_source(
+                &mut event,
+                &rewrite.source,
+                bonsai_lang_api::AssignValueKind::Compound,
+            );
+            events.push(aggregate_event);
+        }
+        events.push(event);
     }
+}
+
+fn set_destructuring_assignment_source(
+    event: &mut FlowEvent,
+    source: &str,
+    assignment_kind: bonsai_lang_api::AssignValueKind,
+) {
+    let FlowEvent::Assign {
+        source_name,
+        source_call,
+        source_call_args,
+        source_names,
+        value_kind,
+        ..
+    } = event
+    else {
+        return;
+    };
+    *source_name = Some(source.to_string());
+    *source_call = None;
+    source_call_args.clear();
+    source_names.clear();
+    source_names.push(source.to_string());
+    *value_kind = Some(assignment_kind);
 }
 
 #[derive(Clone, Debug)]

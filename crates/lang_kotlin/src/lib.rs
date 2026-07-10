@@ -131,6 +131,7 @@ impl LanguageAdapter for KotlinAdapter {
                 if let Some(aliases) = aliases_by_span.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
                 }
+                classify_kotlin_constructor_calls(&mut decl.flow_events, &decl.type_aliases);
             }
             let class_aliases_by_span = collect_kotlin_class_type_aliases(&tree, file, src);
             let class_spans_by_symbol: std::collections::HashMap<_, _> = idx
@@ -223,6 +224,7 @@ impl LanguageAdapter for KotlinAdapter {
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, KOTLIN_LIFECYCLE_TRANSITIONS);
         }
         qualify_kotlin_implicit_member_reads(&mut idx);
+        bonsai_lang_api::kit::qualify_bare_hierarchy_member_calls(&mut idx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -239,6 +241,83 @@ impl LanguageAdapter for KotlinAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Reclassify Kotlin call expressions as constructors when the surrounding
+/// property binding supplies matching static type evidence.
+///
+/// The Kotlin CST uses the same `call_expression` node for `File(...)` and a
+/// top-level function call, so syntax alone cannot distinguish them. The
+/// adapter's property pass has already produced `target -> Type` aliases from
+/// explicit annotations or constructor-shaped RHS syntax. Joining that fact
+/// with the exact assignment/call span gives downstream graph builders a real
+/// `CallKind::Constructor` without teaching them class or API names.
+fn classify_kotlin_constructor_calls(events: &mut [FlowEvent], type_aliases: &[TypeAliasBinding]) {
+    let constructor_assignments = events
+        .iter()
+        .filter_map(|event| {
+            let FlowEvent::Assign {
+                span,
+                target,
+                source_call: Some(source_call),
+                ..
+            } = event
+            else {
+                return None;
+            };
+            let bound_type = type_aliases
+                .iter()
+                .find(|alias| alias.name == *target)
+                .map(|alias| kotlin_call_tail(&alias.type_name))?;
+            (kotlin_call_tail(source_call) == bound_type).then(|| (*span, source_call.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                call_kind,
+                ..
+            } if matches!(call_kind, CallKind::Function | CallKind::Method)
+                && constructor_assignments.iter().any(|(assign_span, source_call)| {
+                    assign_span.file == span.file
+                        && assign_span.start <= span.start
+                        && span.end <= assign_span.end
+                        && source_call == name
+                }) =>
+            {
+                *call_kind = CallKind::Constructor;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                classify_kotlin_constructor_calls(then_events, type_aliases);
+                classify_kotlin_constructor_calls(else_events, type_aliases);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                classify_kotlin_constructor_calls(body, type_aliases);
+                classify_kotlin_constructor_calls(catch_events, type_aliases);
+                classify_kotlin_constructor_calls(finally_events, type_aliases);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                classify_kotlin_constructor_calls(body, type_aliases);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn kotlin_call_tail(name: &str) -> &str {
+    name.rsplit(['.', ':', '\\']).next().unwrap_or(name).trim()
 }
 
 fn qualify_kotlin_implicit_member_reads(index: &mut DeclIndex) {
@@ -264,10 +343,10 @@ fn qualify_kotlin_implicit_member_reads(index: &mut DeclIndex) {
         collect_assign_targets(&decl.flow_events, &mut locals);
         rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
             ImplicitMemberReadCall {
-                source_call: name.to_string(),
-                call_name: name.to_string(),
-                receiver: None,
-                call_kind: CallKind::Function,
+                source_call: format!("this.{name}"),
+                call_name: format!("this.{name}"),
+                receiver: Some("this".to_string()),
+                call_kind: CallKind::Method,
             }
         });
     }

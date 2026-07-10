@@ -366,6 +366,7 @@ dependencies = [
  "bonsai_hash",
  "bonsai_index",
  "bonsai_lang_api",
+ "bonsai_resolve",
  "parking_lot",
  "rayon",
  "regex",

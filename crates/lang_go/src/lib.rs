@@ -704,6 +704,7 @@ fn go_call_event_from_parts(span: Span, callee: &str, args: Vec<String>, file: F
                 let source_names = go_value_source_names(&value_text);
                 let place = go_argument_place(&value_text);
                 CallArg {
+                    passing_mode: Default::default(),
                     span: Span::new(file, span.start, span.end),
                     name: None,
                     value_text,

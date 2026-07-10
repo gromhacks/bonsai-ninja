@@ -1270,6 +1270,8 @@ fn add_resolved_call_edges(
                     folded_call_name_receiver_is_instance(name, candidate, receiver_types)
                 });
                 let semantic_receiver = receiver.as_deref().or(folded_receiver);
+                let local_value_shadow = semantic_receiver.is_none()
+                    && local_value_binding_shadows_callable(&caller_decl.flow_events, short, *span);
                 let mut candidates = collect_local_callable_binding_targets(
                     local_bindings,
                     name,
@@ -1277,6 +1279,7 @@ fn add_resolved_call_edges(
                     alias_qualified_call,
                 );
                 let candidates_from_callable_binding = !candidates.is_empty();
+                let mut candidates_from_dynamic_param_receiver = false;
                 if candidates.is_empty() && semantic_receiver.is_none() && !alias_qualified_call {
                     candidates = collect_nested_local_callable_targets(global, caller_decl, name, *span);
                 }
@@ -1330,6 +1333,36 @@ fn add_resolved_call_edges(
                         method_candidate_cache,
                     );
                 }
+                if candidates.is_empty() {
+                    candidates = collect_dynamic_param_receiver_method_target(
+                        global,
+                        caller_decl,
+                        semantic_receiver,
+                        name,
+                    );
+                    candidates_from_dynamic_param_receiver = !candidates.is_empty();
+                }
+                // A bare call binds to a callable declared in the caller's
+                // lexical scope before an imported member of the same name.
+                // Resolve that scope before `collect_qualified_workspace_targets`,
+                // whose import-oriented lookup intentionally follows alias
+                // targets. This matters for Python/Erlang-style imports that
+                // are subsequently shadowed by a local declaration.
+                if candidates.is_empty()
+                    && semantic_receiver.is_none()
+                    && !local_value_shadow
+                    && fast_local_callable_reference_name(name)
+                {
+                    candidates = collect_callable_targets_with_context_aliases_and_paths(
+                        global,
+                        name,
+                        caller_decl,
+                        alias_targets,
+                        path_for_file,
+                        file_path_parts,
+                        callable_target_cache,
+                    );
+                }
                 let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
                 if candidates.is_empty() && !typed_receiver_method {
                     candidates = collect_qualified_workspace_targets(
@@ -1348,8 +1381,6 @@ fn add_resolved_call_edges(
                     && *call_kind == CallKind::Method
                     && semantic_receiver.is_some()
                     && !alias_qualified_call;
-                let local_value_shadow = semantic_receiver.is_none()
-                    && local_value_binding_shadows_callable(&caller_decl.flow_events, short, *span);
                 if candidates.is_empty() && !unresolved_method_receiver && !local_value_shadow {
                     candidates = collect_callable_targets_with_context_aliases_and_paths(
                         global,
@@ -1492,7 +1523,10 @@ fn add_resolved_call_edges(
                         &mut candidates,
                     );
                 }
-                if !candidates.is_empty() && !candidates_from_callable_binding {
+                if !candidates.is_empty()
+                    && !candidates_from_callable_binding
+                    && !candidates_from_dynamic_param_receiver
+                {
                     retain_semantic_receiver_evidenced_candidates(
                         global,
                         caller_decl,
@@ -1708,6 +1742,7 @@ fn add_resolved_call_edges(
                 let args = source_call_args
                     .iter()
                     .map(|value_text| CallArg {
+                        passing_mode: Default::default(),
                         span: *span,
                         name: None,
                         value_text: value_text.clone(),
@@ -2670,11 +2705,12 @@ pub fn collect_workspace_local_callable_bindings(
             // resolves. Without this, locally-bound lambdas invoked as
             // `f.accept(x)` / `f.call(x)` never enter the workspace
             // binding map and lambda bodies go unreachable.
-            let hosts_nested_callable = decls.iter().any(|other| {
-                other.symbol != decl.symbol
-                    && other.kind == DeclKind::Function
-                    && span_contains_or_equal(decl.span, other.span)
-            });
+            let hosts_nested_callable =
+                decls.iter().any(|other| {
+                    other.symbol != decl.symbol
+                        && other.kind == DeclKind::Function
+                        && span_contains_or_equal(decl.span, other.span)
+                }) || flow_event_assignment_hosts_nested_callable(&decl.flow_events, decls, decl.symbol);
             if !hosts_nested_callable && !flow_events_contain_callable_reference_assignment(&decl.flow_events)
             {
                 continue;
@@ -2694,6 +2730,57 @@ pub fn collect_workspace_local_callable_bindings(
         }
     }
     out
+}
+
+fn flow_event_assignment_hosts_nested_callable(
+    events: &[FlowEvent],
+    decls: &[Decl],
+    caller: bonsai_common::SymbolId,
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Assign { span, .. } => {
+                if decls.iter().any(|candidate| {
+                    candidate.symbol != caller
+                        && candidate.kind == DeclKind::Function
+                        && span_contains_or_equal(*span, candidate.span)
+                }) {
+                    return true;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if flow_event_assignment_hosts_nested_callable(then_events, decls, caller)
+                    || flow_event_assignment_hosts_nested_callable(else_events, decls, caller)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if flow_event_assignment_hosts_nested_callable(body, decls, caller) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if flow_event_assignment_hosts_nested_callable(body, decls, caller)
+                    || flow_event_assignment_hosts_nested_callable(catch_events, decls, caller)
+                    || flow_event_assignment_hosts_nested_callable(finally_events, decls, caller)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bool {
@@ -2719,8 +2806,13 @@ fn flow_events_contain_callable_reference_assignment(events: &[FlowEvent]) -> bo
                 // reaches the resolver. Keep the pre-filter consistent with
                 // the collector it gates.
                 if source_call.is_none()
-                    && quoted_runtime_callable_literal(target, source_name.as_deref(), source_names, *value_kind)
-                        .is_some()
+                    && quoted_runtime_callable_literal(
+                        target,
+                        source_name.as_deref(),
+                        source_names,
+                        *value_kind,
+                    )
+                    .is_some()
                 {
                     return true;
                 }
@@ -4574,8 +4666,8 @@ fn alias_targets_for_decl(
 
 /// Receiver-alias normalisation used at callgraph build time.
 /// Strips outer parentheses (`(repo).run()` → `repo.run()`),
-/// reference sigils (`&str`, `*const T`), and rewrites C/C++/PHP
-/// `->` member access to `.` form.
+/// identifier/reference sigils (`$value`, `@items`, `&str`, `*ptr`),
+/// and rewrites C/C++/PHP `->` member access to `.` form.
 ///
 /// Intentionally simpler than `bonsai_taint::text::normalise_qualified_text`
 /// — the taint engine's variant additionally handles bracket-depth-
@@ -4590,7 +4682,7 @@ fn normalize_receiver_alias_text(receiver: &str) -> String {
     while text.starts_with('(') && text.ends_with(')') && text.len() > 1 {
         text = text[1..text.len() - 1].trim();
     }
-    text.trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+    text.trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
         .replace("->", ".")
         .trim()
         .trim_matches('.')
@@ -4617,7 +4709,7 @@ fn normalized_receiver_alias_matches(candidate: &str, expected: &str) -> bool {
         text = text[1..text.len() - 1].trim();
     }
     let normalized = text
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
         .trim()
         .trim_matches('.');
     normalized == expected
@@ -5095,7 +5187,8 @@ fn collect_callable_targets_with_context_aliases_and_paths(
     file_path_parts: &AHashMap<FileId, Vec<String>>,
     callable_target_cache: &mut CallableTargetCache,
 ) -> Vec<FuncId> {
-    let mut targets = collect_implicit_receiver_method_targets(global, caller_decl, name);
+    let mut targets =
+        collect_implicit_receiver_method_targets(global, caller_decl, name, alias_targets, path_for_file);
     if !targets.is_empty() {
         return targets;
     }
@@ -5154,6 +5247,51 @@ fn collect_c_linked_callable_targets(
     targets
 }
 
+/// Resolve a method invoked on an untyped function parameter when adapter
+/// declaration facts still prove a unique local method target.
+///
+/// This is deliberately narrower than a bare method-name fallback: the
+/// receiver must be a declared parameter, the candidate must be the sole
+/// `DeclKind::Method` declaration with that name in the caller's own file.
+/// This uses adapter-emitted semantic kinds instead of a language-name table
+/// and does not connect an opaque receiver to a same-named function elsewhere
+/// in the workspace.
+fn collect_dynamic_param_receiver_method_target(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    receiver: Option<&str>,
+    name: &str,
+) -> Vec<FuncId> {
+    let Some(receiver) = receiver else {
+        return Vec::new();
+    };
+    let receiver = normalize_receiver_alias_text(receiver);
+    if receiver.is_empty()
+        || !caller_decl
+            .params
+            .iter()
+            .any(|param| normalized_receiver_alias_matches(param, &receiver))
+    {
+        return Vec::new();
+    }
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return Vec::new();
+    };
+    let method_name = short_callee(name);
+    let mut candidates = global
+        .decls_in(caller_file)
+        .iter()
+        .filter(|decl| decl.name == method_name && matches!(decl.kind, DeclKind::Method))
+        .map(|decl| FuncId::new(decl.symbol.raw()))
+        .collect::<Vec<_>>();
+    dedup_func_ids(&mut candidates);
+    if candidates.len() == 1 {
+        candidates
+    } else {
+        Vec::new()
+    }
+}
+
 fn c_family_linked_language(language: Option<&'static str>) -> bool {
     matches!(language, Some("c" | "cpp" | "objc"))
 }
@@ -5162,6 +5300,8 @@ fn collect_implicit_receiver_method_targets(
     global: &GlobalIndex,
     caller_decl: &Decl,
     name: &str,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
 ) -> Vec<FuncId> {
     if caller_decl.implicit_receiver_names.is_empty() {
         return Vec::new();
@@ -5172,30 +5312,24 @@ fn collect_implicit_receiver_method_targets(
     let Some(parent) = caller_decl.parent else {
         return Vec::new();
     };
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
+        .with_alias_map(alias_targets)
+        .with_file_path_lookup(path_for_file);
     let mut targets = Vec::new();
     let mut seen = AHashSet::new();
-    // CONTEXTLESS_LOOKUP_JUSTIFICATION: implicit receiver dispatch is
-    // narrowed by exact parent SymbolId before emitting any edge. This
-    // is equivalent to looking up methods on the caller's enclosing
-    // class/trait, not a workspace-wide bare-name call resolution.
-    for symbol in global.find_by_name(name) {
-        let Some(decl) = global.decl_of(*symbol) else {
-            continue;
-        };
-        if decl.parent != Some(parent) {
-            continue;
-        }
-        if !matches!(
-            decl.kind,
-            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-        ) {
-            continue;
-        }
-        let func = FuncId::new(decl.symbol.raw());
-        if seen.insert(func) {
-            targets.push(func);
-        }
-    }
+    let mut method_cache = MethodCandidateCache::default();
+    collect_method_candidates_for_class_cached(
+        global,
+        parent,
+        name,
+        &ctx,
+        &mut seen,
+        &mut targets,
+        &mut method_cache,
+    );
     targets
 }
 
@@ -5256,6 +5390,8 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     let folded_receiver = receiver_name_from_call_name(name)
         .filter(|candidate| folded_call_name_receiver_is_instance(name, candidate, receiver_types));
     let semantic_receiver = receiver.or(folded_receiver);
+    let local_value_shadow = semantic_receiver.is_none()
+        && local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span);
     let mut targets = if semantic_receiver.is_none() {
         collect_nested_local_callable_targets(global, caller_decl, name, call_span)
     } else {
@@ -5313,6 +5449,21 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             &mut method_candidate_cache,
         );
     }
+    if targets.is_empty()
+        && semantic_receiver.is_none()
+        && !local_value_shadow
+        && fast_local_callable_reference_name(name)
+    {
+        targets = collect_callable_targets_with_context_aliases_and_paths(
+            global,
+            name,
+            caller_decl,
+            alias_targets,
+            path_for_file,
+            &file_path_parts,
+            &mut callable_target_cache,
+        );
+    }
     let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
     if targets.is_empty() && !typed_receiver_method {
         targets = collect_qualified_workspace_targets(
@@ -5329,8 +5480,6 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     }
     let unresolved_method_receiver =
         targets.is_empty() && call_kind == CallKind::Method && semantic_receiver.is_some();
-    let local_value_shadow = semantic_receiver.is_none()
-        && local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span);
     if targets.is_empty() && !unresolved_method_receiver && !local_value_shadow {
         targets = collect_callable_targets_with_context_aliases_and_paths(
             global,

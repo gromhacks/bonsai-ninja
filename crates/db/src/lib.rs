@@ -48,10 +48,13 @@ struct DbInner {
     /// open/index time via [`AnalyzerDb::set_idg_service`]. Consumers
     /// (value-flow, security analysis, browse, dump, export, inspect)
     /// fetch the service via [`AnalyzerDb::idg_service`] and run their
-    /// dataflow queries against it instead of repeatedly invoking the
-    /// per-source interprocedural taint engine. Cleared on file edit
-    /// because cross-file edges may have shifted.
+    /// dataflow queries against it. Cleared on file edit because cross-file
+    /// edges may have shifted.
     idg_service: RwLock<Option<Arc<IdgQueryService>>>,
+    /// Configured IDGs keyed by the canonical transfer-option fingerprint.
+    /// Keeping these separate from `idg_service` prevents query order from
+    /// reusing a graph built with different edge semantics.
+    idg_services_by_semantics: RwLock<AHashMap<u64, Arc<IdgQueryService>>>,
 }
 
 #[derive(Default)]
@@ -107,6 +110,7 @@ impl AnalyzerDb {
                 cache: RwLock::new(Caches::default()),
                 workspace_root: RwLock::new(None),
                 idg_service: RwLock::new(None),
+                idg_services_by_semantics: RwLock::new(AHashMap::new()),
             }),
         }
     }
@@ -132,18 +136,39 @@ impl AnalyzerDb {
         *self.inner.idg_service.write() = Some(service);
     }
 
-    /// Workspace-wide IDG query service, if seeded. Consumers should
-    /// fall back to legacy per-source engine paths when this returns
-    /// `None` (only happens in adapter / unit tests that bypass the
-    /// workspace open path).
+    /// Workspace-wide default IDG query service, if seeded. Consumers with
+    /// transfer options use the fingerprint-keyed service cache instead;
+    /// there is no alternate interprocedural engine.
     pub fn idg_service(&self) -> Option<Arc<IdgQueryService>> {
         self.inner.idg_service.read().clone()
+    }
+
+    /// Configured IDG matching one exact transfer-option fingerprint.
+    pub fn idg_service_for_semantics(&self, fingerprint: u64) -> Option<Arc<IdgQueryService>> {
+        self.inner
+            .idg_services_by_semantics
+            .read()
+            .get(&fingerprint)
+            .cloned()
+    }
+
+    /// Cache a configured IDG without replacing the workspace's default
+    /// service slot. Returns the established service when another thread won
+    /// the race to seed the same semantics.
+    pub fn set_idg_service_for_semantics(
+        &self,
+        fingerprint: u64,
+        service: Arc<IdgQueryService>,
+    ) -> Arc<IdgQueryService> {
+        let mut services = self.inner.idg_services_by_semantics.write();
+        services.entry(fingerprint).or_insert(service).clone()
     }
 
     /// Drop the cached IDG service. Called by the workspace on file
     /// edit so a stale service cannot poison subsequent queries.
     pub fn invalidate_idg_service(&self) {
         *self.inner.idg_service.write() = None;
+        self.inner.idg_services_by_semantics.write().clear();
     }
 
     /// Underlying VFS handle. Use this when extracting raw file

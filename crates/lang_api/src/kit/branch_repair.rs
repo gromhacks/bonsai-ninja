@@ -343,8 +343,7 @@ fn find_keyword_outside_identifier(text: &str, keyword: &str) -> Option<usize> {
             byte_idx += 1;
             continue;
         }
-        if byte_idx + needle.len() <= haystack.len()
-            && &haystack[byte_idx..byte_idx + needle.len()] == needle
+        if byte_idx + needle.len() <= haystack.len() && &haystack[byte_idx..byte_idx + needle.len()] == needle
         {
             // Whole-word: neither neighbour byte is an identifier-continue.
             let prev_byte_ok = byte_idx == 0 || !is_ident_continue_byte(haystack[byte_idx - 1]);

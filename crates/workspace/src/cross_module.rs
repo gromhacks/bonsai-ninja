@@ -583,6 +583,7 @@ impl<'a> TraceBuilder<'a> {
             CallKind::Method => format!("Method call {}", site.name),
             CallKind::Macro => format!("Macro {}", site.name),
             CallKind::Indirect => format!("Indirect call {}", site.name),
+            CallKind::ChannelSend => format!("Channel send {}", site.name),
             CallKind::Function => format!("Call {}", site.name),
         };
 

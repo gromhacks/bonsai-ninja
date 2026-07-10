@@ -4,9 +4,9 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CapabilityLevel, DeclIndex, FieldWrite, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, CallKind, CapabilityLevel, DeclIndex, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    TypeAliasVocabulary, Visibility, NO_CONSTRUCTOR_METHOD_NAMES,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -93,7 +93,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_kinds: &[],
     method_context_kinds: &["impl_item", "trait_item"],
     constructor_method_kinds: &[],
-    constructor_names: &["new"],
+    constructor_names: NO_CONSTRUCTOR_METHOD_NAMES,
     // `if_expression` is the canonical conditional. `match_expression`
     // joins it so each arm's pattern bindings (e.g. `Some(v) => sink(v)`)
     // are emitted as Assigns scoped to the arm body. Without this the
@@ -183,13 +183,10 @@ impl LanguageAdapter for RustAdapter {
             pattern_matching: CapabilityLevel::Exact,
             receiver_types: CapabilityLevel::Partial,
             module_export_aliases: &[],
-            // Rust has no constructor keyword; the idiomatic
-            // associated function is `new`. The cross-language
-            // fallback also accepts `new`, but declaring it here
-            // narrows other-language entries (`__init__`,
-            // `__construct`, `init`) so a same-named Rust method
-            // isn't mis-recognised as a constructor.
-            constructor_method_names: &["new"],
+            // Rust has no constructor keyword or reserved factory name.
+            // Associated functions are classified from their `-> Self`
+            // return plus `Self { ... }` / `Self(...)` AST shape below.
+            constructor_method_names: NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["self"],
         }
@@ -204,6 +201,7 @@ impl LanguageAdapter for RustAdapter {
             let arm_spans = collect_rust_match_arm_spans(&tree, src, file);
             let spawn_body_spans = collect_rust_spawn_body_spans(&tree, src, file);
             let struct_literal_field_assigns = collect_rust_struct_literal_field_assigns(&tree, file, src);
+            let self_constructor_call_spans = collect_rust_self_constructor_call_spans(&tree, file, src);
             for decl in &mut idx.defs {
                 enrich_rust_struct_literal_field_assigns(
                     &mut decl.flow_events,
@@ -211,6 +209,7 @@ impl LanguageAdapter for RustAdapter {
                 );
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
                 isolate_rust_spawn_bodies(&mut decl.flow_events, &spawn_body_spans);
+                classify_rust_self_constructor_calls(&mut decl.flow_events, &self_constructor_call_spans);
                 enrich_rust_format_macro_operands(&mut decl.flow_events);
                 enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
                 enrich_rust_constructor_field_writes(decl);
@@ -278,6 +277,7 @@ impl LanguageAdapter for RustAdapter {
             }
             apply_rust_tuple_struct_field_aliases(&mut idx, &tuple_struct_field_aliases);
             enrich_rust_self_tuple_constructor_returns(&mut idx);
+            classify_rust_declared_constructor_calls(&mut idx);
         }
         // Append `FlowEvent::Lifecycle` for recognised Rust
         // resource transitions (`drop`, `Box::from_raw`,
@@ -291,15 +291,70 @@ impl LanguageAdapter for RustAdapter {
         // typed dispatch through stable instance state is an O(1)
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
-        // Local constructor-result receiver typing (`new Foo()` / `Foo()` / `Foo::new()` -> typed receiver) so `recv.method(...)` resolves
-        // `receiver_type_in` / `[Type, method]` rules; the constructor heuristic only
-        // types PascalCase callees, so language exported-function calls are unaffected.
+        // Propagate adapter-classified constructor result types onto local
+        // receivers so later method dispatch consumes the same semantic fact.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Classify tuple-struct construction through Rust's `Self(...)` type
+/// syntax.  The generic extractor sees the function position as an
+/// identifier, but the Rust AST makes this a type construction rather
+/// than an arbitrary function call.  Keeping the decision on exact AST
+/// spans preserves projected argument state through newtype wrappers
+/// without teaching the dataflow engine any factory or API names.
+fn collect_rust_self_constructor_call_spans(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashSet<bonsai_common::Span> {
+    collect_kinds(tree, &["call_expression"])
+        .into_iter()
+        .filter_map(|call| {
+            let function = call.child_by_field_name("function")?;
+            (function.kind() == "identifier" && node_text(&function, src).trim() == "Self")
+                .then(|| span_of(file, &function))
+        })
+        .collect()
+}
+
+fn classify_rust_self_constructor_calls(
+    events: &mut [FlowEvent],
+    constructor_spans: &std::collections::HashSet<bonsai_common::Span>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, call_kind, .. } if constructor_spans.contains(span) => {
+                *call_kind = CallKind::Constructor;
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                classify_rust_self_constructor_calls(then_events, constructor_spans);
+                classify_rust_self_constructor_calls(else_events, constructor_spans);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                classify_rust_self_constructor_calls(body, constructor_spans);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                classify_rust_self_constructor_calls(body, constructor_spans);
+                classify_rust_self_constructor_calls(catch_events, constructor_spans);
+                classify_rust_self_constructor_calls(finally_events, constructor_spans);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -403,9 +458,16 @@ fn rust_tail_return_source_name(text: &str, params: &[String]) -> Option<String>
 }
 
 fn enrich_rust_constructor_field_writes(decl: &mut bonsai_lang_api::Decl) {
-    if decl.name != "new" || decl.params.is_empty() {
+    if decl.params.is_empty()
+        || decl
+            .return_type
+            .as_deref()
+            .is_none_or(|return_type| return_type.trim() != "Self")
+    {
         return;
     }
+    let mut constructs_self = false;
+    let mut writes = Vec::new();
     for event in &decl.flow_events {
         let FlowEvent::Return {
             span,
@@ -415,17 +477,30 @@ fn enrich_rust_constructor_field_writes(decl: &mut bonsai_lang_api::Decl) {
         else {
             continue;
         };
-        for (field, value) in rust_struct_literal_field_values(value_text) {
+        let value_text = strip_rust_reference_prefix(value_text.trim());
+        if rust_self_tuple_constructor_args(value_text).is_some() {
+            constructs_self = true;
+        }
+        let field_values = rust_struct_literal_field_values(value_text);
+        if !field_values.is_empty() && value_text.trim_start().starts_with("Self") {
+            constructs_self = true;
+        }
+        for (field, value) in field_values {
             let Some(source_idx) = decl.params.iter().position(|param| param == &value) else {
                 continue;
             };
-            decl.receiver_field_writes.push(FieldWrite {
+            writes.push(FieldWrite {
                 span: *span,
                 target: format!("self.{field}"),
                 source_param_indices: vec![source_idx],
             });
         }
     }
+    if !constructs_self {
+        return;
+    }
+    decl.kind = bonsai_lang_api::DeclKind::Constructor;
+    decl.receiver_field_writes.extend(writes);
     decl.receiver_field_writes
         .sort_by_key(|write| (write.span.start, write.target.clone()));
     decl.receiver_field_writes.dedup_by(|a, b| {
@@ -510,6 +585,87 @@ fn enrich_rust_self_tuple_constructor_returns(idx: &mut DeclIndex) {
             a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
         });
         decl.kind = bonsai_lang_api::DeclKind::Constructor;
+    }
+}
+
+/// Classify scoped Rust calls from constructor declarations already
+/// proven by the adapter. This deliberately uses the declaration graph
+/// instead of a conventional factory-name list: `Type::assemble(...)`
+/// and `Type::new(...)` have identical semantics when both return a
+/// `Self { ... }` or `Self(...)` construction.
+fn classify_rust_declared_constructor_calls(idx: &mut DeclIndex) {
+    let owner_name_by_symbol = idx
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Class
+                    | bonsai_lang_api::DeclKind::Struct
+                    | bonsai_lang_api::DeclKind::Trait
+                    | bonsai_lang_api::DeclKind::Interface
+            )
+        })
+        .map(|decl| (decl.symbol, decl.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let constructors = idx
+        .defs
+        .iter()
+        .filter(|decl| decl.kind == bonsai_lang_api::DeclKind::Constructor)
+        .filter_map(|decl| {
+            let owner = decl.parent.and_then(|parent| owner_name_by_symbol.get(&parent))?;
+            Some((owner.clone(), decl.name.clone()))
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if constructors.is_empty() {
+        return;
+    }
+
+    for decl in &mut idx.defs {
+        classify_rust_constructor_calls_in_events(&mut decl.flow_events, &constructors);
+    }
+}
+
+fn classify_rust_constructor_calls_in_events(
+    events: &mut [FlowEvent],
+    constructors: &std::collections::HashSet<(String, String)>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, call_kind, .. } => {
+                let Some((owner, method)) = name.rsplit_once("::") else {
+                    continue;
+                };
+                let Some(owner) = rust_type_tail(owner) else {
+                    continue;
+                };
+                if constructors.contains(&(owner, method.to_string())) {
+                    *call_kind = CallKind::Constructor;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                classify_rust_constructor_calls_in_events(then_events, constructors);
+                classify_rust_constructor_calls_in_events(else_events, constructors);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                classify_rust_constructor_calls_in_events(body, constructors);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                classify_rust_constructor_calls_in_events(body, constructors);
+                classify_rust_constructor_calls_in_events(catch_events, constructors);
+                classify_rust_constructor_calls_in_events(finally_events, constructors);
+            }
+            _ => {}
+        }
     }
 }
 

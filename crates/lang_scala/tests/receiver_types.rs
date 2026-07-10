@@ -95,3 +95,29 @@ object Storage {
         "factory receiver call should be surfaced: {persist_calls:?}"
     );
 }
+
+#[test]
+fn parameterless_member_selection_is_not_invented_as_a_call() {
+    let db = db_with(
+        r#"
+object Transformer {
+  def transform(value: String): String = {
+    val upper = value.toUpperCase
+    upper
+  }
+}
+"#,
+    );
+    let global = db.global_index();
+    let transform = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "transform")
+        .expect("transform declaration");
+    let mut calls = Vec::new();
+    collect_calls(&transform.flow_events, &mut calls);
+    assert!(
+        calls.iter().all(|(name, _)| name != "value.toUpperCase"),
+        "a field_expression is ambiguous and must not gain call semantics without resolution: {calls:?}"
+    );
+}

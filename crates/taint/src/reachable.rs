@@ -35,6 +35,60 @@ use bonsai_lang_api::FlowEvent;
 /// themselves.
 pub type TokenSet = AHashSet<String>;
 
+pub(crate) const SYNTHETIC_RECEIVER_PARAM_NAME: &str = "receiver";
+
+/// The semantic contract used to translate source facts into IDG seed nodes.
+///
+/// Both policies consume indexed AST/flow facts. `RuleMatch` is span-anchored
+/// and field-sensitive for security rules; `LegacyTokenApi` preserves the
+/// historical public token API's sigil, call-result, and first-write behavior.
+/// Keeping the policy explicit lets every consumer share one seed composer
+/// without silently mixing the two contracts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum IdgSeedPolicy {
+    RuleMatch,
+    LegacyTokenApi,
+}
+
+/// Input to [`compose_idg_seed_nodes`].
+#[derive(Copy, Clone, Debug)]
+pub struct IdgSeedRequest<'a> {
+    func: FuncId,
+    names: &'a TokenSet,
+    anchor: Option<Span>,
+    output_arg_names: &'a [String],
+    policy: IdgSeedPolicy,
+}
+
+impl<'a> IdgSeedRequest<'a> {
+    #[must_use]
+    pub fn rule_match(
+        func: FuncId,
+        names: &'a TokenSet,
+        anchor: Option<Span>,
+        output_arg_names: &'a [String],
+    ) -> Self {
+        Self {
+            func,
+            names,
+            anchor,
+            output_arg_names,
+            policy: IdgSeedPolicy::RuleMatch,
+        }
+    }
+
+    #[must_use]
+    pub fn legacy_tokens(func: FuncId, names: &'a TokenSet) -> Self {
+        Self {
+            func,
+            names,
+            anchor: None,
+            output_arg_names: &[],
+            policy: IdgSeedPolicy::LegacyTokenApi,
+        }
+    }
+}
+
 /// Browse-fact kinds the reachability pass classifies tokens into.
 /// Mirrors the
 /// set `bonsai-ninja`'s browse commands expose (`defs`, `calls`,
@@ -122,6 +176,13 @@ pub struct TaintedCallEdge {
     pub tainted_args: Vec<crate::inter::TaintedArg>,
     #[serde(default = "default_graph_precision")]
     pub precision: Precision,
+    /// Resolver sub-kind retained from the IDG cross-call edge.
+    #[serde(default = "default_call_edge_kind")]
+    pub edge_kind: bonsai_callgraph::EdgeKind,
+}
+
+fn default_call_edge_kind() -> bonsai_callgraph::EdgeKind {
+    bonsai_callgraph::EdgeKind::Direct
 }
 
 impl KindedTokens {
@@ -530,6 +591,7 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
                 call_span: record.call_span,
                 tainted_args: record.tainted_args.clone(),
                 precision: record.edge_precision,
+                edge_kind: record.edge_kind,
             })
             .collect();
         graph.tainted_calls.clone_from(&graph_result.tainted_calls);
@@ -979,7 +1041,29 @@ pub fn merge_into(target: &mut KindedTokens, other: &KindedTokens) {
     }
 }
 
-fn source_seed_nodes_from_idg(
+/// Canonical source-fact to IDG-node composer used by taint, security, and
+/// compatibility APIs. Policy selects semantics; graph-node lookup and
+/// deterministic normalization live in this one implementation.
+#[must_use]
+pub fn compose_idg_seed_nodes(
+    request: IdgSeedRequest<'_>,
+    global: &GlobalIndex,
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    match request.policy {
+        IdgSeedPolicy::RuleMatch => rule_match_seed_nodes(
+            request.func,
+            request.names,
+            request.anchor,
+            request.output_arg_names,
+            global,
+            idg,
+        ),
+        IdgSeedPolicy::LegacyTokenApi => legacy_token_seed_nodes(request.func, request.names, global, idg),
+    }
+}
+
+fn rule_match_seed_nodes(
     source_func: FuncId,
     seeds: &TokenSet,
     source_anchor: Option<bonsai_common::Span>,
@@ -1038,7 +1122,7 @@ fn source_seed_nodes_from_idg(
 
 /// Seed-node composer for the LEGACY token-name taint API
 /// (`interprocedural_taint` / `call_site_receives_taint`), which seeds by
-/// bare identifier tokens with the worklist engine's matching semantics:
+/// bare identifier tokens with the compatibility API's matching semantics:
 ///
 /// 1. **Sigil tolerance** — a seed `args` must also address the sigil'd
 ///    bindings Perl/PHP produce (`$args`, `@args`, `%args`). The IDG's
@@ -1050,10 +1134,9 @@ fn source_seed_nodes_from_idg(
 ///    `CallRet → Write` edge, and the CallRet lands in
 ///    `source_call_spans` so `sink(source(x))` isn't pruned as clean.
 ///
-/// This deliberately does NOT replace `source_seed_nodes_from_idg` — the
-/// security path seeds from rule-match spans and already-sigil-correct
-/// token sets; its semantics stay untouched.
-pub(crate) fn legacy_token_seed_nodes(
+/// This is the compatibility-policy branch of the canonical seed composer;
+/// security selects the rule-match policy instead.
+fn legacy_token_seed_nodes(
     entry_func: FuncId,
     seeds: &TokenSet,
     global: &GlobalIndex,
@@ -1066,13 +1149,24 @@ pub(crate) fn legacy_token_seed_nodes(
             continue;
         }
         names.push(seed.to_string());
-        if !seed.starts_with(['$', '@', '%']) {
-            names.push(format!("${seed}"));
-            names.push(format!("@{seed}"));
-            names.push(format!("%{seed}"));
+        let already_sigiled = seed
+            .chars()
+            .next()
+            .is_some_and(|first| bonsai_common::IDENTIFIER_SIGILS.contains(&first));
+        if !already_sigiled {
+            names.extend(
+                bonsai_common::IDENTIFIER_SIGILS
+                    .iter()
+                    .map(|sigil| format!("{sigil}{seed}")),
+            );
         }
     }
-    let expanded = bonsai_idg::expand_bare_seed_names_with_descendants(names.iter());
+    // The legacy API's token contract distinguishes scalar value taint
+    // (`args`) from descendant-container taint (`args.*`).  Do not use the
+    // security seed expansion here: promoting every bare token to `.*`
+    // makes passing a tainted object also taint unrelated fields in the
+    // callee.  Sigil variants are still included above.
+    let expanded = names;
     // Seed the PARAMETER binding nodes for the seed names — the entry
     // value whose forward closure is exactly "what the tainted entry
     // value reaches." Deliberately NOT `read_or_write_nodes_for_names`:
@@ -1081,6 +1175,10 @@ pub(crate) fn legacy_token_seed_nodes(
     // taint the sink's own `sink(cmd)` read directly. The param node's
     // closure naturally excludes an independent later overwrite.
     let mut nodes = idg.param_nodes_for_names(entry_func, &expanded, global);
+    // Explicit wildcard seeds (`args.*`) address unshadowed projected
+    // READS. Seed reads only: projected writes may be later clean
+    // overwrites and must never be resurrected as sources.
+    nodes.extend(legacy_descendant_read_seed_nodes(entry_func, &expanded, idg));
     if let Some(decl) = global.decl_of(SymbolId::new(entry_func.raw())) {
         // Locals that are the entry-most definition of a seed name (e.g.
         // Perl `my ($args) = @_;` when the adapter models the param as a
@@ -1088,7 +1186,12 @@ pub(crate) fn legacy_token_seed_nodes(
         // Seed the FIRST write of each seed name only — later writes are
         // reassignments the token seed must not resurrect.
         if nodes.is_empty() {
-            nodes.extend(first_write_nodes_for_names(entry_func, &expanded, &decl.flow_events, idg));
+            nodes.extend(first_write_nodes_for_names(
+                entry_func,
+                &expanded,
+                &decl.flow_events,
+                idg,
+            ));
         }
         // Source-call-name seeds (`ReadLine`) taint the call's return.
         let mut call_spans: Vec<Span> = Vec::new();
@@ -1096,10 +1199,42 @@ pub(crate) fn legacy_token_seed_nodes(
         for span in call_spans {
             nodes.extend(idg.call_ret_node_at_site(entry_func, span));
         }
+        // Legacy callers sometimes describe an output-buffer source with a
+        // pair of tokens (`fgets` + `buf`) instead of declarative
+        // `SourceOutputArgs`. When both the call name and one of its
+        // addressable arguments are explicitly seeded, start the closure at
+        // that argument's read nodes as well. The two-token requirement keeps
+        // an ordinary source-call seed (`request.args.get`) from incorrectly
+        // treating string/default inputs as output carriers.
+        let mut source_output_names = Vec::new();
+        collect_seed_matching_output_arg_names(&decl.flow_events, seeds, &mut source_output_names);
+        nodes.extend(output_arg_read_seed_nodes(entry_func, &source_output_names, idg));
     }
     nodes.sort();
     nodes.dedup();
     nodes
+}
+
+fn legacy_descendant_read_seed_nodes(
+    entry_func: FuncId,
+    expanded_names: &[String],
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<bonsai_idg::WsNodeId> {
+    let descendant_names = expanded_names
+        .iter()
+        .filter(|name| name.trim().ends_with(".*"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if descendant_names.is_empty() {
+        return Vec::new();
+    }
+    idg.read_or_write_nodes_for_names(entry_func, &descendant_names)
+        .into_iter()
+        .filter(|node| {
+            idg.resolve_point(*node)
+                .is_some_and(|point| point.kind == bonsai_idg::PointKind::Read)
+        })
+        .collect()
 }
 
 /// Seed nodes for the FIRST write of each seed name in `func`, in source
@@ -1171,8 +1306,7 @@ fn collect_seed_matching_call_spans(events: &[FlowEvent], seeds: &TokenSet, out:
             let seed = seed.trim();
             !seed.is_empty()
                 && (name == seed
-                    || (name.ends_with(seed)
-                        && name[..name.len() - seed.len()].ends_with(['.', ':', '>'])))
+                    || (name.ends_with(seed) && name[..name.len() - seed.len()].ends_with(['.', ':', '>'])))
         })
     };
     for event in events {
@@ -1202,6 +1336,65 @@ fn collect_seed_matching_call_spans(events: &[FlowEvent], seeds: &TokenSet, out:
                 collect_seed_matching_call_spans(body, seeds, out);
                 collect_seed_matching_call_spans(catch_events, seeds, out);
                 collect_seed_matching_call_spans(finally_events, seeds, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_seed_matching_output_arg_names(events: &[FlowEvent], seeds: &TokenSet, out: &mut Vec<String>) {
+    let name_matches = |name: &str| -> bool {
+        seeds.iter().any(|seed| {
+            let seed = seed.trim();
+            !seed.is_empty()
+                && (name == seed
+                    || (name.ends_with(seed) && name[..name.len() - seed.len()].ends_with(['.', ':', '>'])))
+        })
+    };
+    let value_matches = |value: &str| -> bool {
+        let value = normalise_qualified_text(value);
+        let value = value.trim().trim_start_matches(['$', '@', '%', '&', '*']).trim();
+        !value.is_empty()
+            && seeds.iter().any(|seed| {
+                let seed = normalise_qualified_text(seed);
+                let seed = seed.trim().trim_start_matches(['$', '@', '%', '&', '*']).trim();
+                !seed.ends_with(".*") && seed == value
+            })
+    };
+    for event in events {
+        match event {
+            FlowEvent::Call { name, args, .. } if name_matches(name) => {
+                for arg in args {
+                    let candidate = arg.place.as_deref().unwrap_or(arg.value_text.as_str()).trim();
+                    if !candidate.is_empty()
+                        && !candidate.starts_with(['\'', '"'])
+                        && value_matches(candidate)
+                        && !out.iter().any(|existing| existing == candidate)
+                    {
+                        out.push(candidate.to_string());
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_seed_matching_output_arg_names(then_events, seeds, out);
+                collect_seed_matching_output_arg_names(else_events, seeds, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_seed_matching_output_arg_names(body, seeds, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_seed_matching_output_arg_names(body, seeds, out);
+                collect_seed_matching_output_arg_names(catch_events, seeds, out);
+                collect_seed_matching_output_arg_names(finally_events, seeds, out);
             }
             _ => {}
         }
@@ -1262,11 +1455,8 @@ pub fn source_seed_reaches_return_from_idg_with_max_precision(
     idg: &bonsai_idg::IdgQueryService,
 ) -> bool {
     let global = db.global_index();
-    let mut seed_nodes = source_seed_nodes_from_idg(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
+    let mut seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
         global.as_ref(),
         idg,
     );
@@ -1376,11 +1566,8 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
     let global = db.global_index();
     let mut graph = EntryTaintGraph::default();
 
-    let mut seed_nodes = source_seed_nodes_from_idg(
-        source_func,
-        seeds,
-        source_anchor,
-        output_arg_names,
+    let mut seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
         global.as_ref(),
         idg,
     );
@@ -1500,6 +1687,7 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision(
             call_span: ce.call_span,
             tainted_args,
             precision: ce.precision,
+            edge_kind: ce.call_kind,
         });
     }
 
@@ -1656,16 +1844,13 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
     // Compose the seed set. When the caller supplies `extra_seed_nodes`
     // (the legacy token-seeding API, which resolves sigil'd / call-name /
     // clean-overwrite-safe seeds ITSELF), use exactly those — mixing in
-    // `source_seed_nodes_from_idg`'s name-based read/write seeding would
+    // the rule-match policy's name-based read/write seeding would
     // re-add post-overwrite writes and the sink's own read, defeating SSA.
     // The security path passes an empty slice, so it keeps the
-    // span-anchored `source_seed_nodes_from_idg` seeding untouched.
+    // span-anchored rule-match seeding untouched.
     let mut seed_nodes = if extra_seed_nodes.is_empty() {
-        source_seed_nodes_from_idg(
-            source_func,
-            seeds,
-            source_anchor,
-            output_arg_names,
+        compose_idg_seed_nodes(
+            IdgSeedRequest::rule_match(source_func, seeds, source_anchor, output_arg_names),
             global.as_ref(),
             idg,
         )
@@ -1854,6 +2039,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
             call_span: ce.call_span,
             tainted_args,
             precision: ce.precision,
+            edge_kind: ce.call_kind,
         });
     }
 
@@ -1898,6 +2084,7 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
             .filter_map(|idx| {
                 if tainted_arg_is_clean_nested_call_return(
                     caller,
+                    call_span,
                     *idx,
                     &call_summary,
                     &cross_calls,
@@ -3501,6 +3688,7 @@ fn push_id_token(tokens: &mut Vec<String>, current: &mut String) {
 #[derive(Clone, Debug)]
 struct CallEventSummary {
     name: String,
+    call_kind: bonsai_lang_api::CallKind,
     args_value_text: Vec<String>,
     args_span: Vec<bonsai_common::Span>,
     args_place: Vec<Option<String>>,
@@ -3568,7 +3756,7 @@ fn tainted_args_for_cross_call_edge(
                 vec![crate::inter::TaintedArg {
                     index: usize::MAX,
                     value_text: receiver.to_string(),
-                    param_name: "receiver".to_string(),
+                    param_name: SYNTHETIC_RECEIVER_PARAM_NAME.to_string(),
                 }]
             })
             .unwrap_or_default();
@@ -3583,6 +3771,8 @@ fn tainted_args_for_cross_call_edge(
             .and_then(|decl| decl.params.get(edge.param_idx as usize).cloned())
             .unwrap_or_default()
     };
+    // `TaintedArg.index` is the call-site argument slot. Keep the IDG edge's
+    // `arg_idx`; `param_idx` can differ for methods with implicit receivers.
     vec![crate::inter::TaintedArg {
         index: edge.arg_idx as usize,
         value_text,
@@ -3669,6 +3859,7 @@ fn expression_mentions_tainted_value(expression: &str, tainted_value: &str) -> b
 #[allow(clippy::too_many_arguments)]
 fn tainted_arg_is_clean_nested_call_return(
     caller: FuncId,
+    call_span: bonsai_common::Span,
     arg_idx: u8,
     call_summary: &CallEventSummary,
     cross_calls: &[bonsai_idg::CrossCallEdge],
@@ -3681,12 +3872,24 @@ fn tainted_arg_is_clean_nested_call_return(
     source_call_spans: &ahash::AHashSet<bonsai_common::Span>,
 ) -> bool {
     let idx = usize::from(arg_idx);
-    let Some(value_text) = call_summary.args_value_text.get(idx).map(String::as_str) else {
-        return false;
-    };
     let Some(arg_span) = call_summary.args_span.get(idx).copied() else {
         return false;
     };
+    // Some adapters lower a language builtin/projection call to the exact
+    // value place it reads (for example Erlang `maps:get(cmd, C)` becomes
+    // `place = C.cmd`). If that structured place reached this CallArg in the
+    // IDG, it is direct semantic evidence for the outer argument; do not
+    // reinterpret the raw expression as an unknown nested return and prune
+    // it. Ordinary nested calls have no `place` and continue through the
+    // return-summary checks below.
+    if call_summary
+        .args_place
+        .get(idx)
+        .and_then(Option::as_deref)
+        .is_some_and(|place| !place.trim().is_empty())
+    {
+        return false;
+    }
     // The nested call is itself a tainted source (`sink(getenv(x))`):
     // its return is tainted no matter what its arguments are, so it is
     // never a "clean" nested return.
@@ -3696,15 +3899,28 @@ fn tainted_arg_is_clean_nested_call_return(
     {
         return false;
     }
-    let Some((callee_text, nested_args)) = crate::inter::direct_call_expression_parts(value_text) else {
+    let Some(summaries) = cached_call_event_summaries_for_func(caller, global, call_summary_cache).cloned()
+    else {
         return false;
     };
-    if value_text.trim().starts_with("new ") {
+    let Some((nested_span, nested_summary)) = summaries
+        .iter()
+        // A language adapter may synthesize one semantic argument whose
+        // span is the whole call expression (Ruby subshells are one
+        // example). That makes the call look contained by its own arg.
+        // Exclude the current call-site identity before asking whether a
+        // genuinely nested call returns a clean value.
+        .filter(|(span, _)| **span != call_span && span_contains_or_equals(arg_span, **span))
+        .min_by_key(|(span, _)| (span.start, std::cmp::Reverse(span.end)))
+    else {
+        return false;
+    };
+    if matches!(nested_summary.call_kind, bonsai_lang_api::CallKind::Constructor) {
         return false;
     }
     if nested_call_return_matches_configured_passthrough(
-        &callee_text,
-        nested_args.len(),
+        &nested_summary.name,
+        nested_summary.args_value_text.len(),
         call_result_passthroughs,
         callee_name_cache,
     ) {
@@ -3733,15 +3949,7 @@ fn tainted_arg_is_clean_nested_call_return(
         if edge.caller != caller || edge.arg_idx == u8::MAX || edge.param_idx == u8::MAX {
             continue;
         }
-        if !span_contains_or_equals(arg_span, edge.call_span) {
-            continue;
-        }
-        let Some(nested_summary) =
-            cached_call_event_summary(edge.caller, edge.call_span, global, call_summary_cache).cloned()
-        else {
-            continue;
-        };
-        if !call_names_match_direct_callee(&nested_summary.name, &callee_text) {
+        if edge.call_span != *nested_span {
             continue;
         }
         tainted_params_by_callee
@@ -3751,7 +3959,7 @@ fn tainted_arg_is_clean_nested_call_return(
     }
 
     if tainted_params_by_callee.is_empty() {
-        return !nested_args.is_empty();
+        return !nested_summary.args_value_text.is_empty();
     }
 
     for (callee, tainted_params) in tainted_params_by_callee {
@@ -3828,33 +4036,6 @@ fn span_contains_or_equals(outer: bonsai_common::Span, inner: bonsai_common::Spa
     outer.file == inner.file && inner.start >= outer.start && inner.end <= outer.end
 }
 
-fn call_names_match_direct_callee(event_name: &str, callee_text: &str) -> bool {
-    let event_name = event_name.trim();
-    let callee_text = callee_text.trim();
-    if event_name == callee_text {
-        return true;
-    }
-    let event_tail = call_name_tail(event_name);
-    let callee_tail = call_name_tail(callee_text);
-    event_tail == callee_tail || event_name == callee_tail || event_tail == callee_text
-}
-
-fn call_name_tail(name: &str) -> &str {
-    let mut tail = name.trim();
-    if let Some(idx) = tail.rfind("->") {
-        tail = &tail[idx + 2..];
-    }
-    if let Some((_, rest)) = tail.rsplit_once(['.', ':', '\\']) {
-        tail = rest;
-    }
-    if let Some(idx) = tail.find('/') {
-        if tail[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
-            tail = &tail[..idx];
-        }
-    }
-    tail
-}
-
 fn cached_call_event_summary<'a>(
     func: FuncId,
     target_span: bonsai_common::Span,
@@ -3891,6 +4072,7 @@ fn collect_call_event_summaries(
             FlowEvent::Call {
                 span,
                 name,
+                call_kind,
                 args,
                 receiver,
                 ..
@@ -3899,6 +4081,7 @@ fn collect_call_event_summaries(
                     *span,
                     CallEventSummary {
                         name: name.clone(),
+                        call_kind: *call_kind,
                         args_value_text: args.iter().map(|arg| arg.value_text.clone()).collect(),
                         args_span: args.iter().map(|arg| arg.span).collect(),
                         args_place: args.iter().map(|arg| arg.place.clone()).collect(),
@@ -3914,6 +4097,7 @@ fn collect_call_event_summaries(
             } => {
                 out.entry(*span).or_insert_with(|| CallEventSummary {
                     name: name.clone(),
+                    call_kind: bonsai_lang_api::CallKind::Function,
                     args_value_text: source_call_args.clone(),
                     args_span: source_call_args.iter().map(|_| *span).collect(),
                     args_place: source_call_args

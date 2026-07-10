@@ -187,7 +187,7 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, c: &Conformance) -> b
                 source_call: Some(callee),
                 ..
             },
-        ) => sigil_strip(target) == "z" && callee == "f",
+        ) => sigil_strip(target) == "z" && call_member_name(callee) == "f",
         (
             CanonicalShape::SingleConditionBranch,
             FlowEvent::Branch {
@@ -235,8 +235,18 @@ fn sigil_strip(s: &str) -> &str {
 fn body_contains_call(body: &[FlowEvent], callee: &str) -> bool {
     walk_events(
         body,
-        &|e| matches!(e, FlowEvent::Call { name, .. } if name == callee),
+        &|e| matches!(e, FlowEvent::Call { name, .. } if call_member_name(name) == callee),
     )
+}
+
+/// Compare the callable member rather than its surface spelling. Adapters may
+/// preserve a bare call (`f`) or, once the declaration index proves class
+/// ownership, lower it to an explicit receiver call (`this.f`). Both encode
+/// the same canonical call shape.
+fn call_member_name(name: &str) -> &str {
+    name.rsplit(['.', ':', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name)
 }
 
 #[test]

@@ -58,11 +58,20 @@ struct CalleeEndpoints {
     segment: SegmentId,
     params: Vec<NodeId>,
     param_names: Vec<String>,
+    /// Non-entry binding writes to each formal parameter. A write is
+    /// only stitched back to the caller when the corresponding actual
+    /// argument is explicitly passed by mutable reference/address.
+    param_write_nodes: Vec<Vec<NodeId>>,
+    /// Bare reads with no local writer in the callee. For a
+    /// resolver-proven local callable these are lexical captures;
+    /// ordinary functions do not receive capture stitching.
+    capture_read_nodes: Vec<(String, NodeId)>,
     receiver_param_index: Option<usize>,
     receiver_consumer_nodes: Vec<NodeId>,
     receiver_field_bases: Vec<String>,
     implicit_receiver_bases: Vec<String>,
     return_field_projections: Vec<ReturnFieldProjection>,
+    return_passthrough_param_indices: Vec<usize>,
     return_node: Option<NodeId>,
 }
 
@@ -76,6 +85,7 @@ struct FunctionStitchData {
     receiver_field_bases: Vec<String>,
     implicit_receiver_bases: Vec<String>,
     return_field_projections: Vec<ReturnFieldProjection>,
+    return_passthrough_param_indices: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -385,6 +395,7 @@ pub trait CalleeResolver {
         callee_name: &str,
         receiver: Option<&str>,
         receiver_types: &[String],
+        call_kind: CallKind,
     ) -> Vec<ResolvedCallee>;
 
     /// Resolve callback bindings: enumerate every function ever
@@ -410,6 +421,14 @@ pub trait CalleeResolver {
         Vec::new()
     }
 
+    /// Resolve callable values proven by indirect callgraph edges whose
+    /// source span is contained by this argument expression. This covers
+    /// nested callable-producing syntax without parsing its text or naming
+    /// a library helper in the IDG engine.
+    fn callable_args_in_span(&self, _caller: FuncId, _arg_span: Span) -> Vec<ResolvedCallee> {
+        Vec::new()
+    }
+
     /// Static receiver type that owns `func`, when known. The IDG
     /// uses this to project embedded receiver fields precisely:
     /// `repo.Run()` resolved to `Repository.Run` forwards
@@ -425,6 +444,13 @@ pub trait CalleeResolver {
     /// target (`repo = Repository(data)` → `repo._data.*`) without
     /// assuming ordinary method returns alias their receiver.
     fn is_constructor_func(&self, _func: FuncId) -> bool {
+        false
+    }
+
+    /// True when `callee` is the function value assigned to a local
+    /// callable binding in `caller` (for example `let f = { ... }`).
+    /// This is the precision boundary for lexical capture stitching.
+    fn is_local_callable_binding(&self, _caller: FuncId, _callee: FuncId) -> bool {
         false
     }
 }
@@ -532,6 +558,7 @@ pub fn stitch_idg_with_field_argument_forwarding(
                 receiver_field_bases,
                 implicit_receiver_bases,
                 return_field_projections,
+                return_passthrough_param_indices,
                 call_sites,
                 is_constructor,
                 ..
@@ -548,6 +575,7 @@ pub fn stitch_idg_with_field_argument_forwarding(
                     receiver_field_bases,
                     implicit_receiver_bases,
                     return_field_projections,
+                    return_passthrough_param_indices,
                 },
             );
             local_remaps.push((func, remap));
@@ -588,6 +616,7 @@ pub fn stitch_idg_with_field_argument_forwarding(
     let mut scalar_return_sites = ScalarReturnSiteQueue::default();
     let mut constructor_return_sites = ConstructorReturnSiteQueue::default();
     let mut receiver_mutation_sites: Vec<ReceiverMutationStitch> = Vec::new();
+    let mut passthrough_field_copy_sites: Vec<FieldCopySite> = Vec::new();
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
     // AHashMap whose iteration order is randomised per process —
     // the cross-file edge index this loop appends to is read
@@ -621,6 +650,7 @@ pub fn stitch_idg_with_field_argument_forwarding(
                 &mut scalar_return_sites,
                 &mut constructor_return_sites,
                 &mut receiver_mutation_sites,
+                &mut passthrough_field_copy_sites,
                 if collect_stats { Some(&mut stats) } else { None },
             );
         }
@@ -642,6 +672,7 @@ pub fn stitch_idg_with_field_argument_forwarding(
             scalar_return_sites.as_slice(),
             constructor_return_sites.as_slice(),
             &receiver_mutation_sites,
+            &passthrough_field_copy_sites,
             &mut ws,
         );
     } else {
@@ -683,6 +714,7 @@ fn build_callee_endpoints(
 ) -> AHashMap<FuncId, CalleeEndpoints> {
     let mut out = AHashMap::with_capacity(stitch_data.len());
     let mut yielded_nodes_by_segment: AHashMap<SegmentId, AHashSet<NodeId>> = AHashMap::new();
+    let mut returned_nodes_by_segment: AHashMap<SegmentId, AHashSet<NodeId>> = AHashMap::new();
     let mut funcs: Vec<FuncId> = stitch_data.keys().copied().collect();
     funcs.sort_by_key(|f| f.raw());
     for func in funcs {
@@ -715,18 +747,31 @@ fn build_callee_endpoints(
         let yielded_nodes = yielded_nodes_by_segment
             .entry(segment_id)
             .or_insert_with(|| collect_yield_value_nodes(segment));
-        let return_node = yield_node
-            .filter(|node| yielded_nodes.contains(node))
+        let returned_nodes = returned_nodes_by_segment
+            .entry(segment_id)
+            .or_insert_with(|| collect_return_value_nodes(segment));
+        // A function that both yields and returns (notably Ruby methods
+        // invoking a block) still assigns its explicit return value at the
+        // call site. Treat Yield as the result endpoint only for generator-
+        // shaped declarations with no explicit Return node.
+        let return_node = plain_return_node
+            .filter(|node| returned_nodes.contains(node))
+            .or_else(|| yield_node.filter(|node| yielded_nodes.contains(node)))
             .or(plain_return_node);
+        let param_names = stitch_data
+            .get(&func)
+            .map(|data| data.params.clone())
+            .unwrap_or_default();
+        let param_write_nodes = collect_non_entry_param_write_nodes(segment, func, &param_names, &params);
+        let capture_read_nodes = collect_unrooted_scalar_reads(segment, func);
         out.insert(
             func,
             CalleeEndpoints {
                 segment: segment_id,
                 params,
-                param_names: stitch_data
-                    .get(&func)
-                    .map(|data| data.params.clone())
-                    .unwrap_or_default(),
+                param_names,
+                param_write_nodes,
+                capture_read_nodes,
                 receiver_param_index: stitch_data.get(&func).and_then(|data| data.receiver_param_index),
                 receiver_consumer_nodes: stitch_data
                     .get(&func)
@@ -744,9 +789,76 @@ fn build_callee_endpoints(
                     .get(&func)
                     .map(|data| data.return_field_projections.clone())
                     .unwrap_or_default(),
+                return_passthrough_param_indices: stitch_data
+                    .get(&func)
+                    .map(|data| data.return_passthrough_param_indices.clone())
+                    .unwrap_or_default(),
                 return_node,
             },
         );
+    }
+    out
+}
+
+fn collect_unrooted_scalar_reads(segment: &IdgSegment, func: FuncId) -> Vec<(String, NodeId)> {
+    let mut out = Vec::new();
+    for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
+        if node.func != func {
+            continue;
+        }
+        let Some(Place::Read { name, path }) = segment.places.get(node.place) else {
+            continue;
+        };
+        if !path.is_empty() {
+            continue;
+        }
+        let Some(name) = segment.strings.get(*name) else {
+            continue;
+        };
+        if !name.trim().is_empty() {
+            out.push((name.to_string(), NodeId(node_idx as u32)));
+        }
+    }
+    out
+}
+
+fn collect_non_entry_param_write_nodes(
+    segment: &IdgSegment,
+    func: FuncId,
+    param_names: &[String],
+    params: &[NodeId],
+) -> Vec<Vec<NodeId>> {
+    let mut out = vec![Vec::new(); param_names.len()];
+    for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
+        if node.func != func {
+            continue;
+        }
+        let Some(Place::Write { name, path, .. }) = segment.places.get(node.place) else {
+            continue;
+        };
+        if !path.is_empty() {
+            continue;
+        }
+        let Some(write_name) = segment.strings.get(*name) else {
+            continue;
+        };
+        let Some(param_idx) = param_names
+            .iter()
+            .position(|param| param.trim() == write_name.trim())
+        else {
+            continue;
+        };
+        let write_node = NodeId(node_idx as u32);
+        let is_entry_binding = params.get(param_idx).is_some_and(|param_node| {
+            !param_node.is_sentinel()
+                && segment
+                    .edges
+                    .iter()
+                    .any(|edge| edge.from == *param_node && edge.to == write_node)
+        });
+        if !is_entry_binding {
+            out[param_idx].push(write_node);
+        }
     }
     out
 }
@@ -768,6 +880,22 @@ fn collect_yield_value_nodes(segment: &IdgSegment) -> AHashSet<NodeId> {
             continue;
         };
         if matches!(to_place, Place::Yield) {
+            out.insert(edge.to);
+        }
+    }
+    out
+}
+
+fn collect_return_value_nodes(segment: &IdgSegment) -> AHashSet<NodeId> {
+    let mut out = AHashSet::new();
+    for edge in &segment.edges {
+        let Some(to_node) = segment.nodes.get(edge.to) else {
+            continue;
+        };
+        let Some(to_place) = segment.places.get(to_node.place) else {
+            continue;
+        };
+        if matches!(to_place, Place::Return) {
             out.insert(edge.to);
         }
     }
@@ -1007,6 +1135,7 @@ fn stitch_call_site(
     scalar_return_sites: &mut ScalarReturnSiteQueue,
     constructor_return_sites: &mut ConstructorReturnSiteQueue,
     receiver_mutation_sites: &mut Vec<ReceiverMutationStitch>,
+    passthrough_field_copy_sites: &mut Vec<FieldCopySite>,
     mut stats: Option<&mut StitchStats>,
 ) {
     if let Some(stats) = &mut stats {
@@ -1019,6 +1148,7 @@ fn stitch_call_site(
         &site.callee_name,
         site.receiver.as_deref(),
         &site.receiver_types,
+        site.call_kind,
     );
     if let Some(stats) = &mut stats {
         stats.resolved_candidates = stats.resolved_candidates.saturating_add(candidates.len());
@@ -1076,6 +1206,88 @@ fn stitch_call_site(
             if let Some(started) = callback_started {
                 stats.callback_nanos = stats.callback_nanos.saturating_add(started.elapsed().as_nanos());
             }
+        }
+    }
+    // Compatibility-only unresolved-call summary. The security graph keeps
+    // this disabled and supplies explicit rulepack passthrough shapes. The
+    // token-level legacy API enables it so an external value constructor such
+    // as `path = os.path.join(base, name)` and nested transforms such as
+    // `map(..., cmd.split(" "))` retain the old conservative argument/receiver
+    // → result contract without weakening resolved callees whose explicit
+    // Return semantics are known.
+    let has_stitchable_candidate = candidates
+        .iter()
+        .any(|candidate| callee_endpoints.contains_key(&candidate.func));
+    // Constructor syntax itself proves that the returned object incorporates
+    // its arguments even when the constructor body lives outside the indexed
+    // workspace. This exception is keyed only by adapter-emitted CallKind,
+    // never by a class/API name heuristic.
+    let unmodeled_constructor = !has_stitchable_candidate && call_site_is_constructor(site);
+    if !has_stitchable_candidate
+        && (site.unresolved_result_passthrough
+            || site.unresolved_receiver_result_passthrough
+            || unmodeled_constructor)
+    {
+        let caller_call_ret = caller_remap.get(site.call_ret_node);
+        if !caller_call_ret.is_sentinel() {
+            let mut passthrough_inputs = site
+                .call_arg_nodes
+                .iter()
+                // Only source-level arguments are generic result inputs.
+                // `walk_call` may append a synthetic arg for flattened
+                // zero-arg method expressions; treating that receiver token
+                // as an ordinary argument would make `client.capacity`
+                // inherit taint from the whole `client` object.
+                .take(if site.unresolved_result_passthrough || unmodeled_constructor {
+                    site.explicit_args_count as usize
+                } else {
+                    0
+                })
+                .copied()
+                .chain(
+                    site.receiver_arg_node
+                        .filter(|_| site.unresolved_receiver_result_passthrough),
+                )
+                .map(|node| caller_remap.get(node))
+                .filter(|node| !node.is_sentinel())
+                .collect::<Vec<_>>();
+            passthrough_inputs.sort_unstable();
+            passthrough_inputs.dedup();
+            for input in passthrough_inputs {
+                place_inter_edge(
+                    caller_seg,
+                    caller_seg,
+                    IdgEdge {
+                        from: input,
+                        to: caller_call_ret,
+                        meta: crate::edge::EdgeMeta {
+                            precision: bonsai_common::Precision::Narrowed,
+                            kind: crate::edge::IdgEdgeKind::IntraAssign,
+                            call_kind: bonsai_callgraph::EdgeKind::Indirect,
+                            via_span: site.site.0,
+                        },
+                    },
+                    ws,
+                );
+                if let Some(stats) = &mut stats {
+                    stats.passthrough_edges = stats.passthrough_edges.saturating_add(1);
+                    stats.inter_edges = stats.inter_edges.saturating_add(1);
+                }
+            }
+        }
+    }
+    let higher_order_edges = stitch_indirect_callback_inputs(
+        caller,
+        caller_seg,
+        caller_remap,
+        site,
+        resolver,
+        callee_endpoints,
+        ws,
+    );
+    if higher_order_edges > 0 {
+        if let Some(stats) = &mut stats {
+            stats.inter_edges = stats.inter_edges.saturating_add(higher_order_edges);
         }
     }
     // Wire only candidates that resolved to a known segment. External
@@ -1288,13 +1500,6 @@ fn stitch_call_site(
                 cand.edge_kind,
             );
         }
-        let higher_order_edges =
-            stitch_higher_order_callback_inputs(caller_seg, caller_remap, site, endpoints, *cand, ws);
-        if higher_order_edges > 0 {
-            if let Some(stats) = &mut stats {
-                stats.inter_edges = stats.inter_edges.saturating_add(higher_order_edges);
-            }
-        }
         // For each explicit arg index, emit
         // `caller.CallArg(site, i) → callee.Param(j)`. When the
         // callee has a declared receiver parameter, `j` skips that
@@ -1350,8 +1555,44 @@ fn stitch_call_site(
                     });
                 }
             }
+            if let Some(target_base) = site.call_arg_writeback_targets.get(i).and_then(Option::as_deref) {
+                let added = stitch_out_parameter_write_back(
+                    caller,
+                    caller_seg,
+                    cand.func,
+                    endpoints.segment,
+                    endpoints
+                        .param_write_nodes
+                        .get(callee_param_idx)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    target_base,
+                    site.site.0,
+                    cand.precision,
+                    cand.edge_kind,
+                    ws,
+                );
+                if let Some(stats) = &mut stats {
+                    stats.inter_edges = stats.inter_edges.saturating_add(added);
+                }
+            }
             if let Some(stats) = &mut stats {
                 stats.inter_edges = stats.inter_edges.saturating_add(1);
+            }
+        }
+        if resolver.is_local_callable_binding(caller, cand.func) {
+            let added = stitch_lexical_capture_reads(
+                caller,
+                caller_seg,
+                endpoints.segment,
+                &endpoints.capture_read_nodes,
+                site.site.0,
+                cand.precision,
+                cand.edge_kind,
+                ws,
+            );
+            if let Some(stats) = &mut stats {
+                stats.inter_edges = stats.inter_edges.saturating_add(added);
             }
         }
         // Emit `callee.Return → caller.CallRet(site)`.
@@ -1374,11 +1615,49 @@ fn stitch_call_site(
         if !caller_call_ret.is_sentinel() {
             let assignment_targets = call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret);
             if !assignment_targets.is_empty() {
+                // Preserve field/descendant identity through wrappers such
+                // as `return param`. This is intentionally separate from
+                // scalar return flow: a bare tainted object remains scalar,
+                // while an explicit `param.*` seed or exact field write can
+                // flow to the corresponding field on the assigned result.
+                for &param_idx in &endpoints.return_passthrough_param_indices {
+                    let explicit_arg_idx = match endpoints.receiver_param_index {
+                        Some(receiver_idx) if param_idx == receiver_idx => None,
+                        Some(receiver_idx) if param_idx > receiver_idx => Some(param_idx - 1),
+                        _ => Some(param_idx),
+                    };
+                    let Some(actual_arg) = explicit_arg_idx
+                        .and_then(|idx| site.call_arg_places.get(idx))
+                        .map(String::as_str)
+                        .map(str::trim)
+                        .filter(|arg| !arg.is_empty())
+                    else {
+                        continue;
+                    };
+                    for (target_base, write_span, result_field) in &assignment_targets {
+                        if result_field.is_some() {
+                            continue;
+                        }
+                        passthrough_field_copy_sites.push(FieldCopySite {
+                            seg_id: caller_seg,
+                            func: caller,
+                            source_base: actual_arg.to_string(),
+                            target_base: target_base.clone(),
+                            write_span: *write_span,
+                            via_span: site.site.0,
+                            precision: cand.precision,
+                            call_kind: cand.edge_kind,
+                        });
+                    }
+                }
                 for source_base in [
                     crate::transfer::RETURN_FIELD_BASE,
                     crate::transfer::YIELD_FIELD_BASE,
                 ] {
-                    for (target_base, write_span) in &assignment_targets {
+                    for (target_base, write_span, result_field) in &assignment_targets {
+                        if result_field.is_some() {
+                            continue;
+                        }
                         return_field_sites.push(ReturnFieldStitch {
                             caller,
                             caller_seg,
@@ -1393,7 +1672,23 @@ fn stitch_call_site(
                         });
                     }
                 }
-                for (target_base, write_span) in &assignment_targets {
+                for (target_base, write_span, result_field) in &assignment_targets {
+                    if let Some(result_field) = result_field {
+                        scalar_return_sites.push(ScalarReturnStitch {
+                            caller,
+                            caller_seg,
+                            callee: cand.func,
+                            callee_seg: endpoints.segment,
+                            source_base: crate::transfer::RETURN_FIELD_BASE.to_string(),
+                            source_field: result_field.clone(),
+                            target_base: target_base.clone(),
+                            call_span: site.site.0,
+                            write_span: *write_span,
+                            precision: cand.precision,
+                            call_kind: cand.edge_kind,
+                        });
+                        continue;
+                    }
                     for projection in &endpoints.return_field_projections {
                         scalar_return_sites.push(ScalarReturnStitch {
                             caller,
@@ -1448,9 +1743,12 @@ fn stitch_call_site(
             if !caller_call_ret.is_sentinel() {
                 let receiver_bases = constructor_receiver_bases(endpoints);
                 if !receiver_bases.is_empty() {
-                    for (target_base, write_span) in
+                    for (target_base, write_span, result_field) in
                         call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret)
                     {
+                        if result_field.is_some() {
+                            continue;
+                        }
                         for receiver_param_name in &receiver_bases {
                             let target_base =
                                 projected_receiver_target_base(&target_base, receiver_param_name);
@@ -1491,6 +1789,200 @@ fn stitch_call_site(
     // generic `CallArg -> CallRet` edge would invent dataflow.
     // Drop unused: candidates iterator is consumed.
     drop(candidates);
+}
+
+fn call_site_is_constructor(site: &crate::transfer::CallSiteRef) -> bool {
+    matches!(site.call_kind, CallKind::Constructor)
+}
+
+#[allow(clippy::too_many_arguments)] // Capture edges retain the resolved call's full precision metadata.
+fn stitch_lexical_capture_reads(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    callee_seg: SegmentId,
+    capture_reads: &[(String, NodeId)],
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    let mut added = 0usize;
+    for (capture_name, capture_read) in capture_reads {
+        for source in scalar_producers_live_at_span(ws, caller_seg, caller, capture_name, call_span) {
+            place_inter_edge(
+                caller_seg,
+                callee_seg,
+                IdgEdge {
+                    from: source,
+                    to: *capture_read,
+                    meta: crate::edge::EdgeMeta {
+                        precision,
+                        kind: crate::edge::IdgEdgeKind::InterCallArg,
+                        call_kind,
+                        via_span: call_span,
+                    },
+                },
+                ws,
+            );
+            added = added.saturating_add(1);
+        }
+    }
+    added
+}
+
+fn scalar_producers_live_at_span(
+    ws: &IdgWorkspace,
+    seg_id: SegmentId,
+    func: FuncId,
+    name: &str,
+    at_span: Span,
+) -> Vec<NodeId> {
+    let Some(segment) = ws.segment(seg_id) else {
+        return Vec::new();
+    };
+    let mut writes = Vec::new();
+    let mut reads = Vec::new();
+    for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
+        if node.func != func {
+            continue;
+        }
+        let Some(place) = segment.places.get(node.place) else {
+            continue;
+        };
+        if place_storage_name(segment, place).as_deref() != Some(name) {
+            continue;
+        }
+        let node_id = NodeId(node_idx as u32);
+        match place {
+            Place::Write { path, span, .. }
+                if path.is_empty() && (span.file != at_span.file || span.start <= at_span.start) =>
+            {
+                writes.push((span.start, node_id));
+            }
+            Place::Read { path, .. } if path.is_empty() => reads.push(node_id),
+            _ => {}
+        }
+    }
+    if let Some(latest_start) = writes.iter().map(|(start, _)| *start).max() {
+        let mut out = writes
+            .into_iter()
+            .filter_map(|(start, node)| (start == latest_start).then_some(node))
+            .collect::<Vec<_>>();
+        out.sort_by_key(|node| node.0);
+        out.dedup();
+        return out;
+    }
+    reads.sort_by_key(|node| node.0);
+    reads.dedup();
+    reads
+}
+
+#[allow(clippy::too_many_arguments)] // The stitch carries both call endpoints and edge metadata explicitly.
+fn stitch_out_parameter_write_back(
+    caller: FuncId,
+    caller_seg: SegmentId,
+    _callee: FuncId,
+    callee_seg: SegmentId,
+    callee_param_writes: &[NodeId],
+    target_base: &str,
+    call_span: Span,
+    precision: Precision,
+    call_kind: CallEdgeKind,
+    ws: &mut IdgWorkspace,
+) -> usize {
+    if callee_param_writes.is_empty() {
+        return 0;
+    }
+    let consumer_edges = scalar_post_call_consumer_edges(ws, caller_seg, caller, target_base, call_span);
+    if consumer_edges.is_empty() {
+        return 0;
+    }
+    let Some(target_write) = ensure_scalar_write_node(ws, caller_seg, caller, target_base, call_span) else {
+        return 0;
+    };
+
+    let mut added = 0usize;
+    for &source_write in callee_param_writes {
+        place_inter_edge(
+            callee_seg,
+            caller_seg,
+            IdgEdge {
+                from: source_write,
+                to: target_write,
+                meta: crate::edge::EdgeMeta {
+                    precision,
+                    kind: crate::edge::IdgEdgeKind::InterReturn,
+                    call_kind,
+                    via_span: call_span,
+                },
+            },
+            ws,
+        );
+        added = added.saturating_add(1);
+    }
+    for consumer in consumer_edges {
+        place_inter_edge(
+            caller_seg,
+            caller_seg,
+            IdgEdge {
+                from: target_write,
+                to: consumer.to,
+                meta: consumer.meta,
+            },
+            ws,
+        );
+        added = added.saturating_add(1);
+    }
+    added
+}
+
+fn scalar_post_call_consumer_edges(
+    ws: &IdgWorkspace,
+    seg_id: SegmentId,
+    func: FuncId,
+    target_base: &str,
+    call_span: Span,
+) -> Vec<IdgEdge> {
+    let Some(segment) = ws.segment(seg_id) else {
+        return Vec::new();
+    };
+    let mut live_producers = AHashSet::default();
+    for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
+        if node.func != func {
+            continue;
+        }
+        let Some(place) = segment.places.get(node.place) else {
+            continue;
+        };
+        let matches_target = place_storage_name(segment, place)
+            .as_deref()
+            .is_some_and(|name| name == target_base);
+        if !matches_target {
+            continue;
+        }
+        let was_live_at_call = match place {
+            Place::Read { path, .. } => path.is_empty(),
+            Place::Write { path, span, .. } => {
+                path.is_empty() && (span.file != call_span.file || span.start <= call_span.start)
+            }
+            _ => false,
+        };
+        if was_live_at_call {
+            live_producers.insert(NodeId(node_idx as u32));
+        }
+    }
+
+    let mut seen = AHashSet::default();
+    segment
+        .edges
+        .iter()
+        .filter(|edge| live_producers.contains(&edge.from))
+        .filter(|edge| {
+            edge.meta.via_span.file != call_span.file || edge.meta.via_span.start > call_span.start
+        })
+        .filter(|edge| seen.insert((edge.to, edge.meta)))
+        .copied()
+        .collect()
 }
 
 fn stitch_source_callback_args(
@@ -1546,86 +2038,92 @@ fn stitch_source_callback_args(
     emitted
 }
 
-fn stitch_higher_order_callback_inputs(
+/// Route the data operands of an AST-proven indirect callback invocation to
+/// its first parameter. The callable argument is identified by resolver
+/// evidence, not by a table of library method names. For a method call the
+/// receiver is also a data operand; for a free call every non-callback
+/// source-level argument is a candidate input.
+#[allow(clippy::too_many_arguments)]
+fn stitch_indirect_callback_inputs(
+    caller: FuncId,
     caller_seg: SegmentId,
     caller_remap: &NodeRemap,
     site: &CallSiteRef,
-    endpoints: &CalleeEndpoints,
-    cand: ResolvedCallee,
+    resolver: &dyn CalleeResolver,
+    callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
     ws: &mut IdgWorkspace,
 ) -> usize {
-    if cand.edge_kind != bonsai_callgraph::EdgeKind::Indirect {
-        return 0;
+    let mut callback_arg_indices = AHashSet::new();
+    let mut callback_candidates = Vec::new();
+    let mut seen_candidates = AHashSet::new();
+    for (idx, value) in site.call_arg_values.iter().enumerate() {
+        let mut resolved = resolver.callable_arg(caller, value);
+        if let Some(&arg_span) = site.call_arg_spans.get(idx) {
+            resolved.extend(resolver.callable_args_in_span(caller, arg_span));
+        }
+        if resolved.is_empty() {
+            continue;
+        }
+        callback_arg_indices.insert(idx);
+        for cand in resolved {
+            if cand.edge_kind == bonsai_callgraph::EdgeKind::Indirect
+                && callee_endpoints.contains_key(&cand.func)
+                && seen_candidates.insert(cand.func)
+            {
+                callback_candidates.push(cand);
+            }
+        }
     }
-    let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index);
-    let Some(&callee_param_node) = endpoints.params.get(callback_param_idx) else {
-        return 0;
-    };
-    if callee_param_node.is_sentinel() {
+    if callback_arg_indices.is_empty() {
         return 0;
     }
 
     let mut input_nodes = Vec::new();
-    if matches!(site.call_kind, CallKind::Method)
-        && higher_order_receiver_method_flows_to_callback(site.callee_name.as_str())
-    {
+    if matches!(site.call_kind, CallKind::Method) {
         if let Some(receiver_arg_node) = site.receiver_arg_node {
             input_nodes.push(receiver_arg_node);
         }
-    } else if higher_order_free_function_flows_to_callback(site.callee_name.as_str()) {
-        // Free HOFs such as C++ `std::for_each(begin, end, step)`
-        // carry collection/iterator values in the arguments before
-        // the callback. Route those value-carrying args to the
-        // callback's first parameter; do not route the callback
-        // function object itself.
-        let data_args = site.call_arg_nodes.len().saturating_sub(1);
-        for arg_node in site.call_arg_nodes.iter().take(data_args) {
-            input_nodes.push(*arg_node);
-        }
     }
+    input_nodes.extend(
+        site.call_arg_nodes
+            .iter()
+            .take(site.explicit_args_count as usize)
+            .enumerate()
+            .filter_map(|(idx, node)| (!callback_arg_indices.contains(&idx)).then_some(*node)),
+    );
     if input_nodes.is_empty() {
         return 0;
     }
 
     let mut emitted = 0usize;
-    for input_node in input_nodes {
-        let caller_call_arg = caller_remap.get(input_node);
-        if caller_call_arg.is_sentinel() {
+    for cand in callback_candidates {
+        let Some(endpoints) = callee_endpoints.get(&cand.func) else {
+            continue;
+        };
+        let callback_param_idx = explicit_arg_param_index(0, endpoints.receiver_param_index);
+        let Some(&callee_param_node) = endpoints.params.get(callback_param_idx) else {
+            continue;
+        };
+        if callee_param_node.is_sentinel() {
             continue;
         }
-        let edge = IdgEdge::inter_call_arg(
-            caller_call_arg,
-            callee_param_node,
-            site.site.0,
-            cand.precision,
-            cand.edge_kind,
-        );
-        place_inter_edge(caller_seg, endpoints.segment, edge, ws);
-        emitted = emitted.saturating_add(1);
+        for &input_node in &input_nodes {
+            let caller_call_arg = caller_remap.get(input_node);
+            if caller_call_arg.is_sentinel() {
+                continue;
+            }
+            let edge = IdgEdge::inter_call_arg(
+                caller_call_arg,
+                callee_param_node,
+                site.site.0,
+                cand.precision,
+                cand.edge_kind,
+            );
+            place_inter_edge(caller_seg, endpoints.segment, edge, ws);
+            emitted = emitted.saturating_add(1);
+        }
     }
     emitted
-}
-
-fn higher_order_receiver_method_flows_to_callback(callee_name: &str) -> bool {
-    matches!(
-        normalized_call_tail(callee_name).as_str(),
-        "foreach" | "each" | "map" | "filter" | "flatmap" | "collect" | "select"
-    )
-}
-
-fn higher_order_free_function_flows_to_callback(callee_name: &str) -> bool {
-    matches!(
-        normalized_call_tail(callee_name).as_str(),
-        "for_each" | "foreach" | "array_walk"
-    )
-}
-
-fn normalized_call_tail(callee_name: &str) -> String {
-    callee_name
-        .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .find(|part| !part.is_empty())
-        .unwrap_or(callee_name)
-        .to_ascii_lowercase()
 }
 
 fn constructor_receiver_target_base(
@@ -2012,6 +2510,7 @@ fn stitch_field_argument_forwarding(
     scalar_return_sites: &[ScalarReturnStitch],
     constructor_return_sites: &[ConstructorReturnStitch],
     receiver_mutation_sites: &[ReceiverMutationStitch],
+    passthrough_field_copy_sites: &[FieldCopySite],
     ws: &mut IdgWorkspace,
 ) {
     if sites.is_empty()
@@ -2019,6 +2518,7 @@ fn stitch_field_argument_forwarding(
         && scalar_return_sites.is_empty()
         && constructor_return_sites.is_empty()
         && receiver_mutation_sites.is_empty()
+        && passthrough_field_copy_sites.is_empty()
     {
         return;
     }
@@ -2026,7 +2526,34 @@ fn stitch_field_argument_forwarding(
     let mut field_index = FieldPlaceIndex::from_workspace(ws);
     let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
     let mut synthetic_field_writes = SyntheticFieldWriteCache::default();
-    let copy_sites = collect_field_copy_sites(ws);
+    let mut copy_sites = collect_field_copy_sites(ws);
+    copy_sites.extend_from_slice(passthrough_field_copy_sites);
+    copy_sites.sort_by(|a, b| {
+        (
+            a.seg_id.0,
+            a.func.raw(),
+            a.source_base.as_str(),
+            a.target_base.as_str(),
+            a.write_span.start,
+            a.via_span.start,
+        )
+            .cmp(&(
+                b.seg_id.0,
+                b.func.raw(),
+                b.source_base.as_str(),
+                b.target_base.as_str(),
+                b.write_span.start,
+                b.via_span.start,
+            ))
+    });
+    copy_sites.dedup_by(|a, b| {
+        a.seg_id == b.seg_id
+            && a.func == b.func
+            && a.source_base == b.source_base
+            && a.target_base == b.target_base
+            && a.write_span == b.write_span
+            && a.via_span == b.via_span
+    });
     let transforms = build_field_write_transforms(
         sites,
         return_field_sites,
@@ -2042,8 +2569,19 @@ fn stitch_field_argument_forwarding(
 
     let phase_started = Instant::now();
     let before_edges = ws.total_edge_count();
-    let fallback_edges =
+    let mut fallback_edges =
         stitch_field_argument_fallbacks(sites, ws, &mut known_edges, &field_index, &inter_call_arg_entries);
+    fallback_edges += stitch_field_copy_fallbacks(
+        &copy_sites,
+        ws,
+        &mut known_edges,
+        &mut field_index,
+        &mut inter_call_arg_entries,
+        &mut synthetic_field_writes,
+        &transforms,
+        &mut pending,
+        &mut enqueued,
+    );
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
     while let Some(write) = pending.pop_front() {
@@ -2700,19 +3238,24 @@ fn stitch_field_argument_fallbacks(
             &site.actual_arg,
             site.call_span,
         );
-        let Some(actual_arg_node) = site.actual_arg_node.filter(|_| writers.is_empty()) else {
+        if !writers.is_empty() {
             continue;
-        };
+        }
         let readers = field_index.field_reads_for_base(site.callee_seg, site.callee, &site.param_name);
         for (field, reader) in readers {
             if !is_forwardable_field(&field) {
                 continue;
             }
+            let Some(actual_field_read) =
+                ensure_field_read_node(ws, site.caller_seg, site.caller, &site.actual_arg, &field)
+            else {
+                continue;
+            };
             let changed = place_inter_edge_if_absent(
                 site.caller_seg,
                 site.callee_seg,
                 IdgEdge {
-                    from: actual_arg_node,
+                    from: actual_field_read,
                     to: reader,
                     meta: crate::edge::EdgeMeta {
                         precision: site.precision,
@@ -2732,12 +3275,71 @@ fn stitch_field_argument_fallbacks(
     added
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stitch_field_copy_fallbacks(
+    sites: &[FieldCopySite],
+    ws: &mut IdgWorkspace,
+    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
+    field_index: &mut FieldPlaceIndex,
+    inter_call_arg_entries: &mut InterCallArgEntryIndex,
+    synthetic_field_writes: &mut SyntheticFieldWriteCache,
+    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    pending: &mut VecDeque<PendingFieldWrite>,
+    enqueued: &mut AHashSet<PendingFieldWrite>,
+) -> usize {
+    let mut added = 0usize;
+    for site in sites {
+        let writers = field_index.field_writes_for_base_before_call(
+            inter_call_arg_entries,
+            site.seg_id,
+            site.func,
+            &site.source_base,
+            site.via_span,
+        );
+        if !writers.is_empty() {
+            continue;
+        }
+        let mut readers = field_index.field_reads_for_base(site.seg_id, site.func, &site.target_base);
+        readers.sort_by(|a, b| (a.0.as_str(), a.1 .0).cmp(&(b.0.as_str(), b.1 .0)));
+        readers.dedup();
+        for (field, _) in readers {
+            if !is_forwardable_field(&field) {
+                continue;
+            }
+            let Some(source_read) =
+                ensure_field_read_node(ws, site.seg_id, site.func, &site.source_base, &field)
+            else {
+                continue;
+            };
+            let before = known_edges.len();
+            apply_intra_field_copy_write(
+                site,
+                &FieldPlaceHit {
+                    field,
+                    node: source_read,
+                    span: None,
+                },
+                inter_call_arg_entries,
+                synthetic_field_writes,
+                ws,
+                known_edges,
+                field_index,
+                transforms,
+                pending,
+                enqueued,
+            );
+            added = added.saturating_add(known_edges.len().saturating_sub(before));
+        }
+    }
+    added
+}
+
 fn call_ret_assignment_targets(
     ws: &IdgWorkspace,
     seg_id: SegmentId,
     func: FuncId,
     call_ret_node: NodeId,
-) -> Vec<(String, Span)> {
+) -> Vec<(String, Span, Option<String>)> {
     let Some(segment) = ws.segment(seg_id) else {
         return Vec::new();
     };
@@ -2758,14 +3360,27 @@ fn call_ret_assignment_targets(
         let Some((target_base, write_span)) = write_place_storage_and_span(segment, to_place) else {
             continue;
         };
-        if target_base.trim().is_empty() || target_base.contains('.') {
+        if target_base.trim().is_empty() {
             continue;
         }
-        out.push((target_base, write_span));
+        let result_field = tuple_result_storage_field(&target_base).map(str::to_string);
+        if target_base.contains('.') && result_field.is_none() {
+            continue;
+        }
+        out.push((target_base, write_span, result_field));
     }
-    out.sort_by(|a, b| (a.0.as_str(), a.1.start).cmp(&(b.0.as_str(), b.1.start)));
+    out.sort_by(|a, b| {
+        (a.0.as_str(), a.1.start, a.2.as_deref()).cmp(&(b.0.as_str(), b.1.start, b.2.as_deref()))
+    });
     out.dedup();
     out
+}
+
+fn tuple_result_storage_field(storage: &str) -> Option<&str> {
+    let (_, suffix) = storage.rsplit_once('.')?;
+    suffix
+        .strip_prefix(bonsai_lang_api::kit::SYNTHETIC_TUPLE_RESULT_PREFIX)
+        .filter(|field| !field.is_empty() && field.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn is_forwardable_field(field: &str) -> bool {
@@ -2984,6 +3599,24 @@ fn ensure_field_write_node(
     Some(segment.intern_node(func, pid))
 }
 
+fn ensure_field_read_node(
+    ws: &mut IdgWorkspace,
+    seg_id: SegmentId,
+    func: FuncId,
+    base: &str,
+    field: &str,
+) -> Option<NodeId> {
+    let (name, path_parts) = storage_path_parts(base, field)?;
+    let segment = ws.segment_mut(seg_id)?;
+    let name_id = segment.strings.intern(&name);
+    let mut path: SmallVec<[StrId; 4]> = SmallVec::new();
+    for part in path_parts {
+        path.push(segment.strings.intern(&part));
+    }
+    let pid = segment.intern_place(Place::Read { name: name_id, path });
+    Some(segment.intern_node(func, pid))
+}
+
 fn ensure_scalar_write_node(
     ws: &mut IdgWorkspace,
     seg_id: SegmentId,
@@ -2991,8 +3624,13 @@ fn ensure_scalar_write_node(
     target_base: &str,
     span: Span,
 ) -> Option<NodeId> {
-    let name = normalize_storage_base(target_base);
-    if name.is_empty() || name.contains('.') {
+    let positional_tuple_binding = tuple_result_storage_field(target_base).is_some();
+    let name = if positional_tuple_binding {
+        target_base.trim().to_string()
+    } else {
+        normalize_storage_base(target_base)
+    };
+    if name.is_empty() || (name.contains('.') && !positional_tuple_binding) {
         return None;
     }
     let segment = ws.segment_mut(seg_id)?;

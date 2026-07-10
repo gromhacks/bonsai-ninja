@@ -477,6 +477,7 @@ fn normalize_ruby_subshell_events(events: &mut [FlowEvent], src: &[u8]) {
                     });
                 *call_kind = CallKind::Function;
                 *args = vec![CallArg {
+                    passing_mode: Default::default(),
                     span: *span,
                     name: None,
                     value_text,

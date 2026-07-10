@@ -210,6 +210,54 @@ impl AuditedRepository {
 }
 
 #[test]
+fn self_tuple_struct_expression_is_a_constructor_call() {
+    let ws = workspace_with(
+        vec![Arc::new(RustAdapter::new())],
+        &[(
+            "src/storage.rs",
+            r#"
+struct Payload { cmd: String }
+struct Inner { data: Payload }
+impl Inner {
+    fn assemble(data: Payload) -> Self {
+        Self { data }
+    }
+}
+
+struct Wrapper(Inner);
+impl Wrapper {
+    fn from_payload(data: Payload) -> Self {
+        Self(Inner::assemble(data))
+    }
+}
+"#,
+        )],
+    );
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).unwrap();
+    let factory = idx.defs.iter().find(|decl| decl.name == "from_payload").unwrap();
+    let self_call = factory.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, call_kind, .. } if name == "Self" => Some(*call_kind),
+        _ => None,
+    });
+    let declared_factory_call = factory.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, call_kind, .. } if name == "Inner::assemble" => Some(*call_kind),
+        _ => None,
+    });
+
+    assert_eq!(self_call, Some(CallKind::Constructor));
+    assert_eq!(declared_factory_call, Some(CallKind::Constructor));
+    assert!(
+        factory
+            .receiver_field_writes
+            .iter()
+            .any(|write| { write.target == "self.0.data" && write.source_param_indices == [0] }),
+        "newtype factory should project its input through the tuple field using declaration facts: {:?}",
+        factory.receiver_field_writes
+    );
+}
+
+#[test]
 fn non_tuple_field_receiver_does_not_inherit_base_alias_type() {
     let ws = workspace_with(
         vec![Arc::new(RustAdapter::new())],

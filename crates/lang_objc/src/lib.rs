@@ -55,7 +55,9 @@ const HANDLER: GrammarHandler = GrammarHandler {
     assignment_kinds: &["assignment_expression", "init_declarator"],
     return_kinds: &["return_statement"],
     throw_kinds: &["throw_statement"],
-    lambda_kinds: &["block_literal_expression"],
+    // Current tree-sitter-objc emits `block_literal`; keep the older
+    // `block_literal_expression` spelling for grammar-version compatibility.
+    lambda_kinds: &["block_literal", "block_literal_expression"],
     try_kinds: &["try_statement"],
     catch_kinds: &["catch_clause"],
     finally_kinds: &["finally_clause"],

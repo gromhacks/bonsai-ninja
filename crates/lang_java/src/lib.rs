@@ -204,6 +204,7 @@ impl LanguageAdapter for JavaAdapter {
         // no nodes for these, so without synthesis `new R(..)` and
         // `r.comp()` are opaque and taint can't thread through a record.
         bonsai_lang_api::kit::synthesize_record_members(&mut index, &tree, src, file);
+        bonsai_lang_api::kit::qualify_bare_hierarchy_member_calls(&mut index);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)

@@ -233,6 +233,49 @@ fn scalar_deref_assignment_stays_compound() {
 }
 
 #[test]
+fn anonymous_hash_assignment_emits_field_scoped_writes() {
+    let src = "my $envelope = { kind => 'run', cmd => \"$raw\", user => $user, clean => 'ok' };";
+    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let mut events = vec![FlowEvent::Assign {
+        span,
+        target: "$envelope".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["raw".to_string(), "user".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(AssignValueKind::Compound),
+    }];
+
+    expand_perl_anonymous_hash_field_assigns(&mut events, src);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, source_names, .. }
+                if target == "$envelope.cmd"
+                    && source_names.contains(&"$raw".to_string())
+                    && source_names.contains(&"raw".to_string())
+        )),
+        "hash cmd field should retain only its exact value sources: {events:#?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target == "$envelope.user"
+                && source_names.contains(&"$user".to_string())
+                && source_names.contains(&"user".to_string())
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, value_kind, .. }
+            if target == "$envelope.clean"
+                && source_names.is_empty()
+                && *value_kind == Some(AssignValueKind::Literal)
+    )));
+}
+
+#[test]
 fn uncaught_die_lowers_to_throw_in_sub_body() {
     // L1: a `die` outside any `eval {}; if ($@)` region must still
     // lower to a Throw so the catch param of a native try (and

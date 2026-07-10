@@ -2225,6 +2225,53 @@ pub fn alias_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
     map
 }
 
+/// Build the local binding table used by semantic graph construction.
+///
+/// Unlike [`alias_map_for_file`], which preserves the historical
+/// local-to-short-name compatibility contract, this map retains the import's
+/// module and member identity. A direct `from storage import Repository`
+/// therefore contributes `Repository -> storage.Repository`, while a renamed
+/// import contributes the same target under its local alias. IDG resolution
+/// can then match that target against declaration/module facts exactly, just
+/// as a compiler symbol table would.
+#[must_use]
+pub fn semantic_import_binding_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
+    let mut map = AHashMap::new();
+    for import in imports {
+        if import.is_wildcard {
+            if let Some(alias) = import.alias.as_deref().filter(|alias| !alias.is_empty()) {
+                map.insert(alias.to_string(), import.module.clone());
+            }
+            continue;
+        }
+        if let Some(member) = import
+            .original_name
+            .as_deref()
+            .filter(|member| !member.is_empty())
+        {
+            let local = import.alias.as_deref().unwrap_or(member);
+            if local.is_empty() {
+                continue;
+            }
+            let target = if import.module.trim().is_empty() {
+                member.to_string()
+            } else {
+                format!("{}.{}", import.module.trim(), member)
+            };
+            map.insert(local.to_string(), target);
+            continue;
+        }
+        if let Some(local) = import.alias.as_deref().filter(|alias| !alias.is_empty()) {
+            map.insert(local.to_string(), import.module.clone());
+            continue;
+        }
+        if let Some(local) = module_local_binding(&import.module) {
+            map.insert(local, import.module.clone());
+        }
+    }
+    map
+}
+
 fn module_local_binding(module: &str) -> Option<String> {
     let trimmed = module
         .trim()

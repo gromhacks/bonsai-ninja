@@ -71,7 +71,9 @@
 
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
-use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent};
+use bonsai_lang_api::{
+    kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, CallArg, CallKind, Decl, DeclKind, FlowEvent,
+};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -113,6 +115,18 @@ pub struct TransferOptions {
     /// enabled; large security scans can skip the eager closure and rely
     /// on the taint engine's demand-driven field propagation.
     pub include_field_argument_forwarding: bool,
+    /// Compatibility mode for token-level taint callers: when a call
+    /// result cannot be resolved to any workspace callee,
+    /// conservatively carry explicit arguments / the method receiver
+    /// into its result. Security graphs leave this disabled and use
+    /// rulepack-declared passthrough shapes instead.
+    pub include_unresolved_call_result_passthrough: bool,
+    /// Whether an unresolved, syntax-classified method call conservatively
+    /// carries its receiver into the call result. This is narrower than the
+    /// compatibility option above: explicit arguments are not propagated,
+    /// and the decision uses only adapter-emitted `CallKind::Method` plus the
+    /// receiver operand—not a library/API name inventory.
+    pub include_unresolved_receiver_result_passthrough: bool,
 }
 
 impl Default for TransferOptions {
@@ -124,6 +138,8 @@ impl Default for TransferOptions {
             include_diagnostic_field_flows: true,
             include_receiver_method_propagation: true,
             include_field_argument_forwarding: true,
+            include_unresolved_call_result_passthrough: false,
+            include_unresolved_receiver_result_passthrough: false,
         }
     }
 }
@@ -138,6 +154,8 @@ impl TransferOptions {
             && self.include_diagnostic_field_flows
             && self.include_receiver_method_propagation
             && self.include_field_argument_forwarding
+            && !self.include_unresolved_call_result_passthrough
+            && !self.include_unresolved_receiver_result_passthrough
     }
 
     /// Return a semantically equivalent option set in deterministic
@@ -175,6 +193,69 @@ impl TransferOptions {
         });
         self.source_callback_args.dedup();
         self
+    }
+
+    /// Stable identity for every option that changes emitted graph edges.
+    /// Database and sidecar caches use this key so differently configured
+    /// IDGs cannot alias through one shared service slot.
+    #[must_use]
+    pub fn semantic_fingerprint(&self) -> u64 {
+        use bonsai_hash::Hasher as StableHasher;
+
+        fn absorb_u64(hasher: &mut StableHasher, value: u64) {
+            hasher.absorb(&value.to_le_bytes());
+            hasher.absorb_separator();
+        }
+
+        fn absorb_str(hasher: &mut StableHasher, value: &str) {
+            hasher.absorb(value.as_bytes());
+            hasher.absorb_separator();
+        }
+
+        let options = self.clone().canonicalized();
+        let mut hasher = StableHasher::new();
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v6");
+        absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
+        absorb_u64(
+            &mut hasher,
+            u64::from(options.include_receiver_method_propagation),
+        );
+        absorb_u64(&mut hasher, u64::from(options.include_field_argument_forwarding));
+        absorb_u64(
+            &mut hasher,
+            u64::from(options.include_unresolved_call_result_passthrough),
+        );
+        absorb_u64(
+            &mut hasher,
+            u64::from(options.include_unresolved_receiver_result_passthrough),
+        );
+        absorb_u64(&mut hasher, options.clean_output_overwrites.len() as u64);
+        for spec in &options.clean_output_overwrites {
+            absorb_str(&mut hasher, "clean-output-overwrite");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_u64(&mut hasher, spec.output_arg_index as u64);
+            absorb_u64(&mut hasher, spec.value_start_arg_index as u64);
+        }
+        absorb_u64(&mut hasher, options.source_output_args.len() as u64);
+        for spec in &options.source_output_args {
+            absorb_str(&mut hasher, "source-output-args");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_u64(&mut hasher, spec.output_arg_indices.len() as u64);
+            for index in &spec.output_arg_indices {
+                absorb_u64(&mut hasher, *index as u64);
+            }
+        }
+        absorb_u64(&mut hasher, options.source_callback_args.len() as u64);
+        for spec in &options.source_callback_args {
+            absorb_str(&mut hasher, "source-callback-args");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_u64(&mut hasher, spec.callback_arg_index as u64);
+            absorb_u64(&mut hasher, spec.source_param_indices.len() as u64);
+            for index in &spec.source_param_indices {
+                absorb_u64(&mut hasher, *index as u64);
+            }
+        }
+        hasher.finish()
     }
 }
 
@@ -261,6 +342,13 @@ pub struct CallSiteRef {
     /// field writers (`env.cmd`) into callee field reads
     /// (`param.cmd`) without tainting the whole container.
     pub call_arg_places: SmallVec<[String; 4]>,
+    /// Source text for each explicit argument. Callback resolution uses it
+    /// only as a callable-reference spelling; write-back semantics use the
+    /// AST-derived targets below.
+    pub call_arg_values: SmallVec<[String; 4]>,
+    /// Addressable caller places whose arguments have adapter-emitted
+    /// write-back passing semantics, parallel to `call_arg_nodes`.
+    pub call_arg_writeback_targets: SmallVec<[Option<String>; 4]>,
     /// Adapter-extracted keyword / label names for call arguments.
     /// Phase 3 uses these to stitch named arguments to the matching
     /// callee parameter instead of relying only on positional order.
@@ -272,6 +360,14 @@ pub struct CallSiteRef {
     /// needs an explicit semantic callee or summary before any
     /// interprocedural flow is stitched.
     pub is_assign_rhs: bool,
+    /// Whether Phase 3 may add a conservative argument/receiver → result
+    /// edge if this call has no semantic callee.
+    pub unresolved_result_passthrough: bool,
+    /// Whether the unresolved-call compatibility fallback may carry the
+    /// method receiver into the result. This comes from the adapter's call
+    /// classification; syntax-level field/property access must not emit a
+    /// method call site.
+    pub unresolved_receiver_result_passthrough: bool,
 }
 
 /// One throw event recorded by the transfer pass for Phase 3 to
@@ -343,6 +439,10 @@ pub struct TransferOutput {
     /// target (`let c = self.cmd()`), without treating sibling fields
     /// as taint on that scalar.
     pub return_field_projections: Vec<ReturnFieldProjection>,
+    /// Formal parameters returned as the whole scalar value (`return x`).
+    /// Phase 3 uses this identity fact to preserve explicit descendant
+    /// taint through wrappers without promoting ordinary scalar taint.
+    pub return_passthrough_param_indices: Vec<usize>,
     /// Name pool used by this function's `Place::Read` /
     /// `Place::Write` / field-path / type-name interns. Embedded so
     /// the segment merge can resolve StrIds back to source-name
@@ -370,6 +470,7 @@ impl TransferOutput {
             call_sites: Vec::new(),
             throw_sites: Vec::new(),
             return_field_projections: Vec::new(),
+            return_passthrough_param_indices: Vec::new(),
             names: bonsai_factstore::StringPoolBuilder::new(),
         }
     }
@@ -442,6 +543,11 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
     out.receiver_field_bases = receiver_field_bases(decl);
     out.implicit_receiver_bases = implicit_receiver_bases(decl);
     out.return_field_projections = return_field_projections(&decl.flow_events);
+    out.return_passthrough_param_indices = return_passthrough_param_indices(&decl.flow_events, &decl.params);
+    let method_receiver_projections = collect_method_receiver_projections(&decl.flow_events);
+    let method_selector_fields = collect_method_selector_fields(&decl.flow_events);
+    let field_precise_source_projections =
+        collect_field_precise_source_projections(&decl.flow_events, &method_receiver_projections);
     let mut ctx = TransferCtx {
         out: &mut out,
         options,
@@ -449,7 +555,9 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
         field_precise_container_assigns: collect_field_precise_container_assigns(&decl.flow_events),
-        method_receiver_projections: collect_method_receiver_projections(&decl.flow_events),
+        method_receiver_projections,
+        method_selector_fields,
+        field_precise_source_projections,
         yield_callback_names: collect_yield_callback_names(&decl.flow_events),
         pattern_bindings: collect_pattern_bindings(&decl.flow_events),
         loop_depth: 0,
@@ -500,6 +608,14 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
 
     emit_receiver_field_writes(decl, &mut ctx);
     walk_events(&decl.flow_events, &mut ctx);
+    let mut assignment_call_sites = ahash::AHashSet::default();
+    collect_assignment_call_sites(&decl.flow_events, &mut assignment_call_sites);
+    for site in &mut ctx.out.call_sites {
+        if assignment_call_sites.contains(&site.site.0) {
+            site.is_assign_rhs = true;
+            site.unresolved_result_passthrough = ctx.options.include_unresolved_call_result_passthrough;
+        }
+    }
     // A call at a given span is one call; the loop double-walk (and any
     // re-entry) pushes a duplicate `CallSiteRef` per visit with no
     // interning. Dedup by site span so the O(sites^2) compound-expression
@@ -520,6 +636,73 @@ fn return_field_projections(events: &[FlowEvent]) -> Vec<ReturnFieldProjection> 
     let mut out = Vec::new();
     collect_return_field_projections(events, &mut out);
     out
+}
+
+fn return_passthrough_param_indices(events: &[FlowEvent], params: &[String]) -> Vec<usize> {
+    fn collect(events: &[FlowEvent], params: &[String], out: &mut Vec<usize>) {
+        for event in events {
+            match event {
+                FlowEvent::Return { value_name, .. } => {
+                    let candidate = value_name.as_deref().map(normalize_return_binding);
+                    let Some(candidate) = candidate else {
+                        continue;
+                    };
+                    if candidate.is_empty()
+                        || !candidate.chars().all(|ch| {
+                            ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_ascii_alphanumeric()
+                        })
+                    {
+                        continue;
+                    }
+                    if let Some(index) = params
+                        .iter()
+                        .position(|param| same_return_binding(param, candidate))
+                    {
+                        if !out.contains(&index) {
+                            out.push(index);
+                        }
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect(then_events, params, out);
+                    collect(else_events, params, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect(body, params, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect(body, params, out);
+                    collect(catch_events, params, out);
+                    collect(finally_events, params, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    collect(events, params, &mut out);
+    out.sort_unstable();
+    out
+}
+
+fn same_return_binding(param: &str, returned: &str) -> bool {
+    let param = normalize_return_binding(param);
+    let returned = normalize_return_binding(returned);
+    !param.is_empty() && param == returned
+}
+
+fn normalize_return_binding(name: &str) -> &str {
+    name.trim().trim_start_matches(['$', '@', '%'])
 }
 
 fn collect_return_field_projections(events: &[FlowEvent], out: &mut Vec<ReturnFieldProjection>) {
@@ -1326,6 +1509,17 @@ struct TransferCtx<'a> {
     /// sibling projections (`item.flag` beside `item.get`) remain
     /// field-sensitive.
     method_receiver_projections: ahash::AHashSet<String>,
+    /// Literal-key method calls keyed by their adapter-emitted projection
+    /// (`request.args.get` -> `request.args.cmd`). These are syntax facts,
+    /// not API names; paired exact field Assigns let mixed expressions keep
+    /// keyed selectors field-scoped while ordinary transforms still consume
+    /// their whole receiver value.
+    method_selector_fields: ahash::AHashMap<String, ahash::AHashSet<String>>,
+    /// Exact projected sources grouped by assignment identity. Multiple
+    /// adapter events can describe the same assignment span/target (a broad
+    /// call-result event plus precise selected-field events), so the group is
+    /// the compiler-level unit used to disambiguate selector calls.
+    field_precise_source_projections: ahash::AHashMap<(Span, String), ahash::AHashSet<String>>,
     /// Local callback variables assigned from a yielding closure such
     /// as Ruby's `callback = Proc.new { |part| yield part }`. Calls
     /// through these names forward their arguments into `Place::Yield`.
@@ -1388,8 +1582,15 @@ impl<'a> TransferCtx<'a> {
     /// elsewhere.
     fn bridge_read(&mut self, name: &str, consumer: NodeId, meta: crate::edge::EdgeMeta) {
         let sid = self.intern_name(name);
-        let writers: smallvec::SmallVec<[NodeId; 4]> =
+        let mut writers: smallvec::SmallVec<[NodeId; 4]> =
             self.last_writer.get(&sid).cloned().unwrap_or_default();
+        if writers.is_empty() {
+            let stripped = name.trim_start_matches(['$', '@', '%', '&']);
+            if !stripped.is_empty() && stripped != name {
+                let alias_sid = self.intern_name(stripped);
+                writers = self.last_writer.get(&alias_sid).cloned().unwrap_or_default();
+            }
+        }
         if writers.is_empty() {
             // Unrooted read: route through the shared Read node so
             // any external taint that finds Read(name) still
@@ -1526,35 +1727,180 @@ fn field_base_name(target: &str) -> Option<&str> {
     (!base.is_empty()).then_some(base)
 }
 
-/// Collect exact method projections that derive from a whole receiver.
-/// `raw.dup` contributes `raw.dup`; chained calls also contribute the
-/// receiver projection (`routed.to_s` in `routed.to_s.empty?`). Used by
-/// [`SemanticSourceFilter`] to keep method transforms whole while still
-/// allowing unrelated static field projections on the same base to stay
-/// field-sensitive.
+/// Collect exact receiver-method projections from adapter-emitted call
+/// events. Dotted assignment text alone is never enough to classify a
+/// field/property access as a method invocation.
 fn collect_method_receiver_projections(events: &[FlowEvent]) -> ahash::AHashSet<String> {
     let mut out = ahash::AHashSet::default();
     collect_method_receiver_projections_into(events, &mut out);
     out
 }
 
+fn collect_method_selector_fields(events: &[FlowEvent]) -> ahash::AHashMap<String, ahash::AHashSet<String>> {
+    fn collect(events: &[FlowEvent], out: &mut ahash::AHashMap<String, ahash::AHashSet<String>>) {
+        for event in events {
+            match event {
+                FlowEvent::Call {
+                    name,
+                    receiver: Some(receiver),
+                    call_kind: CallKind::Method,
+                    args,
+                    ..
+                } => {
+                    let Some(key) = args
+                        .first()
+                        .and_then(|arg| quoted_storage_selector(&arg.value_text))
+                    else {
+                        continue;
+                    };
+                    let receiver = receiver.trim();
+                    let name = name.trim();
+                    if receiver.is_empty() || name.is_empty() {
+                        continue;
+                    }
+                    out.entry(name.to_string())
+                        .or_default()
+                        .insert(format!("{receiver}.{key}"));
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect(then_events, out);
+                    collect(else_events, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect(body, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect(body, out);
+                    collect(catch_events, out);
+                    collect(finally_events, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = ahash::AHashMap::default();
+    collect(events, &mut out);
+    out
+}
+
+fn collect_field_precise_source_projections(
+    events: &[FlowEvent],
+    method_receiver_projections: &ahash::AHashSet<String>,
+) -> ahash::AHashMap<(Span, String), ahash::AHashSet<String>> {
+    fn collect(
+        events: &[FlowEvent],
+        methods: &ahash::AHashSet<String>,
+        out: &mut ahash::AHashMap<(Span, String), ahash::AHashSet<String>>,
+    ) {
+        for event in events {
+            match event {
+                FlowEvent::Assign {
+                    span,
+                    target,
+                    source_name,
+                    source_names,
+                    ..
+                } => {
+                    for source in source_name
+                        .iter()
+                        .map(String::as_str)
+                        .chain(source_names.iter().map(String::as_str))
+                    {
+                        let source = source.trim();
+                        if field_base_name(source).is_some() && !methods.contains(source) {
+                            out.entry((*span, target.clone()))
+                                .or_default()
+                                .insert(source.to_string());
+                        }
+                    }
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect(then_events, methods, out);
+                    collect(else_events, methods, out);
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => collect(body, methods, out),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect(body, methods, out);
+                    collect(catch_events, methods, out);
+                    collect(finally_events, methods, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = ahash::AHashMap::default();
+    collect(events, method_receiver_projections, &mut out);
+    out
+}
+
+fn quoted_storage_selector(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let quote = text.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"' | b'`') || text.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let value = text.get(1..text.len().checked_sub(1)?)?.trim();
+    (!value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch == '$' || ch == '@' || ch.is_ascii_alphanumeric()))
+    .then_some(value)
+}
+
 fn collect_yield_callback_names(events: &[FlowEvent]) -> ahash::AHashSet<String> {
     if !events_contain_yield(events) {
         return ahash::AHashSet::default();
     }
+    let mut yielding_call_assignments = Vec::new();
+    collect_yield_result_call_assignments(events, &mut yielding_call_assignments);
     let mut out = ahash::AHashSet::default();
-    collect_yield_callback_names_into(events, &mut out);
+    collect_yield_callback_names_into(events, &yielding_call_assignments, &mut out);
     out
 }
 
-fn collect_yield_callback_names_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
+fn collect_yield_callback_names_into(
+    events: &[FlowEvent],
+    yielding_call_assignments: &[(Span, String)],
+    out: &mut ahash::AHashSet<String>,
+) {
     for event in events {
         match event {
             FlowEvent::Assign {
+                span,
                 target,
                 source_call: Some(source_call),
+                value_kind,
                 ..
-            } if source_call_creates_yield_callback(source_call) => {
+            } if !matches!(value_kind, Some(AssignValueKind::YieldResult))
+                && yielding_call_assignments.iter().any(|(yield_span, yield_call)| {
+                    yield_call == source_call
+                        && yield_span.file == span.file
+                        && span.start <= yield_span.start
+                        && yield_span.end <= span.end
+                }) =>
+            {
                 let target = target.trim();
                 if is_bare_identifier(target) {
                     out.insert(target.to_string());
@@ -1565,11 +1911,11 @@ fn collect_yield_callback_names_into(events: &[FlowEvent], out: &mut ahash::AHas
                 else_events,
                 ..
             } => {
-                collect_yield_callback_names_into(then_events, out);
-                collect_yield_callback_names_into(else_events, out);
+                collect_yield_callback_names_into(then_events, yielding_call_assignments, out);
+                collect_yield_callback_names_into(else_events, yielding_call_assignments, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_yield_callback_names_into(body, out);
+                collect_yield_callback_names_into(body, yielding_call_assignments, out);
             }
             FlowEvent::Try {
                 body,
@@ -1577,9 +1923,44 @@ fn collect_yield_callback_names_into(events: &[FlowEvent], out: &mut ahash::AHas
                 finally_events,
                 ..
             } => {
-                collect_yield_callback_names_into(body, out);
-                collect_yield_callback_names_into(catch_events, out);
-                collect_yield_callback_names_into(finally_events, out);
+                collect_yield_callback_names_into(body, yielding_call_assignments, out);
+                collect_yield_callback_names_into(catch_events, yielding_call_assignments, out);
+                collect_yield_callback_names_into(finally_events, yielding_call_assignments, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_yield_result_call_assignments(events: &[FlowEvent], out: &mut Vec<(Span, String)>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_call: Some(source_call),
+                value_kind: Some(AssignValueKind::YieldResult),
+                ..
+            } => out.push((*span, source_call.clone())),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_yield_result_call_assignments(then_events, out);
+                collect_yield_result_call_assignments(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_yield_result_call_assignments(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_yield_result_call_assignments(body, out);
+                collect_yield_result_call_assignments(catch_events, out);
+                collect_yield_result_call_assignments(finally_events, out);
             }
             _ => {}
         }
@@ -1609,13 +1990,6 @@ fn events_contain_yield(events: &[FlowEvent]) -> bool {
         }
         _ => false,
     })
-}
-
-fn source_call_creates_yield_callback(source_call: &str) -> bool {
-    matches!(
-        normalise_callee_text(source_call).as_str(),
-        "Proc.new" | "lambda" | "proc"
-    )
 }
 
 fn collect_pattern_bindings(events: &[FlowEvent]) -> Vec<PatternBinding> {
@@ -1716,26 +2090,9 @@ fn single_wrapper_arg(text: &str) -> Option<String> {
 fn collect_method_receiver_projections_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
     for event in events {
         match event {
-            FlowEvent::Call {
-                name,
-                receiver,
-                call_kind,
-                ..
-            } => {
+            FlowEvent::Call { name, call_kind, .. } => {
                 if matches!(call_kind, CallKind::Method) {
                     push_method_projection(name, out);
-                    push_method_projection(receiver.as_deref().unwrap_or_default(), out);
-                }
-            }
-            FlowEvent::Assign { source_call, .. } => {
-                // `a = raw.dup` carries the method projection through
-                // `source_call` rather than a `source_names` entry.
-                if let Some(call) = source_call.as_deref() {
-                    push_method_projection(call, out);
-                    push_method_projection(
-                        method_chain_receiver_carrier(call).as_deref().unwrap_or_default(),
-                        out,
-                    );
                 }
             }
             FlowEvent::Branch {
@@ -1782,8 +2139,17 @@ impl SemanticSourceFilter {
         primary: Option<&str>,
         sources: &[String],
         method_receiver_projections: &ahash::AHashSet<String>,
+        exact_projections: Option<&ahash::AHashSet<String>>,
+        method_selector_fields: &ahash::AHashMap<String, ahash::AHashSet<String>>,
     ) -> Self {
         let mut filter = Self::default();
+        for projection in exact_projections.into_iter().flatten() {
+            if let Some(base) = field_base_name(projection) {
+                if !source_uses_index_projection(projection, base) {
+                    filter.structural_bases.insert(base.to_string());
+                }
+            }
+        }
         for source in primary.into_iter().chain(sources.iter().map(String::as_str)) {
             let source = source.trim();
             let Some(base) = field_base_name(source) else {
@@ -1792,15 +2158,15 @@ impl SemanticSourceFilter {
             if source_uses_index_projection(source, base) {
                 continue;
             }
-            // A method projection (`raw.dup`, `routed.to_s`) derives
-            // its value from the whole receiver, so it must not demote
-            // bare `raw`/`routed` to a field-only structural base — the
-            // receiver legitimately flows whole when it is also read
-            // directly (`cmd: "#{raw}"`, `cmd: routed`). Genuine field
-            // / index projections (`obj.field`, `data[:cmd]`,
-            // Solidity `routed.length`) keep their base structural.
+            // A projection backed by an actual method Call event derives
+            // from the receiver. Genuine field/index projections have no
+            // such event and keep their base structural.
             if method_receiver_projections.contains(source)
-                && method_projection_derives_whole_receiver(source)
+                && !method_projection_has_exact_selected_source(
+                    source,
+                    exact_projections,
+                    method_selector_fields,
+                )
             {
                 continue;
             }
@@ -1815,18 +2181,23 @@ impl SemanticSourceFilter {
     }
 }
 
-fn method_projection_derives_whole_receiver(source: &str) -> bool {
-    let terminal = source
-        .trim()
-        .rsplit('.')
-        .find(|part| !part.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .trim_end_matches("()");
-    !matches!(
-        terminal,
-        "at" | "At" | "fetch" | "Fetch" | "get" | "Get" | "getOrDefault" | "objectForKey" | "valueForKey"
-    )
+fn method_projection_has_exact_selected_source(
+    projection: &str,
+    exact_projections: Option<&ahash::AHashSet<String>>,
+    method_selector_fields: &ahash::AHashMap<String, ahash::AHashSet<String>>,
+) -> bool {
+    let Some(exact_projections) = exact_projections else {
+        return false;
+    };
+    let projection = projection.trim();
+    let receiver_is_exact = dotted_projection_receiver(projection)
+        .is_some_and(|receiver| exact_projections.contains(receiver.trim()));
+    receiver_is_exact
+        || method_selector_fields.get(projection).is_some_and(|selected| {
+            selected
+                .iter()
+                .any(|field| exact_projections.contains(field.as_str()))
+        })
 }
 
 fn source_uses_index_projection(source: &str, base: &str) -> bool {
@@ -2118,7 +2489,10 @@ fn emit_container_field_writes(
     span: Span,
     ctx: &mut TransferCtx<'_>,
 ) -> bool {
-    let fields = container_field_initializers(text);
+    let mut fields = container_field_initializers(text);
+    fields.extend(positional_tuple_initializers(text));
+    fields.sort();
+    fields.dedup();
     let spreads = container_spreads(text);
     if fields.is_empty() && spreads.is_empty() {
         return false;
@@ -2243,7 +2617,7 @@ fn bridge_value_expr_fragment_to_node(
             }
         }
         let source_slice = value.get(*start..*end).unwrap_or(access);
-        if !source_slice.contains('[') {
+        if !source_slice.contains('[') && ctx.method_receiver_projections.contains(access) {
             if let Some(receiver) = method_chain_receiver_carrier(access) {
                 let sid = ctx.intern_name(&receiver);
                 if bridged.insert(sid) {
@@ -2418,6 +2792,22 @@ fn container_field_initializers(text: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+fn positional_tuple_initializers(text: &str) -> Vec<(String, String)> {
+    let trimmed = text.trim().trim_end_matches(';').trim();
+    let Some(body) = trimmed.strip_prefix('{').and_then(|body| body.strip_suffix('}')) else {
+        return Vec::new();
+    };
+    let parts = split_top_level(body, ',');
+    if parts.len() < 2 || parts.iter().any(|part| split_top_level_once(part, ':').is_some()) {
+        return Vec::new();
+    }
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (index.to_string(), value.trim().to_string()))
+        .collect()
 }
 
 fn container_spreads(text: &str) -> Vec<String> {
@@ -2640,6 +3030,42 @@ fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCal
     None
 }
 
+fn collect_assignment_call_sites(events: &[FlowEvent], out: &mut ahash::AHashSet<Span>) {
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_call: Some(_),
+                ..
+            } => {
+                out.insert(assign_call_site_hint(events, index).map_or(*span, |hint| hint.site_span));
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assignment_call_sites(then_events, out);
+                collect_assignment_call_sites(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assignment_call_sites(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assignment_call_sites(body, out);
+                collect_assignment_call_sites(catch_events, out);
+                collect_assignment_call_sites(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn assign_sources_match_call(
     source_call: Option<&str>,
     source_name: Option<&str>,
@@ -2758,7 +3184,18 @@ fn walk_assign(
     }
 
     // Field-write detection: targets like `obj.field` or `obj["k"]`.
-    let (write_node, is_field_write) = build_target_node(target, span, ctx);
+    // Tuple destructuring keeps a synthetic result-position suffix on
+    // the storage node while `last_writer` remains keyed by the user's
+    // binding name. Phase 3 uses the suffix to stitch only the matching
+    // positional return field into this writer.
+    let tuple_result_index = tuple_result_index(source_names);
+    let tuple_target =
+        tuple_result_index.map(|index| format!("{target}.{SYNTHETIC_TUPLE_RESULT_PREFIX}{index}"));
+    let (write_node, is_field_write) = if let Some(tuple_target) = tuple_target.as_deref() {
+        (ctx.write_node(tuple_target, span), false)
+    } else {
+        build_target_node(target, span, ctx)
+    };
 
     let assign_kind = if is_field_write {
         IdgEdgeKind::IntraFieldWrite
@@ -2817,8 +3254,20 @@ fn walk_assign(
         || (source_call.is_some()
             && !source_call_args.is_empty()
             && matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::CallResult)));
-    let source_filter =
-        SemanticSourceFilter::from_sources(source_name, source_names, &ctx.method_receiver_projections);
+    let exact_projections = if matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::Destructure)) {
+        None
+    } else {
+        ctx.field_precise_source_projections
+            .get(&(span, target.to_string()))
+            .cloned()
+    };
+    let source_filter = SemanticSourceFilter::from_sources(
+        source_name,
+        source_names,
+        &ctx.method_receiver_projections,
+        exact_projections.as_ref(),
+        &ctx.method_selector_fields,
+    );
     if !suppress_direct_rhs_inputs {
         if let Some(src) = source_name {
             if !src.is_empty()
@@ -2826,7 +3275,13 @@ fn walk_assign(
                 && !direct_rhs_source_is_call_internals(src, source_call, source_call_args)
             {
                 ctx.bridge_read(src, write_node, edge_meta);
-                bridge_method_projection_receiver_source(src, write_node, edge_meta, ctx);
+                if !method_projection_has_exact_selected_source(
+                    src,
+                    exact_projections.as_ref(),
+                    &ctx.method_selector_fields,
+                ) {
+                    bridge_method_projection_receiver_source(src, write_node, edge_meta, ctx);
+                }
             }
         }
         for src in source_names {
@@ -2837,17 +3292,15 @@ fn walk_assign(
                 continue;
             }
             ctx.bridge_read(src, write_node, edge_meta);
-            bridge_method_projection_receiver_source(src, write_node, edge_meta, ctx);
-        }
-    }
-    if !suppress_broad_container_inputs {
-        if let Some(callee) = source_call.and_then(method_chain_receiver_carrier) {
-            if !callee.is_empty() && callee != target {
-                ctx.bridge_read(&callee, write_node, edge_meta);
+            if !method_projection_has_exact_selected_source(
+                src,
+                exact_projections.as_ref(),
+                &ctx.method_selector_fields,
+            ) {
+                bridge_method_projection_receiver_source(src, write_node, edge_meta, ctx);
             }
         }
     }
-
     // Call-RHS shape: `target = callee(args...)`. Two intra edges per
     // arg (Read(arg) → CallArg(site, idx)) plus one
     // CallRet(site) → Write(target). Phase 3 stitches the
@@ -2880,32 +3333,22 @@ fn walk_assign(
                 to: write_node,
                 meta: edge_meta,
             });
-            if call_result_inherits_constructor_args(callee) {
-                for arg_node in &arg_nodes {
-                    ctx.emit(IdgEdge {
-                        from: *arg_node,
-                        to: ret_node,
-                        meta: crate::edge::EdgeMeta {
-                            precision: Precision::Narrowed,
-                            kind: IdgEdgeKind::IntraAssign,
-                            call_kind: bonsai_callgraph::EdgeKind::Indirect,
-                            via_span: span,
-                        },
-                    });
-                }
-            }
             // Assign-RHS `source_call_args` are Strings without
             // explicit per-arg spans; use the assign's span as
             // the conservative fallback.
             let mut arg_spans: SmallVec<[Span; 4]> = SmallVec::new();
             let mut arg_places: SmallVec<[String; 4]> = SmallVec::new();
+            let mut arg_values: SmallVec<[String; 4]> = SmallVec::new();
+            let mut arg_writeback_targets: SmallVec<[Option<String>; 4]> = SmallVec::new();
             let mut arg_names: SmallVec<[Option<String>; 4]> = SmallVec::new();
             for _ in 0..source_call_args.len() {
                 arg_spans.push(span);
                 arg_names.push(None);
+                arg_writeback_targets.push(None);
             }
             for arg in source_call_args {
                 arg_places.push(arg.clone());
+                arg_values.push(arg.clone());
             }
             if !source_call_site_hint.is_some_and(|hint| hint.sibling_call_event) {
                 ctx.out.call_sites.push(CallSiteRef {
@@ -2921,9 +3364,13 @@ fn walk_assign(
                     receiver_arg_node: None,
                     call_arg_spans: arg_spans,
                     call_arg_places: arg_places,
+                    call_arg_values: arg_values,
+                    call_arg_writeback_targets: arg_writeback_targets,
                     call_arg_names: arg_names,
                     source_callback_args: Vec::new(),
                     is_assign_rhs: true,
+                    unresolved_result_passthrough: ctx.options.include_unresolved_call_result_passthrough,
+                    unresolved_receiver_result_passthrough: false,
                 });
             }
         }
@@ -3032,18 +3479,12 @@ fn direct_rhs_source_is_call_internals(
     source_call_args.iter().any(|arg| arg.trim() == src)
 }
 
-fn call_result_inherits_constructor_args(callee: &str) -> bool {
-    let trimmed = callee.trim();
-    let explicit_new = trimmed.starts_with("new ");
-    let callee = trimmed.trim_start_matches("new ").trim();
-    if !explicit_new && (callee.contains('.') || callee.contains(':') || callee.contains("->")) {
-        return false;
-    }
-    let tail = callee
-        .rsplit(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .find(|part| !part.is_empty())
-        .unwrap_or(callee);
-    tail.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+fn tuple_result_index(source_names: &[String]) -> Option<usize> {
+    source_names.iter().find_map(|source| {
+        source
+            .strip_prefix(SYNTHETIC_TUPLE_RESULT_PREFIX)
+            .and_then(|index| index.parse::<usize>().ok())
+    })
 }
 
 fn bridge_method_projection_receiver_source(
@@ -3053,10 +3494,7 @@ fn bridge_method_projection_receiver_source(
     ctx: &mut TransferCtx<'_>,
 ) {
     let source = source.trim();
-    if source.is_empty()
-        || !ctx.method_receiver_projections.contains(source)
-        || !method_projection_derives_whole_receiver(source)
-    {
+    if source.is_empty() || !ctx.method_receiver_projections.contains(source) {
         return;
     }
     let Some(receiver) = dotted_projection_receiver(source) else {
@@ -3094,6 +3532,8 @@ fn walk_call(
     let site = CallSiteId(span);
     let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
     let mut arg_places: SmallVec<[String; 4]> = SmallVec::new();
+    let mut arg_values: SmallVec<[String; 4]> = SmallVec::new();
+    let mut arg_writeback_targets: SmallVec<[Option<String>; 4]> = SmallVec::new();
     let mut arg_names: SmallVec<[Option<String>; 4]> = SmallVec::new();
     for (idx, arg) in args.iter().enumerate() {
         let arg_idx = u8::try_from(idx).unwrap_or(u8::MAX);
@@ -3104,6 +3544,12 @@ fn walk_call(
             let _ = build_target_node(&arg_place, span, ctx);
         }
         arg_places.push(arg_place);
+        arg_values.push(arg.value_text.clone());
+        arg_writeback_targets.push(
+            matches!(arg.passing_mode, bonsai_lang_api::ArgumentPassingMode::WriteBack)
+                .then(|| arg.place.clone())
+                .flatten(),
+        );
         arg_names.push(arg.name.clone());
         // Connect every NAMED carrier the adapter exposed for this
         // arg expression to the CallArg node, not just the
@@ -3124,6 +3570,8 @@ fn walk_call(
             arg.place.as_deref(),
             &arg.source_names,
             &ctx.method_receiver_projections,
+            None,
+            &ctx.method_selector_fields,
         );
         if let Some(place) = arg.place.as_deref() {
             if !place.is_empty() && !source_filter.is_structural_base_token(place) {
@@ -3188,9 +3636,9 @@ fn walk_call(
             }
         }
     }
-    apply_collection_append_call(span, name, receiver, call_kind, args, ctx);
+    apply_compat_receiver_argument_state_call(span, receiver, call_kind, args, ctx);
     apply_yield_callback_call(span, name, receiver, args, ctx);
-    if name == "send" && args.len() >= 2 {
+    if matches!(call_kind, CallKind::ChannelSend) && args.len() >= 2 {
         if let Some(channel) = args
             .first()
             .map(call_arg_place_name)
@@ -3302,6 +3750,8 @@ fn walk_call(
         if let Some(n) = emitted_arg_zero {
             arg_nodes.push(n);
             arg_places.push(String::new());
+            arg_values.push(String::new());
+            arg_writeback_targets.push(None);
             arg_names.push(None);
         }
     }
@@ -3321,6 +3771,12 @@ fn walk_call(
     while arg_places.len() < arg_nodes.len() {
         arg_places.push(String::new());
     }
+    while arg_values.len() < arg_nodes.len() {
+        arg_values.push(String::new());
+    }
+    while arg_writeback_targets.len() < arg_nodes.len() {
+        arg_writeback_targets.push(None);
+    }
     while arg_names.len() < arg_nodes.len() {
         arg_names.push(None);
     }
@@ -3337,9 +3793,16 @@ fn walk_call(
         receiver_arg_node,
         call_arg_spans: arg_spans,
         call_arg_places: arg_places,
+        call_arg_values: arg_values,
+        call_arg_writeback_targets: arg_writeback_targets,
         call_arg_names: arg_names,
         source_callback_args: source_callback_args_for_call(name, ctx),
         is_assign_rhs: false,
+        unresolved_result_passthrough: ctx.options.include_unresolved_call_result_passthrough,
+        unresolved_receiver_result_passthrough: (ctx.options.include_unresolved_call_result_passthrough
+            || ctx.options.include_unresolved_receiver_result_passthrough)
+            && matches!(call_kind, CallKind::Method)
+            && receiver.is_some(),
     });
     apply_source_output_arg_writes(span, name, args, ctx);
     apply_clean_output_overwrite_call(span, name, args, ctx);
@@ -3396,21 +3859,40 @@ fn apply_yield_callback_call(
     }
 }
 
-fn apply_collection_append_call(
+/// Compatibility graph fallback for unresolved method calls: an explicit
+/// argument may be stored into receiver state. This is deliberately
+/// syntax-driven and name-agnostic. Security graphs disable the fallback and
+/// use resolved bodies or declarative summaries instead.
+fn apply_compat_receiver_argument_state_call(
     span: Span,
-    name: &str,
     receiver: Option<&str>,
     call_kind: CallKind,
     args: &[CallArg],
     ctx: &mut TransferCtx<'_>,
 ) {
-    if !matches!(call_kind, CallKind::Method) || args.is_empty() {
+    if !ctx.options.include_unresolved_call_result_passthrough
+        || !matches!(call_kind, CallKind::Method)
+        || args.is_empty()
+    {
         return;
     }
     let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
         return;
     };
-    if !collection_append_method_name(name, receiver) {
+    // Subscript/property assignments often emit both a method-shaped helper
+    // call and an exact field Assign at the same span. The exact AST write
+    // owns that shape; promoting its value to the whole receiver would erase
+    // sibling-field precision.
+    if ctx
+        .field_precise_container_assigns
+        .iter()
+        .any(|(field_span, base)| {
+            base == receiver
+                && field_span.file == span.file
+                && field_span.start < span.end
+                && span.start < field_span.end
+        })
+    {
         return;
     }
 
@@ -3425,27 +3907,6 @@ fn apply_collection_append_call(
         bridge_call_arg_value_to_node(arg, write_node, meta, span, ctx);
     }
     ctx.append_writer(receiver, write_node);
-}
-
-fn collection_append_method_name(name: &str, receiver: &str) -> bool {
-    let name = name.trim();
-    let receiver = receiver.trim();
-    if name.is_empty() || receiver.is_empty() {
-        return false;
-    }
-    let member = name
-        .strip_prefix(receiver)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .unwrap_or(name)
-        .rsplit(['.', ':'])
-        .next()
-        .unwrap_or(name)
-        .trim()
-        .trim_end_matches("()");
-    matches!(
-        member,
-        "push" | "append" | "add" | "addLast" | "push_back" | "emplace_back"
-    )
 }
 
 fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
@@ -3519,6 +3980,8 @@ fn bridge_call_arg_value_to_node(
         arg.place.as_deref(),
         &arg.source_names,
         &ctx.method_receiver_projections,
+        None,
+        &ctx.method_selector_fields,
     );
     let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {
@@ -3550,7 +4013,8 @@ fn bridge_projection_receiver_to_node(
     ctx: &mut TransferCtx<'_>,
 ) {
     for receiver in projection_receiver_candidates(arg) {
-        let method_projection = arg_has_method_projection_for_receiver(arg, &receiver);
+        let method_projection =
+            arg_has_method_projection_for_receiver(arg, &receiver, &ctx.method_receiver_projections);
         let catch_projection = catch_projection_receiver_matches(ctx, &receiver);
         if receiver.is_empty()
             || (!method_projection && !catch_projection)
@@ -3592,11 +4056,18 @@ fn catch_projection_receiver_matches(ctx: &mut TransferCtx<'_>, receiver: &str) 
     ctx.catch_projection_receivers.contains(&stripped_sid)
 }
 
-fn arg_has_method_projection_for_receiver(arg: &CallArg, receiver: &str) -> bool {
-    std::iter::once(arg.value_text.as_str())
-        .chain(arg.place.as_deref())
-        .chain(arg.source_names.iter().map(String::as_str))
-        .any(|text| text.contains('(') && projection_receiver_from_text(text).as_deref() == Some(receiver))
+fn arg_has_method_projection_for_receiver(
+    arg: &CallArg,
+    receiver: &str,
+    method_receiver_projections: &ahash::AHashSet<String>,
+) -> bool {
+    method_receiver_projections.iter().any(|projection| {
+        dotted_projection_receiver(projection).as_deref() == Some(receiver)
+            && std::iter::once(arg.value_text.as_str())
+                .chain(arg.place.as_deref())
+                .chain(arg.source_names.iter().map(String::as_str))
+                .any(|text| text.contains(projection))
+    })
 }
 
 fn projection_receiver_candidates(arg: &CallArg) -> Vec<String> {
@@ -3714,10 +4185,17 @@ fn call_arg_place_name(arg: &CallArg) -> String {
         return normalized_call_arg_storage_place(place).to_string();
     }
     let value = arg.value_text.trim();
-    if is_bare_identifier(value) {
+    if is_bare_identifier(value) || is_sigiled_bare_identifier(value) {
         return value.to_string();
     }
     String::new()
+}
+
+fn is_sigiled_bare_identifier(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix(['$', '@', '%']) else {
+        return false;
+    };
+    is_bare_identifier(rest)
 }
 
 fn output_candidate_place_needs_field_node(place: &str) -> bool {
@@ -3957,6 +4435,8 @@ fn bridge_call_arg_value_to_throw(arg: &CallArg, throw_node: NodeId, span: Span,
         arg.place.as_deref(),
         &arg.source_names,
         &ctx.method_receiver_projections,
+        None,
+        &ctx.method_selector_fields,
     );
     let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {

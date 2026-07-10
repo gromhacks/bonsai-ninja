@@ -15,6 +15,7 @@ fn edge(
         call_span: Span::new(bonsai_common::FileId::new(0), start, start + 1),
         tainted_args: Vec::new(),
         precision: Precision::Exact,
+        edge_kind: bonsai_callgraph::EdgeKind::Direct,
     }
 }
 

@@ -126,6 +126,7 @@ fn two_files_with_call_creates_cross_file_edges_when_callgraph_resolves() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 22, 23),
             name: None,
             value_text: "x".to_string(),
@@ -167,6 +168,7 @@ fn callee_token_call_site_stitches_full_expression_callgraph_edge() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Method,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 38, 41),
             name: None,
             value_text: "cmd".to_string(),
@@ -202,6 +204,7 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 27, 29),
                 name: None,
                 value_text: "el".to_string(),
@@ -209,6 +212,7 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
                 source_names: vec!["el".to_string()],
             },
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 31, 35),
                 name: None,
                 value_text: "html".to_string(),
@@ -271,6 +275,7 @@ fn exact_site_constructor_edge_stitches_class_call_arguments_across_modules() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 31, 34),
             name: None,
             value_text: "raw".to_string(),
@@ -318,6 +323,51 @@ fn exact_site_constructor_edge_stitches_class_call_arguments_across_modules() {
 }
 
 #[test]
+fn qualified_new_edge_stitches_to_initialize_constructor() {
+    let call_span = span(0, 20, 27);
+    let mut caller = empty_decl(1, 0, "entry");
+    caller.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "Box.new".to_string(),
+        receiver: Some("Box".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Constructor,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(0, 28, 31),
+            name: None,
+            value_text: "raw".to_string(),
+            place: Some("raw".to_string()),
+            source_names: vec!["raw".to_string()],
+        }],
+    }];
+
+    let mut box_class = empty_decl(2, 1, "Box");
+    box_class.kind = DeclKind::Class;
+    box_class.flow_events = Vec::new();
+
+    let mut init = empty_decl(3, 1, "initialize");
+    init.kind = DeclKind::Constructor;
+    init.parent = Some(box_class.symbol);
+    init.params = vec!["value".to_string()];
+
+    let idx = build_index(vec![caller, box_class, init]);
+    let caller_id = func_id(&idx, "entry");
+    let init_id = func_id(&idx, "initialize");
+    let cg = resolved_graph([(caller_id, init_id, call_span)]);
+    let ws = build(&idx, &cg);
+    let caller_seg = ws.segment_for_func(caller_id).expect("caller segment");
+    let init_seg = ws.segment_for_func(init_id).expect("constructor segment");
+
+    assert!(ws.cross_file().edges.iter().any(|cross| {
+        cross.from_segment == caller_seg
+            && cross.to_segment == init_seg
+            && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+            && cross.edge.meta.via_span == call_span
+    }));
+}
+
+#[test]
 fn constructor_fallback_indexes_structs_by_scope_without_sibling_fanout() {
     let call_span = span(0, 20, 35);
     let mut caller = empty_decl(1, 0, "entry");
@@ -329,6 +379,7 @@ fn constructor_fallback_indexes_structs_by_scope_without_sibling_fanout() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, 30, 33),
             name: None,
             value_text: "raw".to_string(),
@@ -424,6 +475,7 @@ fn higher_order_callback_binding_stays_in_same_directory_scope() {
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 21, 29),
                 name: None,
                 value_text: "executor".to_string(),
@@ -431,6 +483,7 @@ fn higher_order_callback_binding_stays_in_same_directory_scope() {
                 source_names: vec!["executor".to_string()],
             },
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 31, 32),
                 name: None,
                 value_text: "t".to_string(),
@@ -448,6 +501,7 @@ fn higher_order_callback_binding_stays_in_same_directory_scope() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(1, 123, 128),
             name: None,
             value_text: "value".to_string(),
@@ -542,6 +596,7 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 21, 29),
                 name: None,
                 value_text: "executor".to_string(),
@@ -549,6 +604,7 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
                 source_names: vec!["executor".to_string()],
             },
             bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
                 span: span(0, 31, 32),
                 name: None,
                 value_text: "t".to_string(),
@@ -567,6 +623,7 @@ fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(1, 123, 128),
             name: None,
             value_text: "value".to_string(),
@@ -616,6 +673,7 @@ fn repeated_calls_to_same_callee_do_not_duplicate_candidates_per_site() {
         receiver_types: Vec::new(),
         call_kind: bonsai_lang_api::CallKind::Function,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, start + 1, start + 2),
             name: None,
             value_text: "x".to_string(),
@@ -660,6 +718,7 @@ fn same_method_name_on_different_receiver_types_stitches_by_exact_site() {
         receiver_types: vec![receiver_type.to_string()],
         call_kind: bonsai_lang_api::CallKind::Method,
         args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
             span: span(0, start + 1, start + 2),
             name: None,
             value_text: "x".to_string(),
@@ -736,4 +795,51 @@ fn unresolved_call_skipped_silently() {
     let ws = build(&idx, &cg);
     assert_eq!(ws.segment_count(), 1);
     assert!(ws.cross_file().is_empty());
+}
+
+#[test]
+fn typed_child_receiver_stitches_to_inherited_cross_file_method() {
+    let call_span = span(0, 40, 55);
+    let mut entry = empty_decl(1, 0, "entry");
+    entry.params = vec!["input".to_string()];
+    entry.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "child.helper".to_string(),
+        receiver: Some("child".to_string()),
+        receiver_types: vec!["Child".to_string()],
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: vec![bonsai_lang_api::CallArg {
+            passing_mode: Default::default(),
+            span: span(0, 51, 54),
+            name: None,
+            value_text: "input".to_string(),
+            place: Some("input".to_string()),
+            source_names: vec!["input".to_string()],
+        }],
+    }];
+
+    let mut child = empty_decl(2, 0, "Child");
+    child.kind = DeclKind::Class;
+    child.bases = vec!["Base".to_string()];
+
+    let mut base = empty_decl(3, 1, "Base");
+    base.kind = DeclKind::Class;
+    let mut helper = empty_decl(4, 1, "helper");
+    helper.kind = DeclKind::Method;
+    helper.parent = Some(base.symbol);
+    helper.params = vec!["value".to_string()];
+
+    let idx = build_index(vec![entry, child, base, helper]);
+    let entry_id = func_id(&idx, "entry");
+    let helper_id = func_id(&idx, "helper");
+    let ws = build(&idx, &ResolvedCallGraph::default());
+    let entry_segment = ws.segment_for_func(entry_id).expect("entry segment");
+    let helper_segment = ws.segment_for_func(helper_id).expect("helper segment");
+
+    assert!(ws.cross_file().edges.iter().any(|edge| {
+        edge.from_segment == entry_segment
+            && edge.to_segment == helper_segment
+            && edge.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+            && edge.edge.meta.via_span == call_span
+    }));
 }

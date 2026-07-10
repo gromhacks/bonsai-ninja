@@ -225,6 +225,52 @@ fn iife_params_bind_to_corresponding_arguments() {
 }
 
 #[test]
+fn object_destructuring_preserves_aggregate_and_exact_field_sources() {
+    use bonsai_lang_api::{FlowEvent, LanguageAdapter};
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "app.js",
+            "function entry(args) {\n  const { v } = args;\n  sink(v);\n}\n",
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+    let global = ws.db().global_index();
+    let entry = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "entry")
+        .expect("entry declaration");
+
+    let v_sources = entry
+        .flow_events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Assign {
+                target, source_name, ..
+            } if target == "v" => source_name.as_deref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(v_sources, ["args", "args.v"]);
+    assert!(entry.flow_events.iter().any(|event| {
+        matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: Some(source),
+                value_kind: Some(bonsai_lang_api::AssignValueKind::Destructure),
+                ..
+            } if target == "v" && source == "args"
+        )
+    }));
+}
+
+#[test]
 fn esm_named_export_alias_preserves_different_local_function_name() {
     use bonsai_lang_api::LanguageAdapter;
 

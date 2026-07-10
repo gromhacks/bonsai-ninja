@@ -7,7 +7,7 @@
 
 mod common;
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::Precision;
 use bonsai_db::AnalyzerDb;
@@ -28,6 +28,21 @@ use common::{build_db, cfg, func_id_or_none, seed, sink_reached};
 use std::sync::Arc;
 
 fn seed_idg_on(db: &AnalyzerDb) -> Arc<IdgQueryService> {
+    let transfer_options = TransferOptions {
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
+        ..TransferOptions::default()
+    };
+    let (ws, global) = build_idg_workspace_on(db, &transfer_options);
+    let svc = Arc::new(IdgQueryService::new(ws, global));
+    db.set_idg_service(Arc::clone(&svc));
+    svc
+}
+
+fn build_idg_workspace_on(
+    db: &AnalyzerDb,
+    transfer_options: &TransferOptions,
+) -> (Arc<bonsai_idg::IdgWorkspace>, Arc<bonsai_index::GlobalIndex>) {
     let global = db.global_index();
     let cg = ResolvedCallGraph::build_with_file_info(
         global.as_ref(),
@@ -50,21 +65,14 @@ fn seed_idg_on(db: &AnalyzerDb) -> Arc<IdgQueryService> {
         },
         |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
     );
-    let transfer_options = TransferOptions {
-        include_diagnostic_field_flows: false,
-        include_receiver_method_propagation: false,
-        ..TransferOptions::default()
-    };
     let ws = workspace_adapter::build_with_file_info_and_options(
         global.as_ref(),
         &cg,
-        |_| AHashMap::new(),
+        |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
         |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
-        &transfer_options,
+        transfer_options,
     );
-    let svc = Arc::new(IdgQueryService::new(Arc::new(ws), global));
-    db.set_idg_service(Arc::clone(&svc));
-    svc
+    (Arc::new(ws), global)
 }
 
 fn go_db(src: &str) -> AnalyzerDb {

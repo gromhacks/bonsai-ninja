@@ -99,6 +99,7 @@ fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
             receiver: None,
             args: vec![
                 CallArg {
+                    passing_mode: Default::default(),
                     span: span(),
                     name: None,
                     place: None,
@@ -106,6 +107,7 @@ fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
                     value_text: "py_expr".to_string(),
                 },
                 CallArg {
+                    passing_mode: Default::default(),
                     span: span(),
                     name: None,
                     place: None,
@@ -889,6 +891,7 @@ fn parse_int_literal_rejects_non_literals() {
 #[test]
 fn arg_int_compare_threshold_semantics() {
     let args = vec![CallArg {
+        passing_mode: Default::default(),
         span: span(),
         name: None,
         place: None,
@@ -910,6 +913,7 @@ fn arg_int_compare_threshold_semantics() {
 #[test]
 fn arg_int_compare_unknown_arg_fails_conservatively() {
     let args = vec![CallArg {
+        passing_mode: Default::default(),
         span: span(),
         name: None,
         place: None,
@@ -924,6 +928,7 @@ fn arg_int_compare_unknown_arg_fails_conservatively() {
 #[test]
 fn arg_int_compare_out_of_bounds_fails() {
     let args = vec![CallArg {
+        passing_mode: Default::default(),
         span: span(),
         name: None,
         place: None,

@@ -1296,7 +1296,7 @@ impl Workspace {
         let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_paths(
             global.as_ref(),
             cg.as_ref(),
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
             |file| {
                 db.vfs()
@@ -1383,6 +1383,10 @@ impl Workspace {
                 {
                     let service =
                         Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                    let service = self
+                        .inner
+                        .db
+                        .set_idg_service_for_semantics(transfer_hash, service);
                     self.inner.db.set_idg_service(service.clone());
                     return service;
                 }
@@ -1399,7 +1403,7 @@ impl Workspace {
         let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
             global.as_ref(),
             cg.as_ref(),
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
             |file| {
                 db.vfs()
@@ -1428,6 +1432,10 @@ impl Workspace {
             );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
+        let service = self
+            .inner
+            .db
+            .set_idg_service_for_semantics(transfer_hash, service);
         self.inner.db.set_idg_service(service.clone());
         service
     }
@@ -1461,6 +1469,7 @@ impl Workspace {
                 {
                     let service =
                         Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                    let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
                     self.inner.db.set_idg_service(service.clone());
                     return service;
                 }
@@ -1476,7 +1485,7 @@ impl Workspace {
         let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files_with_paths(
             global.as_ref(),
             &cg,
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
             |file| {
                 db.vfs()
@@ -1505,6 +1514,7 @@ impl Workspace {
             );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
+        let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
         self.inner.db.set_idg_service(service.clone());
         service
     }
@@ -1552,7 +1562,7 @@ impl Workspace {
             bonsai_idg::workspace_adapter::build_with_file_info_and_options_for_files_and_funcs_with_paths(
                 global.as_ref(),
                 call_graph,
-                |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+                |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
                 |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
                 |file| {
                     db.vfs()
@@ -3090,11 +3100,22 @@ fn idg_pipeline_hash() -> u64 {
     // synthesis (C# expression-bodied-property getters / record members,
     // Java records, Solidity struct-literal field writes) all change the
     // built IDG without an on-disk layout change.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 28;
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
-    lo ^ hi ^ 0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION ^ build_fingerprint_hash()
+    lo ^ hi ^ idg_stitching_semantic_fingerprint() ^ build_fingerprint_hash()
+}
+
+/// Semantic-only IDG construction fingerprint shared with caches whose
+/// payloads embed IDG-derived reachability. Keep build/content/rule hashes out
+/// of this value so callers can combine it without XOR-cancelling their own
+/// freshness inputs.
+pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
+    // v30 (2026-07-09): constructor/inheritance resolution consumes
+    // adapter-emitted call/type facts, and destructuring preserves both
+    // aggregate and exact-field edges through an explicit AST value kind.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 31;
+    0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
 /// Build-time fingerprint emitted by `build.rs` — combines
@@ -3125,42 +3146,7 @@ fn idg_transfer_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>, transfer_has
 }
 
 fn idg_transfer_options_fingerprint(options: &bonsai_idg::TransferOptions) -> u64 {
-    fn absorb_u64(hasher: &mut StableHasher, value: u64) {
-        hasher.absorb(&value.to_le_bytes());
-        hasher.absorb_separator();
-    }
-
-    fn absorb_str(hasher: &mut StableHasher, value: &str) {
-        hasher.absorb(value.as_bytes());
-        hasher.absorb_separator();
-    }
-
-    let options = options.clone().canonicalized();
-    let mut hasher = StableHasher::new();
-    absorb_str(&mut hasher, "bonsai-idg-transfer-options-v3");
-    absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
-    absorb_u64(
-        &mut hasher,
-        u64::from(options.include_receiver_method_propagation),
-    );
-    absorb_u64(&mut hasher, u64::from(options.include_field_argument_forwarding));
-    absorb_u64(&mut hasher, options.clean_output_overwrites.len() as u64);
-    for spec in &options.clean_output_overwrites {
-        absorb_str(&mut hasher, "clean-output-overwrite");
-        absorb_str(&mut hasher, &spec.callee);
-        absorb_u64(&mut hasher, spec.output_arg_index as u64);
-        absorb_u64(&mut hasher, spec.value_start_arg_index as u64);
-    }
-    absorb_u64(&mut hasher, options.source_output_args.len() as u64);
-    for spec in &options.source_output_args {
-        absorb_str(&mut hasher, "source-output-args");
-        absorb_str(&mut hasher, &spec.callee);
-        absorb_u64(&mut hasher, spec.output_arg_indices.len() as u64);
-        for index in &spec.output_arg_indices {
-            absorb_u64(&mut hasher, *index as u64);
-        }
-    }
-    hasher.finish()
+    options.semantic_fingerprint()
 }
 
 fn idg_file_scope_fingerprint(files: &[FileId]) -> u64 {

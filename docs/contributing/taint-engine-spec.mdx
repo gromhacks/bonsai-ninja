@@ -11,7 +11,7 @@ untrusted data through:
 - intra-procedural CFG dataflow within a single function,
 - inter-procedural call propagation across functions, and
 - cross-file resolution via imports / exports / aliases,
-- IDG value-flow edges for production security scans.
+- one IDG value-flow closure for every interprocedural consumer.
 
 This doc covers the engine's contract, the ten concepts it implements, and
 the read/write rules that consumers should understand. It's the engineering
@@ -33,12 +33,14 @@ interprocedural_taint(
 Given a non-empty `entry_sources`, it traces every reachable propagation.
 Given an empty `entry_sources`, it produces zero records; the engine never
 invents taint. Diagnostic and compatibility consumers can drive it through
-`interprocedural_taint_to_completion_with_caches` (in
-`crates/taint/src/inter/mod.rs`), which shares an `InterTaintCaches` across
-calls and runs to fixpoint within `config.budget`.
+`interprocedural_taint_to_completion_with_caches` in
+`crates/taint/src/inter.rs`. That façade composes concrete IDG seed nodes and
+runs one forward closure to completion. `InterTaintCaches` remains as a
+source-compatible handle; graph services are cached on `AnalyzerDb` by the
+canonical transfer-option fingerprint.
 
-Production `security taint-analysis`, `security source-analysis`, and
-`dump-taint` use the IDG-backed graph builders in
+`security taint-analysis`, `security source-analysis`, `dump-taint`, inspect,
+and the public compatibility API use the IDG-backed graph builders in
 `crates/taint/src/reachable.rs`. Those builders resolve source seeds to IDG
 nodes, apply configured transfer summaries, compute a precision-bounded
 closure, and then cut/report only the relevant semantic target or lineage
@@ -450,35 +452,38 @@ factories stay unresolved rather than tainting every later indirect call.
 
 ## Engine layers
 
-The taint crate is layered:
+The taint stack is layered:
 
-- **Layer 1 — name reachability** (`reachable.rs`): pure structural
-  traversal grouped by `FactKind`. No data flow.
-- **Layer 2 — assign chain** (`assignment.rs`): monotonic identifier
-  propagation through `Assign` events. Used internally by summary
-  construction and as a fast-path scan.
-- **Layer 3 — intraprocedural** (`intra.rs`): forward dataflow over the
-  CFG with per-block in/out state. Worklist iterates to fixpoint with a
-  safety cap (CFG size × 8, min 16). Reports `saturated` on cap.
-- **Layer 4 — interprocedural** (`inter/mod.rs`): worklist-driven
-  fixpoint over `(func, seed, dyn_bindings)` items. Memoised by
-  `FunctionSeed`.
+- **Layer 1 — compiler facts** (language adapters, index, resolver, and
+  callgraph): CST/AST nodes become typed declarations, calls, arguments,
+  assignments, imports, receiver types, and semantic call edges.
+- **Layer 2 — canonical dataflow** (`crates/idg`): `builder.rs`,
+  `transfer.rs`, and `workspace_adapter.rs` lower those facts into one graph
+  containing intra-function, cross-call, return, field, capture, callback,
+  write-back, and inheritance edges.
+- **Layer 3 — seed/query conversion** (`reachable.rs`): composes canonical
+  IDG seed nodes and converts closures back into public call/argument evidence
+  for security, inspect, dump-taint, and compatibility callers.
+- **Layer 4 — compatibility surfaces** (`assignment.rs`, `intra.rs`, and
+  `inter.rs`): preserves local helper and public result types while
+  interprocedural answers come exclusively from the IDG. There is no second
+  interprocedural worklist engine.
 
 `InterTaintConfig` covers the knobs:
 
 - `sanitizers: TokenSet` — informational only.
-- `budget: u32` — `(func, seed)` worklist chunk size (default 512);
-  to-completion drivers resume chunks until the semantic worklist
-  drains.
-- `intra_worklist_cap: Option<u32>` — per-function safety cap.
-- `source_bearing_functions: AHashSet<FuncId>` — security-layer source
-  helpers.
+- `budget`, `intra_worklist_cap`, and `source_bearing_functions` — retained
+  for API compatibility; IDG closure is complete and does not consume these
+  former scheduler controls.
 - `clean_output_overwrites: Vec<CleanOutputOverwrite>` — declarative
   overwrite shapes derived from rulepack `taint_semantics`.
 - `source_output_args: Vec<SourceOutputArgs>` — source calls whose
   listed output arguments receive taint, such as `recv`, `SSL_read`,
   and `fgets` buffers. These are derived from source rules, not from a
   built-in API list.
+- `source_callback_args: Vec<SourceCallbackArgs>` — rule-declared source
+  callbacks and parameter positions. Callback invocation itself is resolved
+  from AST/callgraph facts rather than callback method-name inventories.
 - `call_result_passthroughs: Vec<CallResultPassthrough>` — rulepack
   declarations that selected call arguments or the method receiver flow
   to the call result, such as URL decode/unescape helpers. The engine
@@ -487,12 +492,17 @@ The taint crate is layered:
   selected value arguments flow into an output argument. This covers
   formatter/copy-style APIs without putting library names or argument
   orders in the engine.
-- `callback_invocation_methods: AHashSet<String>` — method tails that
-  invoke callable receivers.
+- `callback_invocation_methods: AHashSet<String>` — retained for API
+  compatibility. Callable arguments and local callable bindings are resolved
+  from AST/callgraph facts; the engine owns no invocation-method list.
 - `receiver_state_propagations: Vec<ReceiverStatePropagation>` —
   rulepack-declared receiver/method shapes that move argument taint into
   receiver state for later receiver-only sinks. The engine owns no global
   mutator-name list.
+
+Language syntax and ABI intrinsics remain in adapter/compiler lowering (for
+example C variadic builtins). Library/framework API behavior belongs only in
+rulepack/config transfer semantics.
 
 `InterTaintResult` returns:
 
@@ -502,41 +512,24 @@ The taint crate is layered:
 - `tainted_calls: Vec<TaintedCall>` — every call/write/return whose
   operands carry tainted values.
 - `precision: Precision` — worst seen along any traversed edge.
-- `pairs_analyzed: u32`, `saturated: bool`, `continuation:
-  Option<InterTaintContinuation>` — for resumable chunked runs.
+- `pairs_analyzed: u32` — number of graph pairs represented by the closure.
+- `saturated` is false and `continuation` is `None`; IDG queries run to
+  completion rather than exposing scheduler chunks.
 
 ## Read-side semantic checks
 
-The engine has two read-side functions with different strictness.
+Read propagation is graph-based. Adapters lower identifier, projection,
+interpolation, destructuring, call-argument, and passing-mode facts from the
+AST into `FlowEvent`s. IDG transfer interns those facts as `Place::Read`,
+`Place::Write`, `CallArg`, and `CallRet` nodes, then follows exact or narrowed
+edges. Engines do not recover constructor names, mutable-reference keywords,
+callback factories, or nested calls from raw expression text.
 
-**`arg_text_is_tainted(text, state) -> bool`** — the relaxed check used
-at call-arg / sink-arg sites:
-
-1. Empty trimmed text → false.
-2. Interpolation match (`$x` / `${x}` against state) — runs before the
-   quoted-literal short-circuit so `"... $x ..."` propagates.
-3. Whole-string quoted literal → false.
-4. Strip value-free operands (`sizeof(x)`, `alignof(T)`, `typeof(x)`,
-   `nameof(x)`).
-5. Direct match against state.
-6. Sigil-stripped match (`$x` ↔ `x`, `@arr` ↔ `arr`).
-7. Normalised qualified form (`obj['k']` ↔ `obj.k`).
-8. Qualified-text branch: exact qualified seed prefix-or-equal.
-9. Unqualified-text branch: bare read of any qualified seed sharing the
-   base.
-10. Identifier-tokens-outside-strings fallback (quote-aware), with
-    qualified-access bases filtered when the same token has no standalone
-    value occurrence.
-
-**`rhs_operand_is_tainted(text, state) -> bool`** — the strict check used
-at assignment-RHS and call-argument `source_names`. Same as the relaxed
-form minus steps 8 and 9 (no bare-name promotion, no token-walk
-fallback). This is what keeps `out = data['other']` from inheriting
-`data.value`'s taint.
-
-Interpolated string taint is adapter-derived. The parser surfaces real
-interpolation expression children as `source_names`; the taint engine
-does not parse `$x`, `${x}`, `#{x}`, or f-string syntax out of raw text.
+Qualified-place canonicalization remains shared for compatibility seed names
+(`obj['k']` ↔ `obj.k`, language sigils, and wildcard descendants), but it does
+not invent a read that the adapter failed to emit. This is what keeps
+`data.other` from inheriting `data.value` while still allowing an explicit
+whole-aggregate destructuring edge.
 
 ## Branch conditions and constant facts
 

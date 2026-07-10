@@ -263,7 +263,11 @@ def entry(req):
 
 #[test]
 fn concept_6_module_resolver_cross_file_import_propagates() {
-    let input_js = "export function getName(req) { return req.query.name; }\n";
+    // Keep this contract focused on module resolution. A bare legacy token
+    // seed intentionally does not promote every field of an object; field
+    // projection semantics are covered separately by concept 8 and the
+    // security rule-match seed policy.
+    let input_js = "export function getName(req) { return req; }\n";
     let route_js =
         "import { getName } from './input.js';\nfunction handler(req) { dbQuery(getName(req)); }\n";
     let db = javascript_db(&[("input.js", input_js), ("route.js", route_js)]);

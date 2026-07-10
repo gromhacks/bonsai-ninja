@@ -725,6 +725,7 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
                         let text = node_text(&current, src).to_string();
                         if !text.is_empty() {
                             args.push(CallArg {
+                                passing_mode: Default::default(),
                                 span: span_of(file, &current),
                                 name: None,
                                 value_text: text,
@@ -744,6 +745,7 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
                     let text = node_text(&child, src).to_string();
                     if !text.is_empty() {
                         args.push(CallArg {
+                            passing_mode: Default::default(),
                             span: span_of(file, &child),
                             name: None,
                             value_text: text,

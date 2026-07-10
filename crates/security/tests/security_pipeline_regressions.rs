@@ -7,6 +7,7 @@
 //! matcher output, cross-function propagation, and finding construction are
 //! exercised together.
 
+use bonsai_idg::PointKind;
 use bonsai_lang_api::FlowEvent;
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
@@ -14,6 +15,7 @@ use bonsai_security::{
     run_taint_analysis, ConstraintKind, FindingStatus, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
     RuleTarget, Rulepack, SourceAnalysisOptions, TaintAnalysisOptions, TrustClass,
 };
+use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
 use std::{
     collections::BTreeSet,
@@ -1518,6 +1520,66 @@ fn mega_flow_security_pipeline_covers_every_language_and_flow_event_kind() {
             "mega_flow matrix must cover FlowEvent::{required}; union={union:?}"
         );
     }
+}
+
+#[test]
+fn rust_mega_flow_preserves_nested_field_projection_through_newtype_factory() {
+    let ws = index_real_fixture("rust", "mega_flow");
+    let source = ws
+        .lookup_function("handle_request")
+        .expect("Rust mega-flow entry");
+    let global = ws.db().global_index();
+    let idg = ensure_idg_service(ws.db());
+    let seeds = TokenSet::from_iter(["raw".to_string()]);
+    let seed_nodes = compose_idg_seed_nodes(
+        IdgSeedRequest::legacy_tokens(source, &seeds),
+        global.as_ref(),
+        idg.as_ref(),
+    );
+    let closure = idg.forward_closure(&seed_nodes);
+    let (execute_caller, execute_span) = ws
+        .vfs()
+        .all_files()
+        .into_iter()
+        .flat_map(|file| global.decls_in(file).iter())
+        .filter(|decl| decl.name == "run")
+        .find_map(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Call { span, name, .. } if name == "executor::execute" => {
+                    Some((bonsai_common::FuncId::new(decl.symbol.raw()), span.to_owned()))
+                }
+                _ => None,
+            })
+        })
+        .expect("Repository::run execute call");
+    let points = closure
+        .iter()
+        .filter_map(|node| idg.resolve_point(*node))
+        .collect::<Vec<_>>();
+    let execute_nodes = idg.nodes_at_span(execute_caller, execute_span);
+    let orchestrate = ws.lookup_function("orchestrate").expect("Rust pipeline function");
+    let projection_diagnostics = ["joined", "routed", "valid.cmd", "valid.user"].map(|name| {
+        let nodes = idg.read_or_write_nodes_for_names(orchestrate, &[name.to_string()]);
+        let rows = nodes
+            .iter()
+            .map(|node| {
+                (
+                    *node,
+                    closure.contains(node),
+                    execute_nodes.iter().any(|target| idg.reaches(*node, *target)),
+                    idg.resolve_point(*node),
+                )
+            })
+            .collect::<Vec<_>>();
+        (name, rows)
+    });
+
+    assert!(
+        points.iter().any(|point| {
+            point.kind == PointKind::CallArg && point.span == execute_span && point.name == "arg0"
+        }),
+        "raw -> Envelope.cmd -> wrapper tuple field must reach execute(arg0); projections={projection_diagnostics:#?}; closure={points:#?}"
+    );
 }
 
 #[test]

@@ -19,7 +19,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{FileId, FuncId};
+use bonsai_common::{callable_reference_variants, FileId, FuncId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{FlowEvent, ModulePath};
 use parking_lot::RwLock;
@@ -90,6 +90,13 @@ struct WorkspaceMaps {
     func_to_file: AHashMap<FuncId, FileId>,
     func_to_scope: AHashMap<FuncId, LocalScopeKey>,
     symbol_to_scope: AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
+    /// Source directory for every declaration symbol. A declaration may
+    /// use a module scope (for example a PHP namespace or Python module),
+    /// but its imported base class can still live in the same project
+    /// directory under a different module scope. This secondary key lets
+    /// inheritance lookup make that narrow cross-module hop without
+    /// falling back to every same-named class in the workspace.
+    symbol_to_directory: AHashMap<bonsai_common::SymbolId, String>,
     /// `FileId → language id`, used for class/constructor fallback
     /// where the candidate is still a `SymbolId` rather than a
     /// `FuncId`.
@@ -119,6 +126,7 @@ impl WorkspaceMaps {
         let mut func_to_file: AHashMap<FuncId, FileId> = AHashMap::new();
         let mut func_to_scope: AHashMap<FuncId, LocalScopeKey> = AHashMap::new();
         let mut symbol_to_scope: AHashMap<bonsai_common::SymbolId, LocalScopeKey> = AHashMap::new();
+        let mut symbol_to_directory: AHashMap<bonsai_common::SymbolId, String> = AHashMap::new();
         let mut file_to_language: AHashMap<FileId, &'static str> = AHashMap::new();
         let mut file_to_seg: AHashMap<FileId, SegmentId> = AHashMap::new();
         let mut next_seg = 0u32;
@@ -139,6 +147,9 @@ impl WorkspaceMaps {
                     decl.symbol,
                     local_scope_key_for_decl(file, decl, file_directory.as_deref()),
                 );
+                if let Some(directory) = &file_directory {
+                    symbol_to_directory.insert(decl.symbol, directory.clone());
+                }
             }
             for decl in global.functions_in(file) {
                 let func = FuncId::new(decl.symbol.raw());
@@ -185,6 +196,7 @@ impl WorkspaceMaps {
             func_to_file,
             func_to_scope,
             symbol_to_scope,
+            symbol_to_directory,
             file_to_language,
         }
     }
@@ -313,17 +325,25 @@ struct WorkspaceCalleeResolver<'a> {
     func_to_file: &'a AHashMap<FuncId, FileId>,
     func_to_scope: &'a AHashMap<FuncId, LocalScopeKey>,
     symbol_to_scope: &'a AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
+    symbol_to_directory: &'a AHashMap<bonsai_common::SymbolId, String>,
     call_edges_by_site: &'a AHashMap<CallSiteEdgeKey, Vec<IndexedCallEdge>>,
     file_to_language: &'a AHashMap<FileId, &'static str>,
     class_symbols_by_name: &'a AHashMap<String, Vec<bonsai_common::SymbolId>>,
     class_symbols_by_name_scope: &'a AHashMap<(String, LocalScopeKey), Vec<bonsai_common::SymbolId>>,
+    /// Type declarations addressed by an import's local binding in a
+    /// particular caller file. This is the class/type counterpart of
+    /// `func_to_call_names`: it lets expression-oriented grammars resolve
+    /// `ImportedClass(args)` from import symbols instead of guessing from
+    /// call spelling.
+    class_symbols_by_import_alias_file: &'a AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>>,
     class_constructors_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<FuncId>>,
+    class_methods_by_parent: &'a AHashMap<bonsai_common::SymbolId, Vec<FuncId>>,
     /// Per-caller local callable bindings (`let f = <lambda/function>`),
     /// keyed caller → binding name → bound FuncId. Lets `resolve` connect
     /// invocation-shaped calls on a locally-bound callable — `f(args)`,
     /// `f.accept(args)`, `f.call(args)`, `f.(args)` — to the bound
     /// function when no callgraph edge exists at the site. The legacy
-    /// worklist engine resolved these through its own local-binding scan;
+    /// the compatibility API historically resolved these through a local-binding scan;
     /// without this fallback, lambda bodies are unreachable for adapters
     /// whose functional-invocation forms the callgraph doesn't model.
     local_callable_bindings: &'a AHashMap<FuncId, AHashMap<String, FuncId>>,
@@ -441,6 +461,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         callee_name: &str,
         receiver: Option<&str>,
         receiver_types: &[String],
+        call_kind: bonsai_lang_api::CallKind,
     ) -> Vec<ResolvedCallee> {
         let mut out = Vec::new();
         let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)> =
@@ -502,8 +523,17 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         // the base-class field-init body, so a tainted argument
         // never reaches the field write — and the field-flow
         // stitcher (Phase 3c) has nothing to chain off.
-        if out.is_empty() {
+        if out.is_empty()
+            && self.call_site_denotes_declared_class(caller, callee_name, receiver, receiver_types, call_kind)
+        {
             self.resolve_class_constructor_fallback(caller, callee_name, receiver, receiver_types, &mut out);
+        }
+        // Adapter-derived receiver types can identify methods inherited
+        // from a class declared in another file even when the callgraph has
+        // no direct edge. Walk only that type's declared base chain; no
+        // constructor or API spelling is interpreted here.
+        if out.is_empty() {
+            self.resolve_typed_receiver_method_fallback(caller, callee_name, receiver_types, &mut out);
         }
         // Local-callable-binding fallback: `let f = <lambda>` then
         // `f(args)` / `f.accept(args)` / `f.call(args)` / `f.(args)`.
@@ -553,23 +583,39 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
     }
 
     fn callable_arg(&self, caller: FuncId, arg_text: &str) -> Vec<ResolvedCallee> {
-        let bound_name = strip_callback_syntax(arg_text);
-        if bound_name.is_empty() {
-            return Vec::new();
-        }
         let mut out = Vec::new();
         let mut seen = ahash::AHashSet::new();
-        for candidate_func in self.callback_candidate_funcs_for_bound_name(bound_name, caller, caller) {
-            if !self.funcs_share_language(caller, candidate_func) {
+        for bound_name in callable_reference_variants(arg_text) {
+            for candidate_func in self.callback_candidate_funcs_for_bound_name(&bound_name, caller, caller) {
+                if !self.funcs_share_language(caller, candidate_func) {
+                    continue;
+                }
+                if seen.insert(candidate_func) {
+                    out.push(ResolvedCallee {
+                        func: candidate_func,
+                        edge_kind: bonsai_callgraph::EdgeKind::Indirect,
+                        precision: bonsai_common::Precision::Narrowed,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn callable_args_in_span(&self, caller: FuncId, arg_span: bonsai_common::Span) -> Vec<ResolvedCallee> {
+        let mut out = Vec::new();
+        let mut seen = ahash::AHashSet::new();
+        for edge in self.call_graph.callees_of(caller) {
+            if edge.kind != bonsai_callgraph::EdgeKind::Indirect
+                || edge.span.file != arg_span.file
+                || edge.span.start < arg_span.start
+                || edge.span.end > arg_span.end
+                || !edge.precision.is_semantic()
+                || !self.funcs_share_language(caller, edge.to)
+            {
                 continue;
             }
-            if seen.insert(candidate_func) {
-                out.push(ResolvedCallee {
-                    func: candidate_func,
-                    edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                    precision: bonsai_common::Precision::Narrowed,
-                });
-            }
+            Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.kind, edge.precision);
         }
         out
     }
@@ -586,7 +632,12 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
             return false;
         };
         matches!(decl.kind, DeclKind::Constructor)
-            || matches!(decl.name.as_str(), "constructor" | "__init__" | "initialize")
+    }
+
+    fn is_local_callable_binding(&self, caller: FuncId, callee: FuncId) -> bool {
+        self.local_callable_bindings
+            .get(&caller)
+            .is_some_and(|bindings| bindings.values().any(|bound| *bound == callee))
     }
 }
 
@@ -631,7 +682,12 @@ impl WorkspaceCalleeResolver<'_> {
                 matched = call_names.iter().any(|n| names_match_for_callee(n, callee_name));
             }
         }
-        if !matched && self.constructor_owner_matches_callee(to, callee_name) {
+        // A site-specific semantic callgraph edge to a declaration already
+        // is the compiler's resolution result. Constructor declarations are
+        // commonly named `__init__`/`initialize` while the call expression is
+        // spelled with the owning type, so textual name equality is neither
+        // necessary nor correct here.
+        if !matched && self.is_constructor_func(to) {
             matched = true;
         }
         if matched {
@@ -639,25 +695,40 @@ impl WorkspaceCalleeResolver<'_> {
         }
     }
 
-    fn constructor_owner_matches_callee(&self, func: FuncId, callee_name: &str) -> bool {
-        if !self.is_constructor_func(func) {
-            return false;
-        }
-        let Some(decl) = self.global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
-            return false;
-        };
-        let Some(parent) = decl.parent else {
-            return false;
-        };
-        let Some(parent_decl) = self.global.decl_of(parent) else {
-            return false;
-        };
-        let owner = parent_decl.name.trim();
-        let callee = bare_class_name(callee_name);
-        if matches!(callee, "static" | "self" | "this") {
+    /// Classify a constructor target from semantic declaration facts.
+    ///
+    /// Most adapters expose allocation syntax directly as
+    /// `CallKind::Constructor`. Python and several expression-oriented
+    /// grammars instead parse `ImportedClass(args)` as an ordinary call: the
+    /// CST alone cannot know whether the identifier denotes a class or a
+    /// function. In that case, perform the compiler-style symbol lookup here
+    /// and accept the call only when the scoped target is an actual class
+    /// declaration. No constructor/API spelling is inferred from the text.
+    fn call_site_denotes_declared_class(
+        &self,
+        caller: FuncId,
+        callee_name: &str,
+        receiver: Option<&str>,
+        _receiver_types: &[String],
+        call_kind: bonsai_lang_api::CallKind,
+    ) -> bool {
+        if matches!(call_kind, bonsai_lang_api::CallKind::Constructor) {
             return true;
         }
-        !owner.is_empty() && !callee.is_empty() && names_match_for_callee(owner, callee)
+        if !matches!(call_kind, bonsai_lang_api::CallKind::Function) || receiver.is_some() {
+            return false;
+        }
+        // A bare function call may inherit the enclosing class in
+        // `receiver_types` as contextual type information. That type is not
+        // the call target (`sink(value)` inside `Repository` must never be
+        // interpreted as `Repository(...)`). For expression-oriented class
+        // calls, classify solely from the callee/import symbol. Explicit
+        // constructor syntax returned above may still use receiver/type facts
+        // in the normal constructor fallback.
+        self.constructor_fallback_class_names(caller, callee_name, None, &[])
+            .into_iter()
+            .flat_map(|class_name| self.class_candidates_for_func_scope(caller, &class_name))
+            .any(|symbol| self.symbol_shares_language_with_func(caller, symbol))
     }
 }
 
@@ -703,29 +774,25 @@ impl WorkspaceCalleeResolver<'_> {
                 &mut found_args,
             );
             for arg_text in found_args {
-                // Adapters express callback bindings with various
-                // syntactic prefixes — strip them before matching
-                // against function names: perl `\&foo`, elixir
-                // `&foo/N`, ruby `:foo`, java `Cls::method`,
-                // python `pkg.module.foo`. Keep `&` `\\` `:` `&`
-                // out of the candidate name; final form is the
-                // last bare identifier in the expression.
-                let bound_name = strip_callback_syntax(&arg_text);
-                if bound_name.is_empty() {
-                    continue;
-                }
-                for candidate_func in self.callback_candidate_funcs_for_bound_name(bound_name, caller, host) {
-                    if !self.funcs_share_language(host, candidate_func)
-                        || !self.funcs_share_language(caller, candidate_func)
+                // Use the same syntax-derived callable-reference variants
+                // as the callgraph instead of maintaining a second list of
+                // wrapper/API spellings in the IDG.
+                for bound_name in callable_reference_variants(&arg_text) {
+                    for candidate_func in
+                        self.callback_candidate_funcs_for_bound_name(&bound_name, caller, host)
                     {
-                        continue;
-                    }
-                    if seen.insert(candidate_func) {
-                        out.push(ResolvedCallee {
-                            func: candidate_func,
-                            edge_kind: bonsai_callgraph::EdgeKind::Indirect,
-                            precision: bonsai_common::Precision::Narrowed,
-                        });
+                        if !self.funcs_share_language(host, candidate_func)
+                            || !self.funcs_share_language(caller, candidate_func)
+                        {
+                            continue;
+                        }
+                        if seen.insert(candidate_func) {
+                            out.push(ResolvedCallee {
+                                func: candidate_func,
+                                edge_kind: bonsai_callgraph::EdgeKind::Indirect,
+                                precision: bonsai_common::Precision::Narrowed,
+                            });
+                        }
                     }
                 }
             }
@@ -836,6 +903,16 @@ impl<'a> WorkspaceCalleeResolver<'a> {
     }
 
     fn class_candidates_for_func_scope(&self, func: FuncId, name: &str) -> Vec<bonsai_common::SymbolId> {
+        if let Some(file) = self.func_to_file.get(&func) {
+            if let Some(candidates) = self
+                .class_symbols_by_import_alias_file
+                .get(&(*file, name.to_string()))
+            {
+                if !candidates.is_empty() {
+                    return candidates.clone();
+                }
+            }
+        }
         let mut saw_project_scope = false;
         if let Some(scope) = self.func_to_scope.get(&func) {
             saw_project_scope = scope.has_project_boundary();
@@ -877,6 +954,85 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         self.class_symbols_by_name.get(name).cloned().unwrap_or_default()
     }
 
+    fn class_candidates_for_ancestry(
+        &self,
+        symbol: bonsai_common::SymbolId,
+        name: &str,
+    ) -> Vec<bonsai_common::SymbolId> {
+        let scoped = self.class_candidates_for_symbol_scope(symbol, name);
+        if !scoped.is_empty() {
+            return scoped;
+        }
+        let candidates_for_name = self
+            .class_symbols_by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(directory) = self.symbol_to_directory.get(&symbol) {
+            let same_directory = candidates_for_name
+                .iter()
+                .copied()
+                .filter(|candidate| self.symbol_to_directory.get(candidate) == Some(directory))
+                .collect::<Vec<_>>();
+            if same_directory.len() == 1 {
+                return same_directory;
+            }
+            if same_directory.len() > 1 {
+                return Vec::new();
+            }
+        }
+        let symbol_language = self
+            .global
+            .declaring_file(symbol)
+            .and_then(|file| self.file_to_language.get(&file))
+            .copied();
+        let mut candidates = candidates_for_name
+            .into_iter()
+            .filter(|candidate| {
+                symbol_language.is_none_or(|language| {
+                    self.global
+                        .declaring_file(*candidate)
+                        .and_then(|file| self.file_to_language.get(&file))
+                        .is_none_or(|candidate_language| *candidate_language == language)
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|candidate| candidate.raw());
+        candidates.dedup();
+        // A cross-scope hop is only semantic when the explicit base name
+        // identifies one class in the same language. Multiple modules may
+        // legitimately declare the same class name; without an import-target
+        // fact choosing between them would be an over-approximation.
+        if candidates.len() == 1 {
+            candidates
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn class_candidates_for_typed_receiver(
+        &self,
+        caller: FuncId,
+        name: &str,
+    ) -> Vec<bonsai_common::SymbolId> {
+        let scoped = self.class_candidates_for_func_scope(caller, name);
+        if !scoped.is_empty() {
+            return scoped;
+        }
+        let Some(caller_file) = self.func_to_file.get(&caller) else {
+            return Vec::new();
+        };
+        self.class_symbols_by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|symbol| self.global.declaring_file(*symbol).as_ref() == Some(caller_file))
+            .collect()
+    }
+
     fn funcs_share_language(&self, left: FuncId, right: FuncId) -> bool {
         match (
             self.func_to_language.get(&left),
@@ -900,16 +1056,11 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         func_language == symbol_language
     }
 
-    /// Walk the class hierarchy for `callee_name`, looking for a
-    /// `DeclKind::Constructor` (or `Function` named "constructor"
-    /// / `"__init__"` / `"initialize"`) we can route an
-    /// unresolved `new ClassName(args)` call to. TS / JS / Ruby /
-    /// C# auto-properties don't surface explicit constructor
-    /// decls for inheriting classes — without this fallback,
-    /// every `new SubClass(args)` site stays disconnected from
-    /// the base-class field-init body, so a tainted argument
-    /// never reaches the field write and field-flow stitching has
-    /// nothing to chain off.
+    /// Walk the class hierarchy for an adapter-classified constructor
+    /// call, looking only for `DeclKind::Constructor` facts. Some adapters
+    /// do not surface an explicit constructor declaration for an inheriting
+    /// class, so the nearest declared base constructor supplies the field
+    /// initialization body.
     fn resolve_class_constructor_fallback(
         &self,
         caller: FuncId,
@@ -971,6 +1122,76 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         }
     }
 
+    fn resolve_typed_receiver_method_fallback(
+        &self,
+        caller: FuncId,
+        callee_name: &str,
+        receiver_types: &[String],
+        out: &mut Vec<ResolvedCallee>,
+    ) {
+        let Some(class_name) = receiver_types.iter().find_map(|receiver_type| {
+            let class_name = bare_class_name(receiver_type);
+            (!class_name.is_empty()).then_some(class_name)
+        }) else {
+            return;
+        };
+        let mut frontier = self.class_candidates_for_typed_receiver(caller, class_name);
+        frontier.retain(|symbol| self.symbol_shares_language_with_func(caller, *symbol));
+        let mut seen = ahash::AHashSet::default();
+
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            let mut methods = Vec::new();
+            for class_sym in frontier.drain(..) {
+                if !seen.insert(class_sym) {
+                    continue;
+                }
+                if let Some(candidates) = self.class_methods_by_parent.get(&class_sym) {
+                    for &func in candidates {
+                        if self.funcs_share_language(caller, func)
+                            && self
+                                .func_to_name
+                                .get(&func)
+                                .is_some_and(|name| names_match_for_callee(name, callee_name))
+                        {
+                            methods.push(func);
+                        }
+                    }
+                }
+                let Some(class_decl) = self.global.decl_of(class_sym) else {
+                    continue;
+                };
+                for base_name in &class_decl.bases {
+                    for base_sym in self.class_candidates_for_ancestry(class_sym, base_name) {
+                        if !seen.contains(&base_sym)
+                            && self.symbol_shares_language_with_func(caller, base_sym)
+                        {
+                            next.push(base_sym);
+                        }
+                    }
+                }
+            }
+            // Stop at the nearest inheritance depth that declares the
+            // method. This preserves normal override/shadow semantics and
+            // still supports multiple bases at the same depth.
+            if !methods.is_empty() {
+                methods.sort_unstable_by_key(|func| func.raw());
+                methods.dedup();
+                for func in methods {
+                    out.push(ResolvedCallee {
+                        func,
+                        edge_kind: bonsai_callgraph::EdgeKind::Indirect,
+                        precision: bonsai_common::Precision::Narrowed,
+                    });
+                }
+                return;
+            }
+            next.sort_unstable_by_key(|symbol| symbol.raw());
+            next.dedup();
+            frontier = next;
+        }
+    }
+
     fn constructor_fallback_class_names(
         &self,
         caller: FuncId,
@@ -983,14 +1204,6 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         if trimmed.is_empty() {
             return out;
         }
-        let bare = bare_class_name(trimmed);
-        if !bare.is_empty() && !ownerless_constructor_token(bare) {
-            push_unique_class_name(&mut out, bare.to_string());
-            return out;
-        }
-        if !ownerless_constructor_token(bare) {
-            return out;
-        }
         for receiver_type in receiver_types {
             let class_name = bare_class_name(receiver_type);
             if !class_name.is_empty() {
@@ -999,7 +1212,21 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         }
         if let Some(receiver) = receiver {
             let class_name = bare_class_name(receiver);
-            if !class_name.is_empty() && !ownerless_constructor_token(class_name) {
+            if !class_name.is_empty() {
+                push_unique_class_name(&mut out, class_name.to_string());
+            }
+        }
+        // Constructor syntax may surface a bare class reference or a
+        // qualified member reference. Collect its identifier segments and
+        // let scoped class-declaration lookup determine which segment, if
+        // any, denotes the constructed type.
+        for segment in trimmed
+            .split(['.', ':', '\\'])
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+        {
+            let class_name = bare_class_name(segment);
+            if !class_name.is_empty() {
                 push_unique_class_name(&mut out, class_name.to_string());
             }
         }
@@ -1171,6 +1398,46 @@ fn class_symbols_by_name_for_files(
     out
 }
 
+fn class_symbols_matching_import_target(
+    global: &GlobalIndex,
+    included_files: Option<&AHashSet<FileId>>,
+    target: &str,
+) -> Vec<bonsai_common::SymbolId> {
+    let mut out = Vec::new();
+    for file in global.all_files() {
+        if included_files.is_some_and(|files| !files.contains(&file)) {
+            continue;
+        }
+        for decl in global.decls_in(file) {
+            if decl_kind_is_type_receiver(decl.kind)
+                && declaration_matches_import_target(decl, target)
+                && !out.contains(&decl.symbol)
+            {
+                out.push(decl.symbol);
+            }
+        }
+    }
+    out
+}
+
+fn declaration_matches_import_target(decl: &bonsai_lang_api::Decl, target: &str) -> bool {
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let Some((module, member)) = target.rsplit_once('.') else {
+        return decl.name == target;
+    };
+    if decl.name != member.trim() {
+        return false;
+    }
+    bonsai_resolve::module_target_matches_decl_module_path(module.trim(), &decl.module_path)
+        || decl.qualified_name.as_deref().is_some_and(|qualified| {
+            let normalized = qualified.replace("::", ".").replace(['/', '\\'], ".");
+            normalized == target || normalized.ends_with(&format!(".{target}"))
+        })
+}
+
 fn class_symbols_by_name_scope_for_files(
     global: &GlobalIndex,
     symbol_to_scope: &AHashMap<bonsai_common::SymbolId, LocalScopeKey>,
@@ -1225,7 +1492,7 @@ fn class_constructors_by_parent_for_files(
             let Some(parent) = decl.parent else {
                 continue;
             };
-            if is_constructor_decl(global, decl) {
+            if is_constructor_decl(decl) {
                 out.entry(parent).or_default().push(func);
             }
         }
@@ -1233,78 +1500,34 @@ fn class_constructors_by_parent_for_files(
     out
 }
 
-fn is_constructor_decl(global: &GlobalIndex, decl: &bonsai_lang_api::Decl) -> bool {
-    use bonsai_lang_api::DeclKind;
-    if matches!(decl.kind, DeclKind::Constructor) {
-        return true;
-    }
-    if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
-        return false;
-    }
-    if matches!(decl.name.as_str(), "constructor" | "__init__" | "initialize") {
-        return true;
-    }
-    decl.parent
-        .and_then(|parent| global.decl_of(parent))
-        .is_some_and(|parent_decl| decl.name == parent_decl.name)
-}
-
-/// Strip adapter-specific callback-binding syntax from `text`,
-/// returning the bare function name. Handles perl `\&foo`, elixir
-/// `&foo/N`, ruby `:foo` / `:"foo"` / `method(:foo)`, java
-/// `Cls::method`, python `module.foo`, javascript bare `foo`,
-/// erlang `fun foo/N` / `fun M:foo/N`. Returns empty when `text`
-/// doesn't look like a name reference.
-fn strip_callback_syntax(text: &str) -> &str {
-    let mut s = text.trim();
-    // Ruby `method(:foo)` / Python `partial(foo)` / Erlang
-    // `fun(foo)`: when the text is a wrapper-call form, recurse
-    // into the parenthesised inner expression.
-    if let Some(open) = s.find('(') {
-        if let Some(close) = s.rfind(')') {
-            if open < close {
-                let prefix = s[..open].trim();
-                if matches!(prefix, "method" | "partial" | "fun") {
-                    s = s[open + 1..close].trim();
-                }
+fn class_methods_by_parent_for_files(
+    global: &GlobalIndex,
+    included_files: Option<&AHashSet<FileId>>,
+    included_funcs: Option<&AHashSet<FuncId>>,
+) -> AHashMap<bonsai_common::SymbolId, Vec<FuncId>> {
+    let mut out: AHashMap<bonsai_common::SymbolId, Vec<FuncId>> = AHashMap::new();
+    for file in global.all_files() {
+        if included_files.is_some_and(|files| !files.contains(&file)) {
+            continue;
+        }
+        for decl in global.functions_in(file) {
+            let func = FuncId::new(decl.symbol.raw());
+            if included_funcs.is_some_and(|funcs| !funcs.contains(&func)) {
+                continue;
+            }
+            let Some(parent) = decl.parent else {
+                continue;
+            };
+            if matches!(decl.kind, bonsai_lang_api::DeclKind::Method) {
+                out.entry(parent).or_default().push(func);
             }
         }
     }
-    // Erlang `fun foo/N` (no parens).
-    if let Some(rest) = s.strip_prefix("fun ") {
-        s = rest.trim();
-    }
-    // Strip leading code-reference markers.
-    while let Some(rest) = s
-        .strip_prefix('\\')
-        .or_else(|| s.strip_prefix('&'))
-        .or_else(|| s.strip_prefix(':'))
-    {
-        s = rest;
-    }
-    // Strip trailing `/N` arity (elixir `&foo/2`, erlang `foo/N`).
-    if let Some(idx) = s.find('/') {
-        if s[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
-            s = &s[..idx];
-        }
-    }
-    // Pick the last `::` / `.`-qualified segment (java
-    // `Cls::method` → `method`; python `pkg.foo` → `foo`;
-    // erlang `M:foo` → `foo`).
-    if let Some(stripped) = s.rsplit_once("::") {
-        s = stripped.1;
-    }
-    if let Some(stripped) = s.rsplit_once('.') {
-        s = stripped.1;
-    }
-    // Strip stray quotes (ruby `:"foo"`).
-    s = s.trim_matches(|c: char| c == '"' || c == '\'').trim();
-    // Final guard: if the result still has spaces or punctuation,
-    // it isn't a clean identifier — bail out.
-    if s.is_empty() || !s.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return "";
-    }
-    s
+    out
+}
+
+fn is_constructor_decl(decl: &bonsai_lang_api::Decl) -> bool {
+    matches!(decl.kind, bonsai_lang_api::DeclKind::Constructor)
 }
 
 /// True when `name` (a workspace func decl name) ends with `tail`
@@ -1722,10 +1945,8 @@ where
     // gains the alias `persistEnvelope` so the IDG resolver
     // accepts call sites that spell it that way.
     let mut func_to_call_names: AHashMap<FuncId, Vec<String>> = AHashMap::new();
-    let mut name_to_funcs: AHashMap<String, Vec<FuncId>> = AHashMap::new();
-    for (func, name) in &maps.func_to_name {
-        name_to_funcs.entry(name.clone()).or_default().push(*func);
-    }
+    let mut class_symbols_by_import_alias_file: AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>> =
+        AHashMap::new();
     let module_prefixes = module_prefixes_by_file(global);
     let module_default_exports = module_default_export_funcs_by_module(global, &module_prefixes);
     for file in global.all_files() {
@@ -1735,9 +1956,12 @@ where
         let aliases = aliases_for_file(file);
         let caller_module = module_prefixes.get(&file).map(String::as_str);
         for (alias, original) in aliases {
-            if let Some(funcs) = name_to_funcs.get(&original) {
-                for func in funcs {
-                    add_func_call_alias(&mut func_to_call_names, *func, &alias);
+            for func in maps.func_to_name.keys().copied() {
+                let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+                    continue;
+                };
+                if declaration_matches_import_target(decl, &original) {
+                    add_func_call_alias(&mut func_to_call_names, func, &alias);
                 }
             }
             if let Some(caller_module) = caller_module {
@@ -1749,6 +1973,17 @@ where
                             }
                             add_func_call_alias(&mut func_to_call_names, *func, &alias);
                         }
+                    }
+                }
+            }
+            let symbols = class_symbols_matching_import_target(global, included_files, &original);
+            if !symbols.is_empty() {
+                let candidates = class_symbols_by_import_alias_file
+                    .entry((file, alias.clone()))
+                    .or_default();
+                for symbol in symbols {
+                    if !candidates.contains(&symbol) {
+                        candidates.push(symbol);
                     }
                 }
             }
@@ -1787,13 +2022,17 @@ where
     let class_constructors_by_parent =
         class_constructors_by_parent_for_files(global, included_files, included_funcs);
     let class_constructor_count: usize = class_constructors_by_parent.values().map(Vec::len).sum();
+    let class_methods_by_parent = class_methods_by_parent_for_files(global, included_files, included_funcs);
+    let class_method_count: usize = class_methods_by_parent.values().map(Vec::len).sum();
     idg_build_log(format_args!(
-        "class index: {:.3}s names={} classes={} constructor_parents={} constructors={}",
+        "class index: {:.3}s names={} classes={} constructor_parents={} constructors={} method_parents={} methods={}",
         phase_started.elapsed().as_secs_f64(),
         class_symbols_by_name.len(),
         class_symbol_count,
         class_constructors_by_parent.len(),
-        class_constructor_count
+        class_constructor_count,
+        class_methods_by_parent.len(),
+        class_method_count
     ));
     let phase_started = Instant::now();
     let included_funcs: AHashSet<FuncId> = maps.func_to_seg.keys().copied().collect();
@@ -1820,11 +2059,14 @@ where
         func_to_file: &maps.func_to_file,
         func_to_scope: &maps.func_to_scope,
         symbol_to_scope: &maps.symbol_to_scope,
+        symbol_to_directory: &maps.symbol_to_directory,
         call_edges_by_site: &call_edges_by_site,
         file_to_language: &maps.file_to_language,
         class_symbols_by_name: &class_symbols_by_name,
         class_symbols_by_name_scope: &class_symbols_by_name_scope,
+        class_symbols_by_import_alias_file: &class_symbols_by_import_alias_file,
         class_constructors_by_parent: &class_constructors_by_parent,
+        class_methods_by_parent: &class_methods_by_parent,
         local_callable_bindings: &local_callable_bindings,
         callback_cache: RwLock::new(AHashMap::new()),
     };
@@ -2930,10 +3172,6 @@ fn bare_class_name(name: &str) -> &str {
         return "";
     }
     s
-}
-
-fn ownerless_constructor_token(token: &str) -> bool {
-    matches!(token, "new" | "static" | "self" | "this")
 }
 
 fn push_unique_class_name(out: &mut Vec<String>, value: String) {

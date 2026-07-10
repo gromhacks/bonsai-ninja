@@ -523,6 +523,8 @@ pub enum CallKind {
     Constructor,
     Macro,
     Indirect,
+    /// Language-level channel send lowered from a dedicated AST node.
+    ChannelSend,
 }
 
 impl CallKind {
@@ -534,6 +536,7 @@ impl CallKind {
             CallKind::Constructor => "constructor",
             CallKind::Macro => "macro",
             CallKind::Indirect => "indirect",
+            CallKind::ChannelSend => "channel_send",
         }
     }
 }
@@ -559,6 +562,11 @@ pub enum AssignValueKind {
     /// Engines should require a resolved yield summary rather than
     /// treating tainted call arguments as enough evidence.
     YieldResult,
+    /// A binding projected from an aggregate pattern. The bound value is
+    /// reachable from both the aggregate and the exact selected field, so
+    /// engines preserve both edges instead of treating the aggregate token
+    /// as imprecise field metadata.
+    Destructure,
     /// RHS is a compound expression (member access, binary op,
     /// template literal, ternary, conditional, …). Engine
     /// tokenises identifiers and bridges every carrier.
@@ -582,6 +590,11 @@ pub enum LoopKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallArg {
     pub span: Span,
+    /// AST-derived argument passing semantics. `WriteBack` means the
+    /// callee may update the addressable [`Self::place`] and the caller must
+    /// observe that update after the call.
+    #[serde(default)]
+    pub passing_mode: ArgumentPassingMode,
     /// Keyword-argument name (Python / Ruby / C# named args). `None` for positional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -604,6 +617,14 @@ pub struct CallArg {
     /// interpolation syntax out of `value_text`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_names: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgumentPassingMode {
+    #[default]
+    Value,
+    WriteBack,
 }
 
 /// A language-neutral syntactic operation derived from [`FlowEvent`].
@@ -1598,6 +1619,7 @@ mod operation_tests {
             receiver_types: Vec::new(),
             call_kind: CallKind::Constructor,
             args: vec![CallArg {
+                passing_mode: Default::default(),
                 span: span(21),
                 name: None,
                 value_text: "config".to_string(),

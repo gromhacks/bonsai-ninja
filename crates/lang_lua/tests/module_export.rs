@@ -5,7 +5,7 @@
 //! cross-file candidate sets.
 
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{ImportScope, LanguageRegistry, Visibility};
+use bonsai_lang_api::{CallKind, FlowEvent, ImportScope, LanguageRegistry, Visibility};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -131,4 +131,81 @@ return M
         }),
         "Lua module table export is not an import statement and must not be Module-scope: {imports:?}"
     );
+}
+
+#[test]
+fn anonymous_function_decl_uses_local_binding_name() {
+    let db = db_with("function entry(args)\n  local f = function(x) sink(x) end\n  f(args)\nend\n");
+    let global = db.global_index();
+    let block = global
+        .find_by_name("f")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .unwrap_or_else(|| {
+            panic!("anonymous function must be indexed as local binding `f`; global: {global:?}")
+        });
+
+    assert_eq!(block.params, ["x"]);
+    assert!(
+        block.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { name, .. } if name == "sink"
+        )),
+        "anonymous function declaration must own sink(x); got {:?}",
+        block.flow_events
+    );
+}
+
+#[test]
+fn dotted_table_call_keeps_explicit_receiver_argument() {
+    let db = db_with(
+        "local Box = {}\nfunction Box.method(self, p) sink(p) end\nfunction entry(args) Box.method(Box, args) end\n",
+    );
+    let global = db.global_index();
+    let entry = global
+        .find_by_name("entry")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("entry declaration");
+
+    assert!(entry.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Call { name, call_kind: CallKind::Function, args, .. }
+            if name == "Box.method" && args.len() == 2
+    )));
+}
+
+#[test]
+fn table_literal_emits_field_scoped_assignments() {
+    let db = db_with(
+        "function entry(raw, user)\n  local envelope = { cmd = '' .. raw, user = user, clean = 'ok' }\n  sink(envelope.cmd)\nend\n",
+    );
+    let global = db.global_index();
+    let entry = global
+        .find_by_name("entry")
+        .iter()
+        .find_map(|symbol| global.decl_of(*symbol))
+        .expect("entry declaration");
+
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign { target, source_names, .. }
+                if target == "envelope.cmd" && source_names == &["raw"]
+        )),
+        "table cmd field should retain only its exact source: {:?}",
+        entry.flow_events
+    );
+    assert!(entry.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target == "envelope.user" && source_names == &["user"]
+    )));
+    assert!(entry.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, value_kind, .. }
+            if target == "envelope.clean"
+                && source_names.is_empty()
+                && *value_kind == Some(bonsai_lang_api::AssignValueKind::Literal)
+    )));
 }

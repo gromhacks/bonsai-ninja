@@ -548,6 +548,7 @@ fn scala_constructor_call_args(args_node: Node<'_>, file: FileId, src: &[u8]) ->
             continue;
         }
         out.push(CallArg {
+            passing_mode: Default::default(),
             span: span_of(file, &child),
             name: None,
             place: simple_scala_storage_place(&value_text),

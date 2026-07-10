@@ -12,6 +12,15 @@
 use super::*;
 
 pub(super) fn source_sink_pair_is_low_signal(source: &FindingMatch, sink_rule: &Rule) -> bool {
+    // Inferred entry parameters are untrusted inputs, not confidential
+    // values. A precise flow from such an input to an event/log/response
+    // can be useful lineage, but it is not evidence of information
+    // exposure. Concrete secret/identity source rules remain eligible.
+    if sink_rule.tag.as_deref() == Some("information-exposure")
+        && source.category.as_deref() == Some("inferred")
+    {
+        return true;
+    }
     if sink_rule.tag.as_deref() != Some("log-injection") || source.trust.as_deref() != Some("local") {
         return false;
     }

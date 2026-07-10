@@ -339,6 +339,7 @@ fn synthesize_yul_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Spa
                         continue;
                     }
                     args.push(CallArg {
+                        passing_mode: Default::default(),
                         span: span_of(file, arg_node),
                         name: None,
                         value_text: text,
@@ -391,6 +392,7 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
                 continue;
             }
             args.push(CallArg {
+                passing_mode: Default::default(),
                 span: span_of(file, &child),
                 name: None,
                 place: simple_identifier_place(&value_node, src),
