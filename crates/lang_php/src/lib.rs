@@ -3,7 +3,10 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
+    kit::{
+        call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
+        parse_with, span_of,
+    },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
     LanguageId, ModifierVocabulary, TypeAliasVocabulary, Visibility,
@@ -76,13 +79,21 @@ impl LanguageAdapter for PhpAdapter {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: &["__construct"],
-            super_receiver_tokens: &["parent", "self"],
-            implicit_receiver_tokens: &["$this"],
+            super_receiver_tokens: &["parent"],
+            // PHP distinguishes the current object (`$this`) from current-
+            // class dispatch (`self` / late-bound `static`). None denotes a
+            // parent type; that role belongs exclusively to `parent` above.
+            implicit_receiver_tokens: &["$this", "self", "static"],
             ..LanguageCapabilities::partial_baseline()
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let source = parsed
+            .as_ref()
+            .map(|(snapshot, _)| snapshot.text.to_string())
+            .unwrap_or_default();
         // Synthesize Call FlowEvents for PHP language constructs the
         // tree-sitter grammar exposes as dedicated expression kinds
         // rather than call_expression nodes:
@@ -91,30 +102,16 @@ impl LanguageAdapter for PhpAdapter {
         //   - `` `cmd $tainted` `` (shell_command_expression)
         // Without this lowering the shipped php.eval.{include,require}_*
         // and php.cmdi.backtick rules can't match real code.
-        let source = ctx
-            .vfs
-            .snapshot(file)
-            .ok()
-            .map(|snapshot| snapshot.text.to_string())
-            .unwrap_or_default();
-        if !source.is_empty() {
-            // Reparse here rather than reuse `parse_with` — synthesis
-            // walks descendants and benefits from a dedicated tree.
-            if let Ok(lang) = language_from_pack(PACK_NAME) {
-                let mut parser = tree_sitter::Parser::new();
-                if parser.set_language(&lang).is_ok() {
-                    if let Some(tree) = parser.parse(&source, None) {
-                        let synthesized = synthesize_php_construct_events(&tree, source.as_bytes(), file);
-                        if !synthesized.is_empty() {
-                            attach_synthesized_calls_to_decls(&mut idx, synthesized);
-                        }
-                    }
-                }
+        if let Some((_, tree)) = parsed.as_ref() {
+            let synthesized = synthesize_php_construct_events(tree, source.as_bytes(), file);
+            if !synthesized.is_empty() {
+                attach_synthesized_calls_to_decls(&mut idx, synthesized);
             }
         }
         // Use the `namespace Foo\Bar;` segments as the module path so
         // private symbols cross-link only inside the namespace.
-        let namespace_segments = parse_with(PACK_NAME, file, ctx)
+        let namespace_segments = parsed
+            .as_ref()
             .and_then(|(snapshot, tree)| extract_php_namespace(tree.root_node(), snapshot.text.as_bytes()));
         if let Some(segments) = namespace_segments {
             bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
@@ -122,7 +119,7 @@ impl LanguageAdapter for PhpAdapter {
             // No `namespace` declaration — fall back to file-stem.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         }
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
             let visibility_by_span = collect_modifier_visibility(tree.root_node(), file, src, &PHP_VOCAB);
             let aliases_by_span = collect_param_type_aliases(&tree, file, src, &PHP_TYPE_ALIASES);
@@ -722,17 +719,10 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
                         current.kind(),
                         "variable_name" | "subscript_expression" | "member_access_expression"
                     ) {
-                        let text = node_text(&current, src).to_string();
-                        if !text.is_empty() {
-                            args.push(CallArg {
-                                passing_mode: Default::default(),
-                                span: span_of(file, &current),
-                                name: None,
-                                value_text: text,
-                                place: None,
-                                source_names: Vec::new(),
-                            });
+                        if let Some(argument) = call_arg_from_node(current, file, src, None) {
+                            args.push(argument);
                         }
+                        continue;
                     }
                     let mut child_cursor = current.walk();
                     for child in current.named_children(&mut child_cursor) {
@@ -742,16 +732,8 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
             } else {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
-                    let text = node_text(&child, src).to_string();
-                    if !text.is_empty() {
-                        args.push(CallArg {
-                            passing_mode: Default::default(),
-                            span: span_of(file, &child),
-                            name: None,
-                            value_text: text,
-                            place: None,
-                            source_names: Vec::new(),
-                        });
+                    if let Some(argument) = call_arg_from_node(child, file, src, None) {
+                        args.push(argument);
                         // include/require has exactly one argument.
                         break;
                     }

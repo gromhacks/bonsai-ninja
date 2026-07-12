@@ -22,7 +22,6 @@ pub mod enclosing_index;
 pub mod flow_ids;
 pub mod flow_ids_disk;
 pub mod flow_query;
-pub mod receiver_fields;
 pub mod semantic_context;
 pub mod taint_index;
 pub mod taint_index_disk;
@@ -31,7 +30,6 @@ pub mod value_flow;
 pub mod value_flow_disk;
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_abstract_interp::TraceLimits;
 use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
@@ -57,14 +55,11 @@ use value_flow::ValueFlowCache;
 
 pub use cross_module::CrossModuleOptions;
 pub use decorators::decl_decorator_names;
-pub use receiver_fields::receiver_field_target;
 pub use semantic_context::{
     WorkspaceContextRoot, WorkspaceContextRootKind, WorkspaceSemanticContext,
     WorkspaceSemanticContextSummary, WorkspaceSourceTransformation, WorkspaceSourceVariant,
     WorkspaceToolchainManifest,
 };
-
-const DEFAULT_IDG_SIDECAR_FILE_LIMIT: usize = 5_000;
 
 #[derive(Clone)]
 pub struct SourceReachableCallGraph {
@@ -85,22 +80,15 @@ pub fn validate_idg_sidecar_file(path: &Path) -> bonsai_idg::IdgResult<usize> {
     bonsai_idg::workspace::IdgWorkspace::validate_sidecar_file(path)
 }
 
-fn idg_sidecar_file_limit() -> usize {
-    std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_IDG_SIDECAR_FILE_LIMIT)
-}
-
-fn workspace_idg_sidecar_enabled(file_count: usize) -> bool {
-    file_count <= idg_sidecar_file_limit()
-}
-
-/// Whether the default workspace-wide IDG sidecar is enabled for a
-/// workspace with `file_count` supported source files.
+/// Whether the default workspace-wide IDG sidecar is enabled for a workspace
+/// with `file_count` supported source files.
+///
+/// Streaming factstore persistence has no source-file ceiling. The parameter
+/// is retained for API compatibility; every complete workspace may reuse its
+/// IDG sidecar regardless of scale.
 #[must_use]
-pub fn idg_sidecar_enabled_for_file_count(file_count: usize) -> bool {
-    workspace_idg_sidecar_enabled(file_count)
+pub const fn idg_sidecar_enabled_for_file_count(_file_count: usize) -> bool {
+    true
 }
 
 fn has_summary_output(global: &bonsai_index::GlobalIndex, func: FuncId) -> bool {
@@ -385,7 +373,11 @@ pub(crate) fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_call
         |file| {
             db.adapter_for(file)
                 .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+                .unwrap_or(&[])
+        },
+        |file| {
+            db.adapter_for(file)
+                .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
         },
     )
 }
@@ -418,7 +410,11 @@ pub(crate) fn build_resolved_call_graph_snapshot_for_files(
         |file| {
             db.adapter_for(file)
                 .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+                .unwrap_or(&[])
+        },
+        |file| {
+            db.adapter_for(file)
+                .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
         },
         included_files,
     )
@@ -465,10 +461,10 @@ struct Inner {
     /// need ids for only a small subset of functions.
     flow_ids: FlowIdCache,
     /// Workspace-wide cache of per-entry seed-free value-flow graphs.
-    /// Populated on first `value_flow()` access. Security uses
-    /// it for source-node selection, while `dataflow` remains the
-    /// persisted whole-workspace sidecar for fast navigation/export
-    /// queries.
+    /// Populated on first `value_flow()` access for SDK/navigation
+    /// compatibility. Security and native export query the canonical IDG
+    /// directly; this cache is a presentation projection, not another taint
+    /// engine or source-seeding path.
     value_flow: ValueFlowCache,
     /// Workspace-wide singleton for the interprocedural taint engine's
     /// internal caches (resolver answers per `(caller_func, call_span)`,
@@ -494,6 +490,13 @@ struct Inner {
     /// (within one CLI process or one SDK session) is a lookup
     /// instead of a full per-source interprocedural pass.
     taint_index: TaintGraphIndex,
+    /// One source/taint scan at a time may own the index's active semantic
+    /// configuration and write-through session. The scan's internal IDG work
+    /// remains parallel.
+    taint_analysis_serial: Mutex<()>,
+    /// Single-flight guard for the canonical default workspace IDG. Configured
+    /// services use AnalyzerDb's per-fingerprint OnceLock map.
+    idg_default_build_serial: Mutex<()>,
     /// Memoised transitive caller closures on the resolved call
     /// graph. The closure is rulepack-independent — selection by
     /// `source_returning_indices` is a post-hoc filter — so a
@@ -636,15 +639,12 @@ pub struct WorkspaceOpenOptions {
     pub prewarm_dataflow: bool,
     /// Persist the dataflow sidecar after prewarm.
     pub save_dataflow_sidecar: bool,
-    /// Load `<workspace>/.bonsai/value_flow.v2.bin` before queries run.
+    /// Load a fresh compatibility value-flow sidecar before queries run.
     pub load_value_flow_sidecar: bool,
-    /// Compute every missing value-flow entry during open. Mirrors
-    /// `prewarm_dataflow` but for the seed-free per-entry value-flow
-    /// graph that security source-analysis and source seeding consume.
-    /// Without this, the first security query computes the
-    /// per-source value-flow graph on demand one source at a time — a
-    /// major cliff on workspaces with thousands of source matches
-    /// (OWASP).
+    /// Compute every missing compatibility value-flow projection during
+    /// open. Semantic security and export queries do not require this cache;
+    /// callers must opt in explicitly when they consume the legacy
+    /// `ValueFlowGraph` document shape.
     pub prewarm_value_flow: bool,
     /// Persist the value-flow sidecar after prewarm.
     pub save_value_flow_sidecar: bool,
@@ -663,8 +663,8 @@ pub struct WorkspaceOpenOptions {
     /// IR immediately instead of caching all local and global copies.
     pub eager_decl_index: bool,
     /// Optional per-file tree-sitter parse timeout in milliseconds.
-    /// `None` uses the parser default (`BONSAI_PARSE_TIMEOUT_MS` or
-    /// 30 seconds); `Some(0)` disables the timeout guard.
+    /// `None` uses `BONSAI_PARSE_TIMEOUT_MS` when set and otherwise
+    /// parses to completion; `Some(0)` explicitly selects uncapped parsing.
     pub parse_timeout_ms: Option<u64>,
 }
 
@@ -725,8 +725,13 @@ impl WorkspaceOpenOptions {
     }
 
     /// Explicit full-prewarm mode. Parses and indexes the workspace,
-    /// loads still-fresh sidecars, computes every missing reusable
-    /// dataflow/value-flow/flow-id entry, and writes sidecars back.
+    /// loads still-fresh sidecars, computes reusable dataflow/flow-id entries,
+    /// and persists the canonical workspace IDG.
+    ///
+    /// The legacy per-entry `ValueFlowGraph` projection is intentionally
+    /// on-demand: eagerly projecting every callable performs one IDG closure
+    /// per function and is quadratic-scale work on large repositories. The
+    /// IDG itself is the reusable semantic artifact used by security/export.
     /// This is intentionally not the generic workspace-open default; high-level
     /// index facades opt into it to implement "index once, query many times".
     #[must_use]
@@ -737,8 +742,8 @@ impl WorkspaceOpenOptions {
             prewarm_dataflow: true,
             save_dataflow_sidecar: true,
             load_value_flow_sidecar: true,
-            prewarm_value_flow: true,
-            save_value_flow_sidecar: true,
+            prewarm_value_flow: false,
+            save_value_flow_sidecar: false,
             prewarm_flow_ids: true,
             load_idg_sidecar: true,
             eager_decl_index: true,
@@ -772,6 +777,8 @@ impl Workspace {
                 inter_taint: Arc::new(InterTaintCaches::default()),
                 resolved_call_graph: parking_lot::RwLock::new(None),
                 taint_index: TaintGraphIndex::new(),
+                taint_analysis_serial: Mutex::new(()),
+                idg_default_build_serial: Mutex::new(()),
                 transitive_callers: TransitiveCallersIndex::new(),
                 class_members: ClassMemberIndex::new(),
                 enclosing: EnclosingIndex::new(),
@@ -794,9 +801,9 @@ impl Workspace {
     }
 
     /// Workspace-wide cache of per-entry seed-free value-flow graphs.
-    /// See [`crate::value_flow::ValueFlowCache`]. Security consults
-    /// it for source-node selection; navigation/export consumers
-    /// continue to use the persisted dataflow sidecar.
+    /// See [`crate::value_flow::ValueFlowCache`]. This is a compatibility
+    /// projection for SDK/navigation consumers; security and native export
+    /// query the canonical IDG directly.
     pub fn value_flow(&self) -> &ValueFlowCache {
         &self.inner.value_flow
     }
@@ -835,6 +842,13 @@ impl Workspace {
     /// re-running the engine. Cleared on file edits.
     pub fn taint_index(&self) -> &TaintGraphIndex {
         &self.inner.taint_index
+    }
+
+    /// Hold the Workspace's source-seeded graph configuration/session for a
+    /// complete security scan. Concurrent SDK scans otherwise could clear or
+    /// finish one another's write-through state.
+    pub fn lock_taint_analysis(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.inner.taint_analysis_serial.lock()
     }
 
     /// Workspace-cached transitive caller closures on the resolved
@@ -966,13 +980,6 @@ impl Workspace {
         if let Some(service) = self.inner.db.idg_service() {
             return Ok(Some(service.segment_count()));
         }
-        if !workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len()) {
-            tracing::debug!(
-                file_limit = idg_sidecar_file_limit(),
-                "skipping workspace IDG sidecar load for large workspace"
-            );
-            return Ok(None);
-        }
         let sidecar = bonsai_idg::workspace::idg_sidecar_path(root);
         if !sidecar.exists() {
             return Ok(None);
@@ -1055,6 +1062,12 @@ impl Workspace {
                     .adapter_for(file)
                     .map(|adapter| adapter.language_id().as_str())
             },
+            |file| {
+                self.inner
+                    .db
+                    .adapter_for(file)
+                    .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
+            },
         );
         while !queued_files.is_empty() {
             let mut batch: Vec<FileId> = queued_files.drain().collect();
@@ -1086,7 +1099,7 @@ impl Workspace {
                             .db
                             .adapter_for(file)
                             .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                            .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+                            .unwrap_or(&[])
                     },
                     &batch,
                     &callgraph_context,
@@ -1252,6 +1265,11 @@ impl Workspace {
         if let Some(svc) = self.inner.db.idg_service() {
             return svc;
         }
+        let _build_guard = self.inner.idg_default_build_serial.lock();
+        // The first caller may have completed while this caller waited.
+        if let Some(svc) = self.inner.db.idg_service() {
+            return svc;
+        }
         let global = self.inner.db.global_index();
         // The IDG references symbols by their global-index id, which
         // is content-derived: any file content change can renumber
@@ -1268,8 +1286,7 @@ impl Workspace {
         // latency; the sidecar reduces it to a single mmap + decode
         // for subsequent invocations against the same content-hashed
         // workspace.
-        let use_idg_sidecar = self.is_complete_workspace_index()
-            && workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
+        let use_idg_sidecar = self.is_complete_workspace_index();
         if use_idg_sidecar {
             if let Some(root) = self.root_path() {
                 if self.load_idg_sidecar(&root).ok().flatten().is_some() {
@@ -1281,7 +1298,6 @@ impl Workspace {
         } else {
             tracing::debug!(
                 complete_workspace = self.is_complete_workspace_index(),
-                file_limit = idg_sidecar_file_limit(),
                 "skipping workspace IDG sidecar load"
             );
         }
@@ -1323,7 +1339,6 @@ impl Workspace {
         } else {
             tracing::debug!(
                 complete_workspace = self.is_complete_workspace_index(),
-                file_limit = idg_sidecar_file_limit(),
                 "skipping workspace IDG sidecar save"
             );
         }
@@ -1332,35 +1347,25 @@ impl Workspace {
         service
     }
 
-    /// Build and seed the workspace IDG only when the resulting
-    /// sidecar is enabled for this workspace size. Large workspaces
-    /// intentionally skip the global IDG sidecar; callers that are
-    /// merely warming persisted artifacts should not pay for an
-    /// unsaved whole-workspace graph.
+    /// Build and seed the workspace IDG when the workspace index is complete,
+    /// allowing every workspace size to reuse the streamed sidecar.
     pub fn build_and_seed_persisted_idg_service(&self) -> Option<Arc<bonsai_idg::IdgQueryService>> {
         if !self.is_complete_workspace_index() {
             tracing::debug!("skipping workspace IDG prewarm because the workspace index is scoped");
             return None;
         }
-        let files = self.inner.db.vfs().all_files().len();
-        if !workspace_idg_sidecar_enabled(files) {
-            tracing::debug!(
-                files,
-                file_limit = idg_sidecar_file_limit(),
-                "skipping workspace IDG prewarm because the sidecar is disabled for this workspace size"
-            );
-            return None;
-        }
         Some(self.build_and_seed_idg_service())
     }
 
-    /// Build a workspace IDG with caller-supplied transfer options
-    /// and seed it onto [`AnalyzerDb`].
+    /// Build a workspace IDG with caller-supplied transfer options and cache
+    /// it under those exact semantics.
     ///
     /// Configured transfer options use a distinct sidecar keyed by a
     /// stable fingerprint of those options. The default IDG sidecar
     /// represents source structure only, while transfer options come
-    /// from the editable security rulepack and can alter graph edges.
+    /// from the editable security rulepack and can alter graph edges. A
+    /// configured graph never replaces [`AnalyzerDb::idg_service`], whose
+    /// invariant is the full-workspace graph with default transfer semantics.
     pub fn build_and_seed_idg_service_with_transfer_options(
         &self,
         transfer_options: &bonsai_idg::TransferOptions,
@@ -1373,8 +1378,7 @@ impl Workspace {
         let root_path = self.root_path();
         let transfer_hash = idg_transfer_options_fingerprint(&transfer_options);
         let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), transfer_hash);
-        let use_idg_sidecar = self.is_complete_workspace_index()
-            && workspace_idg_sidecar_enabled(self.inner.db.vfs().all_files().len());
+        let use_idg_sidecar = self.is_complete_workspace_index();
         if use_idg_sidecar {
             if let Some(root) = root_path.as_deref() {
                 let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, transfer_hash);
@@ -1387,14 +1391,12 @@ impl Workspace {
                         .inner
                         .db
                         .set_idg_service_for_semantics(transfer_hash, service);
-                    self.inner.db.set_idg_service(service.clone());
                     return service;
                 }
             }
         } else {
             tracing::debug!(
                 complete_workspace = self.is_complete_workspace_index(),
-                file_limit = idg_sidecar_file_limit(),
                 "skipping workspace transfer IDG sidecar load"
             );
         }
@@ -1427,7 +1429,6 @@ impl Workspace {
         } else {
             tracing::debug!(
                 complete_workspace = self.is_complete_workspace_index(),
-                file_limit = idg_sidecar_file_limit(),
                 "skipping workspace transfer IDG sidecar save"
             );
         }
@@ -1436,18 +1437,20 @@ impl Workspace {
             .inner
             .db
             .set_idg_service_for_semantics(transfer_hash, service);
-        self.inner.db.set_idg_service(service.clone());
         service
     }
 
     /// Build a file-scoped workspace IDG with caller-supplied transfer
-    /// options and seed it onto [`AnalyzerDb`].
+    /// options and cache it under that exact scope and semantics.
     ///
     /// Security production scans use this to keep excluded files out
     /// of the semantic graph before transfer/stitching. The persisted
     /// sidecar key includes both transfer options and the sorted file
     /// scope, so a scoped graph can never be loaded as the full graph
-    /// or as a different scoped graph.
+    /// or as a different scoped graph. The scoped service is deliberately not
+    /// installed as [`AnalyzerDb::idg_service`]: later export, inspect, and
+    /// taint queries must never mistake a partial graph for the canonical
+    /// full-workspace default.
     pub fn build_and_seed_idg_service_with_transfer_options_for_files(
         &self,
         transfer_options: &bonsai_idg::TransferOptions,
@@ -1460,25 +1463,15 @@ impl Workspace {
         let scope_hash = idg_file_scope_fingerprint(included_files);
         let scoped_hash = transfer_hash ^ scope_hash ^ 0x5C0F_ED1D_65C0_9E5D_u64;
         let pipeline_hash = idg_transfer_pipeline_hash(&self.inner.db, root_path.as_deref(), scoped_hash);
-        let use_idg_sidecar = workspace_idg_sidecar_enabled(included_files.len());
-        if use_idg_sidecar {
-            if let Some(root) = root_path.as_deref() {
-                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
-                if let Ok(Some(loaded)) =
-                    bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
-                {
-                    let service =
-                        Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
-                    let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
-                    self.inner.db.set_idg_service(service.clone());
-                    return service;
-                }
+        if let Some(root) = root_path.as_deref() {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+            if let Ok(Some(loaded)) =
+                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+            {
+                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
+                return service;
             }
-        } else {
-            tracing::debug!(
-                file_limit = idg_sidecar_file_limit(),
-                "skipping workspace scoped transfer IDG sidecar load for large workspace"
-            );
         }
         let cg = build_resolved_call_graph_snapshot_for_files(&self.inner.db, included_files);
         let db = &self.inner.db;
@@ -1496,36 +1489,30 @@ impl Workspace {
             &transfer_options,
             included_files,
         );
-        if use_idg_sidecar {
-            if let Some(root) = root_path.as_deref() {
-                let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
-                if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
-                    tracing::warn!(
-                        path = %sidecar.display(),
-                        error = %err,
-                        "workspace scoped transfer IDG save_to_disk failed"
-                    );
-                }
+        if let Some(root) = root_path.as_deref() {
+            let sidecar = bonsai_idg::workspace::idg_transfer_sidecar_path(root, scoped_hash);
+            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %err,
+                    "workspace scoped transfer IDG save_to_disk failed"
+                );
             }
-        } else {
-            tracing::debug!(
-                file_limit = idg_sidecar_file_limit(),
-                "skipping workspace scoped transfer IDG sidecar save for large workspace"
-            );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
-        self.inner.db.set_idg_service(service.clone());
         service
     }
 
-    /// Build and seed a file-scoped workspace IDG using an already
-    /// resolved semantic call graph.
+    /// Build a file-scoped workspace IDG using an already resolved semantic
+    /// call graph.
     ///
     /// Source-to-sink security scans compute a source-reachable graph
     /// first. Reusing that graph here avoids rebuilding workspace-wide
     /// call metadata and keeps IDG transfer scoped to the semantic
-    /// region that can actually participate in findings.
+    /// region that can actually participate in findings. The returned handle
+    /// remains query-local and never replaces the canonical workspace-global
+    /// default service.
     pub fn build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
         &self,
         transfer_options: &bonsai_idg::TransferOptions,
@@ -1533,14 +1520,12 @@ impl Workspace {
         included_funcs: &[FuncId],
         call_graph: &bonsai_callgraph::ResolvedCallGraph,
     ) -> Arc<bonsai_idg::IdgQueryService> {
-        let service = self.build_idg_service_with_transfer_options_for_files_and_call_graph(
+        self.build_idg_service_with_transfer_options_for_files_and_call_graph(
             transfer_options,
             included_files,
             included_funcs,
             call_graph,
-        );
-        self.inner.db.set_idg_service(service.clone());
-        service
+        )
     }
 
     /// Build a file/function-scoped workspace IDG using an already
@@ -1639,6 +1624,11 @@ impl Workspace {
     /// intentionally centralized so watch/SDK refresh, bulk ingest,
     /// and in-memory edits keep the same correctness contract.
     fn invalidate_after_file_change(&self, file: FileId) {
+        // A security scan owns a coherent source snapshot from match through
+        // IDG closure and sidecar commit. Saved-file refresh waits for that
+        // snapshot to finish instead of clearing its caches/write session
+        // midway through analysis.
+        let _taint_analysis_guard = self.inner.taint_analysis_serial.lock();
         self.inner.db.invalidate_file(file);
         // Dataflow tracks per-entry transitive file dependencies, so
         // retain unrelated in-memory facts while evicting entries that
@@ -1663,9 +1653,9 @@ impl Workspace {
     /// Open a structurally indexed workspace: ingest `root`, prewarm
     /// each file's declaration index, and load reusable sidecars when
     /// present. Missing analysis facts are computed on demand by the
-    /// exact query that needs them. Minified / bundled files
-    /// (`*.min.js`, single lines > 5 KB) are skipped by default;
-    /// set `BONSAI_INCLUDE_MINIFIED=1` to opt in.
+    /// exact query that needs them. Every supported UTF-8 source file
+    /// selected by the workspace's ignore rules is ingested; source
+    /// spelling, line length, and delimiter text never change semantics.
     pub fn open(root: &Path, registry: Arc<LanguageRegistry>) -> Result<Self, WorkspaceError> {
         Self::open_with_options(root, registry, WorkspaceOpenOptions::default())
     }
@@ -1677,9 +1667,11 @@ impl Workspace {
         Self::open_with_options(root, registry, WorkspaceOpenOptions::parse_only())
     }
 
-    /// Explicit full-prewarm SDK path for cache rebuilds and
-    /// benchmark/audit flows that intentionally compute reusable
-    /// analysis sidecars up front.
+    /// Explicit full-prewarm SDK path for cache rebuilds and benchmark/audit
+    /// flows that intentionally compute reusable analysis sidecars up front.
+    /// This prewarms the canonical IDG, not the legacy per-entry
+    /// `ValueFlowGraph` projection; compatibility callers can opt into that
+    /// projection with [`WorkspaceOpenOptions::prewarm_value_flow`].
     pub fn index_full_prewarm(root: &Path, registry: Arc<LanguageRegistry>) -> Result<Self, WorkspaceError> {
         Self::open_with_options(root, registry, WorkspaceOpenOptions::full_prewarm())
     }
@@ -1745,7 +1737,7 @@ impl Workspace {
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
-        let (files, skipped_minified) =
+        let files =
             read_supported_source_files_matching_literal(&canonical_root, &ws.inner.registry, literal)?;
         let file_count = files.len();
         for source in files {
@@ -1763,12 +1755,6 @@ impl Workspace {
         on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
         index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
         on_event(WorkspaceOpenEvent::ParseFinished);
-        if skipped_minified > 0 {
-            tracing::info!(
-                skipped = skipped_minified,
-                "skipped minified / bundled files (set BONSAI_INCLUDE_MINIFIED=1 to include)"
-            );
-        }
         Ok(ws)
     }
 
@@ -1832,7 +1818,7 @@ impl Workspace {
         *ws.inner.root_label.lock() = root.display().to_string();
         ws.inner.db.set_workspace_root(canonical_root.clone());
         on_event(WorkspaceOpenEvent::IngestStarted);
-        let (files, skipped_minified) = read_supported_source_files_filtered_paths(
+        let files = read_supported_source_files_filtered_paths(
             &canonical_root,
             &ws.inner.registry,
             include_filters,
@@ -1855,12 +1841,6 @@ impl Workspace {
             on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
             index_workspace_files_with_bounded_parallelism(&ws, &files, on_event);
             on_event(WorkspaceOpenEvent::ParseFinished);
-        }
-        if skipped_minified > 0 {
-            tracing::info!(
-                skipped = skipped_minified,
-                "skipped minified / bundled files (set BONSAI_INCLUDE_MINIFIED=1 to include)"
-            );
         }
         Ok(ws)
     }
@@ -2140,14 +2120,9 @@ impl Workspace {
             }
             on_event(WorkspaceOpenEvent::DataflowPrewarmFinished);
         }
-        // Pass 3: workspace-wide value-flow cache. Same shape as the
-        // dataflow prewarm but for the seed-free per-entry value-flow
-        // graph that `security source-analysis`, the source-seed
-        // selection in `build_findings_chain_aware`, and inspect's
-        // value-flow renderers consume. Without this, every
-        // `taint-analysis` invocation computes the per-source graph on
-        // demand one source at a time — a major cliff on workspaces
-        // with thousands of source matches.
+        // Pass 3: optional compatibility value-flow projection. Security and
+        // native export query the configured IDG directly; only clients of the
+        // older per-entry `ValueFlowGraph` document need this sidecar.
         let skip_value_flow = std::env::var("BONSAI_NO_VALUE_FLOW")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
@@ -2292,24 +2267,17 @@ impl Workspace {
         let canonical_root = canonical_workspace_root(root);
         self.inner.db.set_workspace_root(canonical_root.clone());
         let mut ingested = Vec::new();
-        let skipped_minified =
-            stream_supported_source_files(&canonical_root, &self.inner.registry, |source| {
-                let path = &source.path;
-                let old_id = self.inner.vfs.lookup(path);
-                let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
-                if let Some(prev) = old_id {
-                    self.invalidate_after_file_change(prev);
-                }
-                *self.inner.reparse_counter.lock() += 1;
-                ingested.push(id);
-                Ok(())
-            })?;
-        if skipped_minified > 0 {
-            tracing::info!(
-                skipped = skipped_minified,
-                "skipped minified / bundled files (set BONSAI_INCLUDE_MINIFIED=1 to include)"
-            );
-        }
+        stream_supported_source_files(&canonical_root, &self.inner.registry, |source| {
+            let path = &source.path;
+            let old_id = self.inner.vfs.lookup(path);
+            let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
+            if let Some(prev) = old_id {
+                self.invalidate_after_file_change(prev);
+            }
+            *self.inner.reparse_counter.lock() += 1;
+            ingested.push(id);
+            Ok(())
+        })?;
         Ok(ingested)
     }
 
@@ -2321,7 +2289,7 @@ impl Workspace {
         root: &Path,
     ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
         let canonical_root = canonical_workspace_root(root);
-        let (files, _) = read_supported_source_files(&canonical_root, &self.inner.registry)?;
+        let files = read_supported_source_files(&canonical_root, &self.inner.registry)?;
         Ok(files
             .into_iter()
             .map(|file| SourceFileFingerprint {
@@ -2662,7 +2630,7 @@ impl Workspace {
             .db
             .adapter_for(class_file)
             .map(|adapter| adapter.capabilities().effective_constructor_method_names())
-            .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
+            .unwrap_or(&[]);
         let mut out = Vec::new();
         for name in names {
             let candidates = self
@@ -2724,7 +2692,7 @@ impl Workspace {
                 sink_symbol: None,
                 file_filter: None,
                 max_depth: u32::from(opts.max_depth),
-                max_paths: opts.max_steps,
+                max_paths: u32::from(opts.max_branch_fanout),
                 follow_calls: true,
             },
             symbol,
@@ -2761,7 +2729,7 @@ impl Workspace {
                 sink_symbol: Some(sink.to_string()),
                 file_filter: None,
                 max_depth: u32::from(opts.max_depth),
-                max_paths: opts.max_steps,
+                max_paths: u32::from(opts.max_branch_fanout),
                 follow_calls: true,
             },
             src,
@@ -2828,7 +2796,7 @@ impl Workspace {
             entry_funcs: vec![(FuncId::new(entry.raw()), entry_name.clone())],
             func_name: name_of.as_ref(),
             func_module: module_of.as_ref(),
-            limits: TraceLimits::from(opts),
+            limits: opts.trace_metadata_limits(),
         };
         finalize(raw, ctx, self.inner.vfs.as_ref())
     }
@@ -3111,10 +3079,10 @@ fn idg_pipeline_hash() -> u64 {
 /// of this value so callers can combine it without XOR-cancelling their own
 /// freshness inputs.
 pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
-    // v30 (2026-07-09): constructor/inheritance resolution consumes
-    // adapter-emitted call/type facts, and destructuring preserves both
-    // aggregate and exact-field edges through an explicit AST value kind.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 31;
+    // v33 (2026-07-10): IDG positional parameter/call-argument identities
+    // use u32 end-to-end, so positions above 254 no longer collide with the
+    // synthetic receiver/return sentinel.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 33;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -3195,16 +3163,10 @@ fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
-fn include_minified() -> bool {
-    std::env::var("BONSAI_INCLUDE_MINIFIED")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-}
-
 fn read_supported_source_files(
     canonical_root: &Path,
     registry: &LanguageRegistry,
-) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
+) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(canonical_root, registry, None, None)
 }
 
@@ -3212,12 +3174,13 @@ fn stream_supported_source_files<F>(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     mut on_file: F,
-) -> Result<usize, WorkspaceError>
+) -> Result<(), WorkspaceError>
 where
     F: FnMut(SourceFileContent) -> Result<(), WorkspaceError>,
 {
-    let include_minified = include_minified();
-    let mut skipped_minified = 0usize;
+    // Inclusion is structural: explicit ignore rules plus the adapter's
+    // supported extension. File names and source text are compiler input,
+    // never heuristics for dropping otherwise supported programs.
     let mut builder = ignore::WalkBuilder::new(canonical_root);
     builder
         .follow_links(false)
@@ -3228,11 +3191,10 @@ where
         .parents(true)
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
-    let root_for_filter = canonical_root.to_path_buf();
-    builder.filter_entry(move |entry| {
-        include_minified || !path_looks_minified_under_root(&root_for_filter, entry.path())
-    });
-    let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
+    let mut entries: Vec<_> = builder
+        .build()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
     entries.sort_by(|a, b| a.path().cmp(b.path()));
 
     for entry in entries {
@@ -3246,26 +3208,10 @@ where
         if registry.adapter_for_extension(ext).is_none() {
             continue;
         }
-        if !include_minified && path_looks_minified_under_root(canonical_root, path) {
-            tracing::debug!(path = %path.display(), "skipping minified file (filename)");
-            skipped_minified += 1;
-            continue;
-        }
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => continue,
             Err(error) => return Err(WorkspaceError::Io(error)),
         };
-        if !include_minified && content_looks_minified(&text) {
-            tracing::debug!(path = %path.display(), "skipping minified file (content)");
-            skipped_minified += 1;
-            continue;
-        }
-        if content_has_extreme_structure_nesting(&text) {
-            tracing::debug!(path = %path.display(), "skipping file with extreme structure nesting");
-            skipped_minified += 1;
-            continue;
-        }
         let hash = fnv1a_bytes64(text.as_bytes());
         on_file(SourceFileContent {
             path: path.to_path_buf(),
@@ -3274,14 +3220,14 @@ where
         })?;
     }
 
-    Ok(skipped_minified)
+    Ok(())
 }
 
 fn read_supported_source_files_matching_literal(
     canonical_root: &Path,
     registry: &LanguageRegistry,
     literal: &str,
-) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
+) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(canonical_root, registry, Some(literal), None)
 }
 
@@ -3290,7 +3236,7 @@ fn read_supported_source_files_filtered_paths(
     registry: &LanguageRegistry,
     include_filters: &[String],
     exclude_filters: &[String],
-) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
+) -> Result<Vec<SourceFileContent>, WorkspaceError> {
     read_supported_source_files_impl(
         canonical_root,
         registry,
@@ -3318,28 +3264,10 @@ fn read_supported_source_file_at_path(
     if registry.adapter_for_extension(ext).is_none() {
         return Err(WorkspaceError::NoAdapter(ext.to_string()));
     }
-    if !include_minified() && path_looks_minified_under_root(canonical_root, &path) {
-        return Err(WorkspaceError::NoAdapter(format!(
-            "minified source skipped: {}",
-            path.display()
-        )));
-    }
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => return Err(WorkspaceError::Io(error)),
     };
-    if !include_minified() && content_looks_minified(&text) {
-        return Err(WorkspaceError::NoAdapter(format!(
-            "minified source skipped: {}",
-            path.display()
-        )));
-    }
-    if content_has_extreme_structure_nesting(&text) {
-        return Err(WorkspaceError::NoAdapter(format!(
-            "extreme structure nesting skipped: {}",
-            path.display()
-        )));
-    }
     let hash = fnv1a_bytes64(text.as_bytes());
     Ok(SourceFileContent { path, text, hash })
 }
@@ -3349,9 +3277,9 @@ fn read_supported_source_files_impl(
     registry: &LanguageRegistry,
     literal_filter: Option<&str>,
     path_filter: Option<PathFilterSpec<'_>>,
-) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
-    let include_minified = include_minified();
-    let mut skipped_minified = 0usize;
+) -> Result<Vec<SourceFileContent>, WorkspaceError> {
+    // Match the streaming path's compiler contract. Literal/path filters are
+    // explicit query scopes; no source-shape heuristic may narrow them.
     // The ignore walker follows .gitignore / .ignore / .bonsaiignore but
     // still walks in OS-native order, so a fresh ingest can assign different
     // FileIds to the same paths across runs. Sort by path so allocation and
@@ -3366,11 +3294,10 @@ fn read_supported_source_files_impl(
         .parents(true)
         .ignore(true)
         .add_custom_ignore_filename(".bonsaiignore");
-    let root_for_filter = canonical_root.to_path_buf();
-    builder.filter_entry(move |entry| {
-        include_minified || !path_looks_minified_under_root(&root_for_filter, entry.path())
-    });
-    let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
+    let mut entries: Vec<_> = builder
+        .build()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
     entries.sort_by(|a, b| a.path().cmp(b.path()));
 
     // Read files in parallel. The prior sequential `for entry in
@@ -3381,8 +3308,6 @@ fn read_supported_source_files_impl(
     // path again after the parallel collect so FileId allocation
     // stays deterministic regardless of read-completion order.
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let skipped_counter = AtomicUsize::new(0);
     enum ReadOutcome {
         Keep(SourceFileContent),
         Skip,
@@ -3402,11 +3327,6 @@ fn read_supported_source_files_impl(
             if registry.adapter_for_extension(ext).is_none() {
                 return ReadOutcome::Skip;
             }
-            if !include_minified && path_looks_minified_under_root(canonical_root, path) {
-                tracing::debug!(path = %path.display(), "skipping minified file (filename)");
-                skipped_counter.fetch_add(1, Ordering::Relaxed);
-                return ReadOutcome::Skip;
-            }
             if let Some(filter) = path_filter {
                 if !source_path_allowed(canonical_root, path, filter) {
                     return ReadOutcome::Skip;
@@ -3414,25 +3334,12 @@ fn read_supported_source_files_impl(
             }
             let text = match std::fs::read_to_string(path) {
                 Ok(text) => text,
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => {
-                    return ReadOutcome::Skip;
-                }
                 Err(error) => return ReadOutcome::Err(error),
             };
             if let Some(literal) = literal_filter {
                 if !text_contains_literal_query(&text, literal, literal_lower.as_deref().unwrap_or(literal)) {
                     return ReadOutcome::Skip;
                 }
-            }
-            if !include_minified && content_looks_minified(&text) {
-                tracing::debug!(path = %path.display(), "skipping minified file (content)");
-                skipped_counter.fetch_add(1, Ordering::Relaxed);
-                return ReadOutcome::Skip;
-            }
-            if content_has_extreme_structure_nesting(&text) {
-                tracing::debug!(path = %path.display(), "skipping file with extreme structure nesting");
-                skipped_counter.fetch_add(1, Ordering::Relaxed);
-                return ReadOutcome::Skip;
             }
             let hash = fnv1a_bytes64(text.as_bytes());
             ReadOutcome::Keep(SourceFileContent {
@@ -3451,8 +3358,7 @@ fn read_supported_source_files_impl(
         }
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    skipped_minified += skipped_counter.load(Ordering::Relaxed);
-    Ok((files, skipped_minified))
+    Ok(files)
 }
 
 #[derive(Clone, Copy)]
@@ -3555,155 +3461,9 @@ pub fn summarize_precision(trace: &TraceResult) -> PrecisionReport {
     report
 }
 
-// ---------------------------------------------------------------------------
-// Minified-file detection
-//
-// Minified / bundled JS & TS files are the common failure mode: one
-// million-character line of stripped variable names is still syntactically
-// valid JS, so tree-sitter happily parses it, but it yields essentially
-// zero analysis signal (all identifiers are `a`, `b`, `c` …) while
-// dominating index time and inflating `search` / `inspect` output with
-// useless hits. Skipping them by default is a safer default than forcing
-// users to remember `--exclude`; the `BONSAI_INCLUDE_MINIFIED` env var is
-// there for the edge case of actually analyzing a bundle.
-// ---------------------------------------------------------------------------
-
-/// Does the filename / path suggest a minified, bundled, or generated
-/// build artifact? Catches:
-///
-/// - Suffix conventions: `*.min.js`, `*.min.ts`, `*.min.css`, `*-min.js`.
-/// - Dependency trees: `node_modules/`, `vendor/`, `bower_components/`.
-/// - Build-output dirs: `dist/`, `build/`, `target/` (Rust/Maven),
-///   `out/` (TS / .NET / generic), `.next/` / `.nuxt/` (frameworks),
-///   `__pycache__/` (Python bytecode), `coverage/` (test reports).
-///
-/// All of the above are skipped because the source they're built from
-/// is also in the workspace — indexing both is pure duplication that
-/// inflates `search` / `inspect` output and slows the indexer. If a
-/// project genuinely ships only built artifacts, set
-/// `BONSAI_INCLUDE_MINIFIED=1` to opt back in.
-#[must_use]
-pub fn path_looks_minified(path: &Path) -> bool {
-    // Path-segment checks first — cheaper than reading file content.
-    // Common build / dependency / cache dirs that are essentially
-    // always either generated, vendored, or duplicated from source.
-    // Each entry stays narrow enough to not collide with real
-    // first-party directory names. `BONSAI_INCLUDE_VENDOR=1`
-    // disables the entire skip set when a project genuinely needs
-    // its vendored deps analysed.
-    const SKIP_SEGMENTS: &[&str] = &[
-        // Cross-language dependency trees.
-        "node_modules",     // JS/TS/npm/yarn/pnpm
-        "vendor",           // Go (legacy), PHP composer, Ruby bundler dirs, generic
-        "bower_components", // legacy JS
-        "deps",             // C / C++ / Redis / hiredis / Lua / similar
-        "third_party",      // Chromium-style vendoring
-        "external",         // Bazel / Meson conventions
-        "subprojects",      // Meson
-        // Per-language package / build / cache dirs.
-        "Pods",          // Swift / Objective-C CocoaPods
-        "Carthage",      // Swift Carthage
-        "DerivedData",   // Xcode build cache
-        ".gradle",       // Gradle cache
-        "gradle",        // Gradle wrapper / scripts (regenerable)
-        ".tox",          // Python tox
-        ".mypy_cache",   // Python mypy
-        ".pytest_cache", // Python pytest
-        "site-packages", // Python installed packages
-        // Build outputs.
-        "dist",
-        "build",
-        "target", // Rust / Maven
-        "out",
-        ".next",
-        ".nuxt",
-        "bin", // .NET / generic compiled output
-        "obj", // .NET intermediate
-        // Caches / coverage / VCS.
-        ".bonsai",
-        ".git",
-        ".hg",
-        ".svn",
-        "__pycache__",
-        "coverage",
-        ".coverage",
-        // Virtualenvs (Python convention).
-        ".venv",
-        "venv",
-        ".env",
-        "env",
-    ];
-    for component in path.components() {
-        let std::path::Component::Normal(seg) = component else {
-            continue;
-        };
-        let Some(seg) = seg.to_str() else { continue };
-        if SKIP_SEGMENTS.contains(&seg) {
-            return true;
-        }
-    }
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    let lower = name.to_ascii_lowercase();
-    // `.min.` sits between the base name and the extension (`foo.min.js`).
-    // `-min.` catches the dash-separated convention (`foo-min.js`).
-    lower.contains(".min.") || lower.contains("-min.")
-}
-
-/// Same generated/minified check as [`path_looks_minified`], but scoped to
-/// `root`. This is the predicate ingest paths should use so an explicit
-/// workspace rooted under an ancestor named `target`, `build`, `vendor`, etc.
-/// is still analyzed; only generated/dependency segments inside that selected
-/// workspace are skipped.
-#[must_use]
-pub fn path_looks_minified_under_root(root: &Path, path: &Path) -> bool {
-    let scoped = path.strip_prefix(root).unwrap_or(path);
-    if scoped.as_os_str().is_empty() {
-        return false;
-    }
-    path_looks_minified(scoped)
-}
-
-/// Does the file content look minified? Heuristic: any single line
-/// longer than 5,000 characters is almost certainly machine-emitted.
-/// Hand-written code with 5K-char lines is vanishingly rare — the
-/// longest lines in the Linux kernel, Chromium, and the V8 sources are
-/// all under 1,000.
-#[must_use]
-pub fn content_looks_minified(text: &str) -> bool {
-    const MAX_LINE_LEN: usize = 5_000;
-    text.lines().any(|line| line.len() > MAX_LINE_LEN)
-}
-
-/// Does the file contain delimiter nesting deep enough to be a parser stress
-/// fixture rather than normal source? Tree-sitter grammars can recurse deeply
-/// on thousands of nested `(` / `[` / `{` tokens before any adapter-level
-/// recovery can run, so guard this at repository ingest.
-#[must_use]
-pub fn content_has_extreme_structure_nesting(text: &str) -> bool {
-    const MAX_STRUCTURE_NESTING: usize = 2_048;
-    let mut depth = 0usize;
-    for byte in text.bytes() {
-        match byte {
-            b'(' | b'[' | b'{' => {
-                depth = depth.saturating_add(1);
-                if depth > MAX_STRUCTURE_NESTING {
-                    return true;
-                }
-            }
-            b')' | b']' | b'}' => {
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 #[cfg(test)]
-#[path = "minified_tests.rs"]
-mod minified_tests;
+#[path = "ingestion_tests.rs"]
+mod ingestion_tests;
 
 #[cfg(test)]
 mod symbol_lookup_spec_tests {

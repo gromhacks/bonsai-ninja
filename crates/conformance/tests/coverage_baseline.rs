@@ -274,8 +274,10 @@ fn render_runtime_only() -> String {
             // baseline doesn't render them yet — destructure-and-
             // ignore to keep the table contract stable.
             constructor_method_names: _,
+            bare_call_constructor_syntax: _,
             super_receiver_tokens: _,
             implicit_receiver_tokens: _,
+            field_places_complete: _,
         } = caps;
         let aliases = if module_export_aliases.is_empty() {
             "—".to_string()

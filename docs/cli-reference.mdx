@@ -335,14 +335,16 @@ bonsai-ninja trace ./src --from handle_request --to os.system --format dot --out
 | `--context <BUDGET>` | 32k | Token budget for text. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit full trace. |
-| `--max-depth <N>` | 12 | Max cross-module call depth. |
-| `--max-steps <N>` | 8192 | Max emitted trace steps. |
-| `--max-branch-fanout <N>` | 4 | Branch fanout used to derive path budget. |
-| `--max-loop-iters <N>` | 1 | Loop iterations represented in metadata. |
+| `--max-depth <N>` | 0 (uncapped) | Optional cross-module call-depth cutoff. |
+| `--max-steps <N>` | 0 (uncapped) | Optional emitted semantic-step cutoff. |
+| `--max-branch-fanout <N>` | 0 (uncapped) | Optional alternatives expanded at each structured split. |
+| `--max-loop-iters <N>` | 0 (fixed point) | Optional distinct loop binding-state cutoff. |
 | `--format <FORMAT>` | text | `text`, `json`, or `dot`. |
 | `--output-path <PATH>` | stdout | Write the selected `--format` output to a file. |
 
-JSON `summary.analysis_complete` is false when a trace hits a budget or
+Default tracing follows the structured AST and resolved semantic call graph to
+a cycle-safe fixed point. JSON `summary.analysis_complete` is false when an
+explicit nonzero cutoff is hit or
 cannot resolve a call it would need to expand. Budget failures are listed
 in `summary.truncation_reasons`; semantic gaps such as unresolved calls
 are listed in `summary.analysis_incomplete_reasons`. Text renderers keep
@@ -438,7 +440,7 @@ bonsai-ninja export ./src --format graphml --output-path graph.graphml
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
 | `--full-propagations` | false | Force exhaustive interprocedural propagation records. |
-| `--complete-chains` | false | Request expanded semantic enumeration for chain and flow-id-label evidence; guarded rows remain semantic and are marked incomplete instead of reported complete. |
+| `--complete-chains` | false | Represent the complete semantic chain and flow-id relation as an exact compressed call graph, avoiding potentially exponential simple-path materialization. |
 | `--all` | false | Request every expensive export evidence section, equivalent to `--full-propagations --complete-chains` for native JSON. |
 | `--format <FORMAT>` | json | `json`, `networkx`, `graphml`, or `cypher`. |
 | `--output-path <PATH>` | stdout | Write the selected export format to a file. |

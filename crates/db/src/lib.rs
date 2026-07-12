@@ -19,7 +19,7 @@ use bonsai_parser::{ParseError, ParsedFile, ParserCache, ParserOptions};
 use bonsai_trace::{finalize, TraceResult};
 use bonsai_vfs::Vfs;
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Immutable handle shared across threads. Cheap to clone.
 #[derive(Clone)]
@@ -30,6 +30,24 @@ pub struct AnalyzerDb {
 impl std::fmt::Debug for AnalyzerDb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnalyzerDb").finish()
+    }
+}
+
+impl bonsai_lang_api::TreeProvider for AnalyzerDb {
+    fn tree_for_snapshot(
+        &self,
+        pack_name: &str,
+        snapshot: &bonsai_vfs::FileSnapshot,
+    ) -> Option<Arc<bonsai_lang_api::SyntaxTree>> {
+        let adapter = self.adapter_for(snapshot.file_id)?;
+        if adapter.language_id().as_str() != pack_name {
+            return None;
+        }
+        self.inner
+            .parser
+            .parse_snapshot(snapshot, &adapter, &self.inner.vfs)
+            .ok()
+            .map(|parsed| Arc::clone(&parsed.tree))
     }
 }
 
@@ -52,9 +70,11 @@ struct DbInner {
     /// edges may have shifted.
     idg_service: RwLock<Option<Arc<IdgQueryService>>>,
     /// Configured IDGs keyed by the canonical transfer-option fingerprint.
-    /// Keeping these separate from `idg_service` prevents query order from
-    /// reusing a graph built with different edge semantics.
-    idg_services_by_semantics: RwLock<AHashMap<u64, Arc<IdgQueryService>>>,
+    /// Each key owns a `OnceLock`, making graph construction single-flight
+    /// without serializing independent semantic configurations behind one
+    /// database-wide build lock. Keeping these separate from `idg_service`
+    /// prevents query order from reusing a graph built with different edges.
+    idg_services_by_semantics: RwLock<AHashMap<u64, Arc<OnceLock<Arc<IdgQueryService>>>>>,
 }
 
 #[derive(Default)]
@@ -78,7 +98,8 @@ struct Caches {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct AnalyzerDbOptions {
     /// Optional per-file tree-sitter parse timeout in milliseconds.
-    /// `None` uses the parser default; `Some(0)` disables it.
+    /// `None` uses `BONSAI_PARSE_TIMEOUT_MS`, then the uncapped default;
+    /// `Some(0)` explicitly selects uncapped parsing.
     pub parse_timeout_ms: Option<u64>,
 }
 
@@ -149,7 +170,26 @@ impl AnalyzerDb {
             .idg_services_by_semantics
             .read()
             .get(&fingerprint)
+            .and_then(|slot| slot.get())
             .cloned()
+    }
+
+    /// Return the configured IDG for `fingerprint`, initializing it exactly
+    /// once when absent.
+    ///
+    /// Concurrent callers for the same semantic fingerprint wait for and
+    /// share one build. Different fingerprints initialize independently. The
+    /// initializer must not recursively request the same fingerprint.
+    pub fn get_or_init_idg_service_for_semantics<F>(
+        &self,
+        fingerprint: u64,
+        initialize: F,
+    ) -> Arc<IdgQueryService>
+    where
+        F: FnOnce() -> Arc<IdgQueryService>,
+    {
+        let slot = self.idg_service_slot(fingerprint);
+        slot.get_or_init(initialize).clone()
     }
 
     /// Cache a configured IDG without replacing the workspace's default
@@ -160,8 +200,20 @@ impl AnalyzerDb {
         fingerprint: u64,
         service: Arc<IdgQueryService>,
     ) -> Arc<IdgQueryService> {
-        let mut services = self.inner.idg_services_by_semantics.write();
-        services.entry(fingerprint).or_insert(service).clone()
+        let slot = self.idg_service_slot(fingerprint);
+        let _ = slot.set(service);
+        slot.get()
+            .expect("configured IDG slot is initialized after set")
+            .clone()
+    }
+
+    fn idg_service_slot(&self, fingerprint: u64) -> Arc<OnceLock<Arc<IdgQueryService>>> {
+        self.inner
+            .idg_services_by_semantics
+            .write()
+            .entry(fingerprint)
+            .or_insert_with(|| Arc::new(OnceLock::new()))
+            .clone()
     }
 
     /// Drop the cached IDG service. Called by the workspace on file
@@ -204,6 +256,7 @@ impl AnalyzerDb {
         AdapterContext {
             vfs: &self.inner.vfs,
             diagnostics: &self.inner.diagnostics,
+            tree_provider: Some(self),
             workspace_root: None,
         }
     }
@@ -221,16 +274,20 @@ impl AnalyzerDb {
         let ctx = AdapterContext {
             vfs: &self.inner.vfs,
             diagnostics: &self.inner.diagnostics,
+            tree_provider: Some(self),
             workspace_root: root_guard.as_deref(),
         };
         f(&ctx)
     }
 
-    /// Parse `file` (cached by `(FileId, version)` inside the parser
-    /// cache). Errors when no adapter handles the extension.
+    /// Parse `file` (cached by VFS, file, language, and version inside the
+    /// parser cache). Errors when no adapter handles the extension.
     pub fn parse(&self, file: FileId) -> Result<Arc<ParsedFile>, ParseError> {
         let adapter = self.adapter_for(file).ok_or(ParseError::NoAdapter(file))?;
-        self.inner.parser.parse(file, &adapter, &self.inner.vfs)
+        let snapshot = self.inner.vfs.snapshot(file)?;
+        self.inner
+            .parser
+            .parse_snapshot(&snapshot, &adapter, &self.inner.vfs)
     }
 
     /// Declaration index for `file`, computed once per `(file,
@@ -273,6 +330,42 @@ impl AnalyzerDb {
         let adapter = self.adapter_for(file)?;
         Some(self.adapter_context_with(|ctx| {
             let mut index = adapter.extract_declarations(file, ctx);
+            let capabilities = adapter.capabilities();
+            // Materialize the adapter's language-syntax receiver tokens on
+            // each implicit-receiver declaration. Downstream compiler passes
+            // consume `Decl::implicit_receiver_names`; they must not carry a
+            // separate cross-language spelling inventory. Explicit receiver
+            // parameters remain governed solely by `receiver_param_index`.
+            for decl in &mut index.defs {
+                if !matches!(
+                    decl.kind,
+                    bonsai_lang_api::DeclKind::Method | bonsai_lang_api::DeclKind::Constructor
+                ) {
+                    continue;
+                }
+                let implicit_receivers = decl
+                    .receiver_param_index
+                    .is_none()
+                    .then_some(capabilities.effective_implicit_receiver_tokens())
+                    .unwrap_or_default();
+                for receiver in implicit_receivers
+                    .iter()
+                    .chain(capabilities.effective_super_receiver_tokens().iter())
+                    .copied()
+                {
+                    let receiver = receiver.trim();
+                    if receiver.is_empty()
+                        || receiver.starts_with('<')
+                        || decl
+                            .implicit_receiver_names
+                            .iter()
+                            .any(|existing| existing.trim() == receiver)
+                    {
+                        continue;
+                    }
+                    decl.implicit_receiver_names.push(receiver.to_string());
+                }
+            }
             bonsai_lang_api::apply_constructor_result_type_aliases(&mut index);
             bonsai_lang_api::apply_assign_value_kind(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);
@@ -348,10 +441,7 @@ impl AnalyzerDb {
         let Ok(parsed) = self.parse(file) else {
             return Vec::new();
         };
-        let Ok(snapshot) = self.inner.vfs.snapshot(file) else {
-            return Vec::new();
-        };
-        bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, file, snapshot.text.as_bytes())
+        bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, file, parsed.source_text().as_bytes())
     }
 
     /// Workspace-wide global declaration index. Built lazily on first

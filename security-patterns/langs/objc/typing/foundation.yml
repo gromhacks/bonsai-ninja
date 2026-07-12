@@ -1,0 +1,21 @@
+# Non-finding Foundation collection summaries. Receiver types are emitted by
+# the Objective-C adapter from declared local types, keeping the summary from
+# matching unrelated selectors with the same spelling.
+- id: objc.typing.nsmutablearray_addobject_mutation
+  enabled: true
+  language: objc
+  match:
+    kind: call
+    callee:
+      attribute: [NSMutableArray, addObject]
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: mutable array stores the added object
+    code: |
+      void collect(NSString *input) {
+          NSMutableArray<NSString *> *values = [NSMutableArray array];
+          [values addObject:input];
+      }
+    expect_match_text: [values.addObject]
+  description: "NSMutableArray addObject: stores its value argument in receiver state. Typing-only transfer summary; never a finding."

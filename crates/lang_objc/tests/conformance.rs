@@ -31,6 +31,7 @@ fn objc_adapter_emits_function_pointer_callable_alias() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -72,6 +73,7 @@ fn objc_block_literal_decl_uses_local_binding_name() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -110,6 +112,7 @@ fn objc_message_assignment_preserves_ast_call_and_argument_facts() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -168,6 +171,7 @@ fn objc_sibling_project_classes_do_not_share_module_identity() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: Some(&root),
     };
 
@@ -193,4 +197,42 @@ fn objc_sibling_project_classes_do_not_share_module_identity() {
         ModulePath::from_segments(["flow_b", "Repository"])
     );
     assert_ne!(first_repo.module_path, second_repo.module_path);
+}
+
+#[test]
+fn objc_message_compound_argument_uses_ast_place_and_sources() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_objc::ObjCAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("message_args.m"),
+        "struct Envelope { NSString *command; };\nvoid entry(id runner, struct Envelope *env) { [runner execute:env->command]; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let entry = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry decl");
+    let arg = entry.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { args, .. } => args.iter().find(|arg| arg.value_text.contains("env->command")),
+        _ => None,
+    });
+    let arg = arg.unwrap_or_else(|| panic!("Objective-C message argument: {:?}", entry.flow_events));
+    assert_eq!(arg.place.as_deref(), Some("env.command"));
+    assert!(
+        arg.source_names.iter().any(|source| source == "env.command"),
+        "message argument must expose its AST field carrier: {arg:?}"
+    );
 }

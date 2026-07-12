@@ -3,9 +3,9 @@
 //! Wraps `bonsai_taint::value_flow_for_function` in a per-FuncId
 //! cache, mirroring the persistence + invalidation shape of
 //! [`super::dataflow::DataFlowCache`] but with one canonical seed
-//! strategy (self-provenance). Security uses these graphs for
-//! source-node selection before it runs exact source-seeded taint
-//! paths.
+//! strategy (self-provenance). This is a compatibility projection for
+//! navigation/SDK clients; security and native export query the canonical
+//! IDG directly.
 
 use crate::cache_fingerprint::{
     dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
@@ -75,10 +75,9 @@ type ValueFlowMemoryEntry = (FuncId, Arc<ValueFlowGraph>, Arc<AHashSet<String>>)
 
 /// Cache of `ValueFlowGraph` per entry function.
 ///
-/// Built lazily via `graph_for(func, db)` and shared across
-/// `inspect`/`trace`/`security` queries within a single CLI process.
-/// Optional persistence uses a sidecar beside the existing
-/// `DataFlowCache`.
+/// Built lazily via `graph_for(func, db)` and shared across compatibility
+/// navigation/SDK queries within a single process. Optional persistence uses
+/// a sidecar beside the existing `DataFlowCache`.
 #[derive(Default)]
 pub struct ValueFlowCache {
     inner: Arc<RwLock<Inner>>,
@@ -89,9 +88,9 @@ struct Inner {
     graphs: AHashMap<FuncId, Arc<ValueFlowGraph>>,
     /// Per-FuncId set of seed names whose forward-closure in the
     /// per-entry value-flow graph reaches a `Return` node in the
-    /// same function. Precomputed alongside the graph so
-    /// `source_seed_reaches_return` becomes a hash-set lookup
-    /// instead of a per-seed forward-closure walk.
+    /// same function. Precomputed alongside the graph so compatibility
+    /// return-summary lookups become a hash-set intersection instead of a
+    /// per-seed forward-closure walk.
     returning_seeds: AHashMap<FuncId, Arc<AHashSet<String>>>,
     /// Disk-backed source of truth, populated by either
     /// [`ValueFlowCache::load_from_disk`] or
@@ -160,9 +159,9 @@ impl ValueFlowCache {
     ///
     /// This still reuses existing in-memory/disk entries and still
     /// records the compact `returning_seeds` summary. The difference
-    /// is the cold-miss behavior: broad security scans may touch
-    /// thousands of source-bearing functions, and retaining every full
-    /// `ValueFlowGraph` in RAM defeats the disk-backed cache design.
+    /// is the cold-miss behavior: broad compatibility queries may touch
+    /// thousands of functions, and retaining every full `ValueFlowGraph` in
+    /// RAM defeats the disk-backed cache design.
     /// Callers that need a durable in-process graph cache should use
     /// [`Self::graph_for_with_caches`].
     pub fn graph_for_transient_with_caches(
@@ -218,10 +217,9 @@ impl ValueFlowCache {
 
     /// Set of seed names whose forward closure in `func`'s
     /// value-flow graph reaches a `Return` node in `func`.
-    /// Materialised at graph-build time; used by
-    /// `source_seed_reaches_return` to answer "does any of these
-    /// seeds reach a return?" with a single set intersection
-    /// instead of a per-seed forward-closure walk.
+    /// Materialised at graph-build time so compatibility clients can answer
+    /// "does any of these seeds reach a return?" with a single set
+    /// intersection instead of a per-seed forward-closure walk.
     pub fn returning_seed_names(
         &self,
         func: FuncId,
@@ -247,7 +245,7 @@ impl ValueFlowCache {
     /// Eagerly compute graphs for every callable function. Reuses
     /// rayon to parallelise (mirrors `DataFlowCache::prewarm_all`).
     /// Provisions a fresh `InterTaintCaches` per worker — fine for
-    /// one-off callers; workspace prewarm uses
+    /// one-off callers; an explicit compatibility prewarm should use
     /// [`Self::prewarm_all_with_caches`] so the singleton accumulates.
     pub fn prewarm_all(&self, db: &AnalyzerDb) {
         let caches = InterTaintCaches::default();
@@ -256,9 +254,8 @@ impl ValueFlowCache {
 
     /// Variant of [`Self::prewarm_all`] that fans out across the
     /// workspace using the caller's shared `InterTaintCaches`.
-    /// Accumulating resolver answers across the prewarm fold means
-    /// the post-prewarm singleton is already hot for security's
-    /// per-source taint runs.
+    /// Accumulating resolver answers across the prewarm fold means later
+    /// compatibility queries reuse the same resolver state.
     ///
     /// In-memory variant: every computed graph stays resident in the
     /// in-memory map. Use [`Self::prewarm_to_disk`] when peak RAM
@@ -354,6 +351,7 @@ impl ValueFlowCache {
         )
         .map_err(map_factstore_io)?;
         let written_keys = std::sync::Mutex::new(AHashSet::<FuncId>::default());
+        let write_error = std::sync::Mutex::new(None::<std::io::Error>);
         for (func, graph, returning) in memory_entries {
             let entry = ValueFlowEntry {
                 graph: (*graph).clone(),
@@ -361,11 +359,14 @@ impl ValueFlowCache {
             };
             let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
             writer
-                .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
+                .add_owned(u64::from(func.raw()), RESERVED_BODY_HASH, payload)
                 .map_err(map_factstore_io)?;
             written_keys.lock().expect("written keys lock").insert(func);
         }
         todo.par_iter().for_each(|&f| {
+            if write_error.lock().expect("write error lock").is_some() {
+                return;
+            }
             let graph = value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), caches);
             let returning = compute_returning_seed_names(&graph, f);
             let entry = ValueFlowEntry {
@@ -373,12 +374,21 @@ impl ValueFlowCache {
                 returning_seeds: returning,
             };
             let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
-            if let Err(err) = writer.add(u64::from(f.raw()), RESERVED_BODY_HASH, &payload) {
-                tracing::warn!(error = %err, "value-flow factstore add failed");
+            if let Err(err) = writer.add_owned(u64::from(f.raw()), RESERVED_BODY_HASH, payload) {
+                let mut first_error = write_error.lock().expect("write error lock");
+                if first_error.is_none() {
+                    *first_error = Some(map_factstore_io(err));
+                }
             } else {
                 written_keys.lock().expect("written keys lock").insert(f);
             }
         });
+        if let Some(error) = write_error.lock().expect("write error lock").take() {
+            // Dropping the writer closes the bounded channel and joins its
+            // worker without publishing the temporary sidecar.  Never turn a
+            // partial parallel prewarm into a cache that looks complete.
+            return Err(error);
+        }
         if let Some(reader) = disk_reader {
             let pool = reader.string_pool().map_err(map_factstore_io)?;
             for item in reader.iter() {
@@ -396,7 +406,7 @@ impl ValueFlowCache {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
                 let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
                 writer
-                    .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
+                    .add_owned(u64::from(func.raw()), RESERVED_BODY_HASH, payload)
                     .map_err(map_factstore_io)?;
                 written_keys.lock().expect("written keys lock").insert(func);
             }
@@ -616,7 +626,7 @@ impl ValueFlowCache {
             };
             let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
             writer
-                .add(u64::from(f.raw()), RESERVED_BODY_HASH, &payload)
+                .add_owned(u64::from(f.raw()), RESERVED_BODY_HASH, payload)
                 .map_err(map_factstore_io)?;
             written_keys.insert(f);
         }
@@ -641,7 +651,7 @@ impl ValueFlowCache {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
                 let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
                 writer
-                    .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
+                    .add_owned(u64::from(func.raw()), RESERVED_BODY_HASH, payload)
                     .map_err(map_factstore_io)?;
                 written_keys.insert(func);
             }

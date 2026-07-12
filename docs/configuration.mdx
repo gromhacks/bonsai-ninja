@@ -16,7 +16,7 @@ bonsai-ninja does not require a project config file for normal scans. Workspace-
 | `.bonsai/rules/` | directory | Absent | Optional workspace-local rule overlay. |
 | `.bonsai/manifest.json` | generated file | `index --semantic`, SDK semantic/full-prewarm facades, or `cache rebuild` | JSON inventory of cache coverage, producer fingerprints, sidecar paths, and missing reasons. Do not use as the hot analysis path; commands validate and read the binary sidecars. |
 | `.bonsai/dataflow.v3.factstore` | generated file | SDK full prewarm, explicit dataflow prewarm, or exact query commands | Persisted dataflow sidecar. Do not edit manually. |
-| `.bonsai/value_flow.v*.factstore` | generated file | SDK full prewarm or exact query commands | Persisted value-flow sidecar. Do not edit manually. |
+| `.bonsai/value_flow.v*.factstore` | generated file | explicit compatibility prewarm/save APIs | Persisted legacy `ValueFlowGraph` projection. Canonical security/export semantics live in the IDG; do not edit manually. |
 | `.bonsai/flow_ids.v*.factstore` | generated file | SDK full prewarm or exact render/query commands | Persisted flow-id sidecar. Do not edit manually. |
 | `.bonsai/callgraph.v*.bin` | generated file | Query commands or `cache rebuild` | Persisted resolved-callgraph sidecar. Do not edit manually. |
 | `.bonsai/idg.v*.factstore` | generated file | Query commands, `cache rebuild`, or `index` | Persisted IDG sidecar. Do not edit manually. |
@@ -59,7 +59,7 @@ paths.
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `BONSAI_RULES_DIR` | path | Auto-discover | Rulepack directory. |
-| `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | `30000` | Per-file tree-sitter parse timeout. `0` disables the timeout guard. |
+| `BONSAI_PARSE_TIMEOUT_MS` | integer milliseconds | unset (uncapped) | Optional per-file tree-sitter parse timeout. `0` disables the timeout guard. |
 | `BONSAI_NO_DATAFLOW` | boolean-like | unset | Skip explicit dataflow prewarm and trace eager hydration. Query commands still compute required facts on demand. |
 | `BONSAI_THEME` | string | `moss` | Terminal theme: `moss`, `earthy-dark`, `dracula`, or `retro-amber`. |
 | `BONSAI_WORKSPACE_DIR` | path | Workspace root | Per-workspace state directory override. |
@@ -89,7 +89,7 @@ with `--no-progress` for quiet script/LLM runs.
 | Setting | Highest precedence | Then | Default |
 |---|---|---|---|
 | Rulepack directory | `--rules-dir` | `BONSAI_RULES_DIR`, workspace/cwd discovery | None |
-| Parse timeout | `--parse-timeout` | `BONSAI_PARSE_TIMEOUT_MS` | 30000 ms |
+| Parse timeout | `--parse-timeout` | `BONSAI_PARSE_TIMEOUT_MS` | uncapped |
 | Theme | `--theme` | `BONSAI_THEME` | `moss` |
 | Context budget | `--context` | `BONSAI_CONTEXT` | 32k |
 | Cache behavior | `--no-cache` | `BONSAI_NO_CACHE` | enabled |

@@ -379,10 +379,35 @@ fn flatten_events(
                     span_start: span.start,
                 });
             }
+            FlowEvent::AggregateAssign {
+                span,
+                target,
+                value_flow,
+                ..
+            } => {
+                let mut sources = Vec::new();
+                collect_expression_flow_symbols(value_flow, &mut sources);
+                let (file, line, column) = format_span(span, ws);
+                out.push(SliceFact {
+                    kind: "assign",
+                    symbol: target.clone(),
+                    file,
+                    line,
+                    column,
+                    in_function: in_function.to_string(),
+                    detail: format!("initialize aggregate {target}"),
+                    defines: Some(target.clone()),
+                    sources,
+                    via_call: None,
+                    nesting: nesting.clone(),
+                    span_start: span.start,
+                });
+            }
             FlowEvent::Return {
                 span,
                 value_text,
                 value_name,
+                ..
             } => {
                 let mut sources = Vec::new();
                 if let Some(value_name) = value_name {
@@ -430,7 +455,7 @@ fn flatten_events(
                     nesting,
                 );
             }
-            FlowEvent::Yield { span, value_text } => {
+            FlowEvent::Yield { span, value_text, .. } => {
                 let mut sources = Vec::new();
                 if let Some(value_text) = value_text {
                     if let Some(simple) = simple_symbol_from_value(value_text) {
@@ -552,6 +577,24 @@ fn flatten_events(
             }
             FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {}
         }
+    }
+}
+
+fn collect_expression_flow_symbols(flow: &bonsai_lang_api::ExpressionFlow, out: &mut Vec<String>) {
+    if let Some(place) = flow.place.as_deref() {
+        push_unique_symbol(out, place);
+    }
+    for source in &flow.source_names {
+        push_unique_symbol(out, source);
+    }
+    for field in &flow.aggregate_fields {
+        collect_expression_flow_symbols(&field.value, out);
+    }
+    for item in &flow.tuple_items {
+        collect_expression_flow_symbols(item, out);
+    }
+    for spread in &flow.spreads {
+        collect_expression_flow_symbols(spread, out);
     }
 }
 

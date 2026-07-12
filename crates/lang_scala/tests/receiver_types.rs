@@ -121,3 +121,57 @@ object Transformer {
         "a field_expression is ambiguous and must not gain call semantics without resolution: {calls:?}"
     );
 }
+
+#[test]
+fn base_constructor_named_compound_arg_uses_ast_facts() {
+    let db = db_with(
+        r#"
+final case class Envelope(command: String)
+class Parent(value: String)
+class Child(env: Envelope) extends Parent(value = env.command)
+"#,
+    );
+    let global = db.global_index();
+    let child_ctor = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.kind == DeclKind::Constructor && decl.name == "Child")
+        .expect("Child constructor");
+    let parent_arg = child_ctor.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "Parent" => args.first(),
+        _ => None,
+    });
+    let arg = parent_arg.unwrap_or_else(|| panic!("Parent constructor call: {:?}", child_ctor.flow_events));
+    assert_eq!(arg.name.as_deref(), Some("value"));
+    assert_eq!(arg.place.as_deref(), Some("env.command"));
+    assert!(
+        arg.source_names.iter().any(|source| source == "env.command"),
+        "compound constructor arg must carry AST member place: {arg:?}"
+    );
+}
+
+#[test]
+fn constructor_val_property_types_accessor_receiver_from_ast() {
+    let db = db_with(
+        r#"
+case class Envelope(cmd: String)
+abstract class BaseRepository(val data: Envelope) {
+  def command: String = data.cmd
+}
+"#,
+    );
+    let global = db.global_index();
+    let command = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "command")
+        .expect("command accessor");
+    let mut calls = Vec::new();
+    collect_calls(&command.flow_events, &mut calls);
+    assert!(
+        calls
+            .iter()
+            .any(|(name, receiver_types)| name == "data.cmd" && receiver_types == &["Envelope"]),
+        "constructor `val data: Envelope` must type the rewritten accessor call: {calls:?}"
+    );
+}

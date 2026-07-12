@@ -19,6 +19,16 @@ fn edge(
     }
 }
 
+fn real_edge(trace_id: u64, caller: u32, callee: u32) -> TaintedCallEdge {
+    let mut record = edge(trace_id, None, caller, callee, trace_id * 10);
+    record.tainted_args.push(bonsai_taint::TaintedArg {
+        index: 0,
+        value_text: format!("v{caller}"),
+        param_name: format!("p{callee}"),
+    });
+    record
+}
+
 #[test]
 fn source_lineage_reports_truncated_and_omitted_paths() {
     let records = vec![
@@ -177,4 +187,36 @@ fn strict_source_text_matching_keeps_framework_get_receivers_distinct() {
         "request.values.get",
         "request.args.get"
     ));
+}
+
+#[test]
+fn canonical_chain_search_has_no_fixed_hop_limit() {
+    let records: Vec<_> = (1..=24)
+        .map(|caller| real_edge(u64::from(caller), caller, caller + 1))
+        .collect();
+    let call_graph = bonsai_callgraph::ResolvedCallGraph::from_call_graph(bonsai_callgraph::CallGraph::new());
+    let index = CanonicalChainIndex::new(&records, &call_graph);
+
+    let path =
+        best_chain_through_real_edges(&index, FuncId::new(1), FuncId::new(25)).expect("long canonical path");
+    assert_eq!(path.len(), 25);
+    assert_eq!(path.first(), Some(&FuncId::new(1)));
+    assert_eq!(path.last(), Some(&FuncId::new(25)));
+}
+
+#[test]
+fn canonical_chain_reuses_one_complete_tree_for_multiple_terminals() {
+    let records = vec![real_edge(1, 1, 2), real_edge(2, 2, 3), real_edge(3, 2, 4)];
+    let call_graph = bonsai_callgraph::ResolvedCallGraph::from_call_graph(bonsai_callgraph::CallGraph::new());
+    let index = CanonicalChainIndex::new(&records, &call_graph);
+
+    assert_eq!(
+        index.best_chain(FuncId::new(1), FuncId::new(3)),
+        Some(vec![FuncId::new(1), FuncId::new(2), FuncId::new(3)])
+    );
+    assert_eq!(
+        index.best_chain(FuncId::new(1), FuncId::new(4)),
+        Some(vec![FuncId::new(1), FuncId::new(2), FuncId::new(4)])
+    );
+    assert_eq!(index.best_chain_trees.borrow().len(), 1);
 }

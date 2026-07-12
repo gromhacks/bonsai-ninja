@@ -6,8 +6,8 @@
 //! so downstream queries (inspect, export, security) can reuse exact
 //! facts without making the default structural index solve every entry.
 //!
-//! Keyed by [`FuncId`]; built in parallel via rayon (one worker per
-//! function, bounded by `InterTaintConfig::budget`); incremental
+//! Keyed by [`FuncId`]; built in parallel via rayon while each query runs the
+//! canonical cap-free IDG closure; incremental
 //! invalidation on file edits via content hash + matcher policy
 //! fingerprint; persistable via [`DataFlowCache::save_to_disk`] for
 //! near-instant warm reopens.
@@ -581,6 +581,7 @@ impl DataFlowCache {
         let call_graph = self.call_graph_for(db);
         let global_for_deps = db.global_index();
         let written_keys = std::sync::Mutex::new(AHashSet::<u64>::default());
+        let write_error = std::sync::Mutex::new(None::<std::io::Error>);
         for (func, facts, graph, dependencies) in memory_entries {
             let entry = crate::dataflow_disk::DataFlowEntry::from_owned(
                 (*facts).clone(),
@@ -589,22 +590,31 @@ impl DataFlowCache {
             );
             let payload = crate::dataflow_disk::encode(&entry);
             let key = u64::from(func.raw());
-            writer.add(key, 0, &payload).map_err(map_factstore_io)?;
+            writer.add_owned(key, 0, payload).map_err(map_factstore_io)?;
             written_keys.lock().expect("written keys lock").insert(key);
         }
         todo.par_iter().for_each(|&f| {
+            if write_error.lock().expect("write error lock").is_some() {
+                return;
+            }
             let (facts, graph) = self.compute_facts_and_graph(f, db);
             let dependencies = dependency_files(f, &call_graph, &global_for_deps);
             let entry = crate::dataflow_disk::DataFlowEntry::from_owned(facts, graph, dependencies);
             let payload = crate::dataflow_disk::encode(&entry);
             let key = u64::from(f.raw());
-            if let Err(err) = writer.add(key, 0, &payload) {
-                tracing::warn!(error = %err, "dataflow factstore add failed");
+            if let Err(err) = writer.add_owned(key, 0, payload) {
+                let mut first_error = write_error.lock().expect("write error lock");
+                if first_error.is_none() {
+                    *first_error = Some(map_factstore_io(err));
+                }
             } else {
                 written_keys.lock().expect("written keys lock").insert(key);
             }
             on_each_done(f);
         });
+        if let Some(error) = write_error.lock().expect("write error lock").take() {
+            return Err(error);
+        }
         if let Some(reader) = disk_clone {
             for item in reader.iter() {
                 let (key, hit) = item.map_err(map_factstore_io)?;

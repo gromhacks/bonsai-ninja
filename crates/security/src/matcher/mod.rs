@@ -14,7 +14,7 @@ use bonsai_lang_api::{
     TypeAliasBinding,
 };
 use bonsai_taint::{TaintedCall, TaintedCallKind};
-use bonsai_workspace::{decl_decorator_names, receiver_field_target, Workspace};
+use bonsai_workspace::{decl_decorator_names, Workspace};
 use regex::Regex;
 use std::{
     cell::RefCell,
@@ -43,7 +43,7 @@ pub const MATCHER_POLICY_FINGERPRINT: u128 = bonsai_common::MATCHER_POLICY_FINGE
 /// per-run failures the matcher detects after rules have already
 /// loaded (e.g., a regex that compiled in the schema test but blew
 /// up against this workspace's compiled regex flags).
-#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RuntimeDisabledRule {
     pub rule_id: String,
     pub reason: String,
@@ -402,7 +402,7 @@ where
             scan_files: Some(files),
             factory: &empty_factory_returns(),
             dedup_file_matches: false,
-            retention: FactRetention::Cached,
+            retention: FactRetention::Transient,
         },
     )
 }
@@ -774,9 +774,6 @@ fn write_statement_text(source_text: &str, span: Span) -> Option<&str> {
             _ => {}
         }
         end = line_start + offset + ch.len_utf8();
-        if offset > 4096 {
-            break;
-        }
     }
     source_text
         .get(line_start..end)
@@ -847,7 +844,7 @@ where
             scan_files: Some(files),
             factory,
             dedup_file_matches: false,
-            retention: FactRetention::Cached,
+            retention: FactRetention::Transient,
         },
     )
 }
@@ -996,19 +993,24 @@ where
                                     scan_file_rules(&ctx, &file_rules, &mut file_out);
                                 }
                                 FactRetention::Transient => {
-                                    let file_index = global_file_indexes
+                                    let borrowed_index = global_file_indexes
                                         .as_ref()
-                                        .and_then(|global| global.decl_index_in(file))
-                                        .cloned()
-                                        .or_else(|| ws.db().decl_index_uncached(file));
-                                    let Some(file_index) = file_index else {
-                                        on_file_done();
-                                        return file_out;
+                                        .and_then(|global| global.decl_index_in(file));
+                                    let owned_index;
+                                    let file_index = if let Some(index) = borrowed_index {
+                                        index
+                                    } else {
+                                        owned_index = ws.db().decl_index_uncached(file);
+                                        let Some(index) = owned_index.as_ref() else {
+                                            on_file_done();
+                                            return file_out;
+                                        };
+                                        index
                                     };
                                     let ctx = FileScanContext {
                                         ws,
                                         file,
-                                        file_index: &file_index,
+                                        file_index,
                                         constructor_names: &constructor_names,
                                         mode,
                                         taint_view,
@@ -1081,19 +1083,24 @@ where
                                                 scan_file_rules(&ctx, &file_rules, &mut file_out);
                                             }
                                             FactRetention::Transient => {
-                                                let file_index = global_file_indexes
+                                                let borrowed_index = global_file_indexes
                                                     .as_ref()
-                                                    .and_then(|global| global.decl_index_in(file))
-                                                    .cloned()
-                                                    .or_else(|| ws.db().decl_index_uncached(file));
-                                                let Some(file_index) = file_index else {
-                                                    let _ = tick_tx.send(());
-                                                    return file_out;
+                                                    .and_then(|global| global.decl_index_in(file));
+                                                let owned_index;
+                                                let file_index = if let Some(index) = borrowed_index {
+                                                    index
+                                                } else {
+                                                    owned_index = ws.db().decl_index_uncached(file);
+                                                    let Some(index) = owned_index.as_ref() else {
+                                                        let _ = tick_tx.send(());
+                                                        return file_out;
+                                                    };
+                                                    index
                                                 };
                                                 let ctx = FileScanContext {
                                                     ws,
                                                     file,
-                                                    file_index: &file_index,
+                                                    file_index,
                                                     constructor_names: &constructor_names,
                                                     mode,
                                                     taint_view,
@@ -1170,7 +1177,7 @@ fn language_needs_bare_constructor_fallback(language: &str) -> bool {
     !matches!(language, "java" | "c" | "csharp" | "go" | "rust")
 }
 
-fn matcher_worker_count(file_count: usize) -> usize {
+fn matcher_worker_count(_file_count: usize) -> usize {
     let available = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
@@ -1187,8 +1194,7 @@ fn matcher_worker_count(file_count: usize) -> usize {
     {
         return requested.clamp(1, available);
     }
-    let default = if file_count >= 1_000 { 4 } else { available };
-    default.clamp(1, available)
+    available
 }
 
 fn dedup_inventory_matches_in_place(matches: &mut Vec<RuleMatch>) {
@@ -2776,6 +2782,7 @@ fn first_flow_event_start(events: &[FlowEvent]) -> Option<u64> {
         .map(|event| match event {
             FlowEvent::Call { span, .. }
             | FlowEvent::Assign { span, .. }
+            | FlowEvent::AggregateAssign { span, .. }
             | FlowEvent::Return { span, .. }
             | FlowEvent::Throw { span, .. }
             | FlowEvent::Break { span, .. }
@@ -3319,12 +3326,10 @@ fn scan_missing_batch(
                 continue;
             }
 
-            // Does any call inside this decl (or — when
-            // `search_depth > 0` — any transitively reachable
-            // callee, capped at depth 4) match the rule's
-            // expected target callee? The intra-procedural check
-            // Cross-proc BFS only runs when the rule opts in via
-            // `match.search_depth > 0`.
+            // Does any call inside this declaration (or, when
+            // `search_depth > 0`, any resolved callee reachable within the
+            // rule-declared depth) match the expected target? Cross-procedure
+            // traversal only runs when the rule opts in.
             let target_present = facts.calls.iter().any(|call| {
                 callee_or_alias_matches(
                     &call.callee,
@@ -3368,11 +3373,9 @@ fn scan_missing_batch(
     }
 }
 
-/// BFS the entry decl's reachable callees up to the rule's
-/// `search_depth` (capped at `MISSING_SEARCH_DEPTH_CAP`) looking
-/// for the expected target. Used by the Missing walker only when
-/// the rule opts into cross-procedural reach.
-const MISSING_SEARCH_DEPTH_CAP: u32 = 4;
+/// Walk the entry declaration's resolved callees up to the rule's exact
+/// `search_depth`, looking for the expected target. Used by the Missing
+/// walker only when the rule opts into cross-procedural reach.
 
 fn missing_target_in_reachable_callees(
     ws: &Workspace,
@@ -3385,11 +3388,7 @@ fn missing_target_in_reachable_callees(
     if prepared.rule.match_spec.kind != MatchKind::Missing {
         return false;
     }
-    let max_depth = prepared
-        .rule
-        .match_spec
-        .search_depth
-        .min(MISSING_SEARCH_DEPTH_CAP);
+    let max_depth = prepared.rule.match_spec.search_depth;
     if max_depth == 0 {
         return false;
     }
@@ -5190,6 +5189,7 @@ fn collect_return_sites(events: &[FlowEvent], out: &mut Vec<(Span, Option<String
                 span,
                 value_text,
                 value_name,
+                ..
             } => out.push((*span, value_text.clone(), value_name.clone())),
             FlowEvent::Branch {
                 then_events,
@@ -5291,7 +5291,7 @@ fn collect_flow_read_sites(events: &[FlowEvent], out: &mut Vec<(Span, Vec<String
                     out.push((*span, split_read_token(value_name)));
                 }
             }
-            FlowEvent::Yield { span, value_text } => {
+            FlowEvent::Yield { span, value_text, .. } => {
                 if let Some(value_text) = value_text {
                     out.push((*span, split_read_token(value_text)));
                 }
@@ -5834,16 +5834,17 @@ fn collect_must_alias_pairs(events: &[FlowEvent]) -> AHashMap<String, String> {
         }
     }
     walk(events, &mut order);
-    // Fold each (target, src) so target points to src's root.
-    // Depth-cap guards against pathological cycles.
+    // Fold each (target, src) so target points to src's root. Detect cycles
+    // by identity instead of truncating valid alias chains at an arbitrary
+    // depth.
     for (target, src) in order {
         let mut root = src;
-        let mut depth = 0usize;
-        while depth < 32 {
+        let mut visited = AHashSet::new();
+        visited.insert(root.clone());
+        loop {
             match pairs.get(&root) {
-                Some(next) if next != &root => {
+                Some(next) if next != &root && visited.insert(next.clone()) => {
                     root.clone_from(next);
-                    depth += 1;
                 }
                 _ => break,
             }
@@ -6316,6 +6317,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
             FlowEvent::Yield {
                 span,
                 value_text: Some(value_text),
+                ..
             } => {
                 if let Some((callee, args)) = receiver_call_with_args(value_text, *span) {
                     out.push(CallFact {
@@ -6818,6 +6820,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
             | ConstraintKind::ArgGe { .. }
             | ConstraintKind::RequiresRuntimeType { .. }
             | ConstraintKind::EnclosingDecoratorIn { .. }
+            | ConstraintKind::SinkTagIn { .. }
             | ConstraintKind::MustAlias { .. }
             | ConstraintKind::RequiresState { .. } => None,
         };
@@ -7154,6 +7157,15 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                     .iter()
                     .any(|attached| enclosing_decorator_in.iter().any(|want| want == attached));
                 if !any_match {
+                    return false;
+                }
+            }
+            // Source/sink compatibility is a path-level predicate. Source
+            // matching has no sink yet, so retain the candidate here and let
+            // taint attribution evaluate this declarative constraint once a
+            // proven terminal sink is available.
+            ConstraintKind::SinkTagIn { sink_tag_in } => {
+                if sink_tag_in.is_empty() {
                     return false;
                 }
             }
@@ -7700,7 +7712,11 @@ fn collect_called_symbols_for_files(ws: &Workspace, files: &[FileId]) -> ahash::
         |file| {
             db.adapter_for(file)
                 .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+                .unwrap_or(&[])
+        },
+        |file| {
+            db.adapter_for(file)
+                .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
         },
         files,
     );
@@ -7794,7 +7810,7 @@ fn flow_read_token_span(events: &[FlowEvent], token: &str) -> Option<Span> {
                     return Some(*span);
                 }
             }
-            FlowEvent::Yield { span, value_text } => {
+            FlowEvent::Yield { span, value_text, .. } => {
                 if value_text.as_deref() == Some(token) {
                     return Some(*span);
                 }
@@ -7869,69 +7885,9 @@ fn collect_class_field_taints_for_files(
                     .iter()
                     .map(|write| write.target.clone()),
             );
-            collect_receiver_field_writes_from_events(&decl.flow_events, &decl.params, entry);
         }
     }
     out
-}
-
-fn collect_receiver_field_writes_from_events(
-    events: &[FlowEvent],
-    params: &[String],
-    out: &mut ahash::AHashSet<String>,
-) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                target,
-                source_name,
-                source_names,
-                ..
-            } => {
-                if receiver_field_target(target)
-                    && (source_name
-                        .as_deref()
-                        .is_some_and(|name| param_name_matches(params, name))
-                        || source_names.iter().any(|name| param_name_matches(params, name)))
-                {
-                    out.insert(target.clone());
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_receiver_field_writes_from_events(then_events, params, out);
-                collect_receiver_field_writes_from_events(else_events, params, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_receiver_field_writes_from_events(body, params, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_receiver_field_writes_from_events(body, params, out);
-                collect_receiver_field_writes_from_events(catch_events, params, out);
-                collect_receiver_field_writes_from_events(finally_events, params, out);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// True when `name` matches one of the formal parameters of the
-/// enclosing method. Sigil-tolerant (Perl `$x`, Rust `&x`, C `*x`)
-/// because adapters surface params in their declared form but
-/// flow-event source names may include the prefix.
-fn param_name_matches(params: &[String], name: &str) -> bool {
-    let normalized = normalize_param_name(name);
-    params
-        .iter()
-        .any(|param| normalize_param_name(param) == normalized)
 }
 
 fn is_synthetic_anonymous_callable(decl: &bonsai_lang_api::Decl) -> bool {

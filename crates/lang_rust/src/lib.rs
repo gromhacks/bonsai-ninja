@@ -182,13 +182,19 @@ impl LanguageAdapter for RustAdapter {
             ffi: CapabilityLevel::Partial,
             pattern_matching: CapabilityLevel::Exact,
             receiver_types: CapabilityLevel::Partial,
+            field_places_complete: false,
             module_export_aliases: &[],
             // Rust has no constructor keyword or reserved factory name.
             // Associated functions are classified from their `-> Self`
             // return plus `Self { ... }` / `Self(...)` AST shape below.
             constructor_method_names: NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: &["super"],
-            implicit_receiver_tokens: &["self"],
+            bare_call_constructor_syntax: false,
+            // `super` is a module-path segment in Rust, never a supertype
+            // receiver. Trait/base dispatch is expressed through type paths.
+            super_receiver_tokens: &[],
+            // `self` is an explicit `self_parameter` grammar node and is
+            // carried by receiver_param_index rather than synthesized.
+            implicit_receiver_tokens: &[],
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
@@ -414,13 +420,18 @@ fn enrich_rust_tail_return_sources(events: &mut [FlowEvent], params: &[String]) 
         match event {
             FlowEvent::Return {
                 value_name,
-                value_text,
+                value_flow,
                 ..
             } => {
                 if value_name.is_none() {
-                    if let Some(text) = value_text.as_deref() {
-                        *value_name = rust_tail_return_source_name(text, params);
-                    }
+                    *value_name = value_flow
+                        .place
+                        .as_ref()
+                        .filter(|place| {
+                            rust_self_field_place(place) || params.iter().any(|param| param == *place)
+                        })
+                        .cloned()
+                        .or_else(|| rust_single_param_aggregate_source(value_flow, params));
                 }
             }
             FlowEvent::Branch {
@@ -449,12 +460,28 @@ fn enrich_rust_tail_return_sources(events: &mut [FlowEvent], params: &[String]) 
     }
 }
 
-fn rust_tail_return_source_name(text: &str, params: &[String]) -> Option<String> {
-    let expr = strip_rust_reference_prefix(text.trim());
-    if rust_self_field_place(expr) {
-        return Some(expr.to_string());
+fn rust_single_param_aggregate_source(
+    flow: &bonsai_lang_api::ExpressionFlow,
+    params: &[String],
+) -> Option<String> {
+    let mut sources: Vec<String> = flow
+        .aggregate_fields
+        .iter()
+        .filter_map(|field| field.value.place.clone())
+        .filter(|source| params.iter().any(|param| param == source))
+        .collect();
+    for item in &flow.tuple_items {
+        if let Some(source) = item
+            .place
+            .as_ref()
+            .filter(|source| params.iter().any(|param| param == *source))
+        {
+            sources.push(source.clone());
+        }
     }
-    rust_single_param_struct_literal_source(expr, params)
+    sources.sort();
+    sources.dedup();
+    (sources.len() == 1).then(|| sources.remove(0))
 }
 
 fn enrich_rust_constructor_field_writes(decl: &mut bonsai_lang_api::Decl) {
@@ -469,29 +496,28 @@ fn enrich_rust_constructor_field_writes(decl: &mut bonsai_lang_api::Decl) {
     let mut constructs_self = false;
     let mut writes = Vec::new();
     for event in &decl.flow_events {
-        let FlowEvent::Return {
-            span,
-            value_text: Some(value_text),
-            ..
-        } = event
-        else {
+        let FlowEvent::Return { span, value_flow, .. } = event else {
             continue;
         };
-        let value_text = strip_rust_reference_prefix(value_text.trim());
-        if rust_self_tuple_constructor_args(value_text).is_some() {
+        if value_flow.call_sites.iter().any(|call_span| {
+            rust_call_at_span(&decl.flow_events, *call_span).is_some_and(|(name, _)| name.trim() == "Self")
+        }) || !value_flow.tuple_items.is_empty()
+        {
             constructs_self = true;
         }
-        let field_values = rust_struct_literal_field_values(value_text);
-        if !field_values.is_empty() && value_text.trim_start().starts_with("Self") {
+        if !value_flow.aggregate_fields.is_empty() {
             constructs_self = true;
         }
-        for (field, value) in field_values {
-            let Some(source_idx) = decl.params.iter().position(|param| param == &value) else {
+        for field in &value_flow.aggregate_fields {
+            let Some(value) = field.value.place.as_ref() else {
+                continue;
+            };
+            let Some(source_idx) = decl.params.iter().position(|param| param == value) else {
                 continue;
             };
             writes.push(FieldWrite {
                 span: *span,
-                target: format!("self.{field}"),
+                target: format!("self.{}", field.name),
                 source_param_indices: vec![source_idx],
             });
         }
@@ -678,26 +704,33 @@ fn collect_rust_self_tuple_constructor_return_writes(
 ) {
     for event in events {
         match event {
-            FlowEvent::Return {
-                span,
-                value_text: Some(value_text),
-                ..
-            } => {
-                if !returns_self && !value_text.trim_start().starts_with("Self(") {
+            FlowEvent::Return { span, value_flow, .. } => {
+                if !returns_self {
                     continue;
                 }
-                let Some(args) = rust_self_tuple_constructor_args(value_text) else {
+                let Some((_, args)) = value_flow
+                    .call_sites
+                    .iter()
+                    .find_map(|call_span| rust_call_at_span(events, *call_span))
+                    .filter(|(name, _)| name.trim() == "Self")
+                else {
                     continue;
                 };
                 for (tuple_idx, arg) in args.iter().enumerate() {
-                    if let Some((owner, ctor, ctor_args)) = rust_constructor_call_parts(arg) {
-                        if let Some(fields) = constructor_fields.get(&(owner, ctor)) {
+                    if let Some((callee, ctor_args)) = rust_call_inside_span(events, arg.span) {
+                        let Some((owner, ctor)) = callee.rsplit_once("::") else {
+                            continue;
+                        };
+                        let Some(owner) = rust_type_tail(owner) else {
+                            continue;
+                        };
+                        if let Some(fields) = constructor_fields.get(&(owner, ctor.to_string())) {
                             for field in fields {
                                 let Some(source_arg) = ctor_args.get(field.source_param_index) else {
                                     continue;
                                 };
                                 let Some(source_param_index) =
-                                    rust_param_index_for_bare_arg(source_arg, params)
+                                    rust_param_index_for_call_arg(source_arg, params)
                                 else {
                                     continue;
                                 };
@@ -708,7 +741,7 @@ fn collect_rust_self_tuple_constructor_return_writes(
                                 });
                             }
                         }
-                    } else if let Some(source_param_index) = rust_param_index_for_bare_arg(arg, params) {
+                    } else if let Some(source_param_index) = rust_param_index_for_call_arg(arg, params) {
                         out.push(FieldWrite {
                             span: *span,
                             target: format!("self.{tuple_idx}"),
@@ -779,82 +812,118 @@ fn collect_rust_self_tuple_constructor_return_writes(
     }
 }
 
-fn rust_param_index_for_bare_arg(arg: &str, params: &[String]) -> Option<usize> {
-    let arg = strip_rust_reference_prefix(arg.trim());
-    if !rust_bare_identifier(arg) {
-        return None;
-    }
-    params.iter().position(|param| param == arg)
+fn rust_param_index_for_call_arg(arg: &bonsai_lang_api::CallArg, params: &[String]) -> Option<usize> {
+    arg.place
+        .as_deref()
+        .or_else(|| (arg.source_names.len() == 1).then(|| arg.source_names[0].as_str()))
+        .and_then(|source| params.iter().position(|param| param == source))
 }
 
-fn rust_self_tuple_constructor_args(text: &str) -> Option<Vec<String>> {
-    let expr = strip_rust_reference_prefix(text.trim());
-    let inner = rust_call_inner_for_prefix(expr, "Self")?;
-    Some(
-        split_top_level_commas(inner)
-            .into_iter()
-            .map(str::trim)
-            .filter(|arg| !arg.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
-}
-
-fn rust_constructor_call_parts(text: &str) -> Option<(String, String, Vec<String>)> {
-    let expr = strip_rust_reference_prefix(text.trim());
-    let open = expr.find('(')?;
-    let callee = expr[..open].trim();
-    let (owner, ctor) = callee.rsplit_once("::")?;
-    let owner = rust_type_tail(owner)?;
-    if !rust_bare_identifier(ctor) {
-        return None;
-    }
-    let inner = rust_call_inner_for_prefix(expr, callee)?;
-    let args = split_top_level_commas(inner)
-        .into_iter()
-        .map(str::trim)
-        .filter(|arg| !arg.is_empty())
-        .map(str::to_string)
-        .collect();
-    Some((owner, ctor.to_string(), args))
-}
-
-fn rust_call_inner_for_prefix<'a>(expr: &'a str, prefix: &str) -> Option<&'a str> {
-    let rest = expr.strip_prefix(prefix)?.trim_start();
-    let rest = rest.strip_prefix('(')?;
-    let close = matching_call_close(rest)?;
-    if !rest[close + 1..].trim().is_empty() {
-        return None;
-    }
-    Some(&rest[..close])
-}
-
-fn matching_call_close(text_after_open: &str) -> Option<usize> {
-    let mut depth = 1i32;
-    let mut quote: Option<char> = None;
-    let mut escape = false;
-    for (idx, ch) in text_after_open.char_indices() {
-        if let Some(q) = quote {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == q {
-                quote = None;
+fn rust_call_at_span(
+    events: &[FlowEvent],
+    wanted: bonsai_common::Span,
+) -> Option<(&str, &[bonsai_lang_api::CallArg])> {
+    let mut contained = None;
+    for event in events {
+        match event {
+            FlowEvent::Call { span, name, args, .. } if *span == wanted => return Some((name, args)),
+            FlowEvent::Call { span, name, args, .. }
+                if span.file == wanted.file && span.start == wanted.start && span.end <= wanted.end =>
+            {
+                // The callee token of the outer expression begins at the
+                // expression's start; nested argument calls begin later.
+                return Some((name, args));
             }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
+            FlowEvent::Call { span, name, args, .. }
+                if span.file == wanted.file && wanted.start <= span.start && span.end <= wanted.end =>
+            {
+                // ExpressionFlow records the parsed call-expression span,
+                // while the generic call fact uses the grammar's callee span.
+                // They denote the same AST site. Exact/start-aligned matches
+                // above identify the outer call; this widest-contained choice
+                // is only a recovery path for grammar span variations.
+                let width = span.end.saturating_sub(span.start);
+                if contained
+                    .as_ref()
+                    .is_none_or(|(best_width, _, _)| width > *best_width)
+                {
+                    contained = Some((width, name.as_str(), args.as_slice()));
                 }
             }
-            ']' | '}' | '>' => depth -= 1,
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(call) =
+                    rust_call_at_span(then_events, wanted).or_else(|| rust_call_at_span(else_events, wanted))
+                {
+                    return Some(call);
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(call) = rust_call_at_span(body, wanted) {
+                    return Some(call);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(call) = rust_call_at_span(body, wanted)
+                    .or_else(|| rust_call_at_span(catch_events, wanted))
+                    .or_else(|| rust_call_at_span(finally_events, wanted))
+                {
+                    return Some(call);
+                }
+            }
             _ => {}
+        }
+    }
+    contained.map(|(_, name, args)| (name, args))
+}
+
+fn rust_call_inside_span(
+    events: &[FlowEvent],
+    container: bonsai_common::Span,
+) -> Option<(&str, &[bonsai_lang_api::CallArg])> {
+    for event in events {
+        let event_span = event.span();
+        if let FlowEvent::Call { name, args, span, .. } = event {
+            if span.file == container.file && container.start <= span.start && span.end <= container.end {
+                return Some((name, args));
+            }
+        }
+        if event_span.file != container.file
+            || event_span.end < container.start
+            || container.end < event_span.start
+        {
+            continue;
+        }
+        let nested = match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => rust_call_inside_span(then_events, container)
+                .or_else(|| rust_call_inside_span(else_events, container)),
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rust_call_inside_span(body, container)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => rust_call_inside_span(body, container)
+                .or_else(|| rust_call_inside_span(catch_events, container))
+                .or_else(|| rust_call_inside_span(finally_events, container)),
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
         }
     }
     None
@@ -1143,6 +1212,7 @@ fn first_named_child_of_kind_local<'tree>(node: Node<'tree>, kind: &str) -> Opti
 fn event_span_start(event: &FlowEvent) -> u64 {
     match event {
         FlowEvent::Assign { span, .. }
+        | FlowEvent::AggregateAssign { span, .. }
         | FlowEvent::Call { span, .. }
         | FlowEvent::Return { span, .. }
         | FlowEvent::Throw { span, .. }
@@ -1166,46 +1236,6 @@ fn flow_event_assign_key(event: &FlowEvent) -> Option<(bonsai_common::Span, Stri
     }
 }
 
-fn rust_struct_literal_field_values(expr: &str) -> Vec<(String, String)> {
-    let expr = strip_rust_reference_prefix(expr.trim());
-    let Some(open) = expr.find('{') else {
-        return Vec::new();
-    };
-    let Some(close) = expr.rfind('}') else {
-        return Vec::new();
-    };
-    if close <= open || !expr[close + 1..].trim().is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for field in expr[open + 1..close]
-        .split(',')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-    {
-        let (target, value) = field
-            .split_once(':')
-            .map(|(target, value)| (target.trim(), value.trim()))
-            .unwrap_or((field, field));
-        if rust_bare_identifier(target) && rust_bare_identifier(value) {
-            out.push((target.to_string(), value.to_string()));
-        }
-    }
-    out
-}
-
-fn strip_rust_reference_prefix(mut expr: &str) -> &str {
-    loop {
-        let trimmed = expr.trim_start();
-        if let Some(rest) = trimmed.strip_prefix('&') {
-            let rest = rest.trim_start();
-            expr = rest.strip_prefix("mut ").unwrap_or(rest);
-            continue;
-        }
-        return trimmed;
-    }
-}
-
 fn rust_self_field_place(expr: &str) -> bool {
     let Some(rest) = expr.strip_prefix("self.") else {
         return false;
@@ -1214,35 +1244,6 @@ fn rust_self_field_place(expr: &str) -> bool {
         && rest
             .chars()
             .all(|ch| ch == '.' || ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn rust_single_param_struct_literal_source(expr: &str, params: &[String]) -> Option<String> {
-    let open = expr.find('{')?;
-    if !expr[..open]
-        .trim()
-        .chars()
-        .all(|ch| ch == ':' || ch == '_' || ch.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    let close = expr.rfind('}')?;
-    if close <= open || !expr[close + 1..].trim().is_empty() {
-        return None;
-    }
-    let fields = &expr[open + 1..close];
-    let mut sources = Vec::new();
-    for field in fields.split(',').map(str::trim).filter(|field| !field.is_empty()) {
-        let source = field
-            .split_once(':')
-            .map(|(_, value)| value.trim())
-            .unwrap_or(field);
-        if rust_bare_identifier(source) && params.iter().any(|param| param == source) {
-            sources.push(source.to_string());
-        }
-    }
-    sources.sort();
-    sources.dedup();
-    (sources.len() == 1).then(|| sources.remove(0))
 }
 
 fn rust_bare_identifier(value: &str) -> bool {
@@ -1445,6 +1446,7 @@ fn isolate_rust_spawn_bodies(
         let span = match &ev {
             FlowEvent::Call { span, .. }
             | FlowEvent::Assign { span, .. }
+            | FlowEvent::AggregateAssign { span, .. }
             | FlowEvent::Return { span, .. }
             | FlowEvent::Throw { span, .. }
             | FlowEvent::Branch { span, .. }

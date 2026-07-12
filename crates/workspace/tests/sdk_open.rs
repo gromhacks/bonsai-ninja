@@ -5,7 +5,10 @@
 //! CLI-only helpers, so these tests pin the public workspace API.
 
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
-use bonsai_workspace::{dataflow::DataFlowCache, idg_sidecar_path, Workspace, WorkspaceOpenOptions};
+use bonsai_workspace::{
+    dataflow::DataFlowCache, idg_sidecar_enabled_for_file_count, idg_sidecar_path,
+    value_flow::ValueFlowCache, Workspace, WorkspaceOpenOptions,
+};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -75,6 +78,7 @@ fn workspace_root_under_generated_ancestor_still_indexes_root_sources() {
     let outer = tempdir_for_test("bonsai-root-under-generated-ancestor");
     let root = outer.join("target").join("chosen-workspace");
     std::fs::create_dir_all(root.join("target")).expect("create nested target fixture");
+    std::fs::write(root.join(".bonsaiignore"), "target/\n").expect("write explicit generated-path policy");
     std::fs::write(root.join("app.py"), "def handle():\n    return 1\n").expect("write root source");
     std::fs::write(
         root.join("target").join("generated.py"),
@@ -136,32 +140,47 @@ fn sdk_full_prewarm_writes_dataflow_sidecar() {
         sidecar.exists(),
         "explicit full prewarm should persist the reusable dataflow sidecar"
     );
+    assert!(
+        ws.value_flow().is_empty(),
+        "full prewarm should leave the legacy per-function ValueFlowGraph projection on demand"
+    );
+    assert!(
+        !ValueFlowCache::sidecar_path(&root).exists(),
+        "full prewarm should not persist an all-function compatibility projection"
+    );
+    assert!(
+        ws.db().idg_service().is_some(),
+        "full prewarm must retain the canonical workspace IDG"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn sdk_full_prewarm_skips_global_idg_when_sidecar_is_disabled() {
+fn sdk_full_prewarm_persists_global_idg_without_a_file_count_ceiling() {
     let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let old_limit = std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT").ok();
     std::env::set_var("BONSAI_IDG_SIDECAR_FILE_LIMIT", "0");
 
-    let root = tempdir_for_test("bonsai-sdk-full-prewarm-no-idg-sidecar");
+    assert!(idg_sidecar_enabled_for_file_count(5_001));
+    assert!(idg_sidecar_enabled_for_file_count(usize::MAX));
+
+    let root = tempdir_for_test("bonsai-sdk-full-prewarm-unbounded-idg-sidecar");
     write_fixture(&root);
 
     let ws = Workspace::open_with_options(&root, python_registry(), WorkspaceOpenOptions::full_prewarm())
-        .expect("full prewarm workspace with IDG sidecar disabled");
+        .expect("full prewarm workspace with unbounded IDG persistence");
     assert!(
         ws.dataflow().is_prewarmed(),
         "full prewarm should still compute reusable dataflow facts"
     );
     assert!(
-        ws.db().idg_service().is_none(),
-        "full prewarm must not build an unsavable workspace-global IDG"
+        ws.db().idg_service().is_some(),
+        "full prewarm must retain the workspace-global IDG at every scale"
     );
     assert!(
-        !idg_sidecar_path(&root).exists(),
-        "IDG sidecar should not be written when the sidecar gate disables it"
+        idg_sidecar_path(&root).exists(),
+        "legacy file-limit configuration must not disable streamed IDG persistence"
     );
 
     match old_limit {

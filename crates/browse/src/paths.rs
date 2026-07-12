@@ -337,6 +337,7 @@ fn collect_terminal_call_targets_for_events(
                 );
             }
             FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
             | FlowEvent::Return { .. }
             | FlowEvent::Throw { .. }
             | FlowEvent::Break { .. }
@@ -381,16 +382,16 @@ fn semantic_path_graph(ws: &Workspace) -> SemanticPathGraph {
 }
 
 fn idg_cross_call_is_structural_path_edge(edge: CrossCallEdge) -> bool {
-    edge.precision.is_semantic() && (edge.arg_idx != u8::MAX || edge.param_idx != u8::MAX)
+    edge.precision.is_semantic() && (edge.arg_idx != u32::MAX || edge.param_idx != u32::MAX)
 }
 
 fn call_edge_from_idg_cross_call(edge: CrossCallEdge) -> CallEdge {
-    let evidence = if edge.arg_idx == u8::MAX {
+    let evidence = if edge.arg_idx == u32::MAX {
         format!(
             "IDG callback/output edge into parameter {} at call site",
             edge.param_idx
         )
-    } else if edge.param_idx == u8::MAX {
+    } else if edge.param_idx == u32::MAX {
         format!("IDG call argument {} propagated through call site", edge.arg_idx)
     } else {
         format!(
@@ -570,7 +571,7 @@ mod tests {
     use bonsai_callgraph::EdgeKind;
     use bonsai_common::{FileId, Precision, Span};
 
-    fn cross_call(arg_idx: u8, param_idx: u8) -> CrossCallEdge {
+    fn cross_call(arg_idx: u32, param_idx: u32) -> CrossCallEdge {
         CrossCallEdge {
             caller: FuncId::new(1),
             callee: FuncId::new(2),
@@ -717,10 +718,10 @@ mod tests {
     #[test]
     fn idg_path_edges_keep_only_structural_call_shapes() {
         assert!(idg_cross_call_is_structural_path_edge(cross_call(0, 0)));
-        assert!(idg_cross_call_is_structural_path_edge(cross_call(u8::MAX, 1)));
+        assert!(idg_cross_call_is_structural_path_edge(cross_call(u32::MAX, 1)));
         assert!(!idg_cross_call_is_structural_path_edge(cross_call(
-            u8::MAX,
-            u8::MAX
+            u32::MAX,
+            u32::MAX
         )));
 
         let mut over = cross_call(0, 0);

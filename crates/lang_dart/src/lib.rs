@@ -209,19 +209,14 @@ impl LanguageAdapter for DartAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, DART_LIFECYCLE_TRANSITIONS);
         }
-        // Mirror the lang_csharp fixes that unblocked the parallel
-        // mega_flow: (1) convert a getter / expression-body whose
-        // single Return reads a dotted receiver field (`String get
-        // cmd => data.cmd`) into a `Call+Return` chain so the call
-        // resolves to the receiver-typed member (record accessor /
-        // sibling getter) instead of being a single 2-level field
-        // read the bridge can't follow; (2) qualify bare reads of a
+        // Qualify expression-bodied getter fields from constructor-emitted
+        // class storage facts, then qualify bare reads of a
         // sibling zero-arg member (`final c = cmd;`) into an
         // `Assign{source_call}` plus an explicit `Call` event whose
         // argless walk_call fallback synthesizes a `CallArg{idx=0}`
         // recv-slot so `recv_slots_for_call_span` has something to
         // bridge caller-receiver taint through.
-        rewrite_dart_member_access_getters(&mut decl_index);
+        qualify_dart_member_access_getters(&mut decl_index);
         qualify_dart_implicit_member_reads(&mut decl_index);
         // Synthesize an implicit Return for ctors with no flow events.
         // `BaseRepository(this.data);` declares but has no body; with
@@ -278,6 +273,7 @@ fn synthesize_dart_constructor_implicit_returns(index: &mut DeclIndex) {
             span,
             value_text: Some(value_text),
             value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(decl.params.clone()),
         });
     }
 }
@@ -450,17 +446,31 @@ fn dart_catch_clause_binding(catch_clause: Node<'_>, src: &[u8]) -> Option<Strin
     None
 }
 
-/// Convert a getter / expression-bodied function whose body is a
-/// simple dotted member-access (`String get cmd => data.cmd;`) into a
-/// `Call+Return` chain. The IDG's interprocedural receiver-field
-/// bridge is 1-level — modeling the body as a single 2-level field
-/// read (`Read{name:"data.cmd"}`) never matches the caller's
-/// receiver-state composition (`recv.data.cmd`). Modeling it as
-/// `Call data.cmd(); Return data.cmd()` lets the call resolve to the
-/// receiver-typed member (e.g. a record component accessor) and
-/// thread taint through the chain — mirrors the lang_csharp /
-/// lang_java patterns and Java's natural `data.cmd()` accessor body.
-fn rewrite_dart_member_access_getters(index: &mut DeclIndex) {
+/// Qualify a getter projection such as `data.cmd` to `this.data.cmd` when
+/// `data` is proven to be class storage by a constructor field-formal.  The
+/// exact IDG can then substitute the caller receiver for `this` while
+/// preserving the complete field suffix; no synthetic getter call or textual
+/// member-name guess is needed.
+fn qualify_dart_member_access_getters(index: &mut DeclIndex) {
+    let mut fields_by_parent: std::collections::HashMap<
+        bonsai_common::SymbolId,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for decl in &index.defs {
+        let Some(parent) = decl.parent else { continue };
+        for write in &decl.receiver_field_writes {
+            let Some(field) = write.target.strip_prefix("this.") else {
+                continue;
+            };
+            let field = field.split('.').next().unwrap_or(field).trim();
+            if !field.is_empty() {
+                fields_by_parent
+                    .entry(parent)
+                    .or_default()
+                    .insert(field.to_string());
+            }
+        }
+    }
     for decl in &mut index.defs {
         if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
             continue;
@@ -471,59 +481,24 @@ fn rewrite_dart_member_access_getters(index: &mut DeclIndex) {
         if decl.flow_events.len() != 1 {
             continue;
         }
-        let FlowEvent::Return { span, value_text, .. } = &decl.flow_events[0] else {
+        let Some(fields) = decl.parent.and_then(|parent| fields_by_parent.get(&parent)) else {
             continue;
         };
-        let Some(body) = value_text.as_ref() else {
+        let FlowEvent::Return { value_flow, .. } = &mut decl.flow_events[0] else {
             continue;
         };
-        let Some((call_receiver, call_name)) = dart_dotted_member_access_call_parts(body) else {
+        let Some(projection) = value_flow.projection.as_mut() else {
             continue;
         };
-        let body_span = *span;
-        decl.flow_events = vec![
-            FlowEvent::Call {
-                span: body_span,
-                name: call_name.clone(),
-                receiver: Some(call_receiver),
-                receiver_types: Vec::new(),
-                call_kind: CallKind::Method,
-                args: Vec::new(),
-            },
-            FlowEvent::Return {
-                span: body_span,
-                value_text: Some(format!("{call_name}()")),
-                value_name: None,
-            },
-        ];
-    }
-}
-
-/// If `body` is a simple dotted member-access of identifiers
-/// (`data.cmd`, optionally `this.X.Y`), return `(receiver, call_name)`.
-fn dart_dotted_member_access_call_parts(body: &str) -> Option<(String, String)> {
-    let trimmed = body.trim();
-    let inner = trimmed
-        .strip_prefix("this.")
-        .or_else(|| trimmed.strip_prefix("super."))
-        .unwrap_or(trimmed);
-    let segments: Vec<&str> = inner.split('.').collect();
-    if segments.len() < 2 {
-        return None;
-    }
-    for seg in &segments {
-        if seg.is_empty()
-            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || !seg
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        {
-            return None;
+        if fields.contains(&projection.base) {
+            projection.path.insert(0, std::mem::take(&mut projection.base));
+            projection.base = "this".to_string();
+            let place = projection.canonical_place();
+            value_flow.place = Some(place.clone());
+            value_flow.source_names.clear();
+            value_flow.source_names.push(place);
         }
     }
-    let last_dot = inner.rfind('.')?;
-    Some((inner[..last_dot].to_string(), inner.to_string()))
 }
 
 /// Rewrite a bare read (`final c = cmd;`) of a sibling zero-arg member
@@ -658,16 +633,64 @@ fn collect_dart_expression_body_returns(
         let value_name = first_named_child_of_kind(&body, "identifier")
             .map(|identifier| node_text(&identifier, src).trim().to_string())
             .filter(|name| !name.is_empty());
+        let mut value_flow = bonsai_lang_api::kit::expression_flow_from_node(body, file, src);
+        if let Some(projection) = dart_split_selector_projection(&body, src) {
+            let place = projection.canonical_place();
+            value_flow.place = Some(place.clone());
+            value_flow.projection = Some(projection);
+            value_flow.source_names.clear();
+            value_flow.source_names.push(place);
+        }
         out.push((
             span_of(file, &signature),
             FlowEvent::Return {
                 span: span_of(file, &body),
                 value_text: Some(value_text),
                 value_name,
+                value_flow,
             },
         ));
     }
     out
+}
+
+/// Tree-sitter Dart represents `base.field.subfield` as a base identifier
+/// followed by sibling selector nodes rather than one nested member node.
+/// Lower that exact CST sequence into the language-neutral projection fact.
+fn dart_split_selector_projection(
+    body: &Node<'_>,
+    src: &[u8],
+) -> Option<bonsai_lang_api::ExpressionProjection> {
+    let mut cursor = body.walk();
+    let children: Vec<Node<'_>> = body.named_children(&mut cursor).collect();
+    let base_node = children.first()?;
+    if !matches!(base_node.kind(), "identifier" | "this" | "super") {
+        return None;
+    }
+    let base = node_text(base_node, src).trim().to_string();
+    let mut path = Vec::new();
+    for selector in children.iter().skip(1) {
+        if selector.kind() != "selector" {
+            return None;
+        }
+        if first_named_child_of_kind(selector, "argument_part").is_some() {
+            return None;
+        }
+        let inner = first_named_child(selector)?;
+        if !matches!(
+            inner.kind(),
+            "unconditional_assignable_selector" | "conditional_assignable_selector"
+        ) {
+            return None;
+        }
+        let identifier = first_named_child_of_kind(&inner, "identifier")?;
+        let field = node_text(&identifier, src).trim();
+        if field.is_empty() {
+            return None;
+        }
+        path.push(field.to_string());
+    }
+    (!base.is_empty() && !path.is_empty()).then_some(bonsai_lang_api::ExpressionProjection { base, path })
 }
 
 fn dart_signature_body_node(signature: Node<'_>) -> Option<Node<'_>> {

@@ -242,3 +242,20 @@ fn duplicate_edges_dont_double_count_in_closure() {
     let r = rix.forward_closure(&[NodeId(0)]);
     assert_eq!(r.popcount(), 2);
 }
+
+#[test]
+fn restricted_forward_closure_never_visits_unrelated_branches() {
+    let edges = vec![edge(0, 1), edge(1, 2), edge(0, 3), edge(3, 4)];
+    let rix = ReachabilityIndex::new(5, &edges);
+    let allowed = rix.backward_closure(&[NodeId(2)]);
+    let reached = rix.forward_closure_within(&[NodeId(0)], &allowed);
+    let sparse = rix.forward_closure_nodes_within(&[NodeId(0)], &allowed);
+
+    assert_eq!(reached.popcount(), 3);
+    assert!(reached.contains(NodeId(0)));
+    assert!(reached.contains(NodeId(1)));
+    assert!(reached.contains(NodeId(2)));
+    assert!(!reached.contains(NodeId(3)));
+    assert!(!reached.contains(NodeId(4)));
+    assert_eq!(sparse, vec![NodeId(0), NodeId(1), NodeId(2)]);
+}

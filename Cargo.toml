@@ -78,6 +78,7 @@ rayon = "1"
 regex = "1"
 bincode = { version = "1", features = [] }
 crossbeam-channel = "0.5"
+fs2 = "0.4"
 ignore = "0.4"
 lru = "0.12"
 tempfile = "3"

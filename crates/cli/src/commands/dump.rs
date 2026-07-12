@@ -17,7 +17,8 @@ use anyhow::Result;
 use super::browse::{effective_limit, truncate};
 use super::{
     apply_text_limit, emit_json_paged_cached, emit_json_value_paged_cached, nearest_names,
-    open_project_index_only as open_project, open_project_index_only_with_rulepack, short_file,
+    open_project_index_only as open_project, open_project_index_only_with_rulepack, page_info_to_json,
+    paged_json_incomplete_reasons, short_file,
 };
 
 pub(crate) fn cmd_dump_callgraph(
@@ -830,7 +831,7 @@ pub(crate) fn cmd_dump_taint(
         ),
         bonsai_sdk::TaintOutcome::Report(report) => match format {
             BrowseFormat::Json | BrowseFormat::Sarif => {
-                emit_json_value_paged_cached(root, &report, &paging_cfg, "dump-taint", filters_hash)?;
+                render_taint_report_json_paged(root, &report, &paging_cfg, filters_hash)?;
             }
             BrowseFormat::Text => {
                 render_taint_report_text_paged(root, &report, compact, &paging_cfg, filters_hash)?;
@@ -838,6 +839,86 @@ pub(crate) fn cmd_dump_taint(
         },
     }
     Ok(())
+}
+
+fn render_taint_report_json_paged(
+    root: &std::path::Path,
+    report: &bonsai_sdk::TaintReport,
+    paging_cfg: &paging::PagingConfig,
+    filters_hash: u64,
+) -> Result<()> {
+    if !paging_cfg.json_wrapped() {
+        cli_println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    let force_page_metadata = paging_cfg.context.is_some()
+        || !matches!(paging_cfg.page, paging::PageArg::First)
+        || crate::filter::active().is_active();
+    page_cache::emit_paged_text(
+        root,
+        &report.records,
+        paging_cfg,
+        "dump-taint",
+        filters_hash,
+        |record| {
+            let arg_bytes: usize = record
+                .tainted_args
+                .iter()
+                .map(|arg| arg.value_text.len() + arg.param_name.len() + 48)
+                .sum();
+            (record.taint_id.len()
+                + record.caller_name.len()
+                + record.caller_file.len()
+                + record.callee_name.len()
+                + record.callee_file.len()
+                + record.call_file.len()
+                + record.call_code.len()
+                + record.edge_kind.len()
+                + record.edge_precision.len()
+                + arg_bytes
+                + 256) as u64
+        },
+        |records, info, _cfg| {
+            let presentation_complete = info.page_number == 1 && info.is_last;
+            if !force_page_metadata && presentation_complete {
+                cli_println!("{}", serde_json::to_string_pretty(report)?);
+                return Ok(());
+            }
+
+            let presentation_incomplete_reasons = paged_json_incomplete_reasons("dump-taint", info);
+            let mut semantic_incomplete_reasons = report.analysis_incomplete_reasons.clone();
+            if !report.analysis_complete && semantic_incomplete_reasons.is_empty() {
+                semantic_incomplete_reasons
+                    .push("dump-taint incomplete: unknown semantic reason".to_string());
+            }
+            let mut combined_incomplete_reasons = semantic_incomplete_reasons.clone();
+            combined_incomplete_reasons.extend(presentation_incomplete_reasons.iter().cloned());
+            combined_incomplete_reasons.sort();
+            combined_incomplete_reasons.dedup();
+
+            let payload = serde_json::json!({
+                "source": &report.source,
+                "seeds": &report.seeds,
+                "sanitizers": &report.sanitizers,
+                "analysis_complete": report.analysis_complete
+                    && presentation_complete
+                    && combined_incomplete_reasons.is_empty(),
+                "analysis_incomplete_reasons": combined_incomplete_reasons,
+                "semantic_analysis_complete": report.analysis_complete,
+                "semantic_analysis_incomplete_reasons": semantic_incomplete_reasons,
+                "presentation_complete": presentation_complete,
+                "presentation_incomplete_reasons": presentation_incomplete_reasons,
+                "precision": &report.precision,
+                "pairs_analyzed": report.pairs_analyzed,
+                "saturated": report.saturated,
+                "records": records,
+                "page": page_info_to_json(info),
+            });
+            cli_println!("{}", serde_json::to_string_pretty(&payload)?);
+            Ok(())
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -925,7 +1006,9 @@ fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
             String::new()
         },
     );
-    if !report.analysis_complete {
+    if report.analysis_complete {
+        cli_println!("  {}", u.dim("analysis: complete"));
+    } else {
         let reasons = if report.analysis_incomplete_reasons.is_empty() {
             "unknown reason".to_string()
         } else {

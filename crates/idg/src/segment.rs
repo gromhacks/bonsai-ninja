@@ -39,7 +39,7 @@ use crate::place::Place;
 pub const IDG_SEGMENT_TABLE_ID: u32 = 100;
 
 /// On-disk format version for IDG segments. Bump on layout change.
-pub const IDG_SEGMENT_VERSION: u32 = 1;
+pub const IDG_SEGMENT_VERSION: u32 = 2;
 
 /// One source file's portion of the workspace IDG.
 ///
@@ -156,7 +156,7 @@ impl IdgSegment {
         let writer = FactStoreWriter::create(path, IDG_SEGMENT_TABLE_ID, pipeline_hash)?;
         let payload = bincode::serialize(self)
             .map_err(|e| IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-        writer.add(0, 0, &payload)?;
+        writer.add_owned(0, 0, payload)?;
         writer.finish()?;
         Ok(())
     }

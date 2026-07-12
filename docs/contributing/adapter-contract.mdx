@@ -145,6 +145,11 @@ where adapters declare per-language behaviour the engine consults:
   `bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS` so ordinary variables
   named `super`, `parent`, `base`, or `SUPER` are not treated as
   superclass dispatch.
+- **`field_places_complete`** — every source-level field/property
+  projection is emitted as an IDG `Place`. Sink-oriented analysis may then
+  run sparse AST-demand forwarding for that adapter. Leave this false until
+  call-shaped properties, patterns, and implicit projections all have
+  conformance coverage; complete export graphs never use this optimization.
 
 When the adapter narrows these, ambiguous engine-side fallbacks stop
 firing for the adapter's language. Until an adapter populates them,
@@ -177,15 +182,15 @@ or equivalent:
   for `inspect --query <pat>`. Requires `Decl::name` to be the
   identifier the user would type.
 - **`ValueFlowCache::returning_seed_names`** — precomputed per
-  function from the value-flow graph at index time. Requires
+  function when a compatibility client first requests the value-flow graph;
+  normal/full-prewarm indexing does not build every projection. Requires
   adapters to emit `FlowEvent::Return { value_name, value_text, .. }`
   with `value_name` populated whenever the return value is a single
-  identifier — that's how the security analysis answers "does this
-  seed reach a return?" with a hash-set lookup instead of a per-seed
-  forward-closure walk. Returns of compound expressions
+  identifier. Returns of compound expressions
   (`return x + y`) populate `value_text` only; the value-flow graph
-  emits the Return node but no edge from a name origin, so security
-  analysis falls through to the engine fallback for those shapes.
+  emits the Return node according to the adapter's structured source facts.
+  Canonical security/export return flow is answered by the IDG rather than
+  this compatibility cache.
 - **Per-decl matcher facts cache** (`crates/security/src/matcher/mod.rs`)
   — caches `collect_calls`, `collect_assignment_texts`, decorators,
   alias chains, runtime types, lifecycle transitions per decl.

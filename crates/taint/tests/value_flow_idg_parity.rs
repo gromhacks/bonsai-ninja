@@ -1,25 +1,19 @@
-//! Phase 5b: IDG ↔ legacy engine parity for `value_flow_for_function`.
+//! Warm/cold IDG parity for `value_flow_for_function`.
 //!
 //! For each fixture, runs `value_flow_for_function` twice — once with
-//! the legacy interprocedural engine (no IDG seeded on the db) and
-//! once with the IDG service seeded — and asserts the two paths
-//! produce graphs whose forward-closure from the entry's seed nodes
-//! reaches the same set of `(callee, param_name)` pairs.
-//!
-//! This is the gate that proves the IDG-backed `value_flow` is a
-//! drop-in replacement for the engine path before Phase 6 deletes the
-//! engine. When parity drifts, this test fires before any consumer
-//! ships a behaviour change.
+//! no workspace-default IDG and once after prewarming one. Prewarming is
+//! a cache decision and must not select a different seed policy or graph
+//! materializer.
 
 mod common;
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::FuncId;
+use bonsai_common::{FuncId, Precision};
 use bonsai_db::AnalyzerDb;
 use bonsai_idg::{workspace_adapter, IdgQueryService};
 use bonsai_lang_api::AdapterArc;
-use bonsai_taint::{value_flow_for_function, InterTaintConfig, ValueFlowNodeKind};
+use bonsai_taint::{value_flow_for_function, InterTaintConfig, ValueFlowEdge, ValueFlowNodeKind};
 use common::{build_db, func_id_or_none};
 use std::sync::Arc;
 
@@ -86,45 +80,56 @@ fn callee_param_pairs_from_graph(
     reached
 }
 
-fn assert_idg_legacy_parity(src: &str, entry: &str, seeds: &[&str]) {
+fn edges_from_graph(graph: &bonsai_taint::ValueFlowGraph) -> AHashSet<ValueFlowEdge> {
+    graph
+        .forward
+        .values()
+        .flat_map(|edges| edges.iter().cloned())
+        .collect()
+}
+
+fn assert_warm_cold_parity(src: &str, entry: &str, seeds: &[&str]) {
+    assert_warm_cold_parity_with_config(src, entry, seeds, &InterTaintConfig::default());
+}
+
+fn assert_warm_cold_parity_with_config(src: &str, entry: &str, seeds: &[&str], config: &InterTaintConfig) {
     let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
 
-    // Legacy run: db with no IDG seeded — value_flow falls through to
-    // the engine path.
-    let legacy_db = build_db(adapter.clone(), &[("a.py", src)]);
-    let entry_func = func_id_or_none(&legacy_db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes"));
-    let legacy_graph = value_flow_for_function(entry_func, &legacy_db, &InterTaintConfig::default());
-    let legacy_reached = callee_param_pairs_from_graph(&legacy_graph, entry_func, seeds);
+    // Cold run: the canonical IDG is provisioned on demand.
+    let cold_db = build_db(adapter.clone(), &[("a.py", src)]);
+    let entry_func = func_id_or_none(&cold_db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes"));
+    let cold_graph = value_flow_for_function(entry_func, &cold_db, config);
+    let cold_reached = callee_param_pairs_from_graph(&cold_graph, entry_func, seeds);
 
     // IDG run: fresh db, seed the IDG service before invoking.
-    let idg_db = build_db(adapter, &[("a.py", src)]);
-    let entry_idg =
-        func_id_or_none(&idg_db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes (idg)"));
-    seed_idg_on(&idg_db);
-    let idg_graph = value_flow_for_function(entry_idg, &idg_db, &InterTaintConfig::default());
-    let idg_reached = callee_param_pairs_from_graph(&idg_graph, entry_idg, seeds);
+    let warm_db = build_db(adapter, &[("a.py", src)]);
+    let entry_warm =
+        func_id_or_none(&warm_db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes (warm)"));
+    seed_idg_on(&warm_db);
+    let warm_graph = value_flow_for_function(entry_warm, &warm_db, config);
+    let warm_reached = callee_param_pairs_from_graph(&warm_graph, entry_warm, seeds);
 
-    // The IDG path is the floor — it should reach at least every
-    // (callee, param) pair the legacy path found. (Strict equality
-    // would also fail when one path discovers a wider set; we accept
-    // IDG ⊇ legacy to allow the IDG to surface additional flows the
-    // engine pruned, but every legacy edge must survive.)
-    let missing: Vec<&(FuncId, String)> = legacy_reached
-        .iter()
-        .filter(|p| !idg_reached.contains(*p))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "IDG-backed value_flow must reach every callee param the legacy engine reached.\n\
-         Missing: {missing:?}\n\
-         Legacy: {legacy_reached:?}\n\
-         IDG:    {idg_reached:?}"
+    assert_eq!(entry_func, entry_warm, "fixture FuncIds must be deterministic");
+    assert_eq!(
+        cold_reached, warm_reached,
+        "prewarming changed reachable callee params"
     );
+    assert_eq!(
+        cold_graph.nodes, warm_graph.nodes,
+        "prewarming changed value-flow nodes"
+    );
+    assert_eq!(
+        edges_from_graph(&cold_graph),
+        edges_from_graph(&warm_graph),
+        "prewarming changed value-flow edges"
+    );
+    assert_eq!(cold_graph.precision, warm_graph.precision);
+    assert_eq!(cold_graph.saturated, warm_graph.saturated);
 }
 
 #[test]
 fn idg_parity_two_hop() {
-    assert_idg_legacy_parity(
+    assert_warm_cold_parity(
         "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
         "entry",
         &["args"],
@@ -133,7 +138,7 @@ fn idg_parity_two_hop() {
 
 #[test]
 fn idg_parity_three_hop_chain() {
-    assert_idg_legacy_parity(
+    assert_warm_cold_parity(
         "def entry(args):\n    a = args\n    helper(a)\n\ndef helper(b):\n    deeper(b)\n\ndef deeper(c):\n    sink(c)\n",
         "entry",
         &["args"],
@@ -142,7 +147,7 @@ fn idg_parity_three_hop_chain() {
 
 #[test]
 fn idg_parity_branch_merge() {
-    assert_idg_legacy_parity(
+    assert_warm_cold_parity(
         "def entry(args):\n    if cond():\n        helper(args)\n    else:\n        helper(args)\n\ndef helper(p):\n    sink(p)\n",
         "entry",
         &["args"],
@@ -151,7 +156,7 @@ fn idg_parity_branch_merge() {
 
 #[test]
 fn idg_parity_assigned_local_then_call() {
-    assert_idg_legacy_parity(
+    assert_warm_cold_parity(
         "def entry(args):\n    local = args\n    helper(local)\n\ndef helper(p):\n    sink(p)\n",
         "entry",
         &["args"],
@@ -163,13 +168,74 @@ fn idg_parity_assigned_local_then_call() {
 #[test]
 fn idg_parity_call_nested_in_with_block() {
     // H4: a call nested in a `with` (FlowEvent::Using) body must still
-    // reach the callee param on the IDG-backed path, matching the
-    // legacy engine path. Before the find_call_arg Using/Defer recursion
-    // fix the IDG path recovers an empty arg text, synthesises a
-    // disconnected CallArg, and never reaches `helper`'s `p`.
-    assert_idg_legacy_parity(
+    // reach the callee param independent of whether a workspace IDG was
+    // prewarmed before the value-flow query.
+    assert_warm_cold_parity(
         "def entry(args):\n    with open(\"f\") as fh:\n        helper(args)\n\ndef helper(p):\n    sink(p)\n",
         "entry",
         &["args"],
+    );
+}
+
+#[test]
+fn prewarmed_idg_preserves_paramless_local_assignment_seed() {
+    let src = "def entry():\n    raw = source()\n    helper(raw)\n\ndef helper(p):\n    sink(p)\n";
+    assert_warm_cold_parity(src, "entry", &[]);
+
+    let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let db = build_db(adapter, &[("a.py", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry indexes");
+    seed_idg_on(&db);
+    let graph = value_flow_for_function(entry, &db, &InterTaintConfig::default());
+    let raw = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.func == entry && node.kind == ValueFlowNodeKind::AssignTarget && node.value_text == "raw"
+        })
+        .expect("local assignment target is a canonical value-flow seed");
+    assert!(
+        graph.forward_closure(raw).iter().any(|node| node.func != entry
+            && node.kind == ValueFlowNodeKind::Param
+            && node.value_text == "p"),
+        "prewarmed value-flow must propagate a local source-call assignment into the callee"
+    );
+}
+
+#[test]
+fn canonical_composer_keeps_local_seed_alongside_formal_param() {
+    let src = "def entry(unrelated):\n    raw = source()\n    helper(raw)\n\ndef helper(p):\n    sink(p)\n";
+    assert_warm_cold_parity(src, "entry", &["unrelated"]);
+
+    let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
+    let db = build_db(adapter, &[("a.py", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry indexes");
+    let graph = value_flow_for_function(entry, &db, &InterTaintConfig::default());
+    let raw = graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.func == entry && node.kind == ValueFlowNodeKind::AssignTarget && node.value_text == "raw"
+        })
+        .expect("local assignment target is represented");
+    assert!(
+        graph.forward_closure(raw).iter().any(|node| node.func != entry
+            && node.kind == ValueFlowNodeKind::Param
+            && node.value_text == "p"),
+        "resolving an unrelated formal param must not suppress the local's first-write seed"
+    );
+}
+
+#[test]
+fn prewarmed_idg_honors_configured_precision_ceiling() {
+    let config = InterTaintConfig {
+        max_edge_precision: Some(Precision::Exact),
+        ..Default::default()
+    };
+    assert_warm_cold_parity_with_config(
+        "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
+        "entry",
+        &["args"],
+        &config,
     );
 }

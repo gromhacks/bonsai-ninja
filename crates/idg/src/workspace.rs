@@ -22,7 +22,7 @@ use bonsai_common::FuncId;
 use serde::{Deserialize, Serialize};
 
 use crate::edge::IdgEdge;
-use crate::segment::IdgSegment;
+use crate::segment::{IdgSegment, IDG_SEGMENT_VERSION};
 
 /// Stable handle to a segment in the workspace's segment list.
 /// Distinct from `FuncId`; multiple FuncIds map to one SegmentId.
@@ -338,11 +338,13 @@ impl IdgWorkspace {
     /// Persist the entire workspace IDG to `path` as a streamed
     /// factstore. Each segment is serialised as its own factstore
     /// entry (key = segment index + 1) so peak RAM during persistence
-    /// is bounded by the largest single segment's bincode buffer, not
-    /// the whole IDG. A 100K-LOC C codebase's IDG can occupy several
-    /// GB in memory; the previous single-buffer `bincode::serialize`
-    /// path needed that much RAM again during the write, OOM'ing
-    /// processes that the in-memory build had already cleared.
+    /// is bounded by the writer's small, backpressured pipeline of
+    /// active/queued bincode buffers, not the whole IDG. Each serialized
+    /// `Vec<u8>` moves into the writer without a second payload copy.
+    /// A 100K-LOC C codebase's IDG can occupy several GB in memory; the
+    /// previous single-buffer `bincode::serialize` path needed that much
+    /// RAM again during the write, OOM'ing processes that the in-memory
+    /// build had already cleared.
     ///
     /// Entry 0 holds the per-workspace metadata and chunk counts.
     /// Segments, cross-file edges, and field-flow links are written as
@@ -378,11 +380,11 @@ impl IdgWorkspace {
         };
         let meta_bytes = bincode::serialize(&metadata)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-        writer.add(0, IDG_WORKSPACE_VERSION as u64, &meta_bytes)?;
+        writer.add_owned(0, IDG_WORKSPACE_VERSION as u64, meta_bytes)?;
         for (idx, segment) in self.segments.iter().enumerate() {
             let segment_bytes = bincode::serialize(segment)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, &segment_bytes)?;
+            writer.add_owned((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, segment_bytes)?;
         }
         let cross_base = first_cross_file_chunk_key(self.segments.len() as u32);
         for (idx, chunk) in self
@@ -393,7 +395,7 @@ impl IdgWorkspace {
         {
             let bytes = bincode::serialize(chunk)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add(cross_base + idx as u64, IDG_WORKSPACE_VERSION as u64, &bytes)?;
+            writer.add_owned(cross_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
         }
         let field_base =
             first_field_flow_chunk_key(self.segments.len() as u32, cross_file_chunk_count as u32);
@@ -404,7 +406,7 @@ impl IdgWorkspace {
         {
             let bytes = bincode::serialize(chunk)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-            writer.add(field_base + idx as u64, IDG_WORKSPACE_VERSION as u64, &bytes)?;
+            writer.add_owned(field_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
         }
         writer.finish()?;
         Ok(())
@@ -487,6 +489,17 @@ impl IdgWorkspace {
             };
             let mut segment: IdgSegment = bincode::deserialize(&hit.payload)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            if segment.version != IDG_SEGMENT_VERSION {
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "workspace sidecar miss: path={} reason=segment-version segment={} version={} expected={}",
+                    path.display(),
+                    idx,
+                    segment.version,
+                    IDG_SEGMENT_VERSION
+                );
+                return Ok(None);
+            }
             segment.places.rebuild_lookup();
             segment.nodes.rebuild_lookup();
             segment.strings.rebuild_lookup();
@@ -620,7 +633,7 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 /// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]) or
 /// source-to-call edge semantic change that can leave old facts
 /// structurally decodable but security-significant.
-const IDG_WORKSPACE_VERSION: u32 = 8;
+const IDG_WORKSPACE_VERSION: u32 = 9;
 
 #[cfg(not(test))]
 const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;

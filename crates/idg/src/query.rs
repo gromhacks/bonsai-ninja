@@ -96,6 +96,27 @@ impl ReachabilityIndex {
         sparse_closure_nodes(&self.forward, self.n_nodes, seeds)
     }
 
+    /// Forward closure restricted to `allowed` nodes.
+    ///
+    /// A source-to-target query computes `allowed` as the target's backward
+    /// closure. Filtering while traversing keeps work proportional to the
+    /// actual source-to-target corridor; computing an unrestricted closure
+    /// and intersecting afterward visits unrelated branches needlessly.
+    #[must_use]
+    pub fn forward_closure_within(&self, seeds: &[NodeId], allowed: &NodeBitSet) -> NodeBitSet {
+        debug_assert_eq!(allowed.len(), self.n_nodes);
+        bitvector_closure_within(&self.forward, self.n_nodes, seeds, allowed)
+    }
+
+    /// Restricted forward closure as a sparse node list in visitation order.
+    /// This avoids scanning the entire result bitset when a target corridor is
+    /// much smaller than the workspace graph.
+    #[must_use]
+    pub fn forward_closure_nodes_within(&self, seeds: &[NodeId], allowed: &NodeBitSet) -> Vec<NodeId> {
+        debug_assert_eq!(allowed.len(), self.n_nodes);
+        sparse_closure_nodes_within(&self.forward, self.n_nodes, seeds, allowed)
+    }
+
     /// Backward closure: every node that can reach any of `seeds`.
     #[must_use]
     pub fn backward_closure(&self, seeds: &[NodeId]) -> NodeBitSet {
@@ -225,6 +246,38 @@ fn bitvector_closure(csr: &EdgeCsr, n_nodes: usize, seeds: &[NodeId]) -> NodeBit
     reached
 }
 
+fn bitvector_closure_within(
+    csr: &EdgeCsr,
+    n_nodes: usize,
+    seeds: &[NodeId],
+    allowed: &NodeBitSet,
+) -> NodeBitSet {
+    let mut reached = NodeBitSet::zeros(n_nodes);
+    let mut queue: Vec<NodeId> = Vec::with_capacity(seeds.len());
+    for &seed in seeds {
+        if seed.0 as usize >= n_nodes || !allowed.contains(seed) || reached.contains(seed) {
+            continue;
+        }
+        reached.set(seed);
+        queue.push(seed);
+    }
+
+    let mut cursor = 0usize;
+    while cursor < queue.len() {
+        let src = queue[cursor];
+        cursor += 1;
+        for &target in csr.neighbours(src) {
+            let target = NodeId(target);
+            if !allowed.contains(target) || reached.contains(target) {
+                continue;
+            }
+            reached.set(target);
+            queue.push(target);
+        }
+    }
+    reached
+}
+
 fn sparse_closure_nodes(csr: &EdgeCsr, n_nodes: usize, seeds: &[NodeId]) -> Vec<NodeId> {
     let mut reached = NodeBitSet::zeros(n_nodes);
     let mut queue: Vec<NodeId> = Vec::with_capacity(seeds.len());
@@ -243,6 +296,38 @@ fn sparse_closure_nodes(csr: &EdgeCsr, n_nodes: usize, seeds: &[NodeId]) -> Vec<
         for &target in csr.neighbours(src) {
             let target = NodeId(target);
             if reached.contains(target) {
+                continue;
+            }
+            reached.set(target);
+            queue.push(target);
+        }
+    }
+    queue
+}
+
+fn sparse_closure_nodes_within(
+    csr: &EdgeCsr,
+    n_nodes: usize,
+    seeds: &[NodeId],
+    allowed: &NodeBitSet,
+) -> Vec<NodeId> {
+    let mut reached = NodeBitSet::zeros(n_nodes);
+    let mut queue: Vec<NodeId> = Vec::with_capacity(seeds.len());
+    for &seed in seeds {
+        if seed.0 as usize >= n_nodes || !allowed.contains(seed) || reached.contains(seed) {
+            continue;
+        }
+        reached.set(seed);
+        queue.push(seed);
+    }
+
+    let mut cursor = 0usize;
+    while cursor < queue.len() {
+        let src = queue[cursor];
+        cursor += 1;
+        for &target in csr.neighbours(src) {
+            let target = NodeId(target);
+            if !allowed.contains(target) || reached.contains(target) {
                 continue;
             }
             reached.set(target);

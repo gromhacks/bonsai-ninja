@@ -3,8 +3,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes, language_from_pack,
-        node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
+        call_arg_from_node, canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
+        language_from_pack, node_text, package_module_segments_with_workspace_prefix, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
@@ -386,6 +386,10 @@ fn synthesize_csharp_expression_bodied_properties(
                         span: body_span,
                         value_text: Some(call_name.clone()),
                         value_name: Some(call_name),
+                        value_flow: bonsai_lang_api::ExpressionFlow {
+                            call_sites: vec![body_span],
+                            ..Default::default()
+                        },
                     },
                 ]
             } else {
@@ -393,6 +397,7 @@ fn synthesize_csharp_expression_bodied_properties(
                     span: body_span,
                     value_text: Some(qualified.clone()),
                     value_name: Some(qualified.clone()),
+                    value_flow: bonsai_lang_api::ExpressionFlow::from_place(qualified.clone()),
                 }]
             };
         synthesized.push(bonsai_lang_api::Decl {
@@ -467,7 +472,9 @@ fn synthesize_csharp_constructor_implicit_returns(
         for child in ctor_node.children(&mut cw) {
             if child.kind() == "constructor_initializer" {
                 let t = node_text(&child, src).trim().to_string();
-                if let Some((callee, args)) = csharp_constructor_initializer_call(&t, parent_info) {
+                if let Some((callee, args)) =
+                    csharp_constructor_initializer_call(child, file, src, parent_info)
+                {
                     let span = span_of(file, &child);
                     initializer_call = Some(FlowEvent::Call {
                         span,
@@ -475,19 +482,7 @@ fn synthesize_csharp_constructor_implicit_returns(
                         receiver: None,
                         receiver_types: Vec::new(),
                         call_kind: CallKind::Constructor,
-                        args: args
-                            .into_iter()
-                            .map(|arg| CallArg {
-                                passing_mode: Default::default(),
-                                span,
-                                name: None,
-                                place: csharp_bare_identifier(&arg).map(str::to_string),
-                                source_names: csharp_bare_identifier(&arg)
-                                    .map(|name| vec![name.to_string()])
-                                    .unwrap_or_default(),
-                                value_text: arg,
-                            })
-                            .collect(),
+                        args,
                     });
                 }
                 if !t.is_empty() {
@@ -531,68 +526,47 @@ fn synthesize_csharp_constructor_implicit_returns(
             span: body_span,
             value_text: Some(value_text),
             value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(decl.params.clone()),
         });
     }
 }
 
 fn csharp_constructor_initializer_call(
-    text: &str,
+    initializer: tree_sitter::Node<'_>,
+    file: FileId,
+    src: &[u8],
     parent_info: Option<&(String, Vec<String>)>,
-) -> Option<(String, Vec<String>)> {
-    let init = text.trim().strip_prefix(':').unwrap_or(text).trim();
-    let (callee, rest) = if let Some(rest) = init.strip_prefix("base") {
-        (parent_info.and_then(|(_, bases)| bases.first()).cloned()?, rest)
-    } else if let Some(rest) = init.strip_prefix("this") {
-        (parent_info.map(|(name, _)| name.clone())?, rest)
-    } else {
+) -> Option<(String, Vec<CallArg>)> {
+    if initializer.kind() != "constructor_initializer" {
         return None;
-    };
-    let open = rest.find('(')?;
-    let close = rest.rfind(')')?;
-    let inner = &rest[open + 1..close];
-    let args = split_csharp_initializer_args(inner);
+    }
+    let mut children = initializer.walk();
+    let target = initializer
+        .children(&mut children)
+        .find_map(|child| match child.kind() {
+            "base" => parent_info.and_then(|(_, bases)| bases.first()).cloned(),
+            "this" => parent_info.map(|(name, _)| name.clone()),
+            _ => None,
+        })?;
+    let argument_list = initializer
+        .named_children(&mut initializer.walk())
+        .find(|child| child.kind() == "argument_list")?;
+    let mut args = Vec::new();
+    let mut cursor = argument_list.walk();
+    for argument in argument_list.named_children(&mut cursor) {
+        if argument.kind() != "argument" {
+            continue;
+        }
+        let name = argument
+            .child_by_field_name("name")
+            .map(|name| node_text(&name, src).trim().to_string())
+            .filter(|name| !name.is_empty());
+        if let Some(argument) = call_arg_from_node(argument, file, src, name) {
+            args.push(argument);
+        }
+    }
+    let callee = target;
     Some((callee, args))
-}
-
-fn split_csharp_initializer_args(text: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let piece = text[start..idx].trim();
-                if !piece.is_empty() {
-                    parts.push(piece.to_string());
-                }
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail.to_string());
-    }
-    parts
 }
 
 fn csharp_bare_identifier(text: &str) -> Option<&str> {

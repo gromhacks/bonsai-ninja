@@ -3,8 +3,9 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     collect_assign_targets, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
-        node_text, package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
+        call_arg_from_node, call_arg_from_nodes, collect_kinds, collect_receiver_field_writes,
+        first_named_child_of_kind, language_from_pack, node_at_span, node_text,
+        package_module_segments_with_workspace_prefix, parse_with, span_of, walk_flow_events,
         with_fn_kinds_and_implicit_receivers,
     },
     rewrite_implicit_member_reads, AdapterContext, AdapterError, CallArg, CallKind, Decl, DeclIndex,
@@ -109,7 +110,7 @@ impl LanguageAdapter for ScalaAdapter {
             let arm_spans = collect_scala_match_arm_spans(&tree, src, file);
             for decl in &mut idx.defs {
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
-                annotate_scala_named_call_args(&mut decl.flow_events);
+                annotate_scala_named_call_args(&mut decl.flow_events, tree.root_node(), file, src);
             }
         }
         let pkg_segments = parse_with(PACK_NAME, file, ctx)
@@ -271,6 +272,12 @@ impl LanguageAdapter for ScalaAdapter {
         // Scala class names are PascalCase; the heuristic is reliable.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
+        // Scala adds constructor-property aliases and rewrites property
+        // selections after the generic declaration pass. Re-run the shared
+        // AST/type-fact projection once those facts exist so synthesized
+        // `data.cmd` calls carry `data: Envelope` and resolve the case-class
+        // accessor without any member-name inventory.
+        bonsai_lang_api::apply_call_receiver_types_with_super_tokens(&mut idx, &["super"]);
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -543,42 +550,10 @@ fn scala_constructor_call_args(args_node: Node<'_>, file: FileId, src: &[u8]) ->
     let mut out = Vec::new();
     let mut cursor = args_node.walk();
     for child in args_node.named_children(&mut cursor) {
-        let value_text = node_text(&child, src).trim().to_string();
-        if value_text.is_empty() {
-            continue;
+        if let Some(argument) = call_arg_from_node(child, file, src, None) {
+            out.push(argument);
         }
-        out.push(CallArg {
-            passing_mode: Default::default(),
-            span: span_of(file, &child),
-            name: None,
-            place: simple_scala_storage_place(&value_text),
-            source_names: scala_argument_source_names(&value_text),
-            value_text,
-        });
     }
-    out
-}
-
-fn simple_scala_storage_place(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()
-        && trimmed
-            .split('.')
-            .all(|part| !part.is_empty() && part.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())))
-    .then(|| trimmed.to_string())
-}
-
-fn scala_argument_source_names(value: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for token in value.split(|ch: char| !(ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())) {
-        let token = token.trim_matches('.');
-        if token.is_empty() {
-            continue;
-        }
-        out.push(token.to_string());
-    }
-    out.sort();
-    out.dedup();
     out
 }
 
@@ -667,18 +642,34 @@ fn scala_constructor_param_field_writes_with_mode(
     writes
 }
 
-fn annotate_scala_named_call_args(events: &mut [FlowEvent]) {
+fn annotate_scala_named_call_args(events: &mut [FlowEvent], root: Node<'_>, file: FileId, src: &[u8]) {
     for event in events {
         match event {
             FlowEvent::Call { args, .. } => {
                 for arg in args {
-                    if arg.name.is_none() {
-                        if let Some((label, value)) = scala_named_argument_parts(&arg.value_text) {
-                            arg.name = Some(label);
-                            if arg.place.is_none() {
-                                arg.place = simple_scala_storage_place(value);
-                            }
-                        }
+                    if arg.name.is_some() {
+                        continue;
+                    }
+                    let Some(argument_node) = node_at_span(root, arg.span, &["assignment_expression"]) else {
+                        continue;
+                    };
+                    let Some(label_node) = argument_node.child_by_field_name("left") else {
+                        continue;
+                    };
+                    let Some(value_node) = argument_node.child_by_field_name("right") else {
+                        continue;
+                    };
+                    if label_node.kind() != "identifier" {
+                        continue;
+                    }
+                    let label = node_text(&label_node, src).trim().to_string();
+                    if label.is_empty() {
+                        continue;
+                    }
+                    if let Some(ast_arg) =
+                        call_arg_from_nodes(argument_node, value_node, file, src, Some(label))
+                    {
+                        *arg = ast_arg;
                     }
                 }
             }
@@ -687,11 +678,11 @@ fn annotate_scala_named_call_args(events: &mut [FlowEvent]) {
                 else_events,
                 ..
             } => {
-                annotate_scala_named_call_args(then_events);
-                annotate_scala_named_call_args(else_events);
+                annotate_scala_named_call_args(then_events, root, file, src);
+                annotate_scala_named_call_args(else_events, root, file, src);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                annotate_scala_named_call_args(body);
+                annotate_scala_named_call_args(body, root, file, src);
             }
             FlowEvent::Try {
                 body,
@@ -699,29 +690,13 @@ fn annotate_scala_named_call_args(events: &mut [FlowEvent]) {
                 finally_events,
                 ..
             } => {
-                annotate_scala_named_call_args(body);
-                annotate_scala_named_call_args(catch_events);
-                annotate_scala_named_call_args(finally_events);
+                annotate_scala_named_call_args(body, root, file, src);
+                annotate_scala_named_call_args(catch_events, root, file, src);
+                annotate_scala_named_call_args(finally_events, root, file, src);
             }
             _ => {}
         }
     }
-}
-
-fn scala_named_argument_parts(text: &str) -> Option<(String, &str)> {
-    let text = text.trim();
-    let eq = text.find('=')?;
-    if text.get(eq..eq + 2) == Some("=>") {
-        return None;
-    }
-    let label = text[..eq].trim();
-    if label.is_empty()
-        || !label.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        || label.chars().next().is_some_and(|ch| ch.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((label.to_string(), text[eq + 1..].trim()))
 }
 
 fn scala_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool {
@@ -787,8 +762,9 @@ fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>
 }
 
 /// Walk every Scala class-like declaration and pull `(name, type)`
-/// bindings from `val_definition` and `var_definition` children
-/// (class fields). Returns `(class_span, [TypeAliasBinding])` so the
+/// bindings from `val_definition` / `var_definition` children and from
+/// property-declaring constructor parameters (`val data: Envelope`, plus
+/// every case-class parameter). Returns `(class_span, [TypeAliasBinding])` so the
 /// per-method merge can attach a class's bindings to every method
 /// nested inside it.
 fn collect_scala_class_field_aliases(
@@ -800,6 +776,7 @@ fn collect_scala_class_field_aliases(
     let mut out = Vec::new();
     for class_node in collect_kinds(tree, class_kinds) {
         let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let is_case_class = scala_class_is_case(class_node, src);
         let mut work = vec![class_node];
         while let Some(node) = work.pop() {
             // Don't descend into nested classes; their methods get
@@ -820,6 +797,15 @@ fn collect_scala_class_field_aliases(
                     }
                 }
             }
+            if node.kind() == "class_parameter"
+                && (is_case_class || scala_class_parameter_declares_property(node, src))
+            {
+                if let Some(binding) = scala_field_alias(node, src) {
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 work.push(child);
@@ -832,8 +818,8 @@ fn collect_scala_class_field_aliases(
     out
 }
 
-/// Extract a `name: Type` binding from one Scala `val_definition` /
-/// `var_definition`. Handles both explicit annotations
+/// Extract a `name: Type` binding from one Scala field or class-parameter
+/// node. Handles both explicit annotations
 /// (`val x: Foo = ...`) and constructor-shaped initializers
 /// (`val x = new Foo()`), since Scala source frequently relies on
 /// type inference for class fields.
@@ -1436,13 +1422,13 @@ fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
         if decl.flow_events.len() != 1 {
             continue;
         }
-        let FlowEvent::Return { span, value_text, .. } = &decl.flow_events[0] else {
+        let FlowEvent::Return { span, value_flow, .. } = &decl.flow_events[0] else {
             continue;
         };
-        let Some(body) = value_text.as_ref() else {
+        let Some(projection) = value_flow.projection.as_ref() else {
             continue;
         };
-        let Some((call_receiver, call_name)) = scala_dotted_member_access_parts(body) else {
+        let Some((call_receiver, call_name)) = scala_dotted_member_access_parts(projection) else {
             continue;
         };
         let body_span = *span;
@@ -1459,6 +1445,10 @@ fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
                 span: body_span,
                 value_text: Some(format!("{call_name}()")),
                 value_name: None,
+                value_flow: bonsai_lang_api::ExpressionFlow {
+                    call_sites: vec![body_span],
+                    ..Default::default()
+                },
             },
         ];
     }
@@ -1468,15 +1458,15 @@ fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
 /// (`data.cmd`, optionally prefixed `this.`/`super.`), return
 /// `(receiver, call_name)` so the synthesized accessor can model it
 /// as a method call. Returns `None` for non-trivial bodies.
-fn scala_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
-    let trimmed = body.trim();
-    // Strip implicit-receiver qualifier; the inner text must be a
-    // pure dotted identifier path of ≥2 segments.
-    let inner = trimmed
-        .strip_prefix("this.")
-        .or_else(|| trimmed.strip_prefix("super."))
-        .unwrap_or(trimmed);
-    let segments: Vec<&str> = inner.split('.').collect();
+fn scala_dotted_member_access_parts(
+    projection: &bonsai_lang_api::ExpressionProjection,
+) -> Option<(String, String)> {
+    let mut segments: Vec<&str> = std::iter::once(projection.base.as_str())
+        .chain(projection.path.iter().map(String::as_str))
+        .collect();
+    if matches!(segments.first(), Some(&"this") | Some(&"super")) {
+        segments.remove(0);
+    }
     if segments.len() < 2 {
         return None;
     }
@@ -1493,8 +1483,9 @@ fn scala_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
         }
     }
     // Receiver = up-to-last-dot; call_name = full dotted form.
-    let last_dot = inner.rfind('.')?;
-    Some((inner[..last_dot].to_string(), inner.to_string()))
+    let call_name = segments.join(".");
+    let receiver = segments[..segments.len() - 1].join(".");
+    Some((receiver, call_name))
 }
 
 /// Qualify a bare read `val c = cmd` of a sibling zero-arg member by
@@ -1636,6 +1627,7 @@ fn synthesize_scala_case_class_accessors(idx: &mut DeclIndex, file: FileId, ctx:
                     span: *comp_span,
                     value_text: Some(field.clone()),
                     value_name: Some(field.clone()),
+                    value_flow: bonsai_lang_api::ExpressionFlow::from_place(field.clone()),
                 }],
                 has_implicit_returns: false,
                 params: Vec::new(),

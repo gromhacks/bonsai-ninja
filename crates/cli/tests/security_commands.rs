@@ -95,6 +95,15 @@ fn run(args: &[&str]) -> Option<String> {
     Some(run_command(args, &[])?.stdout)
 }
 
+fn json_rows(value: &serde_json::Value) -> &[serde_json::Value] {
+    value
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| value.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| panic!("expected JSON rows or array, got {value:#}"))
+}
+
 fn rules_dir() -> String {
     repo_root()
         .join("security-patterns")
@@ -1685,7 +1694,7 @@ def handle():
     ])
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint-analysis JSON");
-    let rows = parsed.as_array().expect("finding array");
+    let rows = json_rows(&parsed);
     assert_eq!(
         rows.len(),
         2,
@@ -1969,7 +1978,11 @@ fn source_analysis_maps_python_entrypoint_paths() {
     assert!(out.contains("\"flow\""), "expected rendered source flow:\n{out}");
     assert!(out.contains("python.flask"), "got:\n{out}");
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("source-analysis JSON");
-    let rows = parsed.as_array().expect("source-analysis rows");
+    assert_eq!(parsed["analysis_complete"].as_bool(), Some(true));
+    assert!(parsed["analysis_incomplete_reasons"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let rows = json_rows(&parsed);
     assert!(
         rows.iter()
             .all(|row| row["analysis_complete"].as_bool().is_some()),
@@ -2117,7 +2130,11 @@ fn taint_analysis_json_exposes_completion_metadata() {
     ])
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint-analysis JSON");
-    let rows = parsed.as_array().expect("taint-analysis rows");
+    assert_eq!(parsed["analysis_complete"].as_bool(), Some(true));
+    assert!(parsed["analysis_incomplete_reasons"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let rows = json_rows(&parsed);
     assert!(!rows.is_empty(), "fixture should emit taint findings:\n{out}");
     assert!(
         rows.iter()
@@ -2189,6 +2206,10 @@ fn taint_analysis_summary_text_exposes_precision_counts() {
     assert!(
         out.contains("security taint-analysis summary"),
         "summary text header missing:\n{out}"
+    );
+    assert!(
+        out.contains("analysis: complete") || out.contains("analysis incomplete"),
+        "summary text must state whether semantic coverage is complete:\n{out}"
     );
     assert!(
         out.contains("precision") && (out.contains("exact") || out.contains("narrowed")),
@@ -2628,8 +2649,7 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
         .unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{lang}: invalid JSON: {e}\n{out}"));
-        assert!(parsed.is_array(), "{lang}: expected JSON array:\n{out}");
-        let rows = parsed.as_array().expect("array");
+        let rows = json_rows(&parsed);
         let expected_count = expected_mega_finding_count_with_inferred_sources(lang);
         assert_eq!(
             rows.len(),
@@ -3103,7 +3123,7 @@ def handle():
     ])
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("production profile JSON");
-    let rows = parsed.as_array().expect("finding array");
+    let rows = json_rows(&parsed);
     assert_eq!(rows.len(), 1, "only first-party app.py should remain:\n{out}");
     let row = &rows[0];
     assert!(
@@ -3159,7 +3179,7 @@ def handle():
     ])
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("production profile JSON");
-    let rows = parsed.as_array().expect("finding array");
+    let rows = json_rows(&parsed);
     assert_eq!(
         rows.len(),
         1,

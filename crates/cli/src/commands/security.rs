@@ -31,9 +31,10 @@ use bonsai_sdk::{
     load_rulepack, load_workspace_local_rules, parse_severity, security_match_rows, tree_file_rel,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventoryOptions, DependencyRow,
     Finding, FindingMatch, FindingStatus, PackInventoryOptions, PackRuleRow, Rule, RuleKind, RuleMatch,
-    Rulepack, SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity, SourceAnalysisOptions,
-    SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions, TaintAnalysisReport,
-    TaintPropagationArg, TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, FAMILY_NOT_APPLICABLE,
+    Rulepack, RuntimeDisabledRule, SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity,
+    SourceAnalysisOptions, SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions,
+    TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES,
+    FAMILY_NOT_APPLICABLE,
 };
 use comfy_table::Cell;
 use serde::{Deserialize, Serialize};
@@ -44,8 +45,10 @@ fn source_analysis_json_incomplete_reasons(
     command: &str,
     info: &paging::PageInfo,
     rows: &[CombinedSourceAnalysisFlow],
+    report_reasons: &[String],
 ) -> Vec<String> {
-    let mut reasons = paged_json_incomplete_reasons(command, info);
+    let mut reasons = report_reasons.to_vec();
+    reasons.extend(paged_json_incomplete_reasons(command, info));
     for row in rows {
         if row.analysis_complete {
             continue;
@@ -65,12 +68,18 @@ fn source_analysis_json_incomplete_reasons(
     reasons
 }
 
-const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v7";
+const TAINT_RENDER_CACHE_KIND: &str = "security/taint-analysis/render-report/v9";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisRenderReport {
     summary: TaintAnalysisSummary,
     findings: Vec<TaintAnalysisRenderFinding>,
+    #[serde(default)]
+    analysis_complete: bool,
+    #[serde(default)]
+    analysis_incomplete_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    runtime_disabled_rules: Vec<RuntimeDisabledRule>,
     /// True when every finding was saved after bulk flow-evidence
     /// attachment. JSON `--all` needs this because it serializes full
     /// finding rows; text output can rebuild flow bodies lazily.
@@ -115,6 +124,12 @@ struct TaintAnalysisRenderReportCache {
     summary: TaintAnalysisSummary,
     findings: Vec<TaintAnalysisRenderFindingCache>,
     #[serde(default)]
+    analysis_complete: bool,
+    #[serde(default)]
+    analysis_incomplete_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    runtime_disabled_rules: Vec<RuntimeDisabledRule>,
+    #[serde(default)]
     bulk_flow_evidence: bool,
 }
 
@@ -138,6 +153,9 @@ impl From<&TaintAnalysisRenderReport> for TaintAnalysisRenderReportCache {
                     chain_func_ids: item.chain_func_ids.clone(),
                 })
                 .collect(),
+            analysis_complete: report.analysis_complete,
+            analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone(),
+            runtime_disabled_rules: report.runtime_disabled_rules.clone(),
             bulk_flow_evidence: report.bulk_flow_evidence,
         }
     }
@@ -156,6 +174,9 @@ impl From<TaintAnalysisRenderReportCache> for TaintAnalysisRenderReport {
                     baseline_status: None,
                 })
                 .collect(),
+            analysis_complete: report.analysis_complete,
+            analysis_incomplete_reasons: report.analysis_incomplete_reasons,
+            runtime_disabled_rules: report.runtime_disabled_rules,
             bulk_flow_evidence: report.bulk_flow_evidence,
         }
     }
@@ -163,6 +184,10 @@ impl From<TaintAnalysisRenderReportCache> for TaintAnalysisRenderReport {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct TaintAnalysisSummary {
+    #[serde(default)]
+    analysis_complete: bool,
+    #[serde(default)]
+    analysis_incomplete_reasons: Vec<String>,
     total_findings: usize,
     source_rule_count: usize,
     sink_rule_count: usize,
@@ -1253,6 +1278,7 @@ fn cmd_flows(
         },
         |event| analysis_progress.handle(event),
     )?;
+    let runtime_disabled_rules = report.runtime_disabled_rules.clone();
     if let Some(finding_id) = finding.as_deref() {
         filter_report_to_finding_id(&mut report, finding_id)?;
     }
@@ -1301,10 +1327,8 @@ fn cmd_flows(
             // (invalid regex, etc.) so the SARIF report surfaces them
             // alongside findings. Without this, rules silently
             // dropped at runtime would never reach the user.
-            let report = SecurityReport::with_runtime_disabled_rules(
-                plain,
-                bonsai_sdk::drain_runtime_disabled_rules(),
-            );
+            let report = SecurityReport::with_runtime_disabled_rules(plain, runtime_disabled_rules)
+                .with_analysis_completeness(report.analysis_complete, report.analysis_incomplete_reasons);
             let workspace_root = std::fs::canonicalize(workspace)
                 .ok()
                 .and_then(|path| path.to_str().map(str::to_owned))
@@ -1642,25 +1666,31 @@ fn render_taint_json_page(
     report: &TaintAnalysisRenderReport,
     paged_idx: &[usize],
     info: &paging::PageInfo,
-    paging_cfg: &paging::PagingConfig,
+    _paging_cfg: &paging::PagingConfig,
 ) -> Result<()> {
     // Serialize the render-finding wrapper (the finding fields are
     // flattened in), so the `--baseline` `baseline_status` annotation
     // rides along on each row when present.
     let rows: Vec<&TaintAnalysisRenderFinding> = paged_idx.iter().map(|idx| &report.findings[*idx]).collect();
-    if paging_cfg.json_wrapped() {
-        let analysis_incomplete_reasons = paged_json_incomplete_reasons("security/taint-analysis", info);
-        let wrapped = serde_json::json!({
-            "analysis_complete": info.page_number == 1 && info.is_last,
-            "analysis_incomplete_reasons": analysis_incomplete_reasons,
-            "summary": compact_taint_summary(&report.summary),
-            "rows": rows,
-            "page": page_info_to_json(info),
-        });
-        cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
-    } else {
-        cli_println!("{}", serde_json::to_string_pretty(&rows)?);
+    // Security JSON is always an envelope, including `--all`. A bare empty
+    // array cannot distinguish a proven clean scan from parser/resolution
+    // failure, which is unsafe for automation.
+    let mut analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
+    if !report.analysis_complete && analysis_incomplete_reasons.is_empty() {
+        analysis_incomplete_reasons.push("taint-analysis incomplete: unknown reason".to_string());
     }
+    analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("security/taint-analysis", info));
+    analysis_incomplete_reasons.sort();
+    analysis_incomplete_reasons.dedup();
+    let wrapped = serde_json::json!({
+        "analysis_complete": report.analysis_complete && analysis_incomplete_reasons.is_empty(),
+        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+        "runtime_disabled_rules": report.runtime_disabled_rules,
+        "summary": compact_taint_summary(&report.summary),
+        "rows": rows,
+        "page": page_info_to_json(info),
+    });
+    cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
     Ok(())
 }
 
@@ -1716,9 +1746,8 @@ fn build_taint_text_pages(
                 .map(|unit| paging::bytes_to_tokens(unit.text.len() as u64))
                 .sum(),
         };
-        let text = page_cache::capture(|| {
-            render_taint_analysis_text_units(&report.summary, &units[start..end], &info)
-        })?;
+        let text =
+            page_cache::capture(|| render_taint_analysis_text_units(report, &units[start..end], &info))?;
         pages.push(page_cache::CachedPage {
             number: page_number,
             cursor,
@@ -1780,11 +1809,31 @@ fn build_taint_text_units(
 }
 
 fn render_taint_analysis_text_units(
-    summary: &TaintAnalysisSummary,
+    report: &TaintAnalysisRenderReport,
     units: &[TaintTextUnit],
     info: &paging::PageInfo,
 ) -> Result<()> {
-    render_taint_analysis_report_heading(summary);
+    render_taint_analysis_report_heading(&report.summary);
+    if report.analysis_complete {
+        cli_println!("{}", ui().dim("analysis: complete"));
+    } else {
+        let u = ui();
+        let reasons = if report.analysis_incomplete_reasons.is_empty() {
+            "unknown semantic coverage gap".to_string()
+        } else {
+            report.analysis_incomplete_reasons.join(", ")
+        };
+        cli_println!("{}", u.warn(&format!("analysis incomplete — {reasons}")));
+    }
+    for disabled in &report.runtime_disabled_rules {
+        cli_println!(
+            "{}",
+            ui().warn(&format!(
+                "runtime-disabled rule {} — {}",
+                disabled.rule_id, disabled.reason
+            ))
+        );
+    }
     for unit in units {
         cli_print!("{}", unit.text);
     }
@@ -2077,6 +2126,9 @@ fn build_taint_render_report(
         return TaintAnalysisRenderReport {
             summary,
             findings: Vec::new(),
+            analysis_complete: report.analysis_complete,
+            analysis_incomplete_reasons: report.analysis_incomplete_reasons,
+            runtime_disabled_rules: report.runtime_disabled_rules,
             bulk_flow_evidence: false,
         };
     }
@@ -2095,6 +2147,9 @@ fn build_taint_render_report(
     TaintAnalysisRenderReport {
         summary,
         findings,
+        analysis_complete: report.analysis_complete,
+        analysis_incomplete_reasons: report.analysis_incomplete_reasons,
+        runtime_disabled_rules: report.runtime_disabled_rules,
         bulk_flow_evidence,
     }
 }
@@ -2319,6 +2374,8 @@ fn build_taint_summary(report: &TaintAnalysisReport) -> TaintAnalysisSummary {
         report.source_rule_count,
         report.sink_rule_count,
         report.sanitizer_rule_count,
+        report.analysis_complete,
+        report.analysis_incomplete_reasons.clone(),
     )
 }
 
@@ -2335,8 +2392,12 @@ fn summarize_taint_findings<'a>(
     source_rule_count: usize,
     sink_rule_count: usize,
     sanitizer_rule_count: usize,
+    analysis_complete: bool,
+    analysis_incomplete_reasons: Vec<String>,
 ) -> TaintAnalysisSummary {
     let mut summary = TaintAnalysisSummary {
+        analysis_complete,
+        analysis_incomplete_reasons,
         total_findings,
         source_rule_count,
         sink_rule_count,
@@ -2410,10 +2471,15 @@ fn filter_taint_render_report(report: &TaintAnalysisRenderReport) -> TaintAnalys
         report.summary.source_rule_count,
         report.summary.sink_rule_count,
         report.summary.sanitizer_rule_count,
+        report.analysis_complete,
+        report.analysis_incomplete_reasons.clone(),
     );
     TaintAnalysisRenderReport {
         summary,
         findings,
+        analysis_complete: report.analysis_complete,
+        analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone(),
+        runtime_disabled_rules: report.runtime_disabled_rules.clone(),
         bulk_flow_evidence: report.bulk_flow_evidence,
     }
 }
@@ -2493,6 +2559,16 @@ fn render_taint_summary_text(summary: &TaintAnalysisSummary) {
             summary.total_findings
         ))
     );
+    if summary.analysis_complete {
+        cli_println!("{}", u.dim("analysis: complete"));
+    } else {
+        let reasons = if summary.analysis_incomplete_reasons.is_empty() {
+            "unknown semantic coverage gap".to_string()
+        } else {
+            summary.analysis_incomplete_reasons.join(", ")
+        };
+        cli_println!("{}", u.warn(&format!("analysis incomplete — {reasons}")));
+    }
     let mut overview = u.table(&["metric", "count"]);
     overview.add_row(vec![Cell::new("findings"), Cell::new(summary.total_findings)]);
     overview.add_row(vec![
@@ -2553,6 +2629,8 @@ fn top_counts_json(counts: &BTreeMap<String, usize>, limit: usize) -> serde_json
 fn compact_taint_summary(summary: &TaintAnalysisSummary) -> serde_json::Value {
     serde_json::json!({
         "kind": "compact",
+        "analysis_complete": summary.analysis_complete,
+        "analysis_incomplete_reasons": summary.analysis_incomplete_reasons,
         "total_findings": summary.total_findings,
         "source_rule_count": summary.source_rule_count,
         "sink_rule_count": summary.sink_rule_count,
@@ -2692,6 +2770,12 @@ fn cmd_source_analysis(
     )?;
     let source_rule_count = report.source_rule_count;
     let lineage_summary = report.lineage_summary;
+    let report_analysis_complete = report.analysis_complete;
+    let mut report_analysis_incomplete_reasons = report.analysis_incomplete_reasons;
+    let report_runtime_disabled_rules = report.runtime_disabled_rules;
+    if !report_analysis_complete && report_analysis_incomplete_reasons.is_empty() {
+        report_analysis_incomplete_reasons.push("source-analysis incomplete: unknown reason".to_string());
+    }
     // Secondary `--contains` / `--not-contains` filter, applied once to
     // the candidate set that every render path (text + json) draws from.
     let mut candidates = report.candidates;
@@ -2718,42 +2802,40 @@ fn cmd_source_analysis(
 
     match format {
         SourceAnalysisFormat::Json => {
-            if paging_cfg.json_wrapped() {
-                page_cache::emit_paged_text(
-                    workspace,
-                    &candidates,
-                    &paging_cfg,
-                    "security/source-analysis",
-                    filters_hash,
-                    cost,
-                    |paged, info, _cfg| {
-                        let rendered = render_source_analysis_candidates(ws, paged);
-                        let analysis_incomplete_reasons = source_analysis_json_incomplete_reasons(
-                            "security/source-analysis",
-                            info,
-                            &rendered,
-                        );
-                        let wrapped = serde_json::json!({
-                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
-                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
-                            "rows": rendered,
-                            "summary": {
-                                "source_flow_count": candidates.len(),
-                                "source_rule_count": source_rule_count,
-                                "lineage": lineage_summary,
-                            },
-                            "page": page_info_to_json(info),
-                        });
-                        cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
-                        Ok(())
-                    },
-                )?;
-            } else {
-                let render_progress = ScopedProgress::new("rendering source JSON");
-                let rendered = render_source_analysis_candidates(ws, &candidates);
-                cli_println!("{}", serde_json::to_string_pretty(&rendered)?);
-                render_progress.finish();
-            }
+            // Security JSON always carries scan completeness, including
+            // `--all`; an empty bare array would be ambiguous to automation.
+            page_cache::emit_paged_text(
+                workspace,
+                &candidates,
+                &paging_cfg,
+                "security/source-analysis",
+                filters_hash,
+                cost,
+                |paged, info, _cfg| {
+                    let rendered = render_source_analysis_candidates(ws, paged);
+                    let analysis_incomplete_reasons = source_analysis_json_incomplete_reasons(
+                        "security/source-analysis",
+                        info,
+                        &rendered,
+                        &report_analysis_incomplete_reasons,
+                    );
+                    let wrapped = serde_json::json!({
+                        "analysis_complete": report_analysis_complete
+                            && analysis_incomplete_reasons.is_empty(),
+                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
+                        "runtime_disabled_rules": &report_runtime_disabled_rules,
+                        "rows": rendered,
+                        "summary": {
+                            "source_flow_count": candidates.len(),
+                            "source_rule_count": source_rule_count,
+                            "lineage": lineage_summary,
+                        },
+                        "page": page_info_to_json(info),
+                    });
+                    cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
+                    Ok(())
+                },
+            )?;
             Ok(())
         }
         SourceAnalysisFormat::Text => {
@@ -2797,6 +2879,9 @@ fn cmd_source_analysis(
                         candidates.len(),
                         source_rule_count,
                         lineage_summary,
+                        report_analysis_complete,
+                        &report_analysis_incomplete_reasons,
+                        &report_runtime_disabled_rules,
                     )
                 })?;
                 cached_pages.push(page_cache::CachedPage {
@@ -2839,6 +2924,9 @@ fn render_source_analysis_text_page(
     total_candidates: usize,
     source_rule_count: usize,
     lineage_summary: SourceLineageSummary,
+    report_analysis_complete: bool,
+    report_analysis_incomplete_reasons: &[String],
+    runtime_disabled_rules: &[RuntimeDisabledRule],
 ) -> Result<()> {
     let rendered = render_source_analysis_candidates(ws, candidates);
     let u = ui();
@@ -2849,6 +2937,27 @@ fn render_source_analysis_text_page(
             total_candidates, source_rule_count,
         ))
     );
+    if report_analysis_complete {
+        cli_println!("{}", u.dim("analysis: complete"));
+    } else {
+        let reason = if report_analysis_incomplete_reasons.is_empty() {
+            "unknown scan coverage gap".to_string()
+        } else {
+            report_analysis_incomplete_reasons.join(", ")
+        };
+        for line in u.wrapped_warn_labeled_lines("analysis incomplete", &reason) {
+            cli_println!("{line}");
+        }
+    }
+    for disabled in runtime_disabled_rules {
+        cli_println!(
+            "{}",
+            u.warn(&format!(
+                "runtime-disabled rule {} — {}",
+                disabled.rule_id, disabled.reason
+            ))
+        );
+    }
     if !lineage_summary.is_complete() {
         let reason = format!(
             "{} representative flow(s); {} truncated by hop budget; {} additional path(s) omitted; max {} hop(s), {} path(s) rendered per flow",

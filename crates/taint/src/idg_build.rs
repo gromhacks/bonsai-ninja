@@ -34,11 +34,10 @@ use bonsai_idg::IdgQueryService;
 #[must_use]
 pub fn ensure_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
     // Match the semantic graph used by security: diagnostic peer-method
-    // fan-out is intentionally excluded. The one compatibility concession
-    // belongs specifically to this token-level API — unresolved syntax-
-    // classified calls conservatively preserve argument/receiver taint,
-    // matching the retired worklist without changing rulepack-driven
-    // security graphs.
+    // fan-out is intentionally excluded. Unresolved calls may preserve
+    // AST-proven inputs into their result at narrowed precision, but method
+    // arguments are never invented as exact receiver-state writes: mutation
+    // requires a resolved body or an explicit external summary.
     let transfer_options = bonsai_idg::TransferOptions {
         include_diagnostic_field_flows: false,
         include_receiver_method_propagation: false,
@@ -60,6 +59,9 @@ pub(crate) fn idg_service_for_inter_config(
     if config.clean_output_overwrites.is_empty()
         && config.source_output_args.is_empty()
         && config.source_callback_args.is_empty()
+        && config.call_result_passthroughs.is_empty()
+        && config.output_arg_flows.is_empty()
+        && config.receiver_state_propagations.is_empty()
     {
         return ensure_idg_service(db);
     }
@@ -90,9 +92,40 @@ pub(crate) fn idg_service_for_inter_config(
                 source_param_indices: shape.source_param_indices.clone(),
             })
             .collect(),
+        call_result_passthroughs: config
+            .call_result_passthroughs
+            .iter()
+            .map(|shape| bonsai_idg::CallResultPassthroughSpec {
+                callee: shape.callee.clone(),
+                receiver_type: shape.receiver_type.clone(),
+                input_arg_indices: shape.input_arg_indices.clone(),
+                input_receiver: shape.input_receiver,
+            })
+            .collect(),
+        output_arg_flows: config
+            .output_arg_flows
+            .iter()
+            .map(|shape| bonsai_idg::OutputArgFlowSpec {
+                callee: shape.callee.clone(),
+                output_arg_index: shape.output_arg_index,
+                value_arg_indices: shape.value_arg_indices.clone(),
+                value_start_arg_index: shape.value_start_arg_index,
+            })
+            .collect(),
+        receiver_state_propagations: config
+            .receiver_state_propagations
+            .iter()
+            .map(|shape| bonsai_idg::ReceiverStatePropagationSpec {
+                method: shape.method.clone(),
+                receiver_type: shape.receiver_type.clone(),
+            })
+            .collect(),
         include_diagnostic_field_flows: false,
         include_receiver_method_propagation: false,
         include_field_argument_forwarding: true,
+        demand_driven_field_forwarding: false,
+        field_demand_languages: Vec::new(),
+        field_demand_terminal_sites: Vec::new(),
         include_unresolved_call_result_passthrough: true,
         include_unresolved_receiver_result_passthrough: true,
     }
@@ -106,11 +139,7 @@ fn configured_idg_service(
 ) -> Arc<IdgQueryService> {
     let transfer_options = transfer_options.clone().canonicalized();
     let fingerprint = transfer_options.semantic_fingerprint();
-    if let Some(service) = db.idg_service_for_semantics(fingerprint) {
-        return service;
-    }
-    let built = build_idg_service(db, &transfer_options);
-    db.set_idg_service_for_semantics(fingerprint, built)
+    db.get_or_init_idg_service_for_semantics(fingerprint, || build_idg_service(db, &transfer_options))
 }
 
 fn build_idg_service(
@@ -163,7 +192,11 @@ fn build_resolved_call_graph_snapshot(db: &AnalyzerDb) -> bonsai_callgraph::Reso
         |file| {
             db.adapter_for(file)
                 .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
-                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+                .unwrap_or(&[])
+        },
+        |file| {
+            db.adapter_for(file)
+                .is_some_and(|adapter| adapter.capabilities().bare_call_constructor_syntax)
         },
     )
 }

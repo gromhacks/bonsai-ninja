@@ -7,7 +7,7 @@ use bonsai_lang_api::{
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
+    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use bonsai_lang_api::{CallArg, DeclKind, FlowEvent};
 use std::collections::{HashMap, HashSet};
@@ -160,6 +160,7 @@ impl LanguageAdapter for JavaScriptAdapter {
                 snapshot.text.as_bytes(),
                 file,
             );
+            apply_javascript_array_literal_types(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -175,10 +176,58 @@ impl LanguageAdapter for JavaScriptAdapter {
         // is reliable here (unlike Go's uppercase-exported-function form).
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut decl_index);
         bonsai_lang_api::apply_class_field_type_aliases(&mut decl_index);
+        bonsai_lang_api::apply_call_receiver_types(&mut decl_index);
         decl_index
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Type locals initialized by an ECMAScript array literal from the CST. This
+/// supplies the same semantic fact a compiler obtains from `const xs = []`;
+/// external standard-library summaries can then require an `Array` receiver
+/// instead of matching a method spelling on arbitrary user objects.
+fn apply_javascript_array_literal_types(index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+    let mut bindings = Vec::new();
+    for declarator in collect_kinds(tree, &["variable_declarator"]) {
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value_node) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        if value_node.kind() != "array" || name_node.kind() != "identifier" {
+            continue;
+        }
+        let name = node_text(&name_node, src).trim();
+        if !name.is_empty() {
+            bindings.push((span_of(file, &declarator), name.to_string()));
+        }
+    }
+    for (span, name) in bindings {
+        let owner = index
+            .defs
+            .iter()
+            .enumerate()
+            .filter(|(_, decl)| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) && decl.span.file == span.file
+                    && decl.span.start <= span.start
+                    && span.end <= decl.span.end
+            })
+            .min_by_key(|(_, decl)| decl.span.len())
+            .map(|(idx, _)| idx);
+        let Some(owner) = owner else { continue };
+        let binding = TypeAliasBinding {
+            name,
+            type_name: "Array".to_string(),
+        };
+        if !index.defs[owner].type_aliases.contains(&binding) {
+            index.defs[owner].type_aliases.push(binding);
+        }
     }
 }
 
@@ -1400,6 +1449,7 @@ fn rewrite_javascript_super_constructor_invocations_in_events(
                 rewrite_javascript_super_constructor_invocations_in_events(finally_events, super_ctor);
             }
             FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
             | FlowEvent::Return { .. }
             | FlowEvent::Throw { .. }
             | FlowEvent::Break { .. }
@@ -1543,16 +1593,10 @@ fn is_javascript_getter_method(method: Node<'_>, src: &[u8]) -> bool {
 fn first_simple_js_getter_return_projection(events: &[FlowEvent]) -> Option<String> {
     for event in events {
         match event {
-            FlowEvent::Return {
-                value_name,
-                value_text,
-                ..
-            } => {
-                if let Some(projected) = value_name
-                    .as_deref()
-                    .and_then(simple_js_getter_projection)
-                    .or_else(|| value_text.as_deref().and_then(simple_js_getter_projection))
-                {
+            FlowEvent::Return { value_flow, .. } => {
+                if let Some(projected) = value_flow.projection.as_ref().and_then(|projection| {
+                    matches!(projection.base.as_str(), "this" | "super").then(|| projection.canonical_place())
+                }) {
                     return Some(projected);
                 }
             }
@@ -1589,35 +1633,6 @@ fn first_simple_js_getter_return_projection(events: &[FlowEvent]) -> Option<Stri
         }
     }
     None
-}
-
-fn simple_js_getter_projection(text: &str) -> Option<String> {
-    let normalized = text
-        .trim()
-        .trim_end_matches(';')
-        .replace("?.", ".")
-        .replace("?.[", ".[");
-    if normalized.contains(['(', ')', '{', '}', ',', ' ', '\t', '\n', '\r']) {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for part in normalized.split(['.', '[', ']']) {
-        let part = part.trim().trim_matches('"').trim_matches('\'').trim_matches('`');
-        if part.is_empty() {
-            continue;
-        }
-        if !part
-            .chars()
-            .all(|ch| ch == '_' || ch == '$' || ch == '#' || ch.is_ascii_alphanumeric())
-        {
-            return None;
-        }
-        parts.push(part.to_string());
-    }
-    if parts.len() < 2 || !matches!(parts.first().map(String::as_str), Some("this" | "super")) {
-        return None;
-    }
-    Some(parts.join("."))
 }
 
 fn collect_getters_for_class(

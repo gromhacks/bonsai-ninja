@@ -365,23 +365,17 @@ fn collect_receiver_state_sources_inner(
                 }
                 if let crate::FlowEvent::Call { args, .. } = event {
                     for arg in args {
-                        collect_receiver_state_source_name(
-                            &arg.value_text,
-                            locals,
-                            implicit_receiver_names,
-                            out,
-                        );
+                        if let Some(place) = &arg.place {
+                            collect_receiver_state_source_name(place, locals, implicit_receiver_names, out);
+                        }
+                        for source in &arg.source_names {
+                            collect_receiver_state_source_name(source, locals, implicit_receiver_names, out);
+                        }
                     }
                 }
             }
-            crate::FlowEvent::Return {
-                value_text,
-                value_name,
-                ..
-            } => {
-                if let Some(value) = value_name.as_ref().or(value_text.as_ref()) {
-                    collect_receiver_state_source_name(value, locals, implicit_receiver_names, out);
-                }
+            crate::FlowEvent::Return { value_flow, .. } => {
+                collect_receiver_state_expression_flow(value_flow, locals, implicit_receiver_names, out);
             }
             crate::FlowEvent::Branch {
                 then_events,
@@ -408,6 +402,29 @@ fn collect_receiver_state_sources_inner(
             }
             _ => {}
         }
+    }
+}
+
+fn collect_receiver_state_expression_flow(
+    flow: &crate::ExpressionFlow,
+    locals: &std::collections::HashSet<String>,
+    implicit_receiver_names: &[&str],
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    if let Some(place) = &flow.place {
+        collect_receiver_state_source_name(place, locals, implicit_receiver_names, out);
+    }
+    for source in &flow.source_names {
+        collect_receiver_state_source_name(source, locals, implicit_receiver_names, out);
+    }
+    for field in &flow.aggregate_fields {
+        collect_receiver_state_expression_flow(&field.value, locals, implicit_receiver_names, out);
+    }
+    for item in &flow.tuple_items {
+        collect_receiver_state_expression_flow(item, locals, implicit_receiver_names, out);
+    }
+    for spread in &flow.spreads {
+        collect_receiver_state_expression_flow(spread, locals, implicit_receiver_names, out);
     }
 }
 
@@ -469,6 +486,11 @@ fn argument_node_is_place(node: &Node<'_>, text: &str) -> bool {
     if matches!(
         node.kind(),
         "identifier"
+            | "variable_name"
+            | "var"
+            | "varname"
+            | "identifier_dollar_escaped"
+            | "yul_identifier"
             | "field_identifier"
             | "member_expression"
             | "member_access_expression"

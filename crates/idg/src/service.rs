@@ -26,7 +26,8 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_index::GlobalIndex;
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::bitset::NodeBitSet;
 use crate::edge::IdgEdge;
@@ -112,9 +113,9 @@ pub struct CrossCallEdge {
     /// Source span of the call site in the caller.
     pub call_span: Span,
     /// 0-based positional index of the argument in the call.
-    pub arg_idx: u8,
+    pub arg_idx: u32,
     /// 0-based positional index of the parameter in the callee.
-    pub param_idx: u8,
+    pub param_idx: u32,
     /// Per-edge precision recorded by the IDG transfer / stitch pass.
     pub precision: Precision,
     /// Sub-classifier for the call site (Direct / Virtual / Indirect /
@@ -127,12 +128,20 @@ pub struct CrossCallEdge {
 /// segment. Built once on first reachability query; reused for
 /// subsequent queries.
 struct UnifiedAddressSpace {
-    /// `(seg, local_node) → ws_node`.
-    forward: AHashMap<(SegmentId, NodeId), WsNodeId>,
+    /// Contiguous workspace-node base for each segment plus one trailing
+    /// sentinel. Since segment ids and local node ids are dense, translating
+    /// `(segment, local)` is arithmetic rather than one hash entry per node.
+    segment_bases: Box<[u32]>,
     /// `ws_node → (seg, local_node)`. Vec-indexed by ws node raw.
     reverse: Vec<(SegmentId, NodeId)>,
-    /// Reachability index over the unified edge set.
-    reach: ReachabilityIndex,
+    /// Nodes grouped by owning function. Target-function cuts use this
+    /// compiler-derived index instead of rescanning a file segment once per
+    /// method in the target set.
+    nodes_by_func: AHashMap<FuncId, Box<[NodeId]>>,
+    /// Unfiltered diagnostic reachability is built only if requested. Normal
+    /// semantic consumers request a precision-scoped index, so eagerly
+    /// retaining both CSR pairs doubles large-workspace memory needlessly.
+    unfiltered_reach: RwLock<Option<Arc<ReachabilityIndex>>>,
     /// Precision-scoped reachability indexes. Each entry contains
     /// only edges whose precision is at or below the key. Building
     /// this once per requested precision lets exact/security/export
@@ -145,16 +154,14 @@ struct UnifiedAddressSpace {
     /// those queries proportional to the seed closure instead of
     /// rescanning every segment edge and every cross-file edge.
     cross_calls_by_from: RwLock<Option<Arc<CrossCallsByFrom>>>,
-    /// Backward closures from sink target function sets. Large Java
-    /// scans often have many controllers feeding the same sink-bearing
-    /// helper; caching the sink side keeps each source query from
-    /// walking the same reverse graph again.
-    target_func_backward: RwLock<AHashMap<TargetFuncCutKey, Arc<NodeBitSet>>>,
-    /// Backward closures from concrete sink target node sets. This is
-    /// stricter than `target_func_backward` for same-function or
-    /// module-pseudo-function scans where many source calls share an
-    /// enclosing function but only a few can reach a real sink site.
-    target_node_backward: RwLock<AHashMap<TargetNodeCutKey, Arc<NodeBitSet>>>,
+    /// Recently used backward closures from sink target function or node
+    /// sets. Every closure is a full-workspace bitset, so retaining one per
+    /// source group would make memory grow as `groups * nodes`. The shared
+    /// LRU retains at most one closure per available analysis worker; an
+    /// evicted closure is recomputed exactly when requested again.
+    target_backward: RwLock<TargetCutCache>,
+    #[cfg(test)]
+    target_cut_computations: AtomicU64,
 }
 
 type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
@@ -169,6 +176,109 @@ struct TargetFuncCutKey {
 struct TargetNodeCutKey {
     max_precision: Option<Precision>,
     nodes: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TargetCutKey {
+    Funcs(TargetFuncCutKey),
+    Nodes(TargetNodeCutKey),
+}
+
+struct CachedTargetCut {
+    closure: Arc<OnceLock<Arc<NodeBitSet>>>,
+    last_used: AtomicU64,
+}
+
+/// Exact backward target cuts retained under a strict memory bound.
+///
+/// Cache eviction changes only whether a later query recomputes its reverse
+/// fixed point. It never truncates that fixed point or the returned cut.
+struct TargetCutCache {
+    entries: AHashMap<TargetCutKey, CachedTargetCut>,
+    capacity: usize,
+    access_clock: AtomicU64,
+}
+
+impl TargetCutCache {
+    fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            entries: AHashMap::with_capacity(capacity),
+            capacity,
+            access_clock: AtomicU64::new(1),
+        }
+    }
+
+    fn next_access(&self) -> u64 {
+        self.access_clock.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn get_cell(&self, key: &TargetCutKey) -> Option<Arc<OnceLock<Arc<NodeBitSet>>>> {
+        let entry = self.entries.get(key)?;
+        entry.last_used.store(self.next_access(), Ordering::Relaxed);
+        Some(Arc::clone(&entry.closure))
+    }
+
+    fn get_or_insert_cell(&mut self, key: TargetCutKey) -> Arc<OnceLock<Arc<NodeBitSet>>> {
+        let access = self.next_access();
+        if let Some(existing) = self.entries.get(&key) {
+            existing.last_used.store(access, Ordering::Relaxed);
+            return Arc::clone(&existing.closure);
+        }
+
+        if self.entries.len() >= self.capacity {
+            let least_recent = self
+                .entries
+                .iter()
+                // Never evict an in-flight cell: doing so would let a later
+                // same-key caller create a second whole-workspace closure.
+                .filter(|(_, entry)| entry.closure.get().is_some())
+                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+                .map(|(key, _)| key.clone());
+            if let Some(least_recent) = least_recent {
+                self.entries.remove(&least_recent);
+            }
+        }
+
+        let closure = Arc::new(OnceLock::new());
+        self.entries.insert(
+            key,
+            CachedTargetCut {
+                closure: Arc::clone(&closure),
+                last_used: AtomicU64::new(access),
+            },
+        );
+        closure
+    }
+
+    fn trim_completed(&mut self) {
+        while self.entries.len() > self.capacity {
+            let least_recent = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.closure.get().is_some())
+                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
+                .map(|(key, _)| key.clone());
+            let Some(least_recent) = least_recent else {
+                break;
+            };
+            self.entries.remove(&least_recent);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, key: &TargetCutKey) -> bool {
+        self.entries.contains_key(key)
+    }
+}
+
+fn default_target_cut_cache_capacity() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 impl TargetFuncCutKey {
@@ -198,6 +308,7 @@ pub struct IdgQueryService {
     workspace: Arc<IdgWorkspace>,
     global: Arc<GlobalIndex>,
     unified: RwLock<Option<Arc<UnifiedAddressSpace>>>,
+    target_cut_cache_capacity: usize,
 }
 
 impl IdgQueryService {
@@ -205,10 +316,19 @@ impl IdgQueryService {
     /// is **not** built here — it's deferred to first query.
     #[must_use]
     pub fn new(workspace: Arc<IdgWorkspace>, global: Arc<GlobalIndex>) -> Self {
+        Self::with_target_cut_cache_capacity(workspace, global, default_target_cut_cache_capacity())
+    }
+
+    fn with_target_cut_cache_capacity(
+        workspace: Arc<IdgWorkspace>,
+        global: Arc<GlobalIndex>,
+        target_cut_cache_capacity: usize,
+    ) -> Self {
         Self {
             workspace,
             global,
             unified: RwLock::new(None),
+            target_cut_cache_capacity: target_cut_cache_capacity.max(1),
         }
     }
 
@@ -228,6 +348,36 @@ impl IdgQueryService {
     #[must_use]
     pub fn cross_file_edge_count(&self) -> usize {
         self.workspace.cross_file().len()
+    }
+
+    /// Compute parameter-to-return summaries for `funcs` inside the requested
+    /// precision scope.
+    ///
+    /// Each function is compacted to a function-local CSR. Resolved call
+    /// inputs and outputs are then composed with a monotone summary worklist,
+    /// so recursion reaches a complete least fixed point without allocating a
+    /// workspace-sized closure per function or applying an iteration cap.
+    pub fn return_taint_param_indices_for_funcs_with_max_precision(
+        &self,
+        funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> AHashMap<FuncId, Vec<u32>> {
+        crate::function_summary::return_taint_param_indices(&self.workspace, funcs, max_precision)
+    }
+
+    /// Compute the function-local read/write storage reached from each formal
+    /// parameter in `funcs`.
+    ///
+    /// The outer vector is indexed by parameter position. Traversal uses a
+    /// compact CSR and bitset sized to the owning function, never to the whole
+    /// workspace. All retained edges run to closure; `max_precision` filters
+    /// evidence strength rather than limiting semantic work.
+    pub fn local_storage_taint_by_param_for_funcs_with_max_precision(
+        &self,
+        funcs: &[FuncId],
+        max_precision: Option<Precision>,
+    ) -> AHashMap<FuncId, Vec<Vec<String>>> {
+        crate::function_summary::local_storage_taint_by_param(&self.workspace, funcs, max_precision)
     }
 
     /// Resolve a [`PointRef`] back from a [`WsNodeId`].
@@ -256,8 +406,11 @@ impl IdgQueryService {
     fn forward_closure_unfiltered(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        let bits = unified.reach.forward_closure(&seed_nodes);
-        bits.iter().map(|n| WsNodeId(n.0)).collect()
+        self.ensure_unfiltered_reach(&unified)
+            .forward_closure_nodes(&seed_nodes)
+            .into_iter()
+            .map(|n| WsNodeId(n.0))
+            .collect()
     }
 
     /// Forward closure constrained to edges whose precision is at or
@@ -286,6 +439,33 @@ impl IdgQueryService {
             .collect()
     }
 
+    /// Exact forward closure restricted to nodes owned by `func`.
+    ///
+    /// Export and other intraprocedural projections use this instead of a
+    /// target-function cut: the latter may legitimately include callees that
+    /// flow back into the target, while this API never leaves the function's
+    /// compiler-derived node set.
+    pub fn forward_closure_within_func_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        func: FuncId,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        if seeds.is_empty() {
+            return Vec::new();
+        }
+        let unified = self.ensure_unified();
+        let Some(func_nodes) = unified.nodes_by_func.get(&func) else {
+            return Vec::new();
+        };
+        let allowed = NodeBitSet::from_seed(unified.reverse.len(), func_nodes);
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
+        self.forward_closure_nodes_within(&unified, &seed_nodes, &allowed, max_precision)
+            .into_iter()
+            .map(|node| WsNodeId(node.0))
+            .collect()
+    }
+
     /// Source-to-target cut: every node on at least one path from
     /// `seeds` to any node owned by `target_funcs`, within the
     /// requested precision scope.
@@ -310,14 +490,10 @@ impl IdgQueryService {
         if backward.is_zero() {
             return Vec::new();
         }
-        let mut cut = if let Some(precision) = max_precision {
-            self.ensure_precision_reach(&unified, precision)
-                .forward_closure(&seed_nodes)
-        } else {
-            unified.reach.forward_closure(&seed_nodes)
-        };
-        cut.intersect_inplace(&backward);
-        cut.iter().map(|node| WsNodeId(node.0)).collect()
+        self.forward_closure_nodes_within(&unified, &seed_nodes, &backward, max_precision)
+            .into_iter()
+            .map(|node| WsNodeId(node.0))
+            .collect()
     }
 
     /// Source-to-target cut where targets are concrete IDG nodes,
@@ -337,21 +513,52 @@ impl IdgQueryService {
         if backward.is_zero() {
             return Vec::new();
         }
-        let mut cut = if let Some(precision) = max_precision {
-            self.ensure_precision_reach(&unified, precision)
-                .forward_closure(&seed_nodes)
+        self.forward_closure_nodes_within(&unified, &seed_nodes, &backward, max_precision)
+            .into_iter()
+            .map(|node| WsNodeId(node.0))
+            .collect()
+    }
+
+    /// Source-to-target cut for a mixture of concrete target nodes and
+    /// fallback target functions. The backward slices are unioned first so
+    /// one restricted forward traversal covers both target classes.
+    pub fn forward_target_nodes_and_funcs_cut_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        target_nodes: &[WsNodeId],
+        target_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        if seeds.is_empty() || (target_nodes.is_empty() && target_funcs.is_empty()) {
+            return Vec::new();
+        }
+        let unified = self.ensure_unified();
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
+        let mut backward = if target_nodes.is_empty() {
+            NodeBitSet::zeros(unified.reverse.len())
         } else {
-            unified.reach.forward_closure(&seed_nodes)
+            (*self.target_nodes_backward_closure(&unified, target_nodes, max_precision)).clone()
         };
-        cut.intersect_inplace(&backward);
-        cut.iter().map(|node| WsNodeId(node.0)).collect()
+        if !target_funcs.is_empty() {
+            let function_backward = self.target_func_backward_closure(&unified, target_funcs, max_precision);
+            backward.union_inplace(&function_backward);
+        }
+        if backward.is_zero() {
+            return Vec::new();
+        }
+        self.forward_closure_nodes_within(&unified, &seed_nodes, &backward, max_precision)
+            .into_iter()
+            .map(|node| WsNodeId(node.0))
+            .collect()
     }
 
     /// Backward closure: which nodes flow *into* `targets`?
     pub fn backward_closure(&self, targets: &[WsNodeId]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let target_nodes: Vec<NodeId> = targets.iter().map(|w| NodeId(w.0)).collect();
-        let bits = unified.reach.backward_closure(&target_nodes);
+        let bits = self
+            .ensure_unfiltered_reach(&unified)
+            .backward_closure(&target_nodes);
         bits.iter().map(|n| WsNodeId(n.0)).collect()
     }
 
@@ -359,7 +566,8 @@ impl IdgQueryService {
     #[must_use]
     pub fn reaches(&self, from: WsNodeId, to: WsNodeId) -> bool {
         let unified = self.ensure_unified();
-        unified.reach.reaches(NodeId(from.0), NodeId(to.0))
+        self.ensure_unfiltered_reach(&unified)
+            .reaches(NodeId(from.0), NodeId(to.0))
     }
 
     /// Find every IDG node in `func` whose place is a `Place::Read`
@@ -585,7 +793,7 @@ impl IdgQueryService {
             if !want.contains(param_name.as_str()) {
                 continue;
             }
-            let Ok(b) = u8::try_from(idx) else { continue };
+            let Ok(b) = u32::try_from(idx) else { continue };
             let place = Place::Param { idx: b };
             let Some(pid) = segment.places.lookup(&place) else {
                 continue;
@@ -612,27 +820,21 @@ impl IdgQueryService {
         let Some(segment) = self.workspace.segment(seg_id) else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        // Inclusive of 255: `Place::Param { idx: 255 }` is a legitimate
-        // (256th) param slot. The break-on-miss below still terminates early
-        // for the normal case of a handful of params.
-        for idx in 0..=u8::MAX {
-            let place = Place::Param { idx };
-            let Some(pid) = segment.places.lookup(&place) else {
-                if idx == 0 {
-                    // No params at all.
-                    return out;
-                }
-                break;
+        let mut indexed = Vec::new();
+        for (pid_idx, place) in segment.places.places.iter().enumerate() {
+            let Place::Param { idx } = place else {
+                continue;
             };
+            let pid = crate::node::PlaceId(pid_idx as u32);
             let Some(local_node) = segment.nodes.lookup(func, pid) else {
-                break;
+                continue;
             };
             if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
-                out.push(ws_node);
+                indexed.push((*idx, ws_node));
             }
         }
-        out
+        indexed.sort_unstable_by_key(|(idx, _)| *idx);
+        indexed.into_iter().map(|(_, node)| node).collect()
     }
 
     /// Find every IDG node in `func` anchored at a source-span
@@ -833,7 +1035,7 @@ impl IdgQueryService {
     ///
     /// Result is sorted by `(caller_func, call_span.start, arg_idx)`
     /// for deterministic grouping.
-    pub fn tainted_call_args_in_closure(&self, seeds: &[WsNodeId]) -> Vec<(FuncId, Span, u8)> {
+    pub fn tainted_call_args_in_closure(&self, seeds: &[WsNodeId]) -> Vec<(FuncId, Span, u32)> {
         self.tainted_call_args_in_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
     }
 
@@ -843,7 +1045,7 @@ impl IdgQueryService {
         &self,
         seeds: &[WsNodeId],
         max_precision: Option<Precision>,
-    ) -> Vec<(FuncId, Span, u8)> {
+    ) -> Vec<(FuncId, Span, u32)> {
         let closure = self.forward_closure_with_max_precision(seeds, max_precision);
         self.tainted_call_args_in_reachable_nodes(&closure)
     }
@@ -853,7 +1055,7 @@ impl IdgQueryService {
     /// construction needs several views over the same reachability
     /// set; accepting the closure avoids re-running the bitvector
     /// fixpoint for every view.
-    pub fn tainted_call_args_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<(FuncId, Span, u8)> {
+    pub fn tainted_call_args_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<(FuncId, Span, u32)> {
         self.tainted_call_args_in_reachable_nodes_for_funcs(closure, None)
     }
 
@@ -863,7 +1065,7 @@ impl IdgQueryService {
         &self,
         closure: &[WsNodeId],
         target_funcs: Option<&AHashSet<FuncId>>,
-    ) -> Vec<(FuncId, Span, u8)> {
+    ) -> Vec<(FuncId, Span, u32)> {
         let unified = self.ensure_unified();
         let mut out = Vec::new();
         for ws_node in closure {
@@ -1419,87 +1621,56 @@ impl IdgQueryService {
         unified
     }
 
-    /// Compute a flat workspace-global address space + reachability
-    /// index. Performed once per service lifetime (cached).
+    /// Compute a flat workspace-global address space. Reachability CSRs are
+    /// materialised lazily for the precision actually requested.
     fn build_unified(&self) -> UnifiedAddressSpace {
-        let mut forward = AHashMap::new();
         let mut reverse = Vec::new();
-        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(self.workspace.total_edge_count());
+        let mut segment_bases = Vec::with_capacity(self.workspace.segment_count() + 1);
+        let mut nodes_by_func: AHashMap<FuncId, Vec<NodeId>> = AHashMap::new();
         // 1. Allocate a workspace-global id for every segment-local
         // node. Stable order: iterate segments by SegmentId, then
         // local node id ascending. That guarantees deterministic ws
         // node ids for repeated builds (important for snapshot tests).
         for (seg_id, segment) in self.workspace.segments() {
-            let seg_idx = seg_id.0 as usize;
-            let seg_id = SegmentId(seg_idx as u32);
-            for local_idx in 0..segment.nodes.len() {
+            segment_bases.push(u32::try_from(reverse.len()).expect("unified IDG node count exceeds u32"));
+            for (local_idx, node) in segment.nodes.nodes.iter().enumerate() {
                 let local_node = NodeId(local_idx as u32);
-                let ws_id = WsNodeId(reverse.len() as u32);
-                forward.insert((seg_id, local_node), ws_id);
+                let ws_node =
+                    NodeId(u32::try_from(reverse.len()).expect("unified IDG node count exceeds u32"));
                 reverse.push((seg_id, local_node));
+                nodes_by_func.entry(node.func).or_default().push(ws_node);
             }
         }
-        // 2. Translate every intra-segment edge to ws coords.
-        for (seg_id, segment) in self.workspace.segments() {
-            let seg_idx = seg_id.0 as usize;
-            let seg_id = SegmentId(seg_idx as u32);
-            for edge in &segment.edges {
-                let Some(&from_ws) = forward.get(&(seg_id, edge.from)) else {
-                    continue;
-                };
-                let Some(&to_ws) = forward.get(&(seg_id, edge.to)) else {
-                    continue;
-                };
-                edges.push((from_ws.0, to_ws.0));
-            }
-        }
-        // 3. Translate cross-file edges. The CrossFileEdge stores
-        // segment ids on each endpoint, so we look up the local
-        // node id within each segment.
-        for cfe in &self.workspace.cross_file().edges {
-            let Some(&from_ws) = forward.get(&(cfe.from_segment, cfe.edge.from)) else {
-                continue;
-            };
-            let Some(&to_ws) = forward.get(&(cfe.to_segment, cfe.edge.to)) else {
-                continue;
-            };
-            edges.push((from_ws.0, to_ws.0));
-        }
-        // 4. Build the reachability index over the unified edges.
-        let n_nodes = reverse.len();
-        let reach = ReachabilityIndex::from_pairs(n_nodes, &edges);
+        segment_bases.push(u32::try_from(reverse.len()).expect("unified IDG node count exceeds u32"));
+        let nodes_by_func = nodes_by_func
+            .into_iter()
+            .map(|(func, nodes)| (func, nodes.into_boxed_slice()))
+            .collect();
         UnifiedAddressSpace {
-            forward,
+            segment_bases: segment_bases.into_boxed_slice(),
             reverse,
-            reach,
+            nodes_by_func,
+            unfiltered_reach: RwLock::new(None),
             precision_reach: RwLock::new(AHashMap::new()),
             cross_calls_by_from: RwLock::new(None),
-            target_func_backward: RwLock::new(AHashMap::new()),
-            target_node_backward: RwLock::new(AHashMap::new()),
+            target_backward: RwLock::new(TargetCutCache::new(self.target_cut_cache_capacity)),
+            #[cfg(test)]
+            target_cut_computations: AtomicU64::new(0),
         }
     }
 
     fn ws_node_for(unified: &UnifiedAddressSpace, seg_id: SegmentId, local_node: NodeId) -> Option<WsNodeId> {
-        unified.forward.get(&(seg_id, local_node)).copied()
+        let seg_idx = seg_id.0 as usize;
+        let start = *unified.segment_bases.get(seg_idx)?;
+        let end = *unified.segment_bases.get(seg_idx + 1)?;
+        (local_node.0 < end.saturating_sub(start)).then(|| WsNodeId(start + local_node.0))
     }
 
     fn ws_nodes_for_funcs(&self, unified: &UnifiedAddressSpace, funcs: &AHashSet<FuncId>) -> Vec<NodeId> {
         let mut out = Vec::new();
         for func in funcs {
-            let Some(seg_id) = self.workspace.segment_for_func(*func) else {
-                continue;
-            };
-            let Some(segment) = self.workspace.segment(seg_id) else {
-                continue;
-            };
-            for (idx, node) in segment.nodes.nodes.iter().enumerate() {
-                if node.func != *func {
-                    continue;
-                }
-                let local = NodeId(idx as u32);
-                if let Some(ws_node) = Self::ws_node_for(unified, seg_id, local) {
-                    out.push(NodeId(ws_node.0));
-                }
+            if let Some(nodes) = unified.nodes_by_func.get(func) {
+                out.extend_from_slice(nodes);
             }
         }
         out.sort_by_key(|node| node.0);
@@ -1513,22 +1684,45 @@ impl IdgQueryService {
         funcs: &AHashSet<FuncId>,
         max_precision: Option<Precision>,
     ) -> Arc<NodeBitSet> {
-        let key = TargetFuncCutKey::new(max_precision, funcs);
-        if let Some(hit) = unified.target_func_backward.read().get(&key).cloned() {
-            return hit;
-        }
-        let target_nodes = self.ws_nodes_for_funcs(unified, funcs);
-        let computed = if target_nodes.is_empty() {
-            NodeBitSet::zeros(unified.reverse.len())
-        } else if let Some(precision) = max_precision {
-            self.ensure_precision_reach(unified, precision)
-                .backward_closure(&target_nodes)
+        let key = TargetCutKey::Funcs(TargetFuncCutKey::new(max_precision, funcs));
+        let cached = unified.target_backward.read().get_cell(&key);
+        let cell = if let Some(hit) = cached {
+            hit
         } else {
-            unified.reach.backward_closure(&target_nodes)
+            unified.target_backward.write().get_or_insert_cell(key)
         };
-        let computed = Arc::new(computed);
-        let mut write = unified.target_func_backward.write();
-        write.entry(key).or_insert(computed).clone()
+        let closure = Arc::clone(cell.get_or_init(|| {
+            #[cfg(test)]
+            unified.target_cut_computations.fetch_add(1, Ordering::Relaxed);
+            let target_nodes = self.ws_nodes_for_funcs(unified, funcs);
+            Arc::new(if target_nodes.is_empty() {
+                NodeBitSet::zeros(unified.reverse.len())
+            } else if let Some(precision) = max_precision {
+                self.ensure_precision_reach(unified, precision)
+                    .backward_closure(&target_nodes)
+            } else {
+                self.ensure_unfiltered_reach(unified)
+                    .backward_closure(&target_nodes)
+            })
+        }));
+        unified.target_backward.write().trim_completed();
+        closure
+    }
+
+    fn forward_closure_nodes_within(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+        seeds: &[NodeId],
+        allowed: &NodeBitSet,
+        max_precision: Option<Precision>,
+    ) -> Vec<NodeId> {
+        if let Some(precision) = max_precision {
+            self.ensure_precision_reach(unified, precision)
+                .forward_closure_nodes_within(seeds, allowed)
+        } else {
+            self.ensure_unfiltered_reach(unified)
+                .forward_closure_nodes_within(seeds, allowed)
+        }
     }
 
     fn target_nodes_backward_closure(
@@ -1537,24 +1731,47 @@ impl IdgQueryService {
         nodes: &[WsNodeId],
         max_precision: Option<Precision>,
     ) -> Arc<NodeBitSet> {
-        let key = TargetNodeCutKey::new(max_precision, nodes);
-        if let Some(hit) = unified.target_node_backward.read().get(&key).cloned() {
-            return hit;
-        }
-        let mut target_nodes: Vec<NodeId> = nodes.iter().map(|node| NodeId(node.0)).collect();
-        target_nodes.sort_by_key(|node| node.0);
-        target_nodes.dedup();
-        let computed = if target_nodes.is_empty() {
-            NodeBitSet::zeros(unified.reverse.len())
-        } else if let Some(precision) = max_precision {
-            self.ensure_precision_reach(unified, precision)
-                .backward_closure(&target_nodes)
+        let key = TargetCutKey::Nodes(TargetNodeCutKey::new(max_precision, nodes));
+        let cached = unified.target_backward.read().get_cell(&key);
+        let cell = if let Some(hit) = cached {
+            hit
         } else {
-            unified.reach.backward_closure(&target_nodes)
+            unified.target_backward.write().get_or_insert_cell(key)
         };
-        let computed = Arc::new(computed);
-        let mut write = unified.target_node_backward.write();
-        write.entry(key).or_insert(computed).clone()
+        let closure = Arc::clone(cell.get_or_init(|| {
+            #[cfg(test)]
+            unified.target_cut_computations.fetch_add(1, Ordering::Relaxed);
+            let mut target_nodes: Vec<NodeId> = nodes.iter().map(|node| NodeId(node.0)).collect();
+            target_nodes.sort_by_key(|node| node.0);
+            target_nodes.dedup();
+            Arc::new(if target_nodes.is_empty() {
+                NodeBitSet::zeros(unified.reverse.len())
+            } else if let Some(precision) = max_precision {
+                self.ensure_precision_reach(unified, precision)
+                    .backward_closure(&target_nodes)
+            } else {
+                self.ensure_unfiltered_reach(unified)
+                    .backward_closure(&target_nodes)
+            })
+        }));
+        unified.target_backward.write().trim_completed();
+        closure
+    }
+
+    fn ensure_unfiltered_reach(&self, unified: &Arc<UnifiedAddressSpace>) -> Arc<ReachabilityIndex> {
+        {
+            let read = unified.unfiltered_reach.read();
+            if let Some(reach) = read.as_ref() {
+                return Arc::clone(reach);
+            }
+        }
+        let mut write = unified.unfiltered_reach.write();
+        if let Some(reach) = write.as_ref() {
+            return Arc::clone(reach);
+        }
+        let reach = Arc::new(self.build_reach(unified, None));
+        *write = Some(Arc::clone(&reach));
+        reach
     }
 
     fn ensure_precision_reach(
@@ -1572,21 +1789,21 @@ impl IdgQueryService {
         if let Some(reach) = write.get(&max_precision) {
             return Arc::clone(reach);
         }
-        let reach = Arc::new(self.build_precision_reach(unified, max_precision));
+        let reach = Arc::new(self.build_reach(unified, Some(max_precision)));
         write.insert(max_precision, Arc::clone(&reach));
         reach
     }
 
-    fn build_precision_reach(
+    fn build_reach(
         &self,
         unified: &UnifiedAddressSpace,
-        max_precision: Precision,
+        max_precision: Option<Precision>,
     ) -> ReachabilityIndex {
         let mut edges: Vec<(u32, u32)> = Vec::with_capacity(self.workspace.total_edge_count());
         for (seg_id, segment) in self.workspace.segments() {
             let seg_id = SegmentId(seg_id.0);
             for edge in &segment.edges {
-                if edge.meta.precision > max_precision {
+                if max_precision.is_some_and(|max| edge.meta.precision > max) {
                     continue;
                 }
                 let Some(from_ws) = Self::ws_node_for(unified, seg_id, edge.from) else {
@@ -1599,7 +1816,7 @@ impl IdgQueryService {
             }
         }
         for cfe in &self.workspace.cross_file().edges {
-            if cfe.edge.meta.precision > max_precision {
+            if max_precision.is_some_and(|max| cfe.edge.meta.precision > max) {
                 continue;
             }
             let Some(from_ws) = Self::ws_node_for(unified, cfe.from_segment, cfe.edge.from) else {
@@ -1666,8 +1883,8 @@ impl IdgQueryService {
                     caller: link.writer,
                     callee: link.reader,
                     call_span: link.via_span,
-                    arg_idx: u8::MAX,
-                    param_idx: u8::MAX,
+                    arg_idx: u32::MAX,
+                    param_idx: u32::MAX,
                     precision: link.precision,
                     call_kind: bonsai_callgraph::EdgeKind::Indirect,
                 });
@@ -1893,7 +2110,7 @@ fn lift_call_arg_edge(
                     caller: from_node.func,
                     callee: to_node.func,
                     call_span: edge.meta.via_span,
-                    arg_idx: u8::MAX,
+                    arg_idx: u32::MAX,
                     param_idx: *param_idx,
                     precision: edge.meta.precision,
                     call_kind: edge.meta.call_kind,
@@ -1920,7 +2137,7 @@ fn lift_call_arg_edge(
             from_place,
             to_place,
         )
-        .unwrap_or((u8::MAX, u8::MAX));
+        .unwrap_or((u32::MAX, u32::MAX));
         return Some(CrossCallEdge {
             caller: from_node.func,
             callee: to_node.func,
@@ -1931,8 +2148,15 @@ fn lift_call_arg_edge(
             call_kind: edge.meta.call_kind,
         });
     }
-    // Return-value edge: callee's `Place::Return` or generator
-    // `Place::Yield` flowing back to the caller's `Place::CallRet`.
+    // Return/outbound edge: any interprocedural return-family edge flows
+    // from the callee back into the caller. Besides the scalar
+    // `Return|Yield → CallRet` shape, the stitcher emits the same semantic
+    // edge kind for projected constructor results, receiver mutation, and
+    // out-parameter write-back (`callee.Write(field) → caller.Write(field)`).
+    // These projected edges are equally load-bearing for lineage: omitting
+    // them leaves the IDG proof intact but splits its renderable call chain
+    // at the callee-return boundary.
+    //
     // The lineage walker treats these as legitimate cross-method
     // propagation steps so chain attribution works for call-RHS
     // source patterns
@@ -1944,28 +2168,26 @@ fn lift_call_arg_edge(
     // mid → top in source-to-sink order; without this orientation
     // `first_inflow[top]` never gets seeded and the sink's
     // `parent_trace_id` lookup returns None. Sentinel
-    // `arg_idx = u8::MAX` / `param_idx = u8::MAX` distinguishes
+    // `arg_idx = u32::MAX` / `param_idx = u32::MAX` distinguishes
     // the synthetic return row from real positional-arg edges.
-    if matches!(from_place, Place::Return | Place::Yield) {
-        if let Place::CallRet { site } = to_place {
-            return Some(CrossCallEdge {
-                caller: from_node.func,
-                callee: to_node.func,
-                call_span: site.0,
-                arg_idx: u8::MAX,
-                param_idx: u8::MAX,
-                precision: edge.meta.precision,
-                call_kind: edge.meta.call_kind,
-            });
-        }
+    if edge.meta.kind == crate::edge::IdgEdgeKind::InterReturn && from_node.func != to_node.func {
+        return Some(CrossCallEdge {
+            caller: from_node.func,
+            callee: to_node.func,
+            call_span: edge.meta.via_span,
+            arg_idx: u32::MAX,
+            param_idx: u32::MAX,
+            precision: edge.meta.precision,
+            call_kind: edge.meta.call_kind,
+        });
     }
     None
 }
 
 #[derive(Default)]
 struct FieldCrossCallIndex {
-    call_arg: AHashMap<(SegmentId, FuncId, Span, String), Option<u8>>,
-    param: AHashMap<(SegmentId, FuncId, String), Option<u8>>,
+    call_arg: AHashMap<(SegmentId, FuncId, Span, String), Option<u32>>,
+    param: AHashMap<(SegmentId, FuncId, String), Option<u32>>,
 }
 
 impl FieldCrossCallIndex {
@@ -1976,7 +2198,7 @@ impl FieldCrossCallIndex {
         caller: FuncId,
         call_span: Span,
         base: &str,
-    ) -> Option<u8> {
+    ) -> Option<u32> {
         let key = (segment_id, caller, call_span, base.to_string());
         if let Some(value) = self.call_arg.get(&key) {
             return *value;
@@ -1992,7 +2214,7 @@ impl FieldCrossCallIndex {
         segment: &crate::segment::IdgSegment,
         callee: FuncId,
         base: &str,
-    ) -> Option<u8> {
+    ) -> Option<u32> {
         let key = (segment_id, callee, base.to_string());
         if let Some(value) = self.param.get(&key) {
             return *value;
@@ -2015,15 +2237,15 @@ fn field_cross_call_arg_and_param_indices(
     call_span: Span,
     from_place: &Place,
     to_place: &Place,
-) -> Option<(u8, u8)> {
+) -> Option<(u32, u32)> {
     let from_base = storage_base_from_place(from_seg, from_place)?;
     let to_base = storage_base_from_place(to_seg, to_place)?;
     let arg_idx = field_index
         .call_arg_index(from_seg_id, from_seg, caller, call_span, &from_base)
-        .unwrap_or(u8::MAX);
+        .unwrap_or(u32::MAX);
     let param_idx = field_index
         .param_index(to_seg_id, to_seg, callee, &to_base)
-        .unwrap_or(u8::MAX);
+        .unwrap_or(u32::MAX);
     Some((arg_idx, param_idx))
 }
 
@@ -2041,7 +2263,7 @@ fn call_arg_index_for_storage_base(
     caller: FuncId,
     call_span: Span,
     base: &str,
-) -> Option<u8> {
+) -> Option<u32> {
     let mut best = None;
     for edge in &segment.edges {
         if !edge.meta.kind.is_intra() {
@@ -2069,7 +2291,7 @@ fn call_arg_index_for_storage_base(
             continue;
         };
         if storage_base_from_place(segment, from_place).as_deref() == Some(base) {
-            best = Some(best.map_or(*idx, |existing: u8| existing.min(*idx)));
+            best = Some(best.map_or(*idx, |existing: u32| existing.min(*idx)));
         }
     }
     best
@@ -2079,7 +2301,7 @@ fn param_index_for_storage_base(
     segment: &crate::segment::IdgSegment,
     callee: FuncId,
     base: &str,
-) -> Option<u8> {
+) -> Option<u32> {
     let mut best = None;
     for edge in &segment.edges {
         if !edge.meta.kind.is_intra() {
@@ -2104,7 +2326,7 @@ fn param_index_for_storage_base(
             continue;
         };
         if storage_base_from_place(segment, to_place).as_deref() == Some(base) {
-            best = Some(best.map_or(*idx, |existing: u8| existing.min(*idx)));
+            best = Some(best.map_or(*idx, |existing: u32| existing.min(*idx)));
         }
     }
     best

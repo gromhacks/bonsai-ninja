@@ -217,6 +217,38 @@ fn write_through_persists_evicted_graphs() {
 }
 
 #[test]
+fn write_through_sidecar_has_cross_index_single_owner() {
+    let dir = tempdir_for("bonsai-taint-write-owner");
+    let path = dir.join("taint_graph.bin");
+    let ws = ws_with_python_source("def app(x):\n    return x\n");
+    let first = TaintGraphIndex::new();
+    let second = TaintGraphIndex::new();
+    first.clear_for_config(77);
+    second.clear_for_config(77);
+
+    assert!(first
+        .begin_persist_to_disk(&path, ws.db(), 77)
+        .expect("first owner"));
+    assert!(!first
+        .begin_persist_to_disk(&path, ws.db(), 77)
+        .expect("same session is idempotent"));
+    let conflict = second
+        .begin_persist_to_disk(&path, ws.db(), 77)
+        .expect_err("a second Workspace/process must not race the same atomic target");
+    assert_eq!(conflict.kind(), std::io::ErrorKind::WouldBlock);
+
+    first
+        .finish_persist_to_disk(ws.db())
+        .expect("release first owner");
+    assert!(second
+        .begin_persist_to_disk(&path, ws.db(), 77)
+        .expect("lock is released after finish"));
+    second
+        .finish_persist_to_disk(ws.db())
+        .expect("finish second owner");
+}
+
+#[test]
 fn cleanup_removes_abandoned_taint_graph_temp_files() {
     let dir = tempdir_for("bonsai-taint-temp-cleanup");
     let path = dir.join("taint_graph.bin");

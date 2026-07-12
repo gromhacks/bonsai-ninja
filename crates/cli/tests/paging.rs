@@ -177,6 +177,93 @@ fn json_opts_into_wrap_with_context() {
 }
 
 #[test]
+fn dump_taint_paging_preserves_structured_semantic_and_presentation_coverage() {
+    let ws = ws();
+    let Some(value) = json_wrapped_value(&[
+        "dump-taint",
+        ws.to_str().unwrap(),
+        "--source",
+        "update_user",
+        "--seed",
+        "token",
+        "--seed",
+        "action",
+        "--format",
+        "json",
+        "--context",
+        "1",
+    ]) else {
+        return;
+    };
+
+    assert!(
+        value["records"].is_array(),
+        "records must remain structured: {value:?}"
+    );
+    assert!(
+        value.get("json_lines").is_none(),
+        "paged dump-taint must not replace its report with JSON source lines: {value:?}"
+    );
+    assert!(
+        value["semantic_analysis_complete"].is_boolean(),
+        "semantic completeness must remain available: {value:?}"
+    );
+    assert_eq!(
+        value["analysis_complete"], false,
+        "the combined envelope must not claim complete coverage for one page: {value:?}"
+    );
+    assert_eq!(value["presentation_complete"], false);
+    assert!(
+        value["presentation_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("paged dump-taint result incomplete")))),
+        "presentation truncation must carry an actionable reason: {value:?}"
+    );
+    assert!(
+        value["page"]["total_pages"]
+            .as_u64()
+            .is_some_and(|pages| pages > 1),
+        "tiny context should exercise a multi-page report: {value:?}"
+    );
+}
+
+#[test]
+fn dump_taint_empty_page_is_explicitly_complete_when_analysis_and_presentation_are_complete() {
+    let ws = ws();
+    let Some(value) = json_wrapped_value(&[
+        "dump-taint",
+        ws.to_str().unwrap(),
+        "--source",
+        "update_user",
+        "--seed",
+        "token",
+        "--seed",
+        "action",
+        "--sink",
+        "definitely-not-a-callee",
+        "--format",
+        "json",
+        "--context",
+        "4k",
+    ]) else {
+        return;
+    };
+
+    assert_eq!(value["records"], serde_json::json!([]));
+    assert_eq!(value["semantic_analysis_complete"], true);
+    assert_eq!(value["presentation_complete"], true);
+    assert_eq!(value["analysis_complete"], true);
+    assert!(
+        value["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a proven complete empty result must not invent an incomplete reason: {value:?}"
+    );
+}
+
+#[test]
 fn last_page_of_paged_json_is_still_incomplete() {
     let ws = ws();
     let ws_str = ws.to_str().unwrap();

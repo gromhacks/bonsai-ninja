@@ -84,6 +84,28 @@ fn every_value_dot_access_emits_a_read_ref_without_name_tables() {
 }
 
 #[test]
+fn interpolated_map_field_uses_interpolation_identifier_as_its_source() {
+    let src = "defmodule App do\n  def build(raw) do\n    envelope = %{cmd: \"#{raw}\", clean: \"literal\"}\n    envelope\n  end\nend\n";
+    let language = language_from_pack(PACK_NAME).expect("elixir grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set elixir grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse elixir source");
+    let maps = collect_elixir_map_literal_field_assigns(&tree, src.as_bytes(), FileId::new(0));
+    let fields = maps.iter().flat_map(|map| map.fields.iter()).collect::<Vec<_>>();
+
+    assert!(fields.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target == "envelope.cmd" && source_names == &["raw".to_string()]
+    )));
+    assert!(fields.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { target, source_names, .. }
+            if target == "envelope.clean" && source_names.is_empty()
+    )));
+}
+
+#[test]
 fn function_value_dot_call_lowers_from_cst() {
     let src = "defmodule Main do\n  def run(args) do\n    closure = fn -> sink(args) end\n    closure.()\n  end\nend\n";
     let language = language_from_pack(PACK_NAME).expect("elixir grammar");
@@ -108,4 +130,26 @@ fn short_clause_name_does_not_match_def_keyword() {
     let params = elixir_clause_param_slots(src, span, "f").expect("params");
 
     assert_eq!(params, vec!["p".to_string(), "_arg1".to_string()]);
+}
+
+#[test]
+fn struct_pattern_parameter_has_a_distinct_slot_and_field_binding() {
+    let src = "defp cmd_of(%Envelope{cmd: cmd}), do: cmd";
+    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+
+    let params = elixir_clause_param_slots(src, span, "cmd_of").expect("params");
+    let bindings = elixir_map_pattern_bindings("%Envelope{cmd: cmd}");
+
+    assert_eq!(params, vec!["_arg0".to_string()]);
+    assert_eq!(bindings, vec![("cmd".to_string(), "cmd".to_string())]);
+}
+
+#[test]
+fn keyword_pattern_parameter_keeps_its_binding_name() {
+    let src = "def helper(name: name), do: sink(name)";
+    let span = bonsai_common::Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+
+    let params = elixir_clause_param_slots(src, span, "helper").expect("params");
+
+    assert_eq!(params, vec!["name".to_string()]);
 }

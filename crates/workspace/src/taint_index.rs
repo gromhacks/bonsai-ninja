@@ -28,8 +28,10 @@ use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_taint::EntryTaintGraph;
+use fs2::FileExt;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -140,9 +142,44 @@ struct Inner {
 struct PersistSession {
     path: PathBuf,
     config_fingerprint: u64,
+    /// Cross-process ownership of the target sidecar. The advisory lock is
+    /// released by the OS on crash and therefore cannot strand a stale lock.
+    lock_file: File,
     writer: Mutex<Option<FactStoreWriter>>,
     written_keys: Mutex<AHashSet<u64>>,
     existing: Option<Arc<FactStoreReader>>,
+}
+
+fn persistence_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn acquire_persistence_lock(path: &Path) -> std::io::Result<File> {
+    let lock_path = persistence_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)?;
+    lock_file.try_lock_exclusive().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!(
+                    "taint graph sidecar is owned by another process: {}",
+                    path.display()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
+    Ok(lock_file)
 }
 
 impl Inner {
@@ -429,6 +466,7 @@ impl TaintGraphIndex {
     /// map didn't cover) through the streaming writer so peak RAM
     /// stays bounded by the in-flight payload.
     pub fn save_to_disk(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<()> {
+        let lock_file = acquire_persistence_lock(path)?;
         // Snapshot the in-memory state under a single read guard so
         // we don't hold it during file I/O.
         let inner = self.inner.read();
@@ -462,7 +500,7 @@ impl TaintGraphIndex {
             };
             let payload = encode_taint_graph_entry(&entry);
             let key = factstore_key(*func, seeds);
-            writer.add(key, 0, &payload).map_err(map_factstore_io)?;
+            writer.add_owned(key, 0, payload).map_err(map_factstore_io)?;
             written_keys.insert(key);
         }
         // Forward-port any entries from the existing disk store that
@@ -481,6 +519,7 @@ impl TaintGraphIndex {
             }
         }
         writer.finish().map_err(map_factstore_io)?;
+        FileExt::unlock(&lock_file)?;
         Ok(())
     }
 
@@ -497,20 +536,15 @@ impl TaintGraphIndex {
         db: &AnalyzerDb,
         config_fingerprint: u64,
     ) -> std::io::Result<bool> {
-        let _ = cleanup_sidecar_temp_files(path);
-        let writer = FactStoreWriter::create(
-            path,
-            TAINT_GRAPH_TABLE_ID,
-            taint_graph_pipeline_hash(db, config_fingerprint, path),
-        )
-        .map_err(map_factstore_io)?;
         let mut inner = self.inner.write();
-        if inner
-            .persist
-            .as_ref()
-            .is_some_and(|persist| persist.path == path && persist.config_fingerprint == config_fingerprint)
-        {
-            return Ok(false);
+        if let Some(active) = inner.persist.as_ref() {
+            if active.path == path && active.config_fingerprint == config_fingerprint {
+                return Ok(false);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "another taint graph persistence session is active",
+            ));
         }
         if inner.config_fingerprint != config_fingerprint {
             inner.by_source_seed.clear();
@@ -519,9 +553,21 @@ impl TaintGraphIndex {
             inner.config_fingerprint = config_fingerprint;
         }
         let existing = inner.disk.clone();
+        let lock_file = acquire_persistence_lock(path)?;
+        // Check session ownership before creating a temp writer. Constructing
+        // first let a losing concurrent caller unlink/replace the live temp.
+        // Automatic temp sweeping is intentionally absent because another
+        // process may own a unique active temp for the same target.
+        let writer = FactStoreWriter::create(
+            path,
+            TAINT_GRAPH_TABLE_ID,
+            taint_graph_pipeline_hash(db, config_fingerprint, path),
+        )
+        .map_err(map_factstore_io)?;
         inner.persist = Some(Arc::new(PersistSession {
             path: path.to_path_buf(),
             config_fingerprint,
+            lock_file,
             writer: Mutex::new(Some(writer)),
             written_keys: Mutex::new(AHashSet::default()),
             existing,
@@ -568,6 +614,7 @@ impl TaintGraphIndex {
             .ok_or_else(|| std::io::Error::other("taint graph factstore writer already finished"))?;
         let written = writer.finish().map_err(map_factstore_io)?;
         let _ = self.load_from_disk_for_config(&persist.path, db, persist.config_fingerprint)?;
+        FileExt::unlock(&persist.lock_file)?;
         Ok(written)
     }
 
@@ -593,7 +640,13 @@ impl TaintGraphIndex {
         db: &AnalyzerDb,
         config_fingerprint: u64,
     ) -> std::io::Result<usize> {
-        let _ = cleanup_sidecar_temp_files(path);
+        let mut inner = self.inner.write();
+        if inner.persist.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "cannot replace taint graph disk state during an active persistence session",
+            ));
+        }
         if !path.exists() {
             return Ok(0);
         }
@@ -614,7 +667,6 @@ impl TaintGraphIndex {
             }
         };
         let entries = reader.len();
-        let mut inner = self.inner.write();
         inner.by_source_seed.clear();
         inner.resident_order.clear();
         inner.config_fingerprint = config_fingerprint;
@@ -642,12 +694,12 @@ impl TaintGraphIndex {
     }
 }
 
-/// Best-effort cleanup for temp files left by a process that was
-/// terminated before [`FactStoreWriter`] could run `Drop`. Concurrent
-/// writes to the same workspace sidecar are already last-writer-wins;
-/// temp payloads are never valid cache inputs, so removing leftovers
-/// before a new exact command prevents failed runs from permanently
-/// inflating `.bonsai/` by gigabytes.
+/// Explicit maintenance cleanup for temp files left by a process that was
+/// terminated before [`FactStoreWriter`] could run `Drop`.
+///
+/// Callers must first establish exclusive ownership of the workspace cache
+/// directory. Normal analysis never calls this function: blindly sweeping by
+/// filename can unlink another process's active unique temp file.
 pub fn cleanup_sidecar_temp_files(path: &Path) -> std::io::Result<usize> {
     let Some(parent) = path.parent() else {
         return Ok(0);
@@ -739,7 +791,7 @@ fn persist_graph_entry(
             "taint graph factstore writer already finished",
         ));
     };
-    writer.add(key, 0, &payload).map_err(map_factstore_io)?;
+    writer.add_owned(key, 0, payload).map_err(map_factstore_io)?;
     Ok(())
 }
 

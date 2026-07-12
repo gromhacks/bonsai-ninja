@@ -535,7 +535,7 @@ fn cache_stats_validation_rejects_moved_full_prewarm_factstores() {
         bonsai_sdk::CacheFreshnessStatus::Fresh,
         "fixture should start with a fresh cache manifest: {fresh:#?}"
     );
-    for name in ["callgraph", "dataflow_factstore", "value_flow", "flow_ids"] {
+    for name in ["callgraph", "dataflow_factstore", "flow_ids"] {
         assert!(
             fresh
                 .validation
@@ -557,7 +557,7 @@ fn cache_stats_validation_rejects_moved_full_prewarm_factstores() {
         bonsai_sdk::CacheFreshnessStatus::Fresh,
         "moving preserves relative manifest fingerprints; sidecar payload validation must prove stale paths: {moved_stats:#?}"
     );
-    for name in ["callgraph", "dataflow_factstore", "value_flow", "flow_ids"] {
+    for name in ["callgraph", "dataflow_factstore", "flow_ids"] {
         assert!(
             moved_stats
                 .validation
@@ -1060,7 +1060,7 @@ fn cache_stats_validation_rejects_corrupt_flow_ids_sidecar_even_when_size_matche
 }
 
 #[test]
-fn cache_stats_validation_rejects_corrupt_full_prewarm_factstores_even_when_size_matches() {
+fn cache_stats_validation_rejects_corrupt_full_prewarm_factstore_even_when_size_matches() {
     let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let _dataflow_guard = DATAFLOW_ENV_LOCK.lock().expect("dataflow env lock");
     let root = temp_python_micro("semantic-cache-validation-full-prewarm-corrupt");
@@ -1077,21 +1077,12 @@ fn cache_stats_validation_rejects_corrupt_full_prewarm_factstores_even_when_size
         fresh.dataflow_factstore_sidecar_exists && fresh.dataflow_factstore_sidecar_bytes > 0,
         "full prewarm should write a non-empty dataflow factstore: {fresh:#?}"
     );
-    assert!(
-        fresh.value_flow_sidecar_exists && fresh.value_flow_sidecar_bytes > 0,
-        "full prewarm should write a non-empty value-flow sidecar: {fresh:#?}"
-    );
 
     std::fs::write(
         &fresh.dataflow_factstore_sidecar,
         vec![0_u8; fresh.dataflow_factstore_sidecar_bytes as usize],
     )
     .expect("overwrite dataflow factstore with same-size corrupt payload");
-    std::fs::write(
-        &fresh.value_flow_sidecar,
-        vec![0_u8; fresh.value_flow_sidecar_bytes as usize],
-    )
-    .expect("overwrite value-flow sidecar with same-size corrupt payload");
 
     let stale = sdk()
         .cache(&root)
@@ -1109,26 +1100,12 @@ fn cache_stats_validation_rejects_corrupt_full_prewarm_factstores_even_when_size
         "corrupt dataflow factstore should be stale even when its size matches the manifest: {stale:#?}"
     );
     assert!(
-        stale.validation.sidecars.iter().any(|sidecar| {
-            sidecar.name == "value_flow" && sidecar.status == bonsai_sdk::CacheFreshnessStatus::Stale
-        }),
-        "corrupt value-flow sidecar should be stale even when its size matches the manifest: {stale:#?}"
-    );
-    assert!(
         stale
             .validation
             .stale_reasons
             .iter()
             .any(|reason| reason.contains("dataflow factstore sidecar validation failed")),
         "cache stats should explain dataflow factstore payload validation failure: {stale:#?}"
-    );
-    assert!(
-        stale
-            .validation
-            .stale_reasons
-            .iter()
-            .any(|reason| reason.contains("value-flow sidecar validation failed")),
-        "cache stats should explain value-flow payload validation failure: {stale:#?}"
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -1151,27 +1128,27 @@ fn facade_index_semantic_explicitly_prewarms_sidecars() {
 }
 
 #[test]
-fn facade_semantic_manifest_treats_disabled_idg_sidecar_as_not_applicable() {
+fn facade_semantic_manifest_ignores_legacy_idg_file_limit() {
     let _guard = IDG_SIDECAR_LIMIT_ENV_LOCK.lock().expect("idg sidecar env lock");
     let old_limit = std::env::var("BONSAI_IDG_SIDECAR_FILE_LIMIT").ok();
     std::env::set_var("BONSAI_IDG_SIDECAR_FILE_LIMIT", "0");
 
-    let root = temp_python_micro("semantic-index-idg-disabled");
+    let root = temp_python_micro("semantic-index-idg-unbounded");
     let indexed = sdk().index_semantic(&root).expect("semantic index");
     let stats = indexed.cache().stats().expect("semantic cache stats");
     assert!(
-        stats.callgraph_sidecar_exists && stats.retrieval_sidecar_exists && !stats.idg_sidecar_exists,
-        "semantic index should write callgraph/retrieval and skip a disabled IDG sidecar: {stats:#?}"
+        stats.callgraph_sidecar_exists && stats.retrieval_sidecar_exists && stats.idg_sidecar_exists,
+        "semantic index should persist the streamed IDG despite the retired file-limit setting: {stats:#?}"
     );
     assert!(
         stats.validation.semantic_ready,
-        "disabled IDG sidecar should validate as semantic-ready through not-applicable status: {stats:#?}"
+        "persisted IDG sidecar should validate as semantic-ready: {stats:#?}"
     );
     assert!(
         stats.validation.sidecars.iter().any(|sidecar| {
-            sidecar.name == "idg" && sidecar.status == bonsai_sdk::CacheFreshnessStatus::NotApplicable
+            sidecar.name == "idg" && sidecar.status == bonsai_sdk::CacheFreshnessStatus::Fresh
         }),
-        "disabled IDG sidecar should be reported as not-applicable in cache stats: {stats:#?}"
+        "IDG sidecar should be reported fresh even when the retired limit is zero: {stats:#?}"
     );
     let manifest = indexed
         .cache()
@@ -1180,7 +1157,7 @@ fn facade_semantic_manifest_treats_disabled_idg_sidecar_as_not_applicable() {
         .expect("manifest exists");
     assert!(
         manifest.coverage.semantic_ready,
-        "disabled IDG sidecar should be not-applicable, not a semantic readiness miss: {manifest:#?}"
+        "unbounded IDG persistence should satisfy semantic readiness: {manifest:#?}"
     );
     assert!(
         !manifest
@@ -1188,7 +1165,7 @@ fn facade_semantic_manifest_treats_disabled_idg_sidecar_as_not_applicable() {
             .missing_reasons
             .iter()
             .any(|reason| reason.contains("idg")),
-        "disabled IDG sidecar should not appear in missing reasons: {manifest:#?}"
+        "persisted IDG sidecar should not appear in missing reasons: {manifest:#?}"
     );
 
     match old_limit {
@@ -1621,8 +1598,14 @@ fn facade_full_prewarm_with_progress_reports_analysis_prewarm() {
         bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmStarted { .. }
     )));
     assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmFinished));
-    assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmStarted));
-    assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmFinished));
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmStarted
+                | bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmFinished
+        )),
+        "full prewarm should leave the legacy per-function value-flow projection on demand: {events:#?}"
+    );
     assert!(
         events.iter().any(|event| matches!(
             event,
@@ -1643,7 +1626,16 @@ fn facade_full_prewarm_with_progress_reports_analysis_prewarm() {
                 entries: 0,
             }
         )),
-        "full prewarm should explain the value-flow sidecar cache decision: {events:#?}"
+        "full prewarm should explain the value-flow sidecar load decision without rebuilding it: {events:#?}"
+    );
+    let stats = project.cache().stats().expect("full-prewarm cache stats");
+    assert!(
+        stats.idg_sidecar_exists && stats.idg_sidecar_bytes > 0,
+        "full prewarm must persist the canonical IDG: {stats:#?}"
+    );
+    assert!(
+        !stats.value_flow_sidecar_exists,
+        "full prewarm must not persist the on-demand compatibility ValueFlowGraph projection: {stats:#?}"
     );
     let _ = std::fs::remove_dir_all(root);
 }

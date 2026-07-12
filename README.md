@@ -337,7 +337,7 @@ pages, and `--format json --no-color --no-progress` for scripts.
 ## Configuration
 
 - `BONSAI_RULES_DIR` - alternative rulepack location
-- `BONSAI_PARSE_TIMEOUT_MS` - per-file parse timeout, default 30 seconds
+- `BONSAI_PARSE_TIMEOUT_MS` - optional per-file parse timeout; unset or `0` is uncapped
 - `BONSAI_NO_DATAFLOW=1` - skip explicit dataflow prewarm and trace eager hydration
 - `BONSAI_THEME` - terminal theme
 - `BONSAI_WORKSPACE_DIR` - per-workspace state directory

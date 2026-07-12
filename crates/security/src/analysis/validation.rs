@@ -712,16 +712,16 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                     );
                 }
             }
-            // Typing rules carry no tag/severity/trust/cwe — their whole
-            // contract is `returns_type` (the factory's result type).
+            // Typing rules carry no tag/severity/trust/cwe. They provide a
+            // factory return type and/or an external library transfer summary.
             RuleKind::Typing => {
-                if rule.returns_type.is_none() {
+                if rule.returns_type.is_none() && rule.taint_semantics.is_none() {
                     push_validation_issue(
                         issues,
                         "error",
                         "missing-returns-type",
                         Some(rule),
-                        "enabled typing rule must declare returns_type (it exists only to type a factory-method result)",
+                        "enabled typing rule must declare returns_type or taint_semantics",
                     );
                 }
             }
@@ -740,13 +740,13 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
         return;
     };
     if semantics.taint_receiver_from_args {
-        if rule.kind != RuleKind::Sink {
+        if !matches!(rule.kind, RuleKind::Sink | RuleKind::Typing) {
             push_validation_issue(
                 issues,
                 "error",
                 "invalid-taint-semantics",
                 Some(rule),
-                "taint_semantics.taint_receiver_from_args is only valid on sink rules",
+                "taint_semantics.taint_receiver_from_args is only valid on sink or typing rules",
             );
         }
         let valid_attribute = rule
@@ -794,22 +794,26 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             );
         }
     }
-    if !semantics.call_result_passthrough_args.is_empty() && rule.kind != RuleKind::Sanitizer {
+    if !semantics.call_result_passthrough_args.is_empty()
+        && !matches!(rule.kind, RuleKind::Sanitizer | RuleKind::Typing)
+    {
         push_validation_issue(
             issues,
             "error",
             "invalid-taint-semantics",
             Some(rule),
-            "taint_semantics.call_result_passthrough_args is only valid on sanitizer/passthrough rules",
+            "taint_semantics.call_result_passthrough_args is only valid on sanitizer or typing rules",
         );
     }
-    if semantics.call_result_passthrough_receiver && rule.kind != RuleKind::Sanitizer {
+    if semantics.call_result_passthrough_receiver
+        && !matches!(rule.kind, RuleKind::Sanitizer | RuleKind::Typing)
+    {
         push_validation_issue(
             issues,
             "error",
             "invalid-taint-semantics",
             Some(rule),
-            "taint_semantics.call_result_passthrough_receiver is only valid on sanitizer/passthrough rules",
+            "taint_semantics.call_result_passthrough_receiver is only valid on sanitizer or typing rules",
         );
     }
     for flow in &semantics.output_arg_flows {
@@ -900,6 +904,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
             | crate::rule::ConstraintKind::ArgGe { .. }
             | crate::rule::ConstraintKind::RequiresRuntimeType { .. }
             | crate::rule::ConstraintKind::EnclosingDecoratorIn { .. }
+            | crate::rule::ConstraintKind::SinkTagIn { .. }
             | crate::rule::ConstraintKind::MustAlias { .. }
             | crate::rule::ConstraintKind::RequiresState { .. } => None,
         };

@@ -1,0 +1,41 @@
+# Non-finding ECMAScript library summaries. Receiver types come from adapter
+# CST facts (`const xs = []` -> `xs: Array`), so these do not match unrelated
+# user-defined methods that merely share a standard-library method name.
+- id: javascript.typing.array_push_mutation
+  enabled: true
+  language: javascript
+  match:
+    kind: call
+    callee:
+      attribute: [Array, push]
+  taint_semantics:
+    taint_receiver_from_args: true
+  match_examples:
+  - name: array push mutates receiver state
+    code: |
+      function collect(input) {
+        const values = [];
+        values.push(input);
+        return values;
+      }
+    expect_match_text: [values.push]
+  description: "Array.prototype.push stores its value arguments in the receiver. Typing-only transfer summary; never a finding."
+
+- id: javascript.typing.array_reduce_result
+  enabled: true
+  language: javascript
+  match:
+    kind: call
+    callee:
+      attribute: [Array, reduce]
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: array reduce result derives from receiver elements
+    code: |
+      function join(input) {
+        const values = [input];
+        return values.reduce((acc, value) => acc + value, "");
+      }
+    expect_match_text: [values.reduce]
+  description: "A JavaScript reduce-style external call may return data derived from its receiver. Conservative typing-only transfer summary; never a finding."

@@ -307,9 +307,9 @@ pub struct MatchSpec {
     /// Read / write target. Populated when `kind == Read | Write`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<RuleTarget>,
-    /// BFS depth for `kind: missing`. `0` (default) is
-    /// intra-procedural; higher values walk reachable callees,
-    /// capped engine-side at 4. Ignored for other kinds.
+    /// Resolved-call depth for `kind: missing`. `0` (default) is
+    /// intra-procedural; higher values walk reachable callees to the exact
+    /// rule-declared depth. Ignored for other kinds.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub search_depth: u32,
 }
@@ -481,6 +481,14 @@ pub enum ConstraintKind {
     EnclosingDecoratorIn {
         enclosing_decorator_in: Vec<String>,
     },
+    /// Source rules only: defer source/sink compatibility until a proven
+    /// taint path reaches a sink, then require the sink's semantic tag to be
+    /// one of these values. This keeps narrowly purposed generic sources
+    /// (for example an untrusted serialized blob parameter) from pairing
+    /// with unrelated sink classes without baking rule IDs into the engine.
+    SinkTagIn {
+        sink_tag_in: Vec<String>,
+    },
     /// `must_alias: { source_arg, sink_arg }` — the two args must
     /// share a must-alias root within the same decl. P5.
     MustAlias {
@@ -523,6 +531,7 @@ impl ConstraintKind {
             Self::ArgGe { .. } => "arg_ge",
             Self::RequiresRuntimeType { .. } => "requires_runtime_type",
             Self::EnclosingDecoratorIn { .. } => "enclosing_decorator_in",
+            Self::SinkTagIn { .. } => "sink_tag_in",
             Self::MustAlias { .. } => "must_alias",
             Self::RequiresState { .. } => "requires_state",
         }

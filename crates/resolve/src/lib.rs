@@ -1044,20 +1044,12 @@ pub fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static 
     variants
 }
 
-/// True when `receiver` is a super-call keyword (`super`, `parent`,
-/// `base`) — possibly wrapped in reference sigils or a trailing
-/// `()`. Used by both the callgraph and the taint engine when
-/// resolving `super.method(...)` to the parent class's method
-/// without falling back to bare-name candidate enumeration.
-///
-/// Defaults to the cross-language `bonsai_common::SUPER_RECEIVER_TOKENS`.
-/// Callers that have adapter context should prefer
-/// [`is_super_receiver_with_tokens`] so the adapter's narrowed set
-/// (declared via `LanguageCapabilities::super_receiver_tokens`)
-/// dominates.
+/// Context-free callers cannot infer super-receiver syntax. Production
+/// resolution passes the owning adapter's exact token slice to
+/// [`is_super_receiver_with_tokens`].
 #[must_use]
 pub fn is_super_receiver(receiver: &str) -> bool {
-    is_super_receiver_with_tokens(receiver, bonsai_common::SUPER_RECEIVER_TOKENS)
+    is_super_receiver_with_tokens(receiver, &[])
 }
 
 /// Adapter-aware variant of [`is_super_receiver`]: uses the supplied

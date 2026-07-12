@@ -57,15 +57,10 @@ pub struct TaintConfig {
     /// sanitizer list. Sanitizers are classification evidence, not a
     /// taint-transfer input, so this set does not alter propagation.
     pub sanitizers: TokenSet,
-    /// Optional worklist iteration cap. When unset, the cap is derived
-    /// from CFG size by multiplying the basic-block count by 8 (with a
-    /// floor of 16); see `DEFAULT_WORKLIST_CAP_MULTIPLIER` and
-    /// `MIN_WORKLIST_CAP` in this module.
+    /// Optional diagnostic worklist iteration cap. `None` runs to the
+    /// fixed point and is the completeness-preserving default.
     pub worklist_cap: Option<u32>,
 }
-
-pub(crate) const DEFAULT_WORKLIST_CAP_MULTIPLIER: u32 = 8;
-pub(crate) const MIN_WORKLIST_CAP: u32 = 16;
 
 /// Per-block taint state after the fixed point converges. Callers
 /// typically ask "is identifier X tainted at basic block B?" via
@@ -82,9 +77,8 @@ pub struct IntraTaintResult {
     /// How many worklist iterations the analysis took. Exposed for
     /// tests and performance validation; never affects semantics.
     pub iterations: u32,
-    /// True when the worklist hit its safety cap before converging.
-    /// Realistically shouldn't happen on sane programs —
-    /// the cap exists to protect against pathological adapter output.
+    /// True when an explicitly configured diagnostic cap stopped the
+    /// worklist before convergence.
     pub saturated: bool,
     /// Diagnostics emitted for CFG shapes that force defensive
     /// analysis behavior. These are not parse diagnostics; they flag
@@ -120,20 +114,14 @@ use crate::tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_ha
 
 /// Run the intraprocedural analysis on a function's CFG.
 ///
-/// Worklist iteration until convergence or a safety cap is reached
-/// (explicit [`TaintConfig::worklist_cap`] when set, otherwise a CFG-size
-/// derived cap). Every block visited at least
-/// once; blocks whose `in` state changes force their successors back
-/// onto the worklist.
+/// Worklist iteration until convergence, or until an explicitly configured
+/// diagnostic [`TaintConfig::worklist_cap`] is reached. Every block is
+/// visited at least once; blocks whose `in` state changes force their
+/// successors back onto the worklist.
 #[must_use]
 pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResult {
     let predecessors = build_predecessor_map(cfg);
     let diagnostics = entry_predecessor_diagnostics(cfg, &predecessors);
-    let safety_cap = config.worklist_cap.unwrap_or_else(|| {
-        (cfg.blocks.len() as u32)
-            .saturating_mul(DEFAULT_WORKLIST_CAP_MULTIPLIER)
-            .max(MIN_WORKLIST_CAP)
-    });
 
     // Per-block in / out states. Start with every block empty and
     // the entry's in = sources.
@@ -155,8 +143,7 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
     while let Some(block_id) = worklist.pop_front() {
         enqueued.remove(&block_id);
         iterations += 1;
-        // Safety cap: bail out before pathological adapter output spirals.
-        if iterations > safety_cap {
+        if config.worklist_cap.is_some_and(|cap| iterations > cap) {
             saturated = true;
             break;
         }

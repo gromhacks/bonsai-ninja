@@ -342,10 +342,14 @@ fn enabled_rules_keep_required_metadata() {
                 }
             }
             RuleKind::Typing => {
-                // Typing rules carry no tag/severity/trust/cwe — their
-                // required metadata is `returns_type`.
-                if rule.enabled && rule.returns_type.is_none() {
-                    missing.push(format!("typing rule missing returns_type: {}", rule.id));
+                // Typing rules either describe a factory return type or a
+                // declarative taint-transfer summary. They carry no finding
+                // metadata (tag/severity/trust/cwe).
+                if rule.enabled && rule.returns_type.is_none() && rule.taint_semantics.is_none() {
+                    missing.push(format!(
+                        "typing rule missing returns_type or taint_semantics: {}",
+                        rule.id
+                    ));
                 }
             }
         }

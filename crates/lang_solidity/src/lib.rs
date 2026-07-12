@@ -2,7 +2,9 @@
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, language_from_pack, node_at_span, node_text, parse_with, span_of},
+    kit::{
+        call_arg_from_node, collect_kinds, language_from_pack, node_at_span, node_text, parse_with, span_of,
+    },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
     LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
@@ -130,6 +132,7 @@ impl LanguageAdapter for SolidityAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        let parsed = parse_with(PACK_NAME, file, ctx);
         // Synthesize Call events for Yul function calls inside
         // `assembly { ... }` blocks. tree-sitter-solidity surfaces Yul
         // calls as `yul_function_call` (or `yul_evm_builtin_call` on
@@ -138,28 +141,16 @@ impl LanguageAdapter for SolidityAdapter {
         // Solidity. Without lowering, the canonical reentrancy /
         // selfdestruct shape `assembly { call(gas(), target, ...) }`
         // is invisible to the engine.
-        let source = ctx
-            .vfs
-            .snapshot(file)
-            .ok()
-            .map(|s| s.text.to_string())
-            .unwrap_or_default();
-        if !source.is_empty() {
-            if let Ok(lang) = language_from_pack(PACK_NAME) {
-                let mut parser = tree_sitter::Parser::new();
-                if parser.set_language(&lang).is_ok() {
-                    if let Some(tree) = parser.parse(&source, None) {
-                        let mut synthetic_calls = synthesize_yul_call_events(&tree, source.as_bytes(), file);
-                        synthetic_calls.extend(synthesize_emit_call_events(&tree, source.as_bytes(), file));
-                        if !synthetic_calls.is_empty() {
-                            attach_synthesized_calls_to_decls(&mut idx, synthetic_calls);
-                        }
-                    }
-                }
+        if let Some((snapshot, tree)) = parsed.as_ref() {
+            let source = snapshot.text.as_bytes();
+            let mut synthetic_calls = synthesize_yul_call_events(tree, source, file);
+            synthetic_calls.extend(synthesize_emit_call_events(tree, source, file));
+            if !synthetic_calls.is_empty() {
+                attach_synthesized_calls_to_decls(&mut idx, synthetic_calls);
             }
         }
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+        if let Some((snapshot, tree)) = parsed {
             let src = snapshot.text.as_bytes();
             normalize_solidity_decl_kinds(&mut idx, &tree, file);
             // Phase-6 return-type extraction. The shared walker reads a
@@ -334,18 +325,9 @@ fn synthesize_yul_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Spa
                 }
                 let mut args: Vec<CallArg> = Vec::new();
                 for arg_node in children.iter().skip(1) {
-                    let text = node_text(arg_node, src).trim().to_string();
-                    if text.is_empty() {
-                        continue;
+                    if let Some(argument) = call_arg_from_node(*arg_node, file, src, None) {
+                        args.push(argument);
                     }
-                    args.push(CallArg {
-                        passing_mode: Default::default(),
-                        span: span_of(file, arg_node),
-                        name: None,
-                        value_text: text,
-                        place: None,
-                        source_names: Vec::new(),
-                    });
                 }
                 let event = FlowEvent::Call {
                     span,
@@ -386,19 +368,9 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
             }
             // Unwrap the `call_argument` to its inner expression so the value
             // text matches what shows up at non-emit call sites.
-            let value_node = first_named_child(child).unwrap_or(child);
-            let value_text = collapse_whitespace(node_text(&value_node, src));
-            if value_text.is_empty() {
-                continue;
+            if let Some(argument) = call_arg_from_node(child, file, src, None) {
+                args.push(argument);
             }
-            args.push(CallArg {
-                passing_mode: Default::default(),
-                span: span_of(file, &child),
-                name: None,
-                place: simple_identifier_place(&value_node, src),
-                value_text,
-                source_names: solidity_value_source_names(value_node, src),
-            });
         }
         synthesized.push((
             span,
@@ -865,28 +837,9 @@ fn call_as_assignment_source(call: &FlowEvent) -> (String, Vec<String>, Vec<Stri
     )
 }
 
-/// First named child of `node`, or `None` for leaf nodes.
-fn first_named_child(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
-    let mut cursor = node.walk();
-    let first = node.named_children(&mut cursor).next();
-    first
-}
-
 /// Normalize whitespace runs in `text` to single spaces.
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Return the node text as a `place` only when it's a simple identifier or
-/// field access — the engine's place-tracking can match those reliably.
-/// Anything more complex (calls, indexing, casts) returns `None`.
-fn simple_identifier_place(node: &tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
-    matches!(
-        node.kind(),
-        "identifier" | "member_expression" | "field_expression"
-    )
-    .then(|| collapse_whitespace(node_text(node, src)))
-    .filter(|s| !s.is_empty())
 }
 
 /// True when the decl is a type-defining container that can carry `bases`.

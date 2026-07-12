@@ -17,6 +17,7 @@ use bonsai_lang_api::FlowEvent;
 
 use crate::{text::normalise_qualified_text, IntraTaintResult, TokenSet};
 
+pub(crate) use summary::function_summary_from_idg;
 #[allow(unreachable_pub)]
 pub use summary::{
     function_summary, FunctionSummary, ParamSideEffect, ReturnAccessPath, ReturnElementTaint,
@@ -96,6 +97,10 @@ pub struct SourceCallbackArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallResultPassthrough {
     pub callee: String,
+    /// Optional adapter-derived receiver type required by this external
+    /// summary. This prevents a standard-library method summary from
+    /// applying to unrelated user-defined methods with the same spelling.
+    pub receiver_type: Option<String>,
     pub input_arg_indices: Vec<usize>,
     pub input_receiver: bool,
 }
@@ -120,6 +125,7 @@ pub struct ReceiverStatePropagation {
 #[derive(Debug, Default)]
 pub struct InterTaintCaches {
     warmed: AtomicBool,
+    attribution: crate::reachable::IdgAttributionCaches,
 }
 
 impl InterTaintCaches {
@@ -131,6 +137,7 @@ impl InterTaintCaches {
 
     pub fn clear(&self) {
         self.warmed.store(false, Ordering::Release);
+        self.attribution.clear();
     }
 
     #[must_use]
@@ -140,6 +147,10 @@ impl InterTaintCaches {
 
     pub(crate) fn mark_used(&self) {
         self.warmed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn attribution_caches(&self) -> &crate::reachable::IdgAttributionCaches {
+        &self.attribution
     }
 }
 
@@ -272,9 +283,9 @@ fn idg_backed_interprocedural_taint(
         entry_sources,
         None,
         &[],
-        &config.receiver_state_propagations,
-        &config.call_result_passthroughs,
-        &config.output_arg_flows,
+        &[],
+        &[],
+        &[],
         None,
         None,
         None,
@@ -282,6 +293,7 @@ fn idg_backed_interprocedural_taint(
         db,
         idg.as_ref(),
         &seed_nodes,
+        true,
     );
     entry_taint_graph_to_inter_result(graph, entry_func, entry_sources)
 }
@@ -428,9 +440,9 @@ fn idg_backed_call_site_receives_taint(
         entry_sources,
         None,
         &[],
-        &config.receiver_state_propagations,
-        &config.call_result_passthroughs,
-        &config.output_arg_flows,
+        &[],
+        &[],
+        &[],
         None,
         None,
         None,
@@ -438,6 +450,7 @@ fn idg_backed_call_site_receives_taint(
         db,
         idg.as_ref(),
         &seed_nodes,
+        true,
     );
     let spans_match = |candidate: Span| {
         candidate == sink_span

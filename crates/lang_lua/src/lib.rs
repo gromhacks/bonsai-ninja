@@ -84,7 +84,10 @@ impl LanguageAdapter for LuaAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            super_receiver_tokens: &[],
+            // `function T:method(...)` introduces the language-defined
+            // receiver binding `self`; Lua has no super-dispatch token.
+            implicit_receiver_tokens: &["self"],
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -470,14 +473,7 @@ fn enrich_lua_factory_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
 
 fn lua_returns_name(events: &[FlowEvent], name: &str) -> bool {
     events.iter().any(|event| match event {
-        FlowEvent::Return {
-            value_name,
-            value_text,
-            ..
-        } => {
-            value_name.as_deref() == Some(name)
-                || value_text.as_deref().is_some_and(|text| text.trim() == name)
-        }
+        FlowEvent::Return { value_flow, .. } => value_flow.place.as_deref() == Some(name),
         FlowEvent::Branch {
             then_events,
             else_events,

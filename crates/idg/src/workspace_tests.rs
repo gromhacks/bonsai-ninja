@@ -284,6 +284,52 @@ fn load_rejects_pipeline_hash_mismatch() {
 }
 
 #[test]
+fn workspace_sidecar_round_trips_wide_positional_places() {
+    let mut workspace = IdgWorkspace::new();
+    let mut segment = IdgSegment::new();
+    let func = FuncId::new(1);
+    let site = crate::place::CallSiteId(span());
+    let param = segment.intern_place(Place::Param { idx: 299 });
+    let arg = segment.intern_place(Place::CallArg { site, idx: 299 });
+    let param_node = segment.intern_node(func, param);
+    let arg_node = segment.intern_node(func, arg);
+    segment.add_edge(IdgEdge::intra_assign(param_node, arg_node, span()));
+    segment.record_func(func);
+    workspace.register_segment(segment);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("wide-idg.factstore");
+    workspace.save_to_disk(&path, 0xCAFE).expect("save");
+    let restored = IdgWorkspace::load_from_disk(&path, 0xCAFE)
+        .expect("load")
+        .expect("current workspace");
+    let segment = restored.segment(SegmentId(0)).expect("segment");
+    assert!(segment.places.lookup(&Place::Param { idx: 299 }).is_some());
+    assert!(segment
+        .places
+        .lookup(&Place::CallArg { site, idx: 299 })
+        .is_some());
+}
+
+#[test]
+fn workspace_sidecar_rejects_stale_segment_layout() {
+    let mut workspace = IdgWorkspace::new();
+    let mut segment = IdgSegment::new();
+    populate_segment(&mut segment, FuncId::new(1));
+    segment.version = IDG_SEGMENT_VERSION - 1;
+    workspace.register_segment(segment);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("stale-idg.factstore");
+    workspace.save_to_disk(&path, 0xCAFE).expect("save");
+    let restored = IdgWorkspace::load_from_disk(&path, 0xCAFE).expect("load");
+    assert!(
+        restored.is_none(),
+        "stale segment layout must force an IDG rebuild"
+    );
+}
+
+#[test]
 fn sidecar_file_validator_rejects_corrupt_payload() {
     let mut w = IdgWorkspace::new();
     let mut seg = IdgSegment::new();

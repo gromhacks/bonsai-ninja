@@ -15,6 +15,7 @@ fn solidity_adapter_populates_parameter_type_aliases() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -56,6 +57,7 @@ fn solidity_adapter_call_result_assignment_uses_call_metadata_only() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -107,6 +109,7 @@ fn solidity_adapter_method_call_result_preserves_receiver_source_name() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -153,6 +156,7 @@ fn solidity_modifier_definition_is_not_a_method_entry() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -169,4 +173,46 @@ fn solidity_modifier_definition_is_not_a_method_entry() {
 
     assert_eq!(audit.kind, DeclKind::Function);
     assert_eq!(handle.kind, DeclKind::Method);
+}
+
+#[test]
+fn solidity_emit_and_yul_args_preserve_ast_value_facts() {
+    let adapter = bonsai_lang_solidity::SolidityAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("AstArgs.sol"),
+        "contract AstArgs {\n\
+           struct Envelope { bytes command; }\n\
+           event Action(bytes value);\n\
+           function log(Envelope memory env) public { emit Action(env.command); }\n\
+           function raw(address target) public { assembly { pop(call(gas(), target, 0, 0, 0, 0, 0)) } }\n\
+         }",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let log = idx.defs.iter().find(|decl| decl.name == "log").expect("log decl");
+    let emit_arg = log.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "emit" => args.first(),
+        _ => None,
+    });
+    let emit_arg = emit_arg.unwrap_or_else(|| panic!("emit call: {:?}", log.flow_events));
+    assert_eq!(emit_arg.place.as_deref(), Some("env.command"));
+    assert!(emit_arg.source_names.iter().any(|name| name == "env.command"));
+
+    let raw = idx.defs.iter().find(|decl| decl.name == "raw").expect("raw decl");
+    let target_arg = raw.flow_events.iter().find_map(|event| match event {
+        FlowEvent::Call { name, args, .. } if name == "call" => {
+            args.iter().find(|arg| arg.value_text == "target")
+        }
+        _ => None,
+    });
+    let target_arg = target_arg.unwrap_or_else(|| panic!("Yul call: {:?}", raw.flow_events));
+    assert_eq!(target_arg.place.as_deref(), Some("target"));
+    assert!(target_arg.source_names.iter().any(|name| name == "target"));
 }

@@ -3,8 +3,8 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace, parse_with, span_of,
-        GENERIC_HANDLER,
+        call_arg_from_nodes, collect_kinds, language_from_pack, node_text, normalize_call_name_whitespace,
+        parse_with, span_of, GENERIC_HANDLER,
     },
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
     ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
@@ -126,8 +126,11 @@ impl LanguageAdapter for PythonAdapter {
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: &["__init__"],
+            bare_call_constructor_syntax: true,
             super_receiver_tokens: &["super"],
-            implicit_receiver_tokens: &["self"],
+            // Python's receiver is the adapter-proven first method parameter;
+            // `self` is a convention, not an implicit grammar token.
+            implicit_receiver_tokens: &[],
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -503,14 +506,12 @@ fn python_property_return_tail_from_event(
     receiver_name: &str,
 ) -> Option<String> {
     match event {
-        bonsai_lang_api::FlowEvent::Return {
-            value_text,
-            value_name,
-            ..
-        } => value_text
-            .as_deref()
-            .or(value_name.as_deref())
-            .and_then(|value| python_receiver_access_tail(value, receiver_name)),
+        bonsai_lang_api::FlowEvent::Return { value_flow, .. } => value_flow
+            .projection
+            .as_ref()
+            .filter(|projection| projection.base == receiver_name)
+            .map(|projection| projection.path.join("."))
+            .filter(|tail| !tail.is_empty()),
         bonsai_lang_api::FlowEvent::Branch {
             then_events,
             else_events,
@@ -536,16 +537,6 @@ fn python_property_return_tail_from_event(
             .find_map(|event| python_property_return_tail_from_event(event, receiver_name)),
         _ => None,
     }
-}
-
-fn python_receiver_access_tail(value: &str, receiver_name: &str) -> Option<String> {
-    let value = value.trim();
-    let tail = value.strip_prefix(receiver_name)?.strip_prefix('.')?.trim();
-    (!tail.is_empty()
-        && tail
-            .chars()
-            .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric()))
-    .then(|| tail.to_string())
 }
 
 fn python_property_aliases_for_decl(
@@ -830,18 +821,9 @@ fn build_python_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> Option<F
             } else {
                 (None, arg)
             };
-            let value_text = normalize_call_name_whitespace(node_text(&value_node, src));
-            if value_text.is_empty() {
-                continue;
+            if let Some(argument) = call_arg_from_nodes(arg, value_node, file, src, name) {
+                args.push(argument);
             }
-            args.push(CallArg {
-                passing_mode: Default::default(),
-                span: span_of(file, &arg),
-                name,
-                place: python_argument_place_from_text(&value_text),
-                source_names: python_value_source_names(&value_text),
-                value_text,
-            });
         }
     }
     Some(FlowEvent::Call {
@@ -858,19 +840,6 @@ fn python_call_receiver_from_name(name: &str) -> Option<String> {
     let (receiver, _) = name.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())
-}
-
-fn python_argument_place_from_text(text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let mut parts = text.split('.');
-    let first = parts.next()?;
-    if !python_is_identifier_like(first) {
-        return None;
-    }
-    parts.all(python_is_identifier_like).then(|| text.to_string())
 }
 
 fn python_is_identifier_like(text: &str) -> bool {
@@ -1578,6 +1547,7 @@ fn python_span_contains(outer: Span, inner: Span) -> bool {
 fn python_flow_event_span(event: &bonsai_lang_api::FlowEvent) -> Span {
     match event {
         bonsai_lang_api::FlowEvent::Assign { span, .. }
+        | bonsai_lang_api::FlowEvent::AggregateAssign { span, .. }
         | bonsai_lang_api::FlowEvent::Call { span, .. }
         | bonsai_lang_api::FlowEvent::Return { span, .. }
         | bonsai_lang_api::FlowEvent::Throw { span, .. }

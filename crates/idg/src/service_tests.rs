@@ -8,6 +8,22 @@ fn span(file: u32, start: u64, end: u64) -> Span {
     Span::new(bonsai_common::FileId::new(file), start, end)
 }
 
+fn payload_map_flow() -> bonsai_lang_api::ExpressionFlow {
+    bonsai_lang_api::ExpressionFlow {
+        aggregate_fields: vec![
+            bonsai_lang_api::ExpressionField {
+                name: "cmd".to_string(),
+                value: bonsai_lang_api::ExpressionFlow::from_place("payload.cmd"),
+            },
+            bonsai_lang_api::ExpressionField {
+                name: "user".to_string(),
+                value: bonsai_lang_api::ExpressionFlow::from_place("payload.user"),
+            },
+        ],
+        ..Default::default()
+    }
+}
+
 fn empty_decl(symbol: u32, file: u32, name: &str) -> Decl {
     Decl {
         symbol: SymbolId::new(symbol),
@@ -46,6 +62,7 @@ fn build_index(decls: Vec<Decl>) -> GlobalIndex {
             file,
             defs,
             refs: Vec::new(),
+            aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),
         });
@@ -125,12 +142,45 @@ fn unified_address_space_is_lazily_built() {
         span: span(0, 20, 30),
         value_name: Some("x".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("x"),
     }];
     let (idx, ws) = build(vec![decl]);
     let svc = IdgQueryService::new(ws, idx);
     // Trigger materialisation.
     let params = svc.param_nodes_of(FuncId::new(0));
     assert!(!params.is_empty());
+}
+
+#[test]
+fn param_node_enumeration_includes_positions_above_u8_range() {
+    let mut decl = empty_decl(1, 0, "wide");
+    decl.params = (0..300).map(|idx| format!("p{idx}")).collect();
+    let (idx, ws) = build(vec![decl]);
+    let svc = IdgQueryService::new(ws, Arc::clone(&idx));
+    let func = func_id(&idx, "wide");
+    let params = svc.param_nodes_of(func);
+    assert_eq!(params.len(), 300);
+    let point = svc.resolve_point(params[299]).expect("param 299 point");
+    assert_eq!(point.kind, PointKind::Param);
+    assert_eq!(point.name, "p299");
+}
+
+#[test]
+fn compiler_return_summary_preserves_positions_above_u8_range() {
+    let mut decl = empty_decl(1, 0, "wide_return");
+    decl.params = (0..300).map(|idx| format!("p{idx}")).collect();
+    decl.flow_events = vec![FlowEvent::Return {
+        span: span(0, 20, 30),
+        value_name: Some("p299".to_string()),
+        value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("p299"),
+    }];
+    let (idx, ws) = build(vec![decl]);
+    let func = func_id(&idx, "wide_return");
+    let service = IdgQueryService::new(ws, idx);
+    let summaries =
+        service.return_taint_param_indices_for_funcs_with_max_precision(&[func], Some(Precision::Narrowed));
+    assert_eq!(summaries.get(&func), Some(&vec![299]));
 }
 
 #[test]
@@ -142,6 +192,7 @@ fn forward_closure_from_param_reaches_return() {
         span: span(0, 20, 30),
         value_name: Some("x".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("x"),
     }];
     let (idx, ws) = build(vec![decl]);
     let svc = IdgQueryService::new(ws, idx);
@@ -163,6 +214,7 @@ fn template_interpolation_param_reaches_return() {
         span: span(0, 20, 80),
         value_name: None,
         value_text: Some("`<div class=\"bio\">${bio}</div>`".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["bio".to_string()]),
     }];
     let (idx, ws) = build(vec![decl]);
     let svc = IdgQueryService::new(ws, idx.clone());
@@ -226,6 +278,57 @@ fn forward_closure_with_max_precision_prunes_worse_edges() {
 }
 
 #[test]
+fn within_function_closure_excludes_reachable_callee_nodes() {
+    let caller = FuncId::new(7);
+    let callee = FuncId::new(8);
+    let mut caller_seg = crate::segment::IdgSegment::new();
+    let caller_param = caller_seg.intern_place(Place::Param { idx: 0 });
+    let caller_write = caller_seg.intern_place(Place::Write {
+        name: 1,
+        path: Default::default(),
+        span: span(0, 10, 20),
+    });
+    let caller_param_node = caller_seg.intern_node(caller, caller_param);
+    let caller_write_node = caller_seg.intern_node(caller, caller_write);
+    caller_seg.add_edge(IdgEdge::intra_assign(
+        caller_param_node,
+        caller_write_node,
+        span(0, 10, 20),
+    ));
+    caller_seg.record_func(caller);
+
+    let mut callee_seg = crate::segment::IdgSegment::new();
+    let callee_param = callee_seg.intern_place(Place::Param { idx: 0 });
+    let callee_param_node = callee_seg.intern_node(callee, callee_param);
+    callee_seg.record_func(callee);
+
+    let mut ws = IdgWorkspace::new();
+    let caller_segment = ws.register_segment(caller_seg);
+    let callee_segment = ws.register_segment(callee_seg);
+    ws.cross_file_mut().push(crate::workspace::CrossFileEdge {
+        from_segment: caller_segment,
+        to_segment: callee_segment,
+        edge: IdgEdge::inter_call_arg(
+            caller_write_node,
+            callee_param_node,
+            span(0, 20, 30),
+            Precision::Exact,
+            bonsai_callgraph::EdgeKind::Direct,
+        ),
+    });
+    let svc = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let seed = svc.param_nodes_of(caller);
+
+    let global = svc.forward_closure_with_max_precision(&seed, Some(Precision::Narrowed));
+    let local = svc.forward_closure_within_func_with_max_precision(&seed, caller, Some(Precision::Narrowed));
+    assert_eq!(global.len(), 3);
+    assert_eq!(local.len(), 2);
+    assert!(local
+        .iter()
+        .all(|node| svc.resolve_point(*node).is_some_and(|point| point.func == caller)));
+}
+
+#[test]
 fn cross_call_edges_in_closure_with_max_precision_prunes_worse_edges() {
     let caller = FuncId::new(7);
     let callee = FuncId::new(8);
@@ -281,6 +384,7 @@ fn backward_closure_from_return_reaches_param() {
         span: span(0, 20, 30),
         value_name: Some("x".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("x"),
     }];
     let (idx, ws) = build(vec![decl]);
     let svc = IdgQueryService::new(ws, idx);
@@ -294,6 +398,172 @@ fn backward_closure_from_return_reaches_param() {
 }
 
 #[test]
+fn compiler_return_summaries_compose_calls_and_mutual_recursion() {
+    let f = FuncId::new(70);
+    let g = FuncId::new(71);
+    let f_calls_g = span(0, 20, 30);
+    let g_calls_f = span(0, 50, 60);
+    let mut segment = crate::segment::IdgSegment::new();
+
+    let f_param_place = segment.intern_place(Place::Param { idx: 0 });
+    let f_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(f_calls_g),
+        idx: 0,
+    });
+    let f_call_ret_place = segment.intern_place(Place::CallRet {
+        site: crate::place::CallSiteId(f_calls_g),
+    });
+    let return_place = segment.intern_place(Place::Return);
+    let f_param = segment.intern_node(f, f_param_place);
+    let f_arg = segment.intern_node(f, f_arg_place);
+    let f_call_ret = segment.intern_node(f, f_call_ret_place);
+    let f_return = segment.intern_node(f, return_place);
+
+    let g_param_place = segment.intern_place(Place::Param { idx: 0 });
+    let g_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(g_calls_f),
+        idx: 0,
+    });
+    let g_call_ret_place = segment.intern_place(Place::CallRet {
+        site: crate::place::CallSiteId(g_calls_f),
+    });
+    let g_param = segment.intern_node(g, g_param_place);
+    let g_arg = segment.intern_node(g, g_arg_place);
+    let g_call_ret = segment.intern_node(g, g_call_ret_place);
+    let g_return = segment.intern_node(g, return_place);
+
+    segment.add_edge(IdgEdge::intra_assign(f_param, f_arg, f_calls_g));
+    segment.add_edge(IdgEdge::intra_assign(f_call_ret, f_return, f_calls_g));
+    segment.add_edge(IdgEdge::inter_call_arg(
+        f_arg,
+        g_param,
+        f_calls_g,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::inter_return(
+        g_return,
+        f_call_ret,
+        f_calls_g,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+
+    segment.add_edge(IdgEdge::intra_assign(g_param, g_arg, g_calls_f));
+    segment.add_edge(IdgEdge::intra_assign(g_call_ret, g_return, g_calls_f));
+    segment.add_edge(IdgEdge::inter_call_arg(
+        g_arg,
+        f_param,
+        g_calls_f,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::inter_return(
+        f_return,
+        g_call_ret,
+        g_calls_f,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    // The concrete base arm in g seeds the mutually-recursive fixed point.
+    segment.add_edge(IdgEdge::intra_assign(g_param, g_return, span(0, 70, 80)));
+    segment.record_func(f);
+    segment.record_func(g);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let summaries =
+        service.return_taint_param_indices_for_funcs_with_max_precision(&[f, g], Some(Precision::Narrowed));
+
+    assert_eq!(summaries.get(&f), Some(&vec![0]));
+    assert_eq!(summaries.get(&g), Some(&vec![0]));
+}
+
+#[test]
+fn compiler_return_summaries_respect_the_precision_scope() {
+    let func = FuncId::new(72);
+    let mut segment = crate::segment::IdgSegment::new();
+    let param_place = segment.intern_place(Place::Param { idx: 0 });
+    let return_place = segment.intern_place(Place::Return);
+    let param = segment.intern_node(func, param_place);
+    let ret = segment.intern_node(func, return_place);
+    segment.add_edge(IdgEdge::new(
+        param,
+        ret,
+        crate::edge::EdgeMeta {
+            precision: Precision::OverApproximate,
+            kind: crate::edge::IdgEdgeKind::IntraReturn,
+            call_kind: EdgeKind::Indirect,
+            via_span: span(0, 20, 30),
+        },
+    ));
+    segment.record_func(func);
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+
+    let semantic =
+        service.return_taint_param_indices_for_funcs_with_max_precision(&[func], Some(Precision::Narrowed));
+    let diagnostic = service.return_taint_param_indices_for_funcs_with_max_precision(&[func], None);
+    assert!(semantic.get(&func).is_some_and(Vec::is_empty));
+    assert_eq!(diagnostic.get(&func), Some(&vec![0]));
+}
+
+#[test]
+fn local_storage_summaries_never_absorb_callee_storage() {
+    let caller = FuncId::new(73);
+    let callee = FuncId::new(74);
+    let call_span = span(0, 30, 40);
+    let mut segment = crate::segment::IdgSegment::new();
+    let before_name = segment.strings.intern("before");
+    let deep_name = segment.strings.intern("deep");
+    let caller_param_place = segment.intern_place(Place::Param { idx: 0 });
+    let before_place = segment.intern_place(Place::Write {
+        name: before_name,
+        path: Default::default(),
+        span: span(0, 10, 20),
+    });
+    let call_arg_place = segment.intern_place(Place::CallArg {
+        site: crate::place::CallSiteId(call_span),
+        idx: 0,
+    });
+    let callee_param_place = segment.intern_place(Place::Param { idx: 0 });
+    let deep_place = segment.intern_place(Place::Write {
+        name: deep_name,
+        path: Default::default(),
+        span: span(0, 50, 60),
+    });
+    let caller_param = segment.intern_node(caller, caller_param_place);
+    let before = segment.intern_node(caller, before_place);
+    let call_arg = segment.intern_node(caller, call_arg_place);
+    let callee_param = segment.intern_node(callee, callee_param_place);
+    let deep = segment.intern_node(callee, deep_place);
+    segment.add_edge(IdgEdge::intra_assign(caller_param, before, span(0, 10, 20)));
+    segment.add_edge(IdgEdge::intra_assign(before, call_arg, call_span));
+    segment.add_edge(IdgEdge::inter_call_arg(
+        call_arg,
+        callee_param,
+        call_span,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::intra_assign(callee_param, deep, span(0, 50, 60)));
+    segment.record_func(caller);
+    segment.record_func(callee);
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+
+    let summaries = service.local_storage_taint_by_param_for_funcs_with_max_precision(
+        &[caller, callee],
+        Some(Precision::Narrowed),
+    );
+    assert_eq!(summaries.get(&caller), Some(&vec![vec!["before".to_string()]]));
+    assert_eq!(summaries.get(&callee), Some(&vec![vec!["deep".to_string()]]));
+}
+
+#[test]
 fn reaches_is_consistent_with_forward_closure() {
     let mut decl = empty_decl(1, 0, "f");
     decl.params = vec!["x".to_string()];
@@ -301,6 +571,7 @@ fn reaches_is_consistent_with_forward_closure() {
         span: span(0, 20, 30),
         value_name: Some("x".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("x"),
     }];
     let (idx, ws) = build(vec![decl]);
     let svc = IdgQueryService::new(ws, idx);
@@ -648,6 +919,7 @@ fn cross_file_call_reaches_callee_from_caller_param() {
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("arg"),
     }];
     let (idx, ws) = build_with_edges(vec![f, g], |idx| {
         vec![(func_id(idx, "f"), func_id(idx, "g"), span(0, 20, 30))]
@@ -1247,6 +1519,7 @@ fn returned_container_field_forwards_to_assigned_object_argument() {
         span: span(1, 100, 140),
         value_name: None,
         value_text: Some("{\"cmd\": payload.cmd, \"user\": payload.user}".to_string()),
+        value_flow: payload_map_flow(),
     }];
 
     let mut persist = empty_decl(3, 2, "persist");
@@ -1391,6 +1664,7 @@ fn returned_container_field_forwards_through_constructor_receiver_state() {
         span: span(1, 100, 140),
         value_name: None,
         value_text: Some("{\"cmd\": payload.cmd, \"user\": payload.user}".to_string()),
+        value_flow: payload_map_flow(),
     }];
 
     let mut repository_class = empty_decl(3, 2, "Repository");
@@ -1560,6 +1834,7 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
     ctor.kind = DeclKind::Constructor;
     ctor.parent = Some(base_class.symbol);
     ctor.params = vec!["data".to_string()];
+    ctor.implicit_receiver_names = vec!["this".to_string()];
     ctor.receiver_field_writes = vec![FieldWrite {
         span: span(1, 90, 95),
         target: "this.data".to_string(),
@@ -1590,12 +1865,17 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
             span: span(1, 100, 125),
             value_name: None,
             value_text: Some("new static(data)".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![span(1, 110, 116)],
+                ..Default::default()
+            },
         },
     ];
 
     let mut run = empty_decl(5, 1, "run");
     run.kind = DeclKind::Method;
     run.parent = Some(repository_class.symbol);
+    run.implicit_receiver_names = vec!["$this".to_string()];
     run.flow_events = vec![
         FlowEvent::Call {
             span: span(1, 200, 207),
@@ -1630,10 +1910,12 @@ fn return_expression_constructor_state_flows_to_inline_factory_receiver() {
     let mut cmd = empty_decl(6, 1, "cmd");
     cmd.kind = DeclKind::Method;
     cmd.parent = Some(base_class.symbol);
+    cmd.implicit_receiver_names = vec!["$this".to_string()];
     cmd.flow_events = vec![FlowEvent::Return {
         span: span(1, 300, 315),
         value_name: None,
         value_text: Some("$this->data['cmd']".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("$this.data.cmd"),
     }];
 
     let mut execute = empty_decl(7, 2, "execute");
@@ -1734,6 +2016,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
     init.kind = DeclKind::Constructor;
     init.parent = Some(repository_class.symbol);
     init.params = vec!["data".to_string()];
+    init.implicit_receiver_names = vec!["self".to_string()];
     init.flow_events = vec![FlowEvent::Assign {
         span: span(1, 70, 80),
         target: "self.data".to_string(),
@@ -1769,6 +2052,10 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
             span: span(1, 110, 125),
             value_name: None,
             value_text: Some("new(data)".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![span(1, 110, 116)],
+                ..Default::default()
+            },
         },
     ];
 
@@ -1813,6 +2100,7 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
     let mut run = empty_decl(6, 1, "run");
     run.kind = DeclKind::Method;
     run.parent = Some(repository_class.symbol);
+    run.implicit_receiver_names = vec!["self".to_string()];
     run.flow_events = vec![
         FlowEvent::Call {
             span: span(1, 210, 214),
@@ -1842,10 +2130,12 @@ fn returned_factory_assignment_receiver_field_flows_to_method_call() {
     let mut cmd = empty_decl(7, 1, "cmd");
     cmd.kind = DeclKind::Method;
     cmd.parent = Some(repository_class.symbol);
+    cmd.implicit_receiver_names = vec!["self".to_string()];
     cmd.flow_events = vec![FlowEvent::Return {
         span: span(1, 240, 253),
         value_name: None,
         value_text: Some("self.data[:cmd]".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("self.data.cmd"),
     }];
 
     let mut execute = empty_decl(8, 2, "execute");
@@ -1938,6 +2228,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
     init.kind = DeclKind::Constructor;
     init.parent = Some(repository_class.symbol);
     init.params = vec!["data".to_string()];
+    init.implicit_receiver_names = vec!["self".to_string()];
     init.flow_events = vec![FlowEvent::Assign {
         span: span(1, 70, 80),
         target: "self.data".to_string(),
@@ -1973,6 +2264,10 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
             span: span(1, 110, 125),
             value_name: None,
             value_text: Some("new(data)".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![span(1, 110, 116)],
+                ..Default::default()
+            },
         },
     ];
 
@@ -2017,6 +2312,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
     let mut audited_run = empty_decl(7, 1, "run");
     audited_run.kind = DeclKind::Method;
     audited_run.parent = Some(audited_class.symbol);
+    audited_run.implicit_receiver_names = vec!["self".to_string()];
     audited_run.span = span(1, 300, 340);
     audited_run.name_span = span(1, 300, 303);
     audited_run.flow_events = vec![FlowEvent::Call {
@@ -2031,6 +2327,7 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
     let mut base_run = empty_decl(8, 1, "run");
     base_run.kind = DeclKind::Method;
     base_run.parent = Some(repository_class.symbol);
+    base_run.implicit_receiver_names = vec!["self".to_string()];
     base_run.span = span(1, 360, 430);
     base_run.name_span = span(1, 360, 363);
     base_run.flow_events = vec![
@@ -2062,10 +2359,12 @@ fn returned_factory_assignment_receiver_field_flows_through_super_method() {
     let mut cmd = empty_decl(9, 1, "cmd");
     cmd.kind = DeclKind::Method;
     cmd.parent = Some(repository_class.symbol);
+    cmd.implicit_receiver_names = vec!["self".to_string()];
     cmd.flow_events = vec![FlowEvent::Return {
         span: span(1, 440, 455),
         value_name: None,
         value_text: Some("self.data[:cmd]".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("self.data.cmd"),
     }];
 
     let mut execute = empty_decl(10, 2, "execute");
@@ -2177,14 +2476,20 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
 
     let mut repository_class = empty_decl(2, 1, "Repository");
     repository_class.kind = DeclKind::Class;
+    repository_class.bases = vec!["BaseRepository".to_string()];
 
     let mut audited_class = empty_decl(3, 1, "AuditedRepository");
     audited_class.kind = DeclKind::Class;
     audited_class.bases = vec!["Repository".to_string()];
 
+    let mut base_class = empty_decl(13, 1, "BaseRepository");
+    base_class.kind = DeclKind::Class;
+
     let mut base_ctor = empty_decl(4, 1, "BaseRepository");
     base_ctor.kind = DeclKind::Constructor;
+    base_ctor.parent = Some(base_class.symbol);
     base_ctor.params = vec!["data".to_string()];
+    base_ctor.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
     base_ctor.receiver_field_writes = vec![FieldWrite {
         span: span(1, 70, 90),
         target: "this.data".to_string(),
@@ -2193,7 +2498,9 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
 
     let mut repository_ctor = empty_decl(5, 1, "Repository");
     repository_ctor.kind = DeclKind::Constructor;
+    repository_ctor.parent = Some(repository_class.symbol);
     repository_ctor.params = vec!["data".to_string()];
+    repository_ctor.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
     repository_ctor.receiver_field_writes = vec![FieldWrite {
         span: span(1, 70, 90),
         target: "this.data".to_string(),
@@ -2217,7 +2524,9 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
 
     let mut audited_ctor = empty_decl(6, 1, "AuditedRepository");
     audited_ctor.kind = DeclKind::Constructor;
+    audited_ctor.parent = Some(audited_class.symbol);
     audited_ctor.params = vec!["data".to_string()];
+    audited_ctor.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
     audited_ctor.receiver_field_writes = vec![FieldWrite {
         span: span(1, 70, 90),
         target: "this.data".to_string(),
@@ -2241,6 +2550,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
 
     let mut wrap = empty_decl(7, 1, "wrap");
     wrap.kind = DeclKind::Method;
+    wrap.parent = Some(repository_class.symbol);
     wrap.params = vec!["data".to_string()];
     wrap.flow_events = vec![
         FlowEvent::Call {
@@ -2262,6 +2572,10 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
             span: span(1, 156, 184),
             value_name: None,
             value_text: Some("new AuditedRepository(data)".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow {
+                call_sites: vec![span(1, 160, 178)],
+                ..Default::default()
+            },
         },
     ];
 
@@ -2296,6 +2610,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
     let mut audited_run = empty_decl(9, 1, "run");
     audited_run.kind = DeclKind::Method;
     audited_run.parent = Some(audited_class.symbol);
+    audited_run.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
     audited_run.span = span(1, 300, 340);
     audited_run.name_span = span(1, 300, 303);
     audited_run.flow_events = vec![FlowEvent::Call {
@@ -2310,6 +2625,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
     let mut base_run = empty_decl(10, 1, "run");
     base_run.kind = DeclKind::Method;
     base_run.parent = Some(repository_class.symbol);
+    base_run.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
     base_run.span = span(1, 360, 430);
     base_run.name_span = span(1, 360, 363);
     base_run.flow_events = vec![
@@ -2351,10 +2667,12 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
     let mut cmd = empty_decl(11, 1, "cmd");
     cmd.kind = DeclKind::Method;
     cmd.parent = Some(repository_class.symbol);
+    cmd.implicit_receiver_names = vec!["this".to_string()];
     cmd.flow_events = vec![FlowEvent::Return {
         span: span(1, 440, 455),
         value_name: None,
         value_text: Some("data.cmd".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("data.cmd"),
     }];
 
     let mut execute = empty_decl(12, 2, "execute");
@@ -2378,6 +2696,7 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
     let (idx, ws) = build_with_edges(
         vec![
             entry,
+            base_class,
             repository_class,
             audited_class,
             base_ctor,
@@ -2435,12 +2754,24 @@ fn inline_factory_receiver_field_flows_through_super_and_bare_accessor() {
     let svc = IdgQueryService::new(ws, Arc::clone(&idx));
     let entry_id = func_id(&idx, "entry");
     let raw_seed = svc.param_nodes_for_names(entry_id, &["raw".to_string()], &idx);
+    let raw_closure = svc.forward_closure(&raw_seed);
+    let raw_points: Vec<String> = raw_closure
+        .iter()
+        .filter_map(|node| {
+            svc.resolve_point(*node).map(|point| {
+                format!(
+                    "{:?}:{}@{}..{}",
+                    point.kind, point.name, point.span.start, point.span.end
+                )
+            })
+        })
+        .collect();
     let raw_calls = svc.tainted_call_args_in_closure(&raw_seed);
     assert!(
         raw_calls
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(2, 500, 510) && *idx == 0),
-        "inline factory receiver field must flow through super.run and bare cmd accessor: {raw_calls:?}"
+        "inline factory receiver field must flow through super.run and bare cmd accessor: calls={raw_calls:?} closure={raw_points:?}"
     );
 }
 
@@ -2509,6 +2840,7 @@ fn returned_container_field_forwards_through_super_constructor_receiver_state() 
         span: span(1, 100, 140),
         value_name: None,
         value_text: Some("{\"cmd\": payload.cmd, \"user\": payload.user}".to_string()),
+        value_flow: payload_map_flow(),
     }];
 
     let mut repository_class = empty_decl(3, 2, "Repository");
@@ -2738,5 +3070,114 @@ fn c_indexed_argv_copy_reaches_address_of_struct_field_read() {
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(1, 70, 80) && *idx == 0),
         "argv[1] copied into env.cmd should reach the callee's env.cmd sink without tainting the whole struct: {calls:?}"
+    );
+}
+
+#[test]
+fn target_cut_cache_is_lru_bounded_and_evicted_cuts_recompute_completely() {
+    let func = FuncId::new(7);
+    let mut segment = crate::segment::IdgSegment::new();
+    let param = segment.intern_place(Place::Param { idx: 0 });
+    let first_write = segment.intern_place(Place::Write {
+        name: 1,
+        path: Default::default(),
+        span: span(0, 10, 20),
+    });
+    let second_write = segment.intern_place(Place::Write {
+        name: 2,
+        path: Default::default(),
+        span: span(0, 30, 40),
+    });
+    let third_write = segment.intern_place(Place::Write {
+        name: 3,
+        path: Default::default(),
+        span: span(0, 50, 60),
+    });
+    let param_node = segment.intern_node(func, param);
+    let first_node = segment.intern_node(func, first_write);
+    let second_node = segment.intern_node(func, second_write);
+    let third_node = segment.intern_node(func, third_write);
+    segment.add_edge(IdgEdge::intra_assign(param_node, first_node, span(0, 10, 20)));
+    segment.add_edge(IdgEdge::intra_assign(first_node, second_node, span(0, 30, 40)));
+    segment.add_edge(IdgEdge::intra_assign(second_node, third_node, span(0, 50, 60)));
+    segment.record_func(func);
+
+    let mut workspace = IdgWorkspace::new();
+    workspace.register_segment(segment);
+    let service =
+        IdgQueryService::with_target_cut_cache_capacity(Arc::new(workspace), Arc::new(GlobalIndex::new()), 2);
+    let seeds = service.param_nodes_of(func);
+    let first_target = vec![WsNodeId(first_node.0)];
+    let second_target = vec![WsNodeId(second_node.0)];
+    let precision = Some(Precision::Narrowed);
+
+    let first_cut = service.forward_target_nodes_cut_with_max_precision(&seeds, &first_target, precision);
+    let second_cut = service.forward_target_nodes_cut_with_max_precision(&seeds, &second_target, precision);
+    assert!(first_cut.contains(&WsNodeId(first_node.0)));
+    assert!(second_cut.contains(&WsNodeId(second_node.0)));
+
+    // Refresh the first node cut, then insert a function cut. Both target
+    // kinds share the same two-entry budget, so the second node cut is the
+    // least-recent entry and must be evicted.
+    assert_eq!(
+        service.forward_target_nodes_cut_with_max_precision(&seeds, &first_target, precision),
+        first_cut
+    );
+    let mut target_funcs = AHashSet::default();
+    target_funcs.insert(func);
+    let function_cut = service.forward_target_func_cut_with_max_precision(&seeds, &target_funcs, precision);
+    assert!(function_cut.contains(&WsNodeId(third_node.0)));
+
+    let unified = service.ensure_unified();
+    let first_key = TargetCutKey::Nodes(TargetNodeCutKey::new(precision, &first_target));
+    let second_key = TargetCutKey::Nodes(TargetNodeCutKey::new(precision, &second_target));
+    let function_key = TargetCutKey::Funcs(TargetFuncCutKey::new(precision, &target_funcs));
+    {
+        let cache = unified.target_backward.read();
+        assert_eq!(cache.len(), 2, "retention must never exceed its worker budget");
+        assert!(cache.contains(&first_key), "a cache hit must refresh recency");
+        assert!(cache.contains(&function_key));
+        assert!(
+            !cache.contains(&second_key),
+            "least-recent target cut must be evicted"
+        );
+    }
+
+    // Eviction affects reuse only: querying the removed target reruns the
+    // complete reverse fixed point and returns byte-for-byte the same cut.
+    let recomputed_second =
+        service.forward_target_nodes_cut_with_max_precision(&seeds, &second_target, precision);
+    assert_eq!(recomputed_second, second_cut);
+    let cache = unified.target_backward.read();
+    assert_eq!(cache.len(), 2);
+    assert!(cache.contains(&second_key));
+    drop(cache);
+
+    // A cold same-target burst shares one in-flight reverse fixed point.
+    // Without the per-key OnceLock every worker allocates and walks the full
+    // reverse CSR before insert_or_get discards all but one result.
+    let before = unified.target_cut_computations.load(Ordering::Relaxed);
+    let service = Arc::new(service);
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let third_target = vec![WsNodeId(third_node.0)];
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let service = Arc::clone(&service);
+        let barrier = Arc::clone(&barrier);
+        let seeds = seeds.clone();
+        let target = third_target.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            service.forward_target_nodes_cut_with_max_precision(&seeds, &target, precision)
+        }));
+    }
+    for worker in workers {
+        let closure = worker.join().expect("target-cut worker");
+        assert!(closure.contains(&WsNodeId(third_node.0)));
+    }
+    assert_eq!(
+        unified.target_cut_computations.load(Ordering::Relaxed) - before,
+        1,
+        "same-key concurrent misses must compute one reverse closure"
     );
 }

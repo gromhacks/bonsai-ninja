@@ -68,7 +68,7 @@ pub enum Place {
     /// Entry's formal parameter at positional index `idx`.
     Param {
         /// 0-based positional index in the function's parameter list.
-        idx: u8,
+        idx: u32,
     },
 
     /// Value returned from the entry function.
@@ -117,7 +117,7 @@ pub enum Place {
         /// Call site this argument belongs to.
         site: CallSiteId,
         /// 0-based positional index in the call's argument list.
-        idx: u8,
+        idx: u32,
     },
 
     /// Return value reception from a specific call site.

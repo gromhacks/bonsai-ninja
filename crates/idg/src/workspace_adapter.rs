@@ -27,9 +27,12 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
 
 use crate::builder::{
-    stitch_idg_with_field_argument_forwarding, CalleeResolver, FuncToSegment, ResolvedCallee,
+    stitch_idg_with_selective_field_forwarding_mode, CalleeResolver, FuncToSegment, ResolvedCallee,
 };
-use crate::transfer::{transfer_function_for_with_options, TransferOptions, TransferOutput};
+use crate::transfer::{
+    declared_receiver_names, receiver_name_matches, transfer_function_for_with_options, TransferOptions,
+    TransferOutput,
+};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
 type FieldReadNodesByFunc = AHashMap<FuncId, AHashMap<String, Vec<crate::WsNodeId>>>;
@@ -347,7 +350,8 @@ struct WorkspaceCalleeResolver<'a> {
     /// without this fallback, lambda bodies are unreachable for adapters
     /// whose functional-invocation forms the callgraph doesn't model.
     local_callable_bindings: &'a AHashMap<FuncId, AHashMap<String, FuncId>>,
-    callback_cache: RwLock<AHashMap<(FuncId, u8), Vec<ResolvedCallee>>>,
+    callback_cache: RwLock<AHashMap<(FuncId, u32), Vec<ResolvedCallee>>>,
+    ancestor_dispatch_cache: RwLock<AHashMap<(FuncId, FuncId), bool>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -407,7 +411,15 @@ fn call_event_spans_matching_edge(
     edge_span: bonsai_common::Span,
 ) -> Vec<bonsai_common::Span> {
     let mut out = Vec::new();
-    collect_call_event_spans_matching_edge(events, edge_span, &mut out);
+    // Prefer a call event whose own syntax span matches the callgraph edge.
+    // Only fall back to an argument span when no such nested/outer call exists.
+    // Otherwise an edge for `factory()` inside `host(factory())` is indexed on
+    // both calls merely because the outer argument contains the inner span,
+    // and the IDG mistakes the factory for the host's resolved callee.
+    collect_call_event_spans_matching_edge(events, edge_span, false, &mut out);
+    if out.is_empty() {
+        collect_call_event_spans_matching_edge(events, edge_span, true, &mut out);
+    }
     out.sort_by_key(|span| (span.file.raw(), span.start, span.end));
     out.dedup();
     out
@@ -416,13 +428,15 @@ fn call_event_spans_matching_edge(
 fn collect_call_event_spans_matching_edge(
     events: &[FlowEvent],
     edge_span: bonsai_common::Span,
+    include_arg_spans: bool,
     out: &mut Vec<bonsai_common::Span>,
 ) {
     for event in events {
         match event {
             FlowEvent::Call { span, args, .. } => {
                 if call_site_spans_match(edge_span, *span)
-                    || args.iter().any(|arg| call_site_spans_match(edge_span, arg.span))
+                    || (include_arg_spans
+                        && args.iter().any(|arg| call_site_spans_match(edge_span, arg.span)))
                 {
                     out.push(*span);
                 }
@@ -432,11 +446,11 @@ fn collect_call_event_spans_matching_edge(
                 else_events,
                 ..
             } => {
-                collect_call_event_spans_matching_edge(then_events, edge_span, out);
-                collect_call_event_spans_matching_edge(else_events, edge_span, out);
+                collect_call_event_spans_matching_edge(then_events, edge_span, include_arg_spans, out);
+                collect_call_event_spans_matching_edge(else_events, edge_span, include_arg_spans, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_event_spans_matching_edge(body, edge_span, out);
+                collect_call_event_spans_matching_edge(body, edge_span, include_arg_spans, out);
             }
             FlowEvent::Try {
                 body,
@@ -444,9 +458,9 @@ fn collect_call_event_spans_matching_edge(
                 finally_events,
                 ..
             } => {
-                collect_call_event_spans_matching_edge(body, edge_span, out);
-                collect_call_event_spans_matching_edge(catch_events, edge_span, out);
-                collect_call_event_spans_matching_edge(finally_events, edge_span, out);
+                collect_call_event_spans_matching_edge(body, edge_span, include_arg_spans, out);
+                collect_call_event_spans_matching_edge(catch_events, edge_span, include_arg_spans, out);
+                collect_call_event_spans_matching_edge(finally_events, edge_span, include_arg_spans, out);
             }
             _ => {}
         }
@@ -475,9 +489,17 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                 if !self.funcs_share_language(caller, edge.to) {
                     continue;
                 }
+                // Direct/virtual/constructor edges are the compiler-resolved
+                // target of this exact call site, even when aliases make the
+                // source spelling differ from the declaration. An Indirect
+                // edge can instead be a higher-order callable-argument edge
+                // attached to the host call (`xs.reduce(callback, init)` ->
+                // `callback`). That edge describes a callback invocation, not
+                // the host call's own return semantics. Admit it here only
+                // when its target still matches the syntactic callee; local
+                // callable bindings and callback parameters are resolved by
+                // the dedicated fallbacks below.
                 if edge.edge_kind == bonsai_callgraph::EdgeKind::Indirect {
-                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
-                } else {
                     self.push_resolved_edge_if_name_matches(
                         &mut out,
                         &mut seen,
@@ -486,6 +508,8 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                         edge.precision,
                         callee_name,
                     );
+                } else {
+                    Self::push_resolved_edge(&mut out, &mut seen, edge.to, edge.edge_kind, edge.precision);
                 }
             }
         } else {
@@ -578,7 +602,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         out
     }
 
-    fn callback_bindings(&self, host: FuncId, param_idx: u8) -> Vec<ResolvedCallee> {
+    fn callback_bindings(&self, host: FuncId, param_idx: u32) -> Vec<ResolvedCallee> {
         self.callback_bindings_indexed(host, param_idx)
     }
 
@@ -634,6 +658,16 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         matches!(decl.kind, DeclKind::Constructor)
     }
 
+    fn is_ancestor_dispatch(&self, caller: FuncId, callee: FuncId) -> bool {
+        let key = (caller, callee);
+        if let Some(cached) = self.ancestor_dispatch_cache.read().get(&key).copied() {
+            return cached;
+        }
+        let result = self.callee_parent_is_declared_ancestor(caller, callee);
+        self.ancestor_dispatch_cache.write().insert(key, result);
+        result
+    }
+
     fn is_local_callable_binding(&self, caller: FuncId, callee: FuncId) -> bool {
         self.local_callable_bindings
             .get(&caller)
@@ -642,6 +676,48 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
 }
 
 impl WorkspaceCalleeResolver<'_> {
+    fn callee_parent_is_declared_ancestor(&self, caller: FuncId, callee: FuncId) -> bool {
+        let Some(caller_parent) = self
+            .global
+            .decl_of(bonsai_common::SymbolId::new(caller.raw()))
+            .and_then(|decl| decl.parent)
+        else {
+            return false;
+        };
+        let Some(callee_parent) = self
+            .global
+            .decl_of(bonsai_common::SymbolId::new(callee.raw()))
+            .and_then(|decl| decl.parent)
+        else {
+            return false;
+        };
+        if caller_parent == callee_parent || !self.funcs_share_language(caller, callee) {
+            return false;
+        }
+
+        let mut visited = ahash::AHashSet::default();
+        let mut ancestors = vec![caller_parent];
+        while let Some(class_symbol) = ancestors.pop() {
+            if !visited.insert(class_symbol) {
+                continue;
+            }
+            let Some(class_decl) = self.global.decl_of(class_symbol) else {
+                continue;
+            };
+            for base_name in &class_decl.bases {
+                for base_symbol in self.class_candidates_for_ancestry(class_symbol, base_name) {
+                    if base_symbol == callee_parent {
+                        return true;
+                    }
+                    if !visited.contains(&base_symbol) {
+                        ancestors.push(base_symbol);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn push_resolved_edge(
         out: &mut Vec<ResolvedCallee>,
         seen: &mut ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)>,
@@ -733,7 +809,7 @@ impl WorkspaceCalleeResolver<'_> {
 }
 
 impl WorkspaceCalleeResolver<'_> {
-    fn callback_bindings_indexed(&self, host: FuncId, param_idx: u8) -> Vec<ResolvedCallee> {
+    fn callback_bindings_indexed(&self, host: FuncId, param_idx: u32) -> Vec<ResolvedCallee> {
         let cache_key = (host, param_idx);
         if let Some(cached) = self.callback_cache.read().get(&cache_key).cloned() {
             return cached;
@@ -803,6 +879,61 @@ impl WorkspaceCalleeResolver<'_> {
 }
 
 impl<'a> WorkspaceCalleeResolver<'a> {
+    fn exception_type_assignability(
+        &self,
+        func: FuncId,
+        thrown: &str,
+        caught: &str,
+    ) -> Option<bonsai_common::Precision> {
+        let thrown = bonsai_lang_api::kit::canonical_simple_type_name(thrown);
+        let caught = bonsai_lang_api::kit::canonical_simple_type_name(caught);
+        if thrown.is_empty() || caught.is_empty() {
+            return None;
+        }
+        if thrown == caught {
+            return Some(bonsai_common::Precision::Exact);
+        }
+        let Some(scope) = self.func_to_scope.get(&func).cloned() else {
+            return Some(bonsai_common::Precision::Narrowed);
+        };
+        let thrown_decls = self
+            .class_symbols_by_name_scope
+            .get(&(thrown, scope.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let caught_is_declared = self
+            .class_symbols_by_name_scope
+            .get(&(caught.clone(), scope.clone()))
+            .is_some_and(|decls| !decls.is_empty());
+        // Missing dependencies are an explicit unknown-type boundary. Keep a
+        // narrowed edge rather than pretending two external spellings are
+        // disjoint; when both declarations are present, their parsed base
+        // graph can prove assignability or disjointness exactly.
+        if thrown_decls.is_empty() || !caught_is_declared {
+            return Some(bonsai_common::Precision::Narrowed);
+        }
+        let mut frontier = thrown_decls;
+        let mut visited = AHashSet::new();
+        while let Some(symbol) = frontier.pop() {
+            if !visited.insert(symbol) {
+                continue;
+            }
+            let Some(decl) = self.global.decl_of(symbol) else {
+                continue;
+            };
+            for base in &decl.bases {
+                let base = bonsai_lang_api::kit::canonical_simple_type_name(base);
+                if base == caught {
+                    return Some(bonsai_common::Precision::Exact);
+                }
+                if let Some(symbols) = self.class_symbols_by_name_scope.get(&(base, scope.clone())) {
+                    frontier.extend(symbols.iter().copied());
+                }
+            }
+        }
+        None
+    }
+
     fn callback_candidate_funcs_for_bound_name(
         &self,
         bound_name: &str,
@@ -922,6 +1053,27 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             {
                 if !candidates.is_empty() {
                     return candidates.clone();
+                }
+            }
+        }
+        // Synthetic constructors/accessors are nested under their owning
+        // class declaration. Their function-local scope key can differ from
+        // sibling class declarations even though compiler lookup starts in
+        // the owner's lexical scope. Consult that parent symbol before a
+        // project boundary forbids any workspace-wide fallback.
+        if let Some(parent) = self
+            .global
+            .decl_of(bonsai_common::SymbolId::new(func.raw()))
+            .and_then(|decl| decl.parent)
+        {
+            if let Some(parent_scope) = self.symbol_to_scope.get(&parent) {
+                if let Some(candidates) = self
+                    .class_symbols_by_name_scope
+                    .get(&(name.to_string(), parent_scope.clone()))
+                {
+                    if !candidates.is_empty() {
+                        return candidates.clone();
+                    }
                 }
             }
         }
@@ -1069,8 +1221,17 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         receiver_types: &[String],
         out: &mut Vec<ResolvedCallee>,
     ) {
-        let class_names =
-            self.constructor_fallback_class_names(caller, callee_name, receiver, receiver_types);
+        let callee_class_names = self.constructor_fallback_class_names(caller, callee_name, None, &[]);
+        let callee_resolves_to_class = callee_class_names.iter().any(|class_name| {
+            self.class_candidates_for_func_scope(caller, class_name)
+                .into_iter()
+                .any(|symbol| self.symbol_shares_language_with_func(caller, symbol))
+        });
+        let class_names = if callee_resolves_to_class {
+            callee_class_names
+        } else {
+            self.constructor_fallback_class_names(caller, callee_name, receiver, receiver_types)
+        };
         if class_names.is_empty() {
             return;
         }
@@ -1204,6 +1365,24 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         if trimmed.is_empty() {
             return out;
         }
+        // Constructor syntax may surface a bare class reference or a
+        // qualified member reference. Collect its identifier segments and
+        // let scoped class-declaration lookup determine which segment denotes
+        // the constructed type. The syntactic callee is authoritative and
+        // must be tried before contextual receiver types: inside a subclass
+        // constructor, `Base(args)` delegates to `Base`, not back to the
+        // enclosing subclass merely because its implicit receiver is typed as
+        // that subclass.
+        for segment in trimmed
+            .split(['.', ':', '\\'])
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+        {
+            let class_name = bare_class_name(segment);
+            if !class_name.is_empty() {
+                push_unique_class_name(&mut out, class_name.to_string());
+            }
+        }
         for receiver_type in receiver_types {
             let class_name = bare_class_name(receiver_type);
             if !class_name.is_empty() {
@@ -1212,20 +1391,6 @@ impl<'a> WorkspaceCalleeResolver<'a> {
         }
         if let Some(receiver) = receiver {
             let class_name = bare_class_name(receiver);
-            if !class_name.is_empty() {
-                push_unique_class_name(&mut out, class_name.to_string());
-            }
-        }
-        // Constructor syntax may surface a bare class reference or a
-        // qualified member reference. Collect its identifier segments and
-        // let scoped class-declaration lookup determine which segment, if
-        // any, denotes the constructed type.
-        for segment in trimmed
-            .split(['.', ':', '\\'])
-            .map(str::trim)
-            .filter(|segment| !segment.is_empty())
-        {
-            let class_name = bare_class_name(segment);
             if !class_name.is_empty() {
                 push_unique_class_name(&mut out, class_name.to_string());
             }
@@ -1400,24 +1565,34 @@ fn class_symbols_by_name_for_files(
 
 fn class_symbols_matching_import_target(
     global: &GlobalIndex,
-    included_files: Option<&AHashSet<FileId>>,
+    class_symbols_by_name: &AHashMap<String, Vec<bonsai_common::SymbolId>>,
     target: &str,
 ) -> Vec<bonsai_common::SymbolId> {
+    let Some(member) = import_target_member(target) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for file in global.all_files() {
-        if included_files.is_some_and(|files| !files.contains(&file)) {
+    for symbol in class_symbols_by_name.get(member).into_iter().flatten() {
+        let Some(decl) = global.decl_of(*symbol) else {
             continue;
-        }
-        for decl in global.decls_in(file) {
-            if decl_kind_is_type_receiver(decl.kind)
-                && declaration_matches_import_target(decl, target)
-                && !out.contains(&decl.symbol)
-            {
-                out.push(decl.symbol);
-            }
+        };
+        if declaration_matches_import_target(decl, target) && !out.contains(symbol) {
+            out.push(*symbol);
         }
     }
     out
+}
+
+fn import_target_member(target: &str) -> Option<&str> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    Some(
+        target
+            .rsplit_once('.')
+            .map_or(target, |(_, member)| member.trim()),
+    )
 }
 
 fn declaration_matches_import_target(decl: &bonsai_lang_api::Decl, target: &str) -> bool {
@@ -1947,6 +2122,15 @@ where
     let mut func_to_call_names: AHashMap<FuncId, Vec<String>> = AHashMap::new();
     let mut class_symbols_by_import_alias_file: AHashMap<(FileId, String), Vec<bonsai_common::SymbolId>> =
         AHashMap::new();
+    // Compiler-style declaration indexes make import-alias resolution a
+    // narrow candidate lookup followed by exact module/qualified-name
+    // validation. Rescanning every declaration for every alias is
+    // quadratic on large workspaces.
+    let mut funcs_by_decl_name: AHashMap<String, Vec<FuncId>> = AHashMap::new();
+    for (func, name) in &maps.func_to_name {
+        funcs_by_decl_name.entry(name.clone()).or_default().push(*func);
+    }
+    let class_symbols_by_name = class_symbols_by_name_for_files(global, included_files);
     let module_prefixes = module_prefixes_by_file(global);
     let module_default_exports = module_default_export_funcs_by_module(global, &module_prefixes);
     for file in global.all_files() {
@@ -1956,12 +2140,14 @@ where
         let aliases = aliases_for_file(file);
         let caller_module = module_prefixes.get(&file).map(String::as_str);
         for (alias, original) in aliases {
-            for func in maps.func_to_name.keys().copied() {
-                let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
-                    continue;
-                };
-                if declaration_matches_import_target(decl, &original) {
-                    add_func_call_alias(&mut func_to_call_names, func, &alias);
+            if let Some(member) = import_target_member(&original) {
+                for func in funcs_by_decl_name.get(member).into_iter().flatten().copied() {
+                    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+                        continue;
+                    };
+                    if declaration_matches_import_target(decl, &original) {
+                        add_func_call_alias(&mut func_to_call_names, func, &alias);
+                    }
                 }
             }
             if let Some(caller_module) = caller_module {
@@ -1976,7 +2162,7 @@ where
                     }
                 }
             }
-            let symbols = class_symbols_matching_import_target(global, included_files, &original);
+            let symbols = class_symbols_matching_import_target(global, &class_symbols_by_name, &original);
             if !symbols.is_empty() {
                 let candidates = class_symbols_by_import_alias_file
                     .entry((file, alias.clone()))
@@ -2015,7 +2201,6 @@ where
         alias_count
     ));
     let phase_started = Instant::now();
-    let class_symbols_by_name = class_symbols_by_name_for_files(global, included_files);
     let class_symbols_by_name_scope =
         class_symbols_by_name_scope_for_files(global, &maps.symbol_to_scope, included_files);
     let class_symbol_count: usize = class_symbols_by_name.values().map(Vec::len).sum();
@@ -2069,17 +2254,39 @@ where
         class_methods_by_parent: &class_methods_by_parent,
         local_callable_bindings: &local_callable_bindings,
         callback_cache: RwLock::new(AHashMap::new()),
+        ancestor_dispatch_cache: RwLock::new(AHashMap::new()),
     };
     let f2s = WorkspaceFuncToSegment {
         func_to_seg: &maps.func_to_seg,
     };
     let phase_started = Instant::now();
-    let mut ws = stitch_idg_with_field_argument_forwarding(
+    let demand_languages: AHashSet<&str> = transfer_options
+        .field_demand_languages
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let demand_driven_funcs =
+        (transfer_options.demand_driven_field_forwarding && !demand_languages.is_empty()).then(|| {
+            maps.func_to_language
+                .iter()
+                .filter_map(|(func, language)| demand_languages.contains(language).then_some(*func))
+                .collect::<AHashSet<_>>()
+        });
+    let field_demand_terminal_sites: AHashSet<(FuncId, bonsai_common::Span)> = transfer_options
+        .field_demand_terminal_sites
+        .iter()
+        .copied()
+        .collect();
+    let mut ws = stitch_idg_with_selective_field_forwarding_mode(
         outputs,
         &resolver,
         &f2s,
         transfer_options.include_field_argument_forwarding,
+        transfer_options.demand_driven_field_forwarding,
+        demand_driven_funcs.as_ref(),
+        (!field_demand_terminal_sites.is_empty()).then_some(&field_demand_terminal_sites),
     );
+    stitch_declared_exception_hierarchy(&mut ws, &resolver);
     idg_build_log(format_args!(
         "stitch-idg: {:.3}s segments={} funcs={} intra_edges={} cross_edges={} field_links={}",
         phase_started.elapsed().as_secs_f64(),
@@ -2123,6 +2330,7 @@ where
             &mut ws,
             global,
             call_graph,
+            &resolver,
             &maps.func_to_language,
             &maps.file_to_language,
             &maps.func_to_scope,
@@ -2152,6 +2360,131 @@ where
         ws.field_flow().len()
     ));
     ws
+}
+
+/// Complete typed `throw → catch` edges using declaration inheritance.
+/// The per-function transfer sees exact type spellings but intentionally has
+/// no global type-name inventory. Here the workspace's tree-sitter-derived
+/// class declarations and `bases` facts can prove subtype assignability
+/// without treating names such as `Exception` or `Error` as magic roots.
+fn stitch_declared_exception_hierarchy(ws: &mut IdgWorkspace, resolver: &WorkspaceCalleeResolver<'_>) {
+    #[derive(Clone)]
+    struct ThrowNode {
+        node: crate::node::NodeId,
+        func: FuncId,
+        ty: String,
+        span: bonsai_common::Span,
+    }
+    #[derive(Clone)]
+    struct CatchNode {
+        node: crate::node::NodeId,
+        func: FuncId,
+        ty: String,
+        try_span: bonsai_common::Span,
+    }
+
+    let segment_ids = ws.segments().map(|(id, _)| id).collect::<Vec<_>>();
+    for segment_id in segment_ids {
+        let Some(segment) = ws.segment(segment_id) else {
+            continue;
+        };
+        // Index the exact evidence spans once. Looking them up separately for
+        // every throw/catch node turns this phase into O(nodes * edges) on a
+        // large function even though each relevant edge has one endpoint.
+        let mut throw_spans = vec![None; segment.nodes.nodes.len()];
+        let mut catch_try_spans = vec![None; segment.nodes.nodes.len()];
+        for edge in &segment.edges {
+            match edge.meta.kind {
+                crate::edge::IdgEdgeKind::IntraThrow => {
+                    if let Some(slot) = throw_spans.get_mut(edge.to.0 as usize) {
+                        if slot.is_none() {
+                            *slot = Some(edge.meta.via_span);
+                        }
+                    }
+                }
+                crate::edge::IdgEdgeKind::IntraAssign => {
+                    if let Some(slot) = catch_try_spans.get_mut(edge.from.0 as usize) {
+                        if slot.is_none() {
+                            *slot = Some(edge.meta.via_span);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut throws = Vec::new();
+        let mut catches = Vec::new();
+        for (index, node) in segment.nodes.nodes.iter().enumerate() {
+            let local = crate::node::NodeId(index as u32);
+            let Some(place) = segment.places.get(node.place) else {
+                continue;
+            };
+            match place {
+                crate::place::Place::Throw { ty } => {
+                    let Some(span) = throw_spans[index] else {
+                        continue;
+                    };
+                    let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
+                        continue;
+                    };
+                    throws.push(ThrowNode {
+                        node: local,
+                        func: node.func,
+                        ty: name,
+                        span,
+                    });
+                }
+                crate::place::Place::Catch { ty } => {
+                    let Some(try_span) = catch_try_spans[index] else {
+                        continue;
+                    };
+                    let Some(name) = segment.strings.get(ty.0).map(str::to_string) else {
+                        continue;
+                    };
+                    catches.push(CatchNode {
+                        node: local,
+                        func: node.func,
+                        ty: name,
+                        try_span,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let mut additions = Vec::new();
+        for thrown in &throws {
+            for caught in &catches {
+                if thrown.func != caught.func
+                    || thrown.span.file != caught.try_span.file
+                    || thrown.span.start < caught.try_span.start
+                    || thrown.span.end > caught.try_span.end
+                {
+                    continue;
+                }
+                let Some(precision) =
+                    resolver.exception_type_assignability(thrown.func, &thrown.ty, &caught.ty)
+                else {
+                    continue;
+                };
+                let edge = crate::edge::IdgEdge {
+                    from: thrown.node,
+                    to: caught.node,
+                    meta: crate::edge::EdgeMeta {
+                        precision,
+                        kind: crate::edge::IdgEdgeKind::IntraThrow,
+                        call_kind: bonsai_callgraph::EdgeKind::Direct,
+                        via_span: thrown.span,
+                    },
+                };
+                if !segment.edges.contains(&edge) && !additions.contains(&edge) {
+                    additions.push(edge);
+                }
+            }
+        }
+        if let Some(segment) = ws.segment_mut(segment_id) {
+            segment.edges.extend(additions);
+        }
+    }
 }
 
 fn add_func_call_alias(func_to_call_names: &mut AHashMap<FuncId, Vec<String>>, func: FuncId, alias: &str) {
@@ -2335,7 +2668,7 @@ impl SegmentOffsets {
 /// When a caller calls a method with a tainted receiver, the
 /// closure needs to enter the callee and taint its reads of class
 /// fields. The IDG transfer pass models the receiver-bridge as a
-/// `Place::CallArg{site, idx=u8::MAX}` slot in the caller, but
+/// `Place::CallArg{site, idx=u32::MAX}` slot in the caller, but
 /// nothing connects that slot into the callee's body. This phase
 /// stitches each receiver-bridge slot to every `Place::Read{name,
 /// path: []}` inside the callee whose canonical name matches a
@@ -2348,6 +2681,7 @@ fn stitch_receiver_method_propagation(
     ws: &mut IdgWorkspace,
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
+    resolver: &WorkspaceCalleeResolver<'_>,
     func_to_language: &AHashMap<FuncId, &'static str>,
     file_to_language: &AHashMap<FileId, &'static str>,
     func_to_scope: &AHashMap<FuncId, LocalScopeKey>,
@@ -2451,7 +2785,7 @@ fn stitch_receiver_method_propagation(
         for func in &funcs {
             let names = field_write_names_by_func.entry(*func).or_insert_with(|| {
                 let mut names: ahash::AHashSet<String> = ahash::AHashSet::default();
-                collect_field_write_names(ws, *func, &mut names);
+                collect_field_write_names(ws, global, *func, &mut names);
                 // Also include the function's own decl name as a
                 // potential field key — getters / property
                 // accessors (`def cmd; @data[:cmd]; end`,
@@ -2460,7 +2794,7 @@ fn stitch_receiver_method_propagation(
                 // method's `Read("cmd")` doesn't pair with the
                 // getter's Return.
                 if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) {
-                    let canonical = canonical_field_name(&decl.name);
+                    let canonical = canonical_field_component(&decl.name);
                     if !canonical.is_empty() {
                         names.insert(canonical);
                     }
@@ -2479,7 +2813,7 @@ fn stitch_receiver_method_propagation(
             let mut read_nodes = {
                 let reads_by_name = field_read_nodes_by_func
                     .entry(callee)
-                    .or_insert_with(|| collect_field_read_nodes_by_name(ws, &offsets, callee));
+                    .or_insert_with(|| collect_field_read_nodes_by_name(ws, &offsets, global, callee));
                 field_read_nodes_matching(reads_by_name, &field_names)
             };
             // Also include every recv-slot CallArg in the callee's
@@ -2520,7 +2854,7 @@ fn stitch_receiver_method_propagation(
             // call sequence.
             let delegates = *delegates_by_func
                 .entry(callee)
-                .or_insert_with(|| callee_body_delegates_via_super(global, callee));
+                .or_insert_with(|| callee_body_delegates_to_ancestor(call_graph, resolver, callee));
             let mut super_chain_funcs: Vec<FuncId> = Vec::new();
             if read_nodes.is_empty() || delegates {
                 let extras = collect_super_chain_read_nodes_and_funcs(
@@ -2552,7 +2886,7 @@ fn stitch_receiver_method_propagation(
             }
             // For each caller of `callee` whose call-site receiver
             // is bare, find the receiver-bridge `CallArg{site,
-            // idx=u8::MAX}` ws_node in the caller's segment and
+            // idx=u32::MAX}` ws_node in the caller's segment and
             // emit edges into each field-Read of the callee.
             for edge in call_graph.callers_of(callee) {
                 let caller = edge.from;
@@ -2620,12 +2954,17 @@ fn stitch_receiver_method_propagation(
 }
 
 /// Collect the canonical names of every `Place::Write{path-empty}`
-/// or qualified `Place::Write{name="self"/"this", path=[field, ..]}`
+/// or qualified `Place::Write{name=<declared receiver>, path=[field, ..]}`
 /// in `func`'s segment, PLUS the canonical name of the func itself
 /// (so peer-class getters / property accessors expose their decl
 /// name as a field key — `def cmd` returning a tainted value
 /// surfaces "cmd" as a field-readable name on the class).
-fn collect_field_write_names(ws: &IdgWorkspace, func: FuncId, out: &mut ahash::AHashSet<String>) {
+fn collect_field_write_names(
+    ws: &IdgWorkspace,
+    global: &GlobalIndex,
+    func: FuncId,
+    out: &mut ahash::AHashSet<String>,
+) {
     use crate::place::Place;
     let Some(seg_id) = ws.segment_for_func(func) else {
         return;
@@ -2633,19 +2972,23 @@ fn collect_field_write_names(ws: &IdgWorkspace, func: FuncId, out: &mut ahash::A
     let Some(segment) = ws.segment(seg_id) else {
         return;
     };
+    let receiver_names = global
+        .decl_of(bonsai_common::SymbolId::new(func.raw()))
+        .map(declared_receiver_names)
+        .unwrap_or_default();
     for (pid_idx, place) in segment.places.places.iter().enumerate() {
         let canonical = match place {
             Place::Write { name, path, .. } if path.is_empty() => {
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
-                canonical_field_name(s)
+                canonical_field_name(s, &receiver_names)
             }
             Place::Write { name, path, .. } if !path.is_empty() => {
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
-                if !is_implicit_receiver_name(s) {
+                if !receiver_name_matches(s, &receiver_names) {
                     continue;
                 }
                 let Some(projected) = canonical_projected_path(segment, path) else {
@@ -2669,16 +3012,20 @@ fn collect_field_write_names(ws: &IdgWorkspace, func: FuncId, out: &mut ahash::A
     }
 }
 
-fn field_read_head(segment: &crate::segment::IdgSegment, place: &crate::place::Place) -> Option<String> {
+fn field_read_head(
+    segment: &crate::segment::IdgSegment,
+    place: &crate::place::Place,
+    receiver_names: &[String],
+) -> Option<String> {
     let crate::place::Place::Read { name, path } = place else {
         return None;
     };
     let s = segment.strings.get(*name)?;
     if path.is_empty() {
-        let canonical = canonical_field_name(s);
+        let canonical = canonical_field_name(s, receiver_names);
         let head = canonical.split('.').next().unwrap_or(&canonical);
         Some(head.to_string())
-    } else if is_implicit_receiver_name(s) {
+    } else if receiver_name_matches(s, receiver_names) {
         canonical_projected_path(segment, path)
     } else {
         None
@@ -2691,7 +3038,7 @@ fn canonical_projected_path(
 ) -> Option<String> {
     let mut parts = Vec::new();
     for part in path {
-        let canonical = canonical_field_name(segment.strings.get(*part)?);
+        let canonical = canonical_field_component(segment.strings.get(*part)?);
         if !canonical.is_empty() {
             parts.push(canonical);
         }
@@ -2702,6 +3049,7 @@ fn canonical_projected_path(
 fn collect_field_read_nodes_by_name(
     ws: &IdgWorkspace,
     offsets: &SegmentOffsets,
+    global: &GlobalIndex,
     func: FuncId,
 ) -> ahash::AHashMap<String, Vec<crate::WsNodeId>> {
     use crate::place::Place;
@@ -2711,9 +3059,13 @@ fn collect_field_read_nodes_by_name(
     let Some(segment) = ws.segment(seg_id) else {
         return ahash::AHashMap::default();
     };
+    let receiver_names = global
+        .decl_of(bonsai_common::SymbolId::new(func.raw()))
+        .map(declared_receiver_names)
+        .unwrap_or_default();
     let mut out: ahash::AHashMap<String, Vec<crate::WsNodeId>> = ahash::AHashMap::default();
     for (pid_idx, place) in segment.places.places.iter().enumerate() {
-        let Some(head_field) = field_read_head(segment, place) else {
+        let Some(head_field) = field_read_head(segment, place, &receiver_names) else {
             continue;
         };
         if head_field.is_empty() {
@@ -2763,7 +3115,7 @@ fn receiver_accessor_return_nodes(
     let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
         return Vec::new();
     };
-    let accessor_name = canonical_field_name(&decl.name);
+    let accessor_name = canonical_field_component(&decl.name);
     if accessor_name.is_empty() || !field_names.contains(&accessor_name) {
         return Vec::new();
     }
@@ -2804,18 +3156,13 @@ fn function_returns_accessor_named(events: &[bonsai_lang_api::FlowEvent], field_
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
-            FlowEvent::Return {
-                value_name,
-                value_text,
-                ..
-            } => {
-                if value_name
-                    .as_deref()
-                    .is_some_and(|value| return_value_references_accessor(value, field_name))
-                    || value_text
-                        .as_deref()
-                        .is_some_and(|value| return_value_references_accessor(value, field_name))
-                {
+            FlowEvent::Return { value_flow, .. } => {
+                if value_flow.projection.as_ref().is_some_and(|projection| {
+                    projection
+                        .path
+                        .last()
+                        .is_some_and(|tail| canonical_field_component(tail) == field_name)
+                }) {
                     return true;
                 }
             }
@@ -2854,118 +3201,82 @@ fn function_returns_accessor_named(events: &[bonsai_lang_api::FlowEvent], field_
     false
 }
 
-fn return_value_references_accessor(value: &str, field_name: &str) -> bool {
-    simple_accessor_tail(value).is_some_and(|tail| tail == field_name)
-}
-
-fn simple_accessor_tail(value: &str) -> Option<String> {
-    let mut text = value.trim();
-    if text.is_empty() {
-        return None;
-    }
-    while text.ends_with('?') || text.ends_with('!') {
-        text = text[..text.len().saturating_sub(1)].trim_end();
-    }
-    if let Some(stripped) = text.strip_suffix("()") {
-        text = stripped.trim_end();
-    }
-    if text.contains(['(', ')', '{', '}']) {
-        return None;
-    }
-    let normalized = text.replace("->", ".");
-    let mut parts = normalized
-        .split(|ch: char| !(ch == '_' || ch == '$' || ch == '@' || ch.is_ascii_alphanumeric()))
-        .filter(|part| !part.is_empty());
-    let first = parts.next()?;
-    if matches!(first, "super" | "base" | "parent") {
-        return None;
-    }
-    let tail = parts.next_back().unwrap_or(first);
-    let tail = canonical_field_name(tail);
-    (!tail.is_empty()).then_some(tail)
-}
-
-/// True when `callee`'s body delegates via `super` / `super()` —
-/// the body either contains a `FlowEvent::Call { name: "super"|... }`
-/// event OR is essentially empty (no field reads, no recv slots) and
-/// inherits a same-name method from a base class. Used by Phase 3d
-/// to fold ancestor `read_nodes` into the override's bridge set.
-fn callee_body_delegates_via_super(global: &GlobalIndex, callee: FuncId) -> bool {
-    use bonsai_lang_api::FlowEvent;
-    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
+/// True when the resolved callgraph proves that `callee` dispatches into a
+/// method owned by one of its declaration's ancestor classes. Receiver
+/// spelling is intentionally irrelevant: language adapters/call resolution
+/// already interpreted that syntax before the IDG sees it.
+fn callee_body_delegates_to_ancestor(
+    call_graph: &ResolvedCallGraph,
+    resolver: &WorkspaceCalleeResolver<'_>,
+    callee: FuncId,
+) -> bool {
+    let Some(decl) = resolver
+        .global
+        .decl_of(bonsai_common::SymbolId::new(callee.raw()))
+    else {
         return false;
     };
-    fn walk(events: &[FlowEvent]) -> bool {
-        for e in events {
-            match e {
-                FlowEvent::Call { name, receiver, .. } => {
-                    if name == "super"
-                        || name.starts_with("super.")
-                        || name.starts_with("super(")
-                        || name.starts_with("super::")
-                        || receiver.as_deref() == Some("super")
-                    {
-                        return true;
-                    }
+    let receiver_names = declared_receiver_names(decl);
+    call_graph.callees_of(callee).any(|edge| {
+        resolver.is_ancestor_dispatch(callee, edge.to)
+            && call_site_uses_declared_receiver(&decl.flow_events, edge.span, &receiver_names)
+    })
+}
+
+fn call_site_uses_declared_receiver(
+    events: &[FlowEvent],
+    site: bonsai_common::Span,
+    receiver_names: &[String],
+) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span, name, receiver, ..
+            } if *span == site => {
+                if receiver
+                    .as_deref()
+                    .is_some_and(|receiver| receiver_name_matches(receiver, receiver_names))
+                {
+                    return true;
                 }
-                FlowEvent::Return {
-                    value_text,
-                    value_name,
-                    ..
-                } => {
-                    if value_name.as_deref() == Some("super")
-                        || value_text
-                            .as_deref()
-                            .map(|s| {
-                                let t = s.trim();
-                                t == "super"
-                                    || t.starts_with("super")
-                                        && !t.contains(|c: char| {
-                                            c.is_ascii_alphanumeric()
-                                                && c != 's'
-                                                && c != 'u'
-                                                && c != 'p'
-                                                && c != 'e'
-                                                && c != 'r'
-                                        })
-                            })
-                            .unwrap_or(false)
-                    {
-                        return true;
-                    }
+                let head_end = name.find(['.', '(', ':']).unwrap_or(name.len());
+                if receiver_name_matches(&name[..head_end], receiver_names) {
+                    return true;
                 }
-                FlowEvent::Branch {
-                    then_events,
-                    else_events,
-                    ..
-                } => {
-                    if walk(then_events) || walk(else_events) {
-                        return true;
-                    }
-                }
-                FlowEvent::Loop { body, .. }
-                | FlowEvent::Defer { body, .. }
-                | FlowEvent::Using { body, .. } => {
-                    if walk(body) {
-                        return true;
-                    }
-                }
-                FlowEvent::Try {
-                    body,
-                    catch_events,
-                    finally_events,
-                    ..
-                } => {
-                    if walk(body) || walk(catch_events) || walk(finally_events) {
-                        return true;
-                    }
-                }
-                _ => {}
             }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if call_site_uses_declared_receiver(then_events, site, receiver_names)
+                    || call_site_uses_declared_receiver(else_events, site, receiver_names)
+                {
+                    return true;
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if call_site_uses_declared_receiver(body, site, receiver_names) {
+                    return true;
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if call_site_uses_declared_receiver(body, site, receiver_names)
+                    || call_site_uses_declared_receiver(catch_events, site, receiver_names)
+                    || call_site_uses_declared_receiver(finally_events, site, receiver_names)
+                {
+                    return true;
+                }
+            }
+            _ => {}
         }
-        false
     }
-    walk(&decl.flow_events)
+    false
 }
 
 /// Collect `read_nodes` from every ancestor class's method of the
@@ -3028,7 +3339,7 @@ fn collect_super_chain_read_nodes_and_funcs(
                 let mut nodes = {
                     let reads_by_name = field_read_nodes_by_func
                         .entry(other)
-                        .or_insert_with(|| collect_field_read_nodes_by_name(ws, offsets, other));
+                        .or_insert_with(|| collect_field_read_nodes_by_name(ws, offsets, global, other));
                     field_read_nodes_matching(reads_by_name, field_names)
                 };
                 let recv = recv_nodes_by_func
@@ -3084,7 +3395,7 @@ fn collect_recv_slot_nodes(
         let Place::CallArg { site, idx } = place else {
             continue;
         };
-        if *idx != u8::MAX && !(*idx == 0 && call_site_has_no_explicit_args(global, func, site.0)) {
+        if *idx != u32::MAX && !(*idx == 0 && call_site_has_no_explicit_args(global, func, site.0)) {
             continue;
         }
         let pid = crate::node::PlaceId(pid_idx as u32);
@@ -3101,7 +3412,7 @@ fn collect_recv_slot_nodes(
     out
 }
 
-/// Return every receiver-bridge `Place::CallArg{site, idx=u8::MAX}`
+/// Return every receiver-bridge `Place::CallArg{site, idx=u32::MAX}`
 /// ws_node in `caller`'s segment for one already-resolved call
 /// site. The second tuple element is `None` for the generic fan-out
 /// case (caller-side receiver-bridge taints all of callee's field
@@ -3123,14 +3434,14 @@ fn recv_slots_for_call_span(
     let Some(segment) = ws.segment(seg_id) else {
         return out;
     };
-    // Emit from the receiver-bridge slot (`idx=u8::MAX`). Older
+    // Emit from the receiver-bridge slot (`idx=u32::MAX`). Older
     // adapter shapes also route receiver tokens through `idx=0` for
     // argument-less calls, but for calls with explicit arguments
     // `idx=0` is the first real argument.
-    let try_indices: &[u8] = if call_site_has_no_explicit_args(global, caller, span) {
-        &[u8::MAX, 0u8]
+    let try_indices: &[u32] = if call_site_has_no_explicit_args(global, caller, span) {
+        &[u32::MAX, 0u32]
     } else {
-        &[u8::MAX]
+        &[u32::MAX]
     };
     for try_idx in try_indices {
         let place = Place::CallArg {
@@ -3307,7 +3618,14 @@ fn stitch_receiver_field_flow(
         let mut reads_by_field: ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>> =
             ahash::AHashMap::default();
         for func in &funcs {
-            collect_field_nodes(ws, &offsets, *func, &mut writes_by_field, &mut reads_by_field);
+            collect_field_nodes(
+                ws,
+                &offsets,
+                global,
+                *func,
+                &mut writes_by_field,
+                &mut reads_by_field,
+            );
         }
         // Property-getter return values that match a canonical
         // field name. C# / TypeScript / Python expose
@@ -3324,7 +3642,7 @@ fn stitch_receiver_field_flow(
             let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
                 continue;
             };
-            let canonical = canonical_field_name(&decl.name);
+            let canonical = canonical_field_component(&decl.name);
             if canonical.is_empty() {
                 continue;
             }
@@ -3386,8 +3704,8 @@ fn stitch_receiver_field_flow(
                     // attribute the chain to (writer, reader)
                     // because no cross-call edge with callee=reader
                     // ever appears in `call_records`. The synthetic
-                    // edge fills that role with `arg_idx = u8::MAX`
-                    // and `param_idx = u8::MAX` so it can't be
+                    // edge fills that role with `arg_idx = u32::MAX`
+                    // and `param_idx = u32::MAX` so it can't be
                     // confused with a real positional-arg edge.
                     let writer_span = ws_node_span(ws, &offsets, *w_ws)
                         .or_else(|| func_name_span(global, *w_func))
@@ -3417,6 +3735,7 @@ fn stitch_receiver_field_flow(
 fn collect_field_nodes(
     ws: &IdgWorkspace,
     offsets: &SegmentOffsets,
+    global: &GlobalIndex,
     func: FuncId,
     writes_by_field: &mut ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>>,
     reads_by_field: &mut ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>>,
@@ -3428,12 +3747,16 @@ fn collect_field_nodes(
     let Some(segment) = ws.segment(seg_id) else {
         return;
     };
+    let receiver_names = global
+        .decl_of(bonsai_common::SymbolId::new(func.raw()))
+        .map(declared_receiver_names)
+        .unwrap_or_default();
     for (pid_idx, place) in segment.places.places.iter().enumerate() {
         // Three place shapes contribute to field flow:
         //   * `Place::Write { name, path: [] }` where `name` is
         //     sigil'd (`@cmd`, `$cmd`) or qualified (`self.cmd`).
         //     Bare locals fall through.
-        //   * `Place::Write { name = "self"/"this"/etc, path = ["field", ..] }`
+        //   * `Place::Write { name = <declared receiver>, path = ["field", ..] }`
         //     — `this.cmd = X` style assignments. Canonical key is
         //     the full projected path, so `self._data.cmd` does not
         //     collapse into sibling `self._data.user`.
@@ -3459,13 +3782,13 @@ fn collect_field_nodes(
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
-                (true, canonical_field_name(s))
+                (true, canonical_field_name(s, &receiver_names))
             }
             Place::Write { name, path, .. } if !path.is_empty() => {
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
-                if !is_implicit_receiver_name(s) {
+                if !receiver_name_matches(s, &receiver_names) {
                     continue;
                 }
                 let Some(projected) = canonical_projected_path(segment, path) else {
@@ -3477,13 +3800,13 @@ fn collect_field_nodes(
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
-                (false, canonical_field_name(s))
+                (false, canonical_field_name(s, &receiver_names))
             }
             Place::Read { name, path } if !path.is_empty() => {
                 let Some(s) = segment.strings.get(*name) else {
                     continue;
                 };
-                if !is_implicit_receiver_name(s) {
+                if !receiver_name_matches(s, &receiver_names) {
                     continue;
                 }
                 let Some(projected) = canonical_projected_path(segment, path) else {
@@ -3527,20 +3850,21 @@ fn ws_node_for(
         .map(|base| crate::WsNodeId(base.saturating_add(local.0)))
 }
 
-/// True when `name` is one of the language-specific implicit
-/// receivers used in qualified field writes (`this.cmd = X`,
-/// `self.cmd = X`). Lets the field-flow stitcher recognize the
-/// `Place::Write { name = "this", path = ["cmd"] }` shape and
-/// canonicalize it onto the bare `cmd` field key.
-fn is_implicit_receiver_name(name: &str) -> bool {
-    matches!(name.trim(), "self" | "this" | "$this" | "Self")
-}
-
 /// Strip language-specific sigils and receiver prefixes off a
 /// field name so peer methods spelling the same field differently
 /// (Ruby `@cmd` vs Python `self.cmd` vs PHP `$this->cmd`) all
 /// bucket into the same canonical key.
-fn canonical_field_name(name: &str) -> String {
+fn canonical_field_name(name: &str, receiver_names: &[String]) -> String {
+    let normalized = name.trim().replace("->", ".");
+    if let Some((root, field)) = normalized.split_once('.') {
+        if receiver_name_matches(root, receiver_names) {
+            return canonical_field_component(field);
+        }
+    }
+    canonical_field_component(&normalized)
+}
+
+fn canonical_field_component(name: &str) -> String {
     let mut s = name.trim();
     if let Some(rest) = s.strip_prefix("@@") {
         s = rest;
@@ -3549,13 +3873,6 @@ fn canonical_field_name(name: &str) -> String {
     } else if let Some(rest) = s.strip_prefix('$') {
         s = rest;
     } else if let Some(rest) = s.strip_prefix('&') {
-        s = rest;
-    }
-    if let Some(rest) = s.strip_prefix("self.") {
-        s = rest;
-    } else if let Some(rest) = s.strip_prefix("this.") {
-        s = rest;
-    } else if let Some(rest) = s.strip_prefix("$this->") {
         s = rest;
     }
     s.to_string()
@@ -3659,6 +3976,7 @@ fn run_transfer_in_parallel_for_files(
     included_files: Option<&AHashSet<FileId>>,
     included_funcs: Option<&AHashSet<FuncId>>,
 ) -> Vec<TransferOutput> {
+    let aggregate_layouts = unambiguous_aggregate_layouts(global);
     // Collect every (FileId, decl-index) pair so rayon can split
     // them across threads. Each transfer call produces a
     // `TransferOutput` with its own embedded name pool — the
@@ -3679,8 +3997,144 @@ fn run_transfer_in_parallel_for_files(
     }
     funcs
         .into_par_iter()
-        .map(|(_file, decl)| transfer_function_for_with_options(decl, transfer_options))
+        .map(|(_file, decl)| {
+            if aggregate_layouts.is_empty() || !flow_events_contain_aggregate_assign(&decl.flow_events) {
+                return transfer_function_for_with_options(decl, transfer_options);
+            }
+            let mut resolved = decl.clone();
+            resolve_aggregate_assignments(
+                &mut resolved.flow_events,
+                &resolved.type_aliases,
+                &aggregate_layouts,
+            );
+            transfer_function_for_with_options(&resolved, transfer_options)
+        })
         .collect()
+}
+
+fn unambiguous_aggregate_layouts(global: &GlobalIndex) -> AHashMap<String, Vec<String>> {
+    let mut candidates: AHashMap<String, Option<Vec<String>>> = AHashMap::new();
+    for layout in global.aggregate_layouts() {
+        let key = bonsai_lang_api::kit::canonical_simple_type_name(&layout.type_name);
+        if key.is_empty() || layout.fields.is_empty() {
+            continue;
+        }
+        candidates
+            .entry(key)
+            .and_modify(|known| {
+                if known.as_ref().is_some_and(|fields| fields != &layout.fields) {
+                    *known = None;
+                }
+            })
+            .or_insert_with(|| Some(layout.fields.clone()));
+    }
+    let layouts: AHashMap<String, Vec<String>> = candidates
+        .into_iter()
+        .filter_map(|(name, fields)| fields.map(|fields| (name, fields)))
+        .collect();
+    idg_build_log(format_args!("aggregate layouts: {}", layouts.len()));
+    layouts
+}
+
+fn flow_events_contain_aggregate_assign(events: &[FlowEvent]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::AggregateAssign { .. } => true,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            flow_events_contain_aggregate_assign(then_events)
+                || flow_events_contain_aggregate_assign(else_events)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_events_contain_aggregate_assign(body)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_events_contain_aggregate_assign(body)
+                || flow_events_contain_aggregate_assign(catch_events)
+                || flow_events_contain_aggregate_assign(finally_events)
+        }
+        _ => false,
+    })
+}
+
+fn resolve_aggregate_assignments(
+    events: &mut [FlowEvent],
+    aliases: &[bonsai_lang_api::TypeAliasBinding],
+    layouts: &AHashMap<String, Vec<String>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::AggregateAssign {
+                target,
+                type_name,
+                value_flow,
+                ..
+            } => {
+                if value_flow.tuple_items.is_empty() || !value_flow.aggregate_fields.is_empty() {
+                    continue;
+                }
+                let declared_type = type_name.as_deref().or_else(|| {
+                    aliases
+                        .iter()
+                        .find(|alias| alias.name == *target)
+                        .map(|alias| alias.type_name.as_str())
+                });
+                let Some(declared_type) = declared_type else {
+                    continue;
+                };
+                let key = bonsai_lang_api::kit::canonical_simple_type_name(declared_type);
+                let Some(fields) = layouts.get(&key) else {
+                    idg_build_log(format_args!(
+                        "aggregate unresolved: target={target} type={key} items={}",
+                        value_flow.tuple_items.len()
+                    ));
+                    continue;
+                };
+                if value_flow.tuple_items.len() > fields.len() {
+                    continue;
+                }
+                value_flow.aggregate_fields = value_flow
+                    .tuple_items
+                    .drain(..)
+                    .zip(fields.iter().cloned())
+                    .map(|(value, name)| bonsai_lang_api::ExpressionField { name, value })
+                    .collect();
+                idg_build_log(format_args!(
+                    "aggregate resolved: target={target} type={key} fields={}",
+                    value_flow.aggregate_fields.len()
+                ));
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                resolve_aggregate_assignments(then_events, aliases, layouts);
+                resolve_aggregate_assignments(else_events, aliases, layouts);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                resolve_aggregate_assignments(body, aliases, layouts)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                resolve_aggregate_assignments(body, aliases, layouts);
+                resolve_aggregate_assignments(catch_events, aliases, layouts);
+                resolve_aggregate_assignments(finally_events, aliases, layouts);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

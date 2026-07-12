@@ -495,7 +495,7 @@ fn sdk_taint_json(project: &bonsai_sdk::Project, options: TaintAnalysisOptions) 
 
 fn cli_taint_json(workspace: &str, extra: &[&str]) -> Value {
     let value = run_cli(&security_cli_args(workspace, "taint-analysis", extra));
-    sorted_json_array(value)
+    sorted_json_array(rows_or_array(value))
 }
 
 fn wrapped_rows(value: Value) -> Vec<Value> {
@@ -734,7 +734,7 @@ fn source_analysis_all_options() -> SourceAnalysisOptions {
 }
 
 fn cli_source_json(workspace: &str, extra: &[&str]) -> Value {
-    run_cli(&security_cli_args(workspace, "source-analysis", extra))
+    rows_or_array(run_cli(&security_cli_args(workspace, "source-analysis", extra)))
 }
 
 #[test]

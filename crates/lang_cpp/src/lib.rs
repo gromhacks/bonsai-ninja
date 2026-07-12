@@ -6,9 +6,9 @@ use bonsai_lang_api::{
         c_family_preproc_imports, collect_kinds, collect_param_type_aliases, first_named_child_of_kind,
         language_from_pack, node_text, parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
-    Visibility,
+    AdapterContext, AdapterError, AggregateLayout, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
 /// C++ parameter shape: `parameter_declaration` carries `type` and
@@ -129,13 +129,14 @@ impl LanguageAdapter for CppAdapter {
             // C++ constructors are class-named; the kind-based
             // `DeclKind::Constructor` lookup is authoritative.
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            super_receiver_tokens: &[],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        mark_cpp_constructors(&mut decl_index);
         // Populate qualified_name + module_path + visibility per the
         // semantic-identity contract
         // (`docs/contributing/design-patterns.mdx::Semantic Resolution Always`).
@@ -163,6 +164,15 @@ impl LanguageAdapter for CppAdapter {
             // `Decl.return_type` for `apply_assign_call_result_types`.
             bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
             let bases_by_span = collect_cpp_class_bases(&tree, file, src);
+            let fields_by_class = collect_cpp_class_fields(&tree, file, src);
+            decl_index.aggregate_layouts = fields_by_class
+                .iter()
+                .map(|(_, type_name, fields)| AggregateLayout {
+                    type_name: type_name.clone(),
+                    fields: fields.clone(),
+                })
+                .collect();
+            let fields_by_parent = cpp_fields_by_parent_symbol(&decl_index, &fields_by_class);
             let access_by_span = collect_cpp_member_visibility(&tree, file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CPP_TYPE_ALIASES);
             // WS2: `auto c = static_cast<Foo>(x)` / `auto c = (Foo) x` — the
@@ -171,6 +181,9 @@ impl LanguageAdapter for CppAdapter {
             let cast_aliases = collect_cpp_cast_aliases(&tree, file, src);
             let initializer_specs = collect_cpp_initializer_field_specs(&tree, file, src);
             for decl in &mut decl_index.defs {
+                if let Some(fields) = decl.parent.and_then(|parent| fields_by_parent.get(&parent)) {
+                    qualify_cpp_member_expression_flows(&mut decl.flow_events, fields);
+                }
                 if let Some(visibility) = access_by_span.get(&decl.span).copied() {
                     decl.visibility = visibility;
                 }
@@ -244,6 +257,7 @@ impl LanguageAdapter for CppAdapter {
                 has_variadic_param,
             );
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, CPP_LIFECYCLE_TRANSITIONS);
+            apply_cpp_moved_argument_places(&mut decl.flow_events);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -262,6 +276,295 @@ impl LanguageAdapter for CppAdapter {
     }
 }
 
+/// Preserve object identity through a parsed move expression nested inside a
+/// larger call argument (`run(std::move(env))`). Lifecycle injection has
+/// already classified the inner call from the adapter-owned C++ semantics;
+/// this pass uses only that semantic event plus AST spans to mark the outer
+/// argument as the same addressable place. The IDG can then forward exact
+/// descendant fields without knowing any library function names.
+fn apply_cpp_moved_argument_places(events: &mut [FlowEvent]) {
+    let mut moved = Vec::new();
+    collect_cpp_moved_events(events, &mut moved);
+    apply_cpp_moved_argument_places_with_events(events, &moved);
+}
+
+fn collect_cpp_moved_events(events: &[FlowEvent], out: &mut Vec<(Span, String)>) {
+    for event in events {
+        match event {
+            FlowEvent::Lifecycle {
+                span,
+                name,
+                transition,
+            } if transition == "moved" && !name.is_empty() => out.push((*span, name.clone())),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_cpp_moved_events(then_events, out);
+                collect_cpp_moved_events(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_cpp_moved_events(body, out)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_cpp_moved_events(body, out);
+                collect_cpp_moved_events(catch_events, out);
+                collect_cpp_moved_events(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn apply_cpp_moved_argument_places_with_events(events: &mut [FlowEvent], moved: &[(Span, String)]) {
+    for event in events {
+        match event {
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    if arg.place.is_some() {
+                        continue;
+                    }
+                    let candidate = moved.iter().find_map(|(span, name)| {
+                        (arg.span.file == span.file
+                            && arg.span.start <= span.start
+                            && span.end <= arg.span.end
+                            && arg.source_names.iter().any(|source| source == name))
+                        .then_some(name)
+                    });
+                    if let Some(candidate) = candidate {
+                        arg.place = Some(candidate.clone());
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                apply_cpp_moved_argument_places_with_events(then_events, moved);
+                apply_cpp_moved_argument_places_with_events(else_events, moved);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                apply_cpp_moved_argument_places_with_events(body, moved)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                apply_cpp_moved_argument_places_with_events(body, moved);
+                apply_cpp_moved_argument_places_with_events(catch_events, moved);
+                apply_cpp_moved_argument_places_with_events(finally_events, moved);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// C++ constructors are identified by the grammar-owned class/member
+/// relationship: a member whose identifier equals its parent class identifier
+/// is a constructor.  This uses declaration identity emitted from the CST;
+/// downstream resolution never guesses from capitalization or a name list.
+fn mark_cpp_constructors(decl_index: &mut DeclIndex) {
+    let class_names = decl_index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.symbol, decl.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    for decl in &mut decl_index.defs {
+        if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+            continue;
+        }
+        let Some(parent_name) = decl.parent.and_then(|parent| class_names.get(&parent)) else {
+            continue;
+        };
+        if decl.name == *parent_name {
+            decl.kind = DeclKind::Constructor;
+            if decl.implicit_receiver_names.is_empty() {
+                decl.implicit_receiver_names.push("this".to_string());
+            }
+        }
+    }
+}
+
+fn collect_cpp_class_fields(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String, Vec<String>)> {
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, &["class_specifier", "struct_specifier", "union_specifier"]) {
+        let Some(name_node) = class_node
+            .child_by_field_name("name")
+            .or_else(|| first_named_child_of_kind(&class_node, "type_identifier"))
+        else {
+            continue;
+        };
+        let Some(body) = class_node.child_by_field_name("body") else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        let mut body_cursor = body.walk();
+        for field_decl in body
+            .named_children(&mut body_cursor)
+            .filter(|child| child.kind() == "field_declaration")
+        {
+            for child_index in 0..field_decl.child_count() {
+                if field_decl.field_name_for_child(child_index as u32) != Some("declarator") {
+                    continue;
+                }
+                let Some(child) = field_decl.child(child_index as u32) else {
+                    continue;
+                };
+                if !child.is_named() || cpp_declarator_is_function(child) {
+                    continue;
+                }
+                if let Some(identifier) = cpp_binding_identifier(child) {
+                    let name = node_text(&identifier, src).trim();
+                    if !name.is_empty() {
+                        if !fields.iter().any(|field| field == name) {
+                            fields.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if !fields.is_empty() {
+            out.push((
+                span_of(file, &class_node),
+                node_text(&name_node, src).trim().to_string(),
+                fields,
+            ));
+        }
+    }
+    out
+}
+
+fn cpp_declarator_is_function(node: Node<'_>) -> bool {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "function_declarator" {
+            return true;
+        }
+        let mut cursor = current.walk();
+        stack.extend(current.named_children(&mut cursor));
+    }
+    false
+}
+
+fn cpp_binding_identifier(node: Node<'_>) -> Option<Node<'_>> {
+    if matches!(node.kind(), "identifier" | "field_identifier") {
+        return Some(node);
+    }
+    for field in ["declarator", "name"] {
+        if let Some(child) = node.child_by_field_name(field) {
+            if let Some(identifier) = cpp_binding_identifier(child) {
+                return Some(identifier);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(identifier) = cpp_binding_identifier(child) {
+            return Some(identifier);
+        }
+    }
+    None
+}
+
+fn cpp_fields_by_parent_symbol(
+    index: &DeclIndex,
+    fields_by_class: &[(Span, String, Vec<String>)],
+) -> std::collections::HashMap<bonsai_common::SymbolId, std::collections::HashSet<String>> {
+    index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .filter_map(|decl| {
+            fields_by_class
+                .iter()
+                .find(|(span, name, _)| *span == decl.span || *name == decl.name)
+                .map(|(_, _, fields)| (decl.symbol, fields.iter().cloned().collect()))
+        })
+        .collect()
+}
+
+fn qualify_cpp_member_expression_flows(events: &mut [FlowEvent], fields: &std::collections::HashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Return { value_flow, .. } | FlowEvent::Yield { value_flow, .. } => {
+                qualify_cpp_member_expression_flow(value_flow, fields);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                qualify_cpp_member_expression_flows(then_events, fields);
+                qualify_cpp_member_expression_flows(else_events, fields);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                qualify_cpp_member_expression_flows(body, fields);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                qualify_cpp_member_expression_flows(body, fields);
+                qualify_cpp_member_expression_flows(catch_events, fields);
+                qualify_cpp_member_expression_flows(finally_events, fields);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn qualify_cpp_member_expression_flow(
+    flow: &mut bonsai_lang_api::ExpressionFlow,
+    fields: &std::collections::HashSet<String>,
+) {
+    let old_place = flow.place.clone();
+    if let Some(projection) = &mut flow.projection {
+        if fields.contains(&projection.base) {
+            projection.path.insert(0, std::mem::take(&mut projection.base));
+            projection.base = "this".to_string();
+            flow.place = Some(projection.canonical_place());
+        }
+    } else if let Some(place) = flow.place.as_deref() {
+        if fields.contains(place) {
+            flow.projection = Some(bonsai_lang_api::ExpressionProjection {
+                base: "this".to_string(),
+                path: vec![place.to_string()],
+            });
+            flow.place = Some(format!("this.{place}"));
+        }
+    }
+    if let (Some(old_place), Some(new_place)) = (old_place.as_deref(), flow.place.as_deref()) {
+        if old_place != new_place {
+            for source in &mut flow.source_names {
+                if source == old_place {
+                    source.clone_from(&new_place.to_string());
+                }
+            }
+        }
+    }
+    for field in &mut flow.aggregate_fields {
+        qualify_cpp_member_expression_flow(&mut field.value, fields);
+    }
+    for item in &mut flow.tuple_items {
+        qualify_cpp_member_expression_flow(item, fields);
+    }
+    for spread in &mut flow.spreads {
+        qualify_cpp_member_expression_flow(spread, fields);
+    }
+}
+
 /// Collect every C++ function name that's TU-private:
 ///
 /// - Function definitions with a `static` storage class specifier.
@@ -273,17 +576,7 @@ fn collect_tu_private_function_names(
 ) -> std::collections::HashSet<String> {
     let mut private_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Bail conservatively on any I/O / parser failure.
-    let Ok(snapshot) = ctx.vfs.snapshot(file) else {
-        return private_names;
-    };
-    let Ok(language) = language_from_pack(PACK_NAME) else {
-        return private_names;
-    };
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&language).is_err() {
-        return private_names;
-    }
-    let Some(tree) = parser.parse(snapshot.text.as_bytes(), None) else {
+    let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
         return private_names;
     };
     let src = snapshot.text.as_bytes();
@@ -647,7 +940,7 @@ fn cpp_type_descriptor_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
     canonical_cpp_base_name(node_text(&ti, src))
 }
 
-/// First descendant (BFS) of the given kind, or `None`.
+/// First descendant found by an iterative syntax-tree walk, or `None`.
 fn cpp_first_descendant_of_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut stack = vec![*node];
     while let Some(n) = stack.pop() {

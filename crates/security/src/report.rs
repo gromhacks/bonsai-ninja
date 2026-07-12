@@ -16,6 +16,11 @@ pub struct SecurityReport {
     pub schema_version: String,
     pub language_coverage: Vec<String>,
     pub findings: Vec<Finding>,
+    /// Scan-level semantic coverage. A report with zero findings is not a
+    /// clean result when parsing or workspace resolution was incomplete.
+    pub analysis_complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis_incomplete_reasons: Vec<String>,
     /// Rules the runtime matcher dropped during this analysis run
     /// (e.g., regex compile failures the schema-level pack validator
     /// did not catch). Empty when no rules were dropped. Surfacing
@@ -49,8 +54,27 @@ impl SecurityReport {
             schema_version: "1.0".to_string(),
             language_coverage: languages,
             findings,
+            // A renderer cannot infer scan-level coverage from surviving
+            // findings alone. Callers running an analysis must attach the
+            // report's explicit completeness metadata below; an omitted call
+            // must never turn a partial/empty scan into a clean success.
+            analysis_complete: false,
+            analysis_incomplete_reasons: vec!["analysis-completeness-not-provided".to_string()],
             runtime_disabled_rules,
         }
+    }
+
+    /// Attach scan-level semantic coverage to every public renderer.
+    #[must_use]
+    pub fn with_analysis_completeness(mut self, complete: bool, mut reasons: Vec<String>) -> Self {
+        if !complete && reasons.is_empty() {
+            reasons.push("analysis-incomplete:unknown-reason".to_string());
+        }
+        reasons.sort();
+        reasons.dedup();
+        self.analysis_complete = complete && reasons.is_empty();
+        self.analysis_incomplete_reasons = reasons;
+        self
     }
 
     /// Convenience wrapper around [`render_sarif_json`].
@@ -68,7 +92,7 @@ impl SecurityReport {
 /// Pretty-print the report as JSON. Used by `--render graph` so the
 /// CLI emits the same structure SDK consumers see.
 pub fn render_graph_json(report: &SecurityReport) -> String {
-    serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string())
+    render_json_with_failure_metadata(report, "security-graph")
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -94,6 +118,10 @@ pub(crate) struct TrainExample {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TrainReport {
     pub schema_version: String,
+    pub language_coverage: Vec<String>,
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
+    pub runtime_disabled_rules: Vec<RuntimeDisabledRule>,
     pub examples: Vec<TrainExample>,
 }
 
@@ -126,9 +154,25 @@ pub fn render_train_json(report: &SecurityReport) -> String {
         .collect();
     let train = TrainReport {
         schema_version: "1.0".to_string(),
+        language_coverage: report.language_coverage.clone(),
+        analysis_complete: report.analysis_complete,
+        analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone(),
+        runtime_disabled_rules: report.runtime_disabled_rules.clone(),
         examples,
     };
-    serde_json::to_string_pretty(&train).unwrap_or_else(|_| "{}".to_string())
+    render_json_with_failure_metadata(&train, "security-train")
+}
+
+fn render_json_with_failure_metadata<T: Serialize>(value: &T, surface: &str) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|error| {
+        serde_json::json!({
+            "analysis_complete": false,
+            "analysis_incomplete_reasons": [format!(
+                "{surface} serialization failed: {error}"
+            )],
+        })
+        .to_string()
+    })
 }
 
 /// Minimal text renderer — one block per finding. Full view integration
@@ -137,7 +181,7 @@ pub fn render_train_json(report: &SecurityReport) -> String {
 pub fn render_grouped_text(report: &SecurityReport) -> String {
     let mut output = String::new();
     output.push_str(&format!(
-        "security — {} finding(s) across languages: {}\n\n",
+        "security — {} finding(s) across languages: {}\n",
         report.findings.len(),
         if report.language_coverage.is_empty() {
             "<none>".to_string()
@@ -145,6 +189,23 @@ pub fn render_grouped_text(report: &SecurityReport) -> String {
             report.language_coverage.join(", ")
         },
     ));
+    if report.analysis_complete {
+        output.push_str("analysis: complete\n");
+    } else {
+        let reasons = if report.analysis_incomplete_reasons.is_empty() {
+            "unknown semantic coverage gap".to_string()
+        } else {
+            report.analysis_incomplete_reasons.join("; ")
+        };
+        output.push_str(&format!("analysis: incomplete — {reasons}\n"));
+    }
+    for disabled in &report.runtime_disabled_rules {
+        output.push_str(&format!(
+            "runtime-disabled rule: {} — {}\n",
+            disabled.rule_id, disabled.reason
+        ));
+    }
+    output.push('\n');
     for finding in &report.findings {
         output.push_str(&format!(
             "{}  [{}]  {} -> {}\n    at {}:{}:{}\n    status: {}\n    precision: {}\n",
@@ -424,6 +485,21 @@ pub(crate) fn render_sarif_with_provenance(
         "taxonomies": taxonomies_json,
         "automationDetails": automation_details,
         "columnKind": "utf16CodeUnits",
+        "invocations": [{
+            "executionSuccessful": report.analysis_complete,
+            "toolExecutionNotifications": report.analysis_incomplete_reasons.iter().map(|reason| {
+                serde_json::json!({
+                    "level": "warning",
+                    "message": { "text": format!("Incomplete semantic coverage: {reason}") },
+                })
+            }).collect::<Vec<_>>(),
+            "properties": {
+                "bonsai": {
+                    "analysis_complete": report.analysis_complete,
+                    "analysis_incomplete_reasons": report.analysis_incomplete_reasons,
+                }
+            }
+        }],
     });
     if let Some(uri) = workspace_root_uri {
         run["originalUriBaseIds"] = serde_json::json!({
@@ -442,7 +518,7 @@ pub(crate) fn render_sarif_with_provenance(
         "version": "2.1.0",
         "runs": [run],
     });
-    serde_json::to_string_pretty(&sarif).unwrap_or_else(|_| "{}".to_string())
+    render_json_with_failure_metadata(&sarif, "security-sarif")
 }
 
 /// Map a bonsai severity to the SARIF `level` enum

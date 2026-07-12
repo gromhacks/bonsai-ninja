@@ -41,17 +41,29 @@ def main():\n    raw = get_input()\n    cleaned = process(raw)\n    emit(cleaned
     std::fs::write(root.join("app.py"), body).expect("write app.py");
 }
 
+fn compatibility_value_flow_prewarm_options() -> WorkspaceOpenOptions {
+    let mut options = WorkspaceOpenOptions::full_prewarm();
+    options.prewarm_value_flow = true;
+    options.save_value_flow_sidecar = true;
+    options
+}
+
 #[test]
-fn full_prewarm_open_prewarms_value_flow_cache() {
+fn full_prewarm_keeps_legacy_value_flow_projection_on_demand() {
     let root = tempdir_for_test("bonsai-vf-full");
     write_python_workspace(&root);
 
-    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
-        .expect("open succeeds");
+    let options = WorkspaceOpenOptions::full_prewarm();
+    assert!(options.load_value_flow_sidecar);
+    assert!(!options.prewarm_value_flow);
+    assert!(!options.save_value_flow_sidecar);
 
+    let ws = Workspace::open_with_options(&root, registry(), options).expect("open succeeds");
+
+    assert!(ws.value_flow().is_empty());
     assert!(
-        !ws.value_flow().is_empty(),
-        "full-prewarm open should populate the value-flow cache"
+        ws.db().idg_service().is_some(),
+        "full prewarm must persist the canonical shared semantic graph"
     );
 }
 
@@ -81,7 +93,7 @@ fn returning_seed_names_populates_for_returned_param() {
     let root = tempdir_for_test("bonsai-vf-returning");
     std::fs::write(root.join("app.py"), "def echo(x):\n    return x\n").expect("write fixture");
 
-    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
+    let ws = Workspace::open_with_options(&root, registry(), compatibility_value_flow_prewarm_options())
         .expect("open succeeds");
 
     let global = ws.db().global_index();
@@ -108,7 +120,7 @@ fn snapshot_rejects_stale_matcher_policy_fingerprint() {
     let root = tempdir_for_test("bonsai-vf-fingerprint");
     write_python_workspace(&root);
 
-    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
+    let ws = Workspace::open_with_options(&root, registry(), compatibility_value_flow_prewarm_options())
         .expect("open succeeds");
     let mut snap = ws.value_flow().snapshot();
     assert!(
@@ -134,13 +146,13 @@ fn value_flow_sidecar_round_trips_via_query_only() {
     write_python_workspace(&root);
 
     // First open: prewarm + persist sidecar.
-    let _ = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
+    let _ = Workspace::open_with_options(&root, registry(), compatibility_value_flow_prewarm_options())
         .expect("first open succeeds");
 
     let sidecar = ValueFlowCache::sidecar_path(&root);
     assert!(
         sidecar.exists(),
-        "full-prewarm open should write the value-flow sidecar"
+        "explicit compatibility prewarm should write the value-flow sidecar"
     );
 
     // Second open in `query_only` mode hydrates from the sidecar.
@@ -159,12 +171,12 @@ fn value_flow_sidecar_rejects_changed_dependency_metadata() {
     write_python_workspace(&root);
     std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");
 
-    let _ = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
+    let _ = Workspace::open_with_options(&root, registry(), compatibility_value_flow_prewarm_options())
         .expect("first open succeeds");
     let sidecar = ValueFlowCache::sidecar_path(&root);
     assert!(
         sidecar.exists(),
-        "full-prewarm open should write the value-flow sidecar"
+        "explicit compatibility prewarm should write the value-flow sidecar"
     );
 
     let fresh = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::query_only())

@@ -1,6 +1,6 @@
 use crate::loader::Rulepack;
 use crate::rule::RuleKind;
-use bonsai_common::Precision;
+use bonsai_common::{FileId, FuncId, Precision};
 use bonsai_workspace::Workspace;
 use std::path::PathBuf;
 
@@ -40,6 +40,58 @@ pub(super) fn config_fingerprint(
         format!("rule_content={rule_content_fingerprint}"),
     ];
     bonsai_hash::fnv1a_names64(&tokens)
+}
+
+/// Extend a rule/config fingerprint with the exact semantic IDG scope used to
+/// build cached source graphs. Workspace-global node ordinals are deliberately
+/// excluded: they are only stable inside one scoped IDG and can alias after a
+/// different source/path/profile selection shifts segment offsets.
+pub(super) fn scoped_config_fingerprint(
+    pack: &Rulepack,
+    mode: &'static str,
+    max_precision: Option<Precision>,
+    files: &[FileId],
+    funcs: &[FuncId],
+    transfer_fingerprint: u64,
+) -> u64 {
+    let base = config_fingerprint(pack, mode, max_precision);
+    semantic_scope_fingerprint(base, files, funcs, transfer_fingerprint)
+}
+
+fn semantic_scope_fingerprint(
+    base: u64,
+    files: &[FileId],
+    funcs: &[FuncId],
+    transfer_fingerprint: u64,
+) -> u64 {
+    use bonsai_hash::Hasher as StableHasher;
+
+    fn absorb_u64(hasher: &mut StableHasher, value: u64) {
+        hasher.absorb(&value.to_le_bytes());
+        hasher.absorb_separator();
+    }
+
+    let mut file_ids: Vec<u32> = files.iter().map(|file| file.raw()).collect();
+    file_ids.sort_unstable();
+    file_ids.dedup();
+    let mut func_ids: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
+    func_ids.sort_unstable();
+    func_ids.dedup();
+
+    let mut hasher = StableHasher::new();
+    hasher.absorb(b"bonsai-security-taint-semantic-scope-v1");
+    hasher.absorb_separator();
+    absorb_u64(&mut hasher, base);
+    absorb_u64(&mut hasher, transfer_fingerprint);
+    absorb_u64(&mut hasher, file_ids.len() as u64);
+    for file in file_ids {
+        absorb_u64(&mut hasher, u64::from(file));
+    }
+    absorb_u64(&mut hasher, func_ids.len() as u64);
+    for func in func_ids {
+        absorb_u64(&mut hasher, u64::from(func));
+    }
+    hasher.finish()
 }
 
 #[derive(Clone, Debug)]
@@ -154,22 +206,15 @@ pub(super) fn prepare_workspace_cache(
         namespace,
         config_fingerprint,
     );
-    let mut temp_files_removed = 0usize;
+    // FactStore temp names are unique per process/session. Do not sweep them
+    // automatically here: another bonsai process may be actively writing the
+    // same configured sidecar. Explicit cache maintenance may remove known
+    // stale temps out of band.
+    let temp_files_removed = 0usize;
     let mut disk_entries_loaded = 0usize;
     let mut load_error = None;
     let mut persist_started = false;
     let mut persist_error = None;
-    match bonsai_workspace::taint_index::cleanup_sidecar_temp_files(&sidecar) {
-        Ok(removed) => temp_files_removed = removed,
-        Err(err) => {
-            tracing::warn!(
-                path = %sidecar.display(),
-                error = %err,
-                "taint graph factstore temp cleanup failed"
-            );
-            load_error = Some(format!("temp cleanup failed: {err}"));
-        }
-    }
     match index.load_from_disk_for_config(&sidecar, ws.db(), config_fingerprint) {
         Ok(entries) => disk_entries_loaded = entries,
         Err(err) => {
@@ -242,5 +287,59 @@ fn rule_kind_token(kind: RuleKind) -> &'static str {
         RuleKind::Sink => "sink",
         RuleKind::Sanitizer => "sanitizer",
         RuleKind::Typing => "typing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::semantic_scope_fingerprint;
+    use bonsai_common::{FileId, FuncId};
+
+    #[test]
+    fn semantic_scope_identity_is_order_independent_but_scope_sensitive() {
+        let first = semantic_scope_fingerprint(
+            11,
+            &[FileId::new(2), FileId::new(1), FileId::new(2)],
+            &[FuncId::new(20), FuncId::new(10), FuncId::new(20)],
+            7,
+        );
+        let reordered = semantic_scope_fingerprint(
+            11,
+            &[FileId::new(1), FileId::new(2)],
+            &[FuncId::new(10), FuncId::new(20)],
+            7,
+        );
+        assert_eq!(first, reordered, "scope identity must use sorted set semantics");
+
+        assert_ne!(
+            first,
+            semantic_scope_fingerprint(
+                11,
+                &[FileId::new(1), FileId::new(3)],
+                &[FuncId::new(10), FuncId::new(20)],
+                7,
+            ),
+            "different file scopes must never share a taint sidecar namespace"
+        );
+        assert_ne!(
+            first,
+            semantic_scope_fingerprint(
+                11,
+                &[FileId::new(1), FileId::new(2)],
+                &[FuncId::new(10), FuncId::new(30)],
+                7,
+            ),
+            "different function scopes must never share a taint sidecar namespace"
+        );
+        assert_ne!(
+            first,
+            semantic_scope_fingerprint(
+                11,
+                &[FileId::new(1), FileId::new(2)],
+                &[FuncId::new(10), FuncId::new(20)],
+                8,
+            ),
+            "different transfer semantics must never share a taint sidecar namespace"
+        );
     }
 }

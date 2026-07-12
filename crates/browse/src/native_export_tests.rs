@@ -1,29 +1,24 @@
 use super::*;
 
 #[test]
-fn complete_chain_mode_lifts_chain_caps() {
-    let default_limits = ExportChainLimits::for_complete(false);
-    let complete_limits = ExportChainLimits::for_complete(true);
-
-    assert!(complete_limits.max_chains_per_target > default_limits.max_chains_per_target);
-    assert!(complete_limits.max_entry_probes > default_limits.max_entry_probes);
-    assert_eq!(complete_limits.max_chains_per_target, usize::MAX);
-    assert_eq!(complete_limits.max_entry_probes, usize::MAX);
+fn materialized_chain_limits_are_always_finite() {
+    let limits = ExportChainLimits::bounded_materialization();
+    assert_eq!(
+        limits.max_chains_per_target,
+        EXPORT_FLOW_CHAIN_MAX_CHAINS_PER_TARGET
+    );
+    assert_eq!(limits.max_entry_probes, EXPORT_FLOW_CHAIN_MAX_ENTRY_PROBES);
 }
 
 #[test]
-fn complete_chain_mode_lifts_flow_label_caps() {
-    let limits = ExportChainLimits::for_complete(true);
-    let options = export_flow_label_options(true, limits);
-
-    assert_eq!(options.max_chains, usize::MAX);
-    assert_eq!(options.max_probes, usize::MAX);
-    assert!(options.downstream_depth > FlowIdLabelOptions::default().downstream_depth);
-    assert!(options.downstream_breadth > FlowIdLabelOptions::default().downstream_breadth);
-    assert!(options.max_labels_per_func > FlowIdLabelOptions::default().max_labels_per_func);
-    assert_eq!(options.downstream_depth, usize::MAX);
-    assert_eq!(options.downstream_breadth, usize::MAX);
-    assert_eq!(options.max_labels_per_func, usize::MAX);
+fn compressed_complete_rows_are_honestly_non_materialized() {
+    assert!(!chain_rows_complete(true, 0));
+    assert!(!flow_id_rows_complete(true, 0));
+    assert!(chain_rows_incomplete_reason(true, 0, 16, 64, true)
+        .is_some_and(|reason| reason.contains("compressed_callgraph")));
+    assert!(flow_id_rows_incomplete_reason(true, 0, true)
+        .is_some_and(|reason| reason.contains("compressed_callgraph")));
+    assert_eq!(export_flow_label_options(), FlowIdLabelOptions::default());
 }
 
 #[test]
@@ -125,5 +120,186 @@ class LocalOnly:
                     .is_some_and(|params| params.iter().any(|param| param == "holder.value"))
         }),
         "local object field must not create class_field entrypoint: {entries:#?}"
+    );
+}
+
+#[test]
+fn assign_chains_project_function_local_idg_and_cfg_rows_name_their_backend() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+def entry(user):
+    before = user
+    user = "clean"
+    after = user
+    helper(before)
+
+def helper(p):
+    deep = p
+    return deep
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+    let exported = native_export_json(&ws, dir.path(), false).expect("native export");
+    let chains = exported["taint_graph"]["assign_chains"]
+        .as_array()
+        .expect("assign_chains");
+    let entry = chains
+        .iter()
+        .find(|row| row["function"] == "entry")
+        .expect("entry assign-chain row");
+    let user = entry["per_param"]
+        .as_array()
+        .expect("per_param")
+        .iter()
+        .find(|row| row["param_name"] == "user")
+        .expect("user projection");
+    let tainted: std::collections::BTreeSet<&str> = user["tainted"]
+        .as_array()
+        .expect("tainted names")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        tainted.contains("user") && tainted.contains("before"),
+        "{tainted:?}"
+    );
+    assert!(
+        !tainted.contains("after"),
+        "the clean overwrite must prevent the original parameter from reaching `after`: {tainted:?}"
+    );
+    assert!(
+        !tainted.contains("p") && !tainted.contains("deep"),
+        "a function-local projection must not absorb callee storage: {tainted:?}"
+    );
+
+    let intra = exported["taint_graph"]["intra_taint"]
+        .as_array()
+        .expect("intra_taint");
+    assert!(
+        intra.iter().all(|row| row["backend"] == "cfg_local"),
+        "block-oriented compatibility rows must identify their local CFG backend: {intra:#?}"
+    );
+}
+
+#[test]
+fn function_summaries_compose_resolved_callee_returns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+def identity(value):
+    return value
+
+def wrapper(user):
+    return identity(user)
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+    let exported = native_export_json(&ws, dir.path(), false).expect("native export");
+    let summaries = exported["taint_graph"]["function_summaries"]
+        .as_array()
+        .expect("function_summaries");
+    let wrapper = summaries
+        .iter()
+        .find(|summary| summary["function"] == "wrapper")
+        .expect("wrapper return summary");
+    assert_eq!(wrapper["returns_taint_of"], serde_json::json!([0]));
+}
+
+#[test]
+fn complete_chain_mode_uses_compressed_graph_even_for_small_workspaces() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+def leaf(value):
+    return value
+
+def entry(user):
+    return leaf(user)
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let exported = native_export_json_with_config(
+        &ws,
+        dir.path(),
+        NativeExportConfig {
+            full_propagations: true,
+            complete_chains: true,
+        },
+    )
+    .expect("native export");
+
+    assert_eq!(exported["flow_chains_mode"], "compressed_callgraph");
+    assert_eq!(exported["flow_chains_complete"], false);
+    assert!(exported["flow_chains"].as_array().is_some_and(Vec::is_empty));
+    assert!(exported["flow_chains_incomplete_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("compressed_callgraph")));
+
+    let taint = &exported["taint_graph"];
+    assert_eq!(taint["chains_mode"], "compressed_callgraph");
+    assert_eq!(taint["chains_complete"], false);
+    assert!(taint["chains"].as_array().is_some_and(Vec::is_empty));
+    assert!(taint["chains_incomplete_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("compressed_callgraph")));
+    assert_eq!(taint["flow_id_labels_mode"], "compressed_callgraph");
+    assert_eq!(taint["flow_id_labels_complete"], false);
+    assert!(taint["flow_id_labels"].as_array().is_some_and(Vec::is_empty));
+    assert!(taint["flow_id_labels_incomplete_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("compressed_callgraph")));
+    assert!(taint["call_edges"]
+        .as_array()
+        .is_some_and(|edges| !edges.is_empty()));
+    assert_eq!(
+        exported["analysis_complete"], true,
+        "the compressed semantic graph is exact even though concrete path/label rows are not materialized"
+    );
+}
+
+#[test]
+fn entry_points_preserve_func_identity_when_names_and_lines_collide() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("alpha.py"),
+        "def entry(alpha):\n    return alpha\n",
+    )
+    .expect("write alpha");
+    std::fs::write(dir.path().join("beta.py"), "def entry(beta):\n    return beta\n").expect("write beta");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+    let exported = native_export_json(&ws, dir.path(), false).expect("native export");
+    let entries: Vec<_> = exported["taint_graph"]["entry_points"]
+        .as_array()
+        .expect("entry points")
+        .iter()
+        .filter(|entry| entry["function"] == "entry")
+        .collect();
+    assert_eq!(entries.len(), 2, "same name/line declarations must not merge");
+    assert_ne!(entries[0]["func_id"], entries[1]["func_id"]);
+
+    let parameter_sets: std::collections::BTreeSet<Vec<&str>> = entries
+        .iter()
+        .map(|entry| {
+            entry["params"]
+                .as_array()
+                .expect("params")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        parameter_sets,
+        std::collections::BTreeSet::from([vec!["alpha"], vec!["beta"]])
     );
 }

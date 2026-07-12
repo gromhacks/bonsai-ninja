@@ -33,6 +33,7 @@ fn ret(start: u64, value: &str) -> FlowEvent {
         span: span(FileId::new(0), start, start + 1),
         value_text: Some(value.to_string()),
         value_name: Some(value.to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place(value),
     }
 }
 
@@ -344,6 +345,7 @@ fn yield_emits_return_node_for_yielded_value() {
         vec![FlowEvent::Yield {
             span: span(FileId::new(0), 10, 18),
             value_text: Some("a".to_string()),
+            value_flow: bonsai_lang_api::ExpressionFlow::from_place("a"),
         }],
     );
     let (graph, _) = build_intra_entry_graph(FuncId::new(1), &decl);

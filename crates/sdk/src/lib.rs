@@ -290,11 +290,10 @@ impl Bonsai {
     }
 
     /// Parse/index the workspace and eagerly build the reusable semantic
-    /// structural sidecars shared by query commands: callgraph and,
-    /// when enabled for the workspace size, the workspace IDG. This
-    /// deliberately does not run the legacy all-entry dataflow prewarm;
-    /// use [`WorkspaceOpenOptions::full_prewarm`] for that explicit
-    /// audit/benchmark workflow.
+    /// structural sidecars shared by query commands: callgraph and the
+    /// workspace IDG. This deliberately does not materialize the legacy
+    /// per-entry value-flow projection; those compatibility documents are
+    /// derived from the IDG on demand.
     pub fn index_semantic(&self, root: impl AsRef<Path>) -> Result<Project> {
         let project = self.open_with_options(root, WorkspaceOpenOptions::parse_only())?;
         let _ = project.cache().warm_structural()?;
@@ -1600,7 +1599,7 @@ fn cache_manifest_sidecars(stats: &CacheStats) -> Vec<CacheManifestSidecar> {
             &stats.value_flow_sidecar,
             stats.value_flow_sidecar_exists,
             stats.value_flow_sidecar_bytes,
-            "Seed-free value-flow graphs reused by slice, dump edges, and security narrowing.",
+            "On-demand seed-free compatibility graphs reused by slice and SDK/navigation clients; canonical security/export flow lives in the IDG.",
         ),
         cache_manifest_sidecar(
             "flow_ids",
@@ -2930,7 +2929,7 @@ pub struct ShowOptions<'a> {
     pub taint_sink: Option<&'a str>,
     /// Optional compatibility budget for structured `T:` drilldown.
     pub taint_budget: Option<u32>,
-    /// Optional intraprocedural worklist cap for structured `T:` drilldown.
+    /// Legacy compatibility knob; structured `T:` drilldown uses uncapped IDG closure.
     pub taint_intra_worklist_cap: Option<u32>,
 }
 
@@ -3265,9 +3264,9 @@ pub struct NativeExportOptions {
     pub full_propagations: bool,
     /// Request complete semantic chain and flow-id-label evidence for
     /// native JSON export. Defaults to false so the warmed default
-    /// export cache remains compact and predictable; dense graphs can
-    /// have exponentially many exact paths, so complete mode may use the
-    /// `compressed_callgraph` representation instead of materializing
+    /// export cache remains compact and predictable. Even small graphs can
+    /// have exponentially many exact paths, so complete mode always uses the
+    /// exact `compressed_callgraph` representation instead of materializing
     /// every path row.
     pub complete_chains: bool,
 }

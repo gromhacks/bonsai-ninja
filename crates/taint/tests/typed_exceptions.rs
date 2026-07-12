@@ -116,6 +116,30 @@ class IOException { IOException(Object x) {} }
 }
 
 #[test]
+fn java_declared_subtype_reaches_base_catch() {
+    let src = "
+class C {
+    void entry(String tainted) {
+        try {
+            throw new IOException(tainted);
+        } catch (AppException e) {
+            sink(e);
+        }
+    }
+}
+class AppException { AppException(Object x) {} }
+class IOException extends AppException { IOException(Object x) { super(x); } }
+";
+    let db = ws(Arc::new(bonsai_lang_java::JavaAdapter::new()), &[("C.java", src)]);
+    let entry = func(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["tainted"]), &config(), &db);
+    assert!(
+        body_calls_sink_with_taint(&result, &db, "sink"),
+        "tree-sitter class bases must prove IOException assignable to AppException"
+    );
+}
+
+#[test]
 fn csharp_typed_catch_arm_disambiguation() {
     let src = "
 class C {
@@ -127,6 +151,8 @@ class C {
         }
     }
 }
+class IOException { public IOException(object x) {} }
+class FormatException { public FormatException(object x) {} }
 ";
     let db = ws(
         Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
@@ -152,6 +178,8 @@ class C {
         }
     }
 }
+class IOException(val x: String)
+class NumberFormatException(val x: String)
 ";
     let db = ws(
         Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),

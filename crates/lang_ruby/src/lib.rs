@@ -81,7 +81,7 @@ impl LanguageAdapter for RubyAdapter {
             .is_some_and(|ext| ext == "erb" || ext == "rhtml");
         if !is_erb {
             let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-            if let Ok(snapshot) = ctx.vfs.snapshot(file) {
+            if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
                 idx.refs
                     .extend(synthesize_rack_query_string_refs(snapshot.text.as_bytes(), file));
                 // Apply Ruby's scope-marker visibility: `private`,
@@ -89,7 +89,7 @@ impl LanguageAdapter for RubyAdapter {
                 // change the default visibility of subsequent method
                 // definitions. See `apply_ruby_scope_visibility` for
                 // the exact contract this implements.
-                apply_ruby_scope_visibility(&mut idx, snapshot.text.as_bytes(), file);
+                apply_ruby_scope_visibility(&mut idx, &tree, snapshot.text.as_bytes(), file);
                 for decl in &mut idx.defs {
                     bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
                         &mut decl.flow_events,
@@ -307,6 +307,7 @@ impl LanguageAdapter for RubyAdapter {
             file,
             defs,
             refs,
+            aggregate_layouts: Vec::new(),
             strings,
             comments,
         }
@@ -408,15 +409,10 @@ fn inject_ruby_super_call_events(events: &mut Vec<FlowEvent>, method_name: &str)
 }
 
 fn ruby_return_is_bare_super(event: &FlowEvent) -> bool {
-    let FlowEvent::Return {
-        value_text,
-        value_name,
-        ..
-    } = event
-    else {
+    let FlowEvent::Return { value_flow, .. } = event else {
         return false;
     };
-    value_name.as_deref() == Some("super") || value_text.as_deref().is_some_and(|text| text.trim() == "super")
+    value_flow.place.as_deref() == Some("super")
 }
 
 fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
@@ -551,6 +547,12 @@ fn normalize_ruby_instance_variable_flow_events(events: &mut [FlowEvent]) {
                 normalize_ruby_instance_variable_texts(source_call_args);
                 normalize_ruby_instance_variable_texts(source_names);
             }
+            FlowEvent::AggregateAssign {
+                target, value_flow, ..
+            } => {
+                *target = normalize_ruby_instance_variable_text(target);
+                normalize_ruby_instance_variable_expression_flow(value_flow);
+            }
             FlowEvent::Call {
                 name, receiver, args, ..
             } => {
@@ -566,10 +568,12 @@ fn normalize_ruby_instance_variable_flow_events(events: &mut [FlowEvent]) {
             FlowEvent::Return {
                 value_name,
                 value_text,
+                value_flow,
                 ..
             } => {
                 normalize_optional_ruby_instance_variable_text(value_name);
                 normalize_optional_ruby_instance_variable_text(value_text);
+                normalize_ruby_instance_variable_expression_flow(value_flow);
             }
             FlowEvent::Throw { value_name, .. } => {
                 normalize_optional_ruby_instance_variable_text(value_name);
@@ -599,8 +603,13 @@ fn normalize_ruby_instance_variable_flow_events(events: &mut [FlowEvent]) {
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 normalize_ruby_instance_variable_flow_events(body);
             }
-            FlowEvent::Yield { value_text, .. } => {
+            FlowEvent::Yield {
+                value_text,
+                value_flow,
+                ..
+            } => {
                 normalize_optional_ruby_instance_variable_text(value_text);
+                normalize_ruby_instance_variable_expression_flow(value_flow);
             }
             FlowEvent::Await { value_name, .. } => {
                 normalize_optional_ruby_instance_variable_text(value_name);
@@ -610,6 +619,25 @@ fn normalize_ruby_instance_variable_flow_events(events: &mut [FlowEvent]) {
             }
             FlowEvent::Break { .. } | FlowEvent::Continue { .. } => {}
         }
+    }
+}
+
+fn normalize_ruby_instance_variable_expression_flow(flow: &mut bonsai_lang_api::ExpressionFlow) {
+    normalize_optional_ruby_instance_variable_text(&mut flow.place);
+    normalize_ruby_instance_variable_texts(&mut flow.source_names);
+    if let Some(projection) = &mut flow.projection {
+        projection.base = normalize_ruby_instance_variable_text(&projection.base);
+        normalize_ruby_instance_variable_texts(&mut projection.path);
+    }
+    for field in &mut flow.aggregate_fields {
+        field.name = normalize_ruby_instance_variable_text(&field.name);
+        normalize_ruby_instance_variable_expression_flow(&mut field.value);
+    }
+    for item in &mut flow.tuple_items {
+        normalize_ruby_instance_variable_expression_flow(item);
+    }
+    for spread in &mut flow.spreads {
+        normalize_ruby_instance_variable_expression_flow(spread);
     }
 }
 
@@ -995,6 +1023,11 @@ fn collect_ruby_local_bindings(events: &[FlowEvent], locals: &mut std::collectio
                     locals.insert(name);
                 }
             }
+            FlowEvent::AggregateAssign { target, .. } => {
+                if let Some(name) = ruby_bare_binding_name(target) {
+                    locals.insert(name);
+                }
+            }
             FlowEvent::Try {
                 body,
                 catch_events,
@@ -1141,13 +1174,14 @@ fn collect_ruby_bare_tail_call_sites(
             FlowEvent::Return {
                 span,
                 value_name: Some(name),
-                value_text,
+                value_flow,
+                ..
             } => {
                 // Only the exact bare-word shape: the whole return value
                 // is the identifier itself. Compound returns
                 // (`gets.chomp`, `a + b`) already carry real Call events
                 // or operand reads.
-                if value_text.as_deref().map(str::trim) == Some(name.as_str())
+                if value_flow.place.as_deref() == Some(name.as_str())
                     && ruby_bare_method_candidate(name)
                     && !locals.contains(name.as_str())
                 {
@@ -1401,17 +1435,7 @@ fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
 /// Visibility comes from real syntax. The kit's modifier-vocabulary
 /// path doesn't model line-scoped visibility, so this adapter walks
 /// the parsed tree directly.
-fn apply_ruby_scope_visibility(idx: &mut DeclIndex, src: &[u8], file: FileId) {
-    let Ok(lang) = language_from_pack(PACK_NAME) else {
-        return;
-    };
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&lang).is_err() {
-        return;
-    }
-    let Some(tree) = parser.parse(src, None) else {
-        return;
-    };
+fn apply_ruby_scope_visibility(idx: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
     // Map (start_byte, end_byte) of each method decl in the index to
     // the span we'll patch when we find the matching tree node.
     let mut visibility_overrides: std::collections::HashMap<(u64, u64), bonsai_lang_api::Visibility> =

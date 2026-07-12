@@ -267,6 +267,10 @@ impl LanguageAdapter for SwiftAdapter {
         // names are UpperCamelCase; the constructor heuristic is reliable.
         bonsai_lang_api::apply_constructor_result_type_aliases(&mut idx);
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            let declared_aliases = collect_swift_declared_type_aliases(&tree, snapshot.text.as_bytes());
+            apply_swift_declared_type_aliases(&mut idx, &declared_aliases);
+        }
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -392,6 +396,100 @@ fn normalize_swift_parameter_names(decl: &mut bonsai_lang_api::Decl) {
         .collect::<std::collections::HashSet<_>>();
     decl.params
         .retain(|param| !type_names.contains(param) || alias_names.contains(param));
+}
+
+fn collect_swift_declared_type_aliases(tree: &Tree, src: &[u8]) -> std::collections::HashMap<String, String> {
+    let mut aliases = std::collections::HashMap::new();
+    for declaration in collect_kinds(tree, &["typealias_declaration"]) {
+        // Tree-sitter preserves source order here: the first named child is
+        // the alias declaration name and the second is its target type. Do
+        // not use the generic stack collector, whose LIFO traversal reverses
+        // siblings and would invert `Alias = Target`.
+        let mut cursor = declaration.walk();
+        let mut children = declaration.named_children(&mut cursor);
+        let Some(alias_node) = children.next() else {
+            continue;
+        };
+        let Some(target_node) = children.next() else {
+            continue;
+        };
+        let alias = node_text(&alias_node, src).trim();
+        let target = node_text(&target_node, src).trim();
+        if !alias.is_empty() && !target.is_empty() && alias != target {
+            aliases.insert(alias.to_string(), target.to_string());
+        }
+    }
+    aliases
+}
+
+fn apply_swift_declared_type_aliases(
+    index: &mut DeclIndex,
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    if aliases.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        for binding in &mut decl.type_aliases {
+            binding.type_name = resolve_swift_declared_type_alias(&binding.type_name, aliases);
+        }
+        if let Some(return_type) = &mut decl.return_type {
+            *return_type = resolve_swift_declared_type_alias(return_type, aliases);
+        }
+        rewrite_swift_event_receiver_type_aliases(&mut decl.flow_events, aliases);
+    }
+}
+
+fn resolve_swift_declared_type_alias(
+    type_name: &str,
+    aliases: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut current = type_name.trim();
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current.to_string()) {
+        let Some(next) = aliases.get(current).map(String::as_str) else {
+            break;
+        };
+        current = next.trim();
+    }
+    current.to_string()
+}
+
+fn rewrite_swift_event_receiver_type_aliases(
+    events: &mut [FlowEvent],
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { receiver_types, .. } => {
+                for receiver_type in receiver_types {
+                    *receiver_type = resolve_swift_declared_type_alias(receiver_type, aliases);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_swift_event_receiver_type_aliases(then_events, aliases);
+                rewrite_swift_event_receiver_type_aliases(else_events, aliases);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_swift_event_receiver_type_aliases(body, aliases);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_swift_event_receiver_type_aliases(body, aliases);
+                rewrite_swift_event_receiver_type_aliases(catch_events, aliases);
+                rewrite_swift_event_receiver_type_aliases(finally_events, aliases);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn collect_swift_function_param_names(file: FileId, tree: &Tree, src: &[u8]) -> Vec<(Span, Vec<String>)> {
@@ -969,6 +1067,10 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
                         span: body_span,
                         value_text: Some(format!("{call_name}()")),
                         value_name: None,
+                        value_flow: bonsai_lang_api::ExpressionFlow {
+                            call_sites: vec![body_span],
+                            ..Default::default()
+                        },
                     },
                 ]
             } else {
@@ -980,7 +1082,8 @@ fn synthesize_swift_computed_property_decls(idx: &mut DeclIndex, file: FileId, t
                 vec![FlowEvent::Return {
                     span: body_span,
                     value_text: Some(qualified.clone()),
-                    value_name: Some(qualified),
+                    value_name: Some(qualified.clone()),
+                    value_flow: bonsai_lang_api::ExpressionFlow::from_place(qualified),
                 }]
             };
         // Name span: the simple_identifier under `name: pattern`.
@@ -1204,8 +1307,9 @@ fn swift_lookup_member_type(prop: Node<'_>, member: &str, src: &[u8]) -> Option<
 
 /// Mirror `qualify_csharp_implicit_member_reads` / `qualify_dart_...`
 /// for Swift: bare reads of a sibling zero-arg member (`let c = cmd`)
-/// become `Assign{source_call:cmd}` plus an explicit `Call` event so
-/// `walk_call`'s args-empty fallback synthesizes the recv-slot.
+/// are compiler-style implicit-`self` member calls. Preserve that receiver
+/// explicitly so resolution and receiver-field flow use the AST's lexical
+/// class context rather than treating the getter as a free function.
 fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
     use std::collections::HashSet;
     let getter_names: HashSet<String> = index
@@ -1229,10 +1333,10 @@ fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
         collect_assign_targets(&decl.flow_events, &mut locals);
         rewrite_implicit_member_reads(&mut decl.flow_events, &getter_names, &locals, |name| {
             ImplicitMemberReadCall {
-                source_call: name.to_string(),
-                call_name: name.to_string(),
-                receiver: None,
-                call_kind: CallKind::Function,
+                source_call: format!("self.{name}"),
+                call_name: format!("self.{name}"),
+                receiver: Some("self".to_string()),
+                call_kind: CallKind::Method,
             }
         });
     }
@@ -1388,6 +1492,7 @@ fn synthesize_swift_memberwise_struct_inits(idx: &mut DeclIndex, file: FileId, t
                     span: *span,
                     value_text: Some(field.clone()),
                     value_name: Some(field.clone()),
+                    value_flow: bonsai_lang_api::ExpressionFlow::from_place(field.clone()),
                 }],
                 has_implicit_returns: false,
                 params: Vec::new(),
@@ -1436,6 +1541,7 @@ fn synthesize_swift_constructor_implicit_returns(index: &mut DeclIndex) {
             span,
             value_text: Some(value_text),
             value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(decl.params.clone()),
         });
     }
 }
@@ -1565,7 +1671,7 @@ fn swift_constructor_call_for_assignment_event(
             return Some((constructor, source_call_args.clone()));
         }
     }
-    events.iter().skip(event_index + 1).take(3).find_map(|event| {
+    events.iter().skip(event_index + 1).find_map(|event| {
         let FlowEvent::Call {
             name,
             span: call_span,
