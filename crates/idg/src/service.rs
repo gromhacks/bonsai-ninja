@@ -1855,23 +1855,22 @@ impl IdgQueryService {
             .symbolic_runtime
             .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(unified)));
         let mut ordinary = Vec::with_capacity(seeds.len());
-        let mut ordinary_set = AHashSet::with_capacity(seeds.len());
+        let mut reached = NodeBitSet::zeros(unified.reverse.len());
         for seed in seeds.iter().copied() {
-            if ordinary_set.insert(seed.0) {
+            if (seed.0 as usize) < unified.reverse.len() && !reached.contains(seed) {
+                reached.set(seed);
                 ordinary.push(seed);
             }
         }
-        let mut processed_nodes = NodeBitSet::zeros(unified.reverse.len());
         let mut facts = AHashSet::default();
         let mut pending_facts = Vec::new();
+        let mut node_cursor = 0usize;
+        let mut fact_cursor = 0usize;
 
-        loop {
-            let reached = reach.forward_closure_nodes(&ordinary);
-            for node in reached.iter().copied() {
-                if processed_nodes.contains(node) {
-                    continue;
-                }
-                processed_nodes.set(node);
+        while node_cursor < ordinary.len() || fact_cursor < pending_facts.len() {
+            while node_cursor < ordinary.len() {
+                let node = ordinary[node_cursor];
+                node_cursor += 1;
                 if let Some(node_facts) = runtime.facts_by_node.get(&WsNodeId(node.0)) {
                     for fact in node_facts.iter().copied() {
                         if facts.insert(fact) {
@@ -1879,14 +1878,19 @@ impl IdgQueryService {
                         }
                     }
                 }
+                for target in reach.forward_neighbours(node) {
+                    let target = NodeId(*target);
+                    if !reached.contains(target) {
+                        reached.set(target);
+                        ordinary.push(target);
+                    }
+                }
             }
 
-            let ordinary_len_before = ordinary.len();
-            let mut fact_cursor = 0usize;
             while fact_cursor < pending_facts.len() {
                 let fact = pending_facts[fact_cursor];
                 fact_cursor += 1;
-                self.seed_symbolic_fact_consumers(runtime, fact, &mut ordinary, &mut ordinary_set);
+                self.seed_symbolic_fact_consumers(runtime, fact, &mut ordinary, &mut reached);
                 let outgoing = symbolic.outgoing_transform_indices(fact.base);
                 for transform_index in outgoing {
                     let Some(transform) = symbolic.transforms().get(*transform_index as usize) else {
@@ -1915,8 +1919,10 @@ impl IdgQueryService {
                                 .get(&(transform.target, transform.write_span))
                             {
                                 for node in nodes {
-                                    if ordinary_set.insert(node.0) {
-                                        ordinary.push(NodeId(node.0));
+                                    let node = NodeId(node.0);
+                                    if !reached.contains(node) {
+                                        reached.set(node);
+                                        ordinary.push(node);
                                     }
                                 }
                             }
@@ -1934,18 +1940,15 @@ impl IdgQueryService {
                     }
                 }
             }
-            pending_facts.clear();
-            if ordinary.len() == ordinary_len_before {
-                bonsai_diagnostics::debug_log!(
-                    "idg-closure",
-                    "symbolic closure seeds={} reached={} facts={}",
-                    seeds.len(),
-                    reached.len(),
-                    facts.len()
-                );
-                return reached;
-            }
         }
+        bonsai_diagnostics::debug_log!(
+            "idg-closure",
+            "symbolic closure seeds={} reached={} facts={}",
+            seeds.len(),
+            ordinary.len(),
+            facts.len()
+        );
+        ordinary
     }
 
     fn seed_symbolic_fact_consumers(
@@ -1953,20 +1956,24 @@ impl IdgQueryService {
         runtime: &SymbolicRuntimeIndex,
         fact: SymbolicNodeFact,
         ordinary: &mut Vec<NodeId>,
-        ordinary_set: &mut AHashSet<u32>,
+        reached: &mut NodeBitSet,
     ) {
         let exact_nodes = runtime.exact_reads.get(&symbolic_fact_key(fact.base, fact.field));
         if let Some(nodes) = exact_nodes {
             for node in nodes {
-                if ordinary_set.insert(node.0) {
-                    ordinary.push(NodeId(node.0));
+                let node = NodeId(node.0);
+                if !reached.contains(node) {
+                    reached.set(node);
+                    ordinary.push(node);
                 }
             }
         }
         if let Some(nodes) = runtime.bare_reads.get(&fact.base) {
             for node in nodes {
-                if ordinary_set.insert(node.0) {
-                    ordinary.push(NodeId(node.0));
+                let node = NodeId(node.0);
+                if !reached.contains(node) {
+                    reached.set(node);
+                    ordinary.push(node);
                 }
             }
         }

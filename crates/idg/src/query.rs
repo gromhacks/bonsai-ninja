@@ -97,6 +97,12 @@ impl ReachabilityIndex {
         sparse_closure_nodes(&self.forward, self.n_nodes, seeds)
     }
 
+    /// Direct forward successors for compiler clients that compose another
+    /// monotone relation with the ordinary IDG without restarting closure.
+    pub(crate) fn forward_neighbours(&self, node: NodeId) -> &[u32] {
+        self.forward.neighbours(node)
+    }
+
     /// Forward closure restricted to `allowed` nodes.
     ///
     /// A source-to-target query computes `allowed` as the target's backward
