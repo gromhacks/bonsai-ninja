@@ -2817,6 +2817,7 @@ fn stitch_field_argument_forwarding(
         }
     }
     let transform_count = transforms.values().map(Vec::len).sum::<usize>();
+    let mut applicable_transform_cache: AHashMap<(usize, u32), SmallVec<[u32; 2]>> = AHashMap::default();
     let mut pending = VecDeque::new();
     let mut enqueued = AHashSet::default();
     seed_field_write_worklist(
@@ -2887,7 +2888,34 @@ fn stitch_field_argument_forwarding(
                 node: write.node,
                 span: Some(write_span),
             };
-            for site in sites {
+            let applicable = demands.as_ref().and_then(|demands| {
+                let key_id = demands.key_ids.get(&key).copied()?;
+                let field_id = demands.field_ids.get(&source.field).copied().unwrap_or(u32::MAX);
+                Some(
+                    applicable_transform_cache
+                        .entry((key_id, field_id))
+                        .or_insert_with(|| {
+                            sites
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, transform)| {
+                                    field_transform_may_apply(
+                                        transform,
+                                        &source.field,
+                                        demands,
+                                        demand_driven,
+                                        demand_driven_funcs,
+                                    )
+                                })
+                                .map(|(index, _)| {
+                                    u32::try_from(index).expect("field transform fanout exceeds u32")
+                                })
+                                .collect()
+                        })
+                        .as_slice(),
+                )
+            });
+            let mut apply_site = |site: &FieldWriteTransform| {
                 processed_transforms += 1;
                 apply_field_write_transform(
                     site,
@@ -2905,16 +2933,26 @@ fn stitch_field_argument_forwarding(
                     &mut enqueued,
                     stitch_data,
                 );
+            };
+            if let Some(indices) = applicable {
+                for site_index in indices.iter().copied() {
+                    apply_site(&sites[site_index as usize]);
+                }
+            } else {
+                for site in sites {
+                    apply_site(site);
+                }
             }
         }
     }
     let added_edges = ws.total_edge_count().saturating_sub(before_edges);
     stitch_debug_log(format_args!(
-        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} fallback_edges={} added_edges={} total_edges={} pending_remaining={}",
+        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} transform_field_views={} fallback_edges={} added_edges={} total_edges={} pending_remaining={}",
         phase_started.elapsed().as_secs_f64(),
         processed,
         processed_transforms,
         transform_count,
+        applicable_transform_cache.len(),
         fallback_edges,
         added_edges,
         ws.total_edge_count(),
@@ -3489,6 +3527,21 @@ fn apply_field_write_transform(
             );
         }
     }
+}
+
+fn field_transform_may_apply(
+    transform: &FieldWriteTransform,
+    field: &str,
+    demands: &FieldDemandIndex,
+    demand_driven: bool,
+    demand_driven_funcs: Option<&AHashSet<FuncId>>,
+) -> bool {
+    let Some(target_key) = field_transform_target_key(transform) else {
+        return true;
+    };
+    !field_demand_applies(demand_driven, demand_driven_funcs, target_key.func)
+        || demands.contains_all(&target_key)
+        || demands.contains_exact(&target_key, field)
 }
 
 fn apply_field_argument_aggregate(
