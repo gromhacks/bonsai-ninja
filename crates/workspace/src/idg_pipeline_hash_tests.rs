@@ -150,7 +150,10 @@ fn idg_transfer_fingerprint_tracks_source_callback_shapes() {
 
 #[test]
 fn idg_transfer_fingerprint_tracks_receiver_result_policy() {
-    let plain = bonsai_idg::TransferOptions::default();
+    let plain = bonsai_idg::TransferOptions {
+        include_unresolved_receiver_result_passthrough: false,
+        ..bonsai_idg::TransferOptions::default()
+    };
     let with_receiver_flow = bonsai_idg::TransferOptions {
         include_unresolved_receiver_result_passthrough: true,
         ..bonsai_idg::TransferOptions::default()

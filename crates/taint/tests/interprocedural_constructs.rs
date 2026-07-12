@@ -427,7 +427,25 @@ function entry($envelope) {
     );
     assert!(
         has_propagation(&result, "run", "execute", &db),
-        "nested receiver-return call must taint the enclosing execute argument"
+        "nested receiver-return call must taint the enclosing execute argument: {:?}",
+        result
+            .call_records
+            .iter()
+            .filter_map(|record| {
+                let global = db.global_index();
+                Some((
+                    global
+                        .decl_of(bonsai_common::SymbolId::new(record.caller.raw()))?
+                        .name
+                        .clone(),
+                    global
+                        .decl_of(bonsai_common::SymbolId::new(record.callee.raw()))?
+                        .name
+                        .clone(),
+                    record.tainted_args.clone(),
+                ))
+            })
+            .collect::<Vec<_>>()
     );
     assert!(
         result
@@ -1789,7 +1807,8 @@ fn javascript_mega_flow_handle_reaches_execute_from_readline_question() {
     let execute = func_id(&db, "execute");
     let mut seed = TokenSet::default();
     seed.insert("question".to_string());
-    let result = interprocedural_taint(handle, &seed, &InterTaintConfig::default(), &db);
+    let config = config_with_call_shapes(&[], &["push"]);
+    let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
         "expected JavaScript mega flow to propagate readline.question into execute; records={:?}",
@@ -2034,7 +2053,8 @@ fn objc_mega_flow_handle_reaches_execute_from_fgets_value() {
     let mut seed = TokenSet::default();
     seed.insert("buf".to_string());
     seed.insert("fgets".to_string());
-    let result = interprocedural_taint(handle, &seed, &InterTaintConfig::default(), &db);
+    let config = config_with_call_shapes(&[], &["addObject"]);
+    let result = interprocedural_taint(handle, &seed, &config, &db);
     assert!(
         result.call_records.iter().any(|record| record.callee == execute),
         "expected ObjC mega flow to propagate into executeCmd; records={:?}; calls={:?}",

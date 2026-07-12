@@ -6,16 +6,20 @@
 //! let writer = FactStoreWriter::create(&path, table_id, pipeline_hash)?;
 //! let str_id = writer.intern("hello");          // shared via &writer
 //! writer.add(key, body_hash, &payload_bytes)?;  // shared via &writer
+//! writer.add_owned(key, body_hash, encoded_vec)?; // transfers an owned buffer
 //! // ... many concurrent intern/add calls from rayon workers ...
 //! writer.finish()?;
 //! ```
 //!
 //! ## Design
 //!
-//! Workers call `add(&self, ...)` which **pushes** the entry to a
-//! `crossbeam_channel::Sender`. A single dedicated writer thread,
-//! spawned at `create` time, owns the tmp file and drains the channel
-//! sequentially: append payload bytes to disk, record an index row.
+//! Workers call `add(&self, ...)` or `add_owned(&self, ...)` to hand
+//! entries to a bounded `crossbeam_channel::Sender`. A single dedicated
+//! writer thread, spawned at `create` time, owns the tmp file and drains
+//! the channel sequentially: append payload bytes to disk, record an
+//! index row. The bounded queue applies backpressure when storage falls
+//! behind serialization instead of retaining every encoded payload in
+//! memory. Entries are never dropped or truncated.
 //!
 //! Why this instead of `Mutex<FactStoreWriter>` with a fallible
 //! `add(&mut self)`:
@@ -23,11 +27,16 @@
 //! - File I/O happens off the rayon worker hot path. Workers spend
 //!   their time computing + encoding, not waiting for `flush` or
 //!   `write_all`.
-//! - The channel send is lock-free (crossbeam unbounded MPMC) so
-//!   workers don't serialize on a Mutex acquire.
-//! - `add(&self)` lets the writer be shared as `&FactStoreWriter`
+//! - The channel handoff has no application-level I/O mutex. Producers
+//!   wait only when the small pipeline buffer is full, which keeps peak
+//!   payload memory bounded.
+//! - `add(&self)` and `add_owned(&self)` let the writer be shared as
+//!   `&FactStoreWriter`
 //!   directly through `par_iter().for_each(|f| writer.add(...))` —
 //!   no `Mutex<FactStoreWriter>` wrapper, no per-iteration lock.
+//! - `add_owned` moves an already-serialized `Vec<u8>` into the writer
+//!   thread without cloning it. `add` remains the borrowed compatibility
+//!   API and performs one copy before delegating to `add_owned`.
 //!
 //! String interning still goes through a small `parking_lot::Mutex`
 //! around the `StringPoolBuilder` — interning is a couple hash-table
@@ -62,6 +71,7 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 /// Monotonic counter used to disambiguate temp files when many
@@ -70,15 +80,19 @@ static WRITER_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Streaming writer for a fact-store file.
 ///
-/// Sharable as `&FactStoreWriter` from rayon workers — `add` and
-/// `intern` are `&self` operations that delegate to a background
-/// writer thread (channel send) and a small mutex (string pool)
-/// respectively. There is no per-call lock on the I/O path, so
-/// thousands of concurrent `add` calls do not serialise on each
-/// other.
+/// Sharable as `&FactStoreWriter` from rayon workers — `add`,
+/// `add_owned`, and `intern` are `&self` operations that delegate to
+/// a background writer thread (bounded channel send) and a small mutex
+/// (string pool) respectively. There is no per-call application mutex
+/// on the I/O path; a producer waits only when the bounded pipeline is
+/// full.
 pub struct FactStoreWriter {
     string_pool: parking_lot::Mutex<StringPoolBuilder>,
     sender: Sender<WriteCmd>,
+    /// Byte-weighted backpressure shared with every producer. The channel's
+    /// item bound alone is insufficient because one encoded graph can be
+    /// orders of magnitude larger than another.
+    byte_budget: Arc<ByteBudget>,
     /// Joined by [`Self::finish`] (or `Drop` if `finish` is skipped)
     /// to release the OS thread handle synchronously. `Option` so
     /// `finish` can take it out of the field; `Mutex` so `&self` Drop
@@ -107,6 +121,9 @@ enum WriteCmd {
         key: u64,
         body_hash: u64,
         payload: Vec<u8>,
+        /// Releases the payload's byte charge after the writer consumes (or
+        /// drops) this command.
+        _permit: BytePermit,
     },
     /// Drain queue, finalize the file (string pool, index, header,
     /// fsync, rename), and reply with the entry count.
@@ -116,6 +133,77 @@ enum WriteCmd {
         string_count: u64,
         reply: Sender<FactStoreResult<usize>>,
     },
+}
+
+struct ByteBudget {
+    limit: usize,
+    used: parking_lot::Mutex<usize>,
+    available: parking_lot::Condvar,
+}
+
+impl ByteBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            used: parking_lot::Mutex::new(0),
+            available: parking_lot::Condvar::new(),
+        }
+    }
+
+    fn acquire(self: &Arc<Self>, payload_bytes: usize) -> BytePermit {
+        // A single payload larger than the budget is admitted exclusively;
+        // otherwise it could never make progress. It still cannot coexist in
+        // the queue with another charged payload.
+        let charge = payload_bytes.max(1).min(self.limit);
+        let mut used = self.used.lock();
+        while used.saturating_add(charge) > self.limit {
+            self.available.wait(&mut used);
+        }
+        *used += charge;
+        BytePermit {
+            budget: Arc::clone(self),
+            charge,
+        }
+    }
+
+    #[cfg(test)]
+    fn try_acquire(self: &Arc<Self>, payload_bytes: usize) -> Option<BytePermit> {
+        let charge = payload_bytes.max(1).min(self.limit);
+        let mut used = self.used.lock();
+        if used.saturating_add(charge) > self.limit {
+            return None;
+        }
+        *used += charge;
+        Some(BytePermit {
+            budget: Arc::clone(self),
+            charge,
+        })
+    }
+
+    fn release(&self, charge: usize) {
+        let mut used = self.used.lock();
+        *used = used.saturating_sub(charge);
+        self.available.notify_all();
+    }
+}
+
+struct BytePermit {
+    budget: Arc<ByteBudget>,
+    charge: usize,
+}
+
+impl std::fmt::Debug for BytePermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BytePermit")
+            .field("charge", &self.charge)
+            .finish()
+    }
+}
+
+impl Drop for BytePermit {
+    fn drop(&mut self) {
+        self.budget.release(self.charge);
+    }
 }
 
 struct PendingIndexEntry {
@@ -146,7 +234,8 @@ impl FactStoreWriter {
             .create_new(true)
             .open(&tmp_path)?;
         let target_path = target.to_path_buf();
-        let (sender, receiver) = unbounded::<WriteCmd>();
+        let (sender, receiver) = entry_channel();
+        let byte_budget = Arc::new(ByteBudget::new(entry_queue_byte_budget()));
         let (finish_reply_tx, finish_reply_rx) = bounded::<FactStoreResult<usize>>(1);
         let handle = std::thread::Builder::new()
             .name("factstore-writer".to_string())
@@ -165,6 +254,7 @@ impl FactStoreWriter {
         Ok(Self {
             string_pool: parking_lot::Mutex::new(StringPoolBuilder::new()),
             sender,
+            byte_budget,
             writer_thread: parking_lot::Mutex::new(Some(handle)),
             finish_reply: parking_lot::Mutex::new(Some(finish_reply_rx)),
         })
@@ -192,10 +282,22 @@ impl FactStoreWriter {
         self.string_pool.lock().intern(s)
     }
 
-    /// Append one entry to the writer. The payload is sent to the
-    /// writer thread via the channel — this call does no file I/O
-    /// and acquires no Mutex.
+    /// Append one borrowed entry to the writer.
+    ///
+    /// This compatibility API copies `payload` into an owned buffer,
+    /// then delegates to [`Self::add_owned`]. Prefer `add_owned` when
+    /// the caller already owns a serialized `Vec<u8>`.
     pub fn add(&self, key: u64, body_hash: u64, payload: &[u8]) -> FactStoreResult<()> {
+        self.add_owned(key, body_hash, payload.to_vec())
+    }
+
+    /// Append one owned entry to the writer without cloning its payload.
+    ///
+    /// The payload moves into the writer thread through a small bounded
+    /// channel. If that pipeline buffer is full, this call waits until
+    /// the writer has consumed an earlier entry. Backpressure bounds
+    /// queued payload memory; it does not cap, truncate, or drop facts.
+    pub fn add_owned(&self, key: u64, body_hash: u64, payload: Vec<u8>) -> FactStoreResult<()> {
         if u32::try_from(payload.len()).is_err() {
             return Err(FactStoreError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -206,11 +308,13 @@ impl FactStoreWriter {
         // receiver has been dropped (writer thread exited). That's
         // a contract violation — the writer was finished/dropped
         // while another thread was still calling `add`.
+        let permit = self.byte_budget.acquire(payload.len());
         self.sender
             .send(WriteCmd::Entry {
                 key,
                 body_hash,
-                payload: payload.to_vec(),
+                payload,
+                _permit: permit,
             })
             .map_err(|_| {
                 FactStoreError::Io(std::io::Error::new(
@@ -256,10 +360,6 @@ impl FactStoreWriter {
                 "factstore writer reply channel already consumed",
             ))
         })?;
-        let handle = self.writer_thread.lock().take().ok_or_else(|| {
-            FactStoreError::Io(std::io::Error::other("factstore writer thread already joined"))
-        })?;
-
         // Build a fresh oneshot for the Finish command's reply.
         let (reply_tx, owned_reply_rx) = bounded::<FactStoreResult<usize>>(1);
         self.sender
@@ -283,6 +383,12 @@ impl FactStoreWriter {
         let real_sender = std::mem::replace(&mut self.sender, dummy_tx);
         drop(real_sender);
 
+        // Take the handle only after Finish was accepted. If the send
+        // above fails, `Drop` still owns and joins the writer thread.
+        let handle = self.writer_thread.lock().take().ok_or_else(|| {
+            FactStoreError::Io(std::io::Error::other("factstore writer thread already joined"))
+        })?;
+
         // Wait for the writer thread's reply on the owned oneshot;
         // if that one fires Err (writer thread exited without
         // replying on our channel — panic or earlier write error),
@@ -301,6 +407,33 @@ impl FactStoreWriter {
             .map_err(|_| FactStoreError::Io(std::io::Error::other("factstore writer thread panicked")))?;
         result
     }
+}
+
+/// Construct the bounded producer-to-writer entry channel. Kept in one
+/// helper so tests can prove its capacity/backpressure contract without
+/// scheduler timing assumptions.
+fn entry_channel() -> (Sender<WriteCmd>, Receiver<WriteCmd>) {
+    bounded(entry_queue_capacity())
+}
+
+/// Size the producer pipeline from the host's actual parallelism. This
+/// remains bounded—so encoded payloads cannot accumulate with workspace
+/// size—but gives every available producer a handoff slot instead of baking
+/// one machine-specific queue length into the persistence layer.
+fn entry_queue_capacity() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// Maximum encoded payload bytes accepted by the producer queue. This is a
+/// performance/backpressure budget, never an analysis limit: oversized facts
+/// are admitted one at a time and written losslessly.
+fn entry_queue_byte_budget() -> usize {
+    const BYTES_PER_PRODUCER: usize = 4 * 1024 * 1024;
+    std::env::var("BONSAI_FACTSTORE_QUEUE_BYTES")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|budget| *budget > 0)
+        .unwrap_or_else(|| entry_queue_capacity().saturating_mul(BYTES_PER_PRODUCER))
 }
 
 impl Drop for FactStoreWriter {
@@ -346,6 +479,7 @@ fn run_writer_thread(
                 key,
                 body_hash,
                 payload,
+                _permit,
             }) => {
                 let payload_len = u32::try_from(payload.len()).map_err(|_| {
                     FactStoreError::Io(std::io::Error::new(

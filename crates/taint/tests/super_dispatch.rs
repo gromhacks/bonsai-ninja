@@ -88,42 +88,138 @@ fn super_target_in_class_chain(
 }
 
 #[test]
-fn every_adapter_declares_super_receiver_tokens_without_legacy_fallback() {
-    let adapters: Vec<(&str, Arc<dyn LanguageAdapter>)> = vec![
-        ("c", Arc::new(bonsai_lang_c::CAdapter::new())),
-        ("cpp", Arc::new(bonsai_lang_cpp::CppAdapter::new())),
-        ("csharp", Arc::new(bonsai_lang_csharp::CSharpAdapter::new())),
-        ("dart", Arc::new(bonsai_lang_dart::DartAdapter::new())),
-        ("elixir", Arc::new(bonsai_lang_elixir::ElixirAdapter::new())),
-        ("erlang", Arc::new(bonsai_lang_erlang::ErlangAdapter::new())),
-        ("go", Arc::new(bonsai_lang_go::GoAdapter::new())),
-        ("java", Arc::new(bonsai_lang_java::JavaAdapter::new())),
+fn adapter_receiver_token_capabilities_match_language_syntax() {
+    type ReceiverCase = (
+        &'static str,
+        Arc<dyn LanguageAdapter>,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+    let adapters: Vec<ReceiverCase> = vec![
+        ("c", Arc::new(bonsai_lang_c::CAdapter::new()), &[], &[]),
+        (
+            "cpp",
+            Arc::new(bonsai_lang_cpp::CppAdapter::new()),
+            &[],
+            &["this"],
+        ),
+        (
+            "csharp",
+            Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
+            &["base"],
+            &["this"],
+        ),
+        (
+            "dart",
+            Arc::new(bonsai_lang_dart::DartAdapter::new()),
+            &["super"],
+            &["this"],
+        ),
+        (
+            "elixir",
+            Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
+            &[],
+            &[],
+        ),
+        (
+            "erlang",
+            Arc::new(bonsai_lang_erlang::ErlangAdapter::new()),
+            &[],
+            &[],
+        ),
+        ("go", Arc::new(bonsai_lang_go::GoAdapter::new()), &[], &[]),
+        (
+            "java",
+            Arc::new(bonsai_lang_java::JavaAdapter::new()),
+            &["super"],
+            &["this"],
+        ),
         (
             "javascript",
             Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+            &["super"],
+            &["this"],
         ),
-        ("kotlin", Arc::new(bonsai_lang_kotlin::KotlinAdapter::new())),
-        ("lua", Arc::new(bonsai_lang_lua::LuaAdapter::new())),
-        ("objc", Arc::new(bonsai_lang_objc::ObjCAdapter::new())),
-        ("perl", Arc::new(bonsai_lang_perl::PerlAdapter::new())),
-        ("php", Arc::new(bonsai_lang_php::PhpAdapter::new())),
-        ("python", Arc::new(bonsai_lang_python::PythonAdapter::new())),
-        ("ruby", Arc::new(bonsai_lang_ruby::RubyAdapter::new())),
-        ("rust", Arc::new(bonsai_lang_rust::RustAdapter::new())),
-        ("scala", Arc::new(bonsai_lang_scala::ScalaAdapter::new())),
-        ("solidity", Arc::new(bonsai_lang_solidity::SolidityAdapter::new())),
-        ("swift", Arc::new(bonsai_lang_swift::SwiftAdapter::new())),
+        (
+            "kotlin",
+            Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
+            &["super"],
+            &["this"],
+        ),
+        (
+            "lua",
+            Arc::new(bonsai_lang_lua::LuaAdapter::new()),
+            &[],
+            &["self"],
+        ),
+        (
+            "objc",
+            Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
+            &["super"],
+            &["self"],
+        ),
+        (
+            "perl",
+            Arc::new(bonsai_lang_perl::PerlAdapter::new()),
+            &["SUPER"],
+            &[],
+        ),
+        (
+            "php",
+            Arc::new(bonsai_lang_php::PhpAdapter::new()),
+            &["parent"],
+            &["$this", "self", "static"],
+        ),
+        (
+            "python",
+            Arc::new(bonsai_lang_python::PythonAdapter::new()),
+            &["super"],
+            &[],
+        ),
+        (
+            "ruby",
+            Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
+            &["super"],
+            &["self"],
+        ),
+        ("rust", Arc::new(bonsai_lang_rust::RustAdapter::new()), &[], &[]),
+        (
+            "scala",
+            Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
+            &["super"],
+            &["this"],
+        ),
+        (
+            "solidity",
+            Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
+            &["super"],
+            &["this"],
+        ),
+        (
+            "swift",
+            Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
+            &["super"],
+            &["self"],
+        ),
         (
             "typescript",
             Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+            &["super"],
+            &["this"],
         ),
     ];
 
-    for (lang, adapter) in adapters {
+    for (lang, adapter, expected_super, expected_implicit) in adapters {
         let caps = adapter.capabilities();
-        assert!(
-            !caps.super_receiver_tokens.is_empty(),
-            "{lang} must declare super_receiver_tokens explicitly or use NO_SUPER_RECEIVER_TOKENS"
+        assert_eq!(
+            caps.effective_super_receiver_tokens(),
+            expected_super,
+            "{lang} super-receiver syntax drifted"
+        );
+        assert_eq!(
+            caps.effective_implicit_receiver_tokens(),
+            expected_implicit,
+            "{lang} implicit-receiver syntax drifted"
         );
     }
 }

@@ -72,10 +72,13 @@ get folded to lowercase keys.
 `Diagnostic { span, severity, message, code, notes }` into a sink; rendering
 is the consumer's job.
 
-**`crates/parser`** is a concurrent tree-sitter parse cache keyed on
-`(FileId, version)`. It's careful about race windows when two threads parse
-the same file, walks for ERROR/MISSING nodes (cap 100), and enforces a
-per-file timeout (`BONSAI_PARSE_TIMEOUT_MS`, default 30 s).
+**`crates/parser`** is a concurrent tree-sitter parse cache keyed on VFS
+identity, file, language, and version. Adapters share the exact same
+`Arc<Tree>` for an immutable source snapshot. Mutable parsers are checked out
+from per-language pools, so same-language files parse concurrently without a
+global parser lock. It walks for ERROR/MISSING nodes (cap 100); parsing is
+uncapped by default, with `BONSAI_PARSE_TIMEOUT_MS` available for explicitly
+bounded diagnostic runs.
 
 ## Adapter framework
 
@@ -85,7 +88,9 @@ plus the kit that drives ~70% of every adapter.
 The `LanguageAdapter` trait is the contract: report a `LanguageId`,
 declare extensions and capabilities, parse declarations and imports.
 Adapters never see core internals — they get an `AdapterContext { vfs,
-diagnostics, workspace_root }` and that's it.
+diagnostics, tree_provider, workspace_root }`. The optional tree provider is
+the narrow bridge to the database's versioned parser cache; standalone adapter
+tests can omit it.
 
 The kit is split across several files:
 
@@ -302,10 +307,10 @@ candidate indexes before they can narrow a query.
   decisions in render-only logic.
 - `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
   `ValueFlowGraph` plus a `returning_seed_names` set
-  (precomputed at graph-build time so security-analysis answers
-  "does this seed reach a Return?" with a hash-set intersection).
-  Loaded when present and computed for the requested scope; persisted to
-  `.bonsai/value_flow.v*.factstore`.
+  for compatibility navigation/SDK clients. Loaded when present and projected
+  from the canonical IDG only for the requested scope; explicit callers may
+  persist it to `.bonsai/value_flow.v*.factstore`. Security and native export
+  query the IDG directly.
 - `FlowIdCache` (`flow_ids.rs`) — per-`FuncId` flow labels for
   browse-row F-IDs. Computed for the rendered browse scope; shares the
   workspace-cached resolved call graph via `seed_call_graph` when that
@@ -415,7 +420,8 @@ while preserving access to private helpers through `use super::*;`.
 
 ## Dataflow at a glance
 
-When the CLI runs `index`:
+During workspace indexing (the default `index` path stops after the structural
+steps; explicit full prewarm continues through cache materialization):
 
 1. `vfs` interns paths and stores text.
 2. `parser` parses each file (with cache).
@@ -428,13 +434,14 @@ When the CLI runs `index`:
    `cached_resolved_call_graph`; one canonical instance is shared
    with the dataflow + flow-id caches via `seed_call_graph`).
 7. `cfg` builds basic-block CFGs from flow_events.
-8. `taint` prewarms compatibility dataflow/value-flow caches. Production
-   security scans build source-specific IDG graphs on demand and reuse the
+8. `taint` prewarms the compatibility dataflow cache. Per-entry value-flow
+   documents are projected from the IDG on demand. Production security scans
+   build source-specific IDG graphs on demand and reuse the
    workspace-wide `InterTaintCaches` singleton for resolver memo, alias maps,
    function summaries, and local bindings across source groups.
-9. `DataFlowCache::prewarm_all` and `ValueFlowCache::prewarm_all`
-   fan out across rayon, persist to
-   `.bonsai/dataflow.v3.factstore` / `.bonsai/value_flow.v*.factstore`.
+9. `DataFlowCache::prewarm_all` fans out across rayon and persists to
+   `.bonsai/dataflow.v3.factstore`; compatibility value-flow entries persist
+   only after explicit/on-demand projection.
 10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
     using the same shared call graph.
 

@@ -17,7 +17,7 @@
 //!    site, emit
 //!    - `caller.CallArg(site, i) → callee.Param(j)` per explicit
 //!      arg, where `j` skips any declared receiver parameter
-//!    - `caller.CallArg(site, u8::MAX) → callee.Param(receiver)`
+//!    - `caller.CallArg(site, u32::MAX) → callee.Param(receiver)`
 //!      when the callee exposes a receiver parameter
 //!    - `callee.Return → caller.CallRet(site)`
 //!
@@ -48,7 +48,8 @@ use crate::node::NodeId;
 use crate::place::{CallSiteId, Place};
 use crate::segment::IdgSegment;
 use crate::transfer::{
-    inline_call_result_receiver_base, inline_constructor_receiver_base, CallSiteRef, ReturnFieldProjection,
+    inline_call_result_receiver_base, inline_constructor_receiver_base, receiver_name_matches,
+    receiver_tokens_equal, CallSiteRef, DescendantCopy, FlowControlFacts, ReturnFieldProjection,
     TransferOutput,
 };
 use crate::workspace::{CrossFileEdge, IdgWorkspace, SegmentId};
@@ -70,6 +71,7 @@ struct CalleeEndpoints {
     receiver_consumer_nodes: Vec<NodeId>,
     receiver_field_bases: Vec<String>,
     implicit_receiver_bases: Vec<String>,
+    receiver_names: Vec<String>,
     return_field_projections: Vec<ReturnFieldProjection>,
     return_passthrough_param_indices: Vec<usize>,
     return_node: Option<NodeId>,
@@ -81,11 +83,15 @@ struct FunctionStitchData {
     call_sites: Vec<CallSiteRef>,
     param_count: usize,
     is_constructor: bool,
+    has_return_event: bool,
     receiver_param_index: Option<usize>,
     receiver_field_bases: Vec<String>,
     implicit_receiver_bases: Vec<String>,
+    receiver_names: Vec<String>,
     return_field_projections: Vec<ReturnFieldProjection>,
     return_passthrough_param_indices: Vec<usize>,
+    descendant_copies: Vec<DescendantCopy>,
+    flow_control: FlowControlFacts,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -103,7 +109,6 @@ struct FieldArgStitch {
     allow_out_of_order_source: bool,
 }
 
-const MAX_FIELD_COPY_STITCHES_PER_SOURCE_KEY: usize = 4;
 const STORAGE_SEGMENTS_CACHE_CAP: usize = 131_072;
 static STORAGE_SEGMENTS_CACHE: LazyLock<parking_lot::RwLock<AHashMap<String, Arc<[String]>>>> =
     LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
@@ -112,9 +117,8 @@ static NORMALIZED_STORAGE_CACHE: LazyLock<parking_lot::RwLock<AHashMap<String, A
 
 #[derive(Default, Debug)]
 struct FieldArgSiteQueue {
-    sites: Vec<FieldArgStitch>,
-    by_source_key: AHashMap<FieldPlaceKey, usize>,
-    seen: AHashSet<FieldArgStitch>,
+    sites: Vec<Arc<FieldArgStitch>>,
+    seen: AHashSet<Arc<FieldArgStitch>>,
 }
 
 impl FieldArgSiteQueue {
@@ -124,18 +128,17 @@ impl FieldArgSiteQueue {
         {
             return;
         }
-        let key = field_write_key(site.caller_seg, site.caller, &site.actual_arg);
-        if key.base.is_empty() {
+        if normalize_storage_base_cached(&site.actual_arg).is_empty() {
             return;
         }
-        if self.seen.insert(site.clone()) {
-            *self.by_source_key.entry(key).or_default() += 1;
+        let site = Arc::new(site);
+        if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
         }
     }
 
-    fn as_slice(&self) -> &[FieldArgStitch] {
-        &self.sites
+    fn into_sites(self) -> Vec<Arc<FieldArgStitch>> {
+        self.sites
     }
 
     fn len(&self) -> usize {
@@ -145,16 +148,14 @@ impl FieldArgSiteQueue {
 
 #[derive(Default, Debug)]
 struct ReturnFieldSiteQueue {
-    sites: Vec<ReturnFieldStitch>,
-    by_source_key: AHashMap<FieldPlaceKey, usize>,
-    seen: AHashSet<ReturnFieldStitch>,
+    sites: Vec<Arc<ReturnFieldStitch>>,
+    seen: AHashSet<Arc<ReturnFieldStitch>>,
 }
 
 #[derive(Default, Debug)]
 struct ScalarReturnSiteQueue {
-    sites: Vec<ScalarReturnStitch>,
-    by_source_key: AHashMap<FieldPlaceKey, usize>,
-    seen: AHashSet<ScalarReturnStitch>,
+    sites: Vec<Arc<ScalarReturnStitch>>,
+    seen: AHashSet<Arc<ScalarReturnStitch>>,
 }
 
 impl ScalarReturnSiteQueue {
@@ -164,18 +165,17 @@ impl ScalarReturnSiteQueue {
         {
             return;
         }
-        let key = field_write_key(site.callee_seg, site.callee, &site.source_base);
-        if key.base.is_empty() {
+        if normalize_storage_base_cached(&site.source_base).is_empty() {
             return;
         }
-        if self.seen.insert(site.clone()) {
-            *self.by_source_key.entry(key).or_default() += 1;
+        let site = Arc::new(site);
+        if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
         }
     }
 
-    fn as_slice(&self) -> &[ScalarReturnStitch] {
-        &self.sites
+    fn into_sites(self) -> Vec<Arc<ScalarReturnStitch>> {
+        self.sites
     }
 
     fn len(&self) -> usize {
@@ -188,18 +188,17 @@ impl ReturnFieldSiteQueue {
         if !field_forwarding_base_allowed(&site.target_base) {
             return;
         }
-        let key = field_write_key(site.callee_seg, site.callee, &site.source_base);
-        if key.base.is_empty() {
+        if normalize_storage_base_cached(&site.source_base).is_empty() {
             return;
         }
-        if self.seen.insert(site.clone()) {
-            *self.by_source_key.entry(key).or_default() += 1;
+        let site = Arc::new(site);
+        if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
         }
     }
 
-    fn as_slice(&self) -> &[ReturnFieldStitch] {
-        &self.sites
+    fn into_sites(self) -> Vec<Arc<ReturnFieldStitch>> {
+        self.sites
     }
 
     fn len(&self) -> usize {
@@ -209,9 +208,8 @@ impl ReturnFieldSiteQueue {
 
 #[derive(Default, Debug)]
 struct ConstructorReturnSiteQueue {
-    sites: Vec<ConstructorReturnStitch>,
-    by_source_key: AHashMap<FieldPlaceKey, usize>,
-    seen: AHashSet<ConstructorReturnStitch>,
+    sites: Vec<Arc<ConstructorReturnStitch>>,
+    seen: AHashSet<Arc<ConstructorReturnStitch>>,
 }
 
 impl ConstructorReturnSiteQueue {
@@ -221,18 +219,17 @@ impl ConstructorReturnSiteQueue {
         {
             return;
         }
-        let key = field_write_key(site.callee_seg, site.callee, &site.receiver_param_name);
-        if key.base.is_empty() {
+        if normalize_storage_base_cached(&site.receiver_param_name).is_empty() {
             return;
         }
-        if self.seen.insert(site.clone()) {
-            *self.by_source_key.entry(key).or_default() += 1;
+        let site = Arc::new(site);
+        if self.seen.insert(Arc::clone(&site)) {
             self.sites.push(site);
         }
     }
 
-    fn as_slice(&self) -> &[ConstructorReturnStitch] {
-        &self.sites
+    fn into_sites(self) -> Vec<Arc<ConstructorReturnStitch>> {
+        self.sites
     }
 
     fn len(&self) -> usize {
@@ -314,7 +311,63 @@ struct FieldPlaceKey {
 #[derive(Default, Debug)]
 struct FieldPlaceIndex {
     by_base: AHashMap<FieldPlaceKey, Vec<FieldPlaceHit>>,
-    seen_by_base: AHashMap<FieldPlaceKey, AHashSet<FieldPlaceHit>>,
+    /// Exact storage names read by the AST. A bare read of a transform
+    /// target (for example `sink(obj)`) is a wildcard demand for every
+    /// concrete field that can reach that object; projected reads continue
+    /// to use the precise `(base, suffix)` index above.
+    read_storages: AHashSet<(SegmentId, FuncId, String)>,
+    /// Each compiler node denotes exactly one Place, so one compact identity
+    /// set replaces a string-heavy duplicate set for every prefix view.
+    recorded_nodes: AHashSet<(SegmentId, FuncId, NodeId)>,
+}
+
+#[derive(Default, Debug)]
+struct FieldDemandIndex {
+    key_ids: AHashMap<FieldPlaceKey, usize>,
+    field_ids: AHashMap<String, u32>,
+    fields_by_key: Vec<Vec<u32>>,
+    all_fields_by_key: Vec<bool>,
+}
+
+impl FieldDemandIndex {
+    fn contains_all(&self, key: &FieldPlaceKey) -> bool {
+        let Some(key_id) = self.key_ids.get(key).copied() else {
+            return false;
+        };
+        self.all_fields_by_key.get(key_id).copied().unwrap_or(false)
+    }
+
+    fn contains_exact(&self, key: &FieldPlaceKey, field: &str) -> bool {
+        let Some(key_id) = self.key_ids.get(key).copied() else {
+            return false;
+        };
+        let Some(field_id) = self.field_ids.get(field).copied() else {
+            return false;
+        };
+        self.fields_by_key
+            .get(key_id)
+            .is_some_and(|fields| fields.binary_search(&field_id).is_ok())
+    }
+
+    fn contains(&self, key: &FieldPlaceKey, field: &str) -> bool {
+        self.contains_all(key) || self.contains_exact(key, field)
+    }
+}
+
+/// Finite access-path demand derived from the adapter-produced IDG before
+/// synthetic interprocedural writes are added. This is the compiler-style
+/// termination boundary for recursive base substitution: arbitrary syntactic
+/// depth is supported, but the closure does not invent field suffixes absent
+/// from the program's AST facts.
+#[derive(Default, Debug)]
+struct SyntacticFieldUniverse {
+    suffixes: AHashSet<String>,
+}
+
+impl SyntacticFieldUniverse {
+    fn contains(&self, field: &str) -> bool {
+        self.suffixes.contains(field)
+    }
 }
 
 #[derive(Default, Debug)]
@@ -322,32 +375,25 @@ struct InterCallArgEntryIndex {
     entries: AHashSet<(SegmentId, FuncId, NodeId)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct SyntheticFieldWriteKey {
-    seg_id: SegmentId,
-    func: FuncId,
-    base: Arc<str>,
-    field: Arc<str>,
-}
-
 #[derive(Default, Debug)]
 struct SyntheticFieldWriteCache {
-    nodes: AHashMap<SyntheticFieldWriteKey, (NodeId, Span)>,
+    generated_nodes: AHashSet<(SegmentId, FuncId, NodeId)>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PendingFieldWrite {
-    key: FieldPlaceKey,
-    hit: FieldPlaceHit,
+    seg_id: SegmentId,
+    func: FuncId,
+    node: NodeId,
 }
 
 #[derive(Clone, Debug)]
 enum FieldWriteTransform {
-    Argument(FieldArgStitch),
-    Return(ReturnFieldStitch),
-    ScalarReturn(ScalarReturnStitch),
-    ConstructorReturn(ConstructorReturnStitch),
-    ReceiverMutation(ReceiverMutationStitch),
+    Argument(Arc<FieldArgStitch>),
+    Return(Arc<ReturnFieldStitch>),
+    ScalarReturn(Arc<ScalarReturnStitch>),
+    ConstructorReturn(Arc<ConstructorReturnStitch>),
+    ReceiverMutation(Arc<ReceiverMutationStitch>),
     Copy(FieldCopySite),
 }
 
@@ -410,7 +456,7 @@ pub trait CalleeResolver {
     /// Default implementation returns empty (no callback support);
     /// the workspace adapter overrides with callgraph-driven
     /// binding analysis.
-    fn callback_bindings(&self, _host: FuncId, _param_idx: u8) -> Vec<ResolvedCallee> {
+    fn callback_bindings(&self, _host: FuncId, _param_idx: u32) -> Vec<ResolvedCallee> {
         Vec::new()
     }
 
@@ -444,6 +490,14 @@ pub trait CalleeResolver {
     /// target (`repo = Repository(data)` → `repo._data.*`) without
     /// assuming ordinary method returns alias their receiver.
     fn is_constructor_func(&self, _func: FuncId) -> bool {
+        false
+    }
+
+    /// True when `callee` belongs to a declared ancestor of the receiver
+    /// class that owns `caller`. Workspace implementations derive this from
+    /// resolved declaration/callgraph identity; the IDG never guesses from a
+    /// receiver spelling such as `super` or `base`.
+    fn is_ancestor_dispatch(&self, _caller: FuncId, _callee: FuncId) -> bool {
         false
     }
 
@@ -503,6 +557,42 @@ pub fn stitch_idg_with_field_argument_forwarding(
     f2s: &dyn FuncToSegment,
     include_field_argument_forwarding: bool,
 ) -> IdgWorkspace {
+    stitch_idg_with_field_forwarding_mode(outputs, resolver, f2s, include_field_argument_forwarding, false)
+}
+
+/// Stitch with an optional sparse, read-demanded field closure. The sparse
+/// mode changes only which unobserved synthetic writes are materialized; all
+/// paths ending at an AST field read or scalar projection remain complete.
+pub fn stitch_idg_with_field_forwarding_mode(
+    outputs: Vec<TransferOutput>,
+    resolver: &dyn CalleeResolver,
+    f2s: &dyn FuncToSegment,
+    include_field_argument_forwarding: bool,
+    demand_driven_field_forwarding: bool,
+) -> IdgWorkspace {
+    stitch_idg_with_selective_field_forwarding_mode(
+        outputs,
+        resolver,
+        f2s,
+        include_field_argument_forwarding,
+        demand_driven_field_forwarding,
+        None,
+        None,
+    )
+}
+
+/// Stitch with demand-driven field forwarding limited to adapter functions
+/// whose AST field-place emission is complete. `None` preserves the public
+/// all-functions sparse mode used by focused IDG tests and direct callers.
+pub fn stitch_idg_with_selective_field_forwarding_mode(
+    outputs: Vec<TransferOutput>,
+    resolver: &dyn CalleeResolver,
+    f2s: &dyn FuncToSegment,
+    include_field_argument_forwarding: bool,
+    demand_driven_field_forwarding: bool,
+    demand_driven_funcs: Option<&AHashSet<FuncId>>,
+    field_demand_terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
+) -> IdgWorkspace {
     let mut ws = IdgWorkspace::new();
     let stitch_started = Instant::now();
     // Group by segment so each segment gets a single `IdgSegment`
@@ -557,13 +647,17 @@ pub fn stitch_idg_with_field_argument_forwarding(
                 receiver_param_index,
                 receiver_field_bases,
                 implicit_receiver_bases,
+                receiver_names,
                 return_field_projections,
                 return_passthrough_param_indices,
+                descendant_copies,
+                flow_control,
                 call_sites,
                 is_constructor,
+                has_return_event,
                 ..
             } = out;
-            let param_count = params.len().min(u8::MAX as usize);
+            let param_count = params.len();
             stitch_data.insert(
                 func,
                 FunctionStitchData {
@@ -571,11 +665,15 @@ pub fn stitch_idg_with_field_argument_forwarding(
                     call_sites,
                     param_count,
                     is_constructor,
+                    has_return_event,
                     receiver_param_index,
                     receiver_field_bases,
                     implicit_receiver_bases,
+                    receiver_names,
                     return_field_projections,
                     return_passthrough_param_indices,
+                    descendant_copies,
+                    flow_control,
                 },
             );
             local_remaps.push((func, remap));
@@ -615,8 +713,23 @@ pub fn stitch_idg_with_field_argument_forwarding(
     let mut return_field_sites = ReturnFieldSiteQueue::default();
     let mut scalar_return_sites = ScalarReturnSiteQueue::default();
     let mut constructor_return_sites = ConstructorReturnSiteQueue::default();
-    let mut receiver_mutation_sites: Vec<ReceiverMutationStitch> = Vec::new();
+    let mut receiver_mutation_sites: Vec<Arc<ReceiverMutationStitch>> = Vec::new();
     let mut passthrough_field_copy_sites: Vec<FieldCopySite> = Vec::new();
+    for (&func, data) in &stitch_data {
+        let Some((seg_id, _)) = seg_remaps.get(&func) else {
+            continue;
+        };
+        passthrough_field_copy_sites.extend(data.descendant_copies.iter().map(|copy| FieldCopySite {
+            seg_id: *seg_id,
+            func,
+            source_base: copy.source_base.clone(),
+            target_base: copy.target_base.clone(),
+            write_span: copy.span,
+            via_span: copy.span,
+            precision: Precision::Exact,
+            call_kind: CallEdgeKind::Direct,
+        }));
+    }
     // Phase 3b: stitch cross-function edges. `stitch_data` is an
     // AHashMap whose iteration order is randomised per process —
     // the cross-file edge index this loop appends to is read
@@ -642,6 +755,7 @@ pub fn stitch_idg_with_field_argument_forwarding(
                 data.is_constructor,
                 data.receiver_param_index,
                 &data.implicit_receiver_bases,
+                &data.receiver_names,
                 resolver,
                 &callee_endpoints,
                 &mut ws,
@@ -656,33 +770,49 @@ pub fn stitch_idg_with_field_argument_forwarding(
         }
     }
     dedup_receiver_mutation_sites(&mut receiver_mutation_sites);
+    let field_arg_site_count = field_arg_sites.len();
+    let return_field_site_count = return_field_sites.len();
+    let scalar_return_site_count = scalar_return_sites.len();
+    let constructor_return_site_count = constructor_return_sites.len();
+    let receiver_mutation_site_count = receiver_mutation_sites.len();
     stitch_debug_log(format_args!(
         "stitch call-sites-wired: {:.3}s field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
         call_started.elapsed().as_secs_f64(),
-        field_arg_sites.len(),
-        return_field_sites.len(),
-        scalar_return_sites.len(),
-        constructor_return_sites.len(),
-        receiver_mutation_sites.len()
+        field_arg_site_count,
+        return_field_site_count,
+        scalar_return_site_count,
+        constructor_return_site_count,
+        receiver_mutation_site_count
     ));
+    // Drop the large hash-table dedup indexes before materializing field
+    // transforms. The vectors and transform table share each site record via
+    // `Arc`, so strings remain single-owner throughout the closure build.
+    let field_arg_sites = field_arg_sites.into_sites();
+    let return_field_sites = return_field_sites.into_sites();
+    let scalar_return_sites = scalar_return_sites.into_sites();
+    let constructor_return_sites = constructor_return_sites.into_sites();
     if include_field_argument_forwarding {
         stitch_field_argument_forwarding(
-            field_arg_sites.as_slice(),
-            return_field_sites.as_slice(),
-            scalar_return_sites.as_slice(),
-            constructor_return_sites.as_slice(),
+            &field_arg_sites,
+            &return_field_sites,
+            &scalar_return_sites,
+            &constructor_return_sites,
             &receiver_mutation_sites,
             &passthrough_field_copy_sites,
+            &stitch_data,
             &mut ws,
+            demand_driven_field_forwarding,
+            demand_driven_funcs,
+            field_demand_terminal_sites,
         );
     } else {
         stitch_debug_log(format_args!(
             "field-forward worklist: skipped eager closure field_arg_sites={} return_field_sites={} scalar_return_sites={} constructor_return_sites={} receiver_mutation_sites={}",
-            field_arg_sites.len(),
-            return_field_sites.len(),
-            scalar_return_sites.len(),
-            constructor_return_sites.len(),
-            receiver_mutation_sites.len()
+            field_arg_site_count,
+            return_field_site_count,
+            scalar_return_site_count,
+            constructor_return_site_count,
+            receiver_mutation_site_count
         ));
     }
     stitch_debug_log(format_args!(
@@ -695,11 +825,11 @@ pub fn stitch_idg_with_field_argument_forwarding(
         stats.wired_candidates,
         stats.inter_edges,
         stats.passthrough_edges,
-        field_arg_sites.len(),
-        return_field_sites.len(),
-        scalar_return_sites.len(),
-        constructor_return_sites.len(),
-        receiver_mutation_sites.len(),
+        field_arg_site_count,
+        return_field_site_count,
+        scalar_return_site_count,
+        constructor_return_site_count,
+        receiver_mutation_site_count,
         stats.resolve_nanos as f64 / 1_000_000_000.0,
         stats.callback_nanos as f64 / 1_000_000_000.0
     ));
@@ -728,7 +858,7 @@ fn build_callee_endpoints(
         let param_count = stitch_data.get(&func).map(|data| data.param_count).unwrap_or(0);
         let mut params = Vec::with_capacity(param_count);
         for idx in 0..param_count {
-            let Ok(idx) = u8::try_from(idx) else { break };
+            let Ok(idx) = u32::try_from(idx) else { break };
             let node = segment
                 .places
                 .lookup(&Place::Param { idx })
@@ -754,10 +884,18 @@ fn build_callee_endpoints(
         // invoking a block) still assigns its explicit return value at the
         // call site. Treat Yield as the result endpoint only for generator-
         // shaped declarations with no explicit Return node.
-        let return_node = plain_return_node
-            .filter(|node| returned_nodes.contains(node))
-            .or_else(|| yield_node.filter(|node| yielded_nodes.contains(node)))
-            .or(plain_return_node);
+        let has_return_event = stitch_data.get(&func).is_some_and(|data| data.has_return_event);
+        let return_node = if has_return_event {
+            // A literal or void return deliberately has no inbound dataflow,
+            // but it is still the function's result endpoint. Never replace
+            // it with Yield merely because the returned value is clean.
+            plain_return_node
+        } else {
+            plain_return_node
+                .filter(|node| returned_nodes.contains(node))
+                .or_else(|| yield_node.filter(|node| yielded_nodes.contains(node)))
+                .or(plain_return_node)
+        };
         let param_names = stitch_data
             .get(&func)
             .map(|data| data.params.clone())
@@ -784,6 +922,10 @@ fn build_callee_endpoints(
                 implicit_receiver_bases: stitch_data
                     .get(&func)
                     .map(|data| data.implicit_receiver_bases.clone())
+                    .unwrap_or_default(),
+                receiver_names: stitch_data
+                    .get(&func)
+                    .map(|data| data.receiver_names.clone())
                     .unwrap_or_default(),
                 return_field_projections: stitch_data
                     .get(&func)
@@ -863,13 +1005,6 @@ fn collect_non_entry_param_write_nodes(
     out
 }
 
-fn callee_needs_synthetic_receiver_field_forwarding(endpoints: &CalleeEndpoints) -> bool {
-    !endpoints.receiver_consumer_nodes.is_empty()
-        || !endpoints.receiver_field_bases.is_empty()
-        || !endpoints.implicit_receiver_bases.is_empty()
-        || !endpoints.return_field_projections.is_empty()
-}
-
 fn collect_yield_value_nodes(segment: &IdgSegment) -> AHashSet<NodeId> {
     let mut out = AHashSet::new();
     for edge in &segment.edges {
@@ -910,12 +1045,13 @@ fn collect_receiver_consumer_nodes(
     let mut out = Vec::new();
     for site in &data.call_sites {
         if matches!(site.call_kind, CallKind::Method) {
-            let receiver_is_implicit =
-                site.receiver.as_deref().map(str::trim).is_some_and(|receiver| {
-                    is_super_receiver(receiver) || is_implicit_receiver_name(receiver)
-                });
+            let receiver_is_implicit = site
+                .receiver
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|receiver| receiver_name_matches(receiver, &data.receiver_names));
             if receiver_is_implicit {
-                push_call_arg_node(segment, func, site.site, u8::MAX, &mut out);
+                push_call_arg_node(segment, func, site.site, u32::MAX, &mut out);
             }
         }
         if site.explicit_args_count == 0 && site.receiver.is_none() && !site.receiver_types.is_empty() {
@@ -940,7 +1076,7 @@ fn collect_receiver_consumer_nodes(
         let Some(name_text) = segment.strings.get(*name) else {
             continue;
         };
-        if !is_implicit_receiver_name(name_text) && !is_super_receiver(name_text.trim()) {
+        if !receiver_name_matches(name_text, &data.receiver_names) {
             continue;
         }
         let pid = crate::node::PlaceId(pid_idx as u32);
@@ -956,7 +1092,7 @@ fn collect_receiver_consumer_nodes(
     out
 }
 
-fn push_call_arg_node(segment: &IdgSegment, func: FuncId, site: CallSiteId, idx: u8, out: &mut Vec<NodeId>) {
+fn push_call_arg_node(segment: &IdgSegment, func: FuncId, site: CallSiteId, idx: u32, out: &mut Vec<NodeId>) {
     let place = Place::CallArg { site, idx };
     let Some(pid) = segment.places.lookup(&place) else {
         return;
@@ -1127,6 +1263,7 @@ fn stitch_call_site(
     caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
     caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
     resolver: &dyn CalleeResolver,
     callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
     ws: &mut IdgWorkspace,
@@ -1134,7 +1271,7 @@ fn stitch_call_site(
     return_field_sites: &mut ReturnFieldSiteQueue,
     scalar_return_sites: &mut ScalarReturnSiteQueue,
     constructor_return_sites: &mut ConstructorReturnSiteQueue,
-    receiver_mutation_sites: &mut Vec<ReceiverMutationStitch>,
+    receiver_mutation_sites: &mut Vec<Arc<ReceiverMutationStitch>>,
     passthrough_field_copy_sites: &mut Vec<FieldCopySite>,
     mut stats: Option<&mut StitchStats>,
 ) {
@@ -1166,7 +1303,7 @@ fn stitch_call_site(
     // `callback_bindings` results so `run(executor, t)` /
     // `callback(value)` and `run(callback, t)` / `callback.call(value)`
     // both surface the cross-call edge to executor.
-    let callback_param_idx: Option<u8> =
+    let callback_param_idx: Option<u32> =
         if let Some(recv) = site.receiver.as_deref().filter(|r| !r.is_empty()) {
             // Receiver-form callback. The receiver text might be the
             // param name directly (`cb.accept(...)` → receiver "cb")
@@ -1176,7 +1313,7 @@ fn stitch_call_site(
             caller_params
                 .iter()
                 .position(|p| p == recv || p == stripped)
-                .and_then(|i| u8::try_from(i).ok())
+                .and_then(|i| u32::try_from(i).ok())
         } else {
             // Free-call form: callee name itself is the param.
             // Some adapters keep an explicit invocation marker on the
@@ -1187,7 +1324,7 @@ fn stitch_call_site(
             caller_params
                 .iter()
                 .position(|p| p == &site.callee_name || p == bare_name)
-                .and_then(|i| u8::try_from(i).ok())
+                .and_then(|i| u32::try_from(i).ok())
         };
     if let Some(param_idx) = callback_param_idx {
         if let Some(stats) = &mut stats {
@@ -1302,11 +1439,16 @@ fn stitch_call_site(
         if let Some(stats) = &mut stats {
             stats.wired_candidates = stats.wired_candidates.saturating_add(1);
         }
+        let is_ancestor_dispatch = resolver.is_ancestor_dispatch(caller, cand.func);
         // For method receivers, emit the synthetic receiver slot to
         // the callee's adapter-declared receiver parameter. This is
         // separate from positional args so explicit arguments keep
         // their source-language order.
         if matches!(site.call_kind, CallKind::Method) {
+            let receiver_call_arg = site
+                .receiver_arg_node
+                .map(|node| caller_remap.get(node))
+                .filter(|node| !node.is_sentinel());
             if let (Some(receiver_arg_node), Some(receiver_idx)) =
                 (site.receiver_arg_node, endpoints.receiver_param_index)
             {
@@ -1341,6 +1483,8 @@ fn stitch_call_site(
                         caller_params,
                         caller_receiver_param_index,
                         caller_implicit_receiver_bases,
+                        caller_receiver_names,
+                        is_ancestor_dispatch,
                         false,
                     );
                     push_receiver_field_arg_site(
@@ -1354,6 +1498,7 @@ fn stitch_call_site(
                         site.site.0,
                         cand.precision,
                         cand.edge_kind,
+                        receiver_call_arg,
                         None,
                     );
                     push_nested_receiver_field_arg_sites(
@@ -1368,6 +1513,7 @@ fn stitch_call_site(
                         site.site.0,
                         cand.precision,
                         cand.edge_kind,
+                        receiver_call_arg,
                     );
                     if let Some(receiver_type) = resolver.receiver_type_for(cand.func) {
                         push_receiver_field_arg_site(
@@ -1381,6 +1527,7 @@ fn stitch_call_site(
                             site.site.0,
                             cand.precision,
                             cand.edge_kind,
+                            receiver_call_arg,
                             Some(receiver_type.as_str()),
                         );
                     }
@@ -1411,6 +1558,7 @@ fn stitch_call_site(
             }
             if endpoints.receiver_param_index.is_none()
                 && (!endpoints.implicit_receiver_bases.is_empty()
+                    || !endpoints.receiver_field_bases.is_empty()
                     || !endpoints.return_field_projections.is_empty())
             {
                 if let Some(receiver) = site
@@ -1425,12 +1573,15 @@ fn stitch_call_site(
                         caller_params,
                         caller_receiver_param_index,
                         caller_implicit_receiver_bases,
+                        caller_receiver_names,
+                        is_ancestor_dispatch,
                         true,
                     );
                     let projection_bases = return_projection_bases(endpoints);
                     for param_name in endpoints
                         .implicit_receiver_bases
                         .iter()
+                        .chain(endpoints.receiver_field_bases.iter())
                         .chain(projection_bases.iter())
                     {
                         push_receiver_field_arg_site(
@@ -1444,47 +1595,17 @@ fn stitch_call_site(
                             site.site.0,
                             cand.precision,
                             cand.edge_kind,
+                            receiver_call_arg,
                             None,
                         );
                     }
-                }
-            }
-            if endpoints.receiver_param_index.is_none()
-                && callee_needs_synthetic_receiver_field_forwarding(endpoints)
-            {
-                if let Some(receiver) = site
-                    .receiver
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|receiver| !receiver.is_empty())
-                {
-                    let actual_receiver = receiver_field_forwarding_base(
-                        site,
-                        receiver,
-                        caller_params,
-                        caller_receiver_param_index,
-                        caller_implicit_receiver_bases,
-                        true,
-                    );
-                    push_receiver_field_arg_site(
-                        field_arg_sites,
-                        caller,
-                        caller_seg,
-                        cand.func,
-                        endpoints.segment,
-                        &actual_receiver,
-                        "receiver",
-                        site.site.0,
-                        cand.precision,
-                        cand.edge_kind,
-                        None,
-                    );
                 }
             }
         }
         if site.receiver.is_none()
             && endpoints.receiver_param_index.is_none()
             && (!endpoints.implicit_receiver_bases.is_empty()
+                || !endpoints.receiver_field_bases.is_empty()
                 || !endpoints.return_field_projections.is_empty())
         {
             push_bare_implicit_member_field_arg_sites(
@@ -1495,6 +1616,7 @@ fn stitch_call_site(
                 endpoints.segment,
                 endpoints,
                 caller_implicit_receiver_bases,
+                caller_receiver_names,
                 site.site.0,
                 cand.precision,
                 cand.edge_kind,
@@ -1707,34 +1829,52 @@ fn stitch_call_site(
                 }
             }
         }
-        if matches!(site.call_kind, CallKind::Method) && resolver.is_constructor_func(cand.func) {
-            if let Some(receiver) = site
+        if matches!(site.call_kind, CallKind::Method | CallKind::Constructor)
+            && resolver.is_constructor_func(cand.func)
+        {
+            let explicit_receiver = site
                 .receiver
                 .as_deref()
                 .map(str::trim)
-                .filter(|receiver| !receiver.is_empty())
-            {
-                let target_base = constructor_receiver_target_base(
-                    receiver,
-                    caller_params,
-                    caller_is_constructor,
-                    caller_receiver_param_index,
-                    caller_implicit_receiver_bases,
-                );
-                if !target_base.is_empty() {
-                    for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
-                        receiver_mutation_sites.push(ReceiverMutationStitch {
-                            caller,
-                            caller_seg,
-                            callee: cand.func,
-                            callee_seg: endpoints.segment,
-                            target_base: target_base.clone(),
-                            callee_receiver_param_name,
-                            call_span: site.site.0,
-                            precision: cand.precision,
-                            call_kind: cand.edge_kind,
-                        });
-                    }
+                .filter(|receiver| !receiver.is_empty());
+            let target_base = explicit_receiver
+                .map(|receiver| {
+                    constructor_receiver_target_base(
+                        receiver,
+                        caller_params,
+                        caller_is_constructor,
+                        caller_receiver_param_index,
+                        caller_implicit_receiver_bases,
+                        caller_receiver_names,
+                        is_ancestor_dispatch,
+                    )
+                })
+                .or_else(|| {
+                    // A synthesized primary constructor represents a class-
+                    // header delegation call with no expression receiver.
+                    // Resolved ancestor identity proves that the call mutates
+                    // the current object; use the adapter's canonical receiver
+                    // token rather than a language spelling in the IDG.
+                    (matches!(site.call_kind, CallKind::Constructor)
+                        && caller_is_constructor
+                        && is_ancestor_dispatch)
+                        .then(|| caller_receiver_names.first().cloned())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            if !target_base.is_empty() {
+                for callee_receiver_param_name in constructor_receiver_bases(endpoints) {
+                    receiver_mutation_sites.push(Arc::new(ReceiverMutationStitch {
+                        caller,
+                        caller_seg,
+                        callee: cand.func,
+                        callee_seg: endpoints.segment,
+                        target_base: target_base.clone(),
+                        callee_receiver_param_name,
+                        call_span: site.site.0,
+                        precision: cand.precision,
+                        call_kind: cand.edge_kind,
+                    }));
                 }
             }
         }
@@ -1742,10 +1882,9 @@ fn stitch_call_site(
             let caller_call_ret = caller_remap.get(site.call_ret_node);
             if !caller_call_ret.is_sentinel() {
                 let receiver_bases = constructor_receiver_bases(endpoints);
+                let assignment_targets = call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret);
                 if !receiver_bases.is_empty() {
-                    for (target_base, write_span, result_field) in
-                        call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret)
-                    {
+                    for (target_base, write_span, result_field) in assignment_targets {
                         if result_field.is_some() {
                             continue;
                         }
@@ -2132,9 +2271,11 @@ fn constructor_receiver_target_base(
     caller_is_constructor: bool,
     caller_receiver_param_index: Option<usize>,
     caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
+    is_ancestor_dispatch: bool,
 ) -> String {
     let trimmed = receiver.trim();
-    if is_super_receiver(trimmed) {
+    if receiver_name_matches(trimmed, caller_receiver_names) {
         if let Some(param) = caller_receiver_param_index
             .and_then(|idx| caller_params.get(idx))
             .map(|name| name.trim().to_string())
@@ -2143,7 +2284,12 @@ fn constructor_receiver_target_base(
             return param;
         }
         if caller_is_constructor {
-            if let Some(base) = constructor_implicit_receiver_base(caller_implicit_receiver_bases) {
+            if let Some(base) = constructor_implicit_receiver_base(
+                trimmed,
+                caller_implicit_receiver_bases,
+                caller_receiver_names,
+                is_ancestor_dispatch,
+            ) {
                 return base;
             }
         }
@@ -2167,23 +2313,70 @@ fn constructor_receiver_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
             out.push(base.to_string());
         }
     }
+    // Constructors with an implicit receiver still own object state even
+    // when their body only delegates to an ancestor and declares no fields.
+    // The adapter orders `receiver_names` with the canonical current-object
+    // token first; retaining it lets descendant state flow through each
+    // constructor in the hierarchy without spelling any language receiver in
+    // the IDG.
+    if endpoints.receiver_param_index.is_none() {
+        if let Some(receiver) = endpoints
+            .receiver_names
+            .first()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|receiver| !receiver.is_empty())
+        {
+            if !out.iter().any(|existing| existing == receiver) {
+                out.push(receiver.to_string());
+            }
+        }
+    }
     out
 }
 
-fn constructor_implicit_receiver_base(caller_implicit_receiver_bases: &[String]) -> Option<String> {
-    caller_implicit_receiver_bases
+fn constructor_implicit_receiver_base(
+    receiver: &str,
+    caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
+    is_ancestor_dispatch: bool,
+) -> Option<String> {
+    let matches_requested_receiver = |base: &&String| {
+        receiver_root_if_declared(base, caller_receiver_names)
+            .is_some_and(|root| receiver_tokens_equal(root, receiver))
+    };
+    let declared_bases = caller_implicit_receiver_bases
         .iter()
-        .map(String::as_str)
-        .map(str::trim)
-        .find(|base| !base.is_empty() && is_implicit_receiver_name(base) && !is_super_receiver(base))
-        .or_else(|| {
-            caller_implicit_receiver_bases
-                .iter()
-                .map(String::as_str)
-                .map(str::trim)
-                .find(|base| !base.is_empty() && !is_super_receiver(base))
-        })
-        .map(str::to_string)
+        .filter(|base| receiver_root_if_declared(base, caller_receiver_names).is_some());
+    if is_ancestor_dispatch {
+        declared_bases
+            .clone()
+            .find(|base| !matches_requested_receiver(base))
+            .or_else(|| declared_bases.clone().next())
+            .map(|base| base.trim().to_string())
+            .or_else(|| {
+                caller_receiver_names
+                    .iter()
+                    .find(|name| !receiver_tokens_equal(name, receiver))
+                    .or_else(|| caller_receiver_names.first())
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+            })
+    } else {
+        declared_bases
+            .clone()
+            .find(matches_requested_receiver)
+            .or_else(|| declared_bases.clone().next())
+            .map(|base| base.trim().to_string())
+            .or_else(|| {
+                caller_receiver_names
+                    .iter()
+                    .find(|name| receiver_tokens_equal(name, receiver))
+                    .or_else(|| caller_receiver_names.first())
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+            })
+    }
 }
 
 fn receiver_field_forwarding_base(
@@ -2192,6 +2385,8 @@ fn receiver_field_forwarding_base(
     caller_params: &[String],
     caller_receiver_param_index: Option<usize>,
     caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
+    is_ancestor_dispatch: bool,
     allow_implicit_receiver_rewrite: bool,
 ) -> String {
     if let Some(base) = inline_constructor_receiver_base(receiver, site.site.0) {
@@ -2206,6 +2401,8 @@ fn receiver_field_forwarding_base(
             caller_params,
             caller_receiver_param_index,
             caller_implicit_receiver_bases,
+            caller_receiver_names,
+            is_ancestor_dispatch,
         );
     }
     receiver.trim().to_string()
@@ -2216,9 +2413,11 @@ fn implicit_receiver_actual_base(
     caller_params: &[String],
     caller_receiver_param_index: Option<usize>,
     caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
+    is_ancestor_dispatch: bool,
 ) -> String {
     let trimmed = receiver.trim();
-    if is_super_receiver(trimmed) || is_implicit_receiver_name(trimmed) {
+    if receiver_name_matches(trimmed, caller_receiver_names) {
         if let Some(param) = caller_receiver_param_index
             .and_then(|idx| caller_params.get(idx))
             .map(String::as_str)
@@ -2227,32 +2426,16 @@ fn implicit_receiver_actual_base(
         {
             return param.to_string();
         }
-        if is_super_receiver(trimmed) {
-            if let Some(base) = caller_implicit_receiver_bases
-                .iter()
-                .map(String::as_str)
-                .map(str::trim)
-                .find(|base| *base == "receiver")
-            {
-                return base.to_string();
-            }
-        }
-        if let Some(base) = caller_implicit_receiver_bases
-            .iter()
-            .find(|base| is_implicit_receiver_name(base.trim()) && !is_super_receiver(base.trim()))
-            .or_else(|| caller_implicit_receiver_bases.first())
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        {
-            return base.to_string();
+        if let Some(base) = constructor_implicit_receiver_base(
+            trimmed,
+            caller_implicit_receiver_bases,
+            caller_receiver_names,
+            is_ancestor_dispatch,
+        ) {
+            return base;
         }
     }
     trimmed.to_string()
-}
-
-fn is_super_receiver(receiver: &str) -> bool {
-    matches!(receiver.trim(), "super" | "super()" | "base" | "parent")
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the explicit FieldArgStitch metadata.
@@ -2267,6 +2450,7 @@ fn push_receiver_field_arg_site(
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
+    actual_arg_node: Option<NodeId>,
     receiver_type: Option<&str>,
 ) {
     if param_name.trim().is_empty() {
@@ -2284,7 +2468,7 @@ fn push_receiver_field_arg_site(
         caller_seg,
         callee,
         callee_seg,
-        actual_arg_node: None,
+        actual_arg_node,
         actual_arg,
         param_name: param_name.trim().to_string(),
         call_span,
@@ -2307,6 +2491,7 @@ fn push_nested_receiver_field_arg_sites(
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
+    actual_arg_node: Option<NodeId>,
 ) {
     let projection_bases = return_projection_bases(endpoints);
     let nested_bases = endpoints
@@ -2332,7 +2517,7 @@ fn push_nested_receiver_field_arg_sites(
             caller_seg,
             callee,
             callee_seg,
-            actual_arg_node: None,
+            actual_arg_node,
             actual_arg: actual_nested_base,
             param_name: nested_param_base.to_string(),
             call_span,
@@ -2352,11 +2537,12 @@ fn push_bare_implicit_member_field_arg_sites(
     callee_seg: SegmentId,
     endpoints: &CalleeEndpoints,
     caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
     call_span: Span,
     precision: Precision,
     call_kind: CallEdgeKind,
 ) {
-    let roots = implicit_member_actual_roots(caller_implicit_receiver_bases);
+    let roots = implicit_member_actual_roots(caller_implicit_receiver_bases, caller_receiver_names);
     if roots.is_empty() {
         return;
     }
@@ -2373,7 +2559,7 @@ fn push_bare_implicit_member_field_arg_sites(
             continue;
         }
         for root in &roots {
-            let actual_arg = implicit_member_actual_base(root, nested_param_base);
+            let actual_arg = implicit_member_actual_base(root, nested_param_base, &endpoints.receiver_names);
             if !seen.insert((actual_arg.clone(), nested_param_base.to_string())) {
                 continue;
             }
@@ -2408,26 +2594,34 @@ fn return_projection_bases(endpoints: &CalleeEndpoints) -> Vec<String> {
     out
 }
 
-fn implicit_member_actual_roots(caller_implicit_receiver_bases: &[String]) -> Vec<String> {
+fn implicit_member_actual_roots(
+    caller_implicit_receiver_bases: &[String],
+    caller_receiver_names: &[String],
+) -> Vec<String> {
     let mut roots = Vec::new();
     for base in caller_implicit_receiver_bases {
-        let Some(root) = implicit_receiver_root(base) else {
+        let Some(root) = receiver_root_if_declared(base, caller_receiver_names) else {
             continue;
         };
         if !roots.iter().any(|existing| existing == root) {
             roots.push(root.to_string());
         }
     }
-    for root in ["this", "self", "super", "base", "receiver"] {
-        if !roots.iter().any(|existing| existing == root) {
-            roots.push(root.to_string());
+    for receiver in caller_receiver_names {
+        let receiver = receiver.trim();
+        if !receiver.is_empty()
+            && !roots
+                .iter()
+                .any(|existing| receiver_tokens_equal(existing, receiver))
+        {
+            roots.push(receiver.to_string());
         }
     }
     roots
 }
 
-fn implicit_member_actual_base(root: &str, nested_param_base: &str) -> String {
-    if implicit_receiver_root(nested_param_base).is_some() {
+fn implicit_member_actual_base(root: &str, nested_param_base: &str, receiver_names: &[String]) -> String {
+    if receiver_root_if_declared(nested_param_base, receiver_names).is_some() {
         nested_param_base.trim().to_string()
     } else {
         format!("{}.{}", root.trim(), nested_param_base.trim())
@@ -2435,12 +2629,10 @@ fn implicit_member_actual_base(root: &str, nested_param_base: &str) -> String {
 }
 
 fn projected_receiver_target_base(target_base: &str, receiver_base: &str) -> String {
-    project_receiver_base(
-        target_base,
-        implicit_receiver_root(receiver_base).unwrap_or(""),
-        receiver_base,
-    )
-    .unwrap_or_else(|| target_base.trim().to_string())
+    let receiver_segments = storage_segments_cached(receiver_base);
+    let receiver_root = receiver_segments.first().map(String::as_str).unwrap_or("");
+    project_receiver_base(target_base, receiver_root, receiver_base)
+        .unwrap_or_else(|| target_base.trim().to_string())
 }
 
 fn project_receiver_base(actual_base: &str, receiver_root: &str, receiver_base: &str) -> Option<String> {
@@ -2462,17 +2654,13 @@ fn project_receiver_base(actual_base: &str, receiver_root: &str, receiver_base: 
     Some(format!("{actual_base}.{suffix}"))
 }
 
-fn implicit_receiver_root(receiver_base: &str) -> Option<&str> {
+fn receiver_root_if_declared<'a>(receiver_base: &'a str, receiver_names: &[String]) -> Option<&'a str> {
     let root = receiver_base
         .trim()
         .split('.')
         .find(|part| !part.trim().is_empty())?
         .trim();
-    matches!(
-        root,
-        "self" | "this" | "$this" | "Self" | "super" | "base" | "receiver"
-    )
-    .then_some(root)
+    receiver_name_matches(root, receiver_names).then_some(root)
 }
 
 fn receiver_projection_needed(receiver: &str, receiver_type: &str) -> bool {
@@ -2505,28 +2693,19 @@ fn named_arg_param_index(
 }
 
 fn stitch_field_argument_forwarding(
-    sites: &[FieldArgStitch],
-    return_field_sites: &[ReturnFieldStitch],
-    scalar_return_sites: &[ScalarReturnStitch],
-    constructor_return_sites: &[ConstructorReturnStitch],
-    receiver_mutation_sites: &[ReceiverMutationStitch],
+    sites: &[Arc<FieldArgStitch>],
+    return_field_sites: &[Arc<ReturnFieldStitch>],
+    scalar_return_sites: &[Arc<ScalarReturnStitch>],
+    constructor_return_sites: &[Arc<ConstructorReturnStitch>],
+    receiver_mutation_sites: &[Arc<ReceiverMutationStitch>],
     passthrough_field_copy_sites: &[FieldCopySite],
+    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
     ws: &mut IdgWorkspace,
+    demand_driven: bool,
+    demand_driven_funcs: Option<&AHashSet<FuncId>>,
+    field_demand_terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
 ) {
-    if sites.is_empty()
-        && return_field_sites.is_empty()
-        && scalar_return_sites.is_empty()
-        && constructor_return_sites.is_empty()
-        && receiver_mutation_sites.is_empty()
-        && passthrough_field_copy_sites.is_empty()
-    {
-        return;
-    }
-    let mut known_edges = collect_existing_edges(ws);
-    let mut field_index = FieldPlaceIndex::from_workspace(ws);
-    let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
-    let mut synthetic_field_writes = SyntheticFieldWriteCache::default();
-    let mut copy_sites = collect_field_copy_sites(ws);
+    let mut copy_sites = collect_field_copy_sites(ws, stitch_data);
     copy_sites.extend_from_slice(passthrough_field_copy_sites);
     copy_sites.sort_by(|a, b| {
         (
@@ -2554,6 +2733,20 @@ fn stitch_field_argument_forwarding(
             && a.write_span == b.write_span
             && a.via_span == b.via_span
     });
+    if sites.is_empty()
+        && return_field_sites.is_empty()
+        && scalar_return_sites.is_empty()
+        && constructor_return_sites.is_empty()
+        && receiver_mutation_sites.is_empty()
+        && copy_sites.is_empty()
+    {
+        return;
+    }
+    let mut known_edges = collect_existing_edges(ws);
+    let mut field_index = FieldPlaceIndex::from_workspace(ws);
+    let syntactic_fields = field_index.syntactic_field_universe();
+    let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
+    let mut synthetic_field_writes = SyntheticFieldWriteCache::default();
     let transforms = build_field_write_transforms(
         sites,
         return_field_sites,
@@ -2562,10 +2755,67 @@ fn stitch_field_argument_forwarding(
         receiver_mutation_sites,
         &copy_sites,
     );
+    let demands = demand_driven.then(|| {
+        build_field_demands(
+            &field_index,
+            &transforms,
+            stitch_data,
+            field_demand_terminal_sites,
+        )
+    });
+    if let Some(demands) = &demands {
+        let field_count = demands.fields_by_key.iter().map(Vec::len).sum::<usize>();
+        let exact_base_count = demands
+            .fields_by_key
+            .iter()
+            .filter(|fields| !fields.is_empty())
+            .count();
+        let wildcard_base_count = demands.all_fields_by_key.iter().filter(|all| **all).count();
+        stitch_debug_log(format_args!(
+            "field-forward demands: exact_bases={} wildcard_bases={} fields={}",
+            exact_base_count, wildcard_base_count, field_count
+        ));
+        if field_count <= 128 && wildcard_base_count <= 128 {
+            let fields_by_id: AHashMap<u32, &str> = demands
+                .field_ids
+                .iter()
+                .map(|(field, id)| (*id, field.as_str()))
+                .collect();
+            let mut rendered = Vec::new();
+            for (key, key_id) in &demands.key_ids {
+                if demands.all_fields_by_key.get(*key_id).copied().unwrap_or(false) {
+                    rendered.push(format!("{}:{}:{}.*", key.seg_id.0, key.func.raw(), key.base));
+                }
+                for field_id in demands.fields_by_key.get(*key_id).into_iter().flatten() {
+                    if let Some(field) = fields_by_id.get(field_id) {
+                        rendered.push(format!(
+                            "{}:{}:{}.{field}",
+                            key.seg_id.0,
+                            key.func.raw(),
+                            key.base
+                        ));
+                    }
+                }
+            }
+            rendered.sort();
+            stitch_debug_log(format_args!(
+                "field-forward demand facts: {}",
+                rendered.join(", ")
+            ));
+        }
+    }
     let transform_count = transforms.values().map(Vec::len).sum::<usize>();
     let mut pending = VecDeque::new();
     let mut enqueued = AHashSet::default();
-    seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
+    seed_field_write_worklist(
+        &field_index,
+        &transforms,
+        demands.as_ref(),
+        demand_driven,
+        demand_driven_funcs,
+        &mut pending,
+        &mut enqueued,
+    );
 
     let phase_started = Instant::now();
     let before_edges = ws.total_edge_count();
@@ -2581,28 +2831,69 @@ fn stitch_field_argument_forwarding(
         &transforms,
         &mut pending,
         &mut enqueued,
+        stitch_data,
     );
     let mut processed = 0usize;
     let mut processed_transforms = 0usize;
     while let Some(write) = pending.pop_front() {
         processed += 1;
-        let Some(sites) = transforms.get(&write.key) else {
+        let Some((storage, write_span)) = ws.segment(write.seg_id).and_then(|segment| {
+            let node = segment.nodes.get(write.node)?;
+            if node.func != write.func {
+                return None;
+            }
+            let place = segment.places.get(node.place)?;
+            write_place_storage_and_span(segment, place)
+        }) else {
             continue;
         };
-        for site in sites {
-            processed_transforms += 1;
-            apply_field_write_transform(
-                site,
-                &write,
-                &mut inter_call_arg_entries,
-                &mut synthetic_field_writes,
-                ws,
-                &mut known_edges,
-                &mut field_index,
-                &transforms,
-                &mut pending,
-                &mut enqueued,
-            );
+        let cached_parts = storage_segments_cached(&storage);
+        let parts = cached_parts.iter().map(String::as_str).collect::<Vec<_>>();
+        if parts.len() < 2 {
+            continue;
+        }
+        // A concrete IDG write is queued once. Its canonical storage path is
+        // projected onto every transform-bearing base here, so no semantic
+        // fanout is lost even though duplicate prefix/suffix queue states are
+        // gone.
+        for split in 1..parts.len() {
+            let field = join_storage_part_refs(&parts[split..]);
+            if !syntactic_fields.contains(&field) {
+                continue;
+            }
+            let key = FieldPlaceKey {
+                seg_id: write.seg_id,
+                func: write.func,
+                base: join_storage_part_refs(&parts[..split]),
+                writes: true,
+            };
+            let Some(sites) = transforms.get(&key) else {
+                continue;
+            };
+            let source = FieldPlaceHit {
+                field,
+                node: write.node,
+                span: Some(write_span),
+            };
+            for site in sites {
+                processed_transforms += 1;
+                apply_field_write_transform(
+                    site,
+                    &source,
+                    demands.as_ref(),
+                    demand_driven,
+                    demand_driven_funcs,
+                    &mut inter_call_arg_entries,
+                    &mut synthetic_field_writes,
+                    ws,
+                    &mut known_edges,
+                    &mut field_index,
+                    &transforms,
+                    &mut pending,
+                    &mut enqueued,
+                    stitch_data,
+                );
+            }
         }
     }
     let added_edges = ws.total_edge_count().saturating_sub(before_edges);
@@ -2632,11 +2923,11 @@ struct FieldCopySite {
 }
 
 fn build_field_write_transforms(
-    sites: &[FieldArgStitch],
-    return_field_sites: &[ReturnFieldStitch],
-    scalar_return_sites: &[ScalarReturnStitch],
-    constructor_return_sites: &[ConstructorReturnStitch],
-    receiver_mutation_sites: &[ReceiverMutationStitch],
+    sites: &[Arc<FieldArgStitch>],
+    return_field_sites: &[Arc<ReturnFieldStitch>],
+    scalar_return_sites: &[Arc<ScalarReturnStitch>],
+    constructor_return_sites: &[Arc<ConstructorReturnStitch>],
+    receiver_mutation_sites: &[Arc<ReceiverMutationStitch>],
     copy_sites: &[FieldCopySite],
 ) -> AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>> {
     let mut out: AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>> = AHashMap::default();
@@ -2644,48 +2935,294 @@ fn build_field_write_transforms(
         push_field_write_transform(
             &mut out,
             field_write_key(site.caller_seg, site.caller, &site.actual_arg),
-            FieldWriteTransform::Argument(site.clone()),
+            FieldWriteTransform::Argument(Arc::clone(site)),
         );
     }
     for site in return_field_sites {
         push_field_write_transform(
             &mut out,
             field_write_key(site.callee_seg, site.callee, &site.source_base),
-            FieldWriteTransform::Return(site.clone()),
+            FieldWriteTransform::Return(Arc::clone(site)),
         );
     }
     for site in scalar_return_sites {
         push_field_write_transform(
             &mut out,
             field_write_key(site.callee_seg, site.callee, &site.source_base),
-            FieldWriteTransform::ScalarReturn(site.clone()),
+            FieldWriteTransform::ScalarReturn(Arc::clone(site)),
         );
     }
     for site in constructor_return_sites {
         push_field_write_transform(
             &mut out,
             field_write_key(site.callee_seg, site.callee, &site.receiver_param_name),
-            FieldWriteTransform::ConstructorReturn(site.clone()),
+            FieldWriteTransform::ConstructorReturn(Arc::clone(site)),
         );
     }
     for site in receiver_mutation_sites {
         push_field_write_transform(
             &mut out,
             field_write_key(site.callee_seg, site.callee, &site.callee_receiver_param_name),
-            FieldWriteTransform::ReceiverMutation(site.clone()),
+            FieldWriteTransform::ReceiverMutation(Arc::clone(site)),
         );
     }
-    let mut copy_counts: AHashMap<FieldPlaceKey, usize> = AHashMap::default();
     for site in copy_sites {
         let key = field_write_key(site.seg_id, site.func, &site.source_base);
-        let count = copy_counts.entry(key.clone()).or_default();
-        if *count >= MAX_FIELD_COPY_STITCHES_PER_SOURCE_KEY {
-            continue;
-        }
-        *count += 1;
         push_field_write_transform(&mut out, key, FieldWriteTransform::Copy(site.clone()));
     }
     out
+}
+
+fn field_transform_target_key(transform: &FieldWriteTransform) -> Option<FieldPlaceKey> {
+    match transform {
+        FieldWriteTransform::Argument(site) => {
+            Some(field_write_key(site.callee_seg, site.callee, &site.param_name))
+        }
+        FieldWriteTransform::Return(site) => {
+            Some(field_write_key(site.caller_seg, site.caller, &site.target_base))
+        }
+        FieldWriteTransform::ScalarReturn(_) => None,
+        FieldWriteTransform::ConstructorReturn(site) => {
+            Some(field_write_key(site.caller_seg, site.caller, &site.target_base))
+        }
+        FieldWriteTransform::ReceiverMutation(site) => {
+            Some(field_write_key(site.caller_seg, site.caller, &site.target_base))
+        }
+        FieldWriteTransform::Copy(site) => Some(field_write_key(site.seg_id, site.func, &site.target_base)),
+    }
+}
+
+fn build_field_demands(
+    field_index: &FieldPlaceIndex,
+    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+    terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
+) -> FieldDemandIndex {
+    let mut demands = FieldDemandIndex::default();
+    let mut reverse: Vec<Vec<usize>> = Vec::new();
+    for (source_key, source_transforms) in transforms {
+        let source_id = intern_field_demand_key(&mut demands, &mut reverse, source_key.clone());
+        for transform in source_transforms {
+            let Some(target_key) = field_transform_target_key(transform) else {
+                continue;
+            };
+            let target_id = intern_field_demand_key(&mut demands, &mut reverse, target_key);
+            reverse[target_id].push(source_id);
+        }
+    }
+    for sources in &mut reverse {
+        sources.sort_unstable();
+        sources.dedup();
+    }
+
+    let mut roots_by_field: Vec<Vec<usize>> = Vec::new();
+    for (key, hits) in &field_index.by_base {
+        if key.writes {
+            continue;
+        }
+        let write_key = FieldPlaceKey {
+            seg_id: key.seg_id,
+            func: key.func,
+            base: key.base.clone(),
+            writes: true,
+        };
+        for hit in hits {
+            seed_exact_field_demand(
+                &mut demands,
+                &mut reverse,
+                &mut roots_by_field,
+                write_key.clone(),
+                &hit.field,
+            );
+        }
+    }
+    for (source_key, source_transforms) in transforms {
+        for transform in source_transforms {
+            let FieldWriteTransform::ScalarReturn(site) = transform else {
+                continue;
+            };
+            seed_exact_field_demand(
+                &mut demands,
+                &mut reverse,
+                &mut roots_by_field,
+                source_key.clone(),
+                &site.source_field,
+            );
+        }
+    }
+    let mut segment_by_func = AHashMap::default();
+    for key in field_index.by_base.keys().chain(demands.key_ids.keys()) {
+        segment_by_func.entry(key.func).or_insert(key.seg_id);
+    }
+    let mut resolved_call_sites = AHashSet::default();
+    for source_transforms in transforms.values() {
+        for transform in source_transforms {
+            let caller_and_span = match transform {
+                FieldWriteTransform::Argument(site) => Some((site.caller, site.call_span)),
+                FieldWriteTransform::Return(site) => Some((site.caller, site.call_span)),
+                FieldWriteTransform::ScalarReturn(site) => Some((site.caller, site.call_span)),
+                FieldWriteTransform::ConstructorReturn(site) => Some((site.caller, site.call_span)),
+                FieldWriteTransform::ReceiverMutation(site) => Some((site.caller, site.call_span)),
+                FieldWriteTransform::Copy(_) => None,
+            };
+            if let Some(caller_and_span) = caller_and_span {
+                resolved_call_sites.insert(caller_and_span);
+            }
+        }
+    }
+    let mut whole_demand_key_ids = AHashSet::default();
+    // Some grammars represent a zero-argument field/property access as a
+    // call-shaped AST node (`envelope.cmd`, `obj.size`). Treat its receiver
+    // and member spelling as a demanded access path. This is syntax-derived
+    // and only broadens sparse materialization toward the complete IDG.
+    for (func, data) in stitch_data {
+        let Some(seg_id) = segment_by_func.get(func).copied() else {
+            continue;
+        };
+        for site in &data.call_sites {
+            let call_is_resolved = resolved_call_sites.contains(&(*func, site.site.0));
+            let whole_object_is_demanded = terminal_sites
+                .map(|terminals| terminals.contains(&(*func, site.site.0)))
+                .unwrap_or(!call_is_resolved);
+            if whole_object_is_demanded {
+                let argument_count = site.call_arg_places.len().max(site.call_arg_values.len());
+                for index in 0..argument_count {
+                    let place = site
+                        .call_arg_places
+                        .get(index)
+                        .map(String::as_str)
+                        .filter(|place| !place.trim().is_empty())
+                        .or_else(|| site.call_arg_values.get(index).map(String::as_str))
+                        .unwrap_or_default()
+                        .trim();
+                    if place.is_empty() {
+                        continue;
+                    }
+                    let key = field_write_key(seg_id, *func, place);
+                    let key_id = intern_field_demand_key(&mut demands, &mut reverse, key);
+                    whole_demand_key_ids.insert(key_id);
+                }
+                if site.call_kind == CallKind::Method {
+                    if let Some(receiver) = site
+                        .receiver
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|receiver| !receiver.is_empty())
+                    {
+                        let key = field_write_key(seg_id, *func, receiver);
+                        let key_id = intern_field_demand_key(&mut demands, &mut reverse, key);
+                        whole_demand_key_ids.insert(key_id);
+                    }
+                }
+            }
+            if site.explicit_args_count != 0 {
+                continue;
+            }
+            let projection = if let Some(receiver) = site
+                .receiver
+                .as_deref()
+                .map(str::trim)
+                .filter(|receiver| !receiver.is_empty())
+            {
+                let field = site.callee_name.rsplit('.').next().unwrap_or_default().trim();
+                (!field.is_empty()).then(|| (receiver.to_string(), field.to_string()))
+            } else {
+                site.callee_name.rsplit_once('.').and_then(|(base, field)| {
+                    let base = base.trim();
+                    let field = field.trim();
+                    (!base.is_empty() && !field.is_empty()).then(|| (base.to_string(), field.to_string()))
+                })
+            };
+            let Some((base, field)) = projection else {
+                continue;
+            };
+            let key = field_write_key(seg_id, *func, &base);
+            seed_exact_field_demand(&mut demands, &mut reverse, &mut roots_by_field, key, &field);
+        }
+    }
+
+    let mut pending_all = VecDeque::new();
+    for (key, key_id) in &demands.key_ids {
+        if (field_index.has_whole_read(key) || whole_demand_key_ids.contains(key_id))
+            && !demands.all_fields_by_key[*key_id]
+        {
+            demands.all_fields_by_key[*key_id] = true;
+            pending_all.push_back(*key_id);
+        }
+    }
+    while let Some(target_id) = pending_all.pop_front() {
+        for source_id in reverse.get(target_id).into_iter().flatten().copied() {
+            if !demands.all_fields_by_key[source_id] {
+                demands.all_fields_by_key[source_id] = true;
+                pending_all.push_back(source_id);
+            }
+        }
+    }
+
+    // Propagate each interned suffix through the numeric reverse transform
+    // graph. The previous string/hash representation duplicated the suffix
+    // text and a hash-table entry for every candidate edge (tens of millions
+    // on large Java workspaces). Each reached pair is now one `u32` in a
+    // sorted vector, while a generation-mark array provides O(1) dedup.
+    let mut seen_generation = vec![0u32; demands.fields_by_key.len()];
+    let mut pending = VecDeque::new();
+    for (field_index, roots) in roots_by_field.into_iter().enumerate() {
+        let field_id = u32::try_from(field_index).expect("field demand id exceeds u32");
+        let generation = field_id.saturating_add(1);
+        for root in roots {
+            if demands.all_fields_by_key[root] || seen_generation[root] == generation {
+                continue;
+            }
+            seen_generation[root] = generation;
+            pending.push_back(root);
+        }
+        while let Some(target_id) = pending.pop_front() {
+            demands.fields_by_key[target_id].push(field_id);
+            for source_id in reverse.get(target_id).into_iter().flatten().copied() {
+                if demands.all_fields_by_key[source_id] || seen_generation[source_id] == generation {
+                    continue;
+                }
+                seen_generation[source_id] = generation;
+                pending.push_back(source_id);
+            }
+        }
+    }
+    demands
+}
+
+fn intern_field_demand_key(
+    demands: &mut FieldDemandIndex,
+    reverse: &mut Vec<Vec<usize>>,
+    key: FieldPlaceKey,
+) -> usize {
+    if let Some(id) = demands.key_ids.get(&key).copied() {
+        return id;
+    }
+    let id = demands.fields_by_key.len();
+    demands.key_ids.insert(key, id);
+    demands.fields_by_key.push(Vec::new());
+    demands.all_fields_by_key.push(false);
+    reverse.push(Vec::new());
+    id
+}
+
+fn seed_exact_field_demand(
+    demands: &mut FieldDemandIndex,
+    reverse: &mut Vec<Vec<usize>>,
+    roots_by_field: &mut Vec<Vec<usize>>,
+    key: FieldPlaceKey,
+    field: &str,
+) {
+    let key_id = intern_field_demand_key(demands, reverse, key);
+    let field_id = if let Some(id) = demands.field_ids.get(field).copied() {
+        id
+    } else {
+        let id = u32::try_from(demands.field_ids.len()).expect("field demand id exceeds u32");
+        demands.field_ids.insert(field.to_string(), id);
+        roots_by_field.push(Vec::new());
+        id
+    };
+    roots_by_field[field_id as usize].push(key_id);
 }
 
 fn push_field_write_transform(
@@ -2711,16 +3248,25 @@ fn field_write_key(seg_id: SegmentId, func: FuncId, base: &str) -> FieldPlaceKey
 fn seed_field_write_worklist(
     field_index: &FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    demands: Option<&FieldDemandIndex>,
+    demand_driven: bool,
+    demand_driven_funcs: Option<&AHashSet<FuncId>>,
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
     let mut keys: Vec<FieldPlaceKey> = transforms.keys().cloned().collect();
     sort_field_keys(&mut keys);
     for key in keys {
-        let mut hits = field_index.by_base.get(&key).cloned().unwrap_or_default();
-        sort_field_hits(&mut hits);
+        let Some(hits) = field_index.by_base.get(&key) else {
+            continue;
+        };
         for hit in hits {
-            enqueue_field_write(key.clone(), hit, pending, enqueued);
+            if field_demand_applies(demand_driven, demand_driven_funcs, key.func)
+                && demands.is_some_and(|demands| !demands.contains(&key, &hit.field))
+            {
+                continue;
+            }
+            enqueue_field_write(&key, hit, pending, enqueued);
         }
     }
 }
@@ -2737,14 +3283,18 @@ fn sort_field_keys(keys: &mut [FieldPlaceKey]) {
 }
 
 fn enqueue_field_write(
-    key: FieldPlaceKey,
-    hit: FieldPlaceHit,
+    key: &FieldPlaceKey,
+    hit: &FieldPlaceHit,
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
-    let pending_write = PendingFieldWrite { key, hit };
-    if enqueued.insert(pending_write.clone()) {
-        pending.push_back(pending_write);
+    let write = PendingFieldWrite {
+        seg_id: key.seg_id,
+        func: key.func,
+        node: hit.node,
+    };
+    if enqueued.insert(write) {
+        pending.push_back(write);
     }
 }
 
@@ -2756,20 +3306,23 @@ fn enqueue_recorded_field_writes(
 ) {
     for (key, hit) in writes {
         if transforms.contains_key(&key) {
-            enqueue_field_write(key, hit, pending, enqueued);
+            enqueue_field_write(&key, &hit, pending, enqueued);
         }
     }
 }
 
-fn dedup_receiver_mutation_sites(sites: &mut Vec<ReceiverMutationStitch>) {
+fn dedup_receiver_mutation_sites(sites: &mut Vec<Arc<ReceiverMutationStitch>>) {
     let mut seen = AHashSet::default();
-    sites.retain(|site| seen.insert(site.clone()));
+    sites.retain(|site| seen.insert(Arc::clone(site)));
 }
 
 #[allow(clippy::too_many_arguments)] // Worklist state is explicit to keep the field propagation side effects auditable.
 fn apply_field_write_transform(
     transform: &FieldWriteTransform,
-    write: &PendingFieldWrite,
+    source: &FieldPlaceHit,
+    demands: Option<&FieldDemandIndex>,
+    demand_driven: bool,
+    demand_driven_funcs: Option<&AHashSet<FuncId>>,
     inter_call_arg_entries: &mut InterCallArgEntryIndex,
     synthetic_field_writes: &mut SyntheticFieldWriteCache,
     ws: &mut IdgWorkspace,
@@ -2778,12 +3331,30 @@ fn apply_field_write_transform(
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
+    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
 ) {
+    if let (Some(demands), Some(target_key)) = (demands, field_transform_target_key(transform)) {
+        if field_demand_applies(demand_driven, demand_driven_funcs, target_key.func) {
+            let aggregate_demand = demands.contains_all(&target_key);
+            let exact_demand = demands.contains_exact(&target_key, &source.field);
+            if aggregate_demand {
+                if let FieldWriteTransform::Argument(site) = transform {
+                    apply_field_argument_aggregate(site, source, inter_call_arg_entries, ws, known_edges);
+                    if !exact_demand {
+                        return;
+                    }
+                }
+            }
+            if !aggregate_demand && !exact_demand {
+                return;
+            }
+        }
+    }
     match transform {
         FieldWriteTransform::Argument(site) => {
             apply_field_argument_write(
                 site,
-                &write.hit,
+                source,
                 inter_call_arg_entries,
                 synthetic_field_writes,
                 ws,
@@ -2797,7 +3368,7 @@ fn apply_field_write_transform(
         FieldWriteTransform::Return(site) => {
             apply_return_field_write(
                 site,
-                &write.hit,
+                source,
                 inter_call_arg_entries,
                 synthetic_field_writes,
                 ws,
@@ -2809,12 +3380,12 @@ fn apply_field_write_transform(
             );
         }
         FieldWriteTransform::ScalarReturn(site) => {
-            apply_scalar_return_field_write(site, &write.hit, ws, known_edges);
+            apply_scalar_return_field_write(site, source, ws, known_edges);
         }
         FieldWriteTransform::ConstructorReturn(site) => {
             apply_constructor_return_field_write(
                 site,
-                &write.hit,
+                source,
                 inter_call_arg_entries,
                 synthetic_field_writes,
                 ws,
@@ -2828,7 +3399,7 @@ fn apply_field_write_transform(
         FieldWriteTransform::ReceiverMutation(site) => {
             apply_receiver_mutation_field_write(
                 site,
-                &write.hit,
+                source,
                 inter_call_arg_entries,
                 synthetic_field_writes,
                 ws,
@@ -2842,7 +3413,7 @@ fn apply_field_write_transform(
         FieldWriteTransform::Copy(site) => {
             apply_intra_field_copy_write(
                 site,
-                &write.hit,
+                source,
                 inter_call_arg_entries,
                 synthetic_field_writes,
                 ws,
@@ -2851,9 +3422,58 @@ fn apply_field_write_transform(
                 transforms,
                 pending,
                 enqueued,
+                stitch_data.get(&site.func).map(|data| &data.flow_control),
             );
         }
     }
+}
+
+fn apply_field_argument_aggregate(
+    site: &FieldArgStitch,
+    source: &FieldPlaceHit,
+    inter_call_arg_entries: &InterCallArgEntryIndex,
+    ws: &mut IdgWorkspace,
+    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
+) {
+    if (!site.allow_out_of_order_source
+        && !source_write_can_reach_call(
+            source,
+            site.call_span,
+            inter_call_arg_entries,
+            site.caller_seg,
+            site.caller,
+        ))
+        || !is_forwardable_field(&source.field)
+    {
+        return;
+    }
+    let Some(actual_arg_node) = site.actual_arg_node else {
+        return;
+    };
+    let _ = place_inter_edge_if_absent(
+        site.caller_seg,
+        site.caller_seg,
+        IdgEdge {
+            from: source.node,
+            to: actual_arg_node,
+            meta: crate::edge::EdgeMeta {
+                precision: site.precision,
+                kind: crate::edge::IdgEdgeKind::IntraRead,
+                call_kind: site.call_kind,
+                via_span: site.call_span,
+            },
+        },
+        ws,
+        known_edges,
+    );
+}
+
+fn field_demand_applies(
+    demand_driven: bool,
+    demand_driven_funcs: Option<&AHashSet<FuncId>>,
+    func: FuncId,
+) -> bool {
+    demand_driven && demand_driven_funcs.is_none_or(|funcs| funcs.contains(&func))
 }
 
 #[allow(clippy::too_many_arguments)] // Call-site field forwarding carries source, destination, and worklist state.
@@ -2922,21 +3542,23 @@ fn apply_field_argument_write(
     ) {
         inter_call_arg_entries.insert(site.callee_seg, site.callee, param_field_write);
     }
-    if is_new_field_write {
-        connect_field_write_to_reads(
-            site.callee_seg,
-            site.callee,
-            &site.param_name,
-            &source.field,
-            param_field_write,
-            site.call_span,
-            site.precision,
-            site.call_kind,
-            ws,
-            known_edges,
-            field_index,
-        );
-    }
+    // A synthetic node can be interned first through a different prefix view
+    // of the same storage place. Its exact inbound edge is new even when the
+    // node is not, so always ensure its AST read consumers are connected.
+    // `known_edges` keeps this idempotent.
+    connect_field_write_to_reads(
+        site.callee_seg,
+        site.callee,
+        &site.param_name,
+        &source.field,
+        param_field_write,
+        site.call_span,
+        site.precision,
+        site.call_kind,
+        ws,
+        known_edges,
+        field_index,
+    );
     enqueue_recorded_field_writes(recorded, transforms, pending, enqueued);
 }
 
@@ -3096,7 +3718,26 @@ fn apply_intra_field_copy_write(
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
+    flow_control: Option<&FlowControlFacts>,
 ) {
+    // Reaching definitions normally follow source order. A lexically later
+    // syntax write may feed an earlier copy only when the adapter's structured
+    // FlowEvent tree proves a CFG back-edge. A descendant self-alias such as
+    // `a.child = identity(a)` is the other semantic cycle: the statement
+    // creates a recursive object after the call returns. Its synthetic writes
+    // may feed the same copy, but only through suffixes in the immutable
+    // AST-derived field universe, so convergence is finite without a cap.
+    // Inter-call writes are exempt because their spans are caller anchors, not
+    // ordering points in this function.
+    if !source_can_reach_field_copy(
+        source,
+        site,
+        synthetic_field_writes,
+        inter_call_arg_entries,
+        flow_control,
+    ) {
+        return;
+    }
     apply_outbound_field_write(
         site.seg_id,
         site.seg_id,
@@ -3118,6 +3759,35 @@ fn apply_intra_field_copy_write(
         crate::edge::IdgEdgeKind::IntraAssign,
         true,
     );
+}
+
+fn source_can_reach_field_copy(
+    source: &FieldPlaceHit,
+    site: &FieldCopySite,
+    synthetic_field_writes: &SyntheticFieldWriteCache,
+    inter_call_arg_entries: &InterCallArgEntryIndex,
+    flow_control: Option<&FlowControlFacts>,
+) -> bool {
+    if inter_call_arg_entries.contains(site.seg_id, site.func, source.node) {
+        return true;
+    }
+    let Some(write_span) = source.span else {
+        return true;
+    };
+    if write_span.file != site.via_span.file {
+        return false;
+    }
+    if write_span.start < site.via_span.start {
+        return true;
+    }
+    if synthetic_field_writes.is_generated(site.seg_id, site.func, source.node) {
+        let source_parts = storage_segments_cached(&site.source_base);
+        let target_parts = storage_segments_cached(&site.target_base);
+        return write_span == site.write_span
+            && target_parts.len() > source_parts.len()
+            && target_parts.starts_with(source_parts.as_ref());
+    }
+    flow_control.is_some_and(|facts| facts.spans_share_loop_back_edge(write_span, site.via_span))
 }
 
 #[allow(clippy::too_many_arguments)] // Shared helper keeps edge construction identical across propagation kinds.
@@ -3189,21 +3859,19 @@ fn apply_outbound_field_write(
             inter_call_arg_entries.insert(to_seg, to_func, target_field_write);
         }
     }
-    if is_new_field_write {
-        connect_field_write_to_reads(
-            to_seg,
-            to_func,
-            target_base,
-            &source.field,
-            target_field_write,
-            target_field_span,
-            precision,
-            call_kind,
-            ws,
-            known_edges,
-            field_index,
-        );
-    }
+    connect_field_write_to_reads(
+        to_seg,
+        to_func,
+        target_base,
+        &source.field,
+        target_field_write,
+        target_field_span,
+        precision,
+        call_kind,
+        ws,
+        known_edges,
+        field_index,
+    );
     enqueue_recorded_field_writes(recorded, transforms, pending, enqueued);
 }
 
@@ -3223,7 +3891,7 @@ fn source_write_can_reach_call(
 }
 
 fn stitch_field_argument_fallbacks(
-    sites: &[FieldArgStitch],
+    sites: &[Arc<FieldArgStitch>],
     ws: &mut IdgWorkspace,
     known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
     field_index: &FieldPlaceIndex,
@@ -3246,6 +3914,9 @@ fn stitch_field_argument_fallbacks(
             if !is_forwardable_field(&field) {
                 continue;
             }
+            // The source must be the matching projected Place. Linking the
+            // whole CallArg value here would collapse an object into every
+            // field demanded by the callee and taint unrelated siblings.
             let Some(actual_field_read) =
                 ensure_field_read_node(ws, site.caller_seg, site.caller, &site.actual_arg, &field)
             else {
@@ -3286,6 +3957,7 @@ fn stitch_field_copy_fallbacks(
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
+    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
 ) -> usize {
     let mut added = 0usize;
     for site in sites {
@@ -3327,6 +3999,7 @@ fn stitch_field_copy_fallbacks(
                 transforms,
                 pending,
                 enqueued,
+                stitch_data.get(&site.func).map(|data| &data.flow_control),
             );
             added = added.saturating_add(known_edges.len().saturating_sub(before));
         }
@@ -3364,9 +4037,6 @@ fn call_ret_assignment_targets(
             continue;
         }
         let result_field = tuple_result_storage_field(&target_base).map(str::to_string);
-        if target_base.contains('.') && result_field.is_none() {
-            continue;
-        }
         out.push((target_base, write_span, result_field));
     }
     out.sort_by(|a, b| {
@@ -3385,22 +4055,24 @@ fn tuple_result_storage_field(storage: &str) -> Option<&str> {
 
 fn is_forwardable_field(field: &str) -> bool {
     let parts = storage_segments_cached(field);
-    !parts.is_empty() && parts.len() <= 2
+    !parts.is_empty()
 }
 
 fn field_forwarding_base_allowed(base: &str) -> bool {
     let parts = storage_segments_cached(base);
     !parts.is_empty()
-        && parts.len() <= 3
         && parts.iter().all(|part| {
             !part.is_empty()
                 && part
                     .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '@'))
+                    .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '@'))
         })
 }
 
-fn collect_field_copy_sites(ws: &IdgWorkspace) -> Vec<FieldCopySite> {
+fn collect_field_copy_sites(
+    ws: &IdgWorkspace,
+    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+) -> Vec<FieldCopySite> {
     let mut out = Vec::new();
     for (seg_id, segment) in ws.segments() {
         for edge in &segment.edges {
@@ -3434,7 +4106,13 @@ fn collect_field_copy_sites(ws: &IdgWorkspace) -> Vec<FieldCopySite> {
             if source_base.is_empty()
                 || target_base.is_empty()
                 || source_base == target_base
-                || !is_container_copy_target(&target_base)
+                || !is_container_copy_target(
+                    &target_base,
+                    stitch_data
+                        .get(&from_node.func)
+                        .map(|data| data.receiver_names.as_slice())
+                        .unwrap_or_default(),
+                )
             {
                 continue;
             }
@@ -3477,15 +4155,15 @@ fn collect_field_copy_sites(ws: &IdgWorkspace) -> Vec<FieldCopySite> {
     out
 }
 
-fn is_container_copy_target(target: &str) -> bool {
+fn is_container_copy_target(target: &str, receiver_names: &[String]) -> bool {
     let parts = storage_segments_cached(target);
     match parts.as_ref() {
         [_bare] => true,
-        [receiver, _field] => is_implicit_receiver_name(receiver),
+        [receiver, _field] => receiver_name_matches(receiver, receiver_names),
         [base, ..] => base
             .chars()
             .next()
-            .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_ascii_lowercase()),
+            .is_some_and(|ch| ch == '_' || ch == '$' || ch.is_lowercase()),
         _ => false,
     }
 }
@@ -3504,10 +4182,6 @@ fn storage_segments_cached(text: &str) -> Arc<[String]> {
     }
     write.entry(text.to_string()).or_insert_with(|| parts.clone());
     parts
-}
-
-fn is_implicit_receiver_name(name: &str) -> bool {
-    matches!(name.trim(), "self" | "this" | "$this" | "Self" | "receiver")
 }
 
 fn is_unprojected_storage_place(segment: &crate::segment::IdgSegment, place: &Place) -> bool {
@@ -3545,6 +4219,9 @@ fn connect_field_write_to_reads(
         return false;
     };
     let mut changed = false;
+    // Every exact read is indexed under all of its prefix/suffix views. The
+    // split used to create this canonical writer is therefore sufficient to
+    // find every same-or-descendant read without an O(path_depth^2) scan.
     for reader in readers {
         if !field_matches_or_descends(&reader.field, field) || reader.node == writer {
             continue;
@@ -3726,6 +4403,11 @@ impl FieldPlaceIndex {
                     }
                     _ => continue,
                 };
+                if !writes {
+                    index
+                        .read_storages
+                        .insert((seg_id, node.func, normalize_storage_base(&full_name)));
+                }
                 let _ = index.record_full_storage_place(
                     seg_id,
                     node.func,
@@ -3738,6 +4420,24 @@ impl FieldPlaceIndex {
         }
         index.sort_and_dedup();
         index
+    }
+
+    fn has_whole_read(&self, write_key: &FieldPlaceKey) -> bool {
+        self.read_storages
+            .contains(&(write_key.seg_id, write_key.func, write_key.base.clone()))
+    }
+
+    fn syntactic_field_universe(&self) -> SyntacticFieldUniverse {
+        // This snapshot is intentionally taken before synthetic writes are
+        // recorded. Reads and writes emitted by every language adapter use the
+        // same Place representation, so numeric map/tuple keys and arbitrarily
+        // deep exact paths participate without language-specific constants.
+        let suffixes = self
+            .by_base
+            .values()
+            .flat_map(|hits| hits.iter().map(|hit| hit.field.clone()))
+            .collect();
+        SyntacticFieldUniverse { suffixes }
     }
 
     fn field_writes_for_base_before_call(
@@ -3837,12 +4537,12 @@ impl FieldPlaceIndex {
         if parts.len() < 2 {
             return Vec::new();
         }
+        if !self.recorded_nodes.insert((seg_id, func, node)) {
+            return Vec::new();
+        }
         let mut added = Vec::new();
         for split in 1..parts.len() {
             let field_parts = &parts[split..];
-            if field_parts.len() > 2 {
-                continue;
-            }
             let base = join_storage_part_refs(&parts[..split]);
             let field = join_storage_part_refs(field_parts);
             if base.is_empty() || field.is_empty() {
@@ -3879,11 +4579,11 @@ impl FieldPlaceIndex {
         if parts.len() < 2 {
             return added;
         }
+        if !self.recorded_nodes.insert((seg_id, func, node)) {
+            return added;
+        }
         for split in 1..parts.len() {
             let field_parts = &parts[split..];
-            if field_parts.len() > 2 {
-                continue;
-            }
             let base = join_storage_part_refs(&parts[..split]);
             let field = join_storage_part_refs(field_parts);
             if base.is_empty() || field.is_empty() {
@@ -3912,14 +4612,6 @@ impl FieldPlaceIndex {
             writes,
         };
         let hit = FieldPlaceHit { field, node, span };
-        if !self
-            .seen_by_base
-            .entry(key.clone())
-            .or_default()
-            .insert(hit.clone())
-        {
-            return Vec::new();
-        }
         self.by_base.entry(key.clone()).or_default().push(hit.clone());
         vec![(key, hit)]
     }
@@ -4038,6 +4730,10 @@ impl InterCallArgEntryIndex {
 }
 
 impl SyntheticFieldWriteCache {
+    fn is_generated(&self, seg_id: SegmentId, func: FuncId, node: NodeId) -> bool {
+        self.generated_nodes.contains(&(seg_id, func, node))
+    }
+
     fn ensure(
         &mut self,
         ws: &mut IdgWorkspace,
@@ -4047,26 +4743,13 @@ impl SyntheticFieldWriteCache {
         field: &str,
         fallback_span: Span,
     ) -> Option<(NodeId, Span, bool)> {
-        let key = SyntheticFieldWriteKey {
-            seg_id,
-            func,
-            base: normalize_storage_base_cached(base),
-            field: normalize_storage_base_cached(field),
-        };
-        if let Some(node) = self.nodes.get(&key) {
-            let (node, span) = *node;
-            return Some((node, span, false));
-        }
-        let node = ensure_field_write_node(
-            ws,
-            seg_id,
-            func,
-            key.base.as_ref(),
-            key.field.as_ref(),
-            fallback_span,
-        )?;
-        self.nodes.insert(key, (node, fallback_span));
-        Some((node, fallback_span, true))
+        // The segment's compiler dictionaries already intern the complete
+        // `Place::Write { path, span }` and `(func, place)` node identity.
+        // Reusing that identity avoids a second string-heavy cache while still
+        // canonicalising alternate `(base, field)` splits of the same place.
+        let node = ensure_field_write_node(ws, seg_id, func, base, field, fallback_span)?;
+        let is_new = self.generated_nodes.insert((seg_id, func, node));
+        Some((node, fallback_span, is_new))
     }
 }
 

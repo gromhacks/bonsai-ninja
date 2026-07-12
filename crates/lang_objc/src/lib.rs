@@ -130,6 +130,12 @@ impl LanguageAdapter for ObjCAdapter {
         // visibility at the kit default and let the resolver's name +
         // receiver-type narrowing do the work instead.
         mark_objc_initializer_methods(&mut decl_index);
+        let constructor_selectors = decl_index
+            .defs
+            .iter()
+            .filter(|decl| decl.kind == DeclKind::Constructor)
+            .map(|decl| decl.name.clone())
+            .collect::<std::collections::HashSet<_>>();
         // Per-decl `type_aliases` from typed parameters
         // (`(NSString *)name`, `(HTTPRequest *)req`). Objective-C
         // method signatures and C-style function parameters both
@@ -249,7 +255,7 @@ impl LanguageAdapter for ObjCAdapter {
             // receiver-type dispatch recognises the alloc-init
             // pattern without re-implementing the ObjC message-
             // syntax shape.
-            tag_objc_alloc_receiver_types(&mut decl.flow_events);
+            tag_objc_alloc_receiver_types(&mut decl.flow_events, &constructor_selectors);
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
         // Repair catch-param bindings: the kit's generic extractor
@@ -310,18 +316,19 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 /// reads the pre-populated `receiver_types` directly instead of
 /// reparsing the ObjC `[receiver selector]` syntax at every call
 /// resolution.
-fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
+fn tag_objc_alloc_receiver_types(
+    events: &mut [bonsai_lang_api::FlowEvent],
+    constructor_selectors: &std::collections::HashSet<String>,
+) {
     for event in events {
         match event {
             FlowEvent::Call {
                 name,
                 receiver,
                 receiver_types,
+                call_kind,
                 ..
             } => {
-                if !receiver_types.is_empty() {
-                    continue;
-                }
                 // Adapter-emitted `receiver` field takes precedence;
                 // when absent (tree-sitter-objc doesn't use field
                 // names on message expressions, so the kit walker
@@ -332,7 +339,17 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
                     .and_then(objc_alloc_class_name)
                     .or_else(|| objc_alloc_class_name_from_call_name(name));
                 if let Some(class_name) = class_name {
-                    receiver_types.push(class_name);
+                    if !receiver_types.iter().any(|existing| existing == &class_name) {
+                        receiver_types.push(class_name);
+                    }
+                    // The nested allocation receiver plus a selector that
+                    // resolved to an adapter-declared constructor proves this
+                    // is construction syntax. Use those AST/declaration facts
+                    // instead of teaching the IDG selector spellings.
+                    let selector = name.rsplit('.').next().unwrap_or(name).trim();
+                    if constructor_selectors.contains(selector) {
+                        *call_kind = bonsai_lang_api::CallKind::Constructor;
+                    }
                 }
             }
             FlowEvent::Branch {
@@ -340,11 +357,11 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
                 else_events,
                 ..
             } => {
-                tag_objc_alloc_receiver_types(then_events);
-                tag_objc_alloc_receiver_types(else_events);
+                tag_objc_alloc_receiver_types(then_events, constructor_selectors);
+                tag_objc_alloc_receiver_types(else_events, constructor_selectors);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                tag_objc_alloc_receiver_types(body);
+                tag_objc_alloc_receiver_types(body, constructor_selectors);
             }
             FlowEvent::Try {
                 body,
@@ -352,9 +369,9 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
                 finally_events,
                 ..
             } => {
-                tag_objc_alloc_receiver_types(body);
-                tag_objc_alloc_receiver_types(catch_events);
-                tag_objc_alloc_receiver_types(finally_events);
+                tag_objc_alloc_receiver_types(body, constructor_selectors);
+                tag_objc_alloc_receiver_types(catch_events, constructor_selectors);
+                tag_objc_alloc_receiver_types(finally_events, constructor_selectors);
             }
             _ => {}
         }

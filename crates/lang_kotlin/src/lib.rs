@@ -221,6 +221,7 @@ impl LanguageAdapter for KotlinAdapter {
         ];
         for decl in &mut idx.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
+            synthesize_kotlin_data_copy_fields(&mut decl.flow_events, &decl.type_aliases);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, KOTLIN_LIFECYCLE_TRANSITIONS);
         }
         qualify_kotlin_implicit_member_reads(&mut idx);
@@ -240,6 +241,103 @@ impl LanguageAdapter for KotlinAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Lower Kotlin data-class `copy(field = value, ...)` results into exact
+/// field writes on the enclosing assignment target. `copy` is a
+/// compiler-generated data-class operation; receiver type evidence and named
+/// arguments come from tree-sitter facts, and the IDG remains API agnostic.
+fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases: &[TypeAliasBinding]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                synthesize_kotlin_data_copy_fields(then_events, type_aliases);
+                synthesize_kotlin_data_copy_fields(else_events, type_aliases);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                synthesize_kotlin_data_copy_fields(body, type_aliases)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                synthesize_kotlin_data_copy_fields(body, type_aliases);
+                synthesize_kotlin_data_copy_fields(catch_events, type_aliases);
+                synthesize_kotlin_data_copy_fields(finally_events, type_aliases);
+            }
+            _ => {}
+        }
+    }
+
+    let mut additions = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let FlowEvent::Assign { span, target, .. } = event else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        for candidate in events.iter() {
+            let FlowEvent::Call {
+                span: call_span,
+                name,
+                receiver: Some(receiver),
+                receiver_types,
+                args,
+                ..
+            } = candidate
+            else {
+                continue;
+            };
+            let receiver_root = receiver.split('.').next().unwrap_or(receiver).trim();
+            let receiver_is_typed = !receiver_types.is_empty()
+                || type_aliases
+                    .iter()
+                    .any(|alias| alias.name == receiver_root && !alias.type_name.is_empty());
+            if !receiver_is_typed
+                || kotlin_call_tail(name) != "copy"
+                || call_span.file != span.file
+                || call_span.start < span.start
+                || span.end < call_span.end
+            {
+                continue;
+            }
+            for arg in args {
+                let Some(name) = arg.name.as_ref().filter(|name| !name.is_empty()) else {
+                    continue;
+                };
+                let value = arg.place.as_ref().map_or_else(
+                    || bonsai_lang_api::ExpressionFlow::from_source_names(arg.source_names.clone()),
+                    bonsai_lang_api::ExpressionFlow::from_place,
+                );
+                fields.push(bonsai_lang_api::ExpressionField {
+                    name: name.clone(),
+                    value,
+                });
+            }
+        }
+        if !fields.is_empty() {
+            additions.push((
+                index + 1,
+                FlowEvent::AggregateAssign {
+                    span: *span,
+                    target: target.clone(),
+                    type_name: None,
+                    value_flow: bonsai_lang_api::ExpressionFlow {
+                        aggregate_fields: fields,
+                        ..Default::default()
+                    },
+                },
+            ));
+        }
+    }
+    for (index, event) in additions.into_iter().rev() {
+        events.insert(index, event);
     }
 }
 
@@ -860,27 +958,32 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
         };
         if let Some(primary) = first_named_child_of_kind(&class_node, "primary_constructor") {
             let body = first_named_child_of_kind(&class_node, "class_body");
-            let flow_events = body
-                .map(|body| walk_flow_events(body, file, src, &HANDLER, &class_names))
-                .unwrap_or_default();
+            let mut flow_events =
+                kotlin_primary_constructor_delegation_events(class_node, file, src, &class_names);
+            flow_events.extend(
+                body.map(|body| walk_flow_events(body, file, src, &HANDLER, &class_names))
+                    .unwrap_or_default(),
+            );
             let params = constructor_param_names(primary, src);
             let receiver_field_writes = kotlin_primary_constructor_field_writes(primary, file, src, &params);
-            if !flow_events.is_empty() || !receiver_field_writes.is_empty() {
-                idx.defs.push(kotlin_constructor_decl(
-                    bonsai_common::SymbolId::new(next),
-                    *class_symbol,
-                    class_name,
-                    KotlinConstructorSpans {
-                        name: *class_name_span,
-                        decl: class_span,
-                        body: body.map_or_else(|| span_of(file, &primary), |body| span_of(file, &body)),
-                    },
-                    params,
-                    flow_events,
-                    receiver_field_writes,
-                ));
-                next = next.saturating_add(1);
-            }
+            // A primary constructor exists semantically even when it has no
+            // property parameters or body initializers. Keep the declaration
+            // so constructor calls resolve through the class hierarchy; the
+            // delegation events above model the AST-proven base invocation.
+            idx.defs.push(kotlin_constructor_decl(
+                bonsai_common::SymbolId::new(next),
+                *class_symbol,
+                class_name,
+                KotlinConstructorSpans {
+                    name: *class_name_span,
+                    decl: class_span,
+                    body: body.map_or_else(|| span_of(file, &primary), |body| span_of(file, &body)),
+                },
+                params,
+                flow_events,
+                receiver_field_writes,
+            ));
+            next = next.saturating_add(1);
         }
         for secondary in collect_descendant_kinds(class_node, &["secondary_constructor"]) {
             let body = first_named_child_of_kind(&secondary, "statements").unwrap_or(secondary);
@@ -904,6 +1007,42 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
             next = next.saturating_add(1);
         }
     }
+}
+
+/// Lower direct superclass constructor invocations from the class header into
+/// the synthetic primary constructor. Tree-sitter exposes these as
+/// `delegation_specifier > constructor_invocation`; walking only direct class
+/// children prevents nested class/method calls from leaking into the parent
+/// constructor.
+fn kotlin_primary_constructor_delegation_events(
+    class_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    class_names: &[String],
+) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    let mut cursor = class_node.walk();
+    for child in class_node.named_children(&mut cursor) {
+        if child.kind() != "delegation_specifier"
+            || first_named_child_of_kind(&child, "constructor_invocation").is_none()
+        {
+            continue;
+        }
+        let mut events = walk_flow_events(child, file, src, &HANDLER, class_names);
+        for event in &mut events {
+            if let FlowEvent::Call { call_kind, .. } = event {
+                // A superclass delegation call constructs the ancestor part
+                // of the current instance; it is not a fresh allocation.
+                // Preserve constructor kind; the resolver proves that the
+                // target is an ancestor of the synthetic constructor owner,
+                // which lets the IDG stitch outbound state to the adapter's
+                // canonical receiver without a source-language token here.
+                *call_kind = CallKind::Constructor;
+            }
+        }
+        out.extend(events);
+    }
+    out
 }
 
 fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
@@ -972,10 +1111,12 @@ fn synthesize_kotlin_property_getter_decls(idx: &mut DeclIndex, file: FileId, tr
             .any(|event| matches!(event, FlowEvent::Return { .. }))
         {
             if let Some(expr) = kotlin_getter_expression_text(body, src) {
+                let expression_node = body.named_child(0).unwrap_or(body);
                 flow_events.push(FlowEvent::Return {
                     span: body_span,
                     value_text: Some(expr.clone()),
                     value_name: kotlin_bare_identifier(&expr),
+                    value_flow: bonsai_lang_api::kit::expression_flow_from_node(expression_node, file, src),
                 });
             }
         }

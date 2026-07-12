@@ -2,17 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Sentinel for mature adapters whose language has no super-receiver
-/// token. The string is intentionally not a valid identifier tail in
-/// any supported grammar; it lets adapters distinguish "no token" from
-/// the legacy empty-slice fallback.
-pub const NO_SUPER_RECEIVER_TOKENS: &[&str] = &["<no-super-receiver>"];
-
-/// Sentinel for mature adapters whose language has no constructor
-/// method name. Class-named constructors and constructor-specific
-/// grammar nodes are still handled separately; this only disables the
-/// legacy cross-language method-name fallback.
-pub const NO_CONSTRUCTOR_METHOD_NAMES: &[&str] = &["<no-constructor-method>"];
+/// Empty constructor-name vocabulary for languages whose constructors are
+/// represented exclusively by constructor grammar nodes or class identity.
+///
+/// This is an empty slice, not a sentinel spelling: downstream resolution
+/// must never infer language semantics from an invented identifier.
+pub const NO_CONSTRUCTOR_METHOD_NAMES: &[&str] = &[];
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +39,11 @@ pub struct LanguageCapabilities {
     /// method-call receivers. This lets downstream resolution use
     /// semantic class/type identity instead of receiver-name lists.
     pub receiver_types: CapabilityLevel,
+    /// Every source-level field/property projection is lowered to a concrete
+    /// `Place` fact. Sink-oriented IDG builds may use those facts as complete
+    /// sparse field-demand roots; adapters that leave call-shaped or pattern
+    /// projections implicit must keep this false.
+    pub field_places_complete: bool,
     /// Receiver names that the language treats as aliases for an
     /// export. Used by the call graph to expand an alias-tail to the
     /// set of fully-qualified callee shapes when resolving cross-file
@@ -52,65 +52,53 @@ pub struct LanguageCapabilities {
     /// Empty by default; an adapter that wants to participate in
     /// cross-module export resolution declares the full set.
     pub module_export_aliases: &'static [&'static str],
-    /// Method names this language uses for constructors (e.g.
-    /// Python's `__init__`, Rust's `new`, Java/C++/C# class-named
-    /// constructors). When empty, callers fall back to the
-    /// cross-language `bonsai_common::CONSTRUCTOR_METHOD_NAMES`
-    /// allowlist for backwards-compatibility — adapters should
-    /// override with the narrowest correct set so cross-language
-    /// fallbacks aren't relied on once the adapter is mature.
+    /// Method names this language's grammar uses for constructors when the
+    /// adapter cannot express the construct as [`DeclKind::Constructor`].
+    /// Empty means there is no method-name form. There is deliberately no
+    /// cross-language fallback.
     pub constructor_method_names: &'static [&'static str],
-    /// Receiver tokens that resolve to "the supertype's method"
-    /// (e.g. JS `super`, PHP `parent`, Python `super()` is a call
-    /// not a token). Empty defaults fall through to the cross-
-    /// language `bonsai_common::SUPER_RECEIVER_TOKENS` for legacy
-    /// adapters. Mature adapters whose language has no such token
-    /// should set [`NO_SUPER_RECEIVER_TOKENS`].
+    /// A bare call expression may denote construction when semantic name
+    /// resolution proves that its callee is a class (for example Python's
+    /// `Widget(...)`). The call graph still requires exact scoped class
+    /// identity; this capability only describes the grammar ambiguity and
+    /// never enables capitalization-based inference.
+    pub bare_call_constructor_syntax: bool,
+    /// Receiver spellings that the adapter's syntax lowering resolves to
+    /// "the supertype's method" (e.g. JS `super`, PHP `parent`, or the
+    /// normalized Python call receiver `super()`). Empty means the language
+    /// has no such syntax; there is deliberately no cross-language fallback.
     pub super_receiver_tokens: &'static [&'static str],
     /// Receiver tokens that bind to the enclosing instance/class
-    /// (e.g. `self`, `this`, `me`). Empty defaults fall through to
-    /// the cross-language `bonsai_common::IMPLICIT_RECEIVER_TOKENS`.
+    /// (e.g. Ruby `self`, Java `this`). Empty means the grammar has no
+    /// implicit receiver token. Explicit receiver parameters such as
+    /// Python's first method parameter, Go's receiver declaration, and Rust's
+    /// `self_parameter` are represented by `Decl::receiver_param_index`, not
+    /// by this inventory.
     pub implicit_receiver_tokens: &'static [&'static str],
 }
 
 impl LanguageCapabilities {
     /// Useful baseline: no claims at all. Adapters can override individual
     /// fields by constructing from this and mutating.
-    /// Effective constructor method names: the adapter's slice when
-    /// non-empty, otherwise the cross-language fallback in
-    /// `bonsai_common::CONSTRUCTOR_METHOD_NAMES`. Adapters should
-    /// override `constructor_method_names` with the narrowest
-    /// correct set so the fallback only fires for not-yet-migrated
-    /// adapters. Mature adapters whose language has no constructor
-    /// method name should set [`NO_CONSTRUCTOR_METHOD_NAMES`].
+    /// Adapter-owned constructor method spellings. The `effective_` name is
+    /// retained for API compatibility; empty means no method-name form.
     #[must_use]
     pub fn effective_constructor_method_names(&self) -> &'static [&'static str] {
-        if self.constructor_method_names.is_empty() {
-            bonsai_common::CONSTRUCTOR_METHOD_NAMES
-        } else {
-            self.constructor_method_names
-        }
+        self.constructor_method_names
     }
 
-    /// Effective super-receiver tokens with the same fall-through
-    /// shape as `effective_constructor_method_names`.
+    /// Adapter-owned super-receiver spellings. The `effective_` name is kept
+    /// for API compatibility; unlike constructor names, this never falls back
+    /// to a cross-language spelling inventory.
     #[must_use]
     pub fn effective_super_receiver_tokens(&self) -> &'static [&'static str] {
-        if self.super_receiver_tokens.is_empty() {
-            bonsai_common::SUPER_RECEIVER_TOKENS
-        } else {
-            self.super_receiver_tokens
-        }
+        self.super_receiver_tokens
     }
 
-    /// Effective implicit-receiver tokens.
+    /// Adapter-owned implicit-receiver spellings, with empty meaning none.
     #[must_use]
     pub fn effective_implicit_receiver_tokens(&self) -> &'static [&'static str] {
-        if self.implicit_receiver_tokens.is_empty() {
-            bonsai_common::IMPLICIT_RECEIVER_TOKENS
-        } else {
-            self.implicit_receiver_tokens
-        }
+        self.implicit_receiver_tokens
     }
 
     #[must_use]
@@ -127,8 +115,10 @@ impl LanguageCapabilities {
             ffi: CapabilityLevel::Unsupported,
             pattern_matching: CapabilityLevel::Unsupported,
             receiver_types: CapabilityLevel::Unsupported,
+            field_places_complete: false,
             module_export_aliases: &[],
             constructor_method_names: &[],
+            bare_call_constructor_syntax: false,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
         }
@@ -157,10 +147,24 @@ impl LanguageCapabilities {
             ffi: CapabilityLevel::Unsupported,
             pattern_matching: CapabilityLevel::Partial,
             receiver_types: CapabilityLevel::Unsupported,
+            field_places_complete: false,
             module_export_aliases: &[],
             constructor_method_names: &[],
+            bare_call_constructor_syntax: false,
             super_receiver_tokens: &[],
             implicit_receiver_tokens: &[],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LanguageCapabilities;
+
+    #[test]
+    fn empty_receiver_capabilities_mean_no_receiver_syntax() {
+        let capabilities = LanguageCapabilities::unsupported();
+        assert!(capabilities.effective_super_receiver_tokens().is_empty());
+        assert!(capabilities.effective_implicit_receiver_tokens().is_empty());
     }
 }

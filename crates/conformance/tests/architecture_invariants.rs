@@ -66,7 +66,16 @@ fn read(path: &Path) -> String {
 
 fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     let needle = format!("fn {name}");
-    let start = source.find(&needle).unwrap_or_else(|| panic!("missing {name}"));
+    let start = source
+        .match_indices(&needle)
+        .find_map(|(start, _)| {
+            source[start + needle.len()..]
+                .chars()
+                .next()
+                .filter(|next| matches!(next, '(' | '<'))
+                .map(|_| start)
+        })
+        .unwrap_or_else(|| panic!("missing {name}"));
     let open = source[start..]
         .find('{')
         .map(|idx| start + idx)
@@ -1134,10 +1143,10 @@ fn interprocedural_taint_uses_db_cached_idg_services() {
     assert!(
         text.contains("idg_service_for_inter_config(db, config)")
             && idg_build.contains("transfer_options.semantic_fingerprint()")
-            && idg_build.contains("db.idg_service_for_semantics(fingerprint)")
-            && idg_build.contains("db.set_idg_service_for_semantics(fingerprint, built)")
+            && idg_build.contains("db.get_or_init_idg_service_for_semantics(fingerprint, ||")
+            && !idg_build.contains("db.idg_service_for_semantics(fingerprint)")
             && !text.contains("build_cfg_from_flow"),
-        "interprocedural taint must query a semantics-keyed database IDG cache instead of rebuilding CFGs"
+        "interprocedural taint must single-flight a semantics-keyed database IDG cache instead of rebuilding CFGs"
     );
 }
 
@@ -1903,6 +1912,35 @@ fn call_args_are_post_receiver_normalized() {
     );
 }
 
+/// `CallArg.value_text` is retained for exact display/callback/literal
+/// resolver spelling. It must never become an alternate parser input for
+/// taint propagation: argument carriers come exclusively from the adapter's
+/// AST-derived `place` and `source_names` facts.
+#[test]
+fn idg_taint_does_not_reparse_call_arg_value_text() {
+    let root = repo_root();
+    let transfer = read(&root.join("crates").join("idg").join("src").join("transfer.rs"));
+    let allowed_uses = [
+        // Literal selector spelling is consumed as a field-resolution key,
+        // not tokenised into taint carriers.
+        "quoted_storage_selector(&arg.value_text)",
+        // The callback resolver receives the exact source spelling.
+        "arg_values.push(arg.value_text.clone())",
+    ];
+    let violations: Vec<_> = transfer
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("arg.value_text"))
+        .filter(|(_, line)| !allowed_uses.iter().any(|allowed| line.contains(allowed)))
+        .map(|(line, text)| format!("{}: {}", line + 1, text.trim()))
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "IDG taint must consume CallArg.place/source_names, never parse value_text:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
 /// Two private decls in different translation units that share a
 /// bare name must NOT collide in the resolver. The motivating
 /// regression: hiredis and Lua each defined `static void error()`,
@@ -2171,11 +2209,13 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         !value_intra_body.contains(".take(1)"),
         "value-flow return/call lineage must not pick one arbitrary same-name definition"
     );
+    let value_entry_body = function_body(&taint_value_flow, "value_flow_for_function_with_caches");
     let value_result_body = function_body(&taint_value_flow, "build_graph_from_result");
-    let value_idg_body = function_body(&taint_value_flow, "build_graph_from_idg");
     assert!(
-        value_result_body.contains("find_call_arg_node") && value_idg_body.contains("find_call_arg_node"),
-        "cross-call value-flow edges must start from concrete call-site argument nodes when available"
+        value_entry_body.contains("interprocedural_taint_to_completion_with_caches")
+            && value_entry_body.contains("build_graph_from_result")
+            && value_result_body.contains("find_call_arg_node"),
+        "the single IDG-backed value-flow path must lift concrete call-site argument nodes from its canonical engine result"
     );
 
     let source_body = function_body(&security_analysis, "run_source_analysis_with_phase_progress");
@@ -2197,27 +2237,31 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
     let source_path_graph_body = function_body(&security_analysis, "exact_source_path_graph");
     assert!(
-        source_path_graph_body.contains("entry_taint_call_records_from_idg_with_target_filters_and_max_precision")
+        source_path_graph_body.contains(
+            "entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches",
+        )
             && source_path_graph_body.contains("&config.call_result_passthroughs")
-            && source_path_graph_body.contains("&config.output_arg_flows")
             && source_path_graph_body.contains("target_funcs")
-            && source_path_graph_body.contains("lineage_funcs"),
-        "security source-analysis must use the filtered IDG call-record API with the same rulepack transfer semantics as taint-analysis"
+            && source_path_graph_body.contains("lineage_funcs")
+            && source_path_graph_body.contains("Some(caches)"),
+        "security source-analysis must use the cached filtered IDG call-record API; configured transfers are materialized into the shared IDG before attribution"
     );
     let source_lineage_scope_body = function_body(&security_analysis, "source_analysis_lineage_func_scope");
     assert!(
         source_lineage_scope_body.contains(".callees_of(func)")
             && source_lineage_scope_body.contains(".callers_of(func)")
             && source_lineage_scope_body.contains("summary_dependency_provider")
-            && source_lineage_scope_body.contains("depth >= max_hops")
+            && source_lineage_scope_body.contains("let mut stack")
+            && source_lineage_scope_body.contains("while let Some(func) = stack.pop()")
+            && !source_lineage_scope_body.contains("max_hops")
             && !source_lineage_scope_body.contains(".all_files()"),
-        "source-analysis lineage scope must use semantic callgraph edges and source-origin summary-output support, not a workspace file walk"
+        "source-analysis lineage scope must reach a cap-free semantic callgraph fixed point with source-origin summary-output support, not use a workspace file walk"
     );
 
     let taint_reachable = read(&root.join("crates/taint/src/reachable.rs"));
     let call_records_body = function_body(
         &taint_reachable,
-        "entry_taint_call_records_from_idg_with_target_filters_and_max_precision",
+        "entry_taint_call_records_from_idg_with_target_filters_and_max_precision_and_caches",
     );
     assert!(
         call_records_body.contains("apply_configured_transfer_fixpoint")
@@ -2231,8 +2275,10 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     assert!(
         trace_call_body.contains("StepKind::Diagnostic")
             && trace_call_body.contains("unresolved-call:")
-            && trace_call_body.contains("ambiguous-call:"),
-        "trace must expose unresolved or ambiguous calls as incomplete diagnostic metadata"
+            && trace_call_body.contains("StepKind::BranchSplit")
+            && trace_call_body.contains("Call target split")
+            && trace_call_body.contains("max-branch-fanout"),
+        "trace must mark unresolved calls incomplete, expand every semantic alternative by default, and expose explicit fanout truncation"
     );
     assert!(
         !trace_call_body.contains("Precision::Unknown"),
@@ -2363,12 +2409,13 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
     );
 
     let export_body = read(&root.join("crates/browse/src/native_export.rs"));
-    let chain_limits_body = function_body(&export_body, "for_complete");
+    let chain_limits_body = function_body(&export_body, "bounded_materialization");
     assert!(
-        chain_limits_body.contains("max_chains_per_target: usize::MAX")
-            && chain_limits_body.contains("max_entry_probes: usize::MAX")
-            && !chain_limits_body.contains("usize::MAX / 16"),
-        "native export --complete-chains/--all must not hide an audit path cap behind complete mode"
+        chain_limits_body.contains("EXPORT_FLOW_CHAIN_MAX_CHAINS_PER_TARGET")
+            && chain_limits_body.contains("EXPORT_FLOW_CHAIN_MAX_ENTRY_PROBES")
+            && !export_body.contains("FlowIdLabelOptions::exhaustive")
+            && !export_body.contains("EXPORT_COMPLETE_CHAIN_ENUMERATION_EDGE_LIMIT"),
+        "native export must keep rendered path rows bounded and use graph compression for exact complete mode"
     );
     let main_body = read(&root.join("crates/cli/src/main.rs"));
     assert!(
@@ -2382,12 +2429,67 @@ fn source_and_debug_flow_surfaces_are_semantic_only() {
         "chain enumeration must safely support usize::MAX as the uncapped probe budget"
     );
     assert!(
-        export_body.contains("use_compressed_complete_chains")
+        export_body.matches("let compressed_chains = complete_chains;").count() >= 2
             && export_body.contains("compressed_callgraph")
             && export_body.contains("flow_chains_mode")
             && export_body.contains("chains_mode")
-            && export_body.contains("flow_id_labels_mode"),
-        "native export must use an explicit compressed semantic callgraph mode for dense complete exports"
+            && export_body.contains("flow_id_labels_mode")
+            && export_body.contains("!compressed_chains && truncated_targets == 0")
+            && export_body.contains("!compressed_chains && truncated_functions == 0"),
+        "native export complete mode must always use compressed semantic graph evidence and must not label omitted rows complete"
+    );
+}
+
+#[test]
+fn public_security_and_dump_taint_renderers_preserve_completeness_metadata() {
+    let root = repo_root();
+    let security_report = read(&root.join("crates/security/src/report.rs"));
+    let cli_dump = read(&root.join("crates/cli/src/commands/dump.rs"));
+    let graph_export = read(&root.join("crates/browse/src/graph_export.rs"));
+    let sdk = read(&root.join("crates/sdk/src/lib.rs"));
+
+    let train_body = function_body(&security_report, "render_train_json");
+    assert!(
+        train_body.contains("analysis_complete: report.analysis_complete")
+            && train_body.contains("analysis_incomplete_reasons: report.analysis_incomplete_reasons.clone()")
+            && train_body.contains("runtime_disabled_rules: report.runtime_disabled_rules.clone()"),
+        "training JSON must preserve scan completeness and runtime-disabled rule metadata even when examples is empty"
+    );
+
+    let grouped_body = function_body(&security_report, "render_grouped_text");
+    assert!(
+        grouped_body.contains("analysis: complete")
+            && grouped_body.contains("analysis: incomplete")
+            && grouped_body.contains("runtime-disabled rule:"),
+        "grouped security text must distinguish complete empty reports from incomplete scans"
+    );
+
+    let dump_json_body = function_body(&cli_dump, "render_taint_report_json_paged");
+    assert!(
+        dump_json_body.contains("\"records\": records")
+            && dump_json_body.contains("semantic_analysis_complete")
+            && dump_json_body.contains("semantic_analysis_incomplete_reasons")
+            && dump_json_body.contains("presentation_complete")
+            && dump_json_body.contains("presentation_incomplete_reasons")
+            && dump_json_body.contains("paged_json_incomplete_reasons(\"dump-taint\"")
+            && !dump_json_body.contains("json_lines"),
+        "paged dump-taint JSON must retain structured records and separate semantic coverage from presentation truncation"
+    );
+
+    assert!(
+        graph_export.contains("analysis_complete")
+            && graph_export.contains("analysis_incomplete_reasons")
+            && graph_export.contains("GRAPH_EXPORT_INCOMPLETE_REASON"),
+        "graph exports must explain that propagation evidence is unavailable instead of presenting an empty graph as complete"
+    );
+
+    let cache_sidecar_body = function_body(&sdk, "cache_manifest_sidecar");
+    let cache_coverage_body = function_body(&sdk, "cache_manifest_coverage");
+    assert!(
+        cache_sidecar_body.contains("missing_reason")
+            && cache_coverage_body.contains("missing_reasons")
+            && cache_coverage_body.contains("sidecar has not been produced"),
+        "SDK cache manifests must attach reasons to unavailable sidecars and incomplete semantic coverage"
     );
 }
 
@@ -2692,8 +2794,9 @@ fn persisted_analysis_caches_bind_all_freshness_inputs() {
     );
     assert!(
         security_analysis.contains("mod taint_cache;")
-            && security_analysis.contains("taint_cache::config_fingerprint(pack, \"source-analysis\"")
-            && security_analysis.contains("taint_cache::config_fingerprint(pack, \"taint-analysis\""),
+            && security_analysis.contains("taint_cache::scoped_config_fingerprint(")
+            && security_analysis.contains("\"source-analysis\"")
+            && security_analysis.contains("\"taint-analysis\""),
         "security analysis must route source and taint analysis through the shared taint cache fingerprint"
     );
     let taint_config_body = function_body(&taint_cache, "config_fingerprint");
@@ -2792,6 +2895,15 @@ fn default_index_path_stays_structural_with_explicit_warm_modes() {
             && parse_only_body.contains("prewarm_flow_ids: false"),
         "WorkspaceOpenOptions::parse_only must not load or prewarm semantic analysis sidecars"
     );
+    let full_prewarm_body = function_body(&workspace, "full_prewarm");
+    assert!(
+        full_prewarm_body.contains("prewarm_dataflow: true")
+            && full_prewarm_body.contains("prewarm_flow_ids: true")
+            && full_prewarm_body.contains("load_idg_sidecar: true")
+            && full_prewarm_body.contains("prewarm_value_flow: false")
+            && full_prewarm_body.contains("save_value_flow_sidecar: false"),
+        "full prewarm must build canonical IDG/dataflow facts without eagerly projecting one legacy ValueFlowGraph per function"
+    );
     assert!(
         function_body(&commands_mod, "open_project_parse_only").contains("OpenOptions::parse_only()"),
         "CLI parse-only open helper must use WorkspaceOpenOptions::parse_only"
@@ -2829,6 +2941,66 @@ fn db_applies_receiver_type_enrichment_centrally() {
             && body.contains("apply_assign_call_result_types")
             && body.contains("apply_call_receiver_types"),
         "AnalyzerDb::build_decl_index_uncached must centrally enrich FlowEvent::Call::receiver_types after adapter extraction"
+    );
+}
+
+/// Receiver syntax belongs to each tree-sitter adapter. An empty capability
+/// is a closed "none" claim, not permission for a language-neutral layer to
+/// inject spellings borrowed from unrelated grammars.
+#[test]
+fn receiver_token_capabilities_are_explicit_and_adapter_owned() {
+    let root = repo_root();
+    let capabilities = read(&root.join("crates/lang_api/src/capabilities.rs"));
+    for (function, field) in [
+        ("effective_super_receiver_tokens", "self.super_receiver_tokens"),
+        (
+            "effective_implicit_receiver_tokens",
+            "self.implicit_receiver_tokens",
+        ),
+    ] {
+        let body = function_body(&capabilities, function);
+        assert!(
+            body.contains(field) && !body.contains("bonsai_common::") && !body.contains("if self."),
+            "LanguageCapabilities::{function} must return the adapter declaration directly without a global fallback"
+        );
+    }
+    assert!(
+        !capabilities.contains("NO_SUPER_RECEIVER_TOKENS"),
+        "empty super_receiver_tokens now means none; a sentinel would reintroduce a second empty-state encoding"
+    );
+
+    let crates = root.join("crates");
+    let mut violations = Vec::new();
+    for entry in fs::read_dir(&crates).unwrap_or_else(|error| panic!("read {}: {error}", crates.display())) {
+        let entry = entry.expect("read crate entry");
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("lang_") || name == "lang_api" {
+            continue;
+        }
+        let lib_path = entry.path().join("src/lib.rs");
+        if !lib_path.exists() {
+            continue;
+        }
+        let source = read(&lib_path);
+        let body = function_body(&source, "capabilities");
+        if !body.contains("super_receiver_tokens:") || !body.contains("implicit_receiver_tokens:") {
+            violations.push(format!(
+                "{}: capabilities() must explicitly declare both receiver-token slices",
+                lib_path.display()
+            ));
+        }
+        if body.contains("NO_SUPER_RECEIVER_TOKENS") {
+            violations.push(format!(
+                "{}: empty super syntax must be written as &[]",
+                lib_path.display()
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "receiver-token capability boundary violations:\n  {}",
+        violations.join("\n  ")
     );
 }
 

@@ -319,9 +319,8 @@ fn configured_sanitizer_inside_loop_preserves_taint() {
 }
 
 #[test]
-fn convergence_is_bounded_by_safety_cap() {
-    // Large CFG should converge in a reasonable number of
-    // worklist iterations, never hit the safety cap.
+fn uncapped_worklist_runs_to_fixed_point() {
+    // The default completeness-preserving mode must drain the worklist.
     let mut events = Vec::new();
     for i in 0..50 {
         let target = format!("v{i}");
@@ -334,6 +333,14 @@ fn convergence_is_bounded_by_safety_cap() {
     }
     let (result, _) = run(events, &config(&["recv"], &[]));
     assert!(!result.saturated, "50 sequential assigns must converge");
+}
+
+#[test]
+fn explicit_diagnostic_worklist_cap_reports_saturation() {
+    let mut capped = config(&["recv"], &[]);
+    capped.worklist_cap = Some(0);
+    let (result, _) = run(vec![assign("x", Some("recv"))], &capped);
+    assert!(result.saturated);
 }
 
 #[test]

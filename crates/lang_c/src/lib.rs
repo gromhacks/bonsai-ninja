@@ -70,7 +70,8 @@ impl LanguageAdapter for CAdapter {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -229,17 +230,7 @@ fn collect_static_function_names(
     let mut static_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Bail conservatively on any I/O / language failure — better to
     // leave names public than to hallucinate visibility.
-    let Ok(snapshot) = ctx.vfs.snapshot(file) else {
-        return static_names;
-    };
-    let Ok(language) = language_from_pack(PACK_NAME) else {
-        return static_names;
-    };
-    let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&language).is_err() {
-        return static_names;
-    }
-    let Some(tree) = parser.parse(snapshot.text.as_bytes(), None) else {
+    let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
         return static_names;
     };
     let src = snapshot.text.as_bytes();

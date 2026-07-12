@@ -297,6 +297,14 @@ impl GlobalIndex {
         self.by_file.get(&file)
     }
 
+    /// Every grammar-declared aggregate layout in deterministic file order.
+    /// Consumers must still reject ambiguous type spellings; this iterator is
+    /// the syntax-fact source, not a name-only resolver.
+    pub fn aggregate_layouts(&self) -> impl Iterator<Item = &bonsai_lang_api::AggregateLayout> {
+        self.all_files()
+            .flat_map(|file| self.by_file[&file].aggregate_layouts.iter())
+    }
+
     /// Function-shaped decls (functions, methods, constructors) in
     /// `file`. Used by call-graph construction and the matcher's
     /// receiver-type filter.
@@ -476,6 +484,7 @@ fn enrich_receiver_types_in_events(events: &mut [FlowEvent], bases_by_type: &AHa
                 enrich_receiver_types_in_events(finally_events, bases_by_type);
             }
             FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
             | FlowEvent::Return { .. }
             | FlowEvent::Throw { .. }
             | FlowEvent::Break { .. }

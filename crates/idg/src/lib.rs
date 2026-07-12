@@ -74,6 +74,7 @@ pub mod csr;
 pub mod dict;
 pub mod edge;
 pub mod error;
+mod function_summary;
 pub mod node;
 pub mod place;
 pub mod query;
@@ -93,8 +94,9 @@ pub use service::{
 };
 pub use transfer::{
     transfer_for_many, transfer_for_many_with_options, transfer_function_for,
-    transfer_function_for_with_options, CallSiteRef, CleanOutputOverwriteSpec, NameInterner,
-    SourceCallbackArgSpec, SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
+    transfer_function_for_with_options, CallResultPassthroughSpec, CallSiteRef, CleanOutputOverwriteSpec,
+    NameInterner, OutputArgFlowSpec, ReceiverStatePropagationSpec, SourceCallbackArgSpec,
+    SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
 };
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 

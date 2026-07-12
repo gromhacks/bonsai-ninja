@@ -40,6 +40,7 @@ fn cpp_adapter_marks_static_and_anonymous_ns_private() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -77,5 +78,114 @@ fn cpp_adapter_marks_static_and_anonymous_ns_private() {
     assert!(
         matches!(exposed_decl.visibility, Visibility::Public),
         "non-static, non-anonymous-ns C++ functions are visible"
+    );
+}
+
+#[test]
+fn cpp_adapter_uses_ast_class_identity_for_constructors_and_return_fields() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, DeclKind, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("model.cpp"),
+        "struct Model {\n\
+             explicit Model(int value) : value_(value) {}\n\
+             const int& value() const { return value_; }\n\
+             int value_;\n\
+         };\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+
+    let constructor = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "Model" && decl.params == ["value"])
+        .expect("constructor declaration");
+    assert_eq!(constructor.kind, DeclKind::Constructor);
+    assert!(
+        constructor
+            .receiver_field_writes
+            .iter()
+            .any(|write| write.target == "this.value_" && write.source_param_indices == [0]),
+        "initializer-list field write must remain an AST fact: {constructor:#?}"
+    );
+
+    let accessor = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "value" && decl.params.is_empty())
+        .expect("accessor declaration");
+    assert!(
+        accessor.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Return { value_flow, .. }
+                if value_flow.place.as_deref() == Some("this.value_")
+        )),
+        "field return must be lowered from the return-expression CST: {accessor:#?}"
+    );
+}
+
+#[test]
+fn cpp_adapter_preserves_positional_aggregate_syntax_facts() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_cpp::CppAdapter::new();
+    let vfs = Vfs::new();
+    let header = vfs.write(
+        std::path::Path::new("envelope.hpp"),
+        "struct Envelope { int kind; const char *cmd; const char *user; };\n",
+    );
+    let source = vfs.write(
+        std::path::Path::new("app.cpp"),
+        "int main(int argc, char **argv) { std::string raw = argv[1]; Envelope env{0, raw.size(), raw}; return 0; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+
+    let header_idx = adapter.extract_declarations(header, &ctx);
+    assert_eq!(
+        header_idx.aggregate_layouts,
+        vec![bonsai_lang_api::AggregateLayout {
+            type_name: "Envelope".to_string(),
+            fields: vec!["kind".to_string(), "cmd".to_string(), "user".to_string()],
+        }]
+    );
+
+    let source_idx = adapter.extract_declarations(source, &ctx);
+    let main = source_idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "main")
+        .expect("main declaration");
+    assert!(
+        main.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::AggregateAssign {
+                target,
+                type_name: Some(type_name),
+                value_flow,
+                ..
+            } if target == "env" && type_name == "Envelope" && value_flow.tuple_items.len() == 3
+        )),
+        "aggregate initializer must remain ordered AST data: {main:#?}"
     );
 }

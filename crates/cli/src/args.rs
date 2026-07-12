@@ -239,8 +239,8 @@ pub(crate) struct Cli {
     #[arg(long = "not-contains", global = true, value_name = "TEXT")]
     pub(crate) not_contains: Vec<String>,
 
-    /// Per-file tree-sitter parse timeout in milliseconds. Defaults
-    /// to 30000 ms; `0` disables the timeout guard. Also respects
+    /// Optional per-file tree-sitter parse timeout in milliseconds.
+    /// Uncapped by default; `0` also disables the guard. Also respects
     /// `BONSAI_PARSE_TIMEOUT_MS`.
     #[arg(long = "parse-timeout", global = true, value_name = "MS")]
     pub(crate) parse_timeout_ms: Option<u64>,
@@ -412,17 +412,17 @@ pub(crate) enum Cmd {
         /// Emit the full trace with no context cap.
         #[arg(long, default_value_t = false)]
         all: bool,
-        /// Maximum cross-module call depth to expand.
-        #[arg(long, default_value_t = 12)]
+        /// Optional cross-module call-depth cutoff. `0` analyzes to a graph fixed point.
+        #[arg(long, default_value_t = 0)]
         max_depth: u16,
-        /// Maximum trace steps to emit before truncating.
-        #[arg(long, default_value_t = 8192)]
+        /// Optional semantic-step cutoff. `0` analyzes the complete reachable graph.
+        #[arg(long, default_value_t = 0)]
         max_steps: u32,
-        /// Maximum branch fanout used to derive the path budget.
-        #[arg(long, default_value_t = 4)]
+        /// Optional per-split alternative cutoff. `0` expands every semantic target/arm.
+        #[arg(long, default_value_t = 0)]
         max_branch_fanout: u16,
-        /// Maximum loop iterations represented in trace metadata.
-        #[arg(long, default_value_t = 1)]
+        /// Optional loop binding-state cutoff. `0` iterates each loop to a fixed point.
+        #[arg(long, default_value_t = 0)]
         max_loop_iters: u16,
         /// Output shape — `text` for the rendered trace, `json` for machine-readable output.
         #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -604,7 +604,7 @@ pub(crate) enum Cmd {
         /// Compatibility budget for structured dump-taint `T:` propagation ids.
         #[arg(long = "taint-budget")]
         taint_budget: Option<u32>,
-        /// Intraprocedural worklist cap for structured dump-taint `T:` propagation ids.
+        /// Compatibility knob retained for structured dump-taint `T:` ids; IDG closure is uncapped.
         #[arg(long = "taint-intra-worklist-cap")]
         taint_intra_worklist_cap: Option<u32>,
         /// Render compact source/flow output when the delegated command supports it.
@@ -2317,9 +2317,9 @@ pub(crate) enum Cmd {
                       sections are bounded by default and marked incomplete \
                       when capped; pass `--complete-chains` or `--all` to \
                       request complete semantic chain and flow-id-label evidence. \
-                      Dense call graphs can have exponentially many exact paths, \
-                      so complete mode may switch those sections to \
-                      `compressed_callgraph` instead of materializing path rows. \
+                      Because even a small call graph can have exponentially many \
+                      exact paths, complete mode represents those sections as an \
+                      exact `compressed_callgraph` instead of materializing path rows. \
                       Propagation records are \
                       omitted by default with explicit completeness metadata; \
                       pass `--full-propagations` when downstream tooling needs \
@@ -2366,8 +2366,8 @@ pub(crate) enum Cmd {
         #[arg(long)]
         full_propagations: bool,
         /// Request complete semantic chain and flow-id-label evidence.
-        /// Dense call graphs can have exponentially many exact paths,
-        /// so complete mode may switch chain/label sections to
+        /// Even small call graphs can have exponentially many exact paths,
+        /// so complete mode represents chain/label evidence as an exact
         /// `compressed_callgraph` instead of materialized path rows.
         #[arg(long)]
         complete_chains: bool,
@@ -3170,13 +3170,10 @@ pub(crate) enum SecurityAction {
         /// on unsanitized findings.
         #[arg(long = "show-sanitized", default_value_t = false)]
         show_sanitized: bool,
-        /// Override the interprocedural `(function, seed)` chunk size
-        /// for security taint-analysis. Default 512. This affects
-        /// scheduling granularity, not result completeness.
+        /// Compatibility knob for the retired interprocedural engine; IDG closure is unchunked.
         #[arg(long = "taint-budget")]
         taint_budget: Option<u32>,
-        /// Override the intraprocedural CFG worklist iteration cap per
-        /// function. Default derives from CFG size.
+        /// Compatibility knob for the retired engine; security IDG closure is uncapped.
         #[arg(long = "intra-worklist-cap")]
         intra_worklist_cap: Option<u32>,
         /// Token-budget ceiling for rendered output. Shorthand `4k` /

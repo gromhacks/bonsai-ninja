@@ -12,8 +12,9 @@ use bonsai_lang_api::FlowEvent;
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
-    run_taint_analysis, ConstraintKind, FindingStatus, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
-    RuleTarget, Rulepack, SourceAnalysisOptions, TaintAnalysisOptions, TrustClass,
+    run_taint_analysis, run_taint_analysis_with_phase_progress, ConstraintKind, FindingStatus, MatchKind,
+    MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget, Rulepack, SourceAnalysisOptions,
+    SourceLineageLimits, TaintAnalysisOptions, TrustClass,
 };
 use bonsai_taint::{compose_idg_seed_nodes, ensure_idg_service, IdgSeedRequest, TokenSet};
 use bonsai_workspace::Workspace;
@@ -167,7 +168,11 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // `request.args.get` finding's member ids instead of emitting a
         // second user-visible row.
         "python" => 1,
-        "ruby" => 2,
+        // The real `gets → system` path remains. The generic `data` blob
+        // source is declaratively limited to insecure-deserialization sinks,
+        // so constructor/factory parameters no longer create unrelated
+        // command-injection findings.
+        "ruby" => 1,
         "rust" => 1,
         // HttpServletRequest.getParameter → Envelope (case class) →
         // Pipeline.orchestrate (Option/for/case match) → Storage.persist
@@ -405,6 +410,9 @@ fn collect_event_kinds(events: &[FlowEvent], out: &mut BTreeSet<&'static str>) {
             }
             FlowEvent::Assign { .. } => {
                 out.insert("Assign");
+            }
+            FlowEvent::AggregateAssign { .. } => {
+                out.insert("AggregateAssign");
             }
             FlowEvent::Return { .. } => {
                 out.insert("Return");
@@ -765,6 +773,10 @@ fn taint_analysis_populates_bounded_workspace_graph_cache() {
     let pack = rulepack("python", "source", "sink");
 
     assert_eq!(ws.taint_index().resident_len(), 0);
+    assert!(
+        ws.db().idg_service().is_none(),
+        "taint-analysis fixture must start without a canonical IDG"
+    );
     let first = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("first analysis");
     assert!(
         !first.findings.is_empty(),
@@ -787,6 +799,122 @@ fn taint_analysis_populates_bounded_workspace_graph_cache() {
         populated,
         "repeat analysis with the same rule/config fingerprint should reuse existing graph keys"
     );
+    assert!(
+        ws.db().idg_service().is_none(),
+        "taint-analysis must not publish its source/sink-scoped IDG as the canonical default"
+    );
+}
+
+#[test]
+fn taint_graph_disk_namespace_changes_with_semantic_idg_scope() {
+    let root = temp_real_workspace("taint-scope-identity");
+    std::fs::write(
+        root.join("source_a.py"),
+        "def source_a():\n    return input()\n\ndef sink_a(value):\n    return value\n\ndef entry_a():\n    sink_a(source_a())\n",
+    )
+    .expect("write source A fixture");
+    std::fs::write(
+        root.join("source_b.py"),
+        "def source_b():\n    return input()\n\ndef sink_b(value):\n    return value\n\ndef entry_b():\n    sink_b(source_b())\n",
+    )
+    .expect("write source B fixture");
+
+    let mut pack = Rulepack::default();
+    pack.packs.insert(
+        "python".to_string(),
+        LanguagePack {
+            language: "python".to_string(),
+            sources: vec![
+                rule(
+                    "python",
+                    RuleKind::Source,
+                    "python.test.source_a",
+                    Some(TrustClass::Remote),
+                    None,
+                    "source_a",
+                ),
+                rule(
+                    "python",
+                    RuleKind::Source,
+                    "python.test.source_b",
+                    Some(TrustClass::Remote),
+                    None,
+                    "source_b",
+                ),
+            ],
+            sinks: vec![
+                rule(
+                    "python",
+                    RuleKind::Sink,
+                    "python.test.sink_a",
+                    None,
+                    Some(Severity::Critical),
+                    "sink_a",
+                ),
+                rule(
+                    "python",
+                    RuleKind::Sink,
+                    "python.test.sink_b",
+                    None,
+                    Some(Severity::Critical),
+                    "sink_b",
+                ),
+            ],
+            sanitizers: Vec::new(),
+            typing: Vec::new(),
+        },
+    );
+    let ws = Workspace::index(&root, bonsai_adapters::all_languages_registry()).expect("index scope fixture");
+
+    let run_scope = |source_rule: &str| {
+        let mut sidecar = None;
+        let report = run_taint_analysis_with_phase_progress(
+            &ws,
+            &pack,
+            TaintAnalysisOptions {
+                source: Some(format!("^{source_rule}$")),
+                include_inferred_sources: false,
+                ..Default::default()
+            },
+            |event| {
+                if let bonsai_security::AnalysisProgress::Note { label, detail } = event {
+                    if label == "taint-cache" {
+                        if let Some(path) = detail
+                            .split(';')
+                            .map(str::trim)
+                            .find_map(|part| part.strip_prefix("sidecar="))
+                            .filter(|path| *path != "none")
+                            .map(PathBuf::from)
+                        {
+                            sidecar = Some(path);
+                        }
+                    }
+                }
+            },
+        )
+        .expect("taint analysis for scoped cache identity");
+        assert!(!report.findings.is_empty(), "{source_rule}: expected a real flow");
+        sidecar.expect("scoped taint analysis should report its disk sidecar")
+    };
+
+    let source_a_sidecar = run_scope("python\\.test\\.source_a");
+    let source_b_sidecar = run_scope("python\\.test\\.source_b");
+    assert_ne!(
+        source_a_sidecar, source_b_sidecar,
+        "different semantic IDG scopes must never reuse one taint graph sidecar"
+    );
+    assert!(
+        source_a_sidecar.exists(),
+        "missing {}",
+        source_a_sidecar.display()
+    );
+    assert!(
+        source_b_sidecar.exists(),
+        "missing {}",
+        source_b_sidecar.display()
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1006,6 +1134,10 @@ fn source_analysis_progress_emits_scope_and_cache_notes_to_sdk() {
         "def source():\n    return input()\n\n\
          def handle():\n    value = source()\n    return value\n",
     )]);
+    assert!(
+        ws.db().idg_service().is_none(),
+        "source-analysis fixture must start without a canonical IDG"
+    );
     let mut notes: Vec<(&'static str, String)> = Vec::new();
     let report = bonsai_security::run_source_analysis_with_phase_progress(
         &ws,
@@ -1038,6 +1170,63 @@ fn source_analysis_progress_emits_scope_and_cache_notes_to_sdk() {
                     || detail.contains("skipped"))
         }),
         "source-analysis should report taint cache hit/miss state through SDK progress notes: {notes:#?}"
+    );
+    assert!(
+        ws.db().idg_service().is_none(),
+        "source-analysis must retain its scoped IDG explicitly instead of publishing it as the canonical default"
+    );
+}
+
+#[test]
+fn source_analysis_render_hop_limit_does_not_limit_analyzed_scope() {
+    let mut source = String::from(
+        "def source():\n    return 'tainted'\n\ndef entry():\n    value = source()\n    hop1(value)\n\n",
+    );
+    for hop in 1..8 {
+        writeln!(source, "def hop{hop}(value):\n    hop{}(value)\n", hop + 1)
+            .expect("write deep source-analysis fixture");
+    }
+    source.push_str("def hop8(value):\n    consume(value)\n");
+
+    let ws = workspace(&[("/app/deep.py", source.as_str())]);
+    let pack = rulepack("python", "source", "sink");
+    let bounded = bonsai_security::run_source_analysis(&ws, &pack, SourceAnalysisOptions::default())
+        .expect("bounded source analysis");
+
+    assert!(
+        bounded
+            .candidates
+            .iter()
+            .any(|candidate| candidate.lineage.truncated_hops),
+        "the complete analyzed graph must expose that the representative six-hop rendering truncated a deeper flow: {:#?}",
+        bounded.candidates
+    );
+    assert!(
+        !bounded.lineage_summary.is_complete(),
+        "a truncated representative lineage must be reported as incomplete"
+    );
+
+    let unbounded = bonsai_security::run_source_analysis(
+        &ws,
+        &pack,
+        SourceAnalysisOptions {
+            lineage_limits: SourceLineageLimits::unbounded(),
+            ..Default::default()
+        },
+    )
+    .expect("unbounded source analysis");
+    assert!(
+        unbounded
+            .candidates
+            .iter()
+            .any(|candidate| candidate.chain_names.last().is_some_and(|name| name == "hop8")),
+        "rendering without limits must expose the analyzed terminal hop: {:#?}",
+        unbounded.candidates
+    );
+    assert!(
+        unbounded.lineage_summary.is_complete(),
+        "an unbounded rendering over the same complete graph must be complete: {:#?}",
+        unbounded.lineage_summary
     );
 }
 

@@ -32,3 +32,33 @@ fn renders_networkx_graphml_and_cypher_from_sdk_projection() {
     assert!(cypher.contains("analysis_incomplete_reasons"));
     assert!(cypher.contains("taint_propagations_complete"));
 }
+
+#[test]
+fn graph_projection_composes_resolved_return_summaries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+def identity(value):
+    return value
+
+def wrapper(user):
+    return identity(user)
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let graph = graph_projection(&ws, dir.path());
+    let wrapper_id = graph
+        .nodes
+        .values()
+        .find(|node| node.properties.get("name") == Some(&serde_json::json!("wrapper")))
+        .map(|node| node.id.clone())
+        .expect("wrapper graph node");
+
+    assert!(graph.edges.iter().any(|edge| {
+        edge.source == wrapper_id
+            && edge.label == "RETURNS_TAINT_OF"
+            && edge.properties.get("param_index") == Some(&serde_json::json!(0))
+    }));
+}

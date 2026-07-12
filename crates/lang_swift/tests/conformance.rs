@@ -24,6 +24,7 @@ fn function_typed_parameters_do_not_emit_type_nodes_as_params() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -57,6 +58,7 @@ fn single_expression_function_records_implicit_return() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -103,6 +105,7 @@ class AuditedRepository: Repository {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -152,6 +155,7 @@ fn swiftpm_target_files_share_module_identity() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: Some(&root),
     };
 
@@ -202,6 +206,7 @@ fn swiftpm_sibling_package_targets_do_not_share_module_identity() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: Some(&root),
     };
 
@@ -251,6 +256,7 @@ fn ad_hoc_sibling_directories_do_not_share_module_identity() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: Some(&root),
     };
 
@@ -307,6 +313,7 @@ func handle(raw: String) {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -354,6 +361,7 @@ func execute(_ input: String) {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -376,5 +384,113 @@ func execute(_ input: String) {
         }),
         "Swift member assignment array RHS must carry element sources: {:?}",
         execute.flow_events
+    );
+}
+
+#[test]
+fn bare_computed_property_read_is_an_implicit_self_method_call() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, CallKind, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_swift::SwiftAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Repository.swift"),
+        r#"
+class Repository {
+    let data: String
+    init(_ data: String) { self.data = data }
+    var cmd: String { data }
+    func run() -> String {
+        let value = cmd
+        return value
+    }
+}
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let run = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run declaration");
+
+    assert!(
+        run.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call {
+                name,
+                receiver,
+                call_kind: CallKind::Method,
+                ..
+            } if name == "self.cmd" && receiver.as_deref() == Some("self")
+        )),
+        "Swift bare property reads must retain their implicit self receiver: {:?}",
+        run.flow_events
+    );
+    assert!(run.flow_events.iter().any(|event| matches!(
+        event,
+        FlowEvent::Assign { source_call, .. }
+            if source_call.as_deref() == Some("self.cmd")
+    )));
+}
+
+#[test]
+fn declared_typealias_canonicalizes_computed_property_receiver_type() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_swift::SwiftAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("Repository.swift"),
+        r#"
+struct Envelope { var cmd: String }
+typealias RepoEnvelope = Envelope
+class Repository {
+    let data: RepoEnvelope
+    init(_ data: RepoEnvelope) { self.data = data }
+    var cmd: String { data.cmd }
+}
+"#,
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: None,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let getter = idx
+        .defs
+        .iter()
+        .find(|decl| {
+            decl.name == "cmd"
+                && decl
+                    .flow_events
+                    .iter()
+                    .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "data.cmd"))
+        })
+        .expect("computed cmd getter");
+    assert!(
+        getter.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Call { receiver_types, .. }
+                if receiver_types == &["Envelope".to_string()]
+        )),
+        "declared typealias must resolve to its AST target: {:?}",
+        getter.flow_events
     );
 }

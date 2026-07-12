@@ -9,7 +9,10 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
+    kit::{
+        call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
+        parse_with, span_of,
+    },
     with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind, Visibility,
 };
@@ -62,7 +65,8 @@ impl LanguageAdapter for ElixirAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -90,6 +94,7 @@ impl LanguageAdapter for ElixirAdapter {
                 if let Some(params) = elixir_clause_param_slots(snapshot.text.as_ref(), decl.span, &decl.name)
                 {
                     decl.params = params;
+                    augment_elixir_param_pattern_bindings(decl, snapshot.text.as_ref());
                 }
                 bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
                     &mut decl.flow_events,
@@ -218,19 +223,9 @@ fn collect_elixir_local_callable_invocations(tree: &Tree, src: &[u8], file: File
         let mut args = Vec::new();
         let mut cursor = arguments.walk();
         for argument in arguments.named_children(&mut cursor) {
-            let value_text = node_text(&argument, src).trim().to_string();
-            if value_text.is_empty() {
-                continue;
+            if let Some(argument) = call_arg_from_node(argument, file, src, None) {
+                args.push(argument);
             }
-            let place = (argument.kind() == "identifier").then(|| value_text.clone());
-            args.push(bonsai_lang_api::CallArg {
-                span: span_of(file, &argument),
-                passing_mode: bonsai_lang_api::ArgumentPassingMode::Value,
-                name: None,
-                place,
-                source_names: elixir_value_source_names(argument, src),
-                value_text,
-            });
         }
         out.push(FlowEvent::Call {
             span: span_of(file, &target),
@@ -525,7 +520,11 @@ fn elixir_value_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
                 }
                 return;
             }
-            "string" | "charlist" | "integer" | "float" | "atom" | "true" | "false" | "nil" => {
+            // Strings and charlists are not always literals in Elixir: their
+            // CST may contain interpolation children (`"#{raw}"`). Walk
+            // those children so the AST, rather than a text/name table,
+            // determines the field's value dependencies.
+            "integer" | "float" | "atom" | "true" | "false" | "nil" => {
                 return;
             }
             "call" => {
@@ -704,6 +703,16 @@ fn innermost_module_for_span(modules: &[ElixirModuleSpan], span: bonsai_common::
 }
 
 fn elixir_clause_param_slots(src: &str, span: bonsai_common::Span, name: &str) -> Option<Vec<String>> {
+    let args = elixir_clause_raw_params(src, span, name)?;
+    Some(
+        args.iter()
+            .enumerate()
+            .map(|(idx, arg)| elixir_pattern_param_name(arg).unwrap_or_else(|| format!("_arg{idx}")))
+            .collect(),
+    )
+}
+
+fn elixir_clause_raw_params(src: &str, span: bonsai_common::Span, name: &str) -> Option<Vec<String>> {
     let text = elixir_span_text(src, span)?;
     let name_start = find_elixir_clause_name(text, name)?;
     let after_name = &text[name_start + name.len()..];
@@ -713,13 +722,7 @@ fn elixir_clause_param_slots(src: &str, span: bonsai_common::Span, name: &str) -
         return Some(Vec::new());
     }
     let close = find_matching_elixir_delim(after_name, 0, '(', ')')?;
-    let args = split_elixir_top_level_args(&after_name[1..close]);
-    Some(
-        args.iter()
-            .enumerate()
-            .map(|(idx, arg)| elixir_pattern_param_name(arg).unwrap_or_else(|| format!("_arg{idx}")))
-            .collect(),
-    )
+    Some(split_elixir_top_level_args(&after_name[1..close]))
 }
 
 fn find_elixir_clause_name(text: &str, name: &str) -> Option<usize> {
@@ -749,18 +752,129 @@ fn elixir_span_text(src: &str, span: bonsai_common::Span) -> Option<&str> {
 }
 
 fn elixir_pattern_param_name(arg: &str) -> Option<String> {
-    let mut token = String::new();
-    for ch in arg.chars().chain(std::iter::once(' ')) {
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            token.push(ch);
-            continue;
+    let arg = arg.trim();
+    if elixir_variable_name(arg) {
+        return Some(arg.to_string());
+    }
+    if let Some((left, right)) = split_elixir_top_level_match(arg) {
+        for candidate in [left.trim(), right.trim()] {
+            if elixir_variable_name(candidate) {
+                return Some(candidate.to_string());
+            }
         }
-        if elixir_variable_name(&token) {
-            return Some(token);
+    }
+    if let Some((_, binding)) = split_elixir_top_level_on(arg, ':') {
+        let binding = binding.trim();
+        if elixir_variable_name(binding) {
+            return Some(binding.to_string());
         }
-        token.clear();
+    }
+    // A default argument keeps the binding on its left side. This is a
+    // grammar shape, not an inventory of parameter names.
+    if let Some((binding, _)) = arg.split_once("\\\\") {
+        let binding = binding.trim();
+        if elixir_variable_name(binding) {
+            return Some(binding.to_string());
+        }
     }
     None
+}
+
+fn split_elixir_top_level_match(text: &str) -> Option<(&str, &str)> {
+    split_elixir_top_level_on(text, '=')
+}
+
+fn split_elixir_top_level_on(text: &str, separator: char) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(open) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ch if ch == separator && depth == 0 => {
+                return Some((&text[..idx], &text[idx + ch.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Lower destructured function-head parameters into explicit storage reads.
+/// A head such as `%Envelope{cmd: cmd}` has one argument slot (`_arg0`) and
+/// one AST-proven binding (`cmd = _arg0.cmd`). Keeping the slot distinct from
+/// the binding prevents interprocedural field forwarding from inventing
+/// `cmd.cmd` when the body reads the scalar `cmd`.
+fn augment_elixir_param_pattern_bindings(decl: &mut bonsai_lang_api::Decl, src: &str) {
+    let Some(args) = elixir_clause_raw_params(src, decl.span, &decl.name) else {
+        return;
+    };
+    let mut bindings = Vec::new();
+    for (idx, arg) in args.iter().enumerate() {
+        let Some(slot) = decl.params.get(idx).cloned() else {
+            continue;
+        };
+        for (field, target) in elixir_map_pattern_bindings(arg) {
+            let source = format!("{slot}.{field}");
+            bindings.push(FlowEvent::Assign {
+                span: decl.name_span,
+                target,
+                source_name: Some(source.clone()),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: vec![source],
+                declares_new_binding: false,
+                value_kind: None,
+            });
+        }
+    }
+    if !bindings.is_empty() {
+        bindings.append(&mut decl.flow_events);
+        decl.flow_events = bindings;
+    }
+}
+
+fn elixir_map_pattern_bindings(text: &str) -> Vec<(String, String)> {
+    let Some(open) = text.find('{') else {
+        return Vec::new();
+    };
+    let Some(close) = find_matching_elixir_delim(text, open, '{', '}') else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for field in split_elixir_top_level_args(&text[open + 1..close]) {
+        let Some((key, value)) = field.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().trim_start_matches(':').trim_matches(['"', '\'']);
+        let value = value.trim();
+        if !key.is_empty()
+            && key
+                .chars()
+                .all(|ch| ch == '_' || ch == '@' || ch.is_ascii_alphanumeric())
+            && elixir_variable_name(value)
+        {
+            out.push((key.to_string(), value.to_string()));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn elixir_variable_name(text: &str) -> bool {

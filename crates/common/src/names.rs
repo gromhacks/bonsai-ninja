@@ -66,34 +66,6 @@ pub const PROJECTION_CANONICALIZATION_VECTORS: &[(&str, &str)] = &[
     ("args[:cmd]", "args.cmd"),
 ];
 
-/// Implicit-receiver prefixes recognized across object-oriented
-/// languages: `self.` (Python / Ruby / Rust), `this.` (Java / Kotlin
-/// / JS / TS / C# / Dart / Swift / PHP). Engine code that needs to
-/// detect "is this a method call on the implicit receiver" walks
-/// this list rather than enumerating language keywords inline. The
-/// list is the union — adapters that don't use a given prefix never
-/// emit text starting with it.
-pub const IMPLICIT_RECEIVER_PREFIXES: &[&str] = &["self.", "this."];
-
-/// Bare implicit-receiver tokens (the [`IMPLICIT_RECEIVER_PREFIXES`]
-/// entries minus the trailing `.`). Used at sites that compare a
-/// receiver *expression* for equality with the implicit-receiver
-/// keyword — not a prefix match against a dotted call.
-pub const IMPLICIT_RECEIVER_TOKENS: &[&str] = &["self", "this"];
-
-/// Super / parent receiver tokens used to dispatch into a base
-/// class. `super` covers Java / Kotlin / JS / TS / Python / Ruby /
-/// Swift / Dart / Scala; `parent` and `self` cover PHP's
-/// `parent::method` and `self::method` qualifiers; `base` covers
-/// C# and Lua; `SUPER` (case-sensitive) covers Perl's
-/// `$self->SUPER::method()`. The set is the union of
-/// receiver-equality tokens for the cross-language
-/// `is_super_receiver` predicate; adapters that want to narrow
-/// further declare their own `super_receiver_tokens` slice in
-/// `LanguageCapabilities` and the engine prefers
-/// `effective_super_receiver_tokens()` when the adapter is known.
-pub const SUPER_RECEIVER_TOKENS: &[&str] = &["super", "parent", "base", "SUPER"];
-
 /// Absolute-path prefixes that adapters may surface on
 /// fully-qualified call names — Rust's `crate::` (this crate's
 /// root) and `self::` (current module), PHP / C++ leading `\` and
@@ -131,19 +103,6 @@ pub const VALUE_TEXT_LEADING_KEYWORDS: &[&str] = &["return ", "new "];
 /// or `new static(...)`, the engine treats it as a class-typed
 /// constructor return for dispatch.
 pub const SELF_CONSTRUCTOR_HEADS: &[&str] = &["Self(", "Self {", "self(", "static("];
-
-/// Canonical constructor method names across the supported
-/// languages. Used as a *fallback* when a class's
-/// `DeclKind::Constructor` lookup misses — adapters that don't (or
-/// can't) tag their constructor decls structurally still emit the
-/// method by one of these well-known names:
-///
-/// - `__init__` — Python.
-/// - `constructor` — JavaScript / TypeScript class syntax.
-/// - `__construct` — PHP magic method.
-/// - `init` — Swift / Objective-C.
-/// - `new` — Ruby idiom, PHP factory convention.
-pub const CONSTRUCTOR_METHOD_NAMES: &[&str] = &["__init__", "constructor", "__construct", "init", "new"];
 
 /// Filename prefix used by the VFS case-sensitivity probe.
 ///

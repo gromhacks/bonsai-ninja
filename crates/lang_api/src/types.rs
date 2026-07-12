@@ -257,6 +257,126 @@ pub struct FieldWrite {
     pub source_param_indices: Vec<usize>,
 }
 
+/// AST-derived value dependencies for a return/yield expression.
+///
+/// Adapters build this from tree-sitter nodes. Core engines consume these
+/// facts directly and must never recover them by tokenizing `value_text`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpressionFlow {
+    /// Exact addressable value place when the whole expression is a place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+    /// Structured projection for an exact field/subscript place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ExpressionProjection>,
+    /// AST-proven value operands in a compound scalar expression. Callee
+    /// names and method receivers are excluded; nested calls are represented
+    /// by `call_sites` and ordinary `FlowEvent::Call` records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_names: Vec<String>,
+    /// Nested call-expression spans whose results contribute to this value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_sites: Vec<Span>,
+    /// Statically named record/map/object fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregate_fields: Vec<ExpressionField>,
+    /// Positional tuple/list/array items, in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tuple_items: Vec<ExpressionFlow>,
+    /// Struct/map/object spread operands, in source order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spreads: Vec<ExpressionFlow>,
+}
+
+impl ExpressionFlow {
+    #[must_use]
+    pub fn from_place(place: impl Into<String>) -> Self {
+        let place = place.into();
+        let place = place.trim().to_string();
+        if place.is_empty() {
+            return Self::default();
+        }
+        Self {
+            projection: ExpressionProjection::from_adapter_place(&place),
+            source_names: vec![place.clone()],
+            place: Some(place),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn from_source_names(source_names: Vec<String>) -> Self {
+        Self {
+            source_names,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.place.is_none()
+            && self.projection.is_none()
+            && self.source_names.is_empty()
+            && self.call_sites.is_empty()
+            && self.aggregate_fields.is_empty()
+            && self.tuple_items.is_empty()
+            && self.spreads.is_empty()
+    }
+}
+
+/// Adapter-normalized exact projection (`base.field.subfield`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpressionProjection {
+    pub base: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+}
+
+impl ExpressionProjection {
+    /// Construct from an adapter-proven canonical place. This helper is for
+    /// synthetic adapter facts; raw source text must not be passed here.
+    #[must_use]
+    pub fn from_adapter_place(place: &str) -> Option<Self> {
+        let normalized = place.replace("->", ".").replace("::", ".");
+        let mut parts = normalized
+            .split('.')
+            .map(str::trim)
+            .filter(|part| !part.is_empty());
+        let base = parts.next()?.to_string();
+        let path: Vec<String> = parts.map(ToString::to_string).collect();
+        (!path.is_empty()).then_some(Self { base, path })
+    }
+
+    /// Render the adapter-normalized projection as its canonical place key.
+    /// This is a structured-fact renderer, not a source-text parser.
+    #[must_use]
+    pub fn canonical_place(&self) -> String {
+        std::iter::once(self.base.as_str())
+            .chain(self.path.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+/// One statically named aggregate field and its structured value flow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpressionField {
+    pub name: String,
+    pub value: ExpressionFlow,
+}
+
+/// Ordered fields of an aggregate type as declared by the grammar.
+///
+/// Positional aggregate initializers (for example C++ `T{x, y}`) are
+/// resolved against these facts by the workspace semantic pass. Keeping the
+/// declaration order explicit avoids source-name inventories and prevents a
+/// whole-object assignment from being fanned out to unrelated fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateLayout {
+    pub type_name: String,
+    pub fields: Vec<String>,
+}
+
 /// One piece of control flow inside a function body. Kept as a tree so the
 /// cross-module tracer can walk branches and loops with real structure
 /// rather than a flat sequence of call sites.
@@ -364,6 +484,20 @@ pub enum FlowEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_kind: Option<AssignValueKind>,
     },
+    /// A positional or named aggregate initializer lowered from its parsed
+    /// expression node. `value_flow.tuple_items` preserves source order until
+    /// the workspace resolves it against an [`AggregateLayout`]; named
+    /// initializers arrive directly in `value_flow.aggregate_fields`.
+    AggregateAssign {
+        span: Span,
+        target: String,
+        /// Adapter-normalized declared type of `target`, when syntax exposes
+        /// it. This is a type identity, never an API/name heuristic.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_name: Option<String>,
+        #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
+        value_flow: ExpressionFlow,
+    },
     Return {
         span: Span,
         /// Verbatim return expression text when available. Used by
@@ -380,6 +514,10 @@ pub enum FlowEvent {
         /// treating static literal text as a value read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_name: Option<String>,
+        /// Compiler facts derived from the return expression's tree-sitter
+        /// node. `value_text` above is rendering-only.
+        #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
+        value_flow: ExpressionFlow,
     },
     Throw {
         span: Span,
@@ -452,6 +590,9 @@ pub enum FlowEvent {
         span: Span,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_text: Option<String>,
+        /// Compiler facts derived from the yielded expression node.
+        #[serde(default, skip_serializing_if = "ExpressionFlow::is_empty")]
+        value_flow: ExpressionFlow,
     },
     /// `await` / `.await` / `await?`. Awaits are frequently the point
     /// where an async function re-enters the scheduler — worth surfacing
@@ -501,6 +642,7 @@ impl FlowEvent {
             | FlowEvent::Branch { span, .. }
             | FlowEvent::Loop { span, .. }
             | FlowEvent::Assign { span, .. }
+            | FlowEvent::AggregateAssign { span, .. }
             | FlowEvent::Return { span, .. }
             | FlowEvent::Throw { span, .. }
             | FlowEvent::Try { span, .. }
@@ -598,9 +740,10 @@ pub struct CallArg {
     /// Keyword-argument name (Python / Ruby / C# named args). `None` for positional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The argument's text verbatim. If it looks like a bare identifier
-    /// referring to a function or lambda, the tracer uses it to resolve
-    /// higher-order callback calls.
+    /// The argument's text verbatim. Retained for rendering and exact
+    /// callable/literal resolver spelling; dataflow consumers must not parse
+    /// this string for value carriers. Those come exclusively from the
+    /// parser-derived [`Self::place`] and [`Self::source_names`] facts.
     pub value_text: String,
     /// Adapter-normalized place key when the argument expression is an
     /// addressable/mutable location according to the parsed grammar
@@ -914,22 +1057,62 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
                     });
                 }
             }
+            FlowEvent::AggregateAssign {
+                span,
+                target,
+                value_flow,
+                ..
+            } => {
+                let sources = expression_flow_source_names(value_flow);
+                let mut operands = vec![OperationOperand {
+                    name: target.clone(),
+                    role: OperationOperandRole::Write,
+                }];
+                operands.extend(sources.iter().cloned().map(|name| OperationOperand {
+                    name,
+                    role: OperationOperandRole::Read,
+                }));
+                out.push(Operation {
+                    span: *span,
+                    kind: OperationKind::Write,
+                    target: Some(target.clone()),
+                    operands,
+                    detail: Some("aggregate_initializer".to_string()),
+                });
+                push_place_shape_operations(*span, target, OperationOperandRole::Write, out);
+                for source in sources {
+                    out.push(Operation {
+                        span: *span,
+                        kind: OperationKind::Read,
+                        target: Some(source.clone()),
+                        operands: vec![OperationOperand {
+                            name: source.clone(),
+                            role: OperationOperandRole::Read,
+                        }],
+                        detail: Some("aggregate_initializer".to_string()),
+                    });
+                    push_place_shape_operations(*span, &source, OperationOperandRole::Read, out);
+                }
+            }
             FlowEvent::Return {
                 span,
                 value_text,
                 value_name,
+                value_flow,
             } => {
                 let target = value_name
                     .as_ref()
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| value_text.as_ref().filter(|s| !s.trim().is_empty()))
                     .cloned();
-                let mut operands = Vec::new();
-                push_optional_operand(
-                    &mut operands,
-                    value_name.as_deref(),
-                    OperationOperandRole::Returned,
-                );
+                let sources = expression_flow_source_names(value_flow);
+                let operands = sources
+                    .iter()
+                    .map(|source| OperationOperand {
+                        name: source.clone(),
+                        role: OperationOperandRole::Returned,
+                    })
+                    .collect();
                 out.push(Operation {
                     span: *span,
                     kind: OperationKind::Return,
@@ -937,17 +1120,18 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
                     operands,
                     detail: None,
                 });
-                if let Some(value) = non_empty(value_name.as_deref()) {
+                for value in sources {
                     out.push(Operation {
                         span: *span,
                         kind: OperationKind::Read,
-                        target: Some(value.to_string()),
+                        target: Some(value.clone()),
                         operands: vec![OperationOperand {
-                            name: value.to_string(),
+                            name: value.clone(),
                             role: OperationOperandRole::Returned,
                         }],
                         detail: Some("return_value".to_string()),
                     });
+                    push_place_shape_operations(*span, &value, OperationOperandRole::Returned, out);
                 }
             }
             FlowEvent::Throw {
@@ -1000,26 +1184,37 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
                 collect_operations(catch_events, out);
                 collect_operations(finally_events, out);
             }
-            FlowEvent::Yield { span, value_text } => {
+            FlowEvent::Yield {
+                span,
+                value_text,
+                value_flow,
+            } => {
+                let sources = expression_flow_source_names(value_flow);
                 out.push(Operation {
                     span: *span,
                     kind: OperationKind::Yield,
                     target: value_text.clone().filter(|s| !s.trim().is_empty()),
-                    operands: Vec::new(),
+                    operands: sources
+                        .iter()
+                        .map(|source| OperationOperand {
+                            name: source.clone(),
+                            role: OperationOperandRole::Returned,
+                        })
+                        .collect(),
                     detail: None,
                 });
-                if let Some(value) = operation_place_from_text(value_text.as_deref()) {
+                for value in sources {
                     out.push(Operation {
                         span: *span,
                         kind: OperationKind::Read,
-                        target: Some(value.to_string()),
+                        target: Some(value.clone()),
                         operands: vec![OperationOperand {
-                            name: value.to_string(),
+                            name: value.clone(),
                             role: OperationOperandRole::Returned,
                         }],
                         detail: Some("yield_value".to_string()),
                     });
-                    push_place_shape_operations(*span, value, OperationOperandRole::Returned, out);
+                    push_place_shape_operations(*span, &value, OperationOperandRole::Returned, out);
                 }
             }
             FlowEvent::Await { span, value_name } => {
@@ -1204,20 +1399,32 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     })
 }
 
-fn operation_place_from_text(value: Option<&str>) -> Option<&str> {
-    let trimmed = non_empty(value)?;
-    let mut has_name_char = false;
-    for ch in trimmed.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '@') {
-            has_name_char = true;
-            continue;
+fn expression_flow_source_names(flow: &ExpressionFlow) -> Vec<String> {
+    fn collect(flow: &ExpressionFlow, out: &mut Vec<String>) {
+        if let Some(place) = non_empty(flow.place.as_deref()) {
+            out.push(place.to_string());
         }
-        if matches!(ch, '.' | ':' | '-' | '>' | '[' | ']' | '*' | '&') {
-            continue;
+        out.extend(
+            flow.source_names
+                .iter()
+                .filter(|name| !name.trim().is_empty())
+                .cloned(),
+        );
+        for field in &flow.aggregate_fields {
+            collect(&field.value, out);
         }
-        return None;
+        for item in &flow.tuple_items {
+            collect(item, out);
+        }
+        for spread in &flow.spreads {
+            collect(spread, out);
+        }
     }
-    has_name_char.then_some(trimmed)
+    let mut out = Vec::new();
+    collect(flow, &mut out);
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn is_release_transition(transition: &str) -> bool {
@@ -1261,6 +1468,12 @@ pub struct DeclIndex {
     pub file: FileId,
     pub defs: Vec<Decl>,
     pub refs: Vec<Ref>,
+    /// Grammar-declared aggregate field layouts in this file. These are
+    /// workspace-level type facts rather than function declarations, so they
+    /// live beside the per-file declaration index and remain available for
+    /// cross-file initializer resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregate_layouts: Vec<AggregateLayout>,
     /// Every string / char literal found in the file. Used by the `strings`
     /// browse command to classify and locate SQL / URL / shell strings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1665,6 +1878,7 @@ mod operation_tests {
                     span: span(34),
                     value_text: None,
                     value_name: Some("result".to_string()),
+                    value_flow: ExpressionFlow::from_place("result"),
                 }],
                 catch_param: Some("err".to_string()),
                 catch_types: Vec::new(),
@@ -1693,10 +1907,12 @@ mod operation_tests {
             FlowEvent::Yield {
                 span: span(40),
                 value_text: Some("payload[0]".to_string()),
+                value_flow: ExpressionFlow::from_place("payload[0]"),
             },
             FlowEvent::Yield {
                 span: span(50),
                 value_text: Some("left + right".to_string()),
+                value_flow: ExpressionFlow::from_source_names(vec!["left".to_string(), "right".to_string()]),
             },
         ]);
 
@@ -1711,8 +1927,12 @@ mod operation_tests {
         assert!(ops
             .iter()
             .any(|op| { op.kind == OperationKind::Index && op.target.as_deref() == Some("payload[0]") }));
-        assert!(!ops
-            .iter()
-            .any(|op| { op.kind == OperationKind::Read && op.target.as_deref() == Some("left + right") }));
+        for operand in ["left", "right"] {
+            assert!(ops.iter().any(|op| {
+                op.kind == OperationKind::Read
+                    && op.target.as_deref() == Some(operand)
+                    && op.detail.as_deref() == Some("yield_value")
+            }));
+        }
     }
 }

@@ -66,13 +66,14 @@ fn temp_root(tag: &str) -> std::path::PathBuf {
 
 #[test]
 fn sarif_render_top_level_shape() {
-    let report = SecurityReport::new(vec![sample_finding()]);
+    let report = SecurityReport::new(vec![sample_finding()]).with_analysis_completeness(true, Vec::new());
     let s = render_sarif_json(&report);
     let v: Value = serde_json::from_str(&s).expect("valid json");
     assert_eq!(v["version"], "2.1.0");
     assert!(v["$schema"].as_str().unwrap().contains("sarif-schema-2.1.0"));
     assert_eq!(v["runs"][0]["tool"]["driver"]["name"], "bonsai-ninja");
     assert_eq!(v["runs"][0]["columnKind"], "utf16CodeUnits");
+    assert_eq!(v["runs"][0]["invocations"][0]["executionSuccessful"], true);
     // S2: rules[] now contains one entry per loaded sink rule
     // (the bonsai rule the finding fired on), not the CWE.
     let rules = v["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
@@ -93,6 +94,54 @@ fn sarif_render_top_level_shape() {
         .unwrap()
         .iter()
         .any(|t| t["id"] == "CWE-78"));
+}
+
+#[test]
+fn sarif_does_not_report_success_for_incomplete_semantic_coverage() {
+    let report = SecurityReport::new(Vec::new())
+        .with_analysis_completeness(false, vec!["unresolved-workspace-call-sites:2".to_string()]);
+    let value: Value = serde_json::from_str(&render_sarif_json(&report)).expect("valid SARIF");
+    let invocation = &value["runs"][0]["invocations"][0];
+    assert_eq!(invocation["executionSuccessful"], false);
+    assert_eq!(invocation["properties"]["bonsai"]["analysis_complete"], false);
+    assert!(invocation["toolExecutionNotifications"][0]["message"]["text"]
+        .as_str()
+        .is_some_and(|message| message.contains("unresolved-workspace-call-sites:2")));
+}
+
+#[test]
+fn train_renderer_preserves_empty_report_completeness_metadata() {
+    let report = SecurityReport::with_runtime_disabled_rules(
+        Vec::new(),
+        vec![RuntimeDisabledRule {
+            rule_id: "python.test.rule".to_string(),
+            reason: "runtime matcher preparation failed".to_string(),
+        }],
+    )
+    .with_analysis_completeness(false, vec!["unresolved-workspace-call-sites:2".to_string()]);
+    let value: Value = serde_json::from_str(&render_train_json(&report)).expect("valid train JSON");
+
+    assert_eq!(value["examples"], serde_json::json!([]));
+    assert_eq!(value["analysis_complete"], false);
+    assert_eq!(
+        value["analysis_incomplete_reasons"],
+        serde_json::json!(["unresolved-workspace-call-sites:2"])
+    );
+    assert_eq!(value["runtime_disabled_rules"][0]["rule_id"], "python.test.rule");
+}
+
+#[test]
+fn grouped_text_distinguishes_complete_and_incomplete_empty_reports() {
+    let complete = SecurityReport::new(Vec::new()).with_analysis_completeness(true, Vec::new());
+    let complete_text = render_grouped_text(&complete);
+    assert!(complete_text.contains("0 finding(s)"));
+    assert!(complete_text.contains("analysis: complete"));
+
+    let incomplete = SecurityReport::new(Vec::new())
+        .with_analysis_completeness(false, vec!["parse-timeout:src/app.py".to_string()]);
+    let incomplete_text = render_grouped_text(&incomplete);
+    assert!(incomplete_text.contains("analysis: incomplete"));
+    assert!(incomplete_text.contains("parse-timeout:src/app.py"));
 }
 
 #[test]

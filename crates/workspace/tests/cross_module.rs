@@ -8,7 +8,7 @@
 use bonsai_callgraph::{collect_callable_targets, EdgeKind};
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
 use bonsai_trace::TraceStepKind;
-use bonsai_workspace::Workspace;
+use bonsai_workspace::{CrossModuleOptions, Workspace};
 use std::sync::Arc;
 
 fn ws_with(adapter: AdapterArc, files: &[(&str, &str)]) -> Workspace {
@@ -133,6 +133,234 @@ fn assert_unresolved_call_marked_incomplete(ws: &Workspace, entry: &str, call_na
             .all(|path| !matches!(path.terminated_by, bonsai_trace::PathTermination::DepthLimit)),
         "unresolved calls must not masquerade as depth limits; paths={:#?}",
         trace.paths
+    );
+}
+
+#[test]
+fn cross_module_defaults_are_semantically_uncapped() {
+    let options = CrossModuleOptions::default();
+    assert_eq!(options.max_depth, 0);
+    assert_eq!(options.max_steps, 0);
+    assert_eq!(options.max_branch_fanout, 0);
+    assert_eq!(options.max_loop_iters, 0);
+}
+
+#[test]
+fn default_trace_has_no_hidden_call_depth_limit() {
+    let mut source = String::new();
+    for idx in 0..24 {
+        source.push_str(&format!("def hop_{idx}():\n    hop_{}()\n\n", idx + 1));
+    }
+    source.push_str("def hop_24():\n    pass\n");
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[("/w/deep.py", source.as_str())],
+    );
+
+    let trace = ws.trace_from("hop_0").expect("trace deep call chain");
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|step| step.kind == TraceStepKind::EnterFunction && step.function == "hop_24"),
+        "default trace stopped before the end of a 24-edge semantic chain"
+    );
+    assert!(
+        trace.summary.truncation_reasons.is_empty(),
+        "default trace must not report a hidden traversal budget: {:?}",
+        trace.summary.truncation_reasons
+    );
+}
+
+#[test]
+fn default_trace_has_no_hidden_step_limit() {
+    let mut source = String::from("def entry():\n");
+    for idx in 0..8_300 {
+        source.push_str(&format!("    value_{idx} = 0\n"));
+    }
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[("/w/wide.py", source.as_str())],
+    );
+
+    let trace = ws.trace_from("entry").expect("trace wide function");
+    assert!(
+        trace.steps.len() > 8_192,
+        "fixture did not cross the retired default cap"
+    );
+    assert!(
+        trace.summary.truncation_reasons.is_empty(),
+        "default trace must be complete above 8192 steps: {:?}",
+        trace.summary.truncation_reasons
+    );
+}
+
+#[test]
+fn recursive_call_graph_converges_without_truncation() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/cycle.py",
+            concat!(
+                "def entry():\n    left()\n\n",
+                "def left():\n    right()\n\n",
+                "def right():\n    left()\n",
+            ),
+        )],
+    );
+
+    let trace = ws.trace_from("entry").expect("trace recursive graph");
+    assert_eq!(
+        trace
+            .steps
+            .iter()
+            .filter(|step| step.kind == TraceStepKind::EnterFunction && step.function == "left")
+            .count(),
+        1,
+        "the same semantic recursion state should expand exactly once"
+    );
+    assert!(
+        trace.summary.truncation_reasons.is_empty(),
+        "cycle convergence is completeness, not truncation: {:?}",
+        trace.summary.truncation_reasons
+    );
+}
+
+#[test]
+fn branch_join_preserves_every_structured_callback_target() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/branch.py",
+            concat!(
+                "def entry(flag):\n",
+                "    if flag:\n        cb = left\n",
+                "    else:\n        cb = right\n",
+                "    cb()\n\n",
+                "def left():\n    pass\n\n",
+                "def right():\n    pass\n",
+            ),
+        )],
+    );
+
+    let trace = ws.trace_from("entry").expect("trace callback branch");
+    for target in ["left", "right"] {
+        assert!(
+            trace
+                .steps
+                .iter()
+                .any(|step| { step.kind == TraceStepKind::EnterFunction && step.function == target }),
+            "branch join dropped callback target {target}; steps={:#?}",
+            trace.steps
+        );
+    }
+
+    let limited = ws
+        .trace_from_with_options(
+            "entry",
+            CrossModuleOptions {
+                max_branch_fanout: 1,
+                ..CrossModuleOptions::default()
+            },
+        )
+        .expect("trace callback branch with explicit fanout cutoff");
+    assert!(
+        limited
+            .summary
+            .truncation_reasons
+            .iter()
+            .any(|reason| reason == "max-branch-fanout"),
+        "explicit branch cutoff must be visible: {:?}",
+        limited.summary
+    );
+}
+
+#[test]
+fn explicit_semantic_cutoffs_are_opt_in_and_visible() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/limited.py",
+            concat!(
+                "def entry():\n    first()\n\n",
+                "def first():\n    second()\n\n",
+                "def second():\n    pass\n",
+            ),
+        )],
+    );
+    let trace = ws
+        .trace_from_with_options(
+            "entry",
+            CrossModuleOptions {
+                max_depth: 1,
+                ..CrossModuleOptions::default()
+            },
+        )
+        .expect("trace with explicit depth cutoff");
+    assert!(
+        trace
+            .summary
+            .truncation_reasons
+            .iter()
+            .any(|reason| reason == "max-depth"),
+        "an explicit cutoff must be visible in completion metadata: {:?}",
+        trace.summary
+    );
+    assert!(!trace.summary.analysis_complete);
+
+    let step_limited = ws
+        .trace_from_with_options(
+            "entry",
+            CrossModuleOptions {
+                max_steps: 1,
+                ..CrossModuleOptions::default()
+            },
+        )
+        .expect("trace with explicit step cutoff");
+    assert!(
+        step_limited
+            .summary
+            .truncation_reasons
+            .iter()
+            .any(|reason| reason == "max-steps"),
+        "explicit step cutoff must be visible: {:?}",
+        step_limited.summary
+    );
+}
+
+#[test]
+fn explicit_loop_state_cutoff_is_visible() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/loop.py",
+            concat!(
+                "def entry():\n",
+                "    cb = first\n",
+                "    while True:\n        cb = second\n",
+                "    cb()\n\n",
+                "def first():\n    pass\n\n",
+                "def second():\n    pass\n",
+            ),
+        )],
+    );
+    let trace = ws
+        .trace_from_with_options(
+            "entry",
+            CrossModuleOptions {
+                max_loop_iters: 1,
+                ..CrossModuleOptions::default()
+            },
+        )
+        .expect("trace with explicit loop-state cutoff");
+    assert!(
+        trace
+            .summary
+            .truncation_reasons
+            .iter()
+            .any(|reason| reason == "max-loop-iters"),
+        "explicit loop cutoff must be visible: {:?}",
+        trace.summary
     );
 }
 

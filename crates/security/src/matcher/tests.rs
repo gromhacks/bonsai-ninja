@@ -635,6 +635,7 @@ fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
             span: span(),
             value_text: Some("params(input)".to_string()),
             value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["input".to_string()]),
         }],
         &mut reads,
     );
@@ -647,6 +648,10 @@ fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
             span: span(),
             value_text: Some(r#"render(params["name"])"#.to_string()),
             value_name: None,
+            value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec![
+                "params".to_string(),
+                "name".to_string(),
+            ]),
         }],
         &mut reads,
     );
@@ -939,6 +944,17 @@ fn arg_int_compare_out_of_bounds_fails() {
     assert!(!super::arg_int_compare(&args, 1, |_| true));
 }
 
+#[test]
+fn write_statement_text_has_no_hidden_byte_limit() {
+    let long_value = "x".repeat(8_192);
+    let source = format!("result = build(\n    {long_value}\n)\nafter()\n");
+    let span = Span::new(FileId::new(0), 0, 6);
+    let statement = super::write_statement_text(&source, span).expect("multiline assignment");
+    assert!(statement.ends_with(')'));
+    assert!(statement.contains(&long_value));
+    assert!(!statement.contains("after()"));
+}
+
 // audit re-apply: R5 RED-before/GREEN-after: before the Yield arm, collect_cal
 
 #[test]
@@ -948,6 +964,7 @@ fn collect_calls_lowers_yielded_call_expression_to_a_call_fact() {
     let events = vec![FlowEvent::Yield {
         span: span(),
         value_text: Some("exec(cmd)".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_source_names(vec!["cmd".to_string()]),
     }];
     let calls = collect_calls(&events);
     assert_eq!(
@@ -973,6 +990,7 @@ fn collect_calls_ignores_non_call_yield_value() {
     let events = vec![FlowEvent::Yield {
         span: span(),
         value_text: Some("x".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("x"),
     }];
     assert!(collect_calls(&events).is_empty());
 }

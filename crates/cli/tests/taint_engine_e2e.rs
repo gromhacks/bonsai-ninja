@@ -1110,6 +1110,11 @@ fn intra_taint_pass_propagates_across_blocks() {
     let tg = &parsed["taint_graph"];
     let mut saw_propagation = false;
     for intra in tg["intra_taint"].as_array().unwrap() {
+        assert_eq!(
+            intra.get("backend").and_then(serde_json::Value::as_str),
+            Some("cfg_local"),
+            "intra_taint must identify the block-oriented local CFG presentation"
+        );
         for per_param in intra
             .get("per_param")
             .and_then(|v| v.as_array())

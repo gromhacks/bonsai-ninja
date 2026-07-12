@@ -85,7 +85,8 @@ impl LanguageAdapter for ErlangAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -124,7 +125,18 @@ impl LanguageAdapter for ErlangAdapter {
                 insert_erlang_map_field_assigns_in_events(&mut decl.flow_events, &map_field_assigns);
                 inject_erlang_fun_ref_aliases(&mut decl.flow_events, snapshot.text.as_ref());
                 rewrite_erlang_throw_calls(&mut decl.flow_events);
-                augment_erlang_tail_return_event(&mut decl.flow_events, decl.span, snapshot.text.as_ref());
+                augment_erlang_tail_return_event(
+                    &mut decl.flow_events,
+                    decl.span,
+                    &tree,
+                    snapshot.text.as_ref(),
+                );
+                inject_erlang_comprehension_generator_bindings(
+                    &mut decl.flow_events,
+                    &tree,
+                    snapshot.text.as_bytes(),
+                    file,
+                );
                 decl.has_implicit_returns = true;
             }
         } else {
@@ -159,7 +171,6 @@ impl LanguageAdapter for ErlangAdapter {
         for decl in &mut decl_index.defs {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             augment_erlang_collection_transform_flow_events(&mut decl.flow_events);
-            inject_erlang_comprehension_generator_bindings(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, ERLANG_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -863,7 +874,12 @@ fn augment_erlang_record_flow_events(events: &mut Vec<FlowEvent>, src: &str) {
 /// expression is implicitly returned. Erlang has no `return` keyword —
 /// the last expression of a clause is its value — so the walker can't
 /// emit a Return naturally; we add one textually.
-fn augment_erlang_tail_return_event(events: &mut Vec<FlowEvent>, span: bonsai_common::Span, src: &str) {
+fn augment_erlang_tail_return_event(
+    events: &mut Vec<FlowEvent>,
+    span: bonsai_common::Span,
+    tree: &Tree,
+    src: &str,
+) {
     // Don't double up if any Return already exists (e.g. via early `case`
     // arm rewrites).
     if events
@@ -875,10 +891,21 @@ fn augment_erlang_tail_return_event(events: &mut Vec<FlowEvent>, span: bonsai_co
     let Some((value_text, value_name, value_span)) = erlang_tail_return_value(src, span) else {
         return;
     };
+    let value_flow = usize::try_from(value_span.start)
+        .ok()
+        .zip(usize::try_from(value_span.end).ok())
+        // Use the smallest named syntax node for the exact tail span. The
+        // generic descendant query may return an enclosing clause when the
+        // range begins or ends on trivia, which would incorrectly pull calls
+        // from earlier expressions into a literal tail return.
+        .and_then(|(start, end)| tree.root_node().named_descendant_for_byte_range(start, end))
+        .map(|value| bonsai_lang_api::kit::expression_flow_from_node(value, value_span.file, src.as_bytes()))
+        .unwrap_or_default();
     events.push(FlowEvent::Return {
         span: value_span,
         value_text: Some(value_text),
         value_name,
+        value_flow,
     });
 }
 
@@ -992,36 +1019,6 @@ fn erlang_comprehension_generator_sources(rhs_text: &str) -> Vec<String> {
     sources
 }
 
-/// The `(binding_var, source_names)` pairs of every generator in an
-/// Erlang comprehension text. `[os:cmd(X) || X <- [Cmd]]` yields
-/// `[("X", ["Cmd"])]` — the loop variable and the iterable's operands.
-fn erlang_comprehension_generator_bindings(rhs_text: &str) -> Vec<(String, Vec<String>)> {
-    let Some((_, qualifiers)) = split_top_level_erlang_comprehension(rhs_text) else {
-        return Vec::new();
-    };
-    let mut bindings = Vec::new();
-    for qualifier in split_top_level_args(qualifiers) {
-        let Some((pattern, generator_source)) = split_top_level_erlang_generator(&qualifier) else {
-            continue;
-        };
-        // The binding is the LEFT of `X <- List` (or `<<X>> <= Bin`).
-        // Take its single value-bearing variable; skip compound
-        // patterns we can't reduce to one carrier.
-        let vars = erlang_value_source_names(pattern);
-        let Some(var) = vars.into_iter().next() else {
-            continue;
-        };
-        let mut sources = Vec::new();
-        for source in erlang_value_source_names(generator_source) {
-            push_unique_string(&mut sources, source);
-        }
-        if !sources.is_empty() {
-            bindings.push((var, sources));
-        }
-    }
-    bindings
-}
-
 /// Erlang comprehensions in tail/return position — `handler() -> [os:cmd(X)
 /// || X <- [Cmd]]` — bind the loop variable (`X`) to the iterable, but the
 /// shared walker records only the body call (`os:cmd(X)`) and a Return
@@ -1033,21 +1030,28 @@ fn erlang_comprehension_generator_bindings(rhs_text: &str) -> Vec<(String, Vec<S
 /// iterable (`Cmd = os:getenv(...)` earlier in the body).
 type ErlangComprehensionBindings = Vec<(String, Vec<String>)>;
 
-fn inject_erlang_comprehension_generator_bindings(events: &mut Vec<FlowEvent>) {
-    // Collect the comprehension-bearing Return spans + their generator
-    // bindings first (immutable borrow), then insert.
+fn inject_erlang_comprehension_generator_bindings(
+    events: &mut Vec<FlowEvent>,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let comprehensions = collect_kinds(tree, &["list_comprehension", "binary_comprehension"]);
     let mut plans: Vec<(bonsai_common::Span, ErlangComprehensionBindings)> = Vec::new();
     for event in events.iter() {
-        if let FlowEvent::Return {
-            span,
-            value_text: Some(text),
-            ..
-        } = event
-        {
-            let bindings = erlang_comprehension_generator_bindings(text);
-            if !bindings.is_empty() {
-                plans.push((*span, bindings));
-            }
+        let FlowEvent::Return { span, .. } = event else {
+            continue;
+        };
+        let Some(comprehension) = comprehensions
+            .iter()
+            .copied()
+            .find(|node| span_of(file, node) == *span)
+        else {
+            continue;
+        };
+        let bindings = erlang_comprehension_generator_bindings_from_node(comprehension, src);
+        if !bindings.is_empty() {
+            plans.push((*span, bindings));
         }
     }
     if plans.is_empty() {
@@ -1095,6 +1099,56 @@ fn inject_erlang_comprehension_generator_bindings(events: &mut Vec<FlowEvent>) {
         let idx = idx.min(events.len());
         events.insert(idx, event);
     }
+}
+
+fn erlang_comprehension_generator_bindings_from_node(
+    comprehension: Node<'_>,
+    src: &[u8],
+) -> ErlangComprehensionBindings {
+    fn collect_generators<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if matches!(node.kind(), "generator" | "b_generator" | "map_generator") {
+            out.push(node);
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect_generators(child, out);
+        }
+    }
+
+    fn collect_variables(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+        if node.kind() == "var" {
+            push_unique_string(out, node_text(&node, src).trim().to_string());
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect_variables(child, src, out);
+        }
+    }
+
+    let mut generators = Vec::new();
+    collect_generators(comprehension, &mut generators);
+    let mut bindings = Vec::new();
+    for generator in generators {
+        let Some(lhs) = generator.child_by_field_name("lhs") else {
+            continue;
+        };
+        let Some(rhs) = generator.child_by_field_name("rhs") else {
+            continue;
+        };
+        let mut targets = Vec::new();
+        collect_variables(lhs, src, &mut targets);
+        let Some(target) = targets.into_iter().next() else {
+            continue;
+        };
+        let mut sources = Vec::new();
+        collect_variables(rhs, src, &mut sources);
+        if !sources.is_empty() {
+            bindings.push((target, sources));
+        }
+    }
+    bindings
 }
 
 fn split_top_level_erlang_comprehension(text: &str) -> Option<(&str, &str)> {
@@ -1188,11 +1242,9 @@ fn erlang_tail_return_value(
     let trimmed_expr = last_expr.trim();
     let normalized_expr = normalize_erlang_return_expr(trimmed_expr)?;
     let value_name = erlang_return_value_name(&normalized_expr);
-    // Translate the relative offset back to absolute byte positions —
-    // accounting for any leading whitespace inside the trimmed slice.
-    let leading_ws_len = last_expr.len().saturating_sub(last_expr.trim_start().len());
-    let absolute_start =
-        usize::try_from(span.start).ok()? + body_start + relative_expr_start + leading_ws_len;
+    // Translate the exact, whitespace-adjusted relative offset back to the
+    // source file's byte coordinates.
+    let absolute_start = usize::try_from(span.start).ok()? + body_start + relative_expr_start;
     let absolute_end = absolute_start + trimmed_expr.len();
     Some((
         normalized_expr,
@@ -1568,13 +1620,18 @@ fn last_erlang_sequence_expr(body: &str) -> Option<(usize, &str)> {
             _ => {}
         }
     }
-    let last_expr = body[last_expr_start..].trim();
-    (!last_expr.is_empty()).then_some((last_expr_start, last_expr))
+    let raw_last_expr = &body[last_expr_start..];
+    let leading = raw_last_expr
+        .len()
+        .saturating_sub(raw_last_expr.trim_start().len());
+    let last_expr = raw_last_expr.trim();
+    (!last_expr.is_empty()).then_some((last_expr_start + leading, last_expr))
 }
 
-/// Canonicalize a return expression. Variables, atoms, quoted literals,
-/// `maps:get` reads and record accesses are all mapped to a normalized
-/// place path; anything else returns `None` so the caller skips it.
+/// Canonicalize a return expression. Every non-empty Erlang tail expression
+/// is a returned value; structured `ExpressionFlow` is subsequently lowered
+/// from its exact tree-sitter node, so calls and compound expressions must not
+/// be discarded merely because they are not storage-place spellings.
 fn normalize_erlang_return_expr(expr: &str) -> Option<String> {
     let expr = expr.trim().trim_end_matches('.').trim();
     if expr.is_empty() {
@@ -1592,7 +1649,7 @@ fn normalize_erlang_return_expr(expr: &str) -> Option<String> {
     if erlang_variable_name(expr) || erlang_atom_name(expr) || erlang_quoted_literal(expr) {
         return Some(expr.to_string());
     }
-    None
+    Some(expr.to_string())
 }
 
 fn erlang_return_container_expr(expr: &str) -> bool {

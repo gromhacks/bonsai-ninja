@@ -51,11 +51,51 @@ fn build_index(decls: Vec<Decl>) -> GlobalIndex {
             file,
             defs,
             refs: Vec::new(),
+            aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),
         });
     }
     idx
+}
+
+#[test]
+fn positional_aggregate_resolution_uses_declared_layout_order() {
+    let mut events = vec![FlowEvent::AggregateAssign {
+        span: span(0, 20, 40),
+        target: "env".to_string(),
+        type_name: Some("Envelope".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow {
+            tuple_items: vec![
+                bonsai_lang_api::ExpressionFlow::from_place("kind"),
+                bonsai_lang_api::ExpressionFlow::from_place("raw"),
+                bonsai_lang_api::ExpressionFlow::from_place("user"),
+            ],
+            ..Default::default()
+        },
+    }];
+    let layouts = AHashMap::from([(
+        "Envelope".to_string(),
+        vec!["kind".to_string(), "cmd".to_string(), "user".to_string()],
+    )]);
+    resolve_aggregate_assignments(&mut events, &[], &layouts);
+
+    let FlowEvent::AggregateAssign { value_flow, .. } = &events[0] else {
+        unreachable!();
+    };
+    assert!(value_flow.tuple_items.is_empty());
+    assert_eq!(
+        value_flow
+            .aggregate_fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.value.place.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("kind", Some("kind")),
+            ("cmd", Some("raw")),
+            ("user", Some("user"))
+        ]
+    );
 }
 
 fn func_id(idx: &GlobalIndex, name: &str) -> FuncId {
@@ -102,6 +142,36 @@ fn empty_workspace_produces_empty_idg() {
 }
 
 #[test]
+fn field_canonicalization_uses_adapter_receiver_metadata() {
+    let receiver_names = vec!["me".to_string()];
+    assert_eq!(canonical_field_name("me.data.cmd", &receiver_names), "data.cmd");
+    assert_eq!(
+        canonical_field_name("ordinary.data.cmd", &receiver_names),
+        "ordinary.data.cmd",
+        "ordinary identifiers must not be stripped as receiver prefixes"
+    );
+}
+
+#[test]
+fn qualified_import_target_uses_member_index_then_module_validation() {
+    let mut storage = empty_decl(1, 0, "Repository");
+    storage.kind = DeclKind::Class;
+    storage.module_path = ModulePath::from_segments(["storage"]);
+    let mut sibling = empty_decl(2, 1, "Repository");
+    sibling.kind = DeclKind::Class;
+    sibling.module_path = ModulePath::from_segments(["other"]);
+    let mut unrelated = empty_decl(3, 2, "Service");
+    unrelated.kind = DeclKind::Class;
+    unrelated.module_path = ModulePath::from_segments(["storage"]);
+    let idx = build_index(vec![storage, sibling, unrelated]);
+    let classes = class_symbols_by_name_for_files(&idx, None);
+
+    let matches = class_symbols_matching_import_target(&idx, &classes, "storage.Repository");
+    assert_eq!(matches.len(), 1);
+    assert_eq!(idx.declaring_file(matches[0]), Some(FileId::new(0)));
+}
+
+#[test]
 fn one_function_one_file_yields_one_segment() {
     let mut decl = empty_decl(1, 0, "f");
     decl.params = vec!["x".to_string()];
@@ -141,6 +211,7 @@ fn two_files_with_call_creates_cross_file_edges_when_callgraph_resolves() {
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("arg"),
     }];
 
     let idx = build_index(vec![f, g]);
@@ -232,8 +303,8 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
     let no_alias_ws = build(&idx, &cg);
     assert_eq!(
         no_alias_ws.cross_file().len(),
-        0,
-        "same-span callgraph edges with mismatched names must not stitch without an alias fact"
+        3,
+        "the compiler-resolved exact-site target is authoritative even when exported and local spellings differ"
     );
 
     let ws = build_with_aliases(&idx, &cg, |file| {
@@ -259,7 +330,7 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
 
     assert_eq!(
         arg_edges, 2,
-        "an exact callgraph site may stitch through an explicit alias fact when the callee decl is `default` and the call text is an alias"
+        "alias metadata must preserve the same two exact argument stitches without duplicating the resolved edge"
     );
 }
 
@@ -689,6 +760,7 @@ fn repeated_calls_to_same_callee_do_not_duplicate_candidates_per_site() {
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("arg"),
     }];
 
     let idx = build_index(vec![f, g]);
@@ -738,6 +810,7 @@ fn same_method_name_on_different_receiver_types_stitches_by_exact_site() {
         span: span(1, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("arg"),
     }];
 
     let mut class_b = empty_decl(4, 2, "B");
@@ -750,6 +823,7 @@ fn same_method_name_on_different_receiver_types_stitches_by_exact_site() {
         span: span(2, 50, 60),
         value_name: Some("arg".to_string()),
         value_text: None,
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("arg"),
     }];
 
     let idx = build_index(vec![f, class_a, run_a, class_b, run_b]);

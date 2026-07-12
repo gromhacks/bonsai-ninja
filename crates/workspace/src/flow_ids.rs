@@ -594,13 +594,17 @@ impl FlowIdCache {
         )
         .map_err(map_factstore_io)?;
         let written_keys = std::sync::Mutex::new(AHashSet::<u64>::default());
+        let write_error = std::sync::Mutex::new(None::<std::io::Error>);
         for (func, entry) in memory_entries {
             let key = u64::from(func.raw());
             let payload = encode_flow_id_entry(&entry);
-            writer.add(key, 0, &payload).map_err(map_factstore_io)?;
+            writer.add_owned(key, 0, payload).map_err(map_factstore_io)?;
             written_keys.lock().expect("written keys lock").insert(key);
         }
         todo.par_iter().for_each(|&f| {
+            if write_error.lock().expect("write error lock").is_some() {
+                return;
+            }
             let options = FlowIdLabelOptions::default();
             let (chains, trunc) = enumerate_chains(&cg, f, options.max_chains, options.max_probes);
             let (ids, label_trunc) =
@@ -611,13 +615,19 @@ impl FlowIdCache {
             };
             let payload = encode_flow_id_entry(&entry);
             let key = u64::from(f.raw());
-            if let Err(err) = writer.add(key, 0, &payload) {
-                tracing::warn!(error = %err, "flow-ids factstore add failed");
+            if let Err(err) = writer.add_owned(key, 0, payload) {
+                let mut first_error = write_error.lock().expect("write error lock");
+                if first_error.is_none() {
+                    *first_error = Some(map_factstore_io(err));
+                }
             } else {
                 written_keys.lock().expect("written keys lock").insert(key);
             }
             on_each_done(f);
         });
+        if let Some(error) = write_error.lock().expect("write error lock").take() {
+            return Err(error);
+        }
         if let Some(reader) = disk_clone {
             for item in reader.iter() {
                 let (key, hit) = item.map_err(map_factstore_io)?;

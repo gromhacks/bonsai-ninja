@@ -46,7 +46,7 @@ pub(super) fn dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMat
     let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
     let target_line = *lines.get(target_idx)?;
     let target_indent = leading_ascii_whitespace(target_line);
-    let search_start = target_idx.saturating_sub(12);
+    let search_start = enclosing_body_start_line(ws, hit, &snapshot.text);
     for idx in search_start..target_idx {
         let guard_line = lines[idx];
         if !python_dev_only_env_guard_line(guard_line) {
@@ -83,7 +83,7 @@ fn js_dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> O
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let target_idx = usize::try_from(hit.line.checked_sub(1)?).ok()?;
     let target_indent = leading_ascii_whitespace(lines.get(target_idx)?);
-    let search_start = target_idx.saturating_sub(12);
+    let search_start = enclosing_body_start_line(ws, hit, &snapshot.text);
     for (idx, guard_line) in lines
         .iter()
         .copied()
@@ -115,6 +115,25 @@ fn js_dev_only_environment_guard_sanitizer(ws: &Workspace, hit: &RuleMatch) -> O
         });
     }
     None
+}
+
+/// Start guard discovery at the compiler-owned enclosing declaration rather
+/// than an arbitrary line window. Tree-sitter body spans keep the scan in the
+/// current function while allowing guards of any syntactic size or distance.
+fn enclosing_body_start_line(ws: &Workspace, hit: &RuleMatch, source: &str) -> usize {
+    let Some(entry) = ws
+        .enclosing_index()
+        .enclosing_for(ws.db(), hit.span.file, hit.span.start)
+    else {
+        return 0;
+    };
+    let Ok(start) = usize::try_from(entry.start) else {
+        return 0;
+    };
+    source
+        .as_bytes()
+        .get(..start.min(source.len()))
+        .map_or(0, |prefix| prefix.iter().filter(|byte| **byte == b'\n').count())
 }
 
 fn js_dev_only_env_guard_line(line: &str) -> bool {
@@ -974,11 +993,14 @@ fn java_local_method_body(lines: &[&str], helper: &str) -> Option<(usize, Vec<St
         }
         let mut signature = String::new();
         let mut open_line = None;
-        for (offset, sig_line) in lines.iter().enumerate().skip(idx).take(6) {
+        for (offset, sig_line) in lines.iter().enumerate().skip(idx) {
             signature.push_str(sig_line);
             signature.push('\n');
             if sig_line.contains('{') {
                 open_line = Some(offset);
+                break;
+            }
+            if sig_line.contains(';') {
                 break;
             }
         }
@@ -1207,7 +1229,7 @@ fn js_ts_local_function_body(lines: &[&str], helper: &str) -> Option<(usize, Str
         let mut body = String::new();
         let mut brace_depth = 0isize;
         let mut saw_open = false;
-        for line in lines.iter().skip(idx).take(80) {
+        for line in lines.iter().skip(idx) {
             body.push_str(line);
             body.push('\n');
             for ch in line.chars() {
@@ -1226,9 +1248,8 @@ fn js_ts_local_function_body(lines: &[&str], helper: &str) -> Option<(usize, Str
                 }
             }
         }
-        if saw_open {
-            return Some((idx, body));
-        }
+        // An unterminated body is not sanitizer proof. Parser diagnostics
+        // expose the malformed file; do not accept a truncated prefix.
     }
     None
 }

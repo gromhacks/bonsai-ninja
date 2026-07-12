@@ -1,24 +1,13 @@
 //! Taint-source seed derivation.
 //!
 //! Converts a source `RuleMatch` into the set of seed tokens the taint
-//! engine starts from: value-flow node seeds, event-walk seed targets
-//! (assign / output-arg / callback-param bindings), qualified-read
+//! engine starts from: AST event seed targets (assign / output-arg /
+//! callback-param bindings), qualified-read
 //! descendant aliases, and the strict source-text matcher that gates
 //! text-only seeding.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-
-pub(super) fn seed_source_nodes_from_value_flow(src: &RuleMatch, graph: &ValueFlowGraph, out: &mut TokenSet) {
-    for node in value_flow_match::rule_match_to_nodes(src, graph) {
-        let text = node.value_text.trim();
-        if text.is_empty() || source_seed_text_is_literal(text) {
-            continue;
-        }
-        insert_taint_aliases(out, text);
-        insert_descendant_taint_aliases(out, text);
-    }
-}
 
 pub(super) fn collect_source_seed_targets(
     events: &[bonsai_lang_api::FlowEvent],
@@ -313,7 +302,9 @@ fn seed_source_output_call_args(
         let Some(arg) = args.get(index) else {
             continue;
         };
-        let text = arg.place.as_deref().unwrap_or(arg.value_text.as_str()).trim();
+        let Some(text) = arg.place.as_deref().map(str::trim) else {
+            continue;
+        };
         if text.is_empty() || source_seed_text_is_literal(text) {
             continue;
         }

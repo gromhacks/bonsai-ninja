@@ -2,9 +2,12 @@
 use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallArg, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    kit::{
+        call_arg_from_node, collect_kinds, first_named_child_of_kind, language_from_pack, node_text,
+        parse_with, span_of,
+    },
+    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::Node;
 use tree_sitter::{Language, Tree};
@@ -99,7 +102,10 @@ impl LanguageAdapter for GoAdapter {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
-            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            // Go receiver identifiers are explicit syntax on each method
+            // declaration and are carried by receiver_param_index.
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
             ..LanguageCapabilities::partial_baseline()
         }
     }
@@ -666,8 +672,10 @@ fn go_initializer_assignment_events(init: Node<'_>, file: FileId, src: &[u8]) ->
             declares_new_binding: init.kind() == "short_var_declaration",
             value_kind,
         });
-        if let Some((callee, args)) = call {
-            out.push(go_call_event_from_parts(span_of(file, &rhs), &callee, args, file));
+        if call.is_some() {
+            if let Some(call_event) = go_call_event_from_node(rhs, file, src) {
+                out.push(call_event);
+            }
         }
     }
     out
@@ -685,53 +693,38 @@ fn go_expression_list_values(node: Node<'_>) -> Vec<Node<'_>> {
     out
 }
 
-fn go_call_event_from_parts(span: Span, callee: &str, args: Vec<String>, file: FileId) -> FlowEvent {
+fn go_call_event_from_node(call: Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let callee_node = call.child_by_field_name("function")?;
+    let callee = node_text(&callee_node, src).trim();
+    if callee.is_empty() {
+        return None;
+    }
     let receiver = callee.rsplit_once('.').map(|(recv, _)| recv.to_string());
     let call_kind = if receiver.is_some() {
         bonsai_lang_api::CallKind::Method
     } else {
         bonsai_lang_api::CallKind::Function
     };
-    FlowEvent::Call {
-        span,
+    let mut args = Vec::new();
+    if let Some(arguments) = call.child_by_field_name("arguments") {
+        let mut cursor = arguments.walk();
+        for argument in arguments.named_children(&mut cursor) {
+            if let Some(argument) = call_arg_from_node(argument, file, src, None) {
+                args.push(argument);
+            }
+        }
+    }
+    Some(FlowEvent::Call {
+        span: span_of(file, &call),
         name: callee.to_string(),
         receiver,
         receiver_types: Vec::new(),
         call_kind,
-        args: args
-            .into_iter()
-            .map(|value_text| {
-                let source_names = go_value_source_names(&value_text);
-                let place = go_argument_place(&value_text);
-                CallArg {
-                    passing_mode: Default::default(),
-                    span: Span::new(file, span.start, span.end),
-                    name: None,
-                    value_text,
-                    place,
-                    source_names,
-                }
-            })
-            .collect(),
-    }
-}
-
-fn go_argument_place(value_text: &str) -> Option<String> {
-    let trimmed = value_text.trim();
-    let place = trimmed.strip_prefix('&').unwrap_or(trimmed).trim();
-    if place.is_empty() {
-        return None;
-    }
-    let mut chars = place.chars();
-    let first = chars.next()?;
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    if chars.all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric()) {
-        Some(place.to_string())
-    } else {
-        None
-    }
+        args,
+    })
 }
 
 fn go_range_value_source_names(right_text: &str, source_name: Option<&str>) -> Vec<String> {
@@ -1025,6 +1018,7 @@ fn collect_go_projected_receiver_aliases(
             }
             FlowEvent::Call { receiver: None, .. }
             | FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
             | FlowEvent::Return { .. }
             | FlowEvent::Throw { .. }
             | FlowEvent::Break { .. }

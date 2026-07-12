@@ -38,6 +38,7 @@ fn c_adapter_populates_qualified_name_and_visibility() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -94,6 +95,7 @@ fn c_adapter_does_not_index_function_pointer_api_declarations_as_int() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -126,6 +128,7 @@ fn c_adapter_emits_function_pointer_callable_alias() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);
@@ -168,6 +171,7 @@ fn c_adapter_call_result_assignment_uses_call_metadata_only() {
     let ctx = AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: None,
     };
     let idx = adapter.extract_declarations(file, &ctx);

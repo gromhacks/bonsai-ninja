@@ -4,8 +4,9 @@
 //! adapter's grammar handler). For every ordinary `Call`, we consume the
 //! precomputed semantic resolved callgraph and recurse only when that graph
 //! proves the target. For `Branch`, we emit a `BranchSplit` step and walk
-//! both sides as separate path ids. For `Loop`, we emit `LoopEnter` /
-//! `LoopExit` and walk the body once with an `Iterate` marker.
+//! both sides as separate path ids. Loops and recursive calls converge over
+//! canonical semantic states, so the default trace is complete without an
+//! arbitrary unroll or call-depth ceiling.
 //! Higher-order callbacks are resolved by binding call-site arguments to
 //! parameter names in the callee's `Decl::params`; unresolved calls are
 //! recorded as incompleteness, never widened into guessed targets.
@@ -22,30 +23,37 @@ use bonsai_resolve::{resolve_callable_with_context, ResolveContext};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CrossModuleOptions {
+    /// Maximum call edges from the entry. `0` means no semantic depth cap.
     pub max_depth: u16,
+    /// Maximum emitted semantic steps. `0` means no requested step cap.
     pub max_steps: u32,
+    /// Maximum alternatives expanded at one structured split. `0` means all.
     pub max_branch_fanout: u16,
+    /// Maximum distinct loop binding states evaluated. `0` means fixed point.
     pub max_loop_iters: u16,
 }
 
 impl Default for CrossModuleOptions {
     fn default() -> Self {
         Self {
-            max_depth: 12,
-            max_steps: 8192,
-            max_branch_fanout: 4,
-            max_loop_iters: 1,
+            max_depth: 0,
+            max_steps: 0,
+            max_branch_fanout: 0,
+            max_loop_iters: 0,
         }
     }
 }
 
-impl From<CrossModuleOptions> for TraceLimits {
-    fn from(o: CrossModuleOptions) -> Self {
-        Self {
-            max_steps: o.max_steps,
-            max_call_depth: o.max_depth,
-            max_loop_iters: o.max_loop_iters,
-            max_branches: u32::from(o.max_branch_fanout) * 256,
+impl CrossModuleOptions {
+    /// Presentation metadata for `bonsai_trace::finalize`. Cross-module
+    /// traversal interprets zero itself as uncapped; this value is never fed
+    /// to the separately bounded abstract interpreter.
+    pub(crate) fn trace_metadata_limits(self) -> TraceLimits {
+        TraceLimits {
+            max_steps: self.max_steps,
+            max_call_depth: self.max_depth,
+            max_loop_iters: self.max_loop_iters,
+            max_branches: u32::from(self.max_branch_fanout),
         }
     }
 }
@@ -67,49 +75,128 @@ struct TraceBuilder<'a> {
     /// Per-frame bindings: maps parameter-name -> concrete symbol its
     /// callback argument pointed at. Pushed on entry, popped on exit.
     frames: Vec<CallFrame>,
-    /// Recursion guard: set of symbols currently being expanded.
-    stack_set: AHashSet<SymbolId>,
+    /// Monotone graph fixed point. The symbol alone is insufficient because
+    /// the same higher-order function can be reached with different callback
+    /// and receiver-type bindings.
+    expanded_states: AHashSet<ExpansionState>,
 }
 
 #[derive(Default, Clone)]
 struct CallFrame {
     /// parameter name -> callable symbol passed at the call site
-    callbacks: AHashMap<String, SymbolId>,
+    callbacks: AHashMap<String, AHashSet<SymbolId>>,
     /// whole-local variable bindings (e.g. `x = some_func`)
-    locals: AHashMap<String, SymbolId>,
+    locals: AHashMap<String, AHashSet<SymbolId>>,
     /// local / parameter / field receiver type bindings visible in
     /// this frame. Seeded from adapter-emitted `Decl.type_aliases`
     /// and updated from call-site parameter bindings.
-    types: AHashMap<String, String>,
+    types: AHashMap<String, AHashSet<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExpansionState {
+    symbol: SymbolId,
+    callbacks: Vec<(String, Vec<SymbolId>)>,
+    types: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct FrameState {
+    callbacks: Vec<(String, Vec<SymbolId>)>,
+    locals: Vec<(String, Vec<SymbolId>)>,
+    types: Vec<(String, Vec<String>)>,
+}
+
+impl CallFrame {
+    fn expansion_state(&self, symbol: SymbolId) -> ExpansionState {
+        ExpansionState {
+            symbol,
+            callbacks: canonical_symbol_bindings(&self.callbacks),
+            types: canonical_string_bindings(&self.types),
+        }
+    }
+
+    fn state(&self) -> FrameState {
+        FrameState {
+            callbacks: canonical_symbol_bindings(&self.callbacks),
+            locals: canonical_symbol_bindings(&self.locals),
+            types: canonical_string_bindings(&self.types),
+        }
+    }
+
+    fn merge_alternative(&mut self, other: &Self) {
+        merge_binding_map(&mut self.callbacks, &other.callbacks);
+        merge_binding_map(&mut self.locals, &other.locals);
+        merge_binding_map(&mut self.types, &other.types);
+    }
+
+    fn bound_callables(&self, name: &str) -> Vec<SymbolId> {
+        let mut out = AHashSet::new();
+        if let Some(symbols) = self.callbacks.get(name) {
+            out.extend(symbols.iter().copied());
+        }
+        if let Some(symbols) = self.locals.get(name) {
+            out.extend(symbols.iter().copied());
+        }
+        let mut out: Vec<_> = out.into_iter().collect();
+        out.sort_by_key(|symbol| symbol.raw());
+        out
+    }
+}
+
+fn canonical_symbol_bindings(
+    bindings: &AHashMap<String, AHashSet<SymbolId>>,
+) -> Vec<(String, Vec<SymbolId>)> {
+    let mut out: Vec<_> = bindings
+        .iter()
+        .map(|(name, values)| {
+            let mut values: Vec<_> = values.iter().copied().collect();
+            values.sort_by_key(|symbol| symbol.raw());
+            (name.clone(), values)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn canonical_string_bindings(bindings: &AHashMap<String, AHashSet<String>>) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<_> = bindings
+        .iter()
+        .map(|(name, values)| {
+            let mut values: Vec<_> = values.iter().cloned().collect();
+            values.sort();
+            (name.clone(), values)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn merge_binding_map<T>(into: &mut AHashMap<String, AHashSet<T>>, from: &AHashMap<String, AHashSet<T>>)
+where
+    T: Clone + Eq + std::hash::Hash,
+{
+    for (name, values) in from {
+        into.entry(name.clone())
+            .or_default()
+            .extend(values.iter().cloned());
+    }
 }
 
 struct CallSite<'a> {
     span: Span,
     name: &'a str,
-    receiver: Option<&'a str>,
     call_kind: CallKind,
     args: &'a [CallArg],
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum SiteResolution {
-    Resolved(SymbolId),
-    Ambiguous { candidates: usize },
-    Unresolved,
-}
-
-fn semantic_receiver_callback_args<'a>(site: &'a CallSite<'_>) -> Vec<&'a CallArg> {
-    if site.receiver.is_none() {
-        return Vec::new();
-    }
-    let method = bonsai_lang_api::kit::short_name_of(site.name);
-    match method {
-        // Well-known collection/promise APIs whose first argument is a
-        // callback that the call semantically invokes.
-        "forEach" | "map" | "flatMap" | "filter" | "some" | "every" | "find" | "findIndex" | "reduce"
-        | "reduceRight" | "sort" | "then" | "catch" | "finally" => site.args.first().into_iter().collect(),
-        _ => Vec::new(),
-    }
+struct ResolvedTarget {
+    symbol: SymbolId,
+    /// Whether this edge represents invocation of the call site's arguments.
+    /// Callback edges attached to an argument span do not: the callback's own
+    /// invocation parameters are supplied by the receiving API.
+    bind_site_args: bool,
 }
 
 impl<'a> CrossModuleTracer<'a> {
@@ -132,17 +219,21 @@ impl<'a> CrossModuleTracer<'a> {
             next_path: 1,
             current_path: 1,
             frames: vec![CallFrame::default()],
-            stack_set: AHashSet::new(),
+            expanded_states: AHashSet::new(),
         };
-        builder.expand(start, &[], &[], 0);
+        builder.expand(start, &[], None, 0);
         builder.out
     }
 }
 
 impl<'a> TraceBuilder<'a> {
     fn emit(&mut self, kind: StepKind, func: FuncId, span: Span, precision: Precision, msg: String) -> bool {
-        if self.next_step >= self.opts.max_steps {
+        if self.opts.max_steps != 0 && self.next_step >= self.opts.max_steps {
             self.out.mark_truncated("max-steps");
+            return false;
+        }
+        if self.next_step == u32::MAX {
+            self.out.mark_truncated("trace-step-id-space");
             return false;
         }
         self.out.steps.push(RawStep {
@@ -158,31 +249,29 @@ impl<'a> TraceBuilder<'a> {
         true
     }
 
-    fn allocate_path(&mut self) -> u32 {
-        self.next_path = self.next_path.saturating_add(1);
-        self.next_path
+    fn allocate_path(&mut self) -> Option<u32> {
+        let Some(next) = self.next_path.checked_add(1) else {
+            self.out.mark_truncated("trace-path-id-space");
+            return None;
+        };
+        self.next_path = next;
+        Some(next)
     }
 
-    /// Expand function `symbol`. `args` / `param_names` let us bind
-    /// callback-parameter values from the caller.
-    fn expand(&mut self, symbol: SymbolId, args: &[CallArg], param_names: &[String], depth: u16) -> bool {
-        if depth > self.opts.max_depth {
+    /// Expand one semantic graph state. `args` bind structured call-site
+    /// values to the callee's AST-declared parameters.
+    fn expand(&mut self, symbol: SymbolId, args: &[CallArg], caller: Option<FuncId>, depth: usize) -> bool {
+        if self.opts.max_depth != 0 && depth > usize::from(self.opts.max_depth) {
             self.out.mark_truncated("max-depth");
-            return false;
-        }
-        if !self.stack_set.insert(symbol) {
-            // Cycle: emit a truncation hint rather than recursing forever.
             return true;
         }
         let Some(decl) = self.db.global_index().decl_of(symbol).cloned() else {
-            self.stack_set.remove(&symbol);
             return true;
         };
         if !matches!(
             decl.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor
         ) {
-            self.stack_set.remove(&symbol);
             return true;
         }
         let func = FuncId::new(symbol.raw());
@@ -193,24 +282,31 @@ impl<'a> TraceBuilder<'a> {
             types: types_from_decl(&decl),
             ..Default::default()
         };
-        let zip_params = if param_names.is_empty() {
-            &decl.params[..]
-        } else {
-            param_names
-        };
-        for (idx, param) in zip_params.iter().enumerate() {
+        let global = self.db.global_index();
+        let binding_decl = caller
+            .and_then(|func| global.decl_of(SymbolId::new(func.raw())))
+            .unwrap_or(&decl);
+        for (idx, param) in decl.params.iter().enumerate() {
             // Keyword-arg match first.
             let kw = args.iter().find(|a| a.name.as_deref() == Some(param.as_str()));
             let positional = args.get(idx);
             let arg = kw.or(positional);
             if let Some(a) = arg {
-                if let Some(sym) = self.resolve_callable_by_name(&a.value_text, &decl) {
-                    frame.callbacks.insert(param.clone(), sym);
+                if let Some(sym) = self.resolve_callable_by_name(&a.value_text, binding_decl) {
+                    frame.callbacks.entry(param.clone()).or_default().insert(sym);
                 }
-                if let Some(type_name) = self.type_name_for_expr(&a.value_text, &decl) {
-                    frame.types.insert(param.clone(), type_name);
-                }
+                frame
+                    .types
+                    .entry(param.clone())
+                    .or_default()
+                    .extend(self.type_names_for_expr(&a.value_text, binding_decl));
             }
+        }
+        let state = frame.expansion_state(symbol);
+        if !self.expanded_states.insert(state) {
+            // Reaching an already-expanded semantic state closes a recursive
+            // or diamond edge. This is convergence, not truncation.
+            return true;
         }
         self.frames.push(frame);
 
@@ -222,7 +318,6 @@ impl<'a> TraceBuilder<'a> {
             format!("Enter function {}", decl.name),
         ) {
             self.frames.pop();
-            self.stack_set.remove(&symbol);
             return false;
         }
 
@@ -237,11 +332,10 @@ impl<'a> TraceBuilder<'a> {
         );
 
         self.frames.pop();
-        self.stack_set.remove(&symbol);
         ok
     }
 
-    fn walk_events(&mut self, events: &[FlowEvent], func: FuncId, depth: u16) -> bool {
+    fn walk_events(&mut self, events: &[FlowEvent], func: FuncId, depth: usize) -> bool {
         for event in events {
             if !self.walk_event(event, func, depth) {
                 return false;
@@ -250,13 +344,11 @@ impl<'a> TraceBuilder<'a> {
         true
     }
 
-    fn walk_event(&mut self, event: &FlowEvent, func: FuncId, depth: u16) -> bool {
+    fn walk_event(&mut self, event: &FlowEvent, func: FuncId, depth: usize) -> bool {
         match event {
             FlowEvent::Call {
                 span,
                 name,
-                receiver,
-                receiver_types: _,
                 call_kind,
                 args,
                 ..
@@ -264,7 +356,6 @@ impl<'a> TraceBuilder<'a> {
                 CallSite {
                     span: *span,
                     name,
-                    receiver: receiver.as_deref(),
                     call_kind: *call_kind,
                     args,
                 },
@@ -289,36 +380,57 @@ impl<'a> TraceBuilder<'a> {
                 // Walk both branches and tag the alternate arm with a
                 // distinct path id so renderers can reconstruct the split.
                 let parent_path = self.current_path;
+                let entry_frame = self.frames.last().cloned().unwrap_or_default();
                 if !self.walk_events(then_events, func, depth) {
                     return false;
                 }
+                let then_frame = self.frames.last().cloned().unwrap_or_default();
+                let mut merged_frame = then_frame;
                 if !else_events.is_empty() {
-                    let else_path = self.allocate_path();
-                    self.current_path = else_path;
-                    if !self.emit(
-                        StepKind::BranchSplit,
-                        func,
-                        *span,
-                        Precision::Exact,
-                        "Else branch".into(),
-                    ) {
-                        return false;
-                    }
-                    if !self.walk_events(else_events, func, depth) {
+                    if self.opts.max_branch_fanout == 1 {
+                        self.out.mark_truncated("max-branch-fanout");
+                    } else {
+                        let Some(else_path) = self.allocate_path() else {
+                            return false;
+                        };
+                        self.current_path = else_path;
+                        if let Some(frame) = self.frames.last_mut() {
+                            *frame = entry_frame.clone();
+                        }
+                        if !self.emit(
+                            StepKind::BranchSplit,
+                            func,
+                            *span,
+                            Precision::Exact,
+                            "Else branch".into(),
+                        ) {
+                            return false;
+                        }
+                        if !self.walk_events(else_events, func, depth) {
+                            self.current_path = parent_path;
+                            return false;
+                        }
+                        let else_frame = self.frames.last().cloned().unwrap_or_default();
+                        merged_frame.merge_alternative(&else_frame);
+                        if !self.emit(
+                            StepKind::Merge,
+                            func,
+                            *span,
+                            Precision::Exact,
+                            "Branch merge".into(),
+                        ) {
+                            self.current_path = parent_path;
+                            return false;
+                        }
                         self.current_path = parent_path;
-                        return false;
                     }
-                    if !self.emit(
-                        StepKind::Merge,
-                        func,
-                        *span,
-                        Precision::Exact,
-                        "Branch merge".into(),
-                    ) {
-                        self.current_path = parent_path;
-                        return false;
-                    }
-                    self.current_path = parent_path;
+                } else {
+                    // An if-without-else also has the path on which the body
+                    // is skipped; preserve both binding states at the join.
+                    merged_frame.merge_alternative(&entry_frame);
+                }
+                if let Some(frame) = self.frames.last_mut() {
+                    *frame = merged_frame;
                 }
                 if !self.emit(
                     StepKind::Merge,
@@ -352,10 +464,33 @@ impl<'a> TraceBuilder<'a> {
                 ) {
                     return false;
                 }
-                // Walk body once — static unroll isn't useful; the user
-                // knows the body can repeat.
-                if !self.walk_events(body, func, depth) {
-                    return false;
+                let mut states = AHashSet::new();
+                let mut iterations = 0usize;
+                loop {
+                    let before = self
+                        .frames
+                        .last()
+                        .map(CallFrame::state)
+                        .unwrap_or_else(|| CallFrame::default().state());
+                    if !states.insert(before.clone()) {
+                        break;
+                    }
+                    if self.opts.max_loop_iters != 0 && iterations >= usize::from(self.opts.max_loop_iters) {
+                        self.out.mark_truncated("max-loop-iters");
+                        break;
+                    }
+                    iterations += 1;
+                    if !self.walk_events(body, func, depth) {
+                        return false;
+                    }
+                    let after = self
+                        .frames
+                        .last()
+                        .map(CallFrame::state)
+                        .unwrap_or_else(|| CallFrame::default().state());
+                    if after == before || states.contains(&after) {
+                        break;
+                    }
                 }
                 self.emit(StepKind::Merge, func, *span, Precision::Exact, "Loop exit".into())
             }
@@ -371,26 +506,28 @@ impl<'a> TraceBuilder<'a> {
                 // Record local binding for callback resolution.
                 let global = self.db.global_index();
                 let caller_decl = global.decl_of(SymbolId::new(func.raw()));
-                if let Some(name) = source_name {
-                    if let Some(caller_decl) = caller_decl {
-                        if let Some(sym) = self.resolve_callable_by_name(name, caller_decl) {
-                            if let Some(frame) = self.frames.last_mut() {
-                                frame.locals.insert(target.clone(), sym);
-                            }
-                        }
+                let assigned_callable = source_name
+                    .as_deref()
+                    .and_then(|name| caller_decl.and_then(|decl| self.resolve_callable_by_name(name, decl)));
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.locals.remove(target);
+                    if let Some(symbol) = assigned_callable {
+                        frame.locals.entry(target.clone()).or_default().insert(symbol);
                     }
                 }
-                let assigned_type = caller_decl.and_then(|decl| {
-                    self.infer_assigned_type(
-                        decl,
-                        source_name.as_deref(),
-                        source_call.as_deref(),
-                        source_names,
-                    )
-                });
-                if let Some(type_name) = assigned_type {
+                let assigned_types = caller_decl
+                    .map(|decl| {
+                        self.infer_assigned_types(
+                            decl,
+                            source_name.as_deref(),
+                            source_call.as_deref(),
+                            source_names,
+                        )
+                    })
+                    .unwrap_or_default();
+                if !assigned_types.is_empty() {
                     if let Some(frame) = self.frames.last_mut() {
-                        frame.types.insert(target.clone(), type_name);
+                        frame.types.insert(target.clone(), assigned_types);
                     }
                 } else if let Some(frame) = self.frames.last_mut() {
                     if !declares_type_alias(caller_decl, target) {
@@ -412,6 +549,13 @@ impl<'a> TraceBuilder<'a> {
                     ),
                 )
             }
+            FlowEvent::AggregateAssign { span, target, .. } => self.emit(
+                StepKind::Assign,
+                func,
+                *span,
+                Precision::Exact,
+                format!("Initialize aggregate {target}"),
+            ),
             FlowEvent::Return { span, .. } => {
                 self.emit(StepKind::Return, func, *span, Precision::Exact, "Return".into())
             }
@@ -429,36 +573,51 @@ impl<'a> TraceBuilder<'a> {
                     return false;
                 }
                 let parent_path = self.current_path;
+                let entry_frame = self.frames.last().cloned().unwrap_or_default();
                 for e in body {
                     if !self.walk_event(e, func, depth) {
                         return false;
                     }
                 }
-                if !catch_events.is_empty() {
-                    let catch_path = self.allocate_path();
-                    self.current_path = catch_path;
-                    for e in catch_events {
-                        if !self.walk_event(e, func, depth) {
-                            self.current_path = parent_path;
-                            return false;
-                        }
-                    }
-                    for e in finally_events {
-                        if !self.walk_event(e, func, depth) {
-                            self.current_path = parent_path;
-                            return false;
-                        }
-                    }
-                    if !self.emit(StepKind::Merge, func, *span, Precision::Exact, "Try exit".into()) {
-                        self.current_path = parent_path;
-                        return false;
-                    }
-                    self.current_path = parent_path;
-                }
                 for e in finally_events {
                     if !self.walk_event(e, func, depth) {
                         return false;
                     }
+                }
+                let mut merged_frame = self.frames.last().cloned().unwrap_or_default();
+                if !catch_events.is_empty() {
+                    if self.opts.max_branch_fanout == 1 {
+                        self.out.mark_truncated("max-branch-fanout");
+                    } else {
+                        let Some(catch_path) = self.allocate_path() else {
+                            return false;
+                        };
+                        self.current_path = catch_path;
+                        if let Some(frame) = self.frames.last_mut() {
+                            *frame = entry_frame;
+                        }
+                        for e in catch_events {
+                            if !self.walk_event(e, func, depth) {
+                                self.current_path = parent_path;
+                                return false;
+                            }
+                        }
+                        for e in finally_events {
+                            if !self.walk_event(e, func, depth) {
+                                self.current_path = parent_path;
+                                return false;
+                            }
+                        }
+                        merged_frame.merge_alternative(&self.frames.last().cloned().unwrap_or_default());
+                        if !self.emit(StepKind::Merge, func, *span, Precision::Exact, "Try exit".into()) {
+                            self.current_path = parent_path;
+                            return false;
+                        }
+                        self.current_path = parent_path;
+                    }
+                }
+                if let Some(frame) = self.frames.last_mut() {
+                    *frame = merged_frame;
                 }
                 self.emit(StepKind::Merge, func, *span, Precision::Exact, "Try exit".into())
             }
@@ -482,7 +641,7 @@ impl<'a> TraceBuilder<'a> {
                     .map(|l| format!("Continue {l}"))
                     .unwrap_or_else(|| "Continue".into()),
             ),
-            FlowEvent::Yield { span, value_text } => self.emit(
+            FlowEvent::Yield { span, value_text, .. } => self.emit(
                 StepKind::Yield,
                 func,
                 *span,
@@ -549,34 +708,36 @@ impl<'a> TraceBuilder<'a> {
         }
     }
 
-    fn emit_call(&mut self, site: CallSite<'_>, func: FuncId, depth: u16) -> bool {
+    fn emit_call(&mut self, site: CallSite<'_>, func: FuncId, depth: usize) -> bool {
         // Resolution order:
         //   1. Resolved semantic callgraph edge for this exact call site.
         //   2. Active call-frame parameter/local binding for context-sensitive
-        //      higher-order callbacks.
-        // Anything else is reported as incomplete instead of re-resolved by a
-        // trace-local fallback that could disagree with the callgraph.
-        let graph_resolution = self.resolve_callgraph_site(func, &site);
-        let graph_sym = match graph_resolution {
-            SiteResolution::Resolved(sym) if self.is_trace_expandable(sym) => Some(sym),
-            SiteResolution::Resolved(_) => None,
-            SiteResolution::Ambiguous { .. } | SiteResolution::Unresolved => None,
-        };
-
-        let callback_sym = if graph_sym.is_none() {
-            self.frames.last().and_then(|f| {
-                f.callbacks
-                    .get(site.name)
-                    .or_else(|| f.locals.get(site.name))
-                    .copied()
-                    .filter(|sym| self.is_trace_expandable(*sym))
-            })
-        } else {
-            None
-        };
-
-        let resolved_call = graph_sym.or(callback_sym);
-        let resolved_by_graph = graph_sym.is_some();
+        //      higher-order callbacks. These bindings are unioned because a
+        //      branch join can retain alternatives that the context-free graph
+        //      represents with only one whole-function local binding.
+        // Anything else is reported as incomplete rather than widened through
+        // a workspace name inventory.
+        let mut resolved_calls = self.resolve_callgraph_site(func, &site);
+        if let Some(frame) = self.frames.last() {
+            resolved_calls.extend(frame.bound_callables(site.name).into_iter().map(|symbol| {
+                ResolvedTarget {
+                    symbol,
+                    bind_site_args: true,
+                }
+            }));
+            let short = bonsai_lang_api::kit::short_name_of(site.name);
+            if short != site.name {
+                resolved_calls.extend(frame.bound_callables(short).into_iter().map(|symbol| {
+                    ResolvedTarget {
+                        symbol,
+                        bind_site_args: true,
+                    }
+                }));
+            }
+        }
+        resolved_calls.retain(|target| self.is_trace_expandable(target.symbol));
+        resolved_calls.sort_by_key(|target| (target.symbol.raw(), !target.bind_site_args));
+        resolved_calls.dedup_by_key(|target| target.symbol);
         let display_kind = site.call_kind;
         let label = match display_kind {
             CallKind::Constructor => format!("New {}", site.name),
@@ -587,95 +748,101 @@ impl<'a> TraceBuilder<'a> {
             CallKind::Function => format!("Call {}", site.name),
         };
 
-        let Some(sym) = resolved_call else {
+        if resolved_calls.is_empty() {
             let call_name = site.name.trim();
-            let diagnostic = match graph_resolution {
-                SiteResolution::Ambiguous { candidates } => {
-                    self.out
-                        .mark_incomplete(format!("ambiguous-call:{call_name}:{candidates}"));
-                    format!("Ambiguous call {call_name}")
-                }
-                SiteResolution::Resolved(_) | SiteResolution::Unresolved => {
-                    self.out.mark_incomplete(format!("unresolved-call:{call_name}"));
-                    format!("Unresolved call {call_name}")
-                }
-            };
+            self.out.mark_incomplete(format!("unresolved-call:{call_name}"));
             return self.emit(
                 StepKind::Diagnostic,
                 func,
                 site.span,
                 Precision::Exact,
-                diagnostic,
+                format!("Unresolved call {call_name}"),
             );
+        }
+
+        let allowed = if self.opts.max_branch_fanout == 0 {
+            resolved_calls.len()
+        } else {
+            resolved_calls.len().min(usize::from(self.opts.max_branch_fanout))
         };
+        if allowed < resolved_calls.len() {
+            self.out.mark_truncated("max-branch-fanout");
+            resolved_calls.truncate(allowed);
+        }
 
         let precision = match display_kind {
             CallKind::Constructor => Precision::Exact,
             _ => Precision::Narrowed,
         };
-        if !self.emit(StepKind::Call, func, site.span, precision, label) {
-            return false;
-        }
-
-        if !self.expand(sym, site.args, &self.get_param_names(sym), depth + 1) {
-            return false;
-        }
         let ret_label = if display_kind == CallKind::Constructor {
             format!("Return from new {}", site.name)
         } else {
             format!("Return from {}", site.name)
         };
-        if !self.emit(StepKind::Return, func, site.span, Precision::Exact, ret_label) {
+        let parent_path = self.current_path;
+        if resolved_calls.len() > 1
+            && !self.emit(
+                StepKind::BranchSplit,
+                func,
+                site.span,
+                Precision::Narrowed,
+                format!("Call target split {}", site.name),
+            )
+        {
             return false;
         }
-        if display_kind == CallKind::Method && !resolved_by_graph {
-            for arg in semantic_receiver_callback_args(&site) {
-                let Some(callback) = self.resolve_callable_arg(&arg.value_text, func) else {
-                    continue;
+        for (idx, target) in resolved_calls.into_iter().enumerate() {
+            if idx > 0 {
+                let Some(path) = self.allocate_path() else {
+                    return false;
                 };
-                if !self.expand(callback, &[], &self.get_param_names(callback), depth + 1) {
-                    return false;
-                }
-                if !self.emit(
-                    StepKind::Return,
-                    func,
-                    site.span,
-                    Precision::Narrowed,
-                    format!("Return from callback {}", arg.value_text.trim()),
-                ) {
-                    return false;
-                }
+                self.current_path = path;
+            }
+            if !self.emit(StepKind::Call, func, site.span, precision, label.clone()) {
+                self.current_path = parent_path;
+                return false;
+            }
+            let args = if target.bind_site_args { site.args } else { &[] };
+            if !self.expand(target.symbol, args, Some(func), depth + 1) {
+                self.current_path = parent_path;
+                return false;
+            }
+            if !self.emit(
+                StepKind::Return,
+                func,
+                site.span,
+                Precision::Exact,
+                ret_label.clone(),
+            ) {
+                self.current_path = parent_path;
+                return false;
             }
         }
+        self.current_path = parent_path;
         true
     }
 
-    fn resolve_callgraph_site(&self, caller: FuncId, site: &CallSite<'_>) -> SiteResolution {
+    fn resolve_callgraph_site(&self, caller: FuncId, site: &CallSite<'_>) -> Vec<ResolvedTarget> {
         let mut out = Vec::new();
-        let mut seen = AHashSet::new();
-        let callback_arg_spans: Vec<Span> = if site.call_kind == CallKind::Method {
-            semantic_receiver_callback_args(site)
-                .into_iter()
-                .map(|arg| arg.span)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let mut seen = AHashMap::new();
+        let arg_spans: AHashSet<Span> = site.args.iter().map(|arg| arg.span).collect();
         for edge in self.call_graph.callees_of(caller) {
-            let same_site = edge.span == site.span
-                || (edge.kind == EdgeKind::Indirect && callback_arg_spans.contains(&edge.span));
+            let direct_site = edge.span == site.span;
+            let callback_site = edge.kind == EdgeKind::Indirect && arg_spans.contains(&edge.span);
+            let same_site = direct_site || callback_site;
             if !edge.precision.is_semantic() || !same_site {
                 continue;
             }
-            if seen.insert(edge.to) {
-                out.push(SymbolId::new(edge.to.raw()));
-            }
+            seen.entry(SymbolId::new(edge.to.raw()))
+                .and_modify(|bind_site_args| *bind_site_args |= direct_site)
+                .or_insert(direct_site);
         }
-        match out.len() {
-            0 => SiteResolution::Unresolved,
-            1 => SiteResolution::Resolved(out[0]),
-            candidates => SiteResolution::Ambiguous { candidates },
-        }
+        out.extend(seen.into_iter().map(|(symbol, bind_site_args)| ResolvedTarget {
+            symbol,
+            bind_site_args,
+        }));
+        out.sort_by_key(|target| target.symbol.raw());
+        out
     }
 
     fn is_trace_expandable(&self, symbol: SymbolId) -> bool {
@@ -685,34 +852,6 @@ impl<'a> TraceBuilder<'a> {
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
             ) && decl.body_span.is_some()
         })
-    }
-
-    fn resolve_callable_arg(&self, raw: &str, caller: FuncId) -> Option<SymbolId> {
-        let trimmed = raw.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
-        if trimmed.is_empty()
-            || trimmed.starts_with('"')
-            || trimmed.starts_with('\'')
-            || trimmed.starts_with('`')
-            || trimmed.contains("=>")
-        {
-            return None;
-        }
-        let short = bonsai_lang_api::kit::short_name_of(trimmed);
-        self.frames
-            .last()
-            .and_then(|f| {
-                f.callbacks
-                    .get(trimmed)
-                    .or_else(|| f.callbacks.get(short))
-                    .or_else(|| f.locals.get(trimmed))
-                    .or_else(|| f.locals.get(short))
-                    .copied()
-            })
-            .or_else(|| {
-                let global = self.db.global_index();
-                let caller_decl = global.decl_of(SymbolId::new(caller.raw()))?;
-                self.resolve_callable_by_name(trimmed, caller_decl)
-            })
     }
 
     /// Resolve a textual callable name in the caller's file/module
@@ -742,53 +881,51 @@ impl<'a> TraceBuilder<'a> {
         None
     }
 
-    fn type_name_for_expr(&self, expr: &str, caller_decl: &Decl) -> Option<String> {
+    fn type_names_for_expr(&self, expr: &str, caller_decl: &Decl) -> AHashSet<String> {
         let normalized = normalize_receiver_alias_text(expr);
         let tail = bonsai_lang_api::kit::short_name_of(&normalized);
         let self_tail = format!("self.{tail}");
         let this_tail = format!("this.{tail}");
-        self.frames
-            .last()
-            .and_then(|frame| {
-                frame
-                    .types
-                    .get(expr)
-                    .or_else(|| frame.types.get(normalized.as_str()))
-                    .or_else(|| frame.types.get(tail))
-                    .or_else(|| frame.types.get(self_tail.as_str()))
-                    .or_else(|| frame.types.get(this_tail.as_str()))
-                    .cloned()
-            })
-            .or_else(|| {
-                caller_decl
-                    .type_aliases
-                    .iter()
-                    .find(|alias| {
-                        alias.name == expr
-                            || alias.name == normalized
-                            || alias.name == tail
-                            || alias.name == self_tail
-                            || alias.name == this_tail
-                    })
-                    .map(|alias| alias.type_name.clone())
-            })
+        let aliases = [
+            expr,
+            normalized.as_str(),
+            tail,
+            self_tail.as_str(),
+            this_tail.as_str(),
+        ];
+        let mut out = AHashSet::new();
+        if let Some(frame) = self.frames.last() {
+            for alias in aliases {
+                if let Some(types) = frame.types.get(alias) {
+                    out.extend(types.iter().cloned());
+                }
+            }
+        }
+        out.extend(
+            caller_decl
+                .type_aliases
+                .iter()
+                .filter(|binding| aliases.iter().any(|alias| binding.name == *alias))
+                .map(|binding| binding.type_name.clone()),
+        );
+        out
     }
 
-    fn infer_assigned_type(
+    fn infer_assigned_types(
         &self,
         caller_decl: &Decl,
         source_name: Option<&str>,
         source_call: Option<&str>,
         source_names: &[String],
-    ) -> Option<String> {
+    ) -> AHashSet<String> {
+        let mut out = AHashSet::new();
         if let Some(source_name) = source_name {
-            if let Some(type_name) = self.type_name_for_expr(source_name, caller_decl) {
-                return Some(type_name);
-            }
+            out.extend(self.type_names_for_expr(source_name, caller_decl));
         }
         if let Some(call) = source_call {
-            let bare = constructor_type_tail(call)?;
-            return Some(bare.to_string());
+            if let Some(bare) = constructor_type_tail(call) {
+                out.insert(bare.to_string());
+            }
         }
         if source_names.len() == 2
             && source_names[0]
@@ -796,9 +933,9 @@ impl<'a> TraceBuilder<'a> {
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
         {
-            return Some(source_names[0].clone());
+            out.insert(source_names[0].clone());
         }
-        None
+        out
     }
 
     fn alias_map_for_decl(&self, decl: &Decl) -> AHashMap<String, AliasTarget> {
@@ -868,16 +1005,6 @@ impl<'a> TraceBuilder<'a> {
         }
         Some(first)
     }
-
-    /// Parameter-name list for `sym`, or empty if the symbol isn't
-    /// a known decl.
-    fn get_param_names(&self, sym: SymbolId) -> Vec<String> {
-        self.db
-            .global_index()
-            .decl_of(sym)
-            .map(|decl: &Decl| decl.params.clone())
-            .unwrap_or_default()
-    }
 }
 
 fn callable_name_variants(raw: &str) -> Vec<String> {
@@ -930,11 +1057,14 @@ fn constructor_type_tail(call: &str) -> Option<&str> {
         .then_some(bare)
 }
 
-fn types_from_decl(decl: &Decl) -> AHashMap<String, String> {
-    decl.type_aliases
-        .iter()
-        .map(|alias| (alias.name.clone(), alias.type_name.clone()))
-        .collect()
+fn types_from_decl(decl: &Decl) -> AHashMap<String, AHashSet<String>> {
+    let mut out: AHashMap<String, AHashSet<String>> = AHashMap::new();
+    for alias in &decl.type_aliases {
+        out.entry(alias.name.clone())
+            .or_default()
+            .insert(alias.type_name.clone());
+    }
+    out
 }
 
 fn assignment_trace_message(

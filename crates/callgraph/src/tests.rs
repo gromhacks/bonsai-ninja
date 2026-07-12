@@ -156,6 +156,7 @@ fn insert_file(global: &mut GlobalIndex, file: FileId, defs: Vec<Decl>) {
         file,
         defs,
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -1285,7 +1286,7 @@ fn overloaded_call_drops_candidates_when_type_evidence_is_missing() {
 }
 
 #[test]
-fn overloaded_call_uses_constructor_expression_type_to_avoid_fanout() {
+fn overloaded_call_uses_structured_constructor_type_to_avoid_fanout() {
     let caller_file = FileId::new(1);
     let helper_file = FileId::new(2);
     let mut global = GlobalIndex::new();
@@ -1297,11 +1298,31 @@ fn overloaded_call_uses_constructor_expression_type_to_avoid_fanout() {
                 caller_file,
                 0,
                 "entry",
-                vec![call_with_args(
-                    caller_file,
-                    "getLinesFromFile",
-                    &["new File(filename)"],
-                )],
+                vec![
+                    FlowEvent::Call {
+                        span: Span::new(caller_file, 10, 28),
+                        name: "File".to_string(),
+                        receiver: None,
+                        receiver_types: vec!["File".to_string()],
+                        call_kind: CallKind::Constructor,
+                        args: Vec::new(),
+                    },
+                    FlowEvent::Call {
+                        span: Span::new(caller_file, 0, 50),
+                        name: "getLinesFromFile".to_string(),
+                        receiver: None,
+                        receiver_types: Vec::new(),
+                        call_kind: CallKind::Function,
+                        args: vec![CallArg {
+                            passing_mode: Default::default(),
+                            span: Span::new(caller_file, 8, 30),
+                            name: None,
+                            value_text: "rendering-only".to_string(),
+                            place: None,
+                            source_names: Vec::new(),
+                        }],
+                    },
+                ],
             ),
             &["owasp", "benchmark"],
         )],
@@ -1320,24 +1341,45 @@ fn overloaded_call_uses_constructor_expression_type_to_avoid_fanout() {
         ),
         &[("filename", "String")],
     );
+    let file_class = with_module_path(
+        decl_with(helper_file, 3, "File", DeclKind::Class, None, Vec::new()),
+        &["owasp", "benchmark"],
+    );
+    let file_constructor = with_module_path(
+        decl_with(
+            helper_file,
+            4,
+            "allocate",
+            DeclKind::Constructor,
+            Some(3),
+            Vec::new(),
+        ),
+        &["owasp", "benchmark"],
+    );
     insert_file(
         &mut global,
         helper_file,
-        vec![file_overload.clone(), string_overload],
+        vec![
+            file_overload.clone(),
+            string_overload.clone(),
+            file_class,
+            file_constructor,
+        ],
     );
 
     let cg = build_graph(&global, |_| Some("java"));
     let entry = FuncId::new(global.find_by_name("entry")[0].raw());
     let file_target = FuncId::new(file_overload.symbol.raw());
 
-    let edges = cg.callees_of(entry).collect::<Vec<_>>();
-    assert_eq!(
-        edges.len(),
-        1,
-        "constructor argument type should select the File overload: {edges:?}"
+    let targets = cg.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>();
+    assert!(
+        targets.contains(&file_target),
+        "structured constructor argument type should select the File overload: {targets:?}"
     );
-    assert_eq!(edges[0].to, file_target);
-    assert_eq!(edges[0].precision, Precision::Narrowed);
+    assert!(
+        !targets.contains(&FuncId::new(string_overload.symbol.raw())),
+        "the incompatible String overload must be removed: {targets:?}"
+    );
 }
 
 #[test]
@@ -1613,6 +1655,7 @@ fn super_receiver_resolves_base_method_from_override_context() {
         |_| &[],
         |_| Some("swift"),
         |_| &["super"],
+        |_| false,
     );
     let from = func_id_by_name_and_parent(&global, "run", "AuditedRepository");
     let to = func_id_by_name_and_parent(&global, "run", "Repository");
@@ -1933,6 +1976,25 @@ fn static_class_receiver_method_resolves_without_bare_name_fanout() {
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].to, repo_search);
     assert_eq!(cg.callers_of(repo_search).count(), 1);
+}
+
+#[test]
+fn folded_receiver_identity_comes_from_adapter_metadata() {
+    let file = FileId::new(1);
+    let mut caller = decl(file, 0, "handle", Vec::new());
+    caller.implicit_receiver_names = vec!["$this".to_string(), "self".to_string()];
+
+    assert!(folded_call_name_receiver_is_instance("$this", &caller, &[]));
+    assert!(folded_call_name_receiver_is_instance("self", &caller, &[]));
+    assert!(folded_call_name_receiver_is_instance(
+        "super",
+        &caller,
+        &["super"]
+    ));
+    assert!(
+        !folded_call_name_receiver_is_instance("Repository", &caller, &[]),
+        "a class qualifier is not an instance merely because source syntax used a qualified call"
+    );
 }
 
 #[test]
@@ -2698,6 +2760,7 @@ fn returned_lambda_factory_assignment_resolves_local_callable_call() {
             span: Span::new(file, 120, 180),
             value_name: None,
             value_text: Some("func(acc, tok string) string { return tok }".to_string()),
+            value_flow: Default::default(),
         }],
     );
     factory.span = Span::new(file, 100, 190);
@@ -2926,16 +2989,26 @@ fn constructor_assignment_narrows_constructor_edge_to_assigned_type() {
         file,
         orchestrate,
         "orchestrate",
-        vec![FlowEvent::Assign {
-            span: Span::new(file, 300, 340),
-            target: "repo".to_string(),
-            source_name: None,
-            source_call: Some("AuditedRepository".to_string()),
-            source_call_args: vec!["valid".to_string()],
-            source_names: vec!["AuditedRepository".to_string(), "valid".to_string()],
-            declares_new_binding: false,
-            value_kind: None,
-        }],
+        vec![
+            FlowEvent::Call {
+                span: Span::new(file, 310, 330),
+                name: "AuditedRepository".to_string(),
+                receiver: None,
+                receiver_types: vec!["AuditedRepository".to_string()],
+                call_kind: CallKind::Constructor,
+                args: Vec::new(),
+            },
+            FlowEvent::Assign {
+                span: Span::new(file, 300, 340),
+                target: "repo".to_string(),
+                source_name: None,
+                source_call: Some("AuditedRepository".to_string()),
+                source_call_args: vec!["valid".to_string()],
+                source_names: vec!["AuditedRepository".to_string(), "valid".to_string()],
+                declares_new_binding: false,
+                value_kind: Some(AssignValueKind::CallResult),
+            },
+        ],
     );
     caller.body_span = Some(Span::new(file, 280, 360));
     insert_file(
@@ -2958,6 +3031,185 @@ fn constructor_assignment_narrows_constructor_edge_to_assigned_type() {
         !edges.iter().any(|edge| edge.to == base_init_id),
         "constructor assignment must not also fan out to Repository.__init__: {edges:?}"
     );
+}
+
+#[test]
+fn constructor_call_uses_nearest_inherited_constructor_when_subclass_declares_none() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let base = 1;
+    let child = 2;
+    let mut base_class = decl_with(file, base, "Repository", DeclKind::Class, None, Vec::new());
+    base_class.body_span = Some(Span::new(file, 0, 100));
+    let mut child_class = decl_with(
+        file,
+        child,
+        "AuditedRepository",
+        DeclKind::Class,
+        None,
+        Vec::new(),
+    );
+    child_class.body_span = Some(Span::new(file, 100, 200));
+    child_class.bases = vec!["Repository".to_string()];
+    let base_init = decl_with(
+        file,
+        3,
+        "Repository",
+        DeclKind::Constructor,
+        Some(base),
+        Vec::new(),
+    );
+    let caller = decl(
+        file,
+        4,
+        "persist",
+        vec![FlowEvent::Call {
+            span: Span::new(file, 300, 320),
+            name: "AuditedRepository".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Constructor,
+            args: Vec::new(),
+        }],
+    );
+    insert_file(
+        &mut global,
+        file,
+        vec![base_class, child_class, base_init, caller],
+    );
+
+    let graph = build_graph(&global, |_| Some("swift"));
+    let persist = FuncId::new(global.find_by_name("persist")[0].raw());
+    let inherited_init = func_id_by_name_and_parent(&global, "Repository", "Repository");
+    assert_eq!(
+        graph.callees_of(persist).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![inherited_init]
+    );
+}
+
+#[test]
+fn constructor_call_resolves_by_kind_and_class_parent_not_method_spelling() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "Box", DeclKind::Class, None, Vec::new());
+    let constructor = decl_with(file, 2, "forge", DeclKind::Constructor, Some(1), Vec::new());
+    let caller = decl(
+        file,
+        3,
+        "entry",
+        vec![FlowEvent::Call {
+            span: Span::new(file, 100, 120),
+            name: "forge".to_string(),
+            receiver: Some("Box".to_string()),
+            receiver_types: vec!["Box".to_string()],
+            call_kind: CallKind::Constructor,
+            args: Vec::new(),
+        }],
+    );
+    insert_file(&mut global, file, vec![class, constructor, caller]);
+
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let constructor = func_id_by_name_and_parent(&global, "forge", "Box");
+    assert_eq!(
+        graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![constructor]
+    );
+}
+
+#[test]
+fn class_shaped_function_call_does_not_infer_a_constructor() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "Widget", DeclKind::Class, None, Vec::new());
+    let constructor = decl_with(file, 2, "allocate", DeclKind::Constructor, Some(1), Vec::new());
+    let caller = decl(file, 3, "entry", vec![call(file, "Widget")]);
+    insert_file(&mut global, file, vec![class, constructor, caller]);
+
+    let graph = build_graph(&global, |_| Some("fixture"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    assert_eq!(
+        graph.callees_of(entry).count(),
+        0,
+        "uppercase spelling is not constructor evidence"
+    );
+}
+
+#[test]
+fn ambiguous_bare_call_constructs_only_with_adapter_capability_and_resolved_class() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "Widget", DeclKind::Class, None, Vec::new());
+    let constructor = decl_with(file, 2, "allocate", DeclKind::Constructor, Some(1), Vec::new());
+    let caller = decl(file, 3, "entry", vec![call(file, "Widget")]);
+    insert_file(&mut global, file, vec![class, constructor, caller]);
+
+    let graph = ResolvedCallGraph::build_with_file_info_and_super_tokens(
+        &global,
+        |_| ahash::AHashMap::new(),
+        |_| ahash::AHashMap::new(),
+        |_| None,
+        |_| &[],
+        |_| Some("python"),
+        |_| &[],
+        |_| true,
+    );
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let constructor = func_id_by_name_and_parent(&global, "allocate", "Widget");
+    assert_eq!(
+        graph.callees_of(entry).map(|edge| edge.to).collect::<Vec<_>>(),
+        vec![constructor]
+    );
+}
+
+#[test]
+fn returned_constructor_type_comes_from_expression_call_site_not_text() {
+    let file = FileId::new(1);
+    let call_span = Span::new(file, 40, 60);
+    let mut global = GlobalIndex::new();
+    let class = decl_with(file, 1, "Product", DeclKind::Class, None, Vec::new());
+    let constructor = decl_with(
+        file,
+        2,
+        "build_anyhow",
+        DeclKind::Constructor,
+        Some(1),
+        Vec::new(),
+    );
+    let factory = decl(
+        file,
+        3,
+        "factory",
+        vec![
+            FlowEvent::Call {
+                span: call_span,
+                name: "build_anyhow".to_string(),
+                receiver: Some("Product".to_string()),
+                receiver_types: vec!["Product".to_string()],
+                call_kind: CallKind::Constructor,
+                args: Vec::new(),
+            },
+            FlowEvent::Return {
+                span: Span::new(file, 35, 65),
+                value_name: None,
+                value_text: Some("misleading_render_text".to_string()),
+                value_flow: bonsai_lang_api::ExpressionFlow {
+                    call_sites: vec![Span::new(file, call_span.start, 65)],
+                    ..Default::default()
+                },
+            },
+        ],
+    );
+    insert_file(&mut global, file, vec![class, constructor, factory]);
+    let factory = global
+        .find_by_name("factory")
+        .first()
+        .and_then(|symbol| global.decl_of(*symbol))
+        .expect("globally remapped factory declaration");
+
+    let mut types = Vec::new();
+    collect_constructed_return_type_names(&global, factory, &AHashMap::new(), factory, &mut types);
+    assert_eq!(types, vec!["Product".to_string()]);
 }
 
 #[test]

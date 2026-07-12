@@ -537,10 +537,12 @@
     kind: param
     target:
       regex: "^(blob|payload|data|raw|bytes)$"
+  constraints:
+  - sink_tag_in: [insecure-deserialization]
   match_examples:
   - name: ruby.source.bytes_blob_param example
     code: |
       def handler(payload)
         payload
       end
-  description: "Generic `blob | payload | data | raw | bytes` parameter on deserialization-style entry points. Pairs with ruby.deser.* sinks (YAML.load, Marshal.load, Oj.load). Engine taint flow + sink shape are the second gate."
+  description: "Generic `blob | payload | data | raw | bytes` parameter on deserialization-style entry points. Declaratively restricted to insecure-deserialization sinks so ordinary `data` parameters cannot become unrelated command/XSS sources."

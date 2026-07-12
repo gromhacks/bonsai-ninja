@@ -22,8 +22,8 @@
 //!
 //! ## Three-layer API
 //!
-//! 1. [`FactStoreWriter`] — append entries, write the file
-//!    atomically.
+//! 1. [`FactStoreWriter`] — append entries through a bounded,
+//!    backpressured pipeline and write the file atomically.
 //! 2. [`FactStoreReader`] — open a written file, look up entries by
 //!    key, iterate.
 //! 3. [`FactCache`] — wraps a reader with an LRU of decoded values

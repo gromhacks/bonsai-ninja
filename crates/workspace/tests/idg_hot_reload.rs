@@ -308,3 +308,82 @@ fn idg_service_drops_when_workspace_root_invalidated() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn configured_and_scoped_idgs_never_replace_the_canonical_default() {
+    use bonsai_common::FuncId;
+
+    let ws = Workspace::new(registry());
+    ws.vfs().write(
+        "/w/app.py".to_string(),
+        Arc::<str>::from(
+            "def entry(value):\n    return helper(value)\n\ndef helper(value):\n    return value\n",
+        ),
+    );
+    ws.vfs().write(
+        "/w/outside.py".to_string(),
+        Arc::<str>::from("def outside(value):\n    return value\n"),
+    );
+    let files = ws.vfs().all_files();
+    for file in &files {
+        let _ = ws.db().decl_index(*file);
+        let _ = ws.db().import_index(*file);
+    }
+
+    let canonical = ws.build_and_seed_idg_service();
+    let options = bonsai_idg::TransferOptions {
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
+        ..Default::default()
+    };
+    let configured = ws.build_and_seed_idg_service_with_transfer_options(&options);
+    assert!(
+        !Arc::ptr_eq(&configured, &canonical),
+        "non-default transfer semantics require an isolated service"
+    );
+    assert!(
+        Arc::ptr_eq(
+            &ws.db()
+                .idg_service()
+                .expect("canonical default remains installed"),
+            &canonical,
+        ),
+        "a configured graph must not replace the canonical default"
+    );
+
+    let global = ws.db().global_index();
+    let scoped_file = files[0];
+    let scoped_funcs: Vec<FuncId> = global
+        .functions_in(scoped_file)
+        .map(|decl| FuncId::new(decl.symbol.raw()))
+        .collect();
+    let call_graph = ws.cached_resolved_call_graph();
+    let _scoped = ws.build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
+        &options,
+        &[scoped_file],
+        &scoped_funcs,
+        call_graph.as_ref(),
+    );
+    assert!(
+        Arc::ptr_eq(
+            &ws.db()
+                .idg_service()
+                .expect("canonical default remains installed"),
+            &canonical,
+        ),
+        "a file/function-scoped graph must not replace the canonical default"
+    );
+
+    ws.db().invalidate_idg_service();
+    assert!(ws.db().idg_service().is_none());
+    let _scoped = ws.build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
+        &options,
+        &[scoped_file],
+        &scoped_funcs,
+        call_graph.as_ref(),
+    );
+    assert!(
+        ws.db().idg_service().is_none(),
+        "a scoped build in a cold workspace must leave the canonical slot empty"
+    );
+}

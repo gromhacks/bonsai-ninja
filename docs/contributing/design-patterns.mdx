@@ -363,7 +363,7 @@ Concrete wiring:
 | Cache | File | Build trigger | Invalidation |
 |-------|------|----------------|--------------|
 | `DataFlowCache` | `crates/workspace/src/dataflow.rs` | `prewarm_all` | per-FuncId via dependency files |
-| `ValueFlowCache` | `crates/workspace/src/value_flow.rs` | `prewarm_all_with_caches` | clear |
+| `ValueFlowCache` | `crates/workspace/src/value_flow.rs` | lazy `graph_for_with_caches`; explicit compatibility prewarm only | clear |
 | `FlowIdCache` | `crates/workspace/src/flow_ids.rs` | `prewarm_all` | clear |
 | `TaintGraphIndex` | `crates/workspace/src/taint_index.rs` | lazy on first `taint-analysis` | clear |
 | `TransitiveCallersIndex` | `crates/workspace/src/transitive_callers.rs` | lazy | clear |

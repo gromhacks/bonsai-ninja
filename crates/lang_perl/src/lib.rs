@@ -3,7 +3,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, foreach_binding_assigns_from_text, language_from_pack, node_text, parse_with, span_of,
+        call_arg_from_node as ast_call_arg_from_node, collect_kinds, foreach_binding_assigns_from_text,
+        language_from_pack, node_text, parse_with, span_of,
     },
     AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
     FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
@@ -88,17 +89,18 @@ impl LanguageAdapter for PerlAdapter {
             // dispatch, but the syntactic receiver token preceding
             // `::method` is `SUPER`.
             super_receiver_tokens: &["SUPER"],
-            implicit_receiver_tokens: &["$self"],
+            // Perl's invocant is an explicit first `@_` binding whose name is
+            // adapter-derived (`$self`, `$class`, or another identifier).
+            implicit_receiver_tokens: &[],
             ..LanguageCapabilities::partial_baseline()
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        let source = ctx
-            .vfs
-            .snapshot(file)
-            .ok()
-            .map(|snapshot| snapshot.text.to_string())
+        let parsed = parse_with(PACK_NAME, file, ctx);
+        let source = parsed
+            .as_ref()
+            .map(|(snapshot, _)| snapshot.text.to_string())
             .unwrap_or_default();
         // Perl's tree-sitter grammar doesn't label subroutine
         // parameters structurally — every sub is parameterless at
@@ -122,33 +124,26 @@ impl LanguageAdapter for PerlAdapter {
         // scalars inside become CallArgs so the matcher can evaluate
         // arg-shape constraints and the taint engine can see them as
         // tainted-arg call sites.
-        if !source.is_empty() {
-            if let Ok(lang) = language_from_pack(PACK_NAME) {
-                let mut parser = tree_sitter::Parser::new();
-                if parser.set_language(&lang).is_ok() {
-                    if let Some(tree) = parser.parse(&source, None) {
-                        idx.refs
-                            .extend(synthesize_perl_source_refs(source.as_bytes(), file));
-                        let mut calls = synthesize_qx_call_events(&tree, source.as_bytes(), file);
-                        calls.extend(synthesize_method_call_events(&tree, source.as_bytes(), file));
-                        calls.extend(synthesize_builtin_call_events(&tree, source.as_bytes(), file));
-                        calls.extend(synthesize_builtin_expression_arg_call_events(
-                            &tree,
-                            source.as_bytes(),
-                            file,
-                        ));
-                        calls.extend(synthesize_match_regex_call_events(&tree, source.as_bytes(), file));
-                        calls.extend(synthesize_coderef_invocation_events(source.as_bytes(), file));
-                        calls.extend(synthesize_map_grep_topic_call_events(
-                            &tree,
-                            source.as_bytes(),
-                            file,
-                        ));
-                        if !calls.is_empty() {
-                            attach_synthesized_calls_to_decls(&mut idx, calls);
-                        }
-                    }
-                }
+        if let Some((_, tree)) = parsed {
+            idx.refs
+                .extend(synthesize_perl_source_refs(source.as_bytes(), file));
+            let mut calls = synthesize_qx_call_events(&tree, source.as_bytes(), file);
+            calls.extend(synthesize_method_call_events(&tree, source.as_bytes(), file));
+            calls.extend(synthesize_builtin_call_events(&tree, source.as_bytes(), file));
+            calls.extend(synthesize_builtin_expression_arg_call_events(
+                &tree,
+                source.as_bytes(),
+                file,
+            ));
+            calls.extend(synthesize_match_regex_call_events(&tree, source.as_bytes(), file));
+            calls.extend(synthesize_coderef_invocation_events(source.as_bytes(), file));
+            calls.extend(synthesize_map_grep_topic_call_events(
+                &tree,
+                source.as_bytes(),
+                file,
+            ));
+            if !calls.is_empty() {
+                attach_synthesized_calls_to_decls(&mut idx, calls);
             }
         }
         for decl in &mut idx.defs {
@@ -1829,6 +1824,9 @@ fn rewrite_perl_call_arg_texts(events: &mut [FlowEvent], source: &str) {
                         let extended_end = extend_perl_deref_end(source, end);
                         arg.value_text = source[sigil_start..extended_end].to_string();
                         arg.place = Some(arg.value_text.clone());
+                        for source_name in perl_collection_source_names(&arg.value_text) {
+                            push_unique_string(&mut arg.source_names, source_name);
+                        }
                     }
                 }
                 combine_perl_fat_comma_call_args(args, source);
@@ -2327,17 +2325,10 @@ fn synthesize_qx_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span
         }
         while let Some(node) = stack.pop() {
             if matches!(node.kind(), "scalar" | "array" | "hash") {
-                let text = node_text(&node, src).to_string();
-                if !text.is_empty() {
-                    args.push(CallArg {
-                        passing_mode: Default::default(),
-                        span: span_of(file, &node),
-                        name: None,
-                        value_text: text.clone(),
-                        place: None,
-                        source_names: Vec::new(),
-                    });
+                if let Some(argument) = perl_call_arg_from_node(node, file, src, None) {
+                    args.push(argument);
                 }
+                continue;
             }
             let mut child_cursor = node.walk();
             for child in node.named_children(&mut child_cursor) {
@@ -2406,22 +2397,31 @@ fn synthesize_method_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(
 /// Convert a Perl argument-list node into `CallArg`s. Recognises
 /// `key => value` fat-comma pairs as named args; everything else
 /// becomes a positional arg.
+fn perl_call_arg_from_node(
+    node: tree_sitter::Node<'_>,
+    file: FileId,
+    src: &[u8],
+    name: Option<String>,
+) -> Option<CallArg> {
+    let mut argument = ast_call_arg_from_node(node, file, src, name)?;
+    if matches!(node.kind(), "scalar" | "array" | "hash") {
+        if argument.place.is_none() {
+            argument.place = Some(argument.value_text.clone());
+        }
+        for source_name in perl_collection_source_names(&argument.value_text) {
+            push_unique_string(&mut argument.source_names, source_name);
+        }
+    }
+    Some(argument)
+}
+
 fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec<CallArg> {
     // Single-value forms (`$x`, `'lit'`, `42`) wrap the argument
     // directly — emit a one-element CallArg list.
     if perl_node_is_single_arg(node.kind()) {
-        let value_text = node_text(node, src).trim().to_string();
-        if value_text.is_empty() {
-            return Vec::new();
-        }
-        return vec![CallArg {
-            passing_mode: Default::default(),
-            span: span_of(file, node),
-            name: None,
-            value_text,
-            place: None,
-            source_names: Vec::new(),
-        }];
+        return perl_call_arg_from_node(*node, file, src, None)
+            .into_iter()
+            .collect();
     }
 
     let mut cursor = node.walk();
@@ -2432,45 +2432,50 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
         let child = children[child_idx];
         // Detect fat-comma named args: `key => value` pairs.
         if matches!(child.kind(), "bareword" | "autoquoted_bareword") && child_idx + 1 < children.len() {
-            let next = children[child_idx + 1];
-            // Look at the bytes between the two children to spot the
-            // `=>` operator the grammar leaves anonymous.
-            let gap = std::str::from_utf8(&src[child.end_byte()..next.start_byte()]).unwrap_or("");
-            if gap.contains("=>") {
-                let text = std::str::from_utf8(&src[child.start_byte()..next.end_byte()])
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                args.push(CallArg {
-                    passing_mode: Default::default(),
-                    span: Span::new(
+            let explicit_separator = children[child_idx + 1].kind() == "fat_comma";
+            let value_idx = child_idx + usize::from(explicit_separator) + 1;
+            if let Some(next) = children
+                .get(value_idx)
+                .copied()
+                .filter(|next| explicit_separator || perl_args_have_fat_comma_token(*node, child, *next))
+            {
+                let name = node_text(&child, src).trim().to_string();
+                if let Some(mut argument) = perl_call_arg_from_node(next, file, src, Some(name)) {
+                    argument.span = Span::new(
                         file,
                         u64::try_from(child.start_byte()).unwrap_or(u64::MAX),
                         u64::try_from(next.end_byte()).unwrap_or(u64::MAX),
-                    ),
-                    name: Some(node_text(&child, src).trim().to_string()),
-                    value_text: text,
-                    place: None,
-                    source_names: Vec::new(),
-                });
-                child_idx += 2;
+                    );
+                    args.push(argument);
+                }
+                child_idx = value_idx + 1;
                 continue;
             }
         }
-        let value_text = node_text(&child, src).trim().to_string();
-        if !value_text.is_empty() {
-            args.push(CallArg {
-                passing_mode: Default::default(),
-                span: span_of(file, &child),
-                name: None,
-                value_text,
-                place: None,
-                source_names: Vec::new(),
-            });
+        if child.kind() == "fat_comma" {
+            child_idx += 1;
+            continue;
+        }
+        if let Some(argument) = perl_call_arg_from_node(child, file, src, None) {
+            args.push(argument);
         }
         child_idx += 1;
     }
     args
+}
+
+fn perl_args_have_fat_comma_token(
+    container: tree_sitter::Node<'_>,
+    left: tree_sitter::Node<'_>,
+    right: tree_sitter::Node<'_>,
+) -> bool {
+    let mut cursor = container.walk();
+    let found = container.children(&mut cursor).any(|token| {
+        matches!(token.kind(), "=>" | "fat_comma")
+            && token.start_byte() >= left.end_byte()
+            && token.end_byte() <= right.start_byte()
+    });
+    found
 }
 
 /// True if `kind` represents a single-value expression node — used to
@@ -2520,17 +2525,10 @@ fn synthesize_builtin_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<
         let mut stack: Vec<tree_sitter::Node<'_>> = call_node.named_children(&mut cursor).collect();
         while let Some(node) = stack.pop() {
             if matches!(node.kind(), "scalar" | "array" | "hash") {
-                let value_text = node_text(&node, src).trim().to_string();
-                if !value_text.is_empty() {
-                    args.push(CallArg {
-                        passing_mode: Default::default(),
-                        span: span_of(file, &node),
-                        name: None,
-                        value_text,
-                        place: None,
-                        source_names: Vec::new(),
-                    });
+                if let Some(argument) = perl_call_arg_from_node(node, file, src, None) {
+                    args.push(argument);
                 }
+                continue;
             }
             let mut child_cursor = node.walk();
             for child in node.named_children(&mut child_cursor) {
@@ -2580,11 +2578,10 @@ fn synthesize_builtin_expression_arg_call_events(
         if arguments.kind() != "binary_expression" {
             continue;
         }
-        let value_text = node_text(&arguments, src).trim().to_string();
-        if value_text.is_empty() {
-            continue;
-        }
         let span = span_of(file, &call_node);
+        let Some(argument) = perl_call_arg_from_node(arguments, file, src, None) else {
+            continue;
+        };
         events.push((
             span,
             FlowEvent::Call {
@@ -2593,14 +2590,7 @@ fn synthesize_builtin_expression_arg_call_events(
                 receiver: None,
                 receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
-                args: vec![CallArg {
-                    passing_mode: Default::default(),
-                    span: span_of(file, &arguments),
-                    name: None,
-                    value_text,
-                    place: None,
-                    source_names: Vec::new(),
-                }],
+                args: vec![argument],
             },
         ));
     }
@@ -2615,7 +2605,9 @@ fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> 
         let Some(content) = match_node.child_by_field_name("content") else {
             continue;
         };
-        let value_text = node_text(&content, src).trim().to_string();
+        let Some(argument) = perl_call_arg_from_node(content, file, src, None) else {
+            continue;
+        };
         let span = span_of(file, &match_node);
         events.push((
             span,
@@ -2625,14 +2617,7 @@ fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> 
                 receiver: None,
                 receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
-                args: vec![CallArg {
-                    passing_mode: Default::default(),
-                    span: span_of(file, &content),
-                    name: None,
-                    value_text,
-                    place: None,
-                    source_names: Vec::new(),
-                }],
+                args: vec![argument],
             },
         ));
     }
@@ -2800,6 +2785,7 @@ fn perl_text_args(src: &[u8], start: usize, end: usize, file: FileId) -> Vec<Cal
                 }
                 if part_start < part_end {
                     let value_text = String::from_utf8_lossy(&src[part_start..part_end]).to_string();
+                    let source_names = perl_collection_source_names(&value_text);
                     args.push(CallArg {
                         passing_mode: Default::default(),
                         span: Span::new(
@@ -2813,7 +2799,7 @@ fn perl_text_args(src: &[u8], start: usize, end: usize, file: FileId) -> Vec<Cal
                             .starts_with(['$', '@', '%'])
                             .then(|| value_text.clone()),
                         value_text,
-                        source_names: Vec::new(),
+                        source_names,
                     });
                 }
                 arg_start = idx + 1;

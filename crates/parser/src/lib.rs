@@ -3,21 +3,56 @@
 //! Handles the "parse this file with the right grammar, incrementally if we
 //! can" side of the pipeline. Parsing is not quite free — we keep the
 //! previous [`tree_sitter::Tree`] around so the next reparse can use it as a
-//! hint. The cache is keyed on `(FileId, version)`; stale entries fall out
-//! naturally when a newer version lands.
+//! hint. Cache identity includes the VFS instance, file, and language; each
+//! entry retains the newest immutable source version it has parsed.
 
 use ahash::AHashMap;
 use bonsai_common::FileId;
 use bonsai_diagnostics::{Diagnostic, Severity};
-use bonsai_lang_api::{AdapterArc, AdapterError};
-use bonsai_vfs::Vfs;
+use bonsai_lang_api::{AdapterArc, AdapterError, LanguageId};
+use bonsai_vfs::{FileSnapshot, Vfs};
 use parking_lot::{Mutex, RwLock};
-use std::{ops::ControlFlow, sync::Arc, time::Duration};
+use std::{
+    ops::{ControlFlow, Deref, DerefMut},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
-use tree_sitter::{Node, ParseOptions, Parser, Tree};
+use tree_sitter::{InputEdit, Node, ParseOptions, Parser, Point, Tree};
 
 const MAX_PARSE_NODE_DIAGNOSTICS: usize = 100;
-const DEFAULT_PARSE_TIMEOUT_MS: u64 = 30_000;
+type ParseKey = (u64, FileId, LanguageId);
+type ParserPool = Arc<Mutex<Vec<Parser>>>;
+
+/// Exclusive checkout from a language parser pool. The pool lock is held only
+/// while taking or returning a parser; tree-sitter parsing itself never holds
+/// a global or per-language lock.
+struct ParserLease {
+    parser: Option<Parser>,
+    pool: ParserPool,
+}
+
+impl Deref for ParserLease {
+    type Target = Parser;
+
+    fn deref(&self) -> &Self::Target {
+        self.parser.as_ref().expect("parser lease is populated")
+    }
+}
+
+impl DerefMut for ParserLease {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.parser.as_mut().expect("parser lease is populated")
+    }
+}
+
+impl Drop for ParserLease {
+    fn drop(&mut self) {
+        if let Some(parser) = self.parser.take() {
+            self.pool.lock().push(parser);
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ParseError {
@@ -36,6 +71,7 @@ pub struct ParsedFile {
     pub tree: Arc<Tree>,
     pub diagnostics: Vec<Diagnostic>,
     pub adapter_id: bonsai_lang_api::LanguageId,
+    source: Arc<str>,
 }
 
 impl std::fmt::Debug for ParsedFile {
@@ -49,11 +85,22 @@ impl std::fmt::Debug for ParsedFile {
     }
 }
 
+impl ParsedFile {
+    /// Source text corresponding exactly to [`Self::tree`].
+    ///
+    /// Consumers that interpret node byte ranges must use this text instead
+    /// of taking a fresh VFS snapshot, which may already be a newer version.
+    #[must_use]
+    pub fn source_text(&self) -> &str {
+        &self.source
+    }
+}
+
 /// Parser-cache configuration.
 ///
-/// The default parse timeout is 30 seconds. Set
-/// `BONSAI_PARSE_TIMEOUT_MS=0` or pass a zero timeout through the SDK to
-/// disable the guard for debugging.
+/// Parsing runs to completion by default. Set `BONSAI_PARSE_TIMEOUT_MS` or
+/// use the SDK/CLI override only when an explicitly incomplete diagnostic
+/// run is desired; zero restores the uncapped behavior.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ParserOptions {
     pub parse_timeout: Option<Duration>,
@@ -62,7 +109,7 @@ pub struct ParserOptions {
 impl Default for ParserOptions {
     fn default() -> Self {
         Self {
-            parse_timeout: parse_timeout_from_env().or_else(|| Some(default_parse_timeout())),
+            parse_timeout: parse_timeout_from_env(),
         }
     }
 }
@@ -76,12 +123,18 @@ impl ParserOptions {
     }
 }
 
-/// Concurrent parse cache. Cheap to clone; parser instances are locked per
+/// Concurrent parse cache. Cheap to clone; parser instances are pooled by
 /// language while parsed tree cache reads use an `RwLock`.
+///
+/// A checkout removes one parser from its pool (or creates one if every parser
+/// is busy), then releases the pool lock before parsing. Concurrent files in
+/// the same language therefore do not serialize behind one mutable parser,
+/// while completed workers still make their parser reusable. The tree cache
+/// is logically keyed by `(VFS instance, FileId, language, version)`.
 #[derive(Clone)]
 pub struct ParserCache {
-    parsers: Arc<Mutex<AHashMap<bonsai_lang_api::LanguageId, Arc<Mutex<Parser>>>>>,
-    cache: Arc<RwLock<AHashMap<FileId, Arc<ParsedFile>>>>,
+    parsers: Arc<Mutex<AHashMap<LanguageId, ParserPool>>>,
+    cache: Arc<RwLock<AHashMap<ParseKey, Arc<ParsedFile>>>>,
     options: ParserOptions,
 }
 
@@ -99,10 +152,12 @@ impl std::fmt::Debug for ParserCache {
         // previously held (cache, parsers) at the same time, an
         // AB-BA hazard if a peer ever held parsers then cache.
         let cached_files = self.cache.read().len();
-        let live_parsers = self.parsers.lock().len();
+        let pools = self.parsers.lock().values().cloned().collect::<Vec<_>>();
+        let idle_parsers = pools.iter().map(|pool| pool.lock().len()).sum::<usize>();
         f.debug_struct("ParserCache")
             .field("cached_files", &cached_files)
-            .field("live_parsers", &live_parsers)
+            .field("parser_languages", &pools.len())
+            .field("idle_parsers", &idle_parsers)
             .field("parse_timeout", &self.options.parse_timeout)
             .finish()
     }
@@ -116,8 +171,8 @@ impl ParserCache {
         Self::default()
     }
 
-    /// Construct a cache with explicit options. Useful for tests or
-    /// daemons that need to disable the parse timeout.
+    /// Construct a cache with explicit options. Useful for tests or callers
+    /// that deliberately need a bounded diagnostic parse.
     #[must_use]
     pub fn with_options(options: ParserOptions) -> Self {
         Self {
@@ -127,7 +182,8 @@ impl ParserCache {
         }
     }
 
-    /// Parse `file` with `adapter`, using any cached tree as a reparse hint.
+    /// Parse `file` with `adapter`, using any cached tree as a correctly edited
+    /// incremental reparse hint.
     pub fn parse(
         &self,
         file: FileId,
@@ -135,41 +191,46 @@ impl ParserCache {
         vfs: &Vfs,
     ) -> Result<Arc<ParsedFile>, ParseError> {
         let snapshot = vfs.snapshot(file)?;
-        {
-            let cache = self.cache.read();
-            if let Some(entry) = cache.get(&file) {
-                if entry.version == snapshot.version {
-                    return Ok(entry.clone());
-                }
+        self.parse_snapshot(&snapshot, adapter, vfs)
+    }
+
+    /// Parse an exact immutable snapshot.
+    ///
+    /// This is the adapter bridge used by the analyzer database. It prevents a
+    /// concurrent VFS write from returning a tree for a different source
+    /// version than the snapshot an adapter is currently walking.
+    pub fn parse_snapshot(
+        &self,
+        snapshot: &FileSnapshot,
+        adapter: &AdapterArc,
+        vfs: &Vfs,
+    ) -> Result<Arc<ParsedFile>, ParseError> {
+        let file = snapshot.file_id;
+        let key = (vfs.instance_id(), file, adapter.language_id());
+        if let Some(entry) = self.cache.read().get(&key).cloned() {
+            if parsed_matches_snapshot(&entry, snapshot) {
+                return Ok(entry);
             }
         }
 
         let language = adapter.tree_sitter_language()?;
-        let parser = {
-            let mut parsers = self.parsers.lock();
-            parsers
-                .entry(adapter.language_id())
-                .or_insert_with(|| Arc::new(Mutex::new(Parser::new())))
-                .clone()
-        };
-        let mut parser = parser.lock();
-        // Re-check while holding this language parser. A peer thread for the
-        // same language may have finished this file while we waited.
-        // Drop the read guard's temporary at the `;` so it can't
-        // extend into the subsequent `self.cache.write()` (line 244)
-        // and trigger a same-thread read→write deadlock.
-        let cached = self.cache.read().get(&file).cloned();
-        if let Some(entry) = cached {
-            if entry.version == snapshot.version {
+        let mut parser = self.checkout_parser(adapter.language_id());
+        // Re-check after checkout. A peer may have finished this exact
+        // snapshot between the initial cache read and parser lookup.
+        if let Some(entry) = self.cache.read().get(&key).cloned() {
+            if parsed_matches_snapshot(&entry, snapshot) {
                 return Ok(entry);
             }
         }
-        let old = self.cache.read().get(&file).cloned();
+        let old = self.cache.read().get(&key).cloned();
         parser
             .set_language(&language)
             .map_err(|e| AdapterError::ParserSetup(e.to_string()))?;
 
-        let old_tree = old.as_ref().map(|p| p.tree.as_ref());
+        let incremental_tree = old
+            .as_deref()
+            .and_then(|parsed| incremental_tree(parsed, &snapshot.text));
+        let old_tree = incremental_tree.as_ref();
         let (tree, timed_out) = parse_with_timeout(
             &mut parser,
             snapshot.text.as_ref(),
@@ -177,6 +238,7 @@ impl ParserCache {
             self.options.parse_timeout,
         )?;
         drop(parser);
+        drop(incremental_tree);
 
         let mut diagnostics = Vec::new();
         if let Some(timeout) = timed_out {
@@ -244,37 +306,130 @@ impl ParserCache {
             tree: Arc::new(tree),
             diagnostics,
             adapter_id: adapter.language_id(),
+            source: Arc::clone(&snapshot.text),
         });
-        // Don't overwrite a NEWER cache entry — a peer that
-        // grabbed a fresher snapshot while we were parsing may
-        // have already installed it. Only install our parse if
-        // nothing exists for this file or the existing entry is
-        // older than the snapshot we just parsed.
+        // Cache the newest version, but always return the tree for the exact
+        // snapshot requested by this caller. Returning a peer's newer entry
+        // here would pair that newer tree with the caller's older source.
         let mut cache = self.cache.write();
-        let install = !matches!(cache.get(&file), Some(existing) if existing.version >= parsed.version);
-        if install {
-            cache.insert(file, parsed.clone());
-            Ok(parsed)
-        } else {
-            // Return the newer cached entry so callers see a
-            // consistent "this is the freshest parse" result.
-            Ok(cache.get(&file).cloned().unwrap_or(parsed))
+        if let Some(existing) = cache.get(&key) {
+            if parsed_matches_snapshot(existing, snapshot) {
+                return Ok(existing.clone());
+            }
+            if existing.version >= parsed.version {
+                return Ok(parsed);
+            }
         }
+        cache.insert(key, parsed.clone());
+        Ok(parsed)
     }
 
     /// Invalidate a single file.
     pub fn invalidate(&self, file: FileId) {
-        self.cache.write().remove(&file);
+        self.cache
+            .write()
+            .retain(|(_, cached_file, _), _| *cached_file != file);
+    }
+
+    fn checkout_parser(&self, language: LanguageId) -> ParserLease {
+        let pool = self
+            .parsers
+            .lock()
+            .entry(language)
+            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+            .clone();
+        let parser = pool.lock().pop().unwrap_or_else(Parser::new);
+        ParserLease {
+            parser: Some(parser),
+            pool,
+        }
     }
 }
 
-fn default_parse_timeout() -> Duration {
-    Duration::from_millis(DEFAULT_PARSE_TIMEOUT_MS)
+fn parsed_matches_snapshot(parsed: &ParsedFile, snapshot: &FileSnapshot) -> bool {
+    parsed.version == snapshot.version && Arc::ptr_eq(&parsed.source, &snapshot.text)
+}
+
+/// Clone and edit the previous tree so tree-sitter's incremental parser sees
+/// coordinates for `new_source`. Passing an unedited old tree after source
+/// changes is not a hint: tree-sitter treats unchanged ranges as authoritative
+/// and may reuse stale syntax.
+fn incremental_tree(parsed: &ParsedFile, new_source: &str) -> Option<Tree> {
+    if parsed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.as_deref() == Some("parse-timeout"))
+    {
+        // A timeout stores an intentionally empty placeholder tree, which does
+        // not describe `parsed.source` and therefore cannot be edited safely.
+        return None;
+    }
+    let mut tree = parsed.tree.as_ref().clone();
+    if parsed.source.as_ref() != new_source {
+        tree.edit(&single_replacement_edit(&parsed.source, new_source));
+    }
+    Some(tree)
+}
+
+/// Describe an arbitrary source change as one replacement spanning the first
+/// and last changed UTF-8 boundaries. This remains exact for tree-sitter even
+/// when the VFS update arrived as a whole-file write rather than granular LSP
+/// edits.
+fn single_replacement_edit(old: &str, new: &str) -> InputEdit {
+    let old_bytes = old.as_bytes();
+    let new_bytes = new.as_bytes();
+    let mut prefix = old_bytes
+        .iter()
+        .zip(new_bytes)
+        .take_while(|(old, new)| old == new)
+        .count();
+    while prefix > 0 && (!old.is_char_boundary(prefix) || !new.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+
+    let max_suffix = old
+        .len()
+        .saturating_sub(prefix)
+        .min(new.len().saturating_sub(prefix));
+    let mut suffix = old_bytes[old.len() - max_suffix..]
+        .iter()
+        .rev()
+        .zip(new_bytes[new.len() - max_suffix..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    while suffix > 0
+        && (!old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    let old_end = old.len() - suffix;
+    let new_end = new.len() - suffix;
+    InputEdit {
+        start_byte: prefix,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: point_at_byte(old, prefix),
+        old_end_position: point_at_byte(old, old_end),
+        new_end_position: point_at_byte(new, new_end),
+    }
+}
+
+fn point_at_byte(text: &str, byte: usize) -> Point {
+    debug_assert!(byte <= text.len());
+    debug_assert!(text.is_char_boundary(byte));
+    let prefix = &text.as_bytes()[..byte];
+    let row = prefix.iter().filter(|&&value| value == b'\n').count();
+    let column = prefix
+        .iter()
+        .rposition(|&value| value == b'\n')
+        .map_or(byte, |newline| byte - newline - 1);
+    Point::new(row, column)
 }
 
 /// Read the parse-timeout override from `BONSAI_PARSE_TIMEOUT_MS`.
-/// Empty / unparseable values fall through to `None` (use default);
-/// `0` explicitly disables the timeout.
+/// Empty / unparseable values fall through to the uncapped default; `0`
+/// explicitly selects the same uncapped behavior.
 fn parse_timeout_from_env() -> Option<Duration> {
     let Ok(raw) = std::env::var("BONSAI_PARSE_TIMEOUT_MS") else {
         return None;

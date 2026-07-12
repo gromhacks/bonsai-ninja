@@ -110,6 +110,7 @@ impl LanguageAdapter for JavaAdapter {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            field_places_complete: true,
             // Java constructors are class-named, so the kind-based
             // `DeclKind::Constructor` lookup is authoritative; the
             // name-list fallback is intentionally empty.
@@ -961,6 +962,7 @@ fn rewrite_java_explicit_constructor_invocations_in_events(
                 );
             }
             FlowEvent::Assign { .. }
+            | FlowEvent::AggregateAssign { .. }
             | FlowEvent::Return { .. }
             | FlowEvent::Throw { .. }
             | FlowEvent::Break { .. }

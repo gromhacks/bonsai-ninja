@@ -36,6 +36,73 @@ fn entries_are_sorted_by_key_ascending() {
 }
 
 #[test]
+fn entry_pipeline_has_deterministic_bounded_backpressure() {
+    // Exercise the exact channel factory used by FactStoreWriter without
+    // racing its background consumer. Once the finite pipeline is full,
+    // a producer cannot enqueue another owned payload; `send`, used by
+    // `add_owned`, waits for capacity instead of growing memory or
+    // dropping the entry.
+    let (sender, _receiver) = entry_channel();
+    let capacity = entry_queue_capacity();
+    let byte_budget = Arc::new(ByteBudget::new(capacity.saturating_add(1)));
+    assert!(capacity > 0);
+    assert_eq!(sender.capacity(), Some(capacity));
+
+    for key in 0..capacity as u64 {
+        sender
+            .try_send(WriteCmd::Entry {
+                key,
+                body_hash: 0,
+                payload: vec![key as u8],
+                _permit: byte_budget.acquire(1),
+            })
+            .expect("pipeline slot");
+    }
+    let overflow = WriteCmd::Entry {
+        key: capacity as u64,
+        body_hash: 0,
+        payload: vec![0xFF],
+        _permit: byte_budget.acquire(1),
+    };
+    assert!(matches!(
+        sender.try_send(overflow),
+        Err(crossbeam_channel::TrySendError::Full(_))
+    ));
+}
+
+#[test]
+fn entry_pipeline_backpressure_is_weighted_by_payload_bytes() {
+    let budget = Arc::new(ByteBudget::new(8));
+    let first = budget.try_acquire(6).expect("first payload fits");
+    assert!(
+        budget.try_acquire(3).is_none(),
+        "a second payload must not exceed the byte budget even when item slots remain"
+    );
+    drop(first);
+    let oversized = budget
+        .try_acquire(usize::MAX)
+        .expect("one oversized payload is admitted exclusively");
+    assert!(budget.try_acquire(1).is_none());
+    drop(oversized);
+    assert!(budget.try_acquire(8).is_some());
+}
+
+#[test]
+fn add_owned_transfers_payload_and_preserves_bytes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("v.bin");
+    let w = FactStoreWriter::create(&target, 3, 0xBEEF).expect("create");
+    let payload = vec![0x00, 0x7F, 0x80, 0xFF];
+    w.add_owned(9, 0xCAFE, payload).expect("add owned");
+    w.finish().expect("finish");
+
+    let r = FactStoreReader::open(&target, 3, 0xBEEF).expect("open");
+    let hit = r.get(9).expect("lookup").expect("entry");
+    assert_eq!(hit.body_hash, 0xCAFE);
+    assert_eq!(hit.payload, &[0x00, 0x7F, 0x80, 0xFF]);
+}
+
+#[test]
 fn finish_rejects_duplicate_keys_without_publishing_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("v.bin");

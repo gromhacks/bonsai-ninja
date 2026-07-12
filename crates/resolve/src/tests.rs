@@ -61,6 +61,7 @@ fn insert_one(global: &mut GlobalIndex, file: FileId, decl: Decl) {
         file,
         defs: vec![decl],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -309,6 +310,7 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
         file: local_file,
         defs: vec![local_enum, local_execute],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -324,6 +326,7 @@ fn static_member_resolution_accepts_enum_receivers_in_same_module() {
         file: sibling_file,
         defs: vec![sibling_enum, sibling_execute],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -661,6 +664,7 @@ fn class_resolution_rewrites_alias_map() {
         file,
         defs: vec![class],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -697,6 +701,7 @@ fn type_alias_member_call_does_not_fall_back_to_bare_method() {
         file: helper_file,
         defs: vec![cert, equals],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });

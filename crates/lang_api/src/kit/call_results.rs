@@ -81,12 +81,12 @@ fn adjacent_call_args_for_call_result_assignment(
     events
         .iter()
         .skip(event_index + 1)
-        .take(3)
         .find_map(|event| match event {
             crate::FlowEvent::Call { name, args, span, .. }
                 if call_result_names_match(source_call, name)
                     && span.file == assign_span.file
                     && span.start >= assign_span.start
+                    && span.end <= assign_span.end
                     && !args.is_empty()
                     && (source_call_args.is_empty() || args.len() > source_call_args.len()) =>
             {

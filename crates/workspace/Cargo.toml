@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 ignore = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

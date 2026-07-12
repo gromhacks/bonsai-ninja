@@ -40,7 +40,8 @@
 //! - `Call { name, args }` → for each arg with a `place`:
 //!   `Read(place) → CallArg(site, idx)` (intra). Phase 3 adds the
 //!   `CallArg(site, idx) → callee.Param(idx)` cross edge.
-//! - `Return { value_name: Some(name) }` → `Read(name) → Return`
+//! - `Return { value_flow }` → AST-derived scalar operands/call results
+//!   flow to `Return`; aggregate members flow to field-sensitive return places.
 //! - `Throw { value_name: Some(name), thrown_type }` →
 //!   `Read(name) → Throw(ty)`. Compound throw expressions whose
 //!   adapters emit an inner constructor/call also bridge the inner
@@ -57,22 +58,23 @@
 //!   - Walk catch_events and finally_events as nested event lists.
 //! - `Branch { then_events, else_events }` → walk both arms; the
 //!   union of edges is the merged post-state.
-//! - `Loop { body }` → walk body once for may-run edges and once
-//!   more with body-end writers live so loop-carried reads see the
-//!   previous iteration. Duplicate edges are suppressed by the
-//!   transfer context.
+//! - `Loop { body }` → preserve entry writers for the zero-iteration
+//!   exit, walk once for may-run edges, and replay once with body-end
+//!   writers live so loop-carried reads see the previous iteration.
+//!   Nested replay is flattened and duplicate edges are suppressed.
 //! - `Defer { body }` → walk body normally; we don't separate
 //!   deferred edges from immediate ones in the IDG (path
 //!   sensitivity is a query-time concern, not a graph-construction
 //!   one).
-//! - `Yield { value_text }` → if the text is a bare identifier,
-//!   `Read(name) → Place::Yield`.
+//! - `Yield { value_flow }` → the same structured scalar/aggregate
+//!   lowering into the generator's yield places.
 //! - `Await { value_name }` → `Read(name) → Place::Await`.
 
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_factstore::{StrId, StringPoolBuilder};
 use bonsai_lang_api::{
-    kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, CallArg, CallKind, Decl, DeclKind, FlowEvent,
+    kit::SYNTHETIC_TUPLE_RESULT_PREFIX, AssignValueKind, CallArg, CallKind, Decl, DeclKind, ExpressionFlow,
+    ExpressionProjection, FlowEvent,
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -102,24 +104,49 @@ pub struct TransferOptions {
     /// Configured source calls that deliver untrusted data to callback
     /// parameters.
     pub source_callback_args: Vec<SourceCallbackArgSpec>,
+    /// Declarative external-call summaries whose selected inputs flow to the
+    /// call result. Materialized once into the IDG rather than replayed per
+    /// source closure.
+    pub call_result_passthroughs: Vec<CallResultPassthroughSpec>,
+    /// Declarative external-call summaries whose selected inputs are written
+    /// back through an output argument. These are compiler transfer edges,
+    /// materialized once per call site rather than reinterpreted per source.
+    pub output_arg_flows: Vec<OutputArgFlowSpec>,
+    /// Declarative method summaries whose explicit arguments mutate the
+    /// receiver state. Materialized as ordinary def-use edges at the call.
+    pub receiver_state_propagations: Vec<ReceiverStatePropagationSpec>,
     /// Whether to add diagnostic, over-approximate receiver-field
     /// propagation. Security/default semantic queries cap precision at
     /// `Narrowed`, so they can skip this expensive graph expansion.
     pub include_diagnostic_field_flows: bool,
-    /// Whether to add broad implicit-receiver method propagation. The
-    /// default graph keeps this compatibility heuristic; large security
-    /// scans can skip it and rely on exact call/arg/return propagation.
+    /// Whether to add broad implicit-receiver method propagation. This is a
+    /// compatibility heuristic, not exact compiler-derived call evidence.
     pub include_receiver_method_propagation: bool,
     /// Whether Phase 3 eagerly materializes interprocedural object-field
-    /// forwarding edges. Generic IDG/code-intelligence queries keep this
-    /// enabled; large security scans can skip the eager closure and rely
-    /// on the taint engine's demand-driven field propagation.
+    /// forwarding edges. Completeness-preserving semantic graphs keep this
+    /// enabled; disabling it is only appropriate for diagnostic graph builds.
     pub include_field_argument_forwarding: bool,
-    /// Compatibility mode for token-level taint callers: when a call
-    /// result cannot be resolved to any workspace callee,
-    /// conservatively carry explicit arguments / the method receiver
-    /// into its result. Security graphs leave this disabled and use
-    /// rulepack-declared passthrough shapes instead.
+    /// Whether field forwarding materializes only facts that can reach an
+    /// adapter-emitted field read or scalar field projection. This is an
+    /// exact query optimization for sink-oriented analysis; complete export
+    /// graphs leave it disabled so unobserved propagated writes remain
+    /// inspectable.
+    pub demand_driven_field_forwarding: bool,
+    /// Adapter language ids whose emitted field places are complete enough
+    /// for demand-driven forwarding. An empty list retains the legacy
+    /// all-functions behavior for direct IDG callers; production workspace
+    /// builds populate this from adapter capabilities, never from a
+    /// hard-coded language inventory.
+    pub field_demand_languages: Vec<String>,
+    /// Query terminal call sites whose whole-object arguments are demand
+    /// roots. Security fills this from exact matcher spans; an empty list
+    /// keeps direct IDG callers' conservative unresolved-call behavior.
+    pub field_demand_terminal_sites: Vec<(FuncId, Span)>,
+    /// When a call result cannot be resolved to a workspace body,
+    /// conservatively carry its explicit arguments (and a syntax-classified
+    /// method receiver) into the result at narrowed precision. This name-
+    /// agnostic unknown-code summary is independent of exact receiver-state
+    /// mutation compatibility below.
     pub include_unresolved_call_result_passthrough: bool,
     /// Whether an unresolved, syntax-classified method call conservatively
     /// carries its receiver into the call result. This is narrower than the
@@ -135,11 +162,23 @@ impl Default for TransferOptions {
             clean_output_overwrites: Vec::new(),
             source_output_args: Vec::new(),
             source_callback_args: Vec::new(),
+            call_result_passthroughs: Vec::new(),
+            output_arg_flows: Vec::new(),
+            receiver_state_propagations: Vec::new(),
             include_diagnostic_field_flows: true,
             include_receiver_method_propagation: true,
             include_field_argument_forwarding: true,
+            demand_driven_field_forwarding: false,
+            field_demand_languages: Vec::new(),
+            field_demand_terminal_sites: Vec::new(),
             include_unresolved_call_result_passthrough: false,
-            include_unresolved_receiver_result_passthrough: false,
+            // A syntax-classified method consumes its receiver even when the
+            // external body is unavailable. Conservatively preserving that
+            // receiver in the result is the name-agnostic compiler fallback
+            // used for chains such as `value.clone()` / `value.strip()`.
+            // Explicit arguments remain excluded unless the broader option
+            // above is enabled.
+            include_unresolved_receiver_result_passthrough: true,
         }
     }
 }
@@ -151,11 +190,17 @@ impl TransferOptions {
         self.clean_output_overwrites.is_empty()
             && self.source_output_args.is_empty()
             && self.source_callback_args.is_empty()
+            && self.call_result_passthroughs.is_empty()
+            && self.output_arg_flows.is_empty()
+            && self.receiver_state_propagations.is_empty()
             && self.include_diagnostic_field_flows
             && self.include_receiver_method_propagation
             && self.include_field_argument_forwarding
+            && !self.demand_driven_field_forwarding
+            && self.field_demand_languages.is_empty()
+            && self.field_demand_terminal_sites.is_empty()
             && !self.include_unresolved_call_result_passthrough
-            && !self.include_unresolved_receiver_result_passthrough
+            && self.include_unresolved_receiver_result_passthrough
     }
 
     /// Return a semantically equivalent option set in deterministic
@@ -192,6 +237,52 @@ impl TransferOptions {
             ))
         });
         self.source_callback_args.dedup();
+        for spec in &mut self.call_result_passthroughs {
+            spec.input_arg_indices.sort_unstable();
+            spec.input_arg_indices.dedup();
+        }
+        self.call_result_passthroughs.sort_by(|a, b| {
+            (
+                &a.callee,
+                &a.receiver_type,
+                &a.input_arg_indices,
+                a.input_receiver,
+            )
+                .cmp(&(
+                    &b.callee,
+                    &b.receiver_type,
+                    &b.input_arg_indices,
+                    b.input_receiver,
+                ))
+        });
+        self.call_result_passthroughs.dedup();
+        for spec in &mut self.output_arg_flows {
+            spec.value_arg_indices.sort_unstable();
+            spec.value_arg_indices.dedup();
+        }
+        self.output_arg_flows.sort_by(|a, b| {
+            (
+                &a.callee,
+                a.output_arg_index,
+                &a.value_arg_indices,
+                a.value_start_arg_index,
+            )
+                .cmp(&(
+                    &b.callee,
+                    b.output_arg_index,
+                    &b.value_arg_indices,
+                    b.value_start_arg_index,
+                ))
+        });
+        self.output_arg_flows.dedup();
+        self.receiver_state_propagations
+            .sort_by(|a, b| (&a.method, &a.receiver_type).cmp(&(&b.method, &b.receiver_type)));
+        self.receiver_state_propagations.dedup();
+        self.field_demand_languages.sort();
+        self.field_demand_languages.dedup();
+        self.field_demand_terminal_sites
+            .sort_by_key(|(func, span)| (func.raw(), span.file.raw(), span.start, span.end));
+        self.field_demand_terminal_sites.dedup();
         self
     }
 
@@ -214,13 +305,25 @@ impl TransferOptions {
 
         let options = self.clone().canonicalized();
         let mut hasher = StableHasher::new();
-        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v6");
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v11");
         absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
         absorb_u64(
             &mut hasher,
             u64::from(options.include_receiver_method_propagation),
         );
         absorb_u64(&mut hasher, u64::from(options.include_field_argument_forwarding));
+        absorb_u64(&mut hasher, u64::from(options.demand_driven_field_forwarding));
+        absorb_u64(&mut hasher, options.field_demand_languages.len() as u64);
+        for language in &options.field_demand_languages {
+            absorb_str(&mut hasher, language);
+        }
+        absorb_u64(&mut hasher, options.field_demand_terminal_sites.len() as u64);
+        for (func, span) in &options.field_demand_terminal_sites {
+            absorb_u64(&mut hasher, func.raw() as u64);
+            absorb_u64(&mut hasher, span.file.raw() as u64);
+            absorb_u64(&mut hasher, span.start);
+            absorb_u64(&mut hasher, span.end);
+        }
         absorb_u64(
             &mut hasher,
             u64::from(options.include_unresolved_call_result_passthrough),
@@ -254,6 +357,37 @@ impl TransferOptions {
             for index in &spec.source_param_indices {
                 absorb_u64(&mut hasher, *index as u64);
             }
+        }
+        absorb_u64(&mut hasher, options.call_result_passthroughs.len() as u64);
+        for spec in &options.call_result_passthroughs {
+            absorb_str(&mut hasher, "call-result-passthrough");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_str(&mut hasher, spec.receiver_type.as_deref().unwrap_or_default());
+            absorb_u64(&mut hasher, u64::from(spec.input_receiver));
+            absorb_u64(&mut hasher, spec.input_arg_indices.len() as u64);
+            for index in &spec.input_arg_indices {
+                absorb_u64(&mut hasher, *index as u64);
+            }
+        }
+        absorb_u64(&mut hasher, options.output_arg_flows.len() as u64);
+        for spec in &options.output_arg_flows {
+            absorb_str(&mut hasher, "output-arg-flow");
+            absorb_str(&mut hasher, &spec.callee);
+            absorb_u64(&mut hasher, spec.output_arg_index as u64);
+            absorb_u64(&mut hasher, spec.value_arg_indices.len() as u64);
+            for index in &spec.value_arg_indices {
+                absorb_u64(&mut hasher, *index as u64);
+            }
+            absorb_u64(
+                &mut hasher,
+                spec.value_start_arg_index.map_or(u64::MAX, |index| index as u64),
+            );
+        }
+        absorb_u64(&mut hasher, options.receiver_state_propagations.len() as u64);
+        for spec in &options.receiver_state_propagations {
+            absorb_str(&mut hasher, "receiver-state-propagation");
+            absorb_str(&mut hasher, &spec.method);
+            absorb_str(&mut hasher, spec.receiver_type.as_deref().unwrap_or_default());
         }
         hasher.finish()
     }
@@ -293,6 +427,43 @@ pub struct SourceCallbackArgSpec {
     pub source_param_indices: Vec<usize>,
 }
 
+/// Declarative external-call dependency summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallResultPassthroughSpec {
+    /// Exact or `regex:`-prefixed callee matcher from the rulepack.
+    pub callee: String,
+    /// Optional adapter-derived receiver type required by the summary.
+    pub receiver_type: Option<String>,
+    /// Positional call arguments that flow into the result.
+    pub input_arg_indices: Vec<usize>,
+    /// Whether the method receiver also flows into the result.
+    pub input_receiver: bool,
+}
+
+/// Declarative external-call output-parameter dependency summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputArgFlowSpec {
+    /// Exact or `regex:`-prefixed callee matcher from the rulepack.
+    pub callee: String,
+    /// Positional argument written by the call.
+    pub output_arg_index: usize,
+    /// Individual value-bearing positional arguments.
+    pub value_arg_indices: Vec<usize>,
+    /// Optional first value-bearing argument; all later arguments flow to the
+    /// output except the output argument itself.
+    pub value_start_arg_index: Option<usize>,
+}
+
+/// Declarative external-method summary whose explicit arguments flow into
+/// the receiver's post-call state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiverStatePropagationSpec {
+    /// Exact or `regex:`-prefixed method matcher from the rulepack.
+    pub method: String,
+    /// Optional adapter-derived receiver type required by the summary.
+    pub receiver_type: Option<String>,
+}
+
 /// One call site recorded by the transfer pass for the Phase 3
 /// builder to stitch cross-function edges.
 #[derive(Clone, Debug)]
@@ -314,10 +485,10 @@ pub struct CallSiteRef {
     pub call_kind: CallKind,
     /// Number of arguments at the site. Phase 3 uses this to bound
     /// the param-index edges it stitches.
-    pub args_count: u8,
+    pub args_count: u32,
     /// Number of source-level arguments before the transfer pass adds
     /// synthetic carrier args for flattened no-arg expressions.
-    pub explicit_args_count: u8,
+    pub explicit_args_count: u32,
     /// Caller-side `CallRet(site)` node interned in the function's
     /// segment. Phase 3 connects each candidate callee's
     /// `Return` node to this node.
@@ -394,6 +565,132 @@ pub struct ReturnFieldProjection {
     pub field: String,
 }
 
+/// AST-proven scalar aggregate forwarding inside one function, such as
+/// `yield value` or `return value`. Phase 3 turns this into a field-copy
+/// transform so descendant fields materialized by interprocedural stitching
+/// later in the build are preserved as well.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DescendantCopy {
+    /// Local aggregate place whose known descendants are forwarded.
+    pub source_base: String,
+    /// Synthetic return/yield aggregate place receiving those descendants.
+    pub target_base: String,
+    /// Source expression span proving the forwarding relationship.
+    pub span: Span,
+}
+
+/// Compact control-flow evidence for statements nested in loop bodies.
+///
+/// A context is created only when the adapter-emitted [`FlowEvent`] tree
+/// enters a `Loop::body`.  Loop header events remain in their surrounding
+/// context, matching the CFG: only body execution participates in the
+/// loop's back-edge.  Phase 3 uses this to distinguish a real loop-carried
+/// reaching definition from a lexically later straight-line write.
+#[derive(Clone, Debug)]
+pub(crate) struct FlowControlFacts {
+    /// Parent context by one-based context id. Context zero is the
+    /// implicit non-loop root and is not stored.
+    loop_context_parents: Vec<usize>,
+    /// Innermost loop contexts in which an event span occurs. A small vector
+    /// handles adapters that emit multiple structured facts at one AST span.
+    span_loop_contexts: ahash::AHashMap<Span, smallvec::SmallVec<[usize; 1]>>,
+}
+
+impl Default for FlowControlFacts {
+    fn default() -> Self {
+        Self {
+            loop_context_parents: Vec::new(),
+            span_loop_contexts: ahash::AHashMap::new(),
+        }
+    }
+}
+
+impl FlowControlFacts {
+    fn from_events(events: &[FlowEvent]) -> Self {
+        let mut facts = Self::default();
+        facts.collect_events(events, 0);
+        facts
+    }
+
+    fn collect_events(&mut self, events: &[FlowEvent], loop_context: usize) {
+        for event in events {
+            if loop_context != 0 {
+                let contexts = self.span_loop_contexts.entry(event.span()).or_default();
+                if !contexts.contains(&loop_context) {
+                    contexts.push(loop_context);
+                }
+            }
+            match event {
+                FlowEvent::Loop { body, .. } => {
+                    // Zero is the implicit non-loop root; stored contexts are
+                    // one-based so loop-free functions allocate nothing.
+                    let child_context = self.loop_context_parents.len() + 1;
+                    self.loop_context_parents.push(loop_context);
+                    self.collect_events(body, child_context);
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    self.collect_events(then_events, loop_context);
+                    self.collect_events(else_events, loop_context);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    self.collect_events(body, loop_context);
+                    self.collect_events(catch_events, loop_context);
+                    self.collect_events(finally_events, loop_context);
+                }
+                FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                    self.collect_events(body, loop_context);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn spans_share_loop_back_edge(&self, first: Span, second: Span) -> bool {
+        let Some(first_contexts) = self.span_loop_contexts.get(&first) else {
+            return false;
+        };
+        let Some(second_contexts) = self.span_loop_contexts.get(&second) else {
+            return false;
+        };
+        first_contexts.iter().copied().any(|first_context| {
+            second_contexts
+                .iter()
+                .copied()
+                .any(|second_context| self.contexts_share_loop(first_context, second_context))
+        })
+    }
+
+    fn contexts_share_loop(&self, mut first: usize, second: usize) -> bool {
+        while first != 0 {
+            let mut cursor = second;
+            while cursor != 0 {
+                if first == cursor {
+                    return true;
+                }
+                cursor = self.parent_context(cursor);
+            }
+            first = self.parent_context(first);
+        }
+        false
+    }
+
+    fn parent_context(&self, context: usize) -> usize {
+        self.loop_context_parents
+            .get(context.saturating_sub(1))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
 /// Output of the transfer-function pass for one function.
 #[derive(Clone, Debug)]
 pub struct TransferOutput {
@@ -401,6 +698,11 @@ pub struct TransferOutput {
     pub func: FuncId,
     /// True when this output belongs to a constructor body.
     pub is_constructor: bool,
+    /// Whether the adapter emitted a semantic return event, including a
+    /// literal/void return with no inbound value edge. Phase 3 uses this AST
+    /// fact to keep a function that also yields from exposing its Yield node
+    /// as the ordinary call result.
+    pub(crate) has_return_event: bool,
     /// Parameter names declared by this function, in declaration
     /// order. Used by Phase 3 callback-binding stitching to detect
     /// `callback(value)` calls whose callee name matches a function
@@ -422,6 +724,11 @@ pub struct TransferOutput {
     /// Phase 3 uses these bases to forward caller receiver fields into
     /// the callee even when there is no explicit receiver parameter.
     pub implicit_receiver_bases: Vec<String>,
+    /// Adapter-declared receiver spellings for this declaration. This is
+    /// the syntax boundary for the IDG: core transfer/stitching code must
+    /// compare against these facts instead of maintaining a cross-language
+    /// receiver-token inventory.
+    pub receiver_names: Vec<String>,
     /// Place dictionary local to this function. The Phase 3 builder
     /// merges it into the segment's dictionary, remapping ids.
     pub places: PlaceDict,
@@ -443,6 +750,11 @@ pub struct TransferOutput {
     /// Phase 3 uses this identity fact to preserve explicit descendant
     /// taint through wrappers without promoting ordinary scalar taint.
     pub return_passthrough_param_indices: Vec<usize>,
+    /// Scalar return/yield aggregate copies derived from expression places.
+    pub descendant_copies: Vec<DescendantCopy>,
+    /// AST/HIR-derived loop-body nesting used by Phase 3 to validate
+    /// loop-carried field copies without accepting arbitrary later writes.
+    pub(crate) flow_control: FlowControlFacts,
     /// Name pool used by this function's `Place::Read` /
     /// `Place::Write` / field-path / type-name interns. Embedded so
     /// the segment merge can resolve StrIds back to source-name
@@ -460,10 +772,12 @@ impl TransferOutput {
         Self {
             func,
             is_constructor: false,
+            has_return_event: false,
             params: Vec::new(),
             receiver_param_index: None,
             receiver_field_bases: Vec::new(),
             implicit_receiver_bases: Vec::new(),
+            receiver_names: Vec::new(),
             places: PlaceDict::new(),
             nodes: NodeDict::new(),
             edges: Vec::new(),
@@ -471,6 +785,8 @@ impl TransferOutput {
             throw_sites: Vec::new(),
             return_field_projections: Vec::new(),
             return_passthrough_param_indices: Vec::new(),
+            descendant_copies: Vec::new(),
+            flow_control: FlowControlFacts::default(),
             names: bonsai_factstore::StringPoolBuilder::new(),
         }
     }
@@ -538,12 +854,15 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
     out.is_constructor = matches!(decl.kind, DeclKind::Constructor);
+    out.has_return_event = flow_events_contain_return(&decl.flow_events);
     out.params.clone_from(&decl.params);
     out.receiver_param_index = decl.receiver_param_index;
-    out.receiver_field_bases = receiver_field_bases(decl);
-    out.implicit_receiver_bases = implicit_receiver_bases(decl);
-    out.return_field_projections = return_field_projections(&decl.flow_events);
+    out.receiver_names = declared_receiver_names(decl);
+    out.receiver_field_bases = receiver_field_bases(decl, &out.receiver_names);
+    out.implicit_receiver_bases = implicit_receiver_bases(decl, &out.receiver_names);
+    out.return_field_projections = return_field_projections(&decl.flow_events, &out.receiver_names);
     out.return_passthrough_param_indices = return_passthrough_param_indices(&decl.flow_events, &decl.params);
+    out.flow_control = FlowControlFacts::from_events(&decl.flow_events);
     let method_receiver_projections = collect_method_receiver_projections(&decl.flow_events);
     let method_selector_fields = collect_method_selector_fields(&decl.flow_events);
     let field_precise_source_projections =
@@ -560,7 +879,8 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         field_precise_source_projections,
         yield_callback_names: collect_yield_callback_names(&decl.flow_events),
         pattern_bindings: collect_pattern_bindings(&decl.flow_events),
-        loop_depth: 0,
+        pending_expression_calls: Vec::new(),
+        in_loop_replay: false,
     };
 
     // Seed the function's `Return` place defensively. Every
@@ -588,7 +908,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         if param_name.is_empty() {
             continue;
         }
-        let param_idx = u8::try_from(idx).unwrap_or(u8::MAX);
+        let param_idx = u32::try_from(idx).unwrap_or(u32::MAX);
         let param_node = ctx.intern_node(Place::Param { idx: param_idx });
         let entry_write = ctx.write_node(param_name, decl.name_span);
         ctx.commit_writer(param_name, entry_write);
@@ -616,7 +936,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
             site.unresolved_result_passthrough = ctx.options.include_unresolved_call_result_passthrough;
         }
     }
-    // A call at a given span is one call; the loop double-walk (and any
+    // A call at a given span is one call; loop replay (and any
     // re-entry) pushes a duplicate `CallSiteRef` per visit with no
     // interning. Dedup by site span so the O(sites^2) compound-expression
     // bridge below scales with the number of DISTINCT calls, not the
@@ -625,31 +945,56 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         .call_sites
         .sort_by_key(|site| (site.site.0.file.raw(), site.site.0.start, site.site.0.end));
     ctx.out.call_sites.dedup_by_key(|site| site.site.0);
-    bridge_return_expression_calls(&mut ctx, &decl.flow_events);
+    bridge_expression_value_calls(&mut ctx);
     bridge_compound_expression_calls(&mut ctx);
     bridge_inline_call_result_receivers(&mut ctx);
     bridge_inline_constructor_receivers(&mut ctx);
     out
 }
 
-fn return_field_projections(events: &[FlowEvent]) -> Vec<ReturnFieldProjection> {
+fn return_field_projections(events: &[FlowEvent], receiver_names: &[String]) -> Vec<ReturnFieldProjection> {
     let mut out = Vec::new();
-    collect_return_field_projections(events, &mut out);
+    collect_return_field_projections(events, receiver_names, &mut out);
     out
+}
+
+fn flow_events_contain_return(events: &[FlowEvent]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Return { .. } => true,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => flow_events_contain_return(then_events) || flow_events_contain_return(else_events),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_events_contain_return(body)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_events_contain_return(body)
+                || flow_events_contain_return(catch_events)
+                || flow_events_contain_return(finally_events)
+        }
+        _ => false,
+    })
 }
 
 fn return_passthrough_param_indices(events: &[FlowEvent], params: &[String]) -> Vec<usize> {
     fn collect(events: &[FlowEvent], params: &[String], out: &mut Vec<usize>) {
         for event in events {
             match event {
-                FlowEvent::Return { value_name, .. } => {
-                    let candidate = value_name.as_deref().map(normalize_return_binding);
+                FlowEvent::Return { value_flow, .. } => {
+                    let candidate = value_flow.place.as_deref().map(normalize_return_binding);
                     let Some(candidate) = candidate else {
                         continue;
                     };
                     if candidate.is_empty()
                         || !candidate.chars().all(|ch| {
-                            ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_ascii_alphanumeric()
+                            ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_alphanumeric()
                         })
                     {
                         continue;
@@ -705,18 +1050,18 @@ fn normalize_return_binding(name: &str) -> &str {
     name.trim().trim_start_matches(['$', '@', '%'])
 }
 
-fn collect_return_field_projections(events: &[FlowEvent], out: &mut Vec<ReturnFieldProjection>) {
+fn collect_return_field_projections(
+    events: &[FlowEvent],
+    receiver_names: &[String],
+    out: &mut Vec<ReturnFieldProjection>,
+) {
     for event in events {
         match event {
-            FlowEvent::Return {
-                value_name,
-                value_text,
-                ..
-            } => {
-                let projection = value_name
-                    .as_deref()
-                    .and_then(scalar_return_projection)
-                    .or_else(|| value_text.as_deref().and_then(scalar_return_projection));
+            FlowEvent::Return { value_flow, .. } => {
+                let projection = value_flow
+                    .projection
+                    .as_ref()
+                    .and_then(|projection| return_field_projection(projection, receiver_names));
                 if let Some(projection) = projection {
                     if !out.iter().any(|existing| existing == &projection) {
                         out.push(projection);
@@ -728,11 +1073,11 @@ fn collect_return_field_projections(events: &[FlowEvent], out: &mut Vec<ReturnFi
                 else_events,
                 ..
             } => {
-                collect_return_field_projections(then_events, out);
-                collect_return_field_projections(else_events, out);
+                collect_return_field_projections(then_events, receiver_names, out);
+                collect_return_field_projections(else_events, receiver_names, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_return_field_projections(body, out);
+                collect_return_field_projections(body, receiver_names, out);
             }
             FlowEvent::Try {
                 body,
@@ -740,102 +1085,60 @@ fn collect_return_field_projections(events: &[FlowEvent], out: &mut Vec<ReturnFi
                 finally_events,
                 ..
             } => {
-                collect_return_field_projections(body, out);
-                collect_return_field_projections(catch_events, out);
-                collect_return_field_projections(finally_events, out);
+                collect_return_field_projections(body, receiver_names, out);
+                collect_return_field_projections(catch_events, receiver_names, out);
+                collect_return_field_projections(finally_events, receiver_names, out);
             }
             _ => {}
         }
     }
 }
 
-fn scalar_return_projection(text: &str) -> Option<ReturnFieldProjection> {
-    let mut normalized = text
-        .trim()
-        .trim_end_matches(';')
-        .trim_start_matches('&')
-        .trim_start_matches('*')
-        .replace("->", ".");
-    if normalized.ends_with(')') {
-        let (receiver, method_call) = normalized.rsplit_once('.')?;
-        let method = method_call.trim_end_matches("()").trim();
-        if !method_call.ends_with("()") {
-            return None;
-        }
-        if return_projection_value_preserving_method(method) {
-            normalized = receiver.to_string();
-        } else if return_projection_property_getter_candidate(receiver, method) {
-            normalized = format!("{receiver}.{method}");
-        } else {
-            return None;
-        }
+fn return_field_projection(
+    projection: &ExpressionProjection,
+    receiver_names: &[String],
+) -> Option<ReturnFieldProjection> {
+    let mut path = projection.path.clone();
+    let field = path.pop()?;
+    let mut base = normalize_return_projection_part(&projection.base, receiver_names);
+    for part in path {
+        base.push('.');
+        base.push_str(&normalize_return_projection_part(&part, receiver_names));
     }
-    if normalized.contains(['(', ')', '{', '}', ',', ' ']) {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for part in normalized.split(['.', '[', ']']) {
-        let part = part.trim().trim_matches('"').trim_matches('\'');
-        if part.is_empty() {
-            continue;
-        }
-        if !part
-            .chars()
-            .all(|ch| ch == '_' || ch == '$' || ch == '@' || ch.is_ascii_alphanumeric())
-        {
-            return None;
-        }
-        parts.push(normalize_return_projection_part(part));
-    }
-    if parts.len() < 2 || parts.len() > 4 {
-        return None;
-    }
-    let field = parts.pop()?;
     Some(ReturnFieldProjection {
-        base: parts.join("."),
-        field,
+        base,
+        field: normalize_return_projection_part(&field, receiver_names),
     })
 }
 
-fn normalize_return_projection_part(part: &str) -> String {
-    let stripped = part.trim_start_matches('$');
-    if matches!(stripped, "this" | "self" | "super" | "base") {
-        stripped.to_string()
+fn normalize_return_projection_part(part: &str, receiver_names: &[String]) -> String {
+    if receiver_name_matches(part, receiver_names) {
+        canonical_receiver_token(part).to_string()
     } else {
         part.to_string()
     }
 }
 
-fn return_projection_value_preserving_method(method: &str) -> bool {
-    matches!(
-        method,
-        "clone" | "to_string" | "to_owned" | "as_str" | "trim" | "trim_start" | "trim_end"
-    )
-}
-
-fn return_projection_property_getter_candidate(receiver: &str, method: &str) -> bool {
-    if method.is_empty()
-        || matches!(
-            method,
-            "run" | "execute" | "audit" | "close" | "cancel" | "dispose" | "status" | "wait"
-        )
-    {
-        return false;
+pub(crate) fn declared_receiver_names(decl: &Decl) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in decl.implicit_receiver_names.iter().chain(
+        decl.receiver_param_index
+            .and_then(|idx| decl.params.get(idx))
+            .into_iter(),
+    ) {
+        let name = name.trim();
+        if !name.is_empty() && !out.iter().any(|existing| receiver_tokens_equal(existing, name)) {
+            out.push(name.to_string());
+        }
     }
-    let root = receiver
-        .trim()
-        .split('.')
-        .find(|part| !part.trim().is_empty())
-        .unwrap_or("")
-        .trim();
-    !matches!(root, "self" | "this" | "super" | "base" | "Self")
+    out
 }
 
-fn receiver_field_bases(decl: &Decl) -> Vec<String> {
+fn receiver_field_bases(decl: &Decl, receiver_names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = ahash::AHashSet::default();
     for write in &decl.receiver_field_writes {
-        for base in implicit_receiver_storage_prefixes(&write.target) {
+        for base in implicit_receiver_storage_prefixes(&write.target, receiver_names) {
             if seen.insert(base.clone()) {
                 out.push(base);
             }
@@ -844,29 +1147,29 @@ fn receiver_field_bases(decl: &Decl) -> Vec<String> {
     out
 }
 
-fn implicit_receiver_bases(decl: &Decl) -> Vec<String> {
+fn implicit_receiver_bases(decl: &Decl, receiver_names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for name in decl
         .implicit_receiver_names
         .iter()
         .chain(decl.receiver_state_sources.iter())
     {
-        push_implicit_receiver_base(&mut out, name);
+        push_implicit_receiver_base(&mut out, name, receiver_names);
     }
     for write in &decl.receiver_field_writes {
-        push_implicit_receiver_base(&mut out, &write.target);
+        push_implicit_receiver_base(&mut out, &write.target, receiver_names);
     }
-    collect_implicit_receiver_bases(&decl.flow_events, &mut out);
+    collect_implicit_receiver_bases(&decl.flow_events, receiver_names, &mut out);
     out
 }
 
-fn collect_implicit_receiver_bases(events: &[FlowEvent], out: &mut Vec<String>) {
+fn collect_implicit_receiver_bases(events: &[FlowEvent], receiver_names: &[String], out: &mut Vec<String>) {
     for event in events {
         match event {
             FlowEvent::Call { name, receiver, .. } => {
-                push_implicit_receiver_base(out, name);
+                push_implicit_receiver_base(out, name, receiver_names);
                 if let Some(receiver) = receiver {
-                    push_implicit_receiver_base(out, receiver);
+                    push_implicit_receiver_base(out, receiver, receiver_names);
                 }
             }
             FlowEvent::Assign {
@@ -876,39 +1179,30 @@ fn collect_implicit_receiver_bases(events: &[FlowEvent], out: &mut Vec<String>) 
                 source_names,
                 ..
             } => {
-                push_implicit_receiver_base(out, target);
+                push_implicit_receiver_base(out, target, receiver_names);
                 if let Some(source_name) = source_name {
-                    push_implicit_receiver_base(out, source_name);
+                    push_implicit_receiver_base(out, source_name, receiver_names);
                 }
                 if let Some(source_call) = source_call {
-                    push_implicit_receiver_base(out, source_call);
+                    push_implicit_receiver_base(out, source_call, receiver_names);
                 }
                 for source in source_names {
-                    push_implicit_receiver_base(out, source);
+                    push_implicit_receiver_base(out, source, receiver_names);
                 }
             }
-            FlowEvent::Return {
-                value_text,
-                value_name,
-                ..
-            } => {
-                if let Some(value_text) = value_text {
-                    push_implicit_receiver_base(out, value_text);
-                }
-                if let Some(value_name) = value_name {
-                    push_implicit_receiver_base(out, value_name);
-                }
+            FlowEvent::Return { value_flow, .. } => {
+                collect_expression_flow_receiver_bases(value_flow, receiver_names, out);
             }
             FlowEvent::Branch {
                 then_events,
                 else_events,
                 ..
             } => {
-                collect_implicit_receiver_bases(then_events, out);
-                collect_implicit_receiver_bases(else_events, out);
+                collect_implicit_receiver_bases(then_events, receiver_names, out);
+                collect_implicit_receiver_bases(else_events, receiver_names, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_implicit_receiver_bases(body, out);
+                collect_implicit_receiver_bases(body, receiver_names, out);
             }
             FlowEvent::Try {
                 body,
@@ -916,24 +1210,46 @@ fn collect_implicit_receiver_bases(events: &[FlowEvent], out: &mut Vec<String>) 
                 finally_events,
                 ..
             } => {
-                collect_implicit_receiver_bases(body, out);
-                collect_implicit_receiver_bases(catch_events, out);
-                collect_implicit_receiver_bases(finally_events, out);
+                collect_implicit_receiver_bases(body, receiver_names, out);
+                collect_implicit_receiver_bases(catch_events, receiver_names, out);
+                collect_implicit_receiver_bases(finally_events, receiver_names, out);
             }
             _ => {}
         }
     }
 }
 
-fn push_implicit_receiver_base(out: &mut Vec<String>, text: &str) {
-    for value in implicit_receiver_storage_prefixes(text) {
+fn collect_expression_flow_receiver_bases(
+    flow: &ExpressionFlow,
+    receiver_names: &[String],
+    out: &mut Vec<String>,
+) {
+    if let Some(place) = flow.place.as_deref() {
+        push_implicit_receiver_base(out, place, receiver_names);
+    }
+    for source in &flow.source_names {
+        push_implicit_receiver_base(out, source, receiver_names);
+    }
+    for field in &flow.aggregate_fields {
+        collect_expression_flow_receiver_bases(&field.value, receiver_names, out);
+    }
+    for item in &flow.tuple_items {
+        collect_expression_flow_receiver_bases(item, receiver_names, out);
+    }
+    for spread in &flow.spreads {
+        collect_expression_flow_receiver_bases(spread, receiver_names, out);
+    }
+}
+
+fn push_implicit_receiver_base(out: &mut Vec<String>, text: &str, receiver_names: &[String]) {
+    for value in implicit_receiver_storage_prefixes(text, receiver_names) {
         if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
             out.push(value);
         }
     }
 }
 
-fn implicit_receiver_storage_prefixes(text: &str) -> Vec<String> {
+fn implicit_receiver_storage_prefixes(text: &str, receiver_names: &[String]) -> Vec<String> {
     let normalized = text
         .trim()
         .trim_start_matches('&')
@@ -945,7 +1261,7 @@ fn implicit_receiver_storage_prefixes(text: &str) -> Vec<String> {
         if part.is_empty() {
             continue;
         }
-        if !part.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        if !part.chars().all(|ch| ch == '_' || ch.is_alphanumeric()) {
             break;
         }
         parts.push(part.to_string());
@@ -953,14 +1269,36 @@ fn implicit_receiver_storage_prefixes(text: &str) -> Vec<String> {
     let Some(root) = parts.first().map(String::as_str) else {
         return Vec::new();
     };
-    if !matches!(root, "self" | "this" | "super" | "base" | "Self") {
+    if !receiver_name_matches(root, receiver_names) {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for len in 1..=parts.len().min(3) {
+    for len in 1..=parts.len() {
         out.push(parts[..len].join("."));
     }
     out
+}
+
+pub(crate) fn receiver_name_matches(candidate: &str, receiver_names: &[String]) -> bool {
+    receiver_names
+        .iter()
+        .any(|receiver| receiver_tokens_equal(candidate, receiver))
+}
+
+pub(crate) fn receiver_tokens_equal(left: &str, right: &str) -> bool {
+    let left = canonical_receiver_token(left);
+    let right = canonical_receiver_token(right);
+    !left.is_empty() && left == right
+}
+
+fn canonical_receiver_token(token: &str) -> &str {
+    token
+        .trim()
+        .trim_start_matches('&')
+        .trim_start_matches('*')
+        .trim_start_matches(['$', '@', '%'])
+        .trim_end_matches("()")
+        .trim()
 }
 
 fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
@@ -1039,104 +1377,37 @@ fn bridge_compound_expression_calls(ctx: &mut TransferCtx<'_>) {
     }
 }
 
-fn bridge_return_expression_calls(ctx: &mut TransferCtx<'_>, events: &[FlowEvent]) {
-    let mut return_spans = Vec::new();
-    collect_return_expression_spans(events, &mut return_spans);
-    if return_spans.is_empty() {
+/// Resolve AST-identified expression calls after the event walk. Adapters are
+/// free to emit a Return/Yield before or after its nested Call events, so the
+/// call-result edge cannot depend on traversal order. The exact tree-sitter
+/// call span is the join key; no return text or callee spelling is parsed.
+fn bridge_expression_value_calls(ctx: &mut TransferCtx<'_>) {
+    if ctx.pending_expression_calls.is_empty() {
         return;
     }
-    return_spans.sort_by_key(|span| (span.file.raw(), span.start, span.end));
-    return_spans.dedup();
     let sites = ctx.out.call_sites.clone();
-    let return_node = ctx.intern_node(Place::Return);
-    for return_span in return_spans {
-        let return_base_node = ctx.write_node(RETURN_FIELD_BASE, return_span);
-        let mut contains_call = false;
-        for inner in &sites {
-            let inner_span = inner.site.0;
-            if !span_contains_or_equal(return_span, inner_span) {
+    let pending = std::mem::take(&mut ctx.pending_expression_calls);
+    for value_call in pending {
+        for site in &sites {
+            if !span_contains_or_equal(value_call.call_span, site.site.0) {
                 continue;
             }
-            contains_call = true;
-            ctx.emit(IdgEdge {
-                from: inner.call_ret_node,
-                to: return_node,
-                meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
-                    kind: IdgEdgeKind::IntraReturn,
-                    call_kind: bonsai_callgraph::EdgeKind::Direct,
-                    via_span: return_span,
-                },
+            let nested_in_another_call_argument = sites.iter().any(|outer| {
+                !std::ptr::eq(site, outer)
+                    && span_contains_or_equal(value_call.call_span, outer.site.0)
+                    && outer
+                        .call_arg_spans
+                        .iter()
+                        .any(|arg_span| span_contains_or_equal(*arg_span, site.site.0))
             });
+            if nested_in_another_call_argument {
+                continue;
+            }
             ctx.emit(IdgEdge {
-                from: inner.call_ret_node,
-                to: return_base_node,
-                meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
-                    kind: IdgEdgeKind::IntraReturn,
-                    call_kind: bonsai_callgraph::EdgeKind::Direct,
-                    via_span: return_span,
-                },
+                from: site.call_ret_node,
+                to: value_call.target,
+                meta: value_call.meta,
             });
-        }
-        // Forward the return-expression's own span node into the scalar
-        // `Return` place ONLY when the return expression contains no call.
-        // The FN this fixes is `return <source-expr>` with no call in the
-        // span (`return os.environ["CMD"]`): the loop above adds nothing, so
-        // this span node would be a dead orphan that nonetheless wins
-        // span-anchored source seeding over the edge fallback, emptying the
-        // forward cut and dropping the source group. When the return DOES
-        // contain a call (`return exec(req.params.q)`), the call already
-        // bridges `call_ret -> Return`, AND the argument-taint into that call
-        // is seeded from the inner read node — adding a whole-span
-        // `base -> Return` edge there would instead let the span node win the
-        // seed and divert it to the return value, dropping the arg-taint
-        // finding. So gate the edge on the no-call case.
-        if !contains_call {
-            ctx.emit(IdgEdge {
-                from: return_base_node,
-                to: return_node,
-                meta: crate::edge::EdgeMeta {
-                    precision: Precision::Exact,
-                    kind: IdgEdgeKind::IntraReturn,
-                    call_kind: bonsai_callgraph::EdgeKind::Direct,
-                    via_span: return_span,
-                },
-            });
-        }
-    }
-}
-
-fn collect_return_expression_spans(events: &[FlowEvent], out: &mut Vec<Span>) {
-    for event in events {
-        match event {
-            FlowEvent::Return {
-                span,
-                value_text: Some(value_text),
-                ..
-            } if !value_text.trim().is_empty() => out.push(*span),
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                collect_return_expression_spans(then_events, out);
-                collect_return_expression_spans(else_events, out);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_return_expression_spans(body, out);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                collect_return_expression_spans(body, out);
-                collect_return_expression_spans(catch_events, out);
-                collect_return_expression_spans(finally_events, out);
-            }
-            _ => {}
         }
     }
 }
@@ -1407,7 +1678,7 @@ fn bare_constructor_type_name(raw_type: &str) -> Option<String> {
     (!bare.is_empty()
         && bare
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+            .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$'))
     .then(|| bare.to_string())
 }
 
@@ -1529,20 +1800,25 @@ struct TransferCtx<'a> {
     /// enclosing assignment before the branch condition, so the
     /// binding must be materialized before lowering that assignment.
     pattern_bindings: Vec<PatternBinding>,
-    /// Current loop-nesting depth. The loop arm double-walks its body to
-    /// establish loop-carried edges; nested loops would compound that to
-    /// 2^depth body visits (a hard hang on deeply-nested generated code).
-    /// Beyond `LOOP_DOUBLE_WALK_MAX_DEPTH` the second pass is skipped —
-    /// the inner loops' loop-carried edges are already established by the
-    /// first pass, so this only forgoes a bounded set of deep-nesting
-    /// carry edges (an under-approximation) rather than blowing up.
-    loop_depth: usize,
+    /// AST call spans and the exact Return/Yield/aggregate node that consumes
+    /// each result. Resolved after all Call events have been lowered so event
+    /// order cannot affect dataflow.
+    pending_expression_calls: Vec<PendingExpressionCall>,
+    /// Whether the walker is replaying an enclosing loop body to establish
+    /// loop-carried edges. A nested loop encountered during replay gets one
+    /// body visit: its own normal visit already established its local carry
+    /// edges, while the enclosing replay supplies the outer-iteration state.
+    /// This keeps nested-loop transfer polynomial without imposing a semantic
+    /// nesting ceiling.
+    in_loop_replay: bool,
 }
 
-/// Max loop-nesting depth at which the loop body is double-walked for
-/// loop-carried edges. Keeps nested-loop transfer polynomial rather than
-/// 2^depth.
-const LOOP_DOUBLE_WALK_MAX_DEPTH: usize = 6;
+#[derive(Copy, Clone, Debug)]
+struct PendingExpressionCall {
+    call_span: Span,
+    target: NodeId,
+    meta: crate::edge::EdgeMeta,
+}
 
 #[derive(Clone, Debug)]
 struct PatternBinding {
@@ -1693,6 +1969,14 @@ fn collect_field_precise_container_assigns_into(
                 if let Some(base) = field_base_name(target) {
                     out.insert((*span, base.to_string()));
                 }
+            }
+            FlowEvent::AggregateAssign {
+                span,
+                target,
+                value_flow,
+                ..
+            } if !value_flow.aggregate_fields.is_empty() => {
+                out.insert((*span, target.clone()));
             }
             FlowEvent::Branch {
                 then_events,
@@ -1865,7 +2149,7 @@ fn quoted_storage_selector(text: &str) -> Option<&str> {
     (!value.is_empty()
         && value
             .chars()
-            .all(|ch| ch == '_' || ch == '$' || ch == '@' || ch.is_ascii_alphanumeric()))
+            .all(|ch| ch == '_' || ch == '$' || ch == '@' || ch.is_alphanumeric()))
     .then_some(value)
 }
 
@@ -2062,22 +2346,27 @@ fn pattern_binding_from_condition(condition: &str) -> Option<(String, String)> {
     let condition = condition.trim();
     let rest = condition.strip_prefix("let ")?;
     let (pattern, source) = rest.split_once('=')?;
-    let binding = single_wrapper_arg(pattern.trim()).unwrap_or_else(|| pattern.trim().to_string());
-    let source = single_wrapper_arg(source.trim()).unwrap_or_else(|| source.trim().to_string());
+    let binding = single_pattern_binding_arg(pattern.trim()).unwrap_or_else(|| pattern.trim().to_string());
+    // The scrutinee is already the adapter's AST-derived expression. Do not
+    // guess that an arbitrary call wrapper preserves its argument value.
+    let source = source.trim().to_string();
     if !is_bare_identifier(&binding) || source.is_empty() {
         return None;
     }
     Some((binding, source))
 }
 
-fn single_wrapper_arg(text: &str) -> Option<String> {
+fn single_pattern_binding_arg(text: &str) -> Option<String> {
     let open = text.find('(')?;
     let close = text.rfind(')')?;
     if close <= open {
         return None;
     }
+    // Tuple/variant pattern names are user-defined. The grammar proves this is
+    // the binding side of `let PATTERN = EXPR`; the IDG must not maintain an
+    // enum-constructor inventory.
     let wrapper = text[..open].trim();
-    if !matches!(wrapper, "Some" | "Ok" | "Err") {
+    if !is_bare_identifier(wrapper) {
         return None;
     }
     let inner = text[open + 1..close].trim();
@@ -2217,6 +2506,23 @@ fn source_uses_index_projection(source: &str, base: &str) -> bool {
     !first.is_empty() && first.chars().all(|ch| ch.is_ascii_digit())
 }
 
+/// Merge an alternate control-flow exit into the active writer state.
+/// Writer vectors are tiny in ordinary code, so preserving their stable
+/// insertion order is cheaper than introducing a second per-name set.
+fn merge_writer_states(
+    current: &mut ahash::AHashMap<StrId, smallvec::SmallVec<[NodeId; 4]>>,
+    alternate: ahash::AHashMap<StrId, smallvec::SmallVec<[NodeId; 4]>>,
+) {
+    for (name, writers) in alternate {
+        let merged = current.entry(name).or_default();
+        for writer in writers {
+            if !merged.contains(&writer) {
+                merged.push(writer);
+            }
+        }
+    }
+}
+
 /// Walk a slice of FlowEvents, dispatching each to its handler.
 fn walk_events(events: &[FlowEvent], ctx: &mut TransferCtx<'_>) {
     for (index, event) in events.iter().enumerate() {
@@ -2249,6 +2555,12 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             assign_call_site,
             ctx,
         ),
+        FlowEvent::AggregateAssign {
+            span,
+            target,
+            value_flow,
+            ..
+        } => emit_local_expression_aggregate(target, value_flow, *span, ctx),
         FlowEvent::Call {
             span,
             name,
@@ -2265,11 +2577,7 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             args,
             ctx,
         ),
-        FlowEvent::Return {
-            span,
-            value_name,
-            value_text,
-        } => {
+        FlowEvent::Return { span, value_flow, .. } => {
             let return_node = ctx.intern_node(Place::Return);
             let return_meta = crate::edge::EdgeMeta {
                 precision: Precision::Exact,
@@ -2277,50 +2585,16 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
                 call_kind: bonsai_callgraph::EdgeKind::Direct,
                 via_span: *span,
             };
-            let mut bridged: ahash::AHashSet<StrId> = ahash::AHashSet::default();
-            let field_precise_return = value_text
-                .as_deref()
-                .is_some_and(|text| emit_container_field_writes(RETURN_FIELD_BASE, text, *span, ctx));
-            if let Some(name) = value_name.as_deref() {
-                if !name.is_empty() {
-                    let sid = ctx.intern_name(name);
-                    if bridged.insert(sid) {
-                        ctx.bridge_read(name, return_node, return_meta);
-                    }
-                    emit_storage_copy_to_special_base(RETURN_FIELD_BASE, name, *span, ctx);
-                }
-            }
-            // Compound return expressions (`return ext(inner(x))`)
-            // don't surface a `value_name` — the adapter only fills
-            // `value_text` with the raw expression. Tokenising the
-            // identifier names inside that text and bridging each
-            // through to Place::Return mirrors the engine's
-            // identifier-tokenisation fallback for return-paths;
-            // without it, compound returns silently drop taint and
-            // every transitive sink past such a function disappears.
-            if !field_precise_return {
-                if let Some(text) = value_text.as_deref() {
-                    let trimmed = text.trim();
-                    if is_bare_identifier(trimmed) {
-                        emit_storage_copy_to_special_base(RETURN_FIELD_BASE, trimmed, *span, ctx);
-                    }
-                    if !text.is_empty() {
-                        // Use the same expression bridge as assignments so
-                        // value-preserving method calls (`return x.upper()`,
-                        // `return @cmd.upcase`) carry the receiver while
-                        // string/keyword noise stays out. Shares `bridged`
-                        // with the value_name path above so `return result`
-                        // emits exactly one IntraReturn edge, not two.
-                        bridge_value_expr_to_node_with_bridged(
-                            text,
-                            return_node,
-                            *span,
-                            IdgEdgeKind::IntraReturn,
-                            ctx,
-                            &mut bridged,
-                        );
-                    }
-                }
+            let field_precise_return = emit_expression_aggregate(RETURN_FIELD_BASE, value_flow, *span, ctx);
+            if !field_precise_return && !value_flow.is_empty() {
+                let return_base = ctx.write_node(RETURN_FIELD_BASE, *span);
+                emit_expression_scalar_to_node(value_flow, return_base, return_meta, ctx);
+                copy_expression_descendants_to_special_base(RETURN_FIELD_BASE, value_flow, *span, ctx);
+                ctx.emit(IdgEdge {
+                    from: return_base,
+                    to: return_node,
+                    meta: return_meta,
+                });
             }
         }
         FlowEvent::Throw {
@@ -2330,34 +2604,14 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
         } => walk_throw(*span, value_name.as_deref(), thrown_type.as_deref(), ctx),
         FlowEvent::Branch {
             span: _,
-            condition,
+            condition: _,
             then_events,
             else_events,
         } => {
-            // Phase-8 path-sensitive narrowing: classify the branch
-            // condition. When the textual condition normalises to a
-            // boolean literal (`true` / `false` / `1` / `0`), the
-            // opposite arm is dead and we don't walk it. The
-            // unreachable arm's writers don't enter `last_writer`,
-            // so downstream taint can't flow through it. When the
-            // condition is non-trivial (anything that depends on a
-            // runtime value), fall through to the existing
-            // SSA-style join below.
-            let cond_kind = condition
-                .as_deref()
-                .map(classify_branch_condition)
-                .unwrap_or(BranchConditionKind::Unknown);
-            match cond_kind {
-                BranchConditionKind::AlwaysTrue => {
-                    walk_events(then_events, ctx);
-                    return;
-                }
-                BranchConditionKind::AlwaysFalse => {
-                    walk_events(else_events, ctx);
-                    return;
-                }
-                BranchConditionKind::Unknown => {}
-            }
+            // Reachability is language semantics, not spelling: `0` is false
+            // in C/Python but true in Ruby, Lua, and Elixir. Until adapters
+            // carry an AST-derived constant value, conservatively join both
+            // grammar branches rather than dropping a real flow.
             // SSA-style join: snapshot last_writer at branch entry,
             // walk each arm with an independent copy, then merge by
             // taking the union of writers per name. Either arm's
@@ -2384,27 +2638,26 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
             loop_kind: _,
             body,
         } => {
-            // Loop body may run zero or more times. The first pass
-            // emits may-run edges and establishes body-end writers;
-            // the second pass lets reads in the body see those
-            // previous-iteration writers. Because there is one
-            // stable Write node per source write span, the second
-            // pass completes the loop-carried structural edges.
-            // `emit` suppresses duplicate edges from rewalking the
-            // same statements.
+            // A loop may execute zero or more times. Preserve its entry
+            // writer state for the zero-iteration exit, walk the body once
+            // for ordinary may-run edges, then replay it once so body reads
+            // observe prior-iteration writes. Stable node identities plus
+            // exact edge suppression make one replay sufficient for the
+            // structural closure.
             //
-            // The second (loop-carried) pass is skipped past
-            // `LOOP_DOUBLE_WALK_MAX_DEPTH` of nesting: recursively
-            // double-walking nested loops is 2^depth body visits and hangs
-            // on deeply-nested generated code. Deeper loops still get their
-            // first pass (all nodes/edges), forgoing only some carry edges.
-            ctx.loop_depth += 1;
-            let double_walk = ctx.loop_depth <= LOOP_DOUBLE_WALK_MAX_DEPTH;
+            // Nested loops do not recursively replay while an enclosing
+            // replay is active. They already established their local carry
+            // edges during the normal walk, and this visit lets those nodes
+            // observe the enclosing loop's carried state without 2^depth
+            // traversal or a correctness-reducing nesting cap.
+            let entry_writers = ctx.last_writer.clone();
             walk_events(body, ctx);
-            if double_walk {
+            if !ctx.in_loop_replay {
+                ctx.in_loop_replay = true;
                 walk_events(body, ctx);
+                ctx.in_loop_replay = false;
             }
-            ctx.loop_depth -= 1;
+            merge_writer_states(&mut ctx.last_writer, entry_writers);
         }
         FlowEvent::Try {
             span,
@@ -2424,26 +2677,17 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
         ),
         FlowEvent::Defer { span: _, body } => walk_events(body, ctx),
         FlowEvent::Using { span: _, body } => walk_events(body, ctx),
-        FlowEvent::Yield { span, value_text } => {
-            if let Some(text) = value_text.as_deref() {
-                let field_precise_yield = emit_container_field_writes(YIELD_FIELD_BASE, text, *span, ctx);
-                let trimmed = text.trim();
-                if is_bare_identifier(trimmed) {
-                    emit_storage_copy_to_special_base(YIELD_FIELD_BASE, trimmed, *span, ctx);
-                }
-                if !field_precise_yield && is_bare_identifier(trimmed) {
-                    let to = ctx.intern_node(Place::Yield);
-                    ctx.bridge_read(
-                        trimmed,
-                        to,
-                        crate::edge::EdgeMeta {
-                            precision: Precision::Exact,
-                            kind: IdgEdgeKind::IntraYield,
-                            call_kind: bonsai_callgraph::EdgeKind::Direct,
-                            via_span: *span,
-                        },
-                    );
-                }
+        FlowEvent::Yield { span, value_flow, .. } => {
+            let yield_meta = crate::edge::EdgeMeta {
+                precision: Precision::Exact,
+                kind: IdgEdgeKind::IntraYield,
+                call_kind: bonsai_callgraph::EdgeKind::Direct,
+                via_span: *span,
+            };
+            if !emit_expression_aggregate(YIELD_FIELD_BASE, value_flow, *span, ctx) {
+                let to = ctx.intern_node(Place::Yield);
+                emit_expression_scalar_to_node(value_flow, to, yield_meta, ctx);
+                copy_expression_descendants_to_special_base(YIELD_FIELD_BASE, value_flow, *span, ctx);
             }
         }
         FlowEvent::Await { span, value_name } => {
@@ -2472,47 +2716,151 @@ fn walk_event(event: &FlowEvent, assign_call_site: Option<AssignCallSiteHint>, c
     }
 }
 
-fn emit_storage_copy_to_special_base(
-    special_base: &str,
-    source: &str,
-    span: Span,
-    ctx: &mut TransferCtx<'_>,
-) -> NodeId {
-    let write_node = ctx.write_node(special_base, span);
-    bridge_value_expr_to_node(source, write_node, span, IdgEdgeKind::IntraAssign, ctx);
-    write_node
+/// Materialize a named aggregate initializer as exact local field writes.
+/// Positional items are intentionally ignored here: the workspace semantic
+/// pass must first prove their field identity from a parsed type layout.
+fn emit_local_expression_aggregate(base: &str, flow: &ExpressionFlow, span: Span, ctx: &mut TransferCtx<'_>) {
+    let field_meta = crate::edge::EdgeMeta {
+        precision: Precision::Exact,
+        kind: IdgEdgeKind::IntraFieldWrite,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: span,
+    };
+    for field in &flow.aggregate_fields {
+        if field.name.is_empty() {
+            continue;
+        }
+        let target = format!("{base}.{}", field.name);
+        let (write_node, _) = build_target_node(&target, span, ctx);
+        if field.value.aggregate_fields.is_empty() {
+            emit_expression_scalar_to_node(&field.value, write_node, field_meta, ctx);
+        } else {
+            emit_local_expression_aggregate(&target, &field.value, span, ctx);
+        }
+        ctx.commit_writer(&target, write_node);
+    }
+    for spread in &flow.spreads {
+        let source = spread
+            .place
+            .as_deref()
+            .or_else(|| (spread.source_names.len() == 1).then(|| spread.source_names[0].as_str()));
+        if let Some(source) = source {
+            emit_spread_field_copies_to_special_base(base, source, span, ctx);
+        }
+    }
 }
 
-fn emit_container_field_writes(
+fn emit_expression_aggregate(
     special_base: &str,
-    text: &str,
+    flow: &ExpressionFlow,
     span: Span,
     ctx: &mut TransferCtx<'_>,
 ) -> bool {
-    let mut fields = container_field_initializers(text);
-    fields.extend(positional_tuple_initializers(text));
-    fields.sort();
-    fields.dedup();
-    let spreads = container_spreads(text);
-    if fields.is_empty() && spreads.is_empty() {
+    if flow.aggregate_fields.is_empty() && flow.tuple_items.is_empty() && flow.spreads.is_empty() {
         return false;
     }
-    for (field, value) in fields {
-        let target = format!("{special_base}.{field}");
+
+    let field_meta = crate::edge::EdgeMeta {
+        precision: Precision::Exact,
+        kind: IdgEdgeKind::IntraFieldWrite,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: span,
+    };
+    for field in &flow.aggregate_fields {
+        if field.name.is_empty() {
+            continue;
+        }
+        let target = format!("{special_base}.{}", field.name);
         let write_node = ctx.write_node(&target, span);
-        bridge_value_expr_to_node(&value, write_node, span, IdgEdgeKind::IntraFieldWrite, ctx);
+        if !emit_expression_aggregate(&target, &field.value, span, ctx) {
+            emit_expression_scalar_to_node(&field.value, write_node, field_meta, ctx);
+        }
     }
-    for spread in spreads {
-        emit_spread_field_copies_to_special_base(special_base, &spread, span, ctx);
+    for (index, item) in flow.tuple_items.iter().enumerate() {
+        let target = format!("{special_base}.{index}");
+        let write_node = ctx.write_node(&target, span);
+        if !emit_expression_aggregate(&target, item, span, ctx) {
+            emit_expression_scalar_to_node(item, write_node, field_meta, ctx);
+        }
     }
-    // A spread in a returned/yielded container copies fields, not the
-    // spread object as a scalar return value. Emitting
-    // `spread -> __bonsai_return` promotes any tainted sibling field
-    // to the whole return and lets `rest.user` satisfy a later
-    // `return.cmd` read. Known live spread fields are copied
-    // field-for-field above; unknown spread fields stay unknown rather
-    // than becoming whole-return taint.
+    for spread in &flow.spreads {
+        let source = spread
+            .place
+            .as_deref()
+            .or_else(|| (spread.source_names.len() == 1).then(|| spread.source_names[0].as_str()));
+        if let Some(source) = source {
+            emit_spread_field_copies_to_special_base(special_base, source, span, ctx);
+        }
+    }
     true
+}
+
+/// Bridge compiler-owned expression operands into one semantic value node.
+/// `value_text` is intentionally absent: all reads and nested calls were
+/// extracted from tree-sitter nodes by the language adapter boundary.
+fn emit_expression_scalar_to_node(
+    flow: &ExpressionFlow,
+    target: NodeId,
+    meta: crate::edge::EdgeMeta,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let mut bridged = ahash::AHashSet::default();
+    let raw_projection = flow
+        .projection
+        .as_ref()
+        .map(ExpressionProjection::canonical_place);
+    let canonical_projection = flow
+        .projection
+        .as_ref()
+        .map(|projection| canonical_expression_projection_place(projection, &ctx.out.receiver_names));
+    {
+        let mut bridge_source = |source: &str| {
+            let source = source.trim();
+            if source.is_empty() {
+                return;
+            }
+            let source = if raw_projection.as_deref() == Some(source) {
+                canonical_projection.as_deref().unwrap_or(source)
+            } else {
+                source
+            };
+            let sid = ctx.intern_name(source);
+            if bridged.insert(sid) {
+                ctx.bridge_read(source, target, meta);
+            }
+        };
+        if let Some(projection) = canonical_projection.as_deref() {
+            bridge_source(projection);
+        }
+        for source in flow.place.iter().chain(&flow.source_names) {
+            bridge_source(source);
+        }
+    }
+    for call_span in &flow.call_sites {
+        let pending = PendingExpressionCall {
+            call_span: *call_span,
+            target,
+            meta,
+        };
+        if !ctx.pending_expression_calls.iter().any(|existing| {
+            existing.call_span == pending.call_span
+                && existing.target == pending.target
+                && existing.meta == pending.meta
+        }) {
+            ctx.pending_expression_calls.push(pending);
+        }
+    }
+}
+
+fn canonical_expression_projection_place(
+    projection: &ExpressionProjection,
+    receiver_names: &[String],
+) -> String {
+    std::iter::once(projection.base.as_str())
+        .chain(projection.path.iter().map(String::as_str))
+        .map(|part| normalize_return_projection_part(part, receiver_names))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn emit_spread_field_copies_to_special_base(
@@ -2522,7 +2870,7 @@ fn emit_spread_field_copies_to_special_base(
     ctx: &mut TransferCtx<'_>,
 ) {
     let spread = spread.trim();
-    if spread.is_empty() || spread.contains(['.', '[', '(']) {
+    if spread.is_empty() {
         return;
     }
     let prefix = format!("{spread}.");
@@ -2561,6 +2909,36 @@ fn emit_spread_field_copies_to_special_base(
     }
 }
 
+/// Preserve already-materialized descendant places when a scalar expression
+/// returns or yields an aggregate local (`return value`, `yield value`). The
+/// CST expression identifies the source base; only concrete descendant
+/// writers in the current flow state are copied, so field-only taint remains
+/// field-only and no synthetic member inventory is introduced.
+fn copy_expression_descendants_to_special_base(
+    special_base: &str,
+    flow: &ExpressionFlow,
+    span: Span,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let source = flow
+        .place
+        .as_deref()
+        .or_else(|| (flow.source_names.len() == 1).then(|| flow.source_names[0].as_str()))
+        .map(str::trim)
+        .filter(|source| !source.is_empty());
+    if let Some(source) = source {
+        emit_spread_field_copies_to_special_base(special_base, source, span, ctx);
+        let copy = DescendantCopy {
+            source_base: source.to_string(),
+            target_base: special_base.to_string(),
+            span,
+        };
+        if !ctx.out.descendant_copies.contains(&copy) {
+            ctx.out.descendant_copies.push(copy);
+        }
+    }
+}
+
 fn bridge_value_expr_to_node(
     value: &str,
     target: NodeId,
@@ -2573,10 +2951,9 @@ fn bridge_value_expr_to_node(
 }
 
 /// Like [`bridge_value_expr_to_node`] but dedups against a caller-owned
-/// `bridged` set. The Return arm bridges `value_name` first and then
-/// tokenises `value_text` through this — sharing the set keeps a
-/// `return result` (where `value_name` and the tokenised text are the
-/// same identifier) at exactly one IntraReturn edge instead of two.
+/// `bridged` set. This remains the legacy textual boundary for assignment
+/// shapes whose adapters have not yet promoted RHS operands into HIR; return
+/// and yield lowering never calls it.
 fn bridge_value_expr_to_node_with_bridged(
     value: &str,
     target: NodeId,
@@ -2768,202 +3145,6 @@ fn is_non_value_token(token: &str) -> bool {
     )
 }
 
-fn container_field_initializers(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for body in brace_bodies(text) {
-        for part in split_top_level(&body, ',') {
-            let trimmed = part.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("**")
-                || trimmed.starts_with("...")
-                || trimmed.starts_with('*')
-            {
-                continue;
-            }
-            if let Some((key, value)) = split_top_level_once(trimmed, ':') {
-                if let Some(field) = static_container_key(&key) {
-                    out.push((field, value.trim().to_string()));
-                }
-                continue;
-            }
-            if is_bare_identifier(trimmed) {
-                out.push((trimmed.to_string(), trimmed.to_string()));
-            }
-        }
-    }
-    out
-}
-
-fn positional_tuple_initializers(text: &str) -> Vec<(String, String)> {
-    let trimmed = text.trim().trim_end_matches(';').trim();
-    let Some(body) = trimmed.strip_prefix('{').and_then(|body| body.strip_suffix('}')) else {
-        return Vec::new();
-    };
-    let parts = split_top_level(body, ',');
-    if parts.len() < 2 || parts.iter().any(|part| split_top_level_once(part, ':').is_some()) {
-        return Vec::new();
-    }
-    parts
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| (index.to_string(), value.trim().to_string()))
-        .collect()
-}
-
-fn container_spreads(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for body in brace_bodies(text) {
-        for part in split_top_level(&body, ',') {
-            let trimmed = part.trim();
-            let spread = trimmed
-                .strip_prefix("**")
-                .or_else(|| trimmed.strip_prefix("..."))
-                .map(str::trim);
-            if let Some(spread) = spread.filter(|spread| !spread.is_empty()) {
-                out.push(spread.to_string());
-            }
-        }
-    }
-    out
-}
-
-fn brace_bodies(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack: Vec<(char, usize)> = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '{' => stack.push((ch, idx)),
-            '[' | '(' => stack.push((ch, idx)),
-            '}' => {
-                let Some((open, start)) = stack.pop() else {
-                    continue;
-                };
-                if open == '{' && stack.is_empty() {
-                    out.push(text[start + 1..idx].to_string());
-                }
-            }
-            ']' => {
-                if stack.last().is_some_and(|(open, _)| *open == '[') {
-                    stack.pop();
-                }
-            }
-            ')' => {
-                if stack.last().is_some_and(|(open, _)| *open == '(') {
-                    stack.pop();
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn split_top_level(text: &str, delimiter: char) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0i32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            _ if ch == delimiter && depth == 0 => {
-                out.push(text[start..idx].to_string());
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    out.push(text[start..].to_string());
-    out
-}
-
-fn split_top_level_once(text: &str, delimiter: char) -> Option<(String, String)> {
-    let mut depth = 0i32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (idx, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            _ if ch == delimiter && depth == 0 => {
-                return Some((text[..idx].to_string(), text[idx + ch.len_utf8()..].to_string()));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn static_container_key(text: &str) -> Option<String> {
-    let trimmed = text.trim().trim_start_matches(':').trim();
-    let key = trimmed
-        .strip_prefix('"')
-        .and_then(|part| part.strip_suffix('"'))
-        .or_else(|| {
-            trimmed
-                .strip_prefix('\'')
-                .and_then(|part| part.strip_suffix('\''))
-        })
-        .unwrap_or(trimmed)
-        .trim();
-    if key.is_empty()
-        || !key
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        || !key.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    Some(key.to_string())
-}
-
 fn assign_call_site_hint(events: &[FlowEvent], index: usize) -> Option<AssignCallSiteHint> {
     let FlowEvent::Assign {
         span: assign_span,
@@ -3089,6 +3270,7 @@ fn span_contains_or_equal(outer: Span, inner: Span) -> bool {
 fn flow_event_span(event: &FlowEvent) -> Span {
     match event {
         FlowEvent::Assign { span, .. }
+        | FlowEvent::AggregateAssign { span, .. }
         | FlowEvent::Call { span, .. }
         | FlowEvent::Return { span, .. }
         | FlowEvent::Throw { span, .. }
@@ -3108,60 +3290,6 @@ fn flow_event_span(event: &FlowEvent) -> Span {
 /// Walk an `Assign` event. Handles the four shapes the adapter may
 /// emit: bare-name, multi-source compound, call-RHS with args, and
 /// combinations.
-/// Phase-8 branch-condition classification. The adapter records a
-/// textual condition on `FlowEvent::Branch`; this classifier
-/// normalises the spelling across languages and decides whether
-/// the condition is statically true / false. Anything not in the
-/// small recognised set is `Unknown` and falls through to the
-/// SSA join.
-///
-/// Recognised statically-true literals:
-///   `true`, `True`, `TRUE`, `1`
-/// Recognised statically-false literals:
-///   `false`, `False`, `FALSE`, `0`, `nil`, `null`, `None`
-/// `!true` and `not true` flip; double-negation collapses.
-#[derive(Copy, Clone, Debug)]
-enum BranchConditionKind {
-    AlwaysTrue,
-    AlwaysFalse,
-    Unknown,
-}
-
-fn classify_branch_condition(cond: &str) -> BranchConditionKind {
-    let mut s = cond.trim();
-    let mut negations = 0usize;
-    loop {
-        if let Some(rest) = s.strip_prefix("!") {
-            negations += 1;
-            s = rest.trim_start();
-            continue;
-        }
-        if let Some(rest) = s.strip_prefix("not ").or_else(|| s.strip_prefix("not(")) {
-            negations += 1;
-            s = rest.trim_start();
-            continue;
-        }
-        break;
-    }
-    // Strip surrounding parens once for `not(true)` etc.
-    while s.starts_with('(') && s.ends_with(')') {
-        s = &s[1..s.len() - 1];
-        s = s.trim();
-    }
-    let kind = match s {
-        "true" | "True" | "TRUE" | "1" => BranchConditionKind::AlwaysTrue,
-        "false" | "False" | "FALSE" | "0" | "nil" | "null" | "None" => BranchConditionKind::AlwaysFalse,
-        _ => BranchConditionKind::Unknown,
-    };
-    match (kind, negations % 2 == 0) {
-        (BranchConditionKind::AlwaysTrue, true) => BranchConditionKind::AlwaysTrue,
-        (BranchConditionKind::AlwaysTrue, false) => BranchConditionKind::AlwaysFalse,
-        (BranchConditionKind::AlwaysFalse, true) => BranchConditionKind::AlwaysFalse,
-        (BranchConditionKind::AlwaysFalse, false) => BranchConditionKind::AlwaysTrue,
-        (BranchConditionKind::Unknown, _) => BranchConditionKind::Unknown,
-    }
-}
-
 #[allow(clippy::too_many_arguments)] // FlowEvent::Assign lowering carries the event fields verbatim.
 fn walk_assign(
     span: Span,
@@ -3311,7 +3439,7 @@ fn walk_assign(
             let site = CallSiteId(site_span);
             let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (idx, arg) in source_call_args.iter().enumerate() {
-                let arg_idx = u8::try_from(idx).unwrap_or(u8::MAX);
+                let arg_idx = u32::try_from(idx).unwrap_or(u32::MAX);
                 let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
                 arg_nodes.push(arg_node);
                 if !arg.is_empty() {
@@ -3351,14 +3479,15 @@ fn walk_assign(
                 arg_values.push(arg.clone());
             }
             if !source_call_site_hint.is_some_and(|hint| hint.sibling_call_event) {
+                apply_call_result_passthrough_edges(site_span, callee, &[], &arg_nodes, None, ret_node, ctx);
                 ctx.out.call_sites.push(CallSiteRef {
                     site,
                     callee_name: callee.to_string(),
                     receiver: None,
                     receiver_types: Vec::new(),
                     call_kind: CallKind::Function,
-                    args_count: u8::try_from(source_call_args.len()).unwrap_or(u8::MAX),
-                    explicit_args_count: u8::try_from(source_call_args.len()).unwrap_or(u8::MAX),
+                    args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
+                    explicit_args_count: u32::try_from(source_call_args.len()).unwrap_or(u32::MAX),
                     call_ret_node: ret_node,
                     call_arg_nodes: arg_nodes,
                     receiver_arg_node: None,
@@ -3536,7 +3665,7 @@ fn walk_call(
     let mut arg_writeback_targets: SmallVec<[Option<String>; 4]> = SmallVec::new();
     let mut arg_names: SmallVec<[Option<String>; 4]> = SmallVec::new();
     for (idx, arg) in args.iter().enumerate() {
-        let arg_idx = u8::try_from(idx).unwrap_or(u8::MAX);
+        let arg_idx = u32::try_from(idx).unwrap_or(u32::MAX);
         let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
         arg_nodes.push(arg_node);
         let arg_place = call_arg_place_name(arg);
@@ -3602,41 +3731,7 @@ fn walk_call(
             ctx.bridge_read(source, arg_node, arg_meta);
         }
         bridge_projection_receiver_to_node(arg, arg_node, arg_meta, &mut emitted, ctx);
-        // Tokenise `value_text` to extract bare identifiers from
-        // compound expressions (`"-c " + tmp`, `[obj method:tmp]`).
-        // Scala / Solidity / obj-c adapters don't always populate
-        // `place` / `source_names` for non-bare-identifier args.
-        // Engage the fallback when nothing was emitted yet OR
-        // the adapter populated `place` with an obj-c
-        // message-expression literal (starts with `[`) — that
-        // pattern's bridge_read routes through a never-written
-        // Read("[NSString ...]") node, missing the actual carrier
-        // (`token`) embedded inside. Mirrors the engine's
-        // `identifier_tokens_outside_strings` extractor.
-        // Tokenise value_text when no carrier was emitted yet, or
-        // when the only carriers wired in were compound (non-bare)
-        // expressions whose bridge_read never reaches the actual
-        // data carrier — see obj-c's
-        // `place="[NSString ...]"` / source_names=class-and-selector
-        // pattern where the param identifier (`token`) is only
-        // recoverable via value_text tokenisation.
-        let value_text_starts_with_bracket = arg.value_text.trim_start().starts_with('[');
-        let need_tokenise_fallback =
-            emitted.is_empty() || (value_text_starts_with_bracket && arg.place.is_none());
-        if need_tokenise_fallback && !arg.value_text.is_empty() {
-            for token in extract_identifiers_outside_strings(&arg.value_text) {
-                if token.is_empty() {
-                    continue;
-                }
-                let sid = ctx.intern_name(&token);
-                if !emitted.insert(sid) {
-                    continue;
-                }
-                ctx.bridge_read(&token, arg_node, arg_meta);
-            }
-        }
     }
-    apply_compat_receiver_argument_state_call(span, receiver, call_kind, args, ctx);
     apply_yield_callback_call(span, name, receiver, args, ctx);
     if matches!(call_kind, CallKind::ChannelSend) && args.len() >= 2 {
         if let Some(channel) = args
@@ -3646,21 +3741,17 @@ fn walk_call(
         {
             let value = &args[1];
             let write_node = ctx.write_node(&channel, span);
-            bridge_value_expr_to_node(&value.value_text, write_node, span, IdgEdgeKind::IntraAssign, ctx);
-            for source in &value.source_names {
-                if !source.is_empty() {
-                    ctx.bridge_read(
-                        source,
-                        write_node,
-                        crate::edge::EdgeMeta {
-                            precision: Precision::Exact,
-                            kind: IdgEdgeKind::IntraAssign,
-                            call_kind: bonsai_callgraph::EdgeKind::Direct,
-                            via_span: span,
-                        },
-                    );
-                }
-            }
+            bridge_call_arg_sources_to_node(
+                value,
+                write_node,
+                crate::edge::EdgeMeta {
+                    precision: Precision::Exact,
+                    kind: IdgEdgeKind::IntraAssign,
+                    call_kind: bonsai_callgraph::EdgeKind::Direct,
+                    via_span: span,
+                },
+                ctx,
+            );
             ctx.append_writer(&channel, write_node);
         }
     }
@@ -3683,18 +3774,19 @@ fn walk_call(
                 via_span: span,
             };
             // Use a synthetic receiver slot. Pick a high arg index
-            // (u8::MAX) so we don't collide with positional arg
+            // (u32::MAX) so we don't collide with positional arg
             // indices the call may have.
-            let recv_slot = ctx.intern_node(Place::CallArg { site, idx: u8::MAX });
+            let recv_slot = ctx.intern_node(Place::CallArg { site, idx: u32::MAX });
             receiver_arg_node = Some(recv_slot);
-            // Tokenise the receiver expression — it may be a bare
-            // name (`t`) or a chain (`obj.field`); both cases
-            // surface the relevant identifiers.
-            let tokens = extract_identifiers_outside_strings(recv);
-            if tokens.is_empty() && is_bare_identifier(recv) {
+            // A receiver that is already an addressable AST place must keep
+            // its full projection (`self.data`, `repo.0`). Splitting it into
+            // unrelated identifier tokens loses field identity and prevents
+            // compiler-style receiver-state flow. Only flattened compound
+            // expression text falls back to token carriers.
+            if is_static_receiver_place(recv) {
                 ctx.bridge_read(recv, recv_slot, recv_meta);
             } else {
-                for token in tokens {
+                for token in extract_identifiers_outside_strings(recv) {
                     if !token.is_empty() {
                         ctx.bridge_read(&token, recv_slot, recv_meta);
                     }
@@ -3780,14 +3872,23 @@ fn walk_call(
     while arg_names.len() < arg_nodes.len() {
         arg_names.push(None);
     }
+    apply_call_result_passthrough_edges(
+        span,
+        name,
+        receiver_types,
+        &arg_nodes,
+        receiver_arg_node,
+        ret_node,
+        ctx,
+    );
     ctx.out.call_sites.push(CallSiteRef {
         site,
         callee_name: name.to_string(),
         receiver: receiver.map(str::to_string),
         receiver_types: receiver_types.to_vec(),
         call_kind,
-        args_count: u8::try_from(arg_nodes.len()).unwrap_or(u8::MAX),
-        explicit_args_count: u8::try_from(args.len()).unwrap_or(u8::MAX),
+        args_count: u32::try_from(arg_nodes.len()).unwrap_or(u32::MAX),
+        explicit_args_count: u32::try_from(args.len()).unwrap_or(u32::MAX),
         call_ret_node: ret_node,
         call_arg_nodes: arg_nodes,
         receiver_arg_node,
@@ -3805,7 +3906,67 @@ fn walk_call(
             && receiver.is_some(),
     });
     apply_source_output_arg_writes(span, name, args, ctx);
+    apply_output_arg_flow_call(span, name, args, ctx);
+    apply_receiver_state_propagation_call(span, name, receiver, receiver_types, args, ctx);
     apply_clean_output_overwrite_call(span, name, args, ctx);
+}
+
+fn apply_call_result_passthrough_edges(
+    span: Span,
+    name: &str,
+    receiver_types: &[String],
+    arg_nodes: &[NodeId],
+    receiver_arg_node: Option<NodeId>,
+    ret_node: NodeId,
+    ctx: &mut TransferCtx<'_>,
+) {
+    let selected: Vec<(Vec<usize>, bool)> = ctx
+        .options
+        .call_result_passthroughs
+        .iter()
+        .filter(|shape| configured_name_match(&shape.callee, name))
+        .filter(|shape| {
+            shape
+                .receiver_type
+                .as_deref()
+                .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
+        })
+        .map(|shape| (shape.input_arg_indices.clone(), shape.input_receiver))
+        .collect();
+    if selected.is_empty() {
+        return;
+    }
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Narrowed,
+        kind: IdgEdgeKind::IntraAssign,
+        call_kind: bonsai_callgraph::EdgeKind::Unknown,
+        via_span: span,
+    };
+    let mut emitted = ahash::AHashSet::default();
+    for (indices, input_receiver) in selected {
+        for index in indices {
+            if let Some(node) = arg_nodes.get(index).copied() {
+                if emitted.insert(node) {
+                    ctx.emit(IdgEdge {
+                        from: node,
+                        to: ret_node,
+                        meta,
+                    });
+                }
+            }
+        }
+        if input_receiver {
+            if let Some(node) = receiver_arg_node {
+                if emitted.insert(node) {
+                    ctx.emit(IdgEdge {
+                        from: node,
+                        to: ret_node,
+                        meta,
+                    });
+                }
+            }
+        }
+    }
 }
 
 fn apply_yield_callback_call(
@@ -3839,74 +4000,8 @@ fn apply_yield_callback_call(
         via_span: span,
     };
     for arg in args {
-        bridge_value_expr_to_node(&arg.value_text, yield_node, span, IdgEdgeKind::IntraYield, ctx);
-        let mut emitted = ahash::AHashSet::new();
-        if let Some(place) = arg.place.as_deref().filter(|place| !place.is_empty()) {
-            let sid = ctx.intern_name(place);
-            if emitted.insert(sid) {
-                ctx.bridge_read(place, yield_node, meta);
-            }
-        }
-        for source in &arg.source_names {
-            if source.is_empty() {
-                continue;
-            }
-            let sid = ctx.intern_name(source);
-            if emitted.insert(sid) {
-                ctx.bridge_read(source, yield_node, meta);
-            }
-        }
+        bridge_call_arg_sources_to_node(arg, yield_node, meta, ctx);
     }
-}
-
-/// Compatibility graph fallback for unresolved method calls: an explicit
-/// argument may be stored into receiver state. This is deliberately
-/// syntax-driven and name-agnostic. Security graphs disable the fallback and
-/// use resolved bodies or declarative summaries instead.
-fn apply_compat_receiver_argument_state_call(
-    span: Span,
-    receiver: Option<&str>,
-    call_kind: CallKind,
-    args: &[CallArg],
-    ctx: &mut TransferCtx<'_>,
-) {
-    if !ctx.options.include_unresolved_call_result_passthrough
-        || !matches!(call_kind, CallKind::Method)
-        || args.is_empty()
-    {
-        return;
-    }
-    let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
-        return;
-    };
-    // Subscript/property assignments often emit both a method-shaped helper
-    // call and an exact field Assign at the same span. The exact AST write
-    // owns that shape; promoting its value to the whole receiver would erase
-    // sibling-field precision.
-    if ctx
-        .field_precise_container_assigns
-        .iter()
-        .any(|(field_span, base)| {
-            base == receiver
-                && field_span.file == span.file
-                && field_span.start < span.end
-                && span.start < field_span.end
-        })
-    {
-        return;
-    }
-
-    let (write_node, _) = build_target_node(receiver, span, ctx);
-    let meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
-        kind: IdgEdgeKind::IntraAssign,
-        call_kind: bonsai_callgraph::EdgeKind::Direct,
-        via_span: span,
-    };
-    for arg in args {
-        bridge_call_arg_value_to_node(arg, write_node, meta, span, ctx);
-    }
-    ctx.append_writer(receiver, write_node);
 }
 
 fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
@@ -3928,6 +4023,89 @@ fn apply_source_output_arg_writes(span: Span, name: &str, args: &[CallArg], ctx:
         let (write_node, _) = build_target_node(output, span, ctx);
         ctx.commit_writer(output, write_node);
     }
+}
+
+fn apply_output_arg_flow_call(span: Span, name: &str, args: &[CallArg], ctx: &mut TransferCtx<'_>) {
+    let selected: Vec<(usize, Vec<usize>, Option<usize>)> = ctx
+        .options
+        .output_arg_flows
+        .iter()
+        .filter(|shape| configured_name_match(&shape.callee, name))
+        .map(|shape| {
+            (
+                shape.output_arg_index,
+                shape.value_arg_indices.clone(),
+                shape.value_start_arg_index,
+            )
+        })
+        .collect();
+    for (output_arg_index, explicit_indices, value_start_arg_index) in selected {
+        let Some(output) = args.get(output_arg_index).map(call_arg_place_name) else {
+            continue;
+        };
+        let output = output.trim();
+        if output.is_empty() || quoted_literal_text(output) {
+            continue;
+        }
+        let (write_node, _) = build_target_node(output, span, ctx);
+        let meta = crate::edge::EdgeMeta {
+            precision: Precision::Narrowed,
+            kind: IdgEdgeKind::IntraAssign,
+            call_kind: bonsai_callgraph::EdgeKind::Unknown,
+            via_span: span,
+        };
+        let mut value_indices: ahash::AHashSet<usize> = explicit_indices.into_iter().collect();
+        if let Some(start) = value_start_arg_index {
+            value_indices.extend(start..args.len());
+        }
+        value_indices.remove(&output_arg_index);
+        let mut value_indices: Vec<usize> = value_indices.into_iter().collect();
+        value_indices.sort_unstable();
+        for index in value_indices {
+            if let Some(arg) = args.get(index) {
+                bridge_call_arg_sources_to_node(arg, write_node, meta, ctx);
+            }
+        }
+        ctx.commit_writer(output, write_node);
+    }
+}
+
+fn apply_receiver_state_propagation_call(
+    span: Span,
+    name: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+    args: &[CallArg],
+    ctx: &mut TransferCtx<'_>,
+) {
+    let Some(receiver) = receiver.map(str::trim).filter(|receiver| !receiver.is_empty()) else {
+        return;
+    };
+    let matches = ctx.options.receiver_state_propagations.iter().any(|shape| {
+        configured_name_match(&shape.method, name)
+            && shape
+                .receiver_type
+                .as_deref()
+                .is_none_or(|expected| receiver_name_matches(expected, receiver_types))
+    });
+    if !matches || args.is_empty() {
+        return;
+    }
+    let (write_node, _) = build_target_node(receiver, span, ctx);
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Narrowed,
+        kind: IdgEdgeKind::IntraAssign,
+        call_kind: bonsai_callgraph::EdgeKind::Unknown,
+        via_span: span,
+    };
+    // Mutation extends receiver state; it does not replace the whole object
+    // with the explicit arguments. Preserve the reaching receiver definition
+    // so a later clean argument cannot erase an earlier tainted mutation.
+    ctx.bridge_read(receiver, write_node, meta);
+    for arg in args {
+        bridge_call_arg_sources_to_node(arg, write_node, meta, ctx);
+    }
+    ctx.commit_writer(receiver, write_node);
 }
 
 fn source_callback_args_for_call(name: &str, ctx: &TransferCtx<'_>) -> Vec<SourceCallbackArgSpec> {
@@ -3964,16 +4142,15 @@ fn apply_clean_output_overwrite_call(span: Span, name: &str, args: &[CallArg], c
         via_span: span,
     };
     for arg in args.iter().skip(value_start_arg_index) {
-        bridge_call_arg_value_to_node(arg, write_node, meta, span, ctx);
+        bridge_call_arg_sources_to_node(arg, write_node, meta, ctx);
     }
     ctx.commit_writer(output, write_node);
 }
 
-fn bridge_call_arg_value_to_node(
+fn bridge_call_arg_sources_to_node(
     arg: &CallArg,
     node: NodeId,
     meta: crate::edge::EdgeMeta,
-    span: Span,
     ctx: &mut TransferCtx<'_>,
 ) {
     let source_filter = SemanticSourceFilter::from_sources(
@@ -4002,7 +4179,6 @@ fn bridge_call_arg_value_to_node(
         }
     }
     bridge_projection_receiver_to_node(arg, node, meta, &mut emitted, ctx);
-    bridge_value_expr_to_node(&arg.value_text, node, span, IdgEdgeKind::IntraAssign, ctx);
 }
 
 fn bridge_projection_receiver_to_node(
@@ -4063,8 +4239,10 @@ fn arg_has_method_projection_for_receiver(
 ) -> bool {
     method_receiver_projections.iter().any(|projection| {
         dotted_projection_receiver(projection).as_deref() == Some(receiver)
-            && std::iter::once(arg.value_text.as_str())
-                .chain(arg.place.as_deref())
+            && arg
+                .place
+                .as_deref()
+                .into_iter()
                 .chain(arg.source_names.iter().map(String::as_str))
                 .any(|text| text.contains(projection))
     })
@@ -4072,8 +4250,10 @@ fn arg_has_method_projection_for_receiver(
 
 fn projection_receiver_candidates(arg: &CallArg) -> Vec<String> {
     let mut out = Vec::new();
-    for text in std::iter::once(arg.value_text.as_str())
-        .chain(arg.place.as_deref())
+    for text in arg
+        .place
+        .as_deref()
+        .into_iter()
         .chain(arg.source_names.iter().map(String::as_str))
     {
         if let Some(receiver) = projection_receiver_from_text(text) {
@@ -4103,7 +4283,7 @@ fn projection_receiver_from_text(text: &str) -> Option<String> {
                 || ch == '@'
                 || ch == '%'
                 || ch == '&'
-                || ch.is_ascii_alphanumeric())
+                || ch.is_alphanumeric())
         })
         .map_or(0, |(idx, ch)| idx + ch.len_utf8());
     let candidate = before_call[start..].trim();
@@ -4184,18 +4364,7 @@ fn call_arg_place_name(arg: &CallArg) -> String {
     if let Some(place) = arg.place.as_deref().filter(|place| !place.is_empty()) {
         return normalized_call_arg_storage_place(place).to_string();
     }
-    let value = arg.value_text.trim();
-    if is_bare_identifier(value) || is_sigiled_bare_identifier(value) {
-        return value.to_string();
-    }
     String::new()
-}
-
-fn is_sigiled_bare_identifier(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix(['$', '@', '%']) else {
-        return false;
-    };
-    is_bare_identifier(rest)
 }
 
 fn output_candidate_place_needs_field_node(place: &str) -> bool {
@@ -4286,13 +4455,12 @@ fn walk_try(
         let catch_node = ctx.intern_node(Place::Catch { ty: catch_ty });
 
         for throw in &body_throws {
-            let matches = thrown_type_matches_catch(throw.thrown_type, catch_ty, catch_type);
-            if matches {
+            if let Some(precision) = thrown_type_catch_precision(throw.thrown_type, catch_ty) {
                 ctx.emit(IdgEdge {
                     from: throw.throw_node,
                     to: catch_node,
                     meta: crate::edge::EdgeMeta {
-                        precision: Precision::Exact,
+                        precision,
                         kind: IdgEdgeKind::IntraThrow,
                         call_kind: bonsai_callgraph::EdgeKind::Direct,
                         via_span: throw.span,
@@ -4395,7 +4563,17 @@ fn bridge_call_args_inside_throw(
         match event {
             FlowEvent::Call { span, args, .. } if span_contains_or_equal(throw_span, *span) => {
                 for arg in args {
-                    bridge_call_arg_value_to_throw(arg, throw_node, throw_span, ctx);
+                    bridge_call_arg_sources_to_node(
+                        arg,
+                        throw_node,
+                        crate::edge::EdgeMeta {
+                            precision: Precision::Exact,
+                            kind: IdgEdgeKind::IntraThrow,
+                            call_kind: bonsai_callgraph::EdgeKind::Direct,
+                            via_span: throw_span,
+                        },
+                        ctx,
+                    );
                 }
             }
             FlowEvent::Branch {
@@ -4424,64 +4602,16 @@ fn bridge_call_args_inside_throw(
     }
 }
 
-fn bridge_call_arg_value_to_throw(arg: &CallArg, throw_node: NodeId, span: Span, ctx: &mut TransferCtx<'_>) {
-    let meta = crate::edge::EdgeMeta {
-        precision: Precision::Exact,
-        kind: IdgEdgeKind::IntraThrow,
-        call_kind: bonsai_callgraph::EdgeKind::Direct,
-        via_span: span,
-    };
-    let source_filter = SemanticSourceFilter::from_sources(
-        arg.place.as_deref(),
-        &arg.source_names,
-        &ctx.method_receiver_projections,
-        None,
-        &ctx.method_selector_fields,
-    );
-    let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
-    if let Some(place) = arg.place.as_deref() {
-        if !place.is_empty() && !source_filter.is_structural_base_token(place) {
-            let sid = ctx.intern_name(place);
-            if emitted.insert(sid) {
-                ctx.bridge_read(place, throw_node, meta);
-            }
-        }
-    }
-    for source in &arg.source_names {
-        if source.is_empty() || source_filter.is_structural_base_token(source) {
-            continue;
-        }
-        let sid = ctx.intern_name(source);
-        if emitted.insert(sid) {
-            ctx.bridge_read(source, throw_node, meta);
-        }
-    }
-    bridge_value_expr_to_node(&arg.value_text, throw_node, span, IdgEdgeKind::IntraThrow, ctx);
-}
-
-fn thrown_type_matches_catch(thrown_type: Option<TypeId>, catch_ty: TypeId, catch_type_name: &str) -> bool {
+fn thrown_type_catch_precision(thrown_type: Option<TypeId>, catch_ty: TypeId) -> Option<Precision> {
     match thrown_type {
-        Some(thrown) if thrown == catch_ty => true,
-        Some(_) => is_root_exception_catch_type(catch_type_name),
-        None => is_root_exception_catch_type(catch_type_name),
+        Some(thrown) if thrown == catch_ty => Some(Precision::Exact),
+        // Distinct syntax types are not assignable merely because both are
+        // exception-shaped names. The workspace pass consults declared base
+        // types and adds a precise subtype edge when the AST hierarchy proves
+        // it. An untyped throw remains conservative.
+        Some(_) => None,
+        None => Some(Precision::Narrowed),
     }
-}
-
-fn is_root_exception_catch_type(name: &str) -> bool {
-    matches!(
-        normalise_exception_type_name(name).as_str(),
-        "exception" | "throwable" | "error" | "object"
-    )
-}
-
-fn normalise_exception_type_name(name: &str) -> String {
-    name.trim()
-        .trim_start_matches('\\')
-        .replace("::", ".")
-        .rsplit('.')
-        .find(|part| !part.is_empty())
-        .unwrap_or(name)
-        .to_ascii_lowercase()
 }
 
 /// Build the destination Place for an assignment target. Returns
@@ -4608,11 +4738,10 @@ fn static_subscript_method_receiver(access: &str) -> Option<String> {
     Some(receiver.to_string())
 }
 
-/// Extract every bare-identifier token from `text`, ignoring runs
-/// inside string literals (`"..."`, `'...'`, `` `...` ``). Mirrors
-/// the engine's `identifier_tokens_outside_strings` so the IDG
-/// captures the same name set the engine did when an adapter only
-/// populates `value_text` for compound argument expressions.
+/// Extract every bare-identifier token from legacy expression text, ignoring
+/// runs inside string literals (`"..."`, `'...'`, `` `...` ``). Call
+/// arguments never use this fallback: their carriers are compiler facts in
+/// `CallArg.place` / `CallArg.source_names`.
 pub(crate) fn extract_identifiers_outside_strings(text: &str) -> Vec<String> {
     // First strip every `sizeof(...)` / `alignof(...)` / `_Alignof(...)`
     // / `typeof(...)` payload — these are type-introspection
@@ -4644,7 +4773,7 @@ pub(crate) fn extract_identifiers_outside_strings(text: &str) -> Vec<String> {
             quote = Some(c);
             continue;
         }
-        if (matches!(c, '@' | '$' | '%') && current.is_empty()) || c == '_' || c.is_ascii_alphanumeric() {
+        if (matches!(c, '@' | '$' | '%') && current.is_empty()) || c == '_' || c.is_alphanumeric() {
             current.push(c);
         } else {
             push_id_token(&mut tokens, &mut current);
@@ -4941,6 +5070,17 @@ fn is_bare_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_static_receiver_place(receiver: &str) -> bool {
+    let receiver = normalized_call_arg_storage_place(receiver);
+    if receiver.is_empty() || receiver.chars().any(char::is_whitespace) {
+        return false;
+    }
+    receiver.split('.').all(|segment| {
+        let segment = segment.trim_start_matches(['@', '$', '%']);
+        !segment.is_empty() && (segment.chars().all(|ch| ch.is_ascii_digit()) || is_bare_identifier(segment))
+    })
 }
 
 /// Convenience re-export for callers driving the transfer pass

@@ -1463,7 +1463,7 @@ fn export_marks_capped_chain_sections_incomplete() {
 }
 
 #[test]
-fn export_complete_chains_lifts_chain_caps() {
+fn export_complete_chains_uses_exact_compressed_graph() {
     let tmp = tempdir_for_test("bonsai_export_complete_chains");
     const FAN_IN_CALLERS: usize = 300;
     write_fan_in_python_workspace(&tmp, FAN_IN_CALLERS);
@@ -1474,8 +1474,12 @@ fn export_complete_chains_lifts_chain_caps() {
         };
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(
-            v["flow_chains_complete"], true,
-            "{flag} must make top-level export.flow_chains exhaustive"
+            v["flow_chains_mode"], "compressed_callgraph",
+            "{flag} must avoid unbounded simple-path materialization"
+        );
+        assert_eq!(
+            v["flow_chains_complete"], false,
+            "empty concrete path rows must not claim materialized completeness"
         );
         assert_eq!(
             v["flow_chains_truncated_targets"].as_u64().unwrap_or(1),
@@ -1493,73 +1497,67 @@ fn export_complete_chains_lifts_chain_caps() {
                 "--complete-chains alone still omits propagation records"
             );
         }
-        let flow_sink = v["flow_chains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["target"].as_str() == Some("sink"))
-            .expect("sink row in flow_chains");
-        assert_eq!(
-            flow_sink["truncated"], false,
-            "{flag} sink flow_chains row is complete"
+        assert!(
+            v["flow_chains"].as_array().is_some_and(Vec::is_empty),
+            "{flag} should encode the chain language in the graph, not path rows"
         );
         assert!(
-            flow_sink["chains"]
-                .as_array()
-                .is_some_and(|chains| chains.len() >= FAN_IN_CALLERS),
-            "{flag} must include every fan-in chain for sink"
+            v["flow_chains_incomplete_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("compressed_callgraph")),
+            "{flag} must explain why concrete rows are absent"
         );
 
         let tg = &v["taint_graph"];
         assert_eq!(
-            tg["chains_complete"], true,
-            "{flag} must make taint_graph.chains exhaustive"
+            tg["chains_mode"], "compressed_callgraph",
+            "{flag} must use compressed taint-chain evidence"
+        );
+        assert_eq!(
+            tg["chains_complete"], false,
+            "empty concrete taint-chain rows must not claim completeness"
         );
         assert_eq!(
             tg["chains_truncated_targets"].as_u64().unwrap_or(1),
             0,
             "{flag} must clear taint_graph chain truncation counts"
         );
-        let taint_sink = tg["chains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["target"].as_str() == Some("sink"))
-            .expect("sink row in taint_graph.chains");
-        assert_eq!(
-            taint_sink["truncated"], false,
-            "{flag} taint_graph sink row is complete"
+        assert!(
+            tg["chains"].as_array().is_some_and(Vec::is_empty),
+            "{flag} must not enumerate the fan-in path product"
         );
         assert!(
-            taint_sink["chains"]
-                .as_array()
-                .is_some_and(|chains| chains.len() >= FAN_IN_CALLERS),
-            "{flag} must include every fan-in FuncId chain for sink"
+            tg["chains_incomplete_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("compressed_callgraph")),
+            "{flag} must explain the concrete taint-chain omission"
         );
         assert_eq!(
-            tg["flow_id_labels_complete"], true,
-            "{flag} must make taint_graph.flow_id_labels exhaustive"
+            tg["flow_id_labels_mode"], "compressed_callgraph",
+            "{flag} must use the compressed flow relation"
+        );
+        assert_eq!(
+            tg["flow_id_labels_complete"], false,
+            "empty materialized flow-id rows must not claim completeness"
         );
         assert_eq!(
             tg["flow_id_labels_truncated_functions"].as_u64().unwrap_or(1),
             0,
             "{flag} must clear flow-id-label truncation counts"
         );
-        let sink_labels = tg["flow_id_labels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["function"].as_str() == Some("sink"))
-            .expect("sink row in taint_graph.flow_id_labels");
-        assert_eq!(
-            sink_labels["truncated"], false,
-            "{flag} sink flow-id labels are complete"
+        assert!(
+            tg["flow_id_labels"].as_array().is_some_and(Vec::is_empty),
+            "{flag} must not enumerate the fan-in flow-id product"
         );
         assert!(
-            sink_labels["labels"]
-                .as_array()
-                .is_some_and(|labels| labels.len() >= FAN_IN_CALLERS),
-            "{flag} must include every fan-in flow-id label for sink"
+            tg["flow_id_labels_incomplete_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("compressed_callgraph")),
+            "{flag} must explain the concrete flow-id omission"
+        );
+        assert!(
+            tg["call_edges"].as_array().is_some_and(|edges| !edges.is_empty()),
+            "{flag} must retain the exact resolved semantic graph"
         );
     }
 }

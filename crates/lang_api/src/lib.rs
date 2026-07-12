@@ -10,9 +10,7 @@ pub mod registry;
 pub mod taxonomy;
 pub mod types;
 
-pub use capabilities::{
-    CapabilityLevel, LanguageCapabilities, NO_CONSTRUCTOR_METHOD_NAMES, NO_SUPER_RECEIVER_TOKENS,
-};
+pub use capabilities::{CapabilityLevel, LanguageCapabilities, NO_CONSTRUCTOR_METHOD_NAMES};
 pub use kit::{
     alias_map_from_import_specs, alias_map_from_imports, apply_assign_call_result_types,
     apply_assign_value_kind, apply_call_receiver_types, apply_call_receiver_types_with_super_tokens,
@@ -27,18 +25,34 @@ pub use kit::{
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use taxonomy::{flow_edge_spec, FlowEdgeKind, FlowEdgeSpec, FlowEdgeSupport, FLOW_EDGE_TAXONOMY};
 pub use types::{
-    operations_from_flow_events, ArgumentPassingMode, AssignValueKind, CallArg, CallKind, Comment,
-    CommentKind, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec,
-    LanguageId, LoopKind, ModulePath, Operation, OperationKind, OperationOperand, OperationOperandRole, Ref,
-    RefKind, StringCategory, StringLiteral, TypeAliasBinding, UnsupportedConstruct, Visibility,
-    WorkspaceRoot,
+    operations_from_flow_events, AggregateLayout, ArgumentPassingMode, AssignValueKind, CallArg, CallKind,
+    Comment, CommentKind, Decl, DeclIndex, DeclKind, ExpressionField, ExpressionFlow, ExpressionProjection,
+    FieldWrite, FlowEvent, ImportIndex, ImportScope, ImportSpec, LanguageId, LoopKind, ModulePath, Operation,
+    OperationKind, OperationOperand, OperationOperandRole, Ref, RefKind, StringCategory, StringLiteral,
+    TypeAliasBinding, UnsupportedConstruct, Visibility, WorkspaceRoot,
 };
 
 use bonsai_common::FileId;
 use bonsai_diagnostics::DiagnosticSink;
-use bonsai_vfs::Vfs;
+use bonsai_vfs::{FileSnapshot, Vfs};
 use parking_lot::RwLock;
 use std::sync::Arc;
+pub use tree_sitter::Tree as SyntaxTree;
+
+/// Canonical tree-sitter tree provider used by adapters.
+///
+/// The analyzer database implements this with its versioned parser cache, so
+/// every adapter pass over one file shares the same tree instead of creating
+/// another parser and reparsing identical source. Standalone adapter tests may
+/// omit the provider and use the direct fallback in `kit::parse_with`.
+pub trait TreeProvider: Send + Sync {
+    /// Return the tree for this exact immutable snapshot and grammar.
+    ///
+    /// Taking the snapshot rather than only a [`FileId`] is part of the
+    /// correctness contract: a concurrent VFS write must never pair an older
+    /// source snapshot with a newer syntax tree.
+    fn tree_for_snapshot(&self, pack_name: &str, snapshot: &FileSnapshot) -> Option<Arc<SyntaxTree>>;
+}
 
 /// Read-only view of the pieces of the analyzer database that adapters need.
 ///
@@ -48,6 +62,8 @@ use std::sync::Arc;
 pub struct AdapterContext<'a> {
     pub vfs: &'a Vfs,
     pub diagnostics: &'a RwLock<DiagnosticSink>,
+    /// Versioned parser/tree cache supplied by the analyzer database.
+    pub tree_provider: Option<&'a dyn TreeProvider>,
     /// Absolute path of the workspace root the adapter is running
     /// against. `None` for adapter unit tests that synthesize a Vfs
     /// without a workspace. Adapters use this to compute

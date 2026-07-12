@@ -270,6 +270,12 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         );
     }
 
+    let summary_funcs: Vec<FuncId> = func_ids.keys().copied().map(FuncId::new).collect();
+    let return_taint_by_func = idg.return_taint_param_indices_for_funcs_with_max_precision(
+        &summary_funcs,
+        Some(GRAPH_EXPORT_SEMANTIC_MAX_PRECISION),
+    );
+
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             if !matches!(
@@ -308,12 +314,15 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                 }
             }
 
-            let returns_taint_of = return_taint_indices_from_idg(
-                idg.as_ref(),
-                FuncId::new(decl.symbol.raw()),
-                decl.params.len(),
-            );
+            let summary_func = FuncId::new(decl.symbol.raw());
+            let returns_taint_of = return_taint_by_func
+                .get(&summary_func)
+                .into_iter()
+                .flatten()
+                .copied()
+                .take_while(|idx| (*idx as usize) < decl.params.len());
             for param_index in returns_taint_of {
+                let param_index = param_index as usize;
                 let param_id = stable_graph_id("param", &format!("{func_id}\0{param_index}"));
                 graph.node(
                     param_id.clone(),
@@ -470,28 +479,6 @@ fn collect_structural_graph_facts(
             _ => {}
         }
     }
-}
-
-fn return_taint_indices_from_idg(
-    idg: &bonsai_idg::IdgQueryService,
-    func: FuncId,
-    param_count: usize,
-) -> Vec<usize> {
-    let Some(return_node) = idg.return_node_of(func) else {
-        return Vec::new();
-    };
-    let params = idg.param_nodes_of(func);
-    if params.is_empty() {
-        return Vec::new();
-    }
-    let backward: ahash::AHashSet<bonsai_idg::WsNodeId> =
-        idg.backward_closure(&[return_node]).into_iter().collect();
-    params
-        .into_iter()
-        .take(param_count)
-        .enumerate()
-        .filter_map(|(idx, param)| backward.contains(&param).then_some(idx))
-        .collect()
 }
 
 /// Render a graph database export from the SDK projection.

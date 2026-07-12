@@ -33,7 +33,7 @@ use bonsai_common::FileId;
 use tree_sitter::Node;
 
 use super::{
-    argument_place, extract_rhs_expr_operands, first_named_child, looks_like_bare_identifier, node_text,
+    call_arg_from_node, call_arg_from_nodes, first_named_child, looks_like_bare_identifier, node_text,
     normalize_call_name_whitespace, span_of, CallArg, CallKind, FlowEvent,
 };
 
@@ -75,22 +75,8 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
             let channel = node.child_by_field_name("channel")?;
             let value = node.child_by_field_name("value")?;
             let args = vec![
-                CallArg {
-                    passing_mode: Default::default(),
-                    span: span_of(file, &channel),
-                    name: None,
-                    place: argument_place(&channel, src),
-                    source_names: extract_rhs_expr_operands(&channel, src),
-                    value_text: normalize_call_name_whitespace(node_text(&channel, src)),
-                },
-                CallArg {
-                    passing_mode: Default::default(),
-                    span: span_of(file, &value),
-                    name: None,
-                    place: argument_place(&value, src),
-                    source_names: extract_rhs_expr_operands(&value, src),
-                    value_text: normalize_call_name_whitespace(node_text(&value, src)),
-                },
+                call_arg_from_node(channel, file, src, None)?,
+                call_arg_from_node(value, file, src, None)?,
             ];
             (String::from("send"), args)
         }
@@ -182,27 +168,25 @@ fn jsx_call_from_opening(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<Fl
         if value_text.is_empty() {
             continue;
         }
-        args.push(CallArg {
-            passing_mode: Default::default(),
-            span: span_of(file, &child),
-            name: if attr_name.is_empty() {
-                None
-            } else {
-                Some(attr_name)
-            },
-            place: value_node
-                .as_ref()
-                .and_then(|v| v.named_child(0).and_then(|inner| argument_place(&inner, src))),
-            source_names: value_node
-                .as_ref()
-                .map(|v| {
-                    v.named_child(0)
-                        .map(|inner| extract_rhs_expr_operands(&inner, src))
-                        .unwrap_or_else(|| extract_rhs_expr_operands(v, src))
-                })
-                .unwrap_or_else(Vec::new),
-            value_text,
-        });
+        let name = (!attr_name.is_empty()).then_some(attr_name);
+        if let Some(value_node) = value_node {
+            let value_node = value_node.named_child(0).unwrap_or(value_node);
+            if let Some(argument) = call_arg_from_nodes(child, value_node, file, src, name) {
+                args.push(argument);
+            }
+        } else {
+            // A boolean JSX attribute has no value expression in the AST;
+            // its presence is the literal `true`, so it intentionally has no
+            // place or value operands.
+            args.push(CallArg {
+                passing_mode: Default::default(),
+                span: span_of(file, &child),
+                name,
+                place: None,
+                source_names: Vec::new(),
+                value_text,
+            });
+        }
     }
     Some(FlowEvent::Call {
         span: span_of(file, node),
@@ -225,14 +209,9 @@ fn named_child_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
     let mut call_args = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        call_args.push(CallArg {
-            passing_mode: Default::default(),
-            span: span_of(file, &child),
-            name: None,
-            place: argument_place(&child, src),
-            source_names: extract_rhs_expr_operands(&child, src),
-            value_text: normalize_call_name_whitespace(node_text(&child, src)),
-        });
+        if let Some(argument) = call_arg_from_node(child, file, src, None) {
+            call_args.push(argument);
+        }
     }
     call_args
 }
@@ -249,18 +228,9 @@ fn infix_expression_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallA
         if child_kind == "operator" || child_kind.ends_with("_keyword") {
             continue;
         }
-        let argument_text = normalize_call_name_whitespace(node_text(&child, src));
-        if argument_text.is_empty() {
-            continue;
+        if let Some(argument) = call_arg_from_node(child, file, src, None) {
+            call_args.push(argument);
         }
-        call_args.push(CallArg {
-            passing_mode: Default::default(),
-            span: span_of(file, &child),
-            name: None,
-            place: argument_place(&child, src),
-            source_names: extract_rhs_expr_operands(&child, src),
-            value_text: argument_text,
-        });
     }
     call_args
 }
@@ -287,14 +257,7 @@ fn infix_method_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<
     let left = node.child_by_field_name("left")?;
     let right = node.child_by_field_name("right")?;
     // The single infix argument is the right operand.
-    let arg = CallArg {
-        passing_mode: Default::default(),
-        span: span_of(file, &right),
-        name: None,
-        place: argument_place(&right, src),
-        source_names: extract_rhs_expr_operands(&right, src),
-        value_text: normalize_call_name_whitespace(node_text(&right, src)),
-    };
+    let arg = call_arg_from_node(right, file, src, None)?;
     Some(FlowEvent::Call {
         span: span_of(file, node),
         receiver: Some(normalize_call_name_whitespace(node_text(&left, src))),

@@ -365,14 +365,16 @@ lookup instead of a fresh propagation pass.
   dependency file set, so an edit to any callee invalidates only the
   affected entries.
 - **`ValueFlowCache`** (`crates/workspace/src/value_flow.rs`) — per-`FuncId`
-  seed-free `ValueFlowGraph`. Built for the requested scope and cached
-  for reuse. Each entry also ships a
+  compatibility `ValueFlowGraph` projected from the canonical IDG on demand
+  and cached for reuse. It is not eagerly materialized for every callable,
+  because that would repeat a workspace closure per function. Each requested
+  entry also ships a
   `returning_seed_names: AHashSet<String>` precomputed at graph-build
   time — the set of param/assign-target names whose forward closure
-  reaches a `Return` node in the same function. Security-analysis
-  answers "does this seed reach a return?" with a single hash-set
-  intersection. Persisted to
-  `.bonsai/value_flow.v*.factstore`.
+  reaches a `Return` node in the same function. Compatibility callers can use
+  that summary without another closure. Explicit compatibility prewarm/query
+  paths may persist it to `.bonsai/value_flow.v*.factstore`; security and
+  native export use canonical IDG summaries instead.
 - **`TaintGraphIndex`** (`crates/workspace/src/taint_index.rs`) —
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map in `build_findings_chain_aware` so
@@ -468,6 +470,13 @@ The taint stack is layered:
   `inter.rs`): preserves local helper and public result types while
   interprocedural answers come exclusively from the IDG. There is no second
   interprocedural worklist engine.
+
+Native JSON export follows the same boundary. `taint_graph.assign_chains` is a
+per-parameter, function-local projection of the IDG closure. The stable
+`taint_graph.intra_taint` block table remains a local CFG presentation until IDG
+points carry `BasicBlockId`; every row therefore serializes
+`backend: "cfg_local"`. It is compatibility/debug data, not a second
+interprocedural engine and not an alternate source-to-sink result.
 
 `InterTaintConfig` covers the knobs:
 

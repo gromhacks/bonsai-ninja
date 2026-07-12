@@ -315,6 +315,9 @@ fn walk_flow_source_reads(events: &[FlowEvent], visit: &mut impl FnMut(&str, bon
                     visit(arg, *span);
                 }
             }
+            FlowEvent::AggregateAssign { span, value_flow, .. } => {
+                walk_expression_flow_reads(value_flow, &mut |source| visit(source, *span));
+            }
             FlowEvent::Return { span, value_name, .. }
             | FlowEvent::Throw { span, value_name, .. }
             | FlowEvent::Await { span, value_name } => {
@@ -348,6 +351,24 @@ fn walk_flow_source_reads(events: &[FlowEvent], visit: &mut impl FnMut(&str, bon
             | FlowEvent::Continue { .. }
             | FlowEvent::Lifecycle { .. } => {}
         }
+    }
+}
+
+fn walk_expression_flow_reads(flow: &bonsai_lang_api::ExpressionFlow, visit: &mut impl FnMut(&str)) {
+    if let Some(place) = flow.place.as_deref() {
+        visit(place);
+    }
+    for source in &flow.source_names {
+        visit(source);
+    }
+    for field in &flow.aggregate_fields {
+        walk_expression_flow_reads(&field.value, visit);
+    }
+    for item in &flow.tuple_items {
+        walk_expression_flow_reads(item, visit);
+    }
+    for spread in &flow.spreads {
+        walk_expression_flow_reads(spread, visit);
     }
 }
 

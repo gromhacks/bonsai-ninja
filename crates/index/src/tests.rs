@@ -38,6 +38,7 @@ fn len_and_empty_track_live_decls_after_removal() {
         file,
         defs: vec![decl(file, 0, "one"), decl(file, 1, "two")],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -60,6 +61,7 @@ fn insert_dedupes_identical_adapter_declarations() {
         file,
         defs: vec![decl(file, 0, "dupe"), decl(file, 1, "dupe")],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -79,6 +81,7 @@ fn insert_merges_duplicate_declaration_facts() {
         span: fact_span,
         value_text: Some("value".to_string()),
         value_name: Some("value".to_string()),
+        value_flow: bonsai_lang_api::ExpressionFlow::from_place("value"),
     });
     duplicate.has_implicit_returns = true;
     duplicate.params = vec!["value".to_string()];
@@ -103,6 +106,7 @@ fn insert_merges_duplicate_declaration_facts() {
         file,
         defs: vec![decl(file, 0, "dupe"), duplicate],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -133,6 +137,7 @@ fn reinserting_file_replaces_name_lookup_entries() {
         file,
         defs: vec![decl(file, 0, "old")],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });
@@ -140,6 +145,7 @@ fn reinserting_file_replaces_name_lookup_entries() {
         file,
         defs: vec![decl(file, 0, "new")],
         refs: Vec::new(),
+        aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
     });

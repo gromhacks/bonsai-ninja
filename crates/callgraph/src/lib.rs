@@ -791,7 +791,28 @@ pub struct ResolvedCallGraphBuildContext {
     file_path_parts: AHashMap<FileId, Vec<String>>,
     build_targets: BuildTargetIndex,
     file_languages: AHashMap<FileId, Option<&'static str>>,
+    bare_call_constructor_syntax: AHashMap<FileId, bool>,
     peer_class_index: Arc<PeerClassIndex>,
+    constructor_index: Arc<ConstructorIndex>,
+}
+
+type ConstructorIndex = AHashMap<SymbolId, Vec<FuncId>>;
+
+fn build_constructor_index(global: &GlobalIndex) -> Arc<ConstructorIndex> {
+    let mut index = ConstructorIndex::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if matches!(decl.kind, DeclKind::Constructor) {
+                if let Some(parent) = decl.parent {
+                    index
+                        .entry(parent)
+                        .or_default()
+                        .push(FuncId::new(decl.symbol.raw()));
+                }
+            }
+        }
+    }
+    Arc::new(index)
 }
 
 impl ResolvedCallGraph {
@@ -868,7 +889,8 @@ impl ResolvedCallGraph {
             path_for_file,
             export_aliases_for_file,
             language_for_file,
-            |_| bonsai_common::SUPER_RECEIVER_TOKENS,
+            |_| &[],
+            |_| false,
         )
     }
 
@@ -877,7 +899,7 @@ impl ResolvedCallGraph {
     /// variant so ordinary variables named `base` / `parent` are not
     /// treated as super receivers in languages where only `super` is
     /// meaningful.
-    pub fn build_with_file_info_and_super_tokens<F, T, P, L, G, S>(
+    pub fn build_with_file_info_and_super_tokens<F, T, P, L, G, S, B>(
         global: &GlobalIndex,
         aliases_for_file: F,
         alias_targets_for_file: T,
@@ -885,6 +907,7 @@ impl ResolvedCallGraph {
         export_aliases_for_file: L,
         language_for_file: G,
         super_receiver_tokens_for_file: S,
+        bare_call_constructor_syntax_for_file: B,
     ) -> Self
     where
         F: FnMut(FileId) -> AHashMap<String, String>,
@@ -893,6 +916,7 @@ impl ResolvedCallGraph {
         L: Fn(FileId) -> &'static [&'static str],
         G: Fn(FileId) -> Option<&'static str>,
         S: Fn(FileId) -> &'static [&'static str],
+        B: Fn(FileId) -> bool,
     {
         Self::build_with_file_info_and_super_tokens_scoped(
             global,
@@ -902,6 +926,7 @@ impl ResolvedCallGraph {
             export_aliases_for_file,
             language_for_file,
             super_receiver_tokens_for_file,
+            bare_call_constructor_syntax_for_file,
             None,
         )
     }
@@ -914,7 +939,7 @@ impl ResolvedCallGraph {
     /// production-scope runs from walking tests, fixtures, and generated
     /// trees before the file-scoped IDG build.
     #[allow(clippy::too_many_arguments)] // Mirrors the public builder shape and adds the required file scope.
-    pub fn build_with_file_info_and_super_tokens_for_files<F, T, P, L, G, S>(
+    pub fn build_with_file_info_and_super_tokens_for_files<F, T, P, L, G, S, B>(
         global: &GlobalIndex,
         aliases_for_file: F,
         alias_targets_for_file: T,
@@ -922,6 +947,7 @@ impl ResolvedCallGraph {
         export_aliases_for_file: L,
         language_for_file: G,
         super_receiver_tokens_for_file: S,
+        bare_call_constructor_syntax_for_file: B,
         included_files: &[FileId],
     ) -> Self
     where
@@ -931,6 +957,7 @@ impl ResolvedCallGraph {
         L: Fn(FileId) -> &'static [&'static str],
         G: Fn(FileId) -> Option<&'static str>,
         S: Fn(FileId) -> &'static [&'static str],
+        B: Fn(FileId) -> bool,
     {
         Self::build_with_file_info_and_super_tokens_scoped(
             global,
@@ -940,18 +967,21 @@ impl ResolvedCallGraph {
             export_aliases_for_file,
             language_for_file,
             super_receiver_tokens_for_file,
+            bare_call_constructor_syntax_for_file,
             Some(included_files),
         )
     }
 
-    pub fn build_context<P, G>(
+    pub fn build_context<P, G, B>(
         global: &GlobalIndex,
         path_for_file: P,
         language_for_file: G,
+        bare_call_constructor_syntax_for_file: B,
     ) -> ResolvedCallGraphBuildContext
     where
         P: Fn(FileId) -> Option<String>,
         G: Fn(FileId) -> Option<&'static str>,
+        B: Fn(FileId) -> bool,
     {
         let alias_index = WorkspaceAliasIndex::build(global);
         let callable_index = WorkspaceCallableBindingIndex::build(global);
@@ -970,7 +1000,12 @@ impl ResolvedCallGraph {
             .iter()
             .map(|&file| (file, language_for_file(file)))
             .collect();
+        let bare_call_constructor_syntax = all_files
+            .iter()
+            .map(|&file| (file, bare_call_constructor_syntax_for_file(file)))
+            .collect();
         let peer_class_index = build_shared_peer_class_index(global);
+        let constructor_index = build_constructor_index(global);
         ResolvedCallGraphBuildContext {
             alias_index,
             callable_index,
@@ -978,7 +1013,9 @@ impl ResolvedCallGraph {
             file_path_parts,
             build_targets,
             file_languages,
+            bare_call_constructor_syntax,
             peer_class_index,
+            constructor_index,
         }
     }
 
@@ -1008,6 +1045,7 @@ impl ResolvedCallGraph {
             export_aliases: &'static [&'static str],
             super_receiver_tokens: &'static [&'static str],
             language: Option<&'static str>,
+            bare_call_constructor_syntax: bool,
         }
         let file_infos = files
             .into_iter()
@@ -1018,6 +1056,11 @@ impl ResolvedCallGraph {
                 export_aliases: export_aliases_for_file(file),
                 super_receiver_tokens: super_receiver_tokens_for_file(file),
                 language: context.file_languages.get(&file).copied().flatten(),
+                bare_call_constructor_syntax: context
+                    .bare_call_constructor_syntax
+                    .get(&file)
+                    .copied()
+                    .unwrap_or(false),
             })
             .collect::<Vec<_>>();
         use rayon::prelude::*;
@@ -1061,9 +1104,11 @@ impl ResolvedCallGraph {
                         info.export_aliases,
                         info.super_receiver_tokens,
                         info.language,
+                        info.bare_call_constructor_syntax,
                         &language_lookup,
                         &context.alias_index,
                         &context.build_targets,
+                        &context.constructor_index,
                         &mut method_candidate_cache,
                         &mut workspace_module_cache,
                         &mut callable_target_cache,
@@ -1083,7 +1128,7 @@ impl ResolvedCallGraph {
     }
 
     #[allow(clippy::too_many_arguments)] // Mirrors the public builder shape and adds the optional file scope.
-    fn build_with_file_info_and_super_tokens_scoped<F, T, P, L, G, S>(
+    fn build_with_file_info_and_super_tokens_scoped<F, T, P, L, G, S, B>(
         global: &GlobalIndex,
         mut aliases_for_file: F,
         mut alias_targets_for_file: T,
@@ -1091,6 +1136,7 @@ impl ResolvedCallGraph {
         export_aliases_for_file: L,
         language_for_file: G,
         super_receiver_tokens_for_file: S,
+        bare_call_constructor_syntax_for_file: B,
         included_files: Option<&[FileId]>,
     ) -> Self
     where
@@ -1100,6 +1146,7 @@ impl ResolvedCallGraph {
         L: Fn(FileId) -> &'static [&'static str],
         G: Fn(FileId) -> Option<&'static str>,
         S: Fn(FileId) -> &'static [&'static str],
+        B: Fn(FileId) -> bool,
     {
         let alias_index = WorkspaceAliasIndex::build(global);
         let callable_index = WorkspaceCallableBindingIndex::build(global);
@@ -1133,6 +1180,7 @@ impl ResolvedCallGraph {
             export_aliases: &'static [&'static str],
             super_receiver_tokens: &'static [&'static str],
             language: Option<&'static str>,
+            bare_call_constructor_syntax: bool,
         }
         let file_infos = files
             .into_iter()
@@ -1143,9 +1191,11 @@ impl ResolvedCallGraph {
                 export_aliases: export_aliases_for_file(file),
                 super_receiver_tokens: super_receiver_tokens_for_file(file),
                 language: language_for_file(file),
+                bare_call_constructor_syntax: bare_call_constructor_syntax_for_file(file),
             })
             .collect::<Vec<_>>();
         let peer_class_index = build_shared_peer_class_index(global);
+        let constructor_index = build_constructor_index(global);
         use rayon::prelude::*;
         let edge_chunks = file_infos
             .par_iter()
@@ -1187,9 +1237,11 @@ impl ResolvedCallGraph {
                         info.export_aliases,
                         info.super_receiver_tokens,
                         info.language,
+                        info.bare_call_constructor_syntax,
                         &language_lookup,
                         &alias_index,
                         &build_targets,
+                        &constructor_index,
                         &mut method_candidate_cache,
                         &mut workspace_module_cache,
                         &mut callable_target_cache,
@@ -1244,9 +1296,11 @@ fn add_resolved_call_edges(
     caller_export_aliases: &[&'static str],
     caller_super_receiver_tokens: &[&'static str],
     caller_language: Option<&'static str>,
+    bare_call_constructor_syntax: bool,
     language_for_file: &dyn Fn(FileId) -> Option<&'static str>,
     alias_index: &WorkspaceAliasIndex,
     build_targets: &BuildTargetIndex,
+    constructor_index: &ConstructorIndex,
     method_candidate_cache: &mut MethodCandidateCache,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
     callable_target_cache: &mut CallableTargetCache,
@@ -1267,7 +1321,11 @@ fn add_resolved_call_edges(
                 let alias_qualified_call = qualified_module_alias_call(name, aliases)
                     || qualified_alias_target_entry_tail(name, alias_targets).is_some();
                 let folded_receiver = receiver_name_from_call_name(name).filter(|candidate| {
-                    folded_call_name_receiver_is_instance(name, candidate, receiver_types)
+                    folded_call_name_receiver_is_instance(
+                        candidate,
+                        caller_decl,
+                        caller_super_receiver_tokens,
+                    )
                 });
                 let semantic_receiver = receiver.as_deref().or(folded_receiver);
                 let local_value_shadow = semantic_receiver.is_none()
@@ -1308,29 +1366,17 @@ fn add_resolved_call_edges(
                         method_candidate_cache,
                     );
                 }
-                if candidates.is_empty()
-                    && (*call_kind == CallKind::Constructor || caller_language != Some("java"))
-                {
+                if candidates.is_empty() && *call_kind == CallKind::Constructor {
                     candidates = collect_constructor_targets_for_class_call(
                         global,
                         caller_decl,
                         alias_targets,
                         path_for_file,
                         name,
-                        caller_language,
-                        method_candidate_cache,
-                    );
-                }
-                if candidates.is_empty() && *call_kind == CallKind::Constructor {
-                    candidates = collect_late_static_constructor_targets(
-                        global,
-                        caller_decl,
-                        alias_targets,
-                        path_for_file,
-                        name,
+                        receiver.as_deref(),
                         receiver_types,
-                        caller_language,
-                        method_candidate_cache,
+                        true,
+                        Some(constructor_index),
                     );
                 }
                 if candidates.is_empty() {
@@ -1353,7 +1399,7 @@ fn add_resolved_call_edges(
                     && !local_value_shadow
                     && fast_local_callable_reference_name(name)
                 {
-                    candidates = collect_callable_targets_with_context_aliases_and_paths(
+                    candidates = collect_callable_targets_with_context_aliases_paths_and_method_cache(
                         global,
                         name,
                         caller_decl,
@@ -1361,6 +1407,7 @@ fn add_resolved_call_edges(
                         path_for_file,
                         file_path_parts,
                         callable_target_cache,
+                        method_candidate_cache,
                     );
                 }
                 let typed_receiver_method = semantic_receiver.is_some() && !receiver_types.is_empty();
@@ -1382,7 +1429,7 @@ fn add_resolved_call_edges(
                     && semantic_receiver.is_some()
                     && !alias_qualified_call;
                 if candidates.is_empty() && !unresolved_method_receiver && !local_value_shadow {
-                    candidates = collect_callable_targets_with_context_aliases_and_paths(
+                    candidates = collect_callable_targets_with_context_aliases_paths_and_method_cache(
                         global,
                         name,
                         caller_decl,
@@ -1390,6 +1437,7 @@ fn add_resolved_call_edges(
                         path_for_file,
                         file_path_parts,
                         callable_target_cache,
+                        method_candidate_cache,
                     );
                 }
                 if candidates.is_empty()
@@ -1472,7 +1520,7 @@ fn add_resolved_call_edges(
                     if qualified_owner_in_workspace {
                         let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
                         if resolved_name != name.as_str() {
-                            candidates = collect_callable_targets_with_context_aliases_and_paths(
+                            candidates = collect_callable_targets_with_context_aliases_paths_and_method_cache(
                                 global,
                                 resolved_name,
                                 caller_decl,
@@ -1480,6 +1528,7 @@ fn add_resolved_call_edges(
                                 path_for_file,
                                 file_path_parts,
                                 callable_target_cache,
+                                method_candidate_cache,
                             );
                         }
                     }
@@ -1488,6 +1537,28 @@ fn add_resolved_call_edges(
                     {
                         continue;
                     }
+                }
+                // A capability-declared ambiguous grammar may use a bare
+                // call for both functions and class construction. Refine
+                // only after ordinary callable lookup fails and exact scoped
+                // class resolution succeeds; spelling and casing are never
+                // constructor evidence.
+                if candidates.is_empty()
+                    && bare_call_constructor_syntax
+                    && *call_kind == CallKind::Function
+                    && semantic_receiver.is_none()
+                {
+                    candidates = collect_constructor_targets_for_class_call(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        path_for_file,
+                        name,
+                        None,
+                        &[],
+                        false,
+                        Some(constructor_index),
+                    );
                 }
                 if !candidates.is_empty() {
                     retain_same_language_candidates(
@@ -1553,6 +1624,19 @@ fn add_resolved_call_edges(
                         receiver_supplied,
                     );
                 }
+                let resolved_call_kind = if bare_call_constructor_syntax
+                    && *call_kind == CallKind::Function
+                    && !candidates.is_empty()
+                    && candidates.iter().all(|func| {
+                        global
+                            .decl_of(SymbolId::new(func.raw()))
+                            .is_some_and(|decl| decl.kind == DeclKind::Constructor)
+                    }) {
+                    CallKind::Constructor
+                } else {
+                    *call_kind
+                };
+                retain_call_kind_compatible_candidates(global, resolved_call_kind, &mut candidates);
                 dedup_func_ids(&mut candidates);
                 dedup_semantic_candidate_decls(global, &mut candidates);
                 if !candidates.is_empty() {
@@ -1611,6 +1695,10 @@ fn add_resolved_call_edges(
                     local_bindings,
                     caller_language,
                     language_for_file,
+                    path_for_file,
+                    file_path_parts,
+                    method_candidate_cache,
+                    callable_target_cache,
                     cg,
                 );
             }
@@ -1640,7 +1728,6 @@ fn add_resolved_call_edges(
                     file_path_parts,
                     caller_export_aliases,
                     *span,
-                    caller_language,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1711,6 +1798,11 @@ fn add_resolved_call_edges(
                         receiver_supplied,
                     );
                 }
+                candidates.retain(|func| {
+                    global
+                        .decl_of(SymbolId::new(func.raw()))
+                        .is_some_and(|decl| !matches!(decl.kind, DeclKind::Constructor))
+                });
                 dedup_func_ids(&mut candidates);
                 dedup_semantic_candidate_decls(global, &mut candidates);
                 if !candidates.is_empty() {
@@ -1759,6 +1851,10 @@ fn add_resolved_call_edges(
                     local_bindings,
                     caller_language,
                     language_for_file,
+                    path_for_file,
+                    file_path_parts,
+                    method_candidate_cache,
+                    callable_target_cache,
                     cg,
                 );
             }
@@ -1780,9 +1876,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1801,9 +1899,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1824,9 +1924,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1852,9 +1954,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1873,9 +1977,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1894,9 +2000,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1917,9 +2025,11 @@ fn add_resolved_call_edges(
                     caller_export_aliases,
                     caller_super_receiver_tokens,
                     caller_language,
+                    bare_call_constructor_syntax,
                     language_for_file,
                     alias_index,
                     build_targets,
+                    constructor_index,
                     method_candidate_cache,
                     workspace_module_cache,
                     callable_target_cache,
@@ -1941,6 +2051,10 @@ fn add_callback_arg_edges(
     local_bindings: &AHashMap<String, FuncId>,
     caller_language: Option<&'static str>,
     language_for_file: &dyn Fn(FileId) -> Option<&'static str>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
+    method_candidate_cache: &mut MethodCandidateCache,
+    callable_target_cache: &mut CallableTargetCache,
     cg: &mut CallGraph,
 ) {
     let mut seen = AHashSet::new();
@@ -1952,6 +2066,10 @@ fn add_callback_arg_edges(
             &arg.value_text,
             caller_decl,
             caller_language,
+            path_for_file,
+            file_path_parts,
+            method_candidate_cache,
+            callable_target_cache,
         );
         let [to] = targets.as_slice() else {
             continue;
@@ -2027,7 +2145,6 @@ fn collect_assign_source_call_targets(
     file_path_parts: &AHashMap<FileId, Vec<String>>,
     caller_export_aliases: &[&'static str],
     call_span: Span,
-    caller_language: Option<&'static str>,
     method_candidate_cache: &mut MethodCandidateCache,
     workspace_module_cache: &mut WorkspaceModuleTargetCache,
     callable_target_cache: &mut CallableTargetCache,
@@ -2044,7 +2161,7 @@ fn collect_assign_source_call_targets(
         targets = collect_nested_local_callable_targets(global, caller_decl, trimmed, call_span);
     }
     if targets.is_empty() {
-        targets = collect_callable_targets_with_context_aliases_and_paths(
+        targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
             global,
             trimmed,
             caller_decl,
@@ -2052,6 +2169,7 @@ fn collect_assign_source_call_targets(
             path_for_file,
             file_path_parts,
             callable_target_cache,
+            method_candidate_cache,
         );
     }
     if targets.is_empty() {
@@ -2070,7 +2188,7 @@ fn collect_assign_source_call_targets(
         }
     }
     if targets.is_empty() && !member_like && short != trimmed {
-        targets = collect_callable_targets_with_context_aliases_and_paths(
+        targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
             global,
             short,
             caller_decl,
@@ -2078,16 +2196,6 @@ fn collect_assign_source_call_targets(
             path_for_file,
             file_path_parts,
             callable_target_cache,
-        );
-    }
-    if targets.is_empty() {
-        targets = collect_constructor_targets_for_class_call(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            trimmed,
-            caller_language,
             method_candidate_cache,
         );
     }
@@ -2203,18 +2311,87 @@ fn retain_signature_compatible_candidates(
     if candidates.len() <= 1 {
         return;
     }
-    retain_raw_signature_compatible_candidates(
-        global,
-        caller_decl,
-        candidates,
-        &args.iter().map(call_arg_lookup_text).collect::<Vec<_>>(),
-        receiver_supplied,
-    );
+    retain_candidates_by_arity(global, candidates, args.len(), receiver_supplied);
+    if candidates.len() <= 1 {
+        return;
+    }
+
+    let mut scored = Vec::new();
+    let mut best_score = 0usize;
+    for func in candidates.iter().copied() {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        let params = effective_param_names(decl, receiver_supplied);
+        if params.len() != args.len() {
+            continue;
+        }
+        let mut score = 0usize;
+        let mut incompatible = false;
+        for (arg, param_name) in args.iter().zip(params.iter()) {
+            let actual_types = type_names_for_call_arg(global, caller_decl, arg);
+            let expected_types = type_names_for_binding(global, decl, param_name);
+            if actual_types.is_empty() || expected_types.is_empty() {
+                continue;
+            }
+            if let Some(match_score) = type_sets_match_score(&actual_types, &expected_types) {
+                score += match_score;
+            } else {
+                incompatible = true;
+                break;
+            }
+        }
+        if !incompatible {
+            best_score = best_score.max(score);
+            scored.push((func, score));
+        }
+    }
+    if best_score > 0 {
+        let narrowed: Vec<FuncId> = scored
+            .into_iter()
+            .filter_map(|(func, score)| (score == best_score).then_some(func))
+            .collect();
+        if !narrowed.is_empty() {
+            *candidates = narrowed;
+        }
+    }
+}
+
+fn retain_candidates_by_arity(
+    global: &GlobalIndex,
+    candidates: &mut Vec<FuncId>,
+    arg_count: usize,
+    receiver_supplied: bool,
+) {
+    let mut matches: Vec<FuncId> = candidates
+        .iter()
+        .copied()
+        .filter(|func| {
+            global
+                .decl_of(SymbolId::new(func.raw()))
+                .is_some_and(|decl| effective_param_names(decl, receiver_supplied).len() == arg_count)
+        })
+        .collect();
+    if !matches.is_empty() {
+        std::mem::swap(candidates, &mut matches);
+    }
 }
 
 fn dedup_func_ids(candidates: &mut Vec<FuncId>) {
     let mut seen = AHashSet::new();
     candidates.retain(|func| seen.insert(*func));
+}
+
+fn retain_call_kind_compatible_candidates(
+    global: &GlobalIndex,
+    call_kind: CallKind,
+    candidates: &mut Vec<FuncId>,
+) {
+    candidates.retain(|func| {
+        global.decl_of(SymbolId::new(func.raw())).is_some_and(|decl| {
+            matches!(decl.kind, DeclKind::Constructor) == matches!(call_kind, CallKind::Constructor)
+        })
+    });
 }
 
 fn dedup_symbols(candidates: &mut Vec<SymbolId>) {
@@ -2341,15 +2518,6 @@ fn edge_provenance_for_resolved_call(
     EdgeProvenance::direct_symbol()
 }
 
-fn call_arg_lookup_text(arg: &CallArg) -> String {
-    arg.place
-        .as_deref()
-        .filter(|place| !place.trim().is_empty())
-        .unwrap_or(arg.value_text.as_str())
-        .trim()
-        .to_string()
-}
-
 fn retain_raw_signature_compatible_candidates(
     global: &GlobalIndex,
     caller_decl: &Decl,
@@ -2441,10 +2609,6 @@ fn type_names_for_binding(global: &GlobalIndex, decl: &Decl, binding: &str) -> V
     }
     let tail = short_callee(binding);
     let mut out = Vec::new();
-    if let Some(type_name) = constructor_type_from_expression(binding) {
-        push_unique_type_name(&mut out, &type_name);
-        collect_declared_supertypes(global, decl, &type_name, &mut out);
-    }
     for alias in &decl.type_aliases {
         let alias_name = normalize_receiver_alias_text(&alias.name);
         if alias_name == binding || alias_name == tail {
@@ -2457,15 +2621,42 @@ fn type_names_for_binding(global: &GlobalIndex, decl: &Decl, binding: &str) -> V
     out
 }
 
-fn constructor_type_from_expression(expr: &str) -> Option<String> {
-    let trimmed = expr.trim();
-    let rest = trimmed.strip_prefix("new ")?;
-    let open = rest.find('(')?;
-    let type_name = rest[..open].trim();
-    if type_name.is_empty() {
-        return None;
+fn type_names_for_call_arg(global: &GlobalIndex, caller_decl: &Decl, arg: &CallArg) -> Vec<String> {
+    let mut out = Vec::new();
+    for binding in arg.place.iter().chain(&arg.source_names) {
+        for type_name in type_names_for_binding(global, caller_decl, binding) {
+            push_unique_type_name(&mut out, &type_name);
+        }
     }
-    Some(short_callee(type_name).to_string())
+    let alias_targets = alias_targets_for_decl(&AHashMap::new(), caller_decl);
+    let mut nested_calls = Vec::new();
+    collect_call_events_within(&caller_decl.flow_events, arg.span, &mut nested_calls);
+    for event in nested_calls {
+        let FlowEvent::Call {
+            name,
+            receiver,
+            receiver_types,
+            call_kind: CallKind::Constructor,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        for type_name in constructor_type_names_from_call_fact(
+            global,
+            caller_decl,
+            &alias_targets,
+            name,
+            receiver.as_deref(),
+            receiver_types,
+        ) {
+            push_unique_type_name(&mut out, &type_name);
+            collect_declared_supertypes(global, caller_decl, &type_name, &mut out);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn push_unique_type_name(out: &mut Vec<String>, type_name: &str) {
@@ -2564,6 +2755,10 @@ fn resolve_callable_arg(
     raw: &str,
     caller_decl: &Decl,
     caller_language: Option<&'static str>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
+    method_candidate_cache: &mut MethodCandidateCache,
+    callable_target_cache: &mut CallableTargetCache,
 ) -> Vec<FuncId> {
     if !call_arg_can_be_callable_reference(raw, caller_language) {
         return Vec::new();
@@ -2601,11 +2796,27 @@ fn resolve_callable_arg(
         if !local_targets.is_empty() {
             return local_targets;
         }
-        let mut targets =
-            collect_callable_targets_with_context_and_aliases(global, trimmed, caller_decl, alias_targets);
+        let mut targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+            global,
+            trimmed,
+            caller_decl,
+            alias_targets,
+            path_for_file,
+            file_path_parts,
+            callable_target_cache,
+            method_candidate_cache,
+        );
         if targets.is_empty() && short != trimmed && !alias_qualified_reference {
-            targets =
-                collect_callable_targets_with_context_and_aliases(global, short, caller_decl, alias_targets);
+            targets = collect_callable_targets_with_context_aliases_paths_and_method_cache(
+                global,
+                short,
+                caller_decl,
+                alias_targets,
+                path_for_file,
+                file_path_parts,
+                callable_target_cache,
+                method_candidate_cache,
+            );
         }
         if !targets.is_empty() {
             return targets;
@@ -3567,9 +3778,6 @@ fn collect_receiver_method_targets(
         ) {
             push_unique_string(&mut receiver_type_names, type_name);
         }
-        for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, receiver) {
-            push_unique_string(&mut receiver_type_names, type_name);
-        }
     }
     if receiver_type_names.is_empty() {
         return Vec::new();
@@ -3672,162 +3880,136 @@ fn collect_type_qualified_method_targets(
     targets
 }
 
-/// For a constructor call written as `Owner.new` / `Owner::new` /
-/// `Owner->new` (Ruby/Crystal/Rust/PHP), return the class-owner head
-/// (`Owner`). Returns `None` when the tail is not a recognised
-/// constructor method, so ordinary `obj.method` calls are not treated as
-/// constructions.
-fn constructor_owner_from_call_name(call_name: &str) -> Option<&str> {
-    for sep in ["::", "->", "."] {
-        if let Some(idx) = call_name.rfind(sep) {
-            let head = &call_name[..idx];
-            let tail = &call_name[idx + sep.len()..];
-            if !head.is_empty() && matches!(tail, "new" | "New") {
-                return Some(head);
-            }
-        }
-    }
-    None
-}
-
 fn collect_constructor_targets_for_class_call(
     global: &GlobalIndex,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     call_name: &str,
-    caller_language: Option<&'static str>,
-    method_candidate_cache: &mut MethodCandidateCache,
-) -> Vec<FuncId> {
-    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
-        return Vec::new();
-    };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
-        .with_alias_map(alias_targets)
-        .with_file_path_lookup(path_for_file);
-    let mut class_candidates = resolve_class(global, call_name, &ctx);
-    if class_candidates.is_empty() {
-        let short = short_callee(call_name);
-        if short != call_name {
-            class_candidates = resolve_class(global, short, &ctx);
-        }
-    }
-    if class_candidates.is_empty() {
-        // Ruby/Crystal `Box.new`, Rust `Box::new`, PHP `Box->new`: the
-        // class is the RECEIVER of the constructor method, not the tail
-        // `new`. Neither `call_name` ("Box.new") nor its short tail
-        // ("new") names a class, so strip the constructor suffix and
-        // resolve the owner ("Box"). Guarded on a known constructor tail
-        // so ordinary `obj.method` calls don't get misrouted.
-        if let Some(owner) = constructor_owner_from_call_name(call_name) {
-            class_candidates = resolve_class(global, owner, &ctx);
-        }
-    }
-    if class_candidates.is_empty() {
-        return Vec::new();
-    }
-
-    let mut targets = Vec::new();
-    let mut seen = AHashSet::new();
-    for class_sym in class_candidates {
-        let Some(class_decl) = global.decl_of(class_sym) else {
-            continue;
-        };
-        for method_name in constructor_method_names_for_language(class_decl.name.as_str(), caller_language) {
-            collect_method_candidates_for_class_cached(
-                global,
-                class_sym,
-                method_name,
-                &ctx,
-                &mut seen,
-                &mut targets,
-                method_candidate_cache,
-            );
-        }
-    }
-    targets
-}
-
-#[allow(clippy::too_many_arguments)] // Mirrors constructor resolution context plus typed late-static facts.
-fn collect_late_static_constructor_targets(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    path_for_file: &dyn Fn(FileId) -> Option<String>,
-    call_name: &str,
+    receiver: Option<&str>,
     receiver_types: &[String],
-    caller_language: Option<&'static str>,
-    method_candidate_cache: &mut MethodCandidateCache,
+    allow_implicit_enclosing_class: bool,
+    constructor_index: Option<&ConstructorIndex>,
 ) -> Vec<FuncId> {
-    if receiver_types.is_empty() || !late_static_constructor_token(call_name, caller_language) {
-        return Vec::new();
-    }
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path)
         .with_alias_map(alias_targets)
         .with_file_path_lookup(path_for_file);
-    let receiver_type_names = prune_receiver_type_names_for_dispatch(receiver_types.to_vec(), global, &ctx);
     let mut class_candidates = Vec::new();
     let mut seen_classes = AHashSet::new();
-    for type_name in receiver_type_names {
-        for class_sym in resolve_class(global, &type_name, &ctx) {
+    for type_name in receiver_types {
+        for class_sym in resolve_class(global, type_name, &ctx) {
             if seen_classes.insert(class_sym) {
                 class_candidates.push(class_sym);
             }
         }
     }
-    let mut targets = Vec::new();
-    let mut seen = AHashSet::new();
-    for class_sym in class_candidates {
-        let Some(class_decl) = global.decl_of(class_sym) else {
-            continue;
-        };
-        for method_name in constructor_method_names_for_language(class_decl.name.as_str(), caller_language) {
-            collect_method_candidates_for_class_cached(
-                global,
-                class_sym,
-                method_name,
-                &ctx,
-                &mut seen,
-                &mut targets,
-                method_candidate_cache,
-            );
+    for candidate in receiver.into_iter().chain(std::iter::once(call_name)) {
+        for type_name in receiver_type_names_for_expr(caller_decl, alias_targets, candidate) {
+            for class_sym in resolve_class(global, &type_name, &ctx) {
+                if seen_classes.insert(class_sym) {
+                    class_candidates.push(class_sym);
+                }
+            }
+        }
+        for class_sym in resolve_class(global, candidate, &ctx) {
+            if seen_classes.insert(class_sym) {
+                class_candidates.push(class_sym);
+            }
+        }
+    }
+    // A receiver-less constructor expression inside a class body denotes
+    // construction of the lexically enclosing class in languages whose
+    // adapter classifies that syntax as `CallKind::Constructor` (for
+    // example Ruby's `new(args)` inside a class method).  Use the AST's
+    // owning declaration identity only after explicit receiver/callee type
+    // resolution failed, so a named class expression such as `Other(args)`
+    // keeps its normal lexical binding.
+    if allow_implicit_enclosing_class && class_candidates.is_empty() && receiver.is_none() {
+        if let Some(parent) = caller_decl.parent {
+            if global
+                .decl_of(parent)
+                .is_some_and(|decl| matches!(decl.kind, DeclKind::Class | DeclKind::Struct | DeclKind::Enum))
+                && seen_classes.insert(parent)
+            {
+                class_candidates.push(parent);
+            }
+        }
+    }
+    let mut targets = declared_constructor_targets(global, &class_candidates, constructor_index);
+    if targets.is_empty() {
+        // Constructor inheritance is declaration semantics, not a spelling
+        // heuristic. When the constructed class declares no initializer,
+        // walk each resolved base-class branch until its nearest declared
+        // constructor. This mirrors compiler member lookup and ensures the
+        // semantic graph includes the initializer body before the IDG is
+        // scoped (for example, Swift subclasses that inherit `init`).
+        let mut stack = class_candidates.clone();
+        let mut seen = class_candidates.iter().copied().collect::<AHashSet<_>>();
+        while let Some(class_sym) = stack.pop() {
+            let Some(class_decl) = global.decl_of(class_sym) else {
+                continue;
+            };
+            for base_name in class_decl.bases.iter().rev() {
+                for base_sym in resolve_class(global, base_name, &ctx).into_iter().rev() {
+                    if !seen.insert(base_sym) {
+                        continue;
+                    }
+                    let inherited = declared_constructor_targets(global, &[base_sym], constructor_index);
+                    if inherited.is_empty() {
+                        stack.push(base_sym);
+                    } else {
+                        for constructor in inherited {
+                            push_unique_func(&mut targets, constructor);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if targets.is_empty() {
+        for func in resolve_callable_with_context(global, call_name, &ctx) {
+            let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+                continue;
+            };
+            if matches!(decl.kind, DeclKind::Constructor) {
+                push_unique_func(&mut targets, func);
+            }
         }
     }
     targets
 }
 
-fn late_static_constructor_token(call_name: &str, caller_language: Option<&'static str>) -> bool {
-    let token = short_callee(call_name)
-        .trim_start_matches("new ")
-        .trim_end_matches("()")
-        .trim();
-    matches!(token, "static" | "self" | "this") || (caller_language == Some("ruby") && token == "new")
-}
-
-fn constructor_method_names_for_language<'a>(
-    class_name: &'a str,
-    caller_language: Option<&'static str>,
-) -> Vec<&'a str> {
-    match caller_language {
-        Some("java" | "csharp" | "kotlin" | "scala") => vec![class_name],
-        Some("javascript" | "typescript") => vec!["constructor"],
-        Some("python") => vec!["__init__"],
-        Some("php") => vec!["__construct"],
-        Some("swift") => vec!["init"],
-        Some("ruby") => vec!["initialize", "new"],
-        Some("perl") => vec!["new"],
-        _ => vec![
-            class_name,
-            "__init__",
-            "constructor",
-            "__construct",
-            "init",
-            "new",
-        ],
+fn declared_constructor_targets(
+    global: &GlobalIndex,
+    class_symbols: &[SymbolId],
+    constructor_index: Option<&ConstructorIndex>,
+) -> Vec<FuncId> {
+    if let Some(index) = constructor_index {
+        let mut out = Vec::new();
+        for class_symbol in class_symbols {
+            if let Some(constructors) = index.get(class_symbol) {
+                for &constructor in constructors {
+                    push_unique_func(&mut out, constructor);
+                }
+            }
+        }
+        return out;
     }
+    let class_symbols: AHashSet<SymbolId> = class_symbols.iter().copied().collect();
+    let mut out = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if matches!(decl.kind, DeclKind::Constructor)
+                && decl.parent.is_some_and(|parent| class_symbols.contains(&parent))
+            {
+                push_unique_func(&mut out, FuncId::new(decl.symbol.raw()));
+            }
+        }
+    }
+    out
 }
 
 fn type_qualified_method_tail(call_name: &str) -> Option<(&str, &str)> {
@@ -3846,101 +4028,194 @@ fn receiver_call_return_type_names(
     global: &GlobalIndex,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
-    receiver: &str,
-    _call_span: Option<Span>,
+    _receiver: &str,
+    call_span: Option<Span>,
     method_candidate_cache: &mut MethodCandidateCache,
 ) -> Vec<String> {
-    let mut out = receiver_constructed_type_names(global, caller_decl, alias_targets, receiver);
-    let Some(inner_call) = receiver_inner_call_name(receiver) else {
-        return out;
+    let Some(call_span) = call_span else {
+        return Vec::new();
     };
-    for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, &inner_call) {
-        push_unique_string(&mut out, type_name);
-    }
-    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
-        return out;
-    };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
-    let mut funcs = Vec::new();
-    let mut late_static_type: Option<String> = None;
-    if let Some(receiver_name) = receiver_name_from_call_name(&inner_call) {
-        let receiver_type = short_callee(receiver_name).trim_end_matches("()");
-        if !receiver_type.is_empty() {
-            late_static_type = Some(receiver_type.to_string());
-        }
-        let method_name = callee_without_call_args(short_callee(&inner_call));
-        if !receiver_type.is_empty() && !resolve_class(global, receiver_type, &ctx).is_empty() {
-            let mut seen = AHashSet::new();
-            for class_sym in resolve_class(global, receiver_type, &ctx) {
-                collect_method_candidates_for_class_cached(
-                    global,
-                    class_sym,
-                    method_name,
-                    &ctx,
-                    &mut seen,
-                    &mut funcs,
-                    method_candidate_cache,
-                );
-            }
-        }
-    } else {
-        for func in resolve_callable_with_context(global, &inner_call, &ctx) {
-            push_unique_func(&mut funcs, func);
-        }
-    }
-    for func in funcs {
-        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
-            continue;
-        };
-        collect_constructed_return_type_names(
-            global,
-            caller_decl,
-            alias_targets,
-            decl,
-            late_static_type.as_deref(),
-            &mut out,
-        );
-    }
-    out
-}
-
-fn receiver_constructed_type_names(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    receiver: &str,
-) -> Vec<String> {
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    let mut inner_calls = Vec::new();
+    collect_call_events_strictly_inside(&caller_decl.flow_events, call_span, &mut inner_calls);
+    let mut argument_spans = Vec::new();
+    collect_call_argument_spans_at_site(&caller_decl.flow_events, call_span, &mut argument_spans);
+    inner_calls.retain(|event| {
+        let span = event.span();
+        !argument_spans
+            .iter()
+            .any(|arg| arg.file == span.file && arg.start <= span.start && span.end <= arg.end)
+    });
     let mut out = Vec::new();
-    for candidate in constructed_type_candidates(receiver) {
-        if !resolve_class(global, &candidate, &ctx).is_empty() {
-            push_unique_string(&mut out, short_callee(&candidate).to_string());
+    for inner in inner_calls {
+        let FlowEvent::Call {
+            name,
+            receiver,
+            receiver_types,
+            call_kind,
+            ..
+        } = inner
+        else {
+            continue;
+        };
+        if matches!(call_kind, CallKind::Function | CallKind::Constructor) {
+            let constructed_types = constructor_type_names_from_call_fact(
+                global,
+                caller_decl,
+                alias_targets,
+                name,
+                receiver.as_deref(),
+                receiver_types,
+            );
+            for type_name in &constructed_types {
+                push_unique_string(&mut out, type_name.clone());
+            }
+            // A function-shaped inner call whose declaration identity is a
+            // class is construction in expression-oriented grammars. Its
+            // exact AST type is sufficient; do not reinterpret it as an
+            // ordinary callable return below.
+            if !constructed_types.is_empty() {
+                continue;
+            }
+            if matches!(call_kind, CallKind::Constructor) {
+                continue;
+            }
+        }
+        let mut funcs = resolve_callable_with_context(global, name, &ctx);
+        if funcs.is_empty() {
+            if let Some((type_name, method_name)) = type_qualified_method_tail(name) {
+                let mut seen = AHashSet::new();
+                for class_sym in resolve_class(global, type_name, &ctx) {
+                    collect_method_candidates_for_class_cached(
+                        global,
+                        class_sym,
+                        method_name,
+                        &ctx,
+                        &mut seen,
+                        &mut funcs,
+                        method_candidate_cache,
+                    );
+                }
+            }
+        }
+        for func in funcs {
+            let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+                continue;
+            };
+            collect_constructed_return_type_names(global, caller_decl, alias_targets, decl, &mut out);
         }
     }
     out
 }
 
-/// Extract the inner call name from a `Foo.bar(args)`-shaped
-/// receiver, returning `Foo.bar`. Mirrors
-/// `bonsai_taint::inter::receiver_inner_call_name` shape-for-shape;
-/// the only difference is the normalisation helper — see
-/// [`normalize_receiver_alias_text`] for why callgraph's variant is
-/// the structured-input simpler form.
-fn receiver_inner_call_name(receiver: &str) -> Option<String> {
-    let receiver = normalize_receiver_alias_text(receiver);
-    let receiver = receiver.trim();
-    if !receiver.ends_with(')') {
-        return None;
+fn collect_call_argument_spans_at_site(events: &[FlowEvent], site: Span, out: &mut Vec<Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } if *span == site => {
+                out.extend(args.iter().map(|arg| arg.span));
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_call_argument_spans_at_site(then_events, site, out);
+                collect_call_argument_spans_at_site(else_events, site, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_call_argument_spans_at_site(body, site, out)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_call_argument_spans_at_site(body, site, out);
+                collect_call_argument_spans_at_site(catch_events, site, out);
+                collect_call_argument_spans_at_site(finally_events, site, out);
+            }
+            _ => {}
+        }
     }
-    let open = receiver.find('(')?;
-    let callee = receiver[..open].trim();
-    if callee.is_empty() || callee.contains('"') || callee.contains('\'') || callee.contains('`') {
-        return None;
+}
+
+fn collect_call_events_strictly_inside<'a>(
+    events: &'a [FlowEvent],
+    outer: Span,
+    out: &mut Vec<&'a FlowEvent>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, .. }
+                if span.file == outer.file
+                    && outer.start <= span.start
+                    && span.end <= outer.end
+                    && *span != outer =>
+            {
+                out.push(event);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_call_events_strictly_inside(then_events, outer, out);
+                collect_call_events_strictly_inside(else_events, outer, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_call_events_strictly_inside(body, outer, out)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_call_events_strictly_inside(body, outer, out);
+                collect_call_events_strictly_inside(catch_events, outer, out);
+                collect_call_events_strictly_inside(finally_events, outer, out);
+            }
+            _ => {}
+        }
     }
-    Some(callee.to_string())
+}
+
+fn collect_call_events_within<'a>(events: &'a [FlowEvent], outer: Span, out: &mut Vec<&'a FlowEvent>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, .. }
+                if span.file == outer.file && outer.start <= span.start && span.end <= outer.end =>
+            {
+                out.push(event);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_call_events_within(then_events, outer, out);
+                collect_call_events_within(else_events, outer, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_call_events_within(body, outer, out)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_call_events_within(body, outer, out);
+                collect_call_events_within(catch_events, outer, out);
+                collect_call_events_within(finally_events, outer, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
@@ -3952,64 +4227,116 @@ fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
         .filter(|receiver| !receiver.is_empty())
 }
 
-fn folded_call_name_receiver_is_instance(call_name: &str, receiver: &str, receiver_types: &[String]) -> bool {
+fn folded_call_name_receiver_is_instance(
+    receiver: &str,
+    caller_decl: &Decl,
+    super_receiver_tokens: &[&str],
+) -> bool {
     let receiver = normalize_receiver_alias_text(receiver);
     let bare = short_callee(&receiver);
-    matches!(bare, "super" | "parent" | "base")
-        || (call_name.contains("::") && !receiver_types.is_empty() && matches!(bare, "self" | "static"))
-        || (!call_name.contains("::") && matches!(bare, "self" | "this"))
-        || (!call_name.contains("::")
-            && (receiver.starts_with("self.")
-                || receiver.starts_with("this.")
-                || receiver.starts_with("super.")
-                || receiver.starts_with("parent.")
-                || receiver.starts_with("base.")))
+    let declared_receiver = caller_decl.implicit_receiver_names.iter().any(|declared| {
+        let declared = normalize_receiver_alias_text(declared);
+        receiver == declared
+            || bare == declared
+            || receiver
+                .strip_prefix(&declared)
+                .is_some_and(|tail| tail.starts_with('.'))
+    });
+    let declared_super = super_receiver_tokens.iter().any(|declared| {
+        let declared = normalize_receiver_alias_text(declared);
+        receiver == declared
+            || bare == declared
+            || receiver
+                .strip_prefix(&declared)
+                .is_some_and(|tail| tail.starts_with('.'))
+    });
+    declared_receiver || declared_super
 }
 
 fn collect_constructed_return_type_names(
     global: &GlobalIndex,
-    caller_decl: &Decl,
+    _caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     decl: &Decl,
-    late_static_type: Option<&str>,
     out: &mut Vec<String>,
 ) {
-    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
-        return;
-    };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
-    collect_constructed_return_type_names_from_events(
+    if matches!(decl.kind, DeclKind::Constructor) {
+        if let Some(class_decl) = enclosing_class_for_decl(global, decl) {
+            push_unique_string(out, class_decl.name.clone());
+        }
+    }
+    let mut returned_call_sites = AHashSet::new();
+    collect_return_expression_call_sites(&decl.flow_events, &mut returned_call_sites);
+    collect_returned_constructor_type_names(
         global,
-        &ctx,
         decl,
-        late_static_type,
+        alias_targets,
         &decl.flow_events,
+        &returned_call_sites,
         out,
     );
 }
 
-fn collect_constructed_return_type_names_from_events(
+fn collect_return_expression_call_sites(events: &[FlowEvent], out: &mut AHashSet<Span>) {
+    for event in events {
+        match event {
+            FlowEvent::Return { value_flow, .. } => out.extend(value_flow.call_sites.iter().copied()),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_expression_call_sites(then_events, out);
+                collect_return_expression_call_sites(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_expression_call_sites(body, out)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_expression_call_sites(body, out);
+                collect_return_expression_call_sites(catch_events, out);
+                collect_return_expression_call_sites(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_returned_constructor_type_names(
     global: &GlobalIndex,
-    ctx: &ResolveContext<'_>,
     decl: &Decl,
-    late_static_type: Option<&str>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     events: &[FlowEvent],
+    returned_call_sites: &AHashSet<Span>,
     out: &mut Vec<String>,
 ) {
     for event in events {
         match event {
-            FlowEvent::Return {
-                value_text: Some(value_text),
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                call_kind: CallKind::Constructor,
                 ..
-            } => {
-                if let Some(type_name) = constructed_return_type_from_text(global, ctx, value_text) {
+            } if returned_call_sites.iter().any(|returned| {
+                returned.file == span.file && returned.start <= span.start && span.end <= returned.end
+            }) =>
+            {
+                for type_name in constructor_type_names_from_call_fact(
+                    global,
+                    decl,
+                    alias_targets,
+                    name,
+                    receiver.as_deref(),
+                    receiver_types,
+                ) {
                     push_unique_string(out, type_name);
-                } else if bonsai_common::value_text_returns_self_constructor(value_text) {
-                    if let Some(type_name) = late_static_type {
-                        push_unique_string(out, type_name.to_string());
-                    } else if let Some(parent) = decl.parent.and_then(|symbol| global.decl_of(symbol)) {
-                        push_unique_string(out, parent.name.clone());
-                    }
                 }
             }
             FlowEvent::Branch {
@@ -4017,30 +4344,30 @@ fn collect_constructed_return_type_names_from_events(
                 else_events,
                 ..
             } => {
-                collect_constructed_return_type_names_from_events(
+                collect_returned_constructor_type_names(
                     global,
-                    ctx,
                     decl,
-                    late_static_type,
+                    alias_targets,
                     then_events,
+                    returned_call_sites,
                     out,
                 );
-                collect_constructed_return_type_names_from_events(
+                collect_returned_constructor_type_names(
                     global,
-                    ctx,
                     decl,
-                    late_static_type,
+                    alias_targets,
                     else_events,
+                    returned_call_sites,
                     out,
                 );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_constructed_return_type_names_from_events(
+                collect_returned_constructor_type_names(
                     global,
-                    ctx,
                     decl,
-                    late_static_type,
+                    alias_targets,
                     body,
+                    returned_call_sites,
                     out,
                 );
             }
@@ -4050,28 +4377,28 @@ fn collect_constructed_return_type_names_from_events(
                 finally_events,
                 ..
             } => {
-                collect_constructed_return_type_names_from_events(
+                collect_returned_constructor_type_names(
                     global,
-                    ctx,
                     decl,
-                    late_static_type,
+                    alias_targets,
                     body,
+                    returned_call_sites,
                     out,
                 );
-                collect_constructed_return_type_names_from_events(
+                collect_returned_constructor_type_names(
                     global,
-                    ctx,
                     decl,
-                    late_static_type,
+                    alias_targets,
                     catch_events,
+                    returned_call_sites,
                     out,
                 );
-                collect_constructed_return_type_names_from_events(
+                collect_returned_constructor_type_names(
                     global,
-                    ctx,
                     decl,
-                    late_static_type,
+                    alias_targets,
                     finally_events,
+                    returned_call_sites,
                     out,
                 );
             }
@@ -4080,95 +4407,90 @@ fn collect_constructed_return_type_names_from_events(
     }
 }
 
-fn constructed_return_type_from_text(
+fn constructor_type_names_from_call_fact(
     global: &GlobalIndex,
-    ctx: &ResolveContext<'_>,
-    value_text: &str,
-) -> Option<String> {
-    constructed_type_name_from_expr(global, ctx, value_text)
-}
-
-fn constructed_type_name_from_expr(
-    global: &GlobalIndex,
-    ctx: &ResolveContext<'_>,
-    value_text: &str,
-) -> Option<String> {
-    let mut text = value_text.trim();
-    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
-        text = text.strip_prefix(*keyword).unwrap_or(text).trim();
-    }
-    for candidate in constructed_type_candidates(text) {
-        if !resolve_class(global, &candidate, ctx).is_empty() {
-            return Some(short_callee(&candidate).to_string());
+    context_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    call_name: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+) -> Vec<String> {
+    let Some(file) = caller_decl_file(global, context_decl) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(file, &context_decl.module_path).with_alias_map(alias_targets);
+    let mut class_symbols = Vec::new();
+    let mut seen = AHashSet::new();
+    for type_name in receiver_types {
+        for class_sym in resolve_class(global, type_name, &ctx) {
+            if seen.insert(class_sym) {
+                class_symbols.push(class_sym);
+            }
         }
     }
-    None
-}
-
-fn constructed_type_candidates(text: &str) -> Vec<String> {
+    for candidate in receiver.into_iter().chain(std::iter::once(call_name)) {
+        for class_sym in resolve_class(global, candidate, &ctx) {
+            if seen.insert(class_sym) {
+                class_symbols.push(class_sym);
+            }
+        }
+    }
+    let implicit_receiver_call = receiver
+        .into_iter()
+        .chain(std::iter::once(call_name))
+        .any(|candidate| {
+            context_decl.implicit_receiver_names.iter().any(|declared| {
+                normalize_receiver_alias_text(candidate) == normalize_receiver_alias_text(declared)
+            })
+        });
+    if implicit_receiver_call {
+        if let Some(class_decl) = enclosing_class_for_decl(global, context_decl) {
+            if seen.insert(class_decl.symbol) {
+                class_symbols.push(class_decl.symbol);
+            }
+        }
+    }
     let mut out = Vec::new();
-    push_constructed_type_candidate(text, &mut out);
-    let normalised = normalize_receiver_alias_text(&text.replace("::", "."));
-    push_constructed_type_candidate(&normalised, &mut out);
+    for class_sym in class_symbols {
+        if let Some(class_decl) = global.decl_of(class_sym) {
+            push_unique_string(&mut out, class_decl.name.clone());
+        }
+    }
+    for func in resolve_callable_with_context(global, call_name, &ctx) {
+        let Some(constructor) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        if !matches!(constructor.kind, DeclKind::Constructor) {
+            continue;
+        }
+        if let Some(class_decl) = enclosing_class_for_decl(global, constructor) {
+            push_unique_string(&mut out, class_decl.name.clone());
+        }
+    }
     out
 }
 
-fn push_constructed_type_candidate(text: &str, out: &mut Vec<String>) {
-    let mut candidate = strip_outer_parens(text.trim());
-    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
-        candidate = candidate.strip_prefix(*keyword).unwrap_or(candidate).trim();
-    }
-    if let Some(rest) = candidate.strip_prefix("new ") {
-        candidate = rest.trim();
-    }
-    candidate = strip_outer_parens(candidate);
-    if let Some(open) = candidate.find('(') {
-        candidate = candidate[..open].trim();
-    }
-    candidate = candidate.trim_end_matches("()").trim();
-    if let Some(owner) = candidate
-        .strip_suffix(".new")
-        .or_else(|| candidate.strip_suffix("::new"))
-        .or_else(|| candidate.strip_suffix("->new"))
-        .map(str::trim)
-        .filter(|owner| !owner.is_empty())
-    {
-        candidate = owner;
-    }
-    if candidate.is_empty() || !call_name_looks_type_constructor(candidate) {
-        return;
-    }
-    let value = candidate.to_string();
-    if !out.iter().any(|existing| existing == &value) {
-        out.push(value);
-    }
-}
-
-fn strip_outer_parens(mut text: &str) -> &str {
-    loop {
-        let trimmed = text.trim();
-        if !(trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() > 1) {
-            return trimmed;
-        }
-        text = &trimmed[1..trimmed.len() - 1];
-    }
-}
-
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
-    let normalized = normalize_receiver_alias_text(receiver);
-    let tail = short_callee(&normalized);
-    let self_tail = format!("self.{tail}");
-    let this_tail = format!("this.{tail}");
+    let keys = receiver_alias_keys(decl, receiver);
     decl.type_aliases
         .iter()
-        .find(|alias| {
-            alias.name == receiver
-                || alias.name == normalized
-                || alias.name == tail
-                || alias.name == self_tail
-                || alias.name == this_tail
-        })
+        .find(|alias| keys.iter().any(|key| alias.name == *key))
         .map(|alias| alias.type_name.as_str())
+}
+
+fn receiver_alias_keys(decl: &Decl, receiver: &str) -> Vec<String> {
+    let normalized = normalize_receiver_alias_text(receiver);
+    let tail = short_callee(&normalized).to_string();
+    let mut keys = vec![receiver.to_string(), normalized, tail.clone()];
+    for declared in &decl.implicit_receiver_names {
+        let declared = normalize_receiver_alias_text(declared);
+        if !declared.is_empty() {
+            keys.push(format!("{declared}.{tail}"));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 fn receiver_type_names_for_expr(
@@ -4180,18 +4502,8 @@ fn receiver_type_names_for_expr(
     if let Some(type_name) = type_alias_for_receiver(decl, receiver) {
         push_unique_string(&mut out, type_name.to_string());
     }
-    let normalized = normalize_receiver_alias_text(receiver);
-    let tail = short_callee(&normalized);
-    let self_tail = format!("self.{tail}");
-    let this_tail = format!("this.{tail}");
-    for key in [
-        receiver,
-        normalized.as_str(),
-        tail,
-        self_tail.as_str(),
-        this_tail.as_str(),
-    ] {
-        if let Some(AliasTarget::Type { type_name }) = alias_targets.get(key) {
+    for key in receiver_alias_keys(decl, receiver) {
+        if let Some(AliasTarget::Type { type_name }) = alias_targets.get(&key) {
             push_unique_string(&mut out, type_name.clone());
         }
     }
@@ -4510,9 +4822,6 @@ fn collect_assigned_receiver_type_names(
                     continue;
                 }
                 let distance = call_span.map(|call_span| call_span.start.saturating_sub(span.start));
-                let caller_ctx = caller_decl_file(global, caller_decl).map(|file| {
-                    ResolveContext::new(file, &caller_decl.module_path).with_alias_map(alias_targets)
-                });
                 if let Some(source_call) = source_call {
                     for type_name in receiver_call_return_type_names(
                         global,
@@ -4530,11 +4839,7 @@ fn collect_assigned_receiver_type_names(
                     .chain(source_name.iter())
                     .chain(source_names.iter())
                 {
-                    let candidate = normalize_receiver_alias_text(candidate);
-                    let Some(caller_ctx) = caller_ctx.as_ref() else {
-                        continue;
-                    };
-                    if let Some(type_name) = constructed_type_name_from_expr(global, caller_ctx, &candidate) {
+                    for type_name in type_names_for_binding(global, caller_decl, candidate) {
                         push_assigned_receiver_type(out, best_distance, type_name, distance);
                     }
                 }
@@ -4645,13 +4950,6 @@ fn push_assigned_receiver_type(
         }
     }
     push_unique_string(out, type_name);
-}
-
-fn call_name_looks_type_constructor(name: &str) -> bool {
-    short_callee(name)
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
 }
 
 fn alias_targets_for_decl(
@@ -5187,8 +5485,38 @@ fn collect_callable_targets_with_context_aliases_and_paths(
     file_path_parts: &AHashMap<FileId, Vec<String>>,
     callable_target_cache: &mut CallableTargetCache,
 ) -> Vec<FuncId> {
-    let mut targets =
-        collect_implicit_receiver_method_targets(global, caller_decl, name, alias_targets, path_for_file);
+    let mut method_candidate_cache = MethodCandidateCache::default();
+    collect_callable_targets_with_context_aliases_paths_and_method_cache(
+        global,
+        name,
+        caller_decl,
+        alias_targets,
+        path_for_file,
+        file_path_parts,
+        callable_target_cache,
+        &mut method_candidate_cache,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Build paths share resolver caches across all call sites.
+fn collect_callable_targets_with_context_aliases_paths_and_method_cache(
+    global: &GlobalIndex,
+    name: &str,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    file_path_parts: &AHashMap<FileId, Vec<String>>,
+    callable_target_cache: &mut CallableTargetCache,
+    method_candidate_cache: &mut MethodCandidateCache,
+) -> Vec<FuncId> {
+    let mut targets = collect_implicit_receiver_method_targets(
+        global,
+        caller_decl,
+        name,
+        alias_targets,
+        path_for_file,
+        method_candidate_cache,
+    );
     if !targets.is_empty() {
         return targets;
     }
@@ -5302,6 +5630,7 @@ fn collect_implicit_receiver_method_targets(
     name: &str,
     alias_targets: &AHashMap<String, AliasTarget>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    method_cache: &mut MethodCandidateCache,
 ) -> Vec<FuncId> {
     if caller_decl.implicit_receiver_names.is_empty() {
         return Vec::new();
@@ -5320,7 +5649,6 @@ fn collect_implicit_receiver_method_targets(
         .with_file_path_lookup(path_for_file);
     let mut targets = Vec::new();
     let mut seen = AHashSet::new();
-    let mut method_cache = MethodCandidateCache::default();
     collect_method_candidates_for_class_cached(
         global,
         parent,
@@ -5328,7 +5656,7 @@ fn collect_implicit_receiver_method_targets(
         &ctx,
         &mut seen,
         &mut targets,
-        &mut method_cache,
+        method_cache,
     );
     targets
 }
@@ -5368,7 +5696,7 @@ pub fn collect_call_event_targets_with_context_and_aliases(
         alias_targets,
         path_for_file,
         caller_export_aliases,
-        bonsai_common::SUPER_RECEIVER_TOKENS,
+        &[],
     )
 }
 
@@ -5387,8 +5715,9 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
     caller_export_aliases: &[&'static str],
     caller_super_receiver_tokens: &[&'static str],
 ) -> Vec<FuncId> {
-    let folded_receiver = receiver_name_from_call_name(name)
-        .filter(|candidate| folded_call_name_receiver_is_instance(name, candidate, receiver_types));
+    let folded_receiver = receiver_name_from_call_name(name).filter(|candidate| {
+        folded_call_name_receiver_is_instance(candidate, caller_decl, caller_super_receiver_tokens)
+    });
     let semantic_receiver = receiver.or(folded_receiver);
     let local_value_shadow = semantic_receiver.is_none()
         && local_value_binding_shadows_callable(&caller_decl.flow_events, name, call_span);
@@ -5433,20 +5762,10 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
             alias_targets,
             path_for_file,
             name,
-            None,
-            &mut method_candidate_cache,
-        );
-    }
-    if targets.is_empty() && call_kind == CallKind::Constructor {
-        targets = collect_late_static_constructor_targets(
-            global,
-            caller_decl,
-            alias_targets,
-            path_for_file,
-            name,
+            receiver,
             receiver_types,
+            true,
             None,
-            &mut method_candidate_cache,
         );
     }
     if targets.is_empty()
@@ -5547,6 +5866,7 @@ pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
         let receiver_supplied = semantic_receiver.is_some() || call_kind == CallKind::Method;
         retain_signature_compatible_candidates(global, caller_decl, &mut targets, args, receiver_supplied);
     }
+    retain_call_kind_compatible_candidates(global, call_kind, &mut targets);
     dedup_func_ids(&mut targets);
     dedup_semantic_candidate_decls(global, &mut targets);
     targets

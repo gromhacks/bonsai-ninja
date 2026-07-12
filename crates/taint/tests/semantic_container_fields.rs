@@ -98,6 +98,7 @@ fn solidity_db(src: &str) -> AnalyzerDb {
 fn strings_fields_passthrough() -> Vec<CallResultPassthrough> {
     vec![CallResultPassthrough {
         callee: "strings.Fields".to_string(),
+        receiver_type: None,
         input_arg_indices: vec![0],
         input_receiver: false,
     }]

@@ -31,8 +31,8 @@ pub struct TaintFilters<'a> {
     /// interprocedural engine. The IDG-backed dump path computes its
     /// requested closure exactly and does not use this as a result cap.
     pub budget: Option<u32>,
-    /// `--intra-worklist-cap N` — per-function worklist cap inside
-    /// the intraprocedural CFG pass.
+    /// `--intra-worklist-cap N` — accepted for compatibility with the
+    /// retired engine. Unified IDG closure is never truncated by it.
     pub intra_worklist_cap: Option<u32>,
     /// `--taint T:id` — drill into one propagation by stable id.
     pub taint_id: Option<&'a str>,
@@ -291,8 +291,11 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         .idg_service()
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
     let global = db.global_index();
-    let seed_names: Vec<String> = effective_seed.iter().cloned().collect();
-    let mut seed_nodes = idg_seed_nodes_for_names(idg.as_ref(), source_func, &seed_names, global.as_ref());
+    let mut seed_nodes = bonsai_taint::compose_idg_seed_nodes(
+        bonsai_taint::IdgSeedRequest::legacy_tokens(source_func, &effective_seed),
+        global.as_ref(),
+        idg.as_ref(),
+    );
     bonsai_taint::apply_configured_transfer_fixpoint(
         &mut seed_nodes,
         &f.receiver_state_propagations,
@@ -466,7 +469,7 @@ fn tainted_unresolved_workspace_call_reasons(
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     cross_calls: &[bonsai_idg::CrossCallEdge],
-    tainted_arg_sites: &[(bonsai_common::FuncId, bonsai_common::Span, u8)],
+    tainted_arg_sites: &[(bonsai_common::FuncId, bonsai_common::Span, u32)],
 ) -> Vec<String> {
     let resolved_sites: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::Span)> = cross_calls
         .iter()
@@ -661,7 +664,7 @@ fn tainted_args_from_cross_call(
     callee_decl: &bonsai_lang_api::Decl,
     global: &bonsai_index::GlobalIndex,
 ) -> Option<Vec<TaintedArgRecord>> {
-    if ce.arg_idx == u8::MAX {
+    if ce.arg_idx == u32::MAX {
         return caller_call_receiver(global, ce.caller, ce.call_span)
             .filter(|receiver| !receiver.trim().is_empty())
             .map(|receiver| {
@@ -673,7 +676,7 @@ fn tainted_args_from_cross_call(
             });
     }
     let value_text = caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx).unwrap_or_default();
-    let param_name = if ce.param_idx == u8::MAX {
+    let param_name = if ce.param_idx == u32::MAX {
         String::new()
     } else {
         callee_decl
@@ -689,32 +692,6 @@ fn tainted_args_from_cross_call(
     }])
 }
 
-/// Build the exact IDG seed node set for a source function and
-/// source-token names. This includes formal parameter slots plus
-/// read/write nodes matching the caller-selected seed names.
-pub(crate) fn idg_seed_nodes_for_names(
-    idg: &bonsai_idg::IdgQueryService,
-    source_func: bonsai_common::FuncId,
-    seed_names: &[String],
-    global: &bonsai_index::GlobalIndex,
-) -> Vec<bonsai_idg::WsNodeId> {
-    // Bare container seeds also address their projections (`args` →
-    // `args.q`) — same expansion the security and taint-graph seed
-    // builders apply, so dump-taint reports exactly the flows
-    // taint-analysis acts on.
-    let seed_names = bonsai_idg::expand_bare_seed_names_with_descendants(seed_names.iter());
-    let mut seed_nodes: Vec<bonsai_idg::WsNodeId> =
-        idg.param_nodes_for_names(source_func, &seed_names, global);
-    // Augment with explicit seeds the user supplied (or the
-    // assign-target augment built for dump-taint). The
-    // `read_or_write_nodes_for_names` helper looks each seed name
-    // up in the source func's segment string pool.
-    seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
-    seed_nodes.sort();
-    seed_nodes.dedup();
-    seed_nodes
-}
-
 /// Look up the textual form of the `arg_idx`-th argument of the
 /// `Call` event whose span is `call_span` inside `caller`. Returns
 /// `None` when the caller isn't in the index, isn't callable, or no
@@ -723,7 +700,7 @@ fn caller_arg_value_text(
     global: &bonsai_index::GlobalIndex,
     caller: bonsai_common::FuncId,
     call_span: bonsai_common::Span,
-    arg_idx: u8,
+    arg_idx: u32,
 ) -> Option<String> {
     let decl = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))?;
     fn find_call_arg<'a>(

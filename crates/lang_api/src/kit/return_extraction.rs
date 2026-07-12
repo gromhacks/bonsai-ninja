@@ -1,18 +1,14 @@
 //! Return / throw / catch value extraction.
 //!
-//! Adapters report `FlowEvent::Return { value_name, value_text }` and
-//! `FlowEvent::Throw { value_name, value_text }`; this module computes
-//! those fields from a `return`/`throw` statement node by combining
-//! per-grammar field-name probes with a text-fallback path that
-//! handles grammars whose `return`/`throw` nodes don't expose a
-//! dedicated value field.
+//! Adapters report structured `ExpressionFlow` facts alongside display-only
+//! return/yield text. This module obtains those facts from tree-sitter value
+//! nodes; semantic consumers never reparse the display text.
 //!
-//! Why a text fallback. Some tree-sitter grammars (notably older
+//! Text remains useful for rendering. Some tree-sitter grammars (notably older
 //! grammar revisions) emit `return EXPR;` as a flat statement node
 //! with no `value` / `expression` / `argument` field. Rather than
-//! per-grammar special cases, we strip the leading `return`/`throw`
-//! keyword from the node text and use that. The fallback only fires
-//! when the structural probes return `None`.
+//! per-grammar special cases, the renderer strips the leading keyword. That
+//! fallback does not populate `ExpressionFlow`.
 //!
 //! `extract_catch_param` is the matching reader for try/catch
 //! binding patterns — `catch (FooException e)`, `except E as e`,
@@ -20,12 +16,45 @@
 //! this lives next to the throw extractor rather than in a separate
 //! module.
 
+use bonsai_common::{FileId, Span};
 use tree_sitter::Node;
 
+use crate::ExpressionFlow;
+
 use super::{
-    first_identifier_descendant, first_identifier_like_child, looks_like_bare_identifier,
+    expression_flow_from_node, first_identifier_descendant, first_identifier_like_child,
     looks_like_identifier, looks_like_literal_value, node_text,
 };
+
+/// Lower the parsed return operand into structured compiler facts.
+#[must_use]
+pub fn extract_return_value_flow(node: &Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    let Some(value) = return_value_node(node) else {
+        return ExpressionFlow::default();
+    };
+    if let Some(selector) = dart_selector_call(&value) {
+        // Dart's grammar represents `f(x)` as sibling AST nodes rather than
+        // one call node. Join those exact syntax spans into the same call-site
+        // identity emitted by the call walker; no callee spelling is parsed.
+        return ExpressionFlow {
+            call_sites: vec![Span::new(
+                file,
+                value.start_byte() as u64,
+                selector.end_byte() as u64,
+            )],
+            ..ExpressionFlow::default()
+        };
+    }
+    expression_flow_from_node(value, file, src)
+}
+
+/// Lower the parsed yield operand into structured compiler facts.
+#[must_use]
+pub fn extract_yield_value_flow(node: &Node<'_>, file: FileId, src: &[u8]) -> ExpressionFlow {
+    yield_value_node(node)
+        .map(|value| expression_flow_from_node(value, file, src))
+        .unwrap_or_default()
+}
 
 /// Extract the single value-bearing identifier of the value being
 /// returned when the adapter can determine one precisely.
@@ -33,15 +62,10 @@ use super::{
 /// expressions such as `return x + y` remain `None`.
 pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
     let Some(value_node) = return_value_node(node) else {
-        // Text fallback is only for grammars that expose no value node.
-        // When a grammar gives us structured syntax, trust it: literal
-        // nodes such as Python `none` / JS `null` must not be promoted
-        // to value-bearing identifiers just because their text is a
-        // bare word.
-        return return_statement_value_text(node, src).and_then(|value_text| {
-            (looks_like_bare_identifier(&value_text) && !looks_like_literal_value(node.kind(), &value_text))
-                .then_some(value_text)
-        });
+        // Without an operand node there is no compiler fact. Raw statement
+        // text remains available to the renderer, but semantic lowering must
+        // not recover an identifier by reparsing it.
+        return None;
     };
     let value_kind = value_node.kind();
     // Direct identifier — most languages parse `return x` this way.
@@ -116,17 +140,19 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
 /// the callee, not a value. Property/cascade selectors (`.field`, `..m()`)
 /// carry no `argument_part`, so a pure member read still returns its name.
 fn dart_selector_call_callee(node: &Node<'_>) -> bool {
-    let Some(selector) = node.next_named_sibling() else {
-        return false;
-    };
+    dart_selector_call(node).is_some()
+}
+
+fn dart_selector_call<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+    let selector = node.next_named_sibling()?;
     if selector.kind() != "selector" {
-        return false;
+        return None;
     }
     let mut cursor = selector.walk();
     let has_argument_part = selector
         .named_children(&mut cursor)
         .any(|child| child.kind() == "argument_part");
-    has_argument_part
+    has_argument_part.then_some(selector)
 }
 
 /// Drill into a catch/rescue/except binding subtree to the actual binding
@@ -165,8 +191,8 @@ fn catch_binding_identifier<'a>(node: Node<'a>) -> Option<Node<'a>> {
 
 /// Like [`extract_return_value_name`] but returns the full source
 /// text of the return value (without the leading `return` keyword).
-/// Used by the inter pass when matching return-text-shaped patterns
-/// against the caller's tainted token set.
+/// This field is rendering-only; dataflow comes from
+/// [`extract_return_value_flow`].
 pub fn extract_return_value_text(node: &Node<'_>, src: &[u8]) -> Option<String> {
     if let Some(text) = return_statement_value_text(node, src) {
         return Some(text);
@@ -217,6 +243,23 @@ fn return_value_node<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
     for child in node.named_children(&mut cursor) {
         if child.kind() != "return"
             && child.kind() != "return_keyword"
+            && !child.kind().starts_with("comment")
+        {
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn yield_value_node<'a>(node: &'a Node<'a>) -> Option<Node<'a>> {
+    for field in ["value", "expression", "argument", "operand", "body"] {
+        if let Some(value) = node.child_by_field_name(field) {
+            return Some(value);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if !matches!(child.kind(), "yield" | "yield_from" | "from" | "yield_keyword")
             && !child.kind().starts_with("comment")
         {
             return Some(child);

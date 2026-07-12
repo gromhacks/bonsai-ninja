@@ -114,6 +114,7 @@ fn flow_return() -> FlowEvent {
         span: span(),
         value_text: None,
         value_name: None,
+        value_flow: Default::default(),
     }
 }
 
@@ -129,6 +130,7 @@ fn yield_event(value: Option<&str>) -> FlowEvent {
     FlowEvent::Yield {
         span: span(),
         value_text: value.map(str::to_string),
+        value_flow: value.map_or_else(Default::default, bonsai_lang_api::ExpressionFlow::from_place),
     }
 }
 

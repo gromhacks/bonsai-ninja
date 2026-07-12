@@ -7,6 +7,8 @@
 
 use bonsai_common::{FuncId, SymbolId};
 use bonsai_db::AnalyzerDb;
+use bonsai_idg::IdgQueryService;
+use bonsai_index::GlobalIndex;
 
 /// Per-function return-taint summary.
 ///
@@ -120,10 +122,18 @@ pub struct ParamSideEffect {
 #[must_use]
 pub fn function_summary(db: &AnalyzerDb, func: FuncId) -> FunctionSummary {
     let global = db.global_index();
+    let idg = crate::idg_build::ensure_idg_service(db);
+    function_summary_from_idg(global.as_ref(), idg.as_ref(), func)
+}
+
+pub(crate) fn function_summary_from_idg(
+    global: &GlobalIndex,
+    idg: &IdgQueryService,
+    func: FuncId,
+) -> FunctionSummary {
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return FunctionSummary::default();
     };
-    let idg = crate::idg_build::ensure_idg_service(db);
     let Some(return_node) = idg.return_node_of(func) else {
         return FunctionSummary::default();
     };

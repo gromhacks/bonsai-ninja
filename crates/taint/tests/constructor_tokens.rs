@@ -46,7 +46,7 @@ fn assert_has_constructor(db: &AnalyzerDb, name: &str) {
 }
 
 #[test]
-fn every_adapter_declares_constructor_method_names_without_legacy_fallback() {
+fn constructor_method_vocabulary_is_adapter_owned_without_legacy_fallback() {
     let adapters: Vec<(&str, Arc<dyn LanguageAdapter>)> = vec![
         ("c", Arc::new(bonsai_lang_c::CAdapter::new())),
         ("cpp", Arc::new(bonsai_lang_cpp::CppAdapter::new())),
@@ -79,9 +79,10 @@ fn every_adapter_declares_constructor_method_names_without_legacy_fallback() {
 
     for (lang, adapter) in adapters {
         let caps = adapter.capabilities();
-        assert!(
-            !caps.constructor_method_names.is_empty(),
-            "{lang} must declare constructor_method_names explicitly or use NO_CONSTRUCTOR_METHOD_NAMES"
+        assert_eq!(
+            caps.effective_constructor_method_names(),
+            caps.constructor_method_names,
+            "{lang} must not inherit a cross-language constructor-name fallback"
         );
     }
 }

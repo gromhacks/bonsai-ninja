@@ -1,9 +1,10 @@
 use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
     apply_constructor_result_type_aliases, argument_place, build_call_event, canonical_simple_type_name,
-    collect_kinds, extract_return_value_name, language_from_pack, node_text, normalize_call_name_whitespace,
-    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
-    receiver_projected_alias_matches, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
+    collect_kinds, expression_flow_from_node, extract_return_value_name, extract_rhs_expr_operands,
+    language_from_pack, node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
+    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, GENERIC_HANDLER,
+    SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
@@ -151,6 +152,26 @@ fn call_result_assignment_normalization_recovers_adjacent_call_args() {
 }
 
 #[test]
+fn call_result_assignment_normalization_uses_assignment_span_not_event_window() {
+    let mut events = vec![assign_call("z", "f", &[], &["f", "x"])];
+    events.extend((0..4).map(|_| call("unrelated", &[])));
+    events.push(call("f", &["x"]));
+
+    normalize_call_result_assignment_sources(&mut events);
+
+    let FlowEvent::Assign {
+        source_call_args,
+        source_names,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected assign event")
+    };
+    assert_eq!(source_call_args.as_slice(), ["x"]);
+    assert!(source_names.is_empty());
+}
+
+#[test]
 fn return_value_name_uses_structured_syntax_before_text_fallback() {
     let language = language_from_pack("python").expect("python grammar");
     let mut parser = tree_sitter::Parser::new();
@@ -278,6 +299,7 @@ fn package_module_segments_keep_sibling_projects_distinct() {
     let ctx = crate::AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: Some(&root),
     };
 
@@ -304,6 +326,7 @@ fn package_module_segments_preserve_plain_fixture_packages() {
     let ctx = crate::AdapterContext {
         vfs: &vfs,
         diagnostics: &diagnostics,
+        tree_provider: None,
         workspace_root: Some(&root),
     };
 
@@ -311,6 +334,52 @@ fn package_module_segments_preserve_plain_fixture_packages() {
         package_module_segments_with_workspace_prefix(file, &ctx, ["mega"]),
         vec!["mega".to_string()]
     );
+}
+
+#[test]
+fn parse_with_reuses_context_canonical_tree() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    struct Provider(Arc<crate::SyntaxTree>);
+    impl crate::TreeProvider for Provider {
+        fn tree_for_snapshot(
+            &self,
+            pack_name: &str,
+            snapshot: &bonsai_vfs::FileSnapshot,
+        ) -> Option<Arc<crate::SyntaxTree>> {
+            assert_eq!(pack_name, "java");
+            assert_eq!(snapshot.file_id, FileId::new(0));
+            Some(Arc::clone(&self.0))
+        }
+    }
+
+    let vfs = Vfs::new();
+    let file = vfs.write("Cached.java", "class Cached {}");
+    let snapshot = vfs.snapshot(file).expect("snapshot");
+    let language = language_from_pack("java").expect("java grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set language");
+    let canonical = Arc::new(
+        parser
+            .parse(snapshot.text.as_bytes(), None)
+            .expect("canonical parse"),
+    );
+    let provider = Provider(Arc::clone(&canonical));
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = crate::AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        tree_provider: Some(&provider),
+        workspace_root: None,
+    };
+
+    let (_, first) = super::parse_with("java", file, &ctx).expect("first parse");
+    let (_, second) = super::parse_with("java", file, &ctx).expect("second parse");
+    assert!(Arc::ptr_eq(&canonical, &first));
+    assert!(Arc::ptr_eq(&canonical, &second));
 }
 
 // audit M9: `apply_assign_call_result_types` must fail closed when two
@@ -461,6 +530,10 @@ fn address_arguments_emit_writeback_mode_from_ast_nodes() {
     for (pack, source) in [
         ("c", "void f(void) { int out; helper(&out); }"),
         ("cpp", "void f() { int out; helper(&out); }"),
+        (
+            "csharp",
+            "class C { void F() { string result; helper(out result); } }",
+        ),
         ("go", "package p\nfunc f() { var out string; helper(&out) }"),
         ("objc", "void f(void) { id out; helper(&out); }"),
         (
@@ -472,7 +545,7 @@ fn address_arguments_emit_writeback_mode_from_ast_nodes() {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&language).expect("set language");
         let tree = parser.parse(source, None).expect("parse");
-        let event = collect_kinds(&tree, &["call_expression", "call"])
+        let event = collect_kinds(&tree, &["call_expression", "invocation_expression", "call"])
             .into_iter()
             .filter_map(|node| {
                 build_call_event(node, FileId::new(0), source.as_bytes(), &GENERIC_HANDLER, &[])
@@ -488,8 +561,51 @@ fn address_arguments_emit_writeback_mode_from_ast_nodes() {
             crate::ArgumentPassingMode::WriteBack,
             "{pack}: {args:?}"
         );
-        assert_eq!(args[0].place.as_deref(), Some("out"), "{pack}: {args:?}");
+        let expected_place = if pack == "csharp" { "result" } else { "out" };
+        assert_eq!(args[0].place.as_deref(), Some(expected_place), "{pack}: {args:?}");
     }
+}
+
+#[test]
+fn rust_match_result_dependencies_come_from_arm_ast_values() {
+    let source = r#"fn f(kind: Kind, joined: String) {
+        let routed: String = match kind {
+            Kind::Run => format!("{}", joined),
+            Kind::Eval => joined.trim().to_string(),
+        };
+    }"#;
+    let language = language_from_pack("rust").expect("Rust language pack");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set Rust language");
+    let tree = parser.parse(source, None).expect("parse Rust match");
+    let match_expr = collect_kinds(&tree, &["match_expression"])
+        .into_iter()
+        .next()
+        .expect("match expression");
+
+    let operands = extract_rhs_expr_operands(&match_expr, source.as_bytes());
+    assert!(
+        operands.iter().any(|operand| operand == "joined"),
+        "both macro-token-tree and method-receiver arm values must retain the joined dependency: {operands:?}"
+    );
+}
+
+#[test]
+fn rust_shorthand_struct_initializer_is_an_exact_aggregate_field() {
+    let source = "fn make(data: Envelope) -> Self { Self { data } }";
+    let language = language_from_pack("rust").expect("Rust language pack");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set Rust language");
+    let tree = parser.parse(source, None).expect("parse Rust struct expression");
+    let expression = collect_kinds(&tree, &["struct_expression"])
+        .into_iter()
+        .next()
+        .expect("struct expression");
+
+    let flow = expression_flow_from_node(expression, FileId::new(0), source.as_bytes());
+    assert_eq!(flow.aggregate_fields.len(), 1, "{flow:?}");
+    assert_eq!(flow.aggregate_fields[0].name, "data");
+    assert_eq!(flow.aggregate_fields[0].value.place.as_deref(), Some("data"));
 }
 
 fn m9_func_decl(raw: u32, name: &str, return_type: Option<&str>, flow_events: Vec<FlowEvent>) -> Decl {

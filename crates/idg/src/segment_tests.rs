@@ -100,17 +100,48 @@ fn pipeline_hash_mismatch_surfaces_factstore_error() {
 }
 
 #[test]
-fn version_mismatch_in_payload_returns_none() {
+fn stale_version_in_payload_returns_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("seg.factstore");
     // Hand-craft a segment with a wrong version field.
     let mut seg = IdgSegment::new();
-    seg.version = IDG_SEGMENT_VERSION + 1;
+    seg.version = IDG_SEGMENT_VERSION - 1;
     seg.write_to_path(&path, 0).expect("write");
     // Reader detects version drift and returns None instead of
     // misinterpreting the bytes.
     let result = IdgSegment::read_from_path(&path, 0).expect("ok");
     assert!(result.is_none());
+}
+
+#[test]
+fn wide_positional_places_round_trip_without_sentinel_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide-positions.factstore");
+    let mut seg = IdgSegment::new();
+    let site = crate::place::CallSiteId(span());
+    let param_255 = seg.intern_place(Place::Param { idx: 255 });
+    let param_299 = seg.intern_place(Place::Param { idx: 299 });
+    let arg_255 = seg.intern_place(Place::CallArg { site, idx: 255 });
+    let arg_299 = seg.intern_place(Place::CallArg { site, idx: 299 });
+    let receiver = seg.intern_place(Place::CallArg { site, idx: u32::MAX });
+    assert_ne!(param_255, param_299);
+    assert_ne!(arg_255, arg_299);
+    assert_ne!(arg_255, receiver);
+
+    seg.write_to_path(&path, 0xCAFE).expect("write");
+    let restored = IdgSegment::read_from_path(&path, 0xCAFE)
+        .expect("read")
+        .expect("current segment");
+    assert!(restored.places.lookup(&Place::Param { idx: 255 }).is_some());
+    assert!(restored.places.lookup(&Place::Param { idx: 299 }).is_some());
+    assert!(restored
+        .places
+        .lookup(&Place::CallArg { site, idx: 299 })
+        .is_some());
+    assert!(restored
+        .places
+        .lookup(&Place::CallArg { site, idx: u32::MAX })
+        .is_some());
 }
 
 #[test]
