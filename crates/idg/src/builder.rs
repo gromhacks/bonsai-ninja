@@ -316,9 +316,10 @@ struct FieldPlaceIndex {
     /// concrete field that can reach that object; projected reads continue
     /// to use the precise `(base, suffix)` index above.
     read_storages: AHashSet<(SegmentId, FuncId, String)>,
-    /// Each compiler node denotes exactly one Place, so one compact identity
-    /// set replaces a string-heavy duplicate set for every prefix view.
-    recorded_nodes: AHashSet<(SegmentId, FuncId, NodeId)>,
+    /// AST read nodes with at least one use other than carrying a value into
+    /// a `CallArg`. Carrier-only reads stay indexed for propagation but are
+    /// not liveness roots unless the call site is an explicit terminal.
+    observable_read_nodes: AHashSet<(SegmentId, FuncId, NodeId)>,
 }
 
 #[derive(Default, Debug)]
@@ -377,7 +378,15 @@ struct InterCallArgEntryIndex {
 
 #[derive(Default, Debug)]
 struct SyntheticFieldWriteCache {
-    generated_nodes: AHashSet<(SegmentId, FuncId, NodeId)>,
+    /// Node ids are segment-local and append-only. A node at or beyond the
+    /// segment's pre-closure length was synthesized by field forwarding, so
+    /// compiler dictionary identity replaces a hash entry per generated node.
+    initial_node_counts: Vec<u32>,
+    /// Interprocedural parameters are phi-like compiler places: one callee
+    /// field node receives edges from every resolved caller. Call provenance
+    /// remains on each edge, so duplicating the destination by call span adds
+    /// no information and explodes on widely called methods.
+    parameter_nodes: AHashMap<(SegmentId, FuncId, String, String), (NodeId, Span)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2742,11 +2751,14 @@ fn stitch_field_argument_forwarding(
     {
         return;
     }
-    let mut known_edges = collect_existing_edges(ws);
+    // Field forwarding creates edges to synthetic field nodes. Track only
+    // edges produced by this phase instead of duplicating every pre-existing
+    // workspace edge (millions on large projects) in a second hash table.
+    let mut known_edges = AHashSet::default();
     let mut field_index = FieldPlaceIndex::from_workspace(ws);
     let syntactic_fields = field_index.syntactic_field_universe();
     let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
-    let mut synthetic_field_writes = SyntheticFieldWriteCache::default();
+    let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
     let transforms = build_field_write_transforms(
         sites,
         return_field_sites,
@@ -3027,6 +3039,9 @@ fn build_field_demands(
             writes: true,
         };
         for hit in hits {
+            if !field_index.is_observable_read(key, hit.node) {
+                continue;
+            }
             seed_exact_field_demand(
                 &mut demands,
                 &mut reverse,
@@ -3081,9 +3096,8 @@ fn build_field_demands(
         };
         for site in &data.call_sites {
             let call_is_resolved = resolved_call_sites.contains(&(*func, site.site.0));
-            let whole_object_is_demanded = terminal_sites
-                .map(|terminals| terminals.contains(&(*func, site.site.0)))
-                .unwrap_or(!call_is_resolved);
+            let whole_object_is_demanded =
+                whole_object_call_is_demanded(terminal_sites, call_is_resolved, *func, site.site.0);
             if whole_object_is_demanded {
                 let argument_count = site.call_arg_places.len().max(site.call_arg_values.len());
                 for index in 0..argument_count {
@@ -3098,6 +3112,14 @@ fn build_field_demands(
                     if place.is_empty() {
                         continue;
                     }
+                    seed_terminal_projection_demands(
+                        &mut demands,
+                        &mut reverse,
+                        &mut roots_by_field,
+                        seg_id,
+                        *func,
+                        place,
+                    );
                     let key = field_write_key(seg_id, *func, place);
                     let key_id = intern_field_demand_key(&mut demands, &mut reverse, key);
                     whole_demand_key_ids.insert(key_id);
@@ -3109,6 +3131,14 @@ fn build_field_demands(
                         .map(str::trim)
                         .filter(|receiver| !receiver.is_empty())
                     {
+                        seed_terminal_projection_demands(
+                            &mut demands,
+                            &mut reverse,
+                            &mut roots_by_field,
+                            seg_id,
+                            *func,
+                            receiver,
+                        );
                         let key = field_write_key(seg_id, *func, receiver);
                         let key_id = intern_field_demand_key(&mut demands, &mut reverse, key);
                         whole_demand_key_ids.insert(key_id);
@@ -3188,6 +3218,39 @@ fn build_field_demands(
         }
     }
     demands
+}
+
+fn whole_object_call_is_demanded(
+    terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
+    call_is_resolved: bool,
+    caller: FuncId,
+    site: Span,
+) -> bool {
+    terminal_sites
+        .map(|terminals| terminals.contains(&(caller, site)))
+        .unwrap_or(!call_is_resolved)
+}
+
+fn seed_terminal_projection_demands(
+    demands: &mut FieldDemandIndex,
+    reverse: &mut Vec<Vec<usize>>,
+    roots_by_field: &mut Vec<Vec<usize>>,
+    seg_id: SegmentId,
+    func: FuncId,
+    place: &str,
+) {
+    let parts = storage_segments_cached(place);
+    for split in 1..parts.len() {
+        let base = join_storage_parts(&parts[..split]);
+        let field = join_storage_parts(&parts[split..]);
+        seed_exact_field_demand(
+            demands,
+            reverse,
+            roots_by_field,
+            field_write_key(seg_id, func, &base),
+            &field,
+        );
+    }
 }
 
 fn intern_field_demand_key(
@@ -3501,14 +3564,16 @@ fn apply_field_argument_write(
     {
         return;
     }
-    let Some((param_field_write, param_field_span, is_new_field_write)) = synthetic_field_writes.ensure(
-        ws,
-        site.callee_seg,
-        site.callee,
-        &site.param_name,
-        &source.field,
-        site.call_span,
-    ) else {
+    let Some((param_field_write, param_field_span, is_new_field_write)) = synthetic_field_writes
+        .ensure_parameter(
+            ws,
+            site.callee_seg,
+            site.callee,
+            &site.param_name,
+            &source.field,
+            site.call_span,
+        )
+    else {
         return;
     };
     let recorded = if is_new_field_write {
@@ -4384,6 +4449,27 @@ impl FieldPlaceIndex {
     fn from_workspace(ws: &IdgWorkspace) -> Self {
         let mut index = Self::default();
         for (seg_id, segment) in ws.segments() {
+            for edge in &segment.edges {
+                let Some(from_node) = segment.nodes.get(edge.from) else {
+                    continue;
+                };
+                if !matches!(segment.places.get(from_node.place), Some(Place::Read { .. })) {
+                    continue;
+                }
+                let carrier_only_use = edge.meta.kind == crate::edge::IdgEdgeKind::IntraRead
+                    && segment
+                        .nodes
+                        .get(edge.to)
+                        .and_then(|node| segment.places.get(node.place))
+                        .is_some_and(|place| matches!(place, Place::CallArg { .. }));
+                if !carrier_only_use {
+                    index
+                        .observable_read_nodes
+                        .insert((seg_id, from_node.func, edge.from));
+                }
+            }
+        }
+        for (seg_id, segment) in ws.segments() {
             for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
                 let Some(place) = segment.places.get(node.place) else {
                     continue;
@@ -4403,19 +4489,17 @@ impl FieldPlaceIndex {
                     }
                     _ => continue,
                 };
-                if !writes {
+                let node_id = NodeId(node_idx as u32);
+                if !writes
+                    && index
+                        .observable_read_nodes
+                        .contains(&(seg_id, node.func, node_id))
+                {
                     index
                         .read_storages
                         .insert((seg_id, node.func, normalize_storage_base(&full_name)));
                 }
-                let _ = index.record_full_storage_place(
-                    seg_id,
-                    node.func,
-                    &full_name,
-                    writes,
-                    span,
-                    NodeId(node_idx as u32),
-                );
+                let _ = index.record_full_storage_place(seg_id, node.func, &full_name, writes, span, node_id);
             }
         }
         index.sort_and_dedup();
@@ -4425,6 +4509,10 @@ impl FieldPlaceIndex {
     fn has_whole_read(&self, write_key: &FieldPlaceKey) -> bool {
         self.read_storages
             .contains(&(write_key.seg_id, write_key.func, write_key.base.clone()))
+    }
+
+    fn is_observable_read(&self, key: &FieldPlaceKey, node: NodeId) -> bool {
+        self.observable_read_nodes.contains(&(key.seg_id, key.func, node))
     }
 
     fn syntactic_field_universe(&self) -> SyntacticFieldUniverse {
@@ -4537,9 +4625,6 @@ impl FieldPlaceIndex {
         if parts.len() < 2 {
             return Vec::new();
         }
-        if !self.recorded_nodes.insert((seg_id, func, node)) {
-            return Vec::new();
-        }
         let mut added = Vec::new();
         for split in 1..parts.len() {
             let field_parts = &parts[split..];
@@ -4577,9 +4662,6 @@ impl FieldPlaceIndex {
         let cached_parts = storage_segments_cached(full_name);
         let parts = cached_parts.iter().map(String::as_str).collect::<Vec<_>>();
         if parts.len() < 2 {
-            return added;
-        }
-        if !self.recorded_nodes.insert((seg_id, func, node)) {
             return added;
         }
         for split in 1..parts.len() {
@@ -4730,8 +4812,22 @@ impl InterCallArgEntryIndex {
 }
 
 impl SyntheticFieldWriteCache {
-    fn is_generated(&self, seg_id: SegmentId, func: FuncId, node: NodeId) -> bool {
-        self.generated_nodes.contains(&(seg_id, func, node))
+    fn from_workspace(ws: &IdgWorkspace) -> Self {
+        let mut initial_node_counts = vec![0; ws.segment_count()];
+        for (seg_id, segment) in ws.segments() {
+            initial_node_counts[seg_id.0 as usize] =
+                u32::try_from(segment.nodes.len()).expect("segment node count exceeds u32");
+        }
+        Self {
+            initial_node_counts,
+            parameter_nodes: AHashMap::default(),
+        }
+    }
+
+    fn is_generated(&self, seg_id: SegmentId, _func: FuncId, node: NodeId) -> bool {
+        self.initial_node_counts
+            .get(seg_id.0 as usize)
+            .is_some_and(|initial| node.0 >= *initial)
     }
 
     fn ensure(
@@ -4747,9 +4843,33 @@ impl SyntheticFieldWriteCache {
         // `Place::Write { path, span }` and `(func, place)` node identity.
         // Reusing that identity avoids a second string-heavy cache while still
         // canonicalising alternate `(base, field)` splits of the same place.
+        let before = ws.segment(seg_id)?.nodes.len();
         let node = ensure_field_write_node(ws, seg_id, func, base, field, fallback_span)?;
-        let is_new = self.generated_nodes.insert((seg_id, func, node));
+        let is_new = ws.segment(seg_id)?.nodes.len() != before;
         Some((node, fallback_span, is_new))
+    }
+
+    fn ensure_parameter(
+        &mut self,
+        ws: &mut IdgWorkspace,
+        seg_id: SegmentId,
+        func: FuncId,
+        base: &str,
+        field: &str,
+        fallback_span: Span,
+    ) -> Option<(NodeId, Span, bool)> {
+        let key = (
+            seg_id,
+            func,
+            normalize_storage_base(base),
+            normalize_storage_base(field),
+        );
+        if let Some((node, span)) = self.parameter_nodes.get(&key).copied() {
+            return Some((node, span, false));
+        }
+        let created = self.ensure(ws, seg_id, func, &key.2, &key.3, fallback_span)?;
+        self.parameter_nodes.insert(key, (created.0, created.1));
+        Some(created)
     }
 }
 
@@ -4789,19 +4909,6 @@ fn stitch_debug_log(args: std::fmt::Arguments<'_>) {
         let message = bonsai_diagnostics::debug::render_message(&args.to_string());
         eprintln!("[idg-build] {message}");
     }
-}
-
-fn collect_existing_edges(ws: &IdgWorkspace) -> AHashSet<(SegmentId, SegmentId, IdgEdge)> {
-    let mut out = AHashSet::default();
-    for (seg_id, segment) in ws.segments() {
-        for edge in &segment.edges {
-            out.insert((seg_id, seg_id, *edge));
-        }
-    }
-    for edge in &ws.cross_file().edges {
-        out.insert((edge.from_segment, edge.to_segment, edge.edge));
-    }
-    out
 }
 
 fn place_inter_edge_if_absent(

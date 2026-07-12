@@ -15,6 +15,7 @@ use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -1064,6 +1065,35 @@ const EXPORT_SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
 const COMPRESSED_CHAIN_ROWS_REASON: &str = "concrete path rows are not materialized in compressed_callgraph mode; the complete semantic chain language is represented by the exported function and resolved call-edge graph";
 const COMPRESSED_FLOW_ID_ROWS_REASON: &str = "concrete flow-id label rows are not materialized in compressed_callgraph mode; the complete semantic flow relation is represented by the exported function and resolved call-edge graph";
 
+/// Build the semantic IDG used by native export projections.
+///
+/// Export emits observable parameter/return, local-storage, and call-boundary
+/// facts; it does not expose otherwise-unread synthetic field writes. For
+/// adapters that declare complete AST field places, compiler-style backward
+/// demand therefore removes only dead synthetic writes while preserving every
+/// exported fact. Adapters without that capability retain eager forwarding.
+fn export_projection_idg_service(ws: &Workspace) -> Arc<bonsai_idg::IdgQueryService> {
+    let db = ws.db();
+    let global = db.global_index();
+    let mut field_demand_languages: Vec<String> = global
+        .all_files()
+        .filter_map(|file| db.adapter_for(file))
+        .filter(|adapter| adapter.capabilities().field_places_complete)
+        .map(|adapter| adapter.language_id().as_str().to_string())
+        .collect();
+    field_demand_languages.sort();
+    field_demand_languages.dedup();
+    let options = bonsai_idg::TransferOptions {
+        include_diagnostic_field_flows: false,
+        include_receiver_method_propagation: false,
+        demand_driven_field_forwarding: !field_demand_languages.is_empty(),
+        field_demand_languages,
+        ..bonsai_idg::TransferOptions::default()
+    }
+    .canonicalized();
+    ws.build_and_seed_idg_service_with_transfer_options(&options)
+}
+
 fn export_analysis_scope(config: NativeExportConfig) -> ExportAnalysisScope {
     ExportAnalysisScope {
         semantic_max_precision: export_precision_label(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
@@ -1319,14 +1349,21 @@ fn build_taint_graph(
 ) -> ExportTaintGraph {
     let functions = export_taint_functions(ws, spans);
     let call_edges = export_taint_call_edges(ws);
-    let function_summaries = export_function_summaries(ws, &functions);
+    let projection_idg = export_projection_idg_service(ws);
+    let function_summaries = export_function_summaries_from_idg(&projection_idg, &functions);
     let reachable_facts = export_reachable_facts(ws, &functions);
-    let assign_chains = export_assign_chains(ws, &functions);
+    let assign_chains = export_assign_chains_from_idg(&projection_idg, &functions);
     let intra_taint = export_intra_taint(ws, &functions);
     let alias_maps = export_alias_maps(ws);
     let class_fields = export_class_fields(ws, spans);
     let entry_points = export_entry_points(ws, spans);
-    let propagation_rows = export_taint_propagations(ws, spans, &entry_points, config.full_propagations);
+    let propagation_rows = export_taint_propagations_from_idg(
+        ws,
+        spans,
+        &projection_idg,
+        &entry_points,
+        config.full_propagations,
+    );
     let chain_rows = export_taint_chains_and_flow_labels(
         ws,
         chain_limits,
@@ -1383,7 +1420,8 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         map.serialize_entry("call_edges", &call_edges)?;
         drop(call_edges);
 
-        let function_summaries = export_function_summaries(self.ws, functions);
+        let projection_idg = export_projection_idg_service(self.ws);
+        let function_summaries = export_function_summaries_from_idg(&projection_idg, functions);
         map.serialize_entry("function_summaries", &function_summaries)?;
         drop(function_summaries);
 
@@ -1391,7 +1429,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         map.serialize_entry("reachable_facts", &reachable_facts)?;
         drop(reachable_facts);
 
-        let assign_chains = export_assign_chains(self.ws, functions);
+        let assign_chains = export_assign_chains_from_idg(&projection_idg, functions);
         map.serialize_entry("assign_chains", &assign_chains)?;
         drop(assign_chains);
 
@@ -1413,6 +1451,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         let propagation_rows = ExportTaintPropagationsStreaming {
             ws: self.ws,
             spans: self.spans,
+            idg: &projection_idg,
             entry_points: &entry_points,
             full_propagations: self.config.full_propagations,
         };
@@ -1422,6 +1461,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
             map.serialize_entry("propagations_omitted_reason", &reason)?;
         }
         drop(entry_points);
+        drop(projection_idg);
 
         let chain_rows = self.chain_rows;
         map.serialize_entry("chains", &chain_rows.chains)?;
@@ -1455,6 +1495,7 @@ struct ExportTaintPropagationsSection {
 struct ExportTaintPropagationsStreaming<'a> {
     ws: &'a Workspace,
     spans: &'a ExportSpanCache,
+    idg: &'a bonsai_idg::IdgQueryService,
     entry_points: &'a [ExportEntryPoint],
     full_propagations: bool,
 }
@@ -1476,9 +1517,6 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
 
         let db = self.ws.db();
         let global = db.global_index();
-        let idg = db
-            .idg_service()
-            .unwrap_or_else(|| self.ws.build_and_seed_idg_service());
         let mut render_cache = ExportTaintRecordRenderCache::default();
         let mut seq = serializer.serialize_seq(None)?;
         let mut count = 0usize;
@@ -1488,7 +1526,7 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
                 let row = export_taint_propagation_row_ref(
                     self.spans,
                     global.as_ref(),
-                    idg.as_ref(),
+                    self.idg,
                     &mut render_cache,
                     ep,
                     entry_func,
@@ -1638,18 +1676,14 @@ fn export_taint_call_edges(ws: &Workspace) -> Vec<ExportCallEdge> {
     call_edges
 }
 
-fn export_function_summaries(
-    ws: &Workspace,
+fn export_function_summaries_from_idg(
+    idg: &bonsai_idg::IdgQueryService,
     functions: &[ExportTaintFunction],
 ) -> Vec<ExportFunctionSummary> {
     use bonsai_common::FuncId;
 
     // ---- function_summaries: G1 return-value taint ----
-    let db = ws.db();
     let phase_started = Instant::now();
-    let idg = db
-        .idg_service()
-        .unwrap_or_else(|| ws.build_and_seed_idg_service());
     let funcs: Vec<FuncId> = functions
         .iter()
         .map(|function| FuncId::new(function.func_id))
@@ -1726,13 +1760,12 @@ fn export_reachable_facts(ws: &Workspace, functions: &[ExportTaintFunction]) -> 
     reachable_facts
 }
 
-fn export_assign_chains(ws: &Workspace, functions: &[ExportTaintFunction]) -> Vec<ExportAssignChain> {
+fn export_assign_chains_from_idg(
+    idg: &bonsai_idg::IdgQueryService,
+    functions: &[ExportTaintFunction],
+) -> Vec<ExportAssignChain> {
     use bonsai_common::FuncId;
 
-    let db = ws.db();
-    let idg = db
-        .idg_service()
-        .unwrap_or_else(|| ws.build_and_seed_idg_service());
     let funcs: Vec<FuncId> = functions
         .iter()
         .map(|function| FuncId::new(function.func_id))
@@ -2013,9 +2046,10 @@ fn export_entry_points(ws: &Workspace, spans: &ExportSpanCache) -> Vec<ExportEnt
     entry_points
 }
 
-fn export_taint_propagations(
+fn export_taint_propagations_from_idg(
     ws: &Workspace,
     spans: &ExportSpanCache,
+    idg: &bonsai_idg::IdgQueryService,
     entry_points: &[ExportEntryPoint],
     full_propagations: bool,
 ) -> ExportTaintPropagationsSection {
@@ -2025,10 +2059,7 @@ fn export_taint_propagations(
     let propagation_omitted_reason = propagation_omitted_reason(should_materialize_propagations);
     let phase_started = Instant::now();
     let mut propagations: Vec<ExportTaintPropagations> = if should_materialize_propagations {
-        let idg = db
-            .idg_service()
-            .unwrap_or_else(|| ws.build_and_seed_idg_service());
-        export_taint_propagation_rows(spans, global.as_ref(), idg.as_ref(), entry_points)
+        export_taint_propagation_rows(spans, global.as_ref(), idg, entry_points)
     } else {
         Vec::new()
     };
@@ -2556,7 +2587,8 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
                 continue;
             }
             let has_callers = callees_seen.contains(&decl.symbol);
-            let decorator_entry = detect_framework_decorator(ws, file, decl.span, decl.name_span);
+            let decorator_entry =
+                detect_framework_decorator(ws, global.as_ref(), file, decl.span, decl.name_span);
             let entry_kind = if decorator_entry {
                 Some("decorator")
             } else if !has_callers && matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
@@ -2744,11 +2776,17 @@ fn collect_class_field_taints_for_entries(
 /// Keep this routed through the same helper as `defs --has-decorator`
 /// so export entrypoint inference cannot drift into a broader
 /// file-scoped or gap-only heuristic.
-fn detect_framework_decorator(ws: &Workspace, file: FileId, decl_span: Span, decl_name_span: Span) -> bool {
-    let Some(idx) = ws.db().decl_index(file) else {
+fn detect_framework_decorator(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    file: FileId,
+    decl_span: Span,
+    decl_name_span: Span,
+) -> bool {
+    let Some(idx) = global.file_index(file) else {
         return false;
     };
-    !decl_decorator_names(ws, file, &idx, decl_span, decl_name_span).is_empty()
+    !decl_decorator_names(ws, file, idx, decl_span, decl_name_span).is_empty()
 }
 
 fn count_call_sites_for_export(events: &[bonsai_lang_api::FlowEvent], call_site_count: &mut usize) {

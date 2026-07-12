@@ -1188,6 +1188,65 @@ fn sparse_field_forwarding_preserves_whole_object_ast_reads() {
 }
 
 #[test]
+fn explicit_empty_terminal_set_does_not_promote_unresolved_calls_to_wildcard_demand() {
+    let caller = FuncId::new(1);
+    let unresolved_site = span(50, 65);
+    let empty = AHashSet::default();
+    let terminal = AHashSet::from([(caller, unresolved_site)]);
+
+    assert!(whole_object_call_is_demanded(
+        None,
+        false,
+        caller,
+        unresolved_site
+    ));
+    assert!(!whole_object_call_is_demanded(
+        Some(&empty),
+        false,
+        caller,
+        unresolved_site
+    ));
+    assert!(whole_object_call_is_demanded(
+        Some(&terminal),
+        false,
+        caller,
+        unresolved_site
+    ));
+}
+
+#[test]
+fn call_argument_carriers_are_not_implicit_whole_object_read_roots() {
+    let mut carrier = empty_decl(1, "carrier");
+    carrier.params = vec!["box".to_string()];
+    carrier.flow_events = vec![FlowEvent::Call {
+        span: span(20, 35),
+        name: "external".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            passing_mode: Default::default(),
+            span: span(28, 31),
+            name: None,
+            value_text: "box".to_string(),
+            place: Some("box".to_string()),
+            source_names: Vec::new(),
+        }],
+    }];
+    let carrier_ws = stitch_idg_with_selective_field_forwarding_mode(
+        vec![transfer_function_for(&carrier)],
+        &MockResolver::new(),
+        &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
+        false,
+        true,
+        None,
+        Some(&AHashSet::default()),
+    );
+    let carrier_index = FieldPlaceIndex::from_workspace(&carrier_ws);
+    assert!(!carrier_index.has_whole_read(&field_write_key(SegmentId(0), FuncId::new(1), "box")));
+}
+
+#[test]
 fn field_argument_forwarding_worklist_deduplicates_split_views_but_not_writers() {
     let shallow_key = FieldPlaceKey {
         seg_id: SegmentId(0),
@@ -1255,7 +1314,8 @@ fn synthetic_field_write_interning_canonicalizes_storage_split_views() {
         &MockResolver::new(),
         &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
     );
-    let mut cache = SyntheticFieldWriteCache::default();
+    let initial_nodes = ws.segment(SegmentId(0)).expect("segment").nodes.len();
+    let mut cache = SyntheticFieldWriteCache::from_workspace(&ws);
 
     let (first, _, first_is_new) = cache
         .ensure(
@@ -1281,7 +1341,7 @@ fn synthetic_field_write_interning_canonicalizes_storage_split_views() {
     assert!(first_is_new);
     assert!(!second_is_new);
     assert_eq!(first, second);
-    assert_eq!(cache.generated_nodes.len(), 1);
+    assert!(cache.is_generated(SegmentId(0), FuncId::new(1), first));
     let (third, _, third_is_new) = cache
         .ensure(
             &mut ws,
@@ -1297,12 +1357,49 @@ fn synthetic_field_write_interning_canonicalizes_storage_split_views() {
         first, third,
         "distinct AST writes must preserve statement identity"
     );
-    assert_eq!(cache.generated_nodes.len(), 2);
     let segment = ws.segment(SegmentId(0)).expect("segment");
+    assert_eq!(segment.nodes.len(), initial_nodes + 2);
+    assert!(cache.is_generated(SegmentId(0), FuncId::new(1), third));
     assert_eq!(
         place_storage_name(segment, node_place(segment, first).expect("synthetic place")).as_deref(),
         Some("box.nested.cmd")
     );
+}
+
+#[test]
+fn synthetic_parameter_fields_merge_across_call_spans() {
+    let decl = empty_decl(1, "canonical_parameter_field");
+    let mut ws = stitch_idg(
+        vec![transfer_function_for(&decl)],
+        &MockResolver::new(),
+        &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
+    );
+    let mut cache = SyntheticFieldWriteCache::from_workspace(&ws);
+    let first = cache
+        .ensure_parameter(
+            &mut ws,
+            SegmentId(0),
+            FuncId::new(1),
+            "arg",
+            "value",
+            span(10, 18),
+        )
+        .expect("first caller");
+    let second = cache
+        .ensure_parameter(
+            &mut ws,
+            SegmentId(0),
+            FuncId::new(1),
+            "arg",
+            "value",
+            span(30, 38),
+        )
+        .expect("second caller");
+
+    assert!(first.2);
+    assert!(!second.2);
+    assert_eq!(first.0, second.0);
+    assert_eq!(first.1, second.1);
 }
 
 #[test]
