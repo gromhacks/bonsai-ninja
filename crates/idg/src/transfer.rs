@@ -307,7 +307,7 @@ impl TransferOptions {
 
         let options = self.clone().canonicalized();
         let mut hasher = StableHasher::new();
-        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v11");
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v12");
         absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
         absorb_u64(
             &mut hasher,
