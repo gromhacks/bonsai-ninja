@@ -2,6 +2,9 @@ use super::*;
 use crate::edge::{IdgEdge, IdgEdgeKind};
 use crate::node::NodeId;
 use crate::place::Place;
+use crate::symbolic::{
+    SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING,
+};
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{FileId, Precision, Span};
 
@@ -255,6 +258,23 @@ fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
             precision: Precision::Exact,
         });
     }
+    let mut symbolic = SymbolicFieldGraph::new();
+    let source = symbolic.intern_base(id_a, FuncId::new(11), "payload");
+    let target = symbolic.intern_base(id_b, FuncId::new(22), "arg");
+    for offset in 0_u64..3 {
+        symbolic.push_transform(SymbolicFieldTransform {
+            source,
+            target,
+            exact_field: NO_SYMBOLIC_STRING,
+            call_span: Span::new(FileId::new(0), offset, offset + 1),
+            write_span: Span::new(FileId::new(0), offset, offset + 1),
+            precision: Precision::Exact,
+            call_kind: CallEdgeKind::Direct,
+            kind: SymbolicFieldTransformKind::Argument,
+            allow_out_of_order_source: false,
+        });
+    }
+    w.set_symbolic_field(symbolic);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("idg.factstore");
@@ -267,6 +287,8 @@ fn save_load_round_trip_preserves_chunked_cross_file_and_field_flow() {
     assert_eq!(restored.cross_file().outgoing_from_segment(id_a).count(), 3);
     assert_eq!(restored.cross_file().incoming_to_segment(id_b).count(), 3);
     assert_eq!(restored.field_flow().len(), 3);
+    assert_eq!(restored.symbolic_field().transforms().len(), 3);
+    assert_eq!(restored.symbolic_field().string(0), Some("payload"));
 }
 
 #[test]

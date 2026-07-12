@@ -80,6 +80,7 @@ pub mod place;
 pub mod query;
 pub mod segment;
 pub mod service;
+pub mod symbolic;
 pub mod transfer;
 pub mod workspace;
 pub mod workspace_adapter;
@@ -91,6 +92,10 @@ pub use query::ReachabilityIndex;
 pub use service::{
     expand_bare_seed_names_with_descendants, CallRetAssignmentTarget, CrossCallEdge, IdgQueryService,
     PointKind, PointRef, WsNodeId,
+};
+pub use symbolic::{
+    SymbolicFieldBase, SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind,
+    NO_SYMBOLIC_STRING,
 };
 pub use transfer::{
     transfer_for_many, transfer_for_many_with_options, transfer_function_for,

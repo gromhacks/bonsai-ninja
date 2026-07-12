@@ -47,6 +47,9 @@ use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use crate::place::{CallSiteId, Place};
 use crate::segment::IdgSegment;
+use crate::symbolic::{
+    SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING,
+};
 use crate::transfer::{
     inline_call_result_receiver_base, inline_constructor_receiver_base, receiver_name_matches,
     receiver_tokens_equal, CallSiteRef, DescendantCopy, FlowControlFacts, ReturnFieldProjection,
@@ -2767,6 +2770,10 @@ fn stitch_field_argument_forwarding(
         receiver_mutation_sites,
         &copy_sites,
     );
+    if demand_driven {
+        ws.set_symbolic_field(build_symbolic_field_graph(&transforms));
+        return;
+    }
     let demands = demand_driven.then(|| {
         build_field_demands(
             &field_index,
@@ -3030,6 +3037,97 @@ fn build_field_write_transforms(
         push_field_write_transform(&mut out, key, FieldWriteTransform::Copy(site.clone()));
     }
     out
+}
+
+fn build_symbolic_field_graph(
+    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+) -> SymbolicFieldGraph {
+    let mut graph = SymbolicFieldGraph::new();
+    let mut source_keys: Vec<FieldPlaceKey> = transforms.keys().cloned().collect();
+    sort_field_keys(&mut source_keys);
+    for source_key in source_keys {
+        let source = graph.intern_base(source_key.seg_id, source_key.func, &source_key.base);
+        let Some(entries) = transforms.get(&source_key) else {
+            continue;
+        };
+        for transform in entries {
+            let (target, exact_field, call_span, write_span, precision, call_kind, kind, allow) =
+                match transform {
+                    FieldWriteTransform::Argument(site) => (
+                        graph.intern_base(site.callee_seg, site.callee, &site.param_name),
+                        NO_SYMBOLIC_STRING,
+                        site.call_span,
+                        site.call_span,
+                        site.precision,
+                        site.call_kind,
+                        SymbolicFieldTransformKind::Argument,
+                        site.allow_out_of_order_source,
+                    ),
+                    FieldWriteTransform::Return(site) => (
+                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                        NO_SYMBOLIC_STRING,
+                        site.call_span,
+                        site.write_span,
+                        site.precision,
+                        site.call_kind,
+                        SymbolicFieldTransformKind::Return,
+                        true,
+                    ),
+                    FieldWriteTransform::ScalarReturn(site) => (
+                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                        graph.intern_string(&site.source_field),
+                        site.call_span,
+                        site.write_span,
+                        site.precision,
+                        site.call_kind,
+                        SymbolicFieldTransformKind::ScalarReturn,
+                        true,
+                    ),
+                    FieldWriteTransform::ConstructorReturn(site) => (
+                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                        NO_SYMBOLIC_STRING,
+                        site.call_span,
+                        site.write_span,
+                        site.precision,
+                        site.call_kind,
+                        SymbolicFieldTransformKind::ConstructorReturn,
+                        true,
+                    ),
+                    FieldWriteTransform::ReceiverMutation(site) => (
+                        graph.intern_base(site.caller_seg, site.caller, &site.target_base),
+                        NO_SYMBOLIC_STRING,
+                        site.call_span,
+                        site.call_span,
+                        site.precision,
+                        site.call_kind,
+                        SymbolicFieldTransformKind::ReceiverMutation,
+                        true,
+                    ),
+                    FieldWriteTransform::Copy(site) => (
+                        graph.intern_base(site.seg_id, site.func, &site.target_base),
+                        NO_SYMBOLIC_STRING,
+                        site.via_span,
+                        site.write_span,
+                        site.precision,
+                        site.call_kind,
+                        SymbolicFieldTransformKind::Copy,
+                        false,
+                    ),
+                };
+            graph.push_transform(SymbolicFieldTransform {
+                source,
+                target,
+                exact_field,
+                call_span,
+                write_span,
+                precision,
+                call_kind,
+                kind,
+                allow_out_of_order_source: allow,
+            });
+        }
+    }
+    graph
 }
 
 fn field_transform_target_key(transform: &FieldWriteTransform) -> Option<FieldPlaceKey> {

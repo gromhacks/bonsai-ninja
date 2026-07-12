@@ -1,5 +1,6 @@
 use super::*;
 use crate::workspace_adapter;
+use crate::{SymbolicFieldGraph, SymbolicFieldTransform, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use bonsai_callgraph::{CallEdge, CallGraph, EdgeKind, EdgeProvenance, ResolvedCallGraph};
 use bonsai_common::{Precision, SymbolId};
 use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, ModulePath, Visibility};
@@ -132,6 +133,102 @@ fn empty_service_has_zero_segments() {
     assert_eq!(svc.segment_count(), 0);
     assert_eq!(svc.intra_edge_count(), 0);
     assert_eq!(svc.cross_file_edge_count(), 0);
+}
+
+#[test]
+fn symbolic_argument_transform_reaches_exact_callee_field_without_expanded_edges() {
+    let caller = FuncId::new(1);
+    let middle = FuncId::new(2);
+    let callee = FuncId::new(3);
+    let mut caller_segment = crate::segment::IdgSegment::new();
+    let box_name = caller_segment.strings.intern("box");
+    let live_name = caller_segment.strings.intern("live");
+    let unrelated_name = caller_segment.strings.intern("unrelated");
+    let param_place = caller_segment.intern_place(Place::Param { idx: 0 });
+    let unrelated_param_place = caller_segment.intern_place(Place::Param { idx: 1 });
+    let field_write_place = caller_segment.intern_place(Place::Write {
+        name: box_name,
+        path: smallvec::smallvec![live_name],
+        span: span(0, 10, 11),
+    });
+    let unrelated_write_place = caller_segment.intern_place(Place::Write {
+        name: box_name,
+        path: smallvec::smallvec![unrelated_name],
+        span: span(0, 12, 13),
+    });
+    let param_node = caller_segment.intern_node(caller, param_place);
+    let unrelated_param_node = caller_segment.intern_node(caller, unrelated_param_place);
+    let field_write = caller_segment.intern_node(caller, field_write_place);
+    let unrelated_write = caller_segment.intern_node(caller, unrelated_write_place);
+    caller_segment.add_edge(IdgEdge::intra_assign(param_node, field_write, span(0, 10, 11)));
+    caller_segment.add_edge(IdgEdge::intra_assign(
+        unrelated_param_node,
+        unrelated_write,
+        span(0, 12, 13),
+    ));
+    caller_segment.record_func(caller);
+
+    let mut middle_segment = crate::segment::IdgSegment::new();
+    middle_segment.record_func(middle);
+
+    let mut callee_segment = crate::segment::IdgSegment::new();
+    let arg_name = callee_segment.strings.intern("arg");
+    let live_name = callee_segment.strings.intern("live");
+    let field_read_place = callee_segment.intern_place(Place::Read {
+        name: arg_name,
+        path: smallvec::smallvec![live_name],
+    });
+    let return_place = callee_segment.intern_place(Place::Return);
+    let field_read = callee_segment.intern_node(callee, field_read_place);
+    let return_node = callee_segment.intern_node(callee, return_place);
+    callee_segment.add_edge(IdgEdge::intra_assign(field_read, return_node, span(1, 30, 31)));
+    callee_segment.record_func(callee);
+
+    let mut workspace = IdgWorkspace::new();
+    let caller_segment_id = workspace.register_segment(caller_segment);
+    let middle_segment_id = workspace.register_segment(middle_segment);
+    let callee_segment_id = workspace.register_segment(callee_segment);
+    let mut symbolic = SymbolicFieldGraph::new();
+    let source = symbolic.intern_base(caller_segment_id, caller, "box");
+    let middle_input = symbolic.intern_base(middle_segment_id, middle, "arg");
+    let target = symbolic.intern_base(callee_segment_id, callee, "arg");
+    symbolic.push_transform(SymbolicFieldTransform {
+        source,
+        target: middle_input,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: span(0, 20, 25),
+        write_span: span(0, 20, 25),
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Argument,
+        allow_out_of_order_source: false,
+    });
+    symbolic.push_transform(SymbolicFieldTransform {
+        source: middle_input,
+        target,
+        exact_field: NO_SYMBOLIC_STRING,
+        call_span: span(0, 26, 29),
+        write_span: span(0, 26, 29),
+        precision: Precision::Exact,
+        call_kind: EdgeKind::Direct,
+        kind: SymbolicFieldTransformKind::Argument,
+        allow_out_of_order_source: false,
+    });
+    workspace.set_symbolic_field(symbolic);
+
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let params = service.param_nodes_of(caller);
+    let reached: AHashSet<WsNodeId> = service.forward_closure(&[params[0]]).into_iter().collect();
+    let unrelated_reached: AHashSet<WsNodeId> = service.forward_closure(&[params[1]]).into_iter().collect();
+    let callee_return = service.return_node_of(callee).expect("callee return");
+    assert!(
+        reached.contains(&callee_return),
+        "symbolic access-path transforms must reach arg.live through both wrappers without physical cross-field edges"
+    );
+    assert!(
+        !unrelated_reached.contains(&callee_return),
+        "symbolic access paths must not promote the unrelated sibling field"
+    );
 }
 
 #[test]
