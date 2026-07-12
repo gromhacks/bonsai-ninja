@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::edge::IdgEdge;
 use crate::segment::{IdgSegment, IDG_SEGMENT_VERSION};
+use crate::symbolic::{SymbolicFieldBase, SymbolicFieldGraph, SymbolicFieldTransform};
 
 /// Stable handle to a segment in the workspace's segment list.
 /// Distinct from `FuncId`; multiple FuncIds map to one SegmentId.
@@ -242,6 +243,10 @@ pub struct IdgWorkspace {
     /// `find-group` chain enumeration can traverse cross-method
     /// state propagation the same way they traverse real calls.
     field_flow: Vec<FieldFlowLink>,
+    /// Compact AST/resolver-derived access-path transform algebra. Query
+    /// services interpret this relation without expanding every concrete
+    /// suffix into the ordinary edge table.
+    symbolic_field: SymbolicFieldGraph,
 }
 
 impl IdgWorkspace {
@@ -323,6 +328,17 @@ impl IdgWorkspace {
         &mut self.field_flow
     }
 
+    /// Borrow the symbolic access-path relation.
+    #[must_use]
+    pub fn symbolic_field(&self) -> &SymbolicFieldGraph {
+        &self.symbolic_field
+    }
+
+    /// Replace the symbolic access-path relation after Phase 3 stitching.
+    pub fn set_symbolic_field(&mut self, graph: SymbolicFieldGraph) {
+        self.symbolic_field = graph;
+    }
+
     /// Mutable access for the IDG builder phase 3 to push
     /// cross-file edges as it stitches them.
     pub fn cross_file_mut(&mut self) -> &mut CrossFileEdges {
@@ -358,10 +374,16 @@ impl IdgWorkspace {
         use bonsai_factstore::FactStoreWriter;
         let cross_file_chunk_count = chunk_count(self.cross_file.edges.len(), IDG_WORKSPACE_EDGE_CHUNK_LEN);
         let field_flow_chunk_count = chunk_count(self.field_flow.len(), IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN);
+        let symbolic_transform_chunk_count = chunk_count(
+            self.symbolic_field.transforms().len(),
+            IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN,
+        );
         let entry_count = 1usize
             .saturating_add(self.segments.len())
             .saturating_add(cross_file_chunk_count)
-            .saturating_add(field_flow_chunk_count);
+            .saturating_add(field_flow_chunk_count)
+            .saturating_add(1)
+            .saturating_add(symbolic_transform_chunk_count);
         let writer = FactStoreWriter::create_with_capacity(
             path,
             IDG_WORKSPACE_TABLE_ID,
@@ -377,6 +399,10 @@ impl IdgWorkspace {
             cross_file_chunk_count: cross_file_chunk_count as u32,
             field_flow_count: self.field_flow.len() as u64,
             field_flow_chunk_count: field_flow_chunk_count as u32,
+            symbolic_string_count: self.symbolic_field.strings().len() as u64,
+            symbolic_base_count: self.symbolic_field.bases().len() as u64,
+            symbolic_transform_count: self.symbolic_field.transforms().len() as u64,
+            symbolic_transform_chunk_count: symbolic_transform_chunk_count as u32,
         };
         let meta_bytes = bincode::serialize(&metadata)
             .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
@@ -407,6 +433,25 @@ impl IdgWorkspace {
             let bytes = bincode::serialize(chunk)
                 .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
             writer.add_owned(field_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
+        }
+        let symbolic_header = symbolic_field_header_key(
+            self.segments.len() as u32,
+            cross_file_chunk_count as u32,
+            field_flow_chunk_count as u32,
+        );
+        let header_bytes = bincode::serialize(&(self.symbolic_field.strings(), self.symbolic_field.bases()))
+            .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        writer.add_owned(symbolic_header, IDG_WORKSPACE_VERSION as u64, header_bytes)?;
+        let transform_base = symbolic_header + 1;
+        for (idx, chunk) in self
+            .symbolic_field
+            .transforms()
+            .chunks(IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN)
+            .enumerate()
+        {
+            let bytes = bincode::serialize(chunk)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            writer.add_owned(transform_base + idx as u64, IDG_WORKSPACE_VERSION as u64, bytes)?;
         }
         writer.finish()?;
         Ok(())
@@ -475,6 +520,7 @@ impl IdgWorkspace {
             by_func: AHashMap::new(),
             cross_file: CrossFileEdges::new(),
             field_flow: Vec::with_capacity(metadata.field_flow_count.min(usize::MAX as u64) as usize),
+            symbolic_field: SymbolicFieldGraph::new(),
         };
         for idx in 0..metadata.segment_count {
             let Some(hit) = reader.get((idx + 1) as u64)? else {
@@ -561,6 +607,46 @@ impl IdgWorkspace {
             );
             return Ok(None);
         }
+        let symbolic_header = symbolic_field_header_key(
+            metadata.segment_count,
+            metadata.cross_file_chunk_count,
+            metadata.field_flow_chunk_count,
+        );
+        let Some(header_hit) = reader.get(symbolic_header)? else {
+            bonsai_diagnostics::debug_log!(
+                "idg-build",
+                "workspace sidecar miss: path={} reason=missing-symbolic-field-header",
+                path.display()
+            );
+            return Ok(None);
+        };
+        let (strings, bases): (Vec<String>, Vec<SymbolicFieldBase>) =
+            bincode::deserialize(&header_hit.payload)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        if strings.len() as u64 != metadata.symbolic_string_count
+            || bases.len() as u64 != metadata.symbolic_base_count
+        {
+            return Ok(None);
+        }
+        let mut symbolic = SymbolicFieldGraph::from_parts(strings, bases, Vec::new());
+        for chunk_idx in 0..metadata.symbolic_transform_chunk_count {
+            let Some(hit) = reader.get(symbolic_header + 1 + u64::from(chunk_idx))? else {
+                bonsai_diagnostics::debug_log!(
+                    "idg-build",
+                    "workspace sidecar miss: path={} reason=missing-symbolic-transform-chunk chunk={}",
+                    path.display(),
+                    chunk_idx
+                );
+                return Ok(None);
+            };
+            let chunk: Vec<SymbolicFieldTransform> = bincode::deserialize(&hit.payload)
+                .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+            symbolic.extend_transforms(chunk);
+        }
+        if symbolic.transforms().len() as u64 != metadata.symbolic_transform_count {
+            return Ok(None);
+        }
+        ws.symbolic_field = symbolic;
         ws.cross_file.rebuild_indexes();
         bonsai_diagnostics::debug_log!(
             "idg-build",
@@ -610,6 +696,10 @@ struct IdgWorkspaceMetadata {
     cross_file_chunk_count: u32,
     field_flow_count: u64,
     field_flow_chunk_count: u32,
+    symbolic_string_count: u64,
+    symbolic_base_count: u64,
+    symbolic_transform_count: u64,
+    symbolic_transform_chunk_count: u32,
 }
 
 /// Owned mirror of [`IdgWorkspaceMetadata`] used by the load path.
@@ -621,6 +711,10 @@ struct IdgWorkspaceMetadataOwned {
     cross_file_chunk_count: u32,
     field_flow_count: u64,
     field_flow_chunk_count: u32,
+    symbolic_string_count: u64,
+    symbolic_base_count: u64,
+    symbolic_transform_count: u64,
+    symbolic_transform_chunk_count: u32,
 }
 
 /// Factstore table id for the workspace-wide IDG sidecar. Distinct
@@ -633,7 +727,7 @@ const IDG_WORKSPACE_TABLE_ID: u32 = 101;
 /// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]) or
 /// source-to-call edge semantic change that can leave old facts
 /// structurally decodable but security-significant.
-const IDG_WORKSPACE_VERSION: u32 = 9;
+const IDG_WORKSPACE_VERSION: u32 = 10;
 
 #[cfg(not(test))]
 const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 100_000;
@@ -643,6 +737,10 @@ const IDG_WORKSPACE_EDGE_CHUNK_LEN: usize = 2;
 const IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN: usize = 100_000;
 #[cfg(test)]
 const IDG_WORKSPACE_FIELD_FLOW_CHUNK_LEN: usize = 2;
+#[cfg(not(test))]
+const IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN: usize = 100_000;
+#[cfg(test)]
+const IDG_WORKSPACE_SYMBOLIC_TRANSFORM_CHUNK_LEN: usize = 2;
 
 fn chunk_count(len: usize, chunk_len: usize) -> usize {
     if len == 0 {
@@ -658,6 +756,14 @@ fn first_cross_file_chunk_key(segment_count: u32) -> u64 {
 
 fn first_field_flow_chunk_key(segment_count: u32, cross_file_chunk_count: u32) -> u64 {
     first_cross_file_chunk_key(segment_count) + u64::from(cross_file_chunk_count)
+}
+
+fn symbolic_field_header_key(
+    segment_count: u32,
+    cross_file_chunk_count: u32,
+    field_flow_chunk_count: u32,
+) -> u64 {
+    first_field_flow_chunk_key(segment_count, cross_file_chunk_count) + u64::from(field_flow_chunk_count)
 }
 
 /// Conventional sidecar path under `<workspace>/.bonsai/`.

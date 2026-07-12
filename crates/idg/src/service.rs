@@ -34,6 +34,7 @@ use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use crate::place::Place;
 use crate::query::ReachabilityIndex;
+use crate::symbolic::{SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
 const SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
@@ -154,6 +155,9 @@ struct UnifiedAddressSpace {
     /// those queries proportional to the seed closure instead of
     /// rescanning every segment edge and every cross-file edge.
     cross_calls_by_from: RwLock<Option<Arc<CrossCallsByFrom>>>,
+    /// Numeric runtime indexes for the compact access-path algebra. Built
+    /// only when a workspace actually carries symbolic transforms.
+    symbolic_runtime: OnceLock<Arc<SymbolicRuntimeIndex>>,
     /// Recently used backward closures from sink target function or node
     /// sets. Every closure is a full-workspace bitset, so retaining one per
     /// source group would make memory grow as `groups * nodes`. The shared
@@ -165,6 +169,44 @@ struct UnifiedAddressSpace {
 }
 
 type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct SymbolicNodeFact {
+    base: u32,
+    field: u32,
+    span: Option<Span>,
+    interprocedural: bool,
+}
+
+#[derive(Default)]
+struct SymbolicRuntimeIndex {
+    field_ids: AHashMap<String, u32>,
+    fields: Vec<String>,
+    facts_by_node: AHashMap<WsNodeId, Vec<SymbolicNodeFact>>,
+    exact_reads: AHashMap<u64, Vec<WsNodeId>>,
+    bare_reads: AHashMap<u32, Vec<WsNodeId>>,
+    scalar_writes: AHashMap<(u32, Span), Vec<WsNodeId>>,
+}
+
+impl SymbolicRuntimeIndex {
+    fn intern_field(&mut self, field: &str) -> u32 {
+        if let Some(id) = self.field_ids.get(field).copied() {
+            return id;
+        }
+        let id = u32::try_from(self.fields.len()).expect("symbolic runtime field count exceeds u32");
+        self.fields.push(field.to_string());
+        self.field_ids.insert(field.to_string(), id);
+        id
+    }
+
+    fn field(&self, id: u32) -> Option<&str> {
+        self.fields.get(id as usize).map(String::as_str)
+    }
+}
+
+fn symbolic_fact_key(base: u32, field: u32) -> u64 {
+    (u64::from(base) << 32) | u64::from(field)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TargetFuncCutKey {
@@ -362,6 +404,33 @@ impl IdgQueryService {
         funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> AHashMap<FuncId, Vec<u32>> {
+        if !self.workspace.symbolic_field().transforms().is_empty() {
+            let mut out = AHashMap::with_capacity(funcs.len());
+            for func in funcs.iter().copied() {
+                let Some(return_node) = self.return_node_of(func) else {
+                    out.insert(func, Vec::new());
+                    continue;
+                };
+                let mut returning = Vec::new();
+                for (index, param) in self.param_nodes_of(func).into_iter().enumerate() {
+                    let reaches_return = self
+                        .forward_closure_with_max_precision(&[param], max_precision)
+                        .contains(&return_node);
+                    bonsai_diagnostics::debug_log!(
+                        "idg-closure",
+                        "symbolic return summary func={} param={} reaches_return={}",
+                        func.raw(),
+                        index,
+                        reaches_return
+                    );
+                    if reaches_return {
+                        returning.push(u32::try_from(index).expect("parameter index exceeds u32"));
+                    }
+                }
+                out.insert(func, returning);
+            }
+            return out;
+        }
         crate::function_summary::return_taint_param_indices(&self.workspace, funcs, max_precision)
     }
 
@@ -406,8 +475,8 @@ impl IdgQueryService {
     fn forward_closure_unfiltered(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        self.ensure_unfiltered_reach(&unified)
-            .forward_closure_nodes(&seed_nodes)
+        let reach = self.ensure_unfiltered_reach(&unified);
+        self.symbolic_forward_closure_nodes(&unified, &reach, &seed_nodes, None)
             .into_iter()
             .map(|n| WsNodeId(n.0))
             .collect()
@@ -432,8 +501,7 @@ impl IdgQueryService {
         let unified = self.ensure_unified();
         let reach = self.ensure_precision_reach(&unified, max_precision);
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        reach
-            .forward_closure_nodes(&seed_nodes)
+        self.symbolic_forward_closure_nodes(&unified, &reach, &seed_nodes, Some(max_precision))
             .into_iter()
             .map(|n| WsNodeId(n.0))
             .collect()
@@ -1653,6 +1721,7 @@ impl IdgQueryService {
             unfiltered_reach: RwLock::new(None),
             precision_reach: RwLock::new(AHashMap::new()),
             cross_calls_by_from: RwLock::new(None),
+            symbolic_runtime: OnceLock::new(),
             target_backward: RwLock::new(TargetCutCache::new(self.target_cut_cache_capacity)),
             #[cfg(test)]
             target_cut_computations: AtomicU64::new(0),
@@ -1756,6 +1825,209 @@ impl IdgQueryService {
         }));
         unified.target_backward.write().trim_completed();
         closure
+    }
+
+    fn symbolic_forward_closure_nodes(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+        reach: &ReachabilityIndex,
+        seeds: &[NodeId],
+        max_precision: Option<Precision>,
+    ) -> Vec<NodeId> {
+        let symbolic = self.workspace.symbolic_field();
+        if symbolic.transforms().is_empty() {
+            return reach.forward_closure_nodes(seeds);
+        }
+        let runtime = unified
+            .symbolic_runtime
+            .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(unified)));
+        let mut ordinary = Vec::with_capacity(seeds.len());
+        let mut ordinary_set = AHashSet::with_capacity(seeds.len());
+        for seed in seeds.iter().copied() {
+            if ordinary_set.insert(seed.0) {
+                ordinary.push(seed);
+            }
+        }
+        let mut processed_nodes = NodeBitSet::zeros(unified.reverse.len());
+        let mut facts = AHashSet::default();
+        let mut pending_facts = Vec::new();
+
+        loop {
+            let reached = reach.forward_closure_nodes(&ordinary);
+            for node in reached.iter().copied() {
+                if processed_nodes.contains(node) {
+                    continue;
+                }
+                processed_nodes.set(node);
+                if let Some(node_facts) = runtime.facts_by_node.get(&WsNodeId(node.0)) {
+                    for fact in node_facts.iter().copied() {
+                        if facts.insert(fact) {
+                            pending_facts.push(fact);
+                        }
+                    }
+                }
+            }
+
+            let ordinary_len_before = ordinary.len();
+            let mut fact_cursor = 0usize;
+            while fact_cursor < pending_facts.len() {
+                let fact = pending_facts[fact_cursor];
+                fact_cursor += 1;
+                self.seed_symbolic_fact_consumers(runtime, fact, &mut ordinary, &mut ordinary_set);
+                let outgoing = symbolic.outgoing_transform_indices(fact.base);
+                for transform_index in outgoing {
+                    let Some(transform) = symbolic.transforms().get(*transform_index as usize) else {
+                        continue;
+                    };
+                    if max_precision.is_some_and(|max| transform.precision > max) {
+                        continue;
+                    }
+                    if !transform.allow_out_of_order_source
+                        && !fact.interprocedural
+                        && fact.span.is_some_and(|span| {
+                            span.file == transform.call_span.file && span.start > transform.call_span.start
+                        })
+                    {
+                        continue;
+                    }
+                    if transform.kind == SymbolicFieldTransformKind::ScalarReturn {
+                        let exact_matches = transform.exact_field != NO_SYMBOLIC_STRING
+                            && symbolic
+                                .string(transform.exact_field)
+                                .zip(runtime.field(fact.field))
+                                .is_some_and(|(expected, actual)| expected == actual);
+                        if exact_matches {
+                            if let Some(nodes) = runtime
+                                .scalar_writes
+                                .get(&(transform.target, transform.write_span))
+                            {
+                                for node in nodes {
+                                    if ordinary_set.insert(node.0) {
+                                        ordinary.push(NodeId(node.0));
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    let next = SymbolicNodeFact {
+                        base: transform.target,
+                        field: fact.field,
+                        span: Some(transform.write_span),
+                        interprocedural: transform.kind != SymbolicFieldTransformKind::Copy,
+                    };
+                    if facts.insert(next) {
+                        pending_facts.push(next);
+                    }
+                }
+            }
+            pending_facts.clear();
+            if ordinary.len() == ordinary_len_before {
+                bonsai_diagnostics::debug_log!(
+                    "idg-closure",
+                    "symbolic closure seeds={} reached={} facts={}",
+                    seeds.len(),
+                    reached.len(),
+                    facts.len()
+                );
+                return reached;
+            }
+        }
+    }
+
+    fn seed_symbolic_fact_consumers(
+        &self,
+        runtime: &SymbolicRuntimeIndex,
+        fact: SymbolicNodeFact,
+        ordinary: &mut Vec<NodeId>,
+        ordinary_set: &mut AHashSet<u32>,
+    ) {
+        let exact_nodes = runtime.exact_reads.get(&symbolic_fact_key(fact.base, fact.field));
+        if let Some(nodes) = exact_nodes {
+            for node in nodes {
+                if ordinary_set.insert(node.0) {
+                    ordinary.push(NodeId(node.0));
+                }
+            }
+        }
+        if let Some(nodes) = runtime.bare_reads.get(&fact.base) {
+            for node in nodes {
+                if ordinary_set.insert(node.0) {
+                    ordinary.push(NodeId(node.0));
+                }
+            }
+        }
+    }
+
+    fn build_symbolic_runtime_index(&self, unified: &UnifiedAddressSpace) -> SymbolicRuntimeIndex {
+        let symbolic = self.workspace.symbolic_field();
+        let mut out = SymbolicRuntimeIndex::default();
+        for (segment_id, segment) in self.workspace.segments() {
+            for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+                let Some(place) = segment.places.get(node.place) else {
+                    continue;
+                };
+                let Some((parts, write_span, is_read)) = structured_storage_parts(segment, place) else {
+                    continue;
+                };
+                let local = NodeId(u32::try_from(node_index).expect("segment-local node count exceeds u32"));
+                let Some(ws_node) = Self::ws_node_for(unified, segment_id, local) else {
+                    continue;
+                };
+                let full = parts.join(".");
+                if let Some(base) = symbolic.base_id(segment_id, node.func, &full) {
+                    if is_read {
+                        out.bare_reads.entry(base).or_default().push(ws_node);
+                    }
+                    if let Some(span) = write_span {
+                        out.scalar_writes.entry((base, span)).or_default().push(ws_node);
+                    }
+                }
+                for split in 1..parts.len() {
+                    let base_text = parts[..split].join(".");
+                    let Some(base) = symbolic.base_id(segment_id, node.func, &base_text) else {
+                        bonsai_diagnostics::debug_log!(
+                            "idg-closure-detail",
+                            "symbolic runtime misses base segment={} func={} base={} full={}",
+                            segment_id.0,
+                            node.func.raw(),
+                            base_text,
+                            full
+                        );
+                        continue;
+                    };
+                    let field_text = parts[split..].join(".");
+                    let field = out.intern_field(&field_text);
+                    let fact = SymbolicNodeFact {
+                        base,
+                        field,
+                        span: write_span,
+                        interprocedural: false,
+                    };
+                    out.facts_by_node.entry(ws_node).or_default().push(fact);
+                    if is_read {
+                        out.exact_reads
+                            .entry(symbolic_fact_key(base, field))
+                            .or_default()
+                            .push(ws_node);
+                    }
+                }
+            }
+        }
+        for nodes in out
+            .exact_reads
+            .values_mut()
+            .chain(out.bare_reads.values_mut())
+            .chain(out.scalar_writes.values_mut())
+        {
+            nodes.sort_unstable_by_key(|node| node.0);
+            nodes.dedup();
+        }
+        for facts in out.facts_by_node.values_mut() {
+            facts.sort_unstable_by_key(|fact| (fact.base, fact.field, fact.span, fact.interprocedural));
+            facts.dedup();
+        }
+        out
     }
 
     fn ensure_unfiltered_reach(&self, unified: &Arc<UnifiedAddressSpace>) -> Arc<ReachabilityIndex> {
@@ -2256,6 +2528,33 @@ fn storage_base_from_place(segment: &crate::segment::IdgSegment, place: &Place) 
     };
     let base = segment.strings.get(name)?.trim();
     (!base.is_empty()).then(|| base.to_string())
+}
+
+fn structured_storage_parts(
+    segment: &crate::segment::IdgSegment,
+    place: &Place,
+) -> Option<(Vec<String>, Option<Span>, bool)> {
+    let (name, path, write_span, is_read) = match place {
+        Place::Read { name, path } => (*name, path, None, true),
+        Place::Write { name, path, span } => (*name, path, Some(*span), false),
+        _ => return None,
+    };
+    let mut parts = Vec::with_capacity(path.len() + 1);
+    // Some older transfer paths intern an adapter-normalized dotted place in
+    // the `name` slot while newer paths use `Place::path`. Both are compiler
+    // dictionary forms (never raw source text), so canonicalize them here.
+    parts.extend(
+        segment
+            .strings
+            .get(name)?
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .map(ToString::to_string),
+    );
+    for part in path {
+        parts.push(segment.strings.get(*part)?.to_string());
+    }
+    Some((parts, write_span, is_read))
 }
 
 fn call_arg_index_for_storage_base(

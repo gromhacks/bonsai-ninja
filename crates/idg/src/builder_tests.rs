@@ -4,8 +4,11 @@ use crate::node::NodeId;
 use crate::place::Place;
 use crate::query::ReachabilityIndex;
 use crate::transfer::{transfer_function_for, transfer_function_for_with_options, TransferOptions};
+use crate::{IdgQueryService, PointKind};
 use bonsai_common::{FileId, SymbolId};
+use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent, ModulePath, Visibility};
+use std::sync::Arc;
 
 fn span(start: u64, end: u64) -> Span {
     Span::new(FileId::new(0), start, end)
@@ -1072,13 +1075,11 @@ fn field_argument_forwarding_preserves_matching_field_path() {
     );
 }
 
-fn sparse_field_forwarding_pairs(callee_read: &str) -> (AHashSet<(String, String)>, AHashSet<String>) {
-    sparse_field_forwarding_pairs_for_reads(&[callee_read])
+fn sparse_field_forwarding_reachability(callee_read: &str) -> ([AHashSet<usize>; 2], usize) {
+    sparse_field_forwarding_reachability_for_reads(&[callee_read])
 }
 
-fn sparse_field_forwarding_pairs_for_reads(
-    callee_reads: &[&str],
-) -> (AHashSet<(String, String)>, AHashSet<String>) {
+fn sparse_field_forwarding_reachability_for_reads(callee_reads: &[&str]) -> ([AHashSet<usize>; 2], usize) {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["live_src".to_string(), "dead_src".to_string()];
     caller.flow_events = vec![
@@ -1166,57 +1167,53 @@ fn sparse_field_forwarding_pairs_for_reads(
         None,
         Some(&terminal_sites),
     );
-    let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
-    let callee_segment = ws.segment(SegmentId(1)).expect("callee segment");
-    let field_pairs = ws
-        .cross_file()
-        .edges
+    let symbolic_transform_count = ws.symbolic_field().transforms().len();
+    let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
+    let params = service.param_nodes_of(FuncId::new(1));
+    assert_eq!(params.len(), 2);
+    let reached_terminals = params
         .iter()
-        .filter(|edge| edge.edge.meta.kind == IdgEdgeKind::InterCallArg)
-        .filter_map(|edge| {
-            let source = place_storage_name(caller_segment, node_place(caller_segment, edge.edge.from)?)?;
-            let target = place_storage_name(callee_segment, node_place(callee_segment, edge.edge.to)?)?;
-            Some((source, target))
+        .map(|seed| {
+            service
+                .forward_closure(&[*seed])
+                .into_iter()
+                .filter_map(|node| service.resolve_point(node))
+                .filter(|point| point.func == FuncId::new(2) && point.kind == PointKind::CallArg)
+                .filter_map(|point| {
+                    callee_reads.iter().enumerate().find_map(|(index, _)| {
+                        let start = 50 + u64::try_from(index).expect("test call index") * 20;
+                        (point.span == span(start, start + 15)).then_some(index)
+                    })
+                })
+                .collect()
         })
-        .collect();
-    let aggregate_sources = caller_segment
-        .edges
-        .iter()
-        .filter(|edge| {
-            matches!(
-                node_place(caller_segment, edge.to),
-                Some(Place::CallArg { site, .. }) if site.0 == span(30, 45)
-            )
-        })
-        .filter_map(|edge| place_storage_name(caller_segment, node_place(caller_segment, edge.from)?))
-        .collect();
-    (field_pairs, aggregate_sources)
+        .collect::<Vec<AHashSet<usize>>>();
+    (
+        [reached_terminals[0].clone(), reached_terminals[1].clone()],
+        symbolic_transform_count,
+    )
 }
 
 #[test]
 fn sparse_field_forwarding_uses_exact_ast_projection_demand() {
-    let (pairs, _) = sparse_field_forwarding_pairs("arg.live");
-    assert!(pairs.contains(&("box.live".to_string(), "arg.live".to_string())));
-    assert!(!pairs.contains(&("box.dead".to_string(), "arg.dead".to_string())));
+    let ([live, dead], symbolic_transform_count) = sparse_field_forwarding_reachability("arg.live");
+    assert_eq!(live, AHashSet::from([0]));
+    assert!(dead.is_empty());
+    assert_eq!(symbolic_transform_count, 1);
 }
 
 #[test]
 fn sparse_field_forwarding_preserves_whole_object_ast_reads() {
-    let (_, aggregate_sources) = sparse_field_forwarding_pairs("arg");
-    assert!(aggregate_sources.contains("box.live"));
-    assert!(aggregate_sources.contains("box.dead"));
+    let ([live, dead], _) = sparse_field_forwarding_reachability("arg");
+    assert_eq!(live, AHashSet::from([0]));
+    assert_eq!(dead, AHashSet::from([0]));
 }
 
 #[test]
 fn whole_object_demand_does_not_erase_exact_projection_demand() {
-    let (pairs, aggregate_sources) = sparse_field_forwarding_pairs_for_reads(&["arg", "arg.live"]);
-
-    assert!(aggregate_sources.contains("box.live"));
-    assert!(aggregate_sources.contains("box.dead"));
-    assert!(
-        pairs.contains(&("box.live".to_string(), "arg.live".to_string())),
-        "wildcard demand must retain the exact compiler-derived field path: {pairs:?}"
-    );
+    let ([live, dead], _) = sparse_field_forwarding_reachability_for_reads(&["arg", "arg.live"]);
+    assert_eq!(live, AHashSet::from([0, 1]));
+    assert_eq!(dead, AHashSet::from([0]));
 }
 
 #[test]
