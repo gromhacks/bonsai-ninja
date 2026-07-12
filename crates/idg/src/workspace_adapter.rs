@@ -2284,7 +2284,9 @@ where
         transfer_options.include_field_argument_forwarding,
         transfer_options.demand_driven_field_forwarding,
         demand_driven_funcs.as_ref(),
-        (!field_demand_terminal_sites.is_empty()).then_some(&field_demand_terminal_sites),
+        transfer_options
+            .demand_driven_field_forwarding
+            .then_some(&field_demand_terminal_sites),
     );
     stitch_declared_exception_hierarchy(&mut ws, &resolver);
     idg_build_log(format_args!(

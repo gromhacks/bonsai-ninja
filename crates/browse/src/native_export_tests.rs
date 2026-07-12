@@ -213,6 +213,43 @@ def wrapper(user):
 }
 
 #[test]
+fn function_summaries_preserve_demanded_java_field_flow() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("Demo.java"),
+        r#"
+class Box {
+    String value;
+}
+
+class Demo {
+    static String read(Box box) {
+        return box.value;
+    }
+
+    static String entry(String args) {
+        Box box = new Box();
+        box.value = args;
+        return read(box);
+    }
+}
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+    let exported = native_export_json(&ws, dir.path(), false).expect("native export");
+    let summaries = exported["taint_graph"]["function_summaries"]
+        .as_array()
+        .expect("function_summaries");
+    let entry = summaries
+        .iter()
+        .find(|summary| summary["function"] == "entry")
+        .expect("entry return summary");
+    assert_eq!(entry["returns_taint_of"], serde_json::json!([0]));
+}
+
+#[test]
 fn complete_chain_mode_uses_compressed_graph_even_for_small_workspaces() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

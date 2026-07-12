@@ -1190,6 +1190,10 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
                 value_flow,
             } => {
                 let sources = expression_flow_source_names(value_flow);
+                let source_syntax = value_text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty() && value_flow.place.is_some() && sources.len() == 1);
                 out.push(Operation {
                     span: *span,
                     kind: OperationKind::Yield,
@@ -1204,17 +1208,18 @@ fn collect_operations(events: &[FlowEvent], out: &mut Vec<Operation>) {
                     detail: None,
                 });
                 for value in sources {
+                    let rendered = source_syntax.unwrap_or(&value);
                     out.push(Operation {
                         span: *span,
                         kind: OperationKind::Read,
-                        target: Some(value.clone()),
+                        target: Some(rendered.to_string()),
                         operands: vec![OperationOperand {
-                            name: value.clone(),
+                            name: rendered.to_string(),
                             role: OperationOperandRole::Returned,
                         }],
                         detail: Some("yield_value".to_string()),
                     });
-                    push_place_shape_operations(*span, &value, OperationOperandRole::Returned, out);
+                    push_place_shape_operations(*span, rendered, OperationOperandRole::Returned, out);
                 }
             }
             FlowEvent::Await { span, value_name } => {

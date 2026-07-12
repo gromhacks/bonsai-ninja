@@ -139,8 +139,10 @@ pub struct TransferOptions {
     /// hard-coded language inventory.
     pub field_demand_languages: Vec<String>,
     /// Query terminal call sites whose whole-object arguments are demand
-    /// roots. Security fills this from exact matcher spans; an empty list
-    /// keeps direct IDG callers' conservative unresolved-call behavior.
+    /// roots. Security fills this from exact matcher spans. For workspace
+    /// builds with demand-driven forwarding enabled, an empty list means no
+    /// call site is a whole-object terminal; direct builder callers that pass
+    /// no terminal set retain conservative unresolved-call demand.
     pub field_demand_terminal_sites: Vec<(FuncId, Span)>,
     /// When a call result cannot be resolved to a workspace body,
     /// conservatively carry its explicit arguments (and a syntax-classified
