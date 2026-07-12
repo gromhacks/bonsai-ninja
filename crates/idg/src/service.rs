@@ -26,6 +26,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FuncId, Precision, Span};
 use bonsai_index::GlobalIndex;
 use parking_lot::RwLock;
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -34,7 +35,7 @@ use crate::edge::IdgEdge;
 use crate::node::NodeId;
 use crate::place::Place;
 use crate::query::ReachabilityIndex;
-use crate::symbolic::{SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
+use crate::symbolic::{structured_storage_parts, SymbolicFieldTransformKind, NO_SYMBOLIC_STRING};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
 const SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
@@ -404,34 +405,46 @@ impl IdgQueryService {
         funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> AHashMap<FuncId, Vec<u32>> {
+        let mut batch =
+            crate::function_summary::return_taint_param_indices(&self.workspace, funcs, max_precision);
         if !self.workspace.symbolic_field().transforms().is_empty() {
-            let mut out = AHashMap::with_capacity(funcs.len());
-            for func in funcs.iter().copied() {
-                let Some(return_node) = self.return_node_of(func) else {
-                    out.insert(func, Vec::new());
-                    continue;
-                };
-                let mut returning = Vec::new();
-                for (index, param) in self.param_nodes_of(func).into_iter().enumerate() {
-                    let reaches_return = self
-                        .forward_closure_with_max_precision(&[param], max_precision)
-                        .contains(&return_node);
-                    bonsai_diagnostics::debug_log!(
-                        "idg-closure",
-                        "symbolic return summary func={} param={} reaches_return={}",
-                        func.raw(),
-                        index,
-                        reaches_return
-                    );
-                    if reaches_return {
-                        returning.push(u32::try_from(index).expect("parameter index exceeds u32"));
+            let symbolic_funcs: Vec<FuncId> = funcs
+                .iter()
+                .copied()
+                .filter(|func| batch.symbolic_sensitive.contains(func))
+                .collect();
+            let updates: Vec<(FuncId, Vec<u32>)> = symbolic_funcs
+                .par_iter()
+                .filter_map(|func| {
+                    let func = *func;
+                    let Some(return_node) = self.return_node_of(func) else {
+                        return None;
+                    };
+                    let params = self.param_nodes_of(func);
+                    let mut returning = batch.indices.get(&func).cloned().unwrap_or_default();
+                    let already_returning: AHashSet<u32> = returning.iter().copied().collect();
+                    for (index, param) in params.into_iter().enumerate() {
+                        let index = u32::try_from(index).expect("parameter index exceeds u32");
+                        if already_returning.contains(&index) {
+                            continue;
+                        }
+                        if self
+                            .forward_closure_with_max_precision(&[param], max_precision)
+                            .contains(&return_node)
+                        {
+                            returning.push(index);
+                        }
                     }
-                }
-                out.insert(func, returning);
+                    returning.sort_unstable();
+                    returning.dedup();
+                    Some((func, returning))
+                })
+                .collect();
+            for (func, returning) in updates {
+                batch.indices.insert(func, returning);
             }
-            return out;
         }
-        crate::function_summary::return_taint_param_indices(&self.workspace, funcs, max_precision)
+        batch.indices
     }
 
     /// Compute the function-local read/write storage reached from each formal
@@ -2528,33 +2541,6 @@ fn storage_base_from_place(segment: &crate::segment::IdgSegment, place: &Place) 
     };
     let base = segment.strings.get(name)?.trim();
     (!base.is_empty()).then(|| base.to_string())
-}
-
-fn structured_storage_parts(
-    segment: &crate::segment::IdgSegment,
-    place: &Place,
-) -> Option<(Vec<String>, Option<Span>, bool)> {
-    let (name, path, write_span, is_read) = match place {
-        Place::Read { name, path } => (*name, path, None, true),
-        Place::Write { name, path, span } => (*name, path, Some(*span), false),
-        _ => return None,
-    };
-    let mut parts = Vec::with_capacity(path.len() + 1);
-    // Some older transfer paths intern an adapter-normalized dotted place in
-    // the `name` slot while newer paths use `Place::path`. Both are compiler
-    // dictionary forms (never raw source text), so canonicalize them here.
-    parts.extend(
-        segment
-            .strings
-            .get(name)?
-            .split('.')
-            .filter(|part| !part.is_empty())
-            .map(ToString::to_string),
-    );
-    for part in path {
-        parts.push(segment.strings.get(*part)?.to_string());
-    }
-    Some((parts, write_span, is_read))
 }
 
 fn call_arg_index_for_storage_base(

@@ -19,6 +19,7 @@ use crate::edge::{IdgEdge, IdgEdgeKind};
 use crate::node::{NodeId, PlaceId};
 use crate::place::Place;
 use crate::query::ReachabilityIndex;
+use crate::symbolic::{structured_storage_parts, SymbolicFieldTransformKind};
 use crate::workspace::{IdgWorkspace, SegmentId};
 
 #[derive(Copy, Clone)]
@@ -303,11 +304,18 @@ fn add_summary_edges_to_fixed_point(
     }
 }
 
+/// Batched ordinary summaries plus the functions whose result can depend on
+/// the symbolic access-path relation.
+pub(crate) struct ReturnSummaryBatch {
+    pub(crate) indices: AHashMap<FuncId, Vec<u32>>,
+    pub(crate) symbolic_sensitive: AHashSet<FuncId>,
+}
+
 pub(crate) fn return_taint_param_indices(
     workspace: &IdgWorkspace,
     funcs: &[FuncId],
     max_precision: Option<Precision>,
-) -> AHashMap<FuncId, Vec<u32>> {
+) -> ReturnSummaryBatch {
     let (mut graphs, addresses) = build_layout(workspace);
     let mut boundaries: AHashMap<CallBoundaryKey, CallBoundary> = AHashMap::default();
     for (segment_id, segment) in workspace.segments() {
@@ -334,30 +342,137 @@ pub(crate) fn return_taint_param_indices(
             max_precision,
         );
     }
+    let mut return_continuations_by_caller: AHashMap<FuncId, Vec<(FuncId, u32)>> = AHashMap::default();
+    for boundary in boundaries.values() {
+        for &(_, continuation) in &boundary.outputs {
+            return_continuations_by_caller
+                .entry(boundary.key.caller)
+                .or_default()
+                .push((boundary.key.callee, continuation));
+        }
+    }
+    for continuations in return_continuations_by_caller.values_mut() {
+        continuations.sort_unstable_by_key(|(callee, continuation)| (callee.raw(), *continuation));
+        continuations.dedup();
+    }
     add_summary_edges_to_fixed_point(&mut graphs, boundaries.into_values().collect());
 
     let mut requested: Vec<FuncId> = funcs.to_vec();
     requested.sort_unstable_by_key(|func| func.raw());
     requested.dedup();
-    let mut summaries = AHashMap::with_capacity(requested.len());
-    for func in requested {
+    let requested_set: AHashSet<FuncId> = requested.iter().copied().collect();
+    let mut summaries: AHashMap<FuncId, Vec<u32>> =
+        requested.iter().copied().map(|func| (func, Vec::new())).collect();
+    let symbolic_consumers = symbolic_consumer_nodes(workspace, &addresses, max_precision);
+    let mut directly_sensitive = AHashSet::default();
+    let mut return_callers_by_callee: AHashMap<FuncId, Vec<FuncId>> = AHashMap::default();
+    let mut graph_funcs: Vec<FuncId> = graphs.keys().copied().collect();
+    graph_funcs.sort_unstable_by_key(|func| func.raw());
+    for func in graph_funcs {
         let Some(graph) = graphs.get_mut(&func) else {
-            summaries.insert(func, Vec::new());
             continue;
         };
         let Some(return_node) = graph.return_node else {
-            summaries.insert(func, Vec::new());
             continue;
         };
         let params = graph.params.clone();
         let backward = graph.reachability().backward_closure(&[NodeId(return_node)]);
-        let indices = params
-            .into_iter()
-            .filter_map(|(idx, node)| backward.contains(NodeId(node)).then_some(idx))
-            .collect();
-        summaries.insert(func, indices);
+        if symbolic_consumers
+            .get(&func)
+            .is_some_and(|nodes| nodes.iter().any(|node| backward.contains(NodeId(*node))))
+        {
+            directly_sensitive.insert(func);
+        }
+        if let Some(continuations) = return_continuations_by_caller.get(&func) {
+            for &(callee, continuation) in continuations {
+                if backward.contains(NodeId(continuation)) {
+                    return_callers_by_callee.entry(callee).or_default().push(func);
+                }
+            }
+        }
+        if requested_set.contains(&func) {
+            let indices = params
+                .into_iter()
+                .filter_map(|(idx, node)| backward.contains(NodeId(node)).then_some(idx))
+                .collect();
+            summaries.insert(func, indices);
+        }
     }
-    summaries
+
+    for callers in return_callers_by_callee.values_mut() {
+        callers.sort_unstable_by_key(|func| func.raw());
+        callers.dedup();
+    }
+
+    // A symbolic dependency in a callee can change a caller summary only when
+    // that exact call's returned continuation reaches the caller's Return.
+    // Propagating over these compiler call/return boundaries is substantially
+    // narrower than marking every transitive caller in the resolved callgraph.
+    let mut symbolic_sensitive = directly_sensitive.clone();
+    let mut pending: VecDeque<FuncId> = directly_sensitive.into_iter().collect();
+    while let Some(callee) = pending.pop_front() {
+        let Some(callers) = return_callers_by_callee.get(&callee) else {
+            continue;
+        };
+        for caller in callers {
+            if symbolic_sensitive.insert(*caller) {
+                pending.push_back(*caller);
+            }
+        }
+    }
+
+    ReturnSummaryBatch {
+        indices: summaries,
+        symbolic_sensitive,
+    }
+}
+
+fn symbolic_consumer_nodes(
+    workspace: &IdgWorkspace,
+    addresses: &[Vec<LocalNodeAddress>],
+    max_precision: Option<Precision>,
+) -> AHashMap<FuncId, AHashSet<u32>> {
+    let symbolic = workspace.symbolic_field();
+    if symbolic.transforms().is_empty() {
+        return AHashMap::default();
+    }
+    let scalar_targets: AHashSet<(u32, Span)> = symbolic
+        .transforms()
+        .iter()
+        .filter(|transform| transform.kind == SymbolicFieldTransformKind::ScalarReturn)
+        .filter(|transform| !max_precision.is_some_and(|max| transform.precision > max))
+        .map(|transform| (transform.target, transform.write_span))
+        .collect();
+    let mut consumers: AHashMap<FuncId, AHashSet<u32>> = AHashMap::default();
+    for (segment_id, segment) in workspace.segments() {
+        for (node_index, node) in segment.nodes.nodes.iter().enumerate() {
+            let Some(place) = segment.places.get(node.place) else {
+                continue;
+            };
+            let Some((parts, write_span, is_read)) = structured_storage_parts(segment, place) else {
+                continue;
+            };
+            let full = parts.join(".");
+            let full_base = symbolic.base_id(segment_id, node.func, &full);
+            let bare_consumer = is_read && full_base.is_some();
+            let exact_consumer = is_read
+                && (1..parts.len()).any(|split| {
+                    let base = parts[..split].join(".");
+                    symbolic.base_id(segment_id, node.func, &base).is_some()
+                });
+            let scalar_consumer = write_span
+                .zip(full_base)
+                .is_some_and(|(span, base)| scalar_targets.contains(&(base, span)));
+            let local = NodeId(u32::try_from(node_index).expect("segment-local IDG node count exceeds u32"));
+            let Some(address) = address_of(addresses, segment_id, local) else {
+                continue;
+            };
+            if bare_consumer || exact_consumer || scalar_consumer {
+                consumers.entry(address.func).or_default().insert(address.compact);
+            }
+        }
+    }
+    consumers
 }
 
 fn record_function_local_edge(
