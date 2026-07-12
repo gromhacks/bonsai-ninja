@@ -12,6 +12,36 @@ use bonsai_common::{FuncId, Precision, Span};
 use serde::{Deserialize, Serialize};
 
 use crate::workspace::SegmentId;
+use crate::{place::Place, segment::IdgSegment};
+
+/// Canonical adapter-normalized storage components for one IDG read/write.
+///
+/// Older transfer payloads may store a dotted compiler place in `name`, while
+/// newer payloads use `Place::path`. Both forms come from adapter AST facts;
+/// this is the single normalization boundary used by symbolic consumers.
+pub(crate) fn structured_storage_parts(
+    segment: &IdgSegment,
+    place: &Place,
+) -> Option<(Vec<String>, Option<Span>, bool)> {
+    let (name, path, write_span, is_read) = match place {
+        Place::Read { name, path } => (*name, path, None, true),
+        Place::Write { name, path, span } => (*name, path, Some(*span), false),
+        _ => return None,
+    };
+    let mut parts = Vec::with_capacity(path.len() + 1);
+    parts.extend(
+        segment
+            .strings
+            .get(name)?
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .map(ToString::to_string),
+    );
+    for part in path {
+        parts.push(segment.strings.get(*part)?.to_string());
+    }
+    Some((parts, write_span, is_read))
+}
 
 /// Sentinel used when a transform has no string operand.
 pub const NO_SYMBOLIC_STRING: u32 = u32::MAX;

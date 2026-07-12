@@ -51,13 +51,12 @@
 //! ## Why a single graph
 //!
 //! The IFDS dataflow framework (Reps, Horwitz, Sagiv 1995) reduces
-//! interprocedural taint reachability to **graph reachability** on
-//! a precomputed exploded supergraph. The bonsai IDG is that
-//! supergraph specialised for the language-agnostic FlowEvent
-//! contract. Once it's built, every "is X tainted?" / "what flows
-//! into Y?" / "show source-to-sink chains" question is a bitvector
-//! operation on the graph — never a per-query traversal of the
-//! whole workspace.
+//! interprocedural taint reachability to graph reachability. Bonsai lowers the
+//! language-agnostic `FlowEvent` contract into numeric nodes, CSR value edges,
+//! and compact symbolic access-path transforms. Queries reuse those compiler
+//! relations and solve only demanded facts to a fixed point; they do not
+//! materialize the whole `transform × field` product or search through source
+//! spellings.
 //!
 //! ## Module layout
 //!

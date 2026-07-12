@@ -2754,14 +2754,6 @@ fn stitch_field_argument_forwarding(
     {
         return;
     }
-    // Field forwarding creates edges to synthetic field nodes. Track only
-    // edges produced by this phase instead of duplicating every pre-existing
-    // workspace edge (millions on large projects) in a second hash table.
-    let mut known_edges = AHashSet::default();
-    let mut field_index = FieldPlaceIndex::from_workspace(ws);
-    let syntactic_fields = field_index.syntactic_field_universe();
-    let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
-    let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
     let transforms = build_field_write_transforms(
         sites,
         return_field_sites,
@@ -2774,6 +2766,18 @@ fn stitch_field_argument_forwarding(
         ws.set_symbolic_field(build_symbolic_field_graph(&transforms));
         return;
     }
+    // Eager compatibility mode alone needs the concrete field universe and
+    // synthetic-node indexes. Building them before the symbolic return made
+    // demand-mode peak memory scale with the representation it deliberately
+    // avoids.
+    let mut field_index = FieldPlaceIndex::from_workspace(ws);
+    let syntactic_fields = field_index.syntactic_field_universe();
+    let mut inter_call_arg_entries = InterCallArgEntryIndex::from_workspace(ws);
+    let mut synthetic_field_writes = SyntheticFieldWriteCache::from_workspace(ws);
+    // Field forwarding creates edges to synthetic field nodes. Track only
+    // edges produced by this phase instead of duplicating every pre-existing
+    // workspace edge (millions on large projects) in a second hash table.
+    let mut known_edges = AHashSet::default();
     let demands = demand_driven.then(|| {
         build_field_demands(
             &field_index,

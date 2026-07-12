@@ -3,9 +3,9 @@
 //! The hot operations are:
 //!
 //! - `forward_closure(seed)`: every node reachable forward from any
-//!   seed node (one BFS over the forward CSR using bitset frontier).
+//!   seed node (one sparse monotone worklist over the forward CSR).
 //! - `backward_closure(seed)`: every node that can reach any seed
-//!   node (BFS over the backward CSR).
+//!   node (the same fixed-point kernel over the backward CSR).
 //! - `reaches(src, sink)`: bit AND of single-source forward and
 //!   backward closures.
 //! - `reachable_from_any(seeds)`: union forward closure from a bag
@@ -15,10 +15,11 @@
 //!   pre-computation makes path enumeration O(actual paths) instead
 //!   of O(graph size).
 //!
-//! Algorithmic shape: classical IFDS / dataflow as reachability over
-//! a precomputed exploded supergraph. No BFS/DFS over names; no
-//! per-query repropagation; the worklist walks CSR edges until the
-//! visited bitset reaches fixpoint.
+//! Algorithmic shape: classical compiler dataflow over numeric IR. Ordinary
+//! value edges are compact CSR relations; access-path transfers stay symbolic
+//! and are composed only for demanded facts. No traversal guesses through
+//! source text or identifier spellings. Sparse worklists run monotonically to
+//! a fixed point without semantic depth or iteration limits.
 
 use crate::bitset::NodeBitSet;
 use crate::csr::EdgeCsr;
@@ -211,7 +212,7 @@ impl ReachabilityIndex {
     }
 }
 
-/// Generic exact closure: sparse BFS/worklist expansion until empty.
+/// Generic exact closure: sparse monotone worklist expansion until empty.
 ///
 /// The earlier frontier-bitset implementation was exact but paid
 /// `O(depth * graph_words)` because every level allocated and scanned
