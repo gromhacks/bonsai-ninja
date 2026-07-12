@@ -1073,6 +1073,12 @@ fn field_argument_forwarding_preserves_matching_field_path() {
 }
 
 fn sparse_field_forwarding_pairs(callee_read: &str) -> (AHashSet<(String, String)>, AHashSet<String>) {
+    sparse_field_forwarding_pairs_for_reads(&[callee_read])
+}
+
+fn sparse_field_forwarding_pairs_for_reads(
+    callee_reads: &[&str],
+) -> (AHashSet<(String, String)>, AHashSet<String>) {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["live_src".to_string(), "dead_src".to_string()];
     caller.flow_events = vec![
@@ -1114,26 +1120,40 @@ fn sparse_field_forwarding_pairs(callee_read: &str) -> (AHashSet<(String, String
     ];
     let mut callee = empty_decl(2, "helper");
     callee.params = vec!["arg".to_string()];
-    callee.flow_events = vec![FlowEvent::Call {
-        span: span(50, 65),
-        name: "sink".to_string(),
-        receiver: None,
-        receiver_types: Vec::new(),
-        call_kind: CallKind::Function,
-        args: vec![CallArg {
-            passing_mode: Default::default(),
-            span: span(55, 62),
-            name: None,
-            value_text: callee_read.to_string(),
-            place: Some(callee_read.to_string()),
-            source_names: vec![callee_read.to_string()],
-        }],
-    }];
+    callee.flow_events = callee_reads
+        .iter()
+        .enumerate()
+        .map(|(index, callee_read)| {
+            let start = 50 + u64::try_from(index).expect("test call index") * 20;
+            FlowEvent::Call {
+                span: span(start, start + 15),
+                name: "sink".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: vec![CallArg {
+                    passing_mode: Default::default(),
+                    span: span(start + 5, start + 12),
+                    name: None,
+                    value_text: (*callee_read).to_string(),
+                    place: Some((*callee_read).to_string()),
+                    source_names: vec![(*callee_read).to_string()],
+                }],
+            }
+        })
+        .collect();
     let mut resolver = MockResolver::new();
     resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
     let caller_transfer = transfer_function_for(&caller);
     let callee_transfer = transfer_function_for(&callee);
-    let terminal_sites = AHashSet::from([(FuncId::new(2), span(50, 65))]);
+    let terminal_sites = callee_reads
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let start = 50 + u64::try_from(index).expect("test call index") * 20;
+            (FuncId::new(2), span(start, start + 15))
+        })
+        .collect();
     let ws = stitch_idg_with_selective_field_forwarding_mode(
         vec![caller_transfer, callee_transfer],
         &resolver,
@@ -1185,6 +1205,18 @@ fn sparse_field_forwarding_preserves_whole_object_ast_reads() {
     let (_, aggregate_sources) = sparse_field_forwarding_pairs("arg");
     assert!(aggregate_sources.contains("box.live"));
     assert!(aggregate_sources.contains("box.dead"));
+}
+
+#[test]
+fn whole_object_demand_does_not_erase_exact_projection_demand() {
+    let (pairs, aggregate_sources) = sparse_field_forwarding_pairs_for_reads(&["arg", "arg.live"]);
+
+    assert!(aggregate_sources.contains("box.live"));
+    assert!(aggregate_sources.contains("box.dead"));
+    assert!(
+        pairs.contains(&("box.live".to_string(), "arg.live".to_string())),
+        "wildcard demand must retain the exact compiler-derived field path: {pairs:?}"
+    );
 }
 
 #[test]

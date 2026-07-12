@@ -3238,7 +3238,11 @@ fn build_field_demands(
         let field_id = u32::try_from(field_index).expect("field demand id exceeds u32");
         let generation = field_id.saturating_add(1);
         for root in roots {
-            if demands.all_fields_by_key[root] || seen_generation[root] == generation {
+            // Wildcard demand and exact projection demand are independent
+            // facts. A whole-object use must not erase a simultaneously
+            // observed field path: downstream summary queries still need
+            // the concrete synthetic field edge for that projection.
+            if seen_generation[root] == generation {
                 continue;
             }
             seen_generation[root] = generation;
@@ -3247,7 +3251,7 @@ fn build_field_demands(
         while let Some(target_id) = pending.pop_front() {
             demands.fields_by_key[target_id].push(field_id);
             for source_id in reverse.get(target_id).into_iter().flatten().copied() {
-                if demands.all_fields_by_key[source_id] || seen_generation[source_id] == generation {
+                if seen_generation[source_id] == generation {
                     continue;
                 }
                 seen_generation[source_id] = generation;
