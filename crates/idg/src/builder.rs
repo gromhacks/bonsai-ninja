@@ -2916,6 +2916,15 @@ fn stitch_field_argument_forwarding(
                 )
             });
             let mut apply_site = |site: &FieldWriteTransform| {
+                if !field_transform_source_may_apply(
+                    site,
+                    &source,
+                    &inter_call_arg_entries,
+                    &synthetic_field_writes,
+                    stitch_data,
+                ) {
+                    return;
+                }
                 processed_transforms += 1;
                 apply_field_write_transform(
                     site,
@@ -3227,22 +3236,19 @@ fn build_field_demands(
         }
     }
 
-    // Propagate each interned suffix through the numeric reverse transform
-    // graph. The previous string/hash representation duplicated the suffix
-    // text and a hash-table entry for every candidate edge (tens of millions
-    // on large Java workspaces). Each reached pair is now one `u32` in a
-    // sorted vector, while a generation-mark array provides O(1) dedup.
+    // A wildcard is the lattice top for its base: transforms materialize all
+    // concrete syntactic suffixes directly, so duplicating those suffix ids
+    // in the demand relation adds no information. Exact facts propagate only
+    // through non-wildcard keys, using a generation-mark array for O(1)
+    // deduplication and no semantic work cap.
+    let exact_started = Instant::now();
     let mut seen_generation = vec![0u32; demands.fields_by_key.len()];
     let mut pending = VecDeque::new();
     for (field_index, roots) in roots_by_field.into_iter().enumerate() {
         let field_id = u32::try_from(field_index).expect("field demand id exceeds u32");
         let generation = field_id.saturating_add(1);
         for root in roots {
-            // Wildcard demand and exact projection demand are independent
-            // facts. A whole-object use must not erase a simultaneously
-            // observed field path: downstream summary queries still need
-            // the concrete synthetic field edge for that projection.
-            if seen_generation[root] == generation {
+            if demands.all_fields_by_key[root] || seen_generation[root] == generation {
                 continue;
             }
             seen_generation[root] = generation;
@@ -3251,7 +3257,7 @@ fn build_field_demands(
         while let Some(target_id) = pending.pop_front() {
             demands.fields_by_key[target_id].push(field_id);
             for source_id in reverse.get(target_id).into_iter().flatten().copied() {
-                if seen_generation[source_id] == generation {
+                if demands.all_fields_by_key[source_id] || seen_generation[source_id] == generation {
                     continue;
                 }
                 seen_generation[source_id] = generation;
@@ -3259,6 +3265,11 @@ fn build_field_demands(
             }
         }
     }
+    stitch_debug_log(format_args!(
+        "exact field-demand closure: {:.3}s facts={}",
+        exact_started.elapsed().as_secs_f64(),
+        demands.fields_by_key.iter().map(Vec::len).sum::<usize>()
+    ));
     demands
 }
 
@@ -3445,9 +3456,6 @@ fn apply_field_write_transform(
             if aggregate_demand {
                 if let FieldWriteTransform::Argument(site) = transform {
                     apply_field_argument_aggregate(site, source, inter_call_arg_entries, ws, known_edges);
-                    if !exact_demand {
-                        return;
-                    }
                 }
             }
             if !aggregate_demand && !exact_demand {
@@ -3546,6 +3554,41 @@ fn field_transform_may_apply(
     !field_demand_applies(demand_driven, demand_driven_funcs, target_key.func)
         || demands.contains_all(&target_key)
         || demands.contains_exact(&target_key, field)
+}
+
+fn field_transform_source_may_apply(
+    transform: &FieldWriteTransform,
+    source: &FieldPlaceHit,
+    inter_call_arg_entries: &InterCallArgEntryIndex,
+    synthetic_field_writes: &SyntheticFieldWriteCache,
+    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
+) -> bool {
+    if !is_forwardable_field(&source.field) {
+        return false;
+    }
+    match transform {
+        FieldWriteTransform::Argument(site) => {
+            site.allow_out_of_order_source
+                || source_write_can_reach_call(
+                    source,
+                    site.call_span,
+                    inter_call_arg_entries,
+                    site.caller_seg,
+                    site.caller,
+                )
+        }
+        FieldWriteTransform::ScalarReturn(site) => source.field == site.source_field,
+        FieldWriteTransform::Copy(site) => source_can_reach_field_copy(
+            source,
+            site,
+            synthetic_field_writes,
+            inter_call_arg_entries,
+            stitch_data.get(&site.func).map(|data| &data.flow_control),
+        ),
+        FieldWriteTransform::Return(_)
+        | FieldWriteTransform::ConstructorReturn(_)
+        | FieldWriteTransform::ReceiverMutation(_) => true,
+    }
 }
 
 fn apply_field_argument_aggregate(

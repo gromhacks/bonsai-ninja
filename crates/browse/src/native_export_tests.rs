@@ -250,6 +250,56 @@ class Demo {
 }
 
 #[test]
+fn wildcard_field_demand_matches_complete_export_summaries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("Demo.java"),
+        r#"
+class Box {
+    String live;
+    String unrelated;
+}
+
+class Demo {
+    static String read(Box box) {
+        external(box.unrelated);
+        return box.live;
+    }
+
+    static String pass(Box box) {
+        external(box);
+        return read(box);
+    }
+
+    static String entry(String live, String unrelated) {
+        Box box = new Box();
+        box.live = live;
+        box.unrelated = unrelated;
+        external(box);
+        return pass(box);
+    }
+
+    static void external(Object value) {}
+}
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+
+    let scoped = native_export_json(&ws, dir.path(), false).expect("demand-driven export");
+    let complete = native_export_json(&ws, dir.path(), true).expect("complete export");
+
+    assert_eq!(
+        scoped["taint_graph"]["function_summaries"],
+        complete["taint_graph"]["function_summaries"]
+    );
+    assert_eq!(
+        scoped["taint_graph"]["assign_chains"],
+        complete["taint_graph"]["assign_chains"]
+    );
+}
+
+#[test]
 fn complete_chain_mode_uses_compressed_graph_even_for_small_workspaces() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
