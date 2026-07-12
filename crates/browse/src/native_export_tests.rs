@@ -289,6 +289,18 @@ class Demo {
     let scoped = native_export_json(&ws, dir.path(), false).expect("demand-driven export");
     let complete = native_export_json(&ws, dir.path(), true).expect("complete export");
 
+    let entry = scoped["taint_graph"]["function_summaries"]
+        .as_array()
+        .expect("function_summaries")
+        .iter()
+        .find(|summary| summary["function"] == "entry")
+        .expect("entry summary");
+    assert_eq!(
+        entry["returns_taint_of"],
+        serde_json::json!([0]),
+        "the live field must transit through both wrappers without promoting the unrelated sibling"
+    );
+
     assert_eq!(
         scoped["taint_graph"]["function_summaries"],
         complete["taint_graph"]["function_summaries"]
