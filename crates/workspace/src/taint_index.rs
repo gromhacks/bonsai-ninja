@@ -165,6 +165,7 @@ fn acquire_persistence_lock(path: &Path) -> std::io::Result<File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)?;
     lock_file.try_lock_exclusive().map_err(|error| {
         if error.kind() == std::io::ErrorKind::WouldBlock {

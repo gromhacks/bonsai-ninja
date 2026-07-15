@@ -21,7 +21,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{callable_reference_variants, FileId, FuncId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{FlowEvent, ModulePath};
+use bonsai_lang_api::{DeclKind, FlowEvent, ModulePath};
 use parking_lot::RwLock;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{path::Path, time::Instant};
@@ -382,9 +382,25 @@ fn call_edges_by_site_for_funcs(
             edge_kind: edge.kind,
             precision: edge.precision,
         };
-        push_call_edge_site(&mut out, edge.from, edge.span, indexed);
-        if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(edge.from.raw())) {
-            for call_span in call_event_spans_matching_edge(&decl.flow_events, edge.span) {
+        let mapped_sites = if let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(edge.from.raw())) {
+            let target_decl = global.decl_of(bonsai_common::SymbolId::new(edge.to.raw()));
+            let target_name = target_decl.map(|target| target.name.as_str());
+            let target_is_constructor =
+                target_decl.is_some_and(|target| target.kind == DeclKind::Constructor);
+            call_event_spans_matching_edge(&decl.flow_events, edge.span, target_name, target_is_constructor)
+        } else {
+            Vec::new()
+        };
+        if mapped_sites.is_empty() {
+            // Some adapters intentionally omit a call event for a resolved
+            // graph edge. Preserve the resolver span as a fallback only when
+            // no AST event can own the edge.
+            push_call_edge_site(&mut out, edge.from, edge.span, indexed);
+        } else {
+            // Once the AST identifies an owning call event, indexing the raw
+            // resolver span as well is unsound: that span may cover a complete
+            // nested expression and therefore name a different host call.
+            for call_span in mapped_sites {
                 push_call_edge_site(&mut out, edge.from, call_span, indexed);
             }
         }
@@ -409,36 +425,95 @@ fn push_call_edge_site(
 fn call_event_spans_matching_edge(
     events: &[FlowEvent],
     edge_span: bonsai_common::Span,
+    target_name: Option<&str>,
+    target_is_constructor: bool,
 ) -> Vec<bonsai_common::Span> {
-    let mut out = Vec::new();
+    let mut candidates = Vec::new();
     // Prefer a call event whose own syntax span matches the callgraph edge.
     // Only fall back to an argument span when no such nested/outer call exists.
     // Otherwise an edge for `factory()` inside `host(factory())` is indexed on
     // both calls merely because the outer argument contains the inner span,
     // and the IDG mistakes the factory for the host's resolved callee.
-    collect_call_event_spans_matching_edge(events, edge_span, false, &mut out);
-    if out.is_empty() {
-        collect_call_event_spans_matching_edge(events, edge_span, true, &mut out);
+    collect_call_event_spans_matching_edge(
+        events,
+        edge_span,
+        target_name,
+        target_is_constructor,
+        false,
+        &mut candidates,
+    );
+    if candidates.is_empty() {
+        collect_call_event_spans_matching_edge(
+            events,
+            edge_span,
+            target_name,
+            target_is_constructor,
+            true,
+            &mut candidates,
+        );
     }
+
+    // A callgraph span can cover a complete nested expression while adapter
+    // Call events deliberately point at each callee token. Select the event
+    // whose syntax name agrees with the resolved declaration before applying
+    // span proximity. This prevents `outer(request.field())` from attaching
+    // the resolved `field` edge to `outer`, while still retaining exact-site
+    // import aliases whose local spelling differs from the exported name.
+    if candidates.iter().any(|candidate| candidate.target_matches) {
+        candidates.retain(|candidate| candidate.target_matches);
+    }
+    if let Some(best_distance) = candidates
+        .iter()
+        .map(|candidate| span_boundary_distance(edge_span, candidate.span))
+        .min()
+    {
+        candidates.retain(|candidate| span_boundary_distance(edge_span, candidate.span) == best_distance);
+    }
+
+    let mut out: Vec<bonsai_common::Span> = candidates.into_iter().map(|candidate| candidate.span).collect();
     out.sort_by_key(|span| (span.file.raw(), span.start, span.end));
     out.dedup();
     out
 }
 
+#[derive(Copy, Clone)]
+struct CallEventSpanCandidate {
+    span: bonsai_common::Span,
+    target_matches: bool,
+}
+
+fn span_boundary_distance(left: bonsai_common::Span, right: bonsai_common::Span) -> u128 {
+    u128::from(left.start.abs_diff(right.start)) + u128::from(left.end.abs_diff(right.end))
+}
+
 fn collect_call_event_spans_matching_edge(
     events: &[FlowEvent],
     edge_span: bonsai_common::Span,
+    target_name: Option<&str>,
+    target_is_constructor: bool,
     include_arg_spans: bool,
-    out: &mut Vec<bonsai_common::Span>,
+    out: &mut Vec<CallEventSpanCandidate>,
 ) {
     for event in events {
         match event {
-            FlowEvent::Call { span, args, .. } => {
+            FlowEvent::Call {
+                span,
+                name,
+                call_kind,
+                args,
+                ..
+            } => {
                 if call_site_spans_match(edge_span, *span)
                     || (include_arg_spans
                         && args.iter().any(|arg| call_site_spans_match(edge_span, arg.span)))
                 {
-                    out.push(*span);
+                    let name_matches = target_name.is_some_and(|target| names_match_for_callee(target, name));
+                    let constructor_matches =
+                        target_is_constructor && *call_kind == bonsai_lang_api::CallKind::Constructor;
+                    out.push(CallEventSpanCandidate {
+                        span: *span,
+                        target_matches: name_matches || constructor_matches,
+                    });
                 }
             }
             FlowEvent::Branch {
@@ -446,11 +521,32 @@ fn collect_call_event_spans_matching_edge(
                 else_events,
                 ..
             } => {
-                collect_call_event_spans_matching_edge(then_events, edge_span, include_arg_spans, out);
-                collect_call_event_spans_matching_edge(else_events, edge_span, include_arg_spans, out);
+                collect_call_event_spans_matching_edge(
+                    then_events,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
+                collect_call_event_spans_matching_edge(
+                    else_events,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_event_spans_matching_edge(body, edge_span, include_arg_spans, out);
+                collect_call_event_spans_matching_edge(
+                    body,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
             }
             FlowEvent::Try {
                 body,
@@ -458,9 +554,30 @@ fn collect_call_event_spans_matching_edge(
                 finally_events,
                 ..
             } => {
-                collect_call_event_spans_matching_edge(body, edge_span, include_arg_spans, out);
-                collect_call_event_spans_matching_edge(catch_events, edge_span, include_arg_spans, out);
-                collect_call_event_spans_matching_edge(finally_events, edge_span, include_arg_spans, out);
+                collect_call_event_spans_matching_edge(
+                    body,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
+                collect_call_event_spans_matching_edge(
+                    catch_events,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
+                collect_call_event_spans_matching_edge(
+                    finally_events,
+                    edge_span,
+                    target_name,
+                    target_is_constructor,
+                    include_arg_spans,
+                    out,
+                );
             }
             _ => {}
         }
@@ -2260,33 +2377,25 @@ where
         func_to_seg: &maps.func_to_seg,
     };
     let phase_started = Instant::now();
-    let demand_languages: AHashSet<&str> = transfer_options
-        .field_demand_languages
+    let symbolic_languages: AHashSet<&str> = transfer_options
+        .symbolic_field_languages
         .iter()
         .map(String::as_str)
         .collect();
-    let demand_driven_funcs =
-        (transfer_options.demand_driven_field_forwarding && !demand_languages.is_empty()).then(|| {
+    let symbolic_funcs =
+        (transfer_options.symbolic_field_forwarding && !symbolic_languages.is_empty()).then(|| {
             maps.func_to_language
                 .iter()
-                .filter_map(|(func, language)| demand_languages.contains(language).then_some(*func))
+                .filter_map(|(func, language)| symbolic_languages.contains(language).then_some(*func))
                 .collect::<AHashSet<_>>()
         });
-    let field_demand_terminal_sites: AHashSet<(FuncId, bonsai_common::Span)> = transfer_options
-        .field_demand_terminal_sites
-        .iter()
-        .copied()
-        .collect();
     let mut ws = stitch_idg_with_selective_field_forwarding_mode(
         outputs,
         &resolver,
         &f2s,
         transfer_options.include_field_argument_forwarding,
-        transfer_options.demand_driven_field_forwarding,
-        demand_driven_funcs.as_ref(),
-        transfer_options
-            .demand_driven_field_forwarding
-            .then_some(&field_demand_terminal_sites),
+        transfer_options.symbolic_field_forwarding,
+        symbolic_funcs.as_ref(),
     );
     stitch_declared_exception_hierarchy(&mut ws, &resolver);
     idg_build_log(format_args!(
@@ -4122,7 +4231,7 @@ fn resolve_aggregate_assignments(
                 resolve_aggregate_assignments(else_events, aliases, layouts);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                resolve_aggregate_assignments(body, aliases, layouts)
+                resolve_aggregate_assignments(body, aliases, layouts);
             }
             FlowEvent::Try {
                 body,

@@ -5,7 +5,7 @@
 //!
 //! - "What flows from `entry_func`'s params (or a named seed)?"
 //! - "What flows into `sink_func`'s arg N?"
-//! - "What's the smallest cut that separates a source from a sink?"
+//! - "Does a realizable, call-matched source flow reach a sink target?"
 //! - "Translate an IDG node back to a renderable `(func, span, name)`
 //!   triple."
 //!
@@ -27,11 +27,10 @@ use bonsai_common::{FuncId, Precision, Span};
 use bonsai_index::GlobalIndex;
 use parking_lot::RwLock;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::bitset::NodeBitSet;
-use crate::edge::IdgEdge;
+use crate::edge::{IdgEdge, IdgEdgeKind};
 use crate::node::NodeId;
 use crate::place::Place;
 use crate::query::ReachabilityIndex;
@@ -44,129 +43,109 @@ const SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
 /// every consumer eventually reports back to its UI / report layer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PointRef {
-    /// The function that owns this point.
+    /// Owning function.
     pub func: FuncId,
-    /// The exact source span. Defaults to the func's name span when
-    /// the IDG node is a logical position (a synthesised `Param`
-    /// node, the function's `Return` slot) without an explicit span.
+    /// Exact source span.
     pub span: Span,
-    /// Render-friendly textual handle. Empty for synthesised nodes.
+    /// Renderable compiler-place name.
     pub name: String,
-    /// Coarse classification — useful for consumers that want to
-    /// render param/read/write/call differently.
+    /// Coarse point classification.
     pub kind: PointKind,
 }
 
-/// Coarse classification of an IDG point. Mirrors [`Place`] but
-/// flattens it to a small enum so consumers don't have to match on
-/// every variant.
+/// Coarse classification of an IDG compiler point.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PointKind {
-    /// `Place::Param`.
+    /// Formal parameter.
     Param,
-    /// `Place::Return`.
+    /// Function return slot.
     Return,
-    /// `Place::Read`.
+    /// Storage read.
     Read,
-    /// `Place::Write`.
+    /// Storage write.
     Write,
-    /// `Place::CallArg`.
+    /// Call argument slot.
     CallArg,
-    /// `Place::CallRet`.
+    /// Call result slot.
     CallRet,
-    /// Throw / Catch / Yield / Await — render the same way at the
-    /// query layer (rare, exceptional flows).
+    /// Exceptional or asynchronous flow point.
     Other,
 }
 
-/// Assignment target written from a call site's synthetic
-/// `Place::CallRet`. This is the precise `target = call(...)`
-/// binding the transfer pass emitted, not a name lookup heuristic.
+/// Assignment target fed by a call site's result slot.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CallRetAssignmentTarget {
-    /// Adapter-normalized storage name written by the call return.
+    /// Adapter-normalized target storage.
     pub name: String,
-    /// Source span of the assignment target write.
+    /// Target write span.
     pub span: Span,
-    /// Workspace-global node id for the target write.
+    /// Workspace-global target node.
     pub node: WsNodeId,
 }
 
-/// Workspace-global node identifier. Identifies a `(SegmentId,
-/// segment_local_node_id)` pair via a flat u32 mapping the service
-/// computes on first query.
+/// Workspace-global IDG node identifier.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WsNodeId(pub u32);
 
-/// One transitive cross-call propagation extracted from the IDG.
-///
-/// Value-flow / dataflow consumers replace the legacy engine's
-/// per-source `CallPropagation` records with these — every
-/// `(CallArg{site, arg_idx} → callee.Param{param_idx})` cross-file
-/// edge whose source endpoint is in the seed's forward closure
-/// surfaces as one [`CrossCallEdge`].
+/// One resolved cross-call value propagation extracted from the IDG.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CrossCallEdge {
-    /// Function holding the call site.
+    /// Function containing the call.
     pub caller: FuncId,
-    /// Function being called (one row per resolved candidate; virtual
-    /// dispatch produces one row per receiver-type-narrowed candidate).
+    /// Resolved destination function.
     pub callee: FuncId,
-    /// Source span of the call site in the caller.
+    /// Call-site span.
     pub call_span: Span,
-    /// 0-based positional index of the argument in the call.
+    /// Zero-based argument position, or `u32::MAX` for outbound state.
     pub arg_idx: u32,
-    /// 0-based positional index of the parameter in the callee.
+    /// Zero-based formal position, or `u32::MAX` for outbound state.
     pub param_idx: u32,
-    /// Per-edge precision recorded by the IDG transfer / stitch pass.
+    /// Resolver/evidence precision.
     pub precision: Precision,
-    /// Sub-classifier for the call site (Direct / Virtual / Indirect /
-    /// Unknown). Lets consumers render edge_kind without a separate
-    /// callgraph lookup.
+    /// Resolved call classification.
     pub call_kind: bonsai_callgraph::EdgeKind,
+    /// Compiler relation represented by this propagation.
+    pub relation: CrossCallRelation,
 }
 
-/// Lazily-computed unified node address space spanning every
-/// segment. Built once on first reachability query; reused for
-/// subsequent queries.
+/// Provenance of a cross-function IDG propagation.
+///
+/// The distinction is semantic, not presentational: projected heap state can
+/// connect functions without proving that one calls the other. Consumers may
+/// use those links for reachability and lineage, but must not render them as
+/// resolved call records.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CrossCallRelation {
+    /// Scalar `CallArg -> Param` boundary.
+    Argument,
+    /// External/source callback result entering a callback parameter.
+    Callback,
+    /// Lexically captured value entering a closure body.
+    Capture,
+    /// Callee return/output state flowing back to its caller.
+    Return,
+    /// Projected object/container state crossing function ownership.
+    FieldState,
+}
+
+impl CrossCallRelation {
+    /// Whether this relation proves a renderable call-like propagation.
+    #[must_use]
+    pub const fn is_renderable_call(self) -> bool {
+        !matches!(self, Self::FieldState)
+    }
+}
+
 struct UnifiedAddressSpace {
-    /// Contiguous workspace-node base for each segment plus one trailing
-    /// sentinel. Since segment ids and local node ids are dense, translating
-    /// `(segment, local)` is arithmetic rather than one hash entry per node.
     segment_bases: Box<[u32]>,
-    /// `ws_node → (seg, local_node)`. Vec-indexed by ws node raw.
     reverse: Vec<(SegmentId, NodeId)>,
-    /// Nodes grouped by owning function. Target-function cuts use this
-    /// compiler-derived index instead of rescanning a file segment once per
-    /// method in the target set.
+    node_funcs: Box<[FuncId]>,
     nodes_by_func: AHashMap<FuncId, Box<[NodeId]>>,
-    /// Unfiltered diagnostic reachability is built only if requested. Normal
-    /// semantic consumers request a precision-scoped index, so eagerly
-    /// retaining both CSR pairs doubles large-workspace memory needlessly.
     unfiltered_reach: RwLock<Option<Arc<ReachabilityIndex>>>,
-    /// Precision-scoped reachability indexes. Each entry contains
-    /// only edges whose precision is at or below the key. Building
-    /// this once per requested precision lets exact/security/export
-    /// callers reuse the normal CSR closure kernel without checking
-    /// every edge's precision on every source query.
     precision_reach: RwLock<AHashMap<Precision, Arc<ReachabilityIndex>>>,
-    /// Cross-call rows keyed by the workspace-global `from` node
-    /// that makes the row reachable. `cross_call_edges_in_closure`
-    /// is called once per exact source seed; pre-indexing here keeps
-    /// those queries proportional to the seed closure instead of
-    /// rescanning every segment edge and every cross-file edge.
+    contextual_summaries: RwLock<AHashMap<Option<Precision>, Arc<ContextualSummaryRuntime>>>,
     cross_calls_by_from: RwLock<Option<Arc<CrossCallsByFrom>>>,
-    /// Numeric runtime indexes for the compact access-path algebra. Built
-    /// only when a workspace actually carries symbolic transforms.
     symbolic_runtime: OnceLock<Arc<SymbolicRuntimeIndex>>,
-    /// Recently used backward closures from sink target function or node
-    /// sets. Every closure is a full-workspace bitset, so retaining one per
-    /// source group would make memory grow as `groups * nodes`. The shared
-    /// LRU retains at most one closure per available analysis worker; an
-    /// evicted closure is recomputed exactly when requested again.
-    target_backward: RwLock<TargetCutCache>,
-    #[cfg(test)]
-    target_cut_computations: AtomicU64,
 }
 
 type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
@@ -177,6 +156,7 @@ struct SymbolicNodeFact {
     field: u32,
     span: Option<Span>,
     interprocedural: bool,
+    context: u32,
 }
 
 #[derive(Default)]
@@ -187,6 +167,209 @@ struct SymbolicRuntimeIndex {
     exact_reads: AHashMap<u64, Vec<WsNodeId>>,
     bare_reads: AHashMap<u32, Vec<WsNodeId>>,
     scalar_writes: AHashMap<(u32, Span), Vec<WsNodeId>>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct ContextBoundaryKey {
+    caller: FuncId,
+    callee: FuncId,
+    span: Span,
+}
+
+#[derive(Copy, Clone)]
+struct ContextBoundaryEdge {
+    key: ContextBoundaryKey,
+    target: NodeId,
+}
+
+struct ContextualSummaryRuntime {
+    reach: ReachabilityIndex,
+    heap_by_from: AHashMap<NodeId, Vec<NodeId>>,
+    calls_by_from: AHashMap<NodeId, Vec<ContextBoundaryEdge>>,
+    returns_by_from: AHashMap<NodeId, Vec<ContextBoundaryEdge>>,
+}
+
+enum RootClosureVisited {
+    Dense(NodeBitSet),
+    Sparse {
+        reached: AHashSet<u32>,
+        node_count: usize,
+    },
+}
+
+impl RootClosureVisited {
+    fn new(node_count: usize, seed_count: usize) -> Self {
+        let dense_bytes = node_count.div_ceil(u8::BITS as usize);
+        let sparse_entry_bytes = std::mem::size_of::<u32>() + std::mem::size_of::<usize>();
+        if seed_count.saturating_mul(sparse_entry_bytes) >= dense_bytes {
+            Self::Dense(NodeBitSet::zeros(node_count))
+        } else {
+            Self::Sparse {
+                reached: AHashSet::with_capacity(seed_count),
+                node_count,
+            }
+        }
+    }
+
+    fn insert(&mut self, node: NodeId) -> bool {
+        match self {
+            Self::Dense(reached) => {
+                if node.0 as usize >= reached.len() || reached.contains(node) {
+                    return false;
+                }
+                reached.set(node);
+                true
+            }
+            Self::Sparse { reached, node_count } => {
+                if node.0 as usize >= *node_count || !reached.insert(node.0) {
+                    return false;
+                }
+                let dense_bytes = node_count.div_ceil(u8::BITS as usize);
+                let sparse_entry_bytes = std::mem::size_of::<u32>() + std::mem::size_of::<usize>();
+                if reached.len().saturating_mul(sparse_entry_bytes) >= dense_bytes {
+                    let mut dense = NodeBitSet::zeros(*node_count);
+                    for reached_node in reached.iter().copied() {
+                        dense.set(NodeId(reached_node));
+                    }
+                    *self = Self::Dense(dense);
+                }
+                true
+            }
+        }
+    }
+}
+
+struct ClosureVisited {
+    root: RootClosureVisited,
+    contextual: AHashSet<u64>,
+}
+
+impl ClosureVisited {
+    fn new(node_count: usize, seed_count: usize) -> Self {
+        Self {
+            root: RootClosureVisited::new(node_count, seed_count),
+            contextual: AHashSet::default(),
+        }
+    }
+
+    fn insert(&mut self, node: NodeId, context: u32) -> bool {
+        if context == 0 {
+            self.root.insert(node)
+        } else {
+            self.contextual
+                .insert((u64::from(context) << 32) | u64::from(node.0))
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct ClosureNodeState {
+    node: NodeId,
+    context: u32,
+}
+
+/// Finite pushdown tabulation for realizable call/return flow.
+///
+/// A context is one concrete call boundary, not an ever-growing call string.
+/// `callers[boundary]` records the contexts in which that call was reached,
+/// and completed node/fact returns are replayed when a new caller context is
+/// discovered. This is the standard compiler-summary fixed point: recursion
+/// and diamonds converge over finite relations instead of enumerating paths.
+struct CallContexts {
+    ids: AHashMap<ContextBoundaryKey, u32>,
+    boundaries: Vec<Option<ContextBoundaryKey>>,
+    callers: Vec<AHashSet<u32>>,
+    returned_nodes: Vec<AHashSet<NodeId>>,
+    returned_facts: Vec<AHashSet<SymbolicNodeFact>>,
+}
+
+impl CallContexts {
+    fn new() -> Self {
+        Self {
+            boundaries: vec![None],
+            ids: AHashMap::default(),
+            callers: vec![AHashSet::default()],
+            returned_nodes: vec![AHashSet::default()],
+            returned_facts: vec![AHashSet::default()],
+        }
+    }
+
+    fn context_for(&mut self, boundary: ContextBoundaryKey) -> u32 {
+        if let Some(context) = self.ids.get(&boundary).copied() {
+            return context;
+        }
+        let context = u32::try_from(self.boundaries.len()).expect("call-context count exceeds u32");
+        self.boundaries.push(Some(boundary));
+        self.callers.push(AHashSet::default());
+        self.returned_nodes.push(AHashSet::default());
+        self.returned_facts.push(AHashSet::default());
+        self.ids.insert(boundary, context);
+        context
+    }
+
+    fn register_call(
+        &mut self,
+        caller_context: u32,
+        boundary: ContextBoundaryKey,
+    ) -> (u32, Vec<NodeId>, Vec<SymbolicNodeFact>) {
+        let context = self.context_for(boundary);
+        let Some(callers) = self.callers.get_mut(context as usize) else {
+            return (context, Vec::new(), Vec::new());
+        };
+        if !callers.insert(caller_context) {
+            return (context, Vec::new(), Vec::new());
+        }
+        let nodes = self
+            .returned_nodes
+            .get(context as usize)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        let facts = self
+            .returned_facts
+            .get(context as usize)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        (context, nodes, facts)
+    }
+
+    fn matches(&self, context: u32, boundary: ContextBoundaryKey) -> bool {
+        self.boundaries.get(context as usize).and_then(|value| *value) == Some(boundary)
+    }
+
+    fn complete_node_return(&mut self, context: u32, node: NodeId) -> Vec<u32> {
+        let Some(returned) = self.returned_nodes.get_mut(context as usize) else {
+            return Vec::new();
+        };
+        if !returned.insert(node) {
+            return Vec::new();
+        }
+        self.callers
+            .get(context as usize)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn complete_fact_return(&mut self, context: u32, mut fact: SymbolicNodeFact) -> Vec<u32> {
+        fact.context = 0;
+        let Some(returned) = self.returned_facts.get_mut(context as usize) else {
+            return Vec::new();
+        };
+        if !returned.insert(fact) {
+            return Vec::new();
+        }
+        self.callers
+            .get(context as usize)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
 }
 
 impl SymbolicRuntimeIndex {
@@ -209,137 +392,31 @@ fn symbolic_fact_key(base: u32, field: u32) -> u64 {
     (u64::from(base) << 32) | u64::from(field)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TargetFuncCutKey {
-    max_precision: Option<Precision>,
-    funcs: Vec<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TargetNodeCutKey {
-    max_precision: Option<Precision>,
-    nodes: Vec<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum TargetCutKey {
-    Funcs(TargetFuncCutKey),
-    Nodes(TargetNodeCutKey),
-}
-
-struct CachedTargetCut {
-    closure: Arc<OnceLock<Arc<NodeBitSet>>>,
-    last_used: AtomicU64,
-}
-
-/// Exact backward target cuts retained under a strict memory bound.
-///
-/// Cache eviction changes only whether a later query recomputes its reverse
-/// fixed point. It never truncates that fixed point or the returned cut.
-struct TargetCutCache {
-    entries: AHashMap<TargetCutKey, CachedTargetCut>,
-    capacity: usize,
-    access_clock: AtomicU64,
-}
-
-impl TargetCutCache {
-    fn new(capacity: usize) -> Self {
-        let capacity = capacity.max(1);
-        Self {
-            entries: AHashMap::with_capacity(capacity),
-            capacity,
-            access_clock: AtomicU64::new(1),
-        }
+fn symbolic_transform_boundary(
+    graph: &crate::symbolic::SymbolicFieldGraph,
+    transform: &crate::symbolic::SymbolicFieldTransform,
+) -> Option<(ContextBoundaryKey, bool)> {
+    let source = graph.bases().get(transform.source as usize)?.func;
+    let target = graph.bases().get(transform.target as usize)?.func;
+    if source == target {
+        return None;
     }
-
-    fn next_access(&self) -> u64 {
-        self.access_clock.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn get_cell(&self, key: &TargetCutKey) -> Option<Arc<OnceLock<Arc<NodeBitSet>>>> {
-        let entry = self.entries.get(key)?;
-        entry.last_used.store(self.next_access(), Ordering::Relaxed);
-        Some(Arc::clone(&entry.closure))
-    }
-
-    fn get_or_insert_cell(&mut self, key: TargetCutKey) -> Arc<OnceLock<Arc<NodeBitSet>>> {
-        let access = self.next_access();
-        if let Some(existing) = self.entries.get(&key) {
-            existing.last_used.store(access, Ordering::Relaxed);
-            return Arc::clone(&existing.closure);
-        }
-
-        if self.entries.len() >= self.capacity {
-            let least_recent = self
-                .entries
-                .iter()
-                // Never evict an in-flight cell: doing so would let a later
-                // same-key caller create a second whole-workspace closure.
-                .filter(|(_, entry)| entry.closure.get().is_some())
-                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
-                .map(|(key, _)| key.clone());
-            if let Some(least_recent) = least_recent {
-                self.entries.remove(&least_recent);
-            }
-        }
-
-        let closure = Arc::new(OnceLock::new());
-        self.entries.insert(
-            key,
-            CachedTargetCut {
-                closure: Arc::clone(&closure),
-                last_used: AtomicU64::new(access),
-            },
-        );
-        closure
-    }
-
-    fn trim_completed(&mut self) {
-        while self.entries.len() > self.capacity {
-            let least_recent = self
-                .entries
-                .iter()
-                .filter(|(_, entry)| entry.closure.get().is_some())
-                .min_by_key(|(_, entry)| entry.last_used.load(Ordering::Relaxed))
-                .map(|(key, _)| key.clone());
-            let Some(least_recent) = least_recent else {
-                break;
-            };
-            self.entries.remove(&least_recent);
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[cfg(test)]
-    fn contains(&self, key: &TargetCutKey) -> bool {
-        self.entries.contains_key(key)
-    }
-}
-
-fn default_target_cut_cache_capacity() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-}
-
-impl TargetFuncCutKey {
-    fn new(max_precision: Option<Precision>, funcs: &AHashSet<FuncId>) -> Self {
-        let mut funcs: Vec<u32> = funcs.iter().map(|func| func.raw()).collect();
-        funcs.sort_unstable();
-        funcs.dedup();
-        Self { max_precision, funcs }
-    }
-}
-
-impl TargetNodeCutKey {
-    fn new(max_precision: Option<Precision>, nodes: &[WsNodeId]) -> Self {
-        let mut nodes: Vec<u32> = nodes.iter().map(|node| node.0).collect();
-        nodes.sort_unstable();
-        nodes.dedup();
-        Self { max_precision, nodes }
-    }
+    let (caller, callee, enters) = match transform.kind {
+        SymbolicFieldTransformKind::Argument => (source, target, true),
+        SymbolicFieldTransformKind::Return
+        | SymbolicFieldTransformKind::ScalarReturn
+        | SymbolicFieldTransformKind::ConstructorReturn
+        | SymbolicFieldTransformKind::ReceiverMutation => (target, source, false),
+        SymbolicFieldTransformKind::Copy => return None,
+    };
+    Some((
+        ContextBoundaryKey {
+            caller,
+            callee,
+            span: transform.call_span,
+        },
+        enters,
+    ))
 }
 
 /// Service handle for IDG queries. Wraps an [`IdgWorkspace`] and a
@@ -351,7 +428,6 @@ pub struct IdgQueryService {
     workspace: Arc<IdgWorkspace>,
     global: Arc<GlobalIndex>,
     unified: RwLock<Option<Arc<UnifiedAddressSpace>>>,
-    target_cut_cache_capacity: usize,
 }
 
 impl IdgQueryService {
@@ -359,19 +435,10 @@ impl IdgQueryService {
     /// is **not** built here — it's deferred to first query.
     #[must_use]
     pub fn new(workspace: Arc<IdgWorkspace>, global: Arc<GlobalIndex>) -> Self {
-        Self::with_target_cut_cache_capacity(workspace, global, default_target_cut_cache_capacity())
-    }
-
-    fn with_target_cut_cache_capacity(
-        workspace: Arc<IdgWorkspace>,
-        global: Arc<GlobalIndex>,
-        target_cut_cache_capacity: usize,
-    ) -> Self {
         Self {
             workspace,
             global,
             unified: RwLock::new(None),
-            target_cut_cache_capacity: target_cut_cache_capacity.max(1),
         }
     }
 
@@ -405,33 +472,73 @@ impl IdgQueryService {
         funcs: &[FuncId],
         max_precision: Option<Precision>,
     ) -> AHashMap<FuncId, Vec<u32>> {
+        let summary_started = std::time::Instant::now();
         let mut batch =
             crate::function_summary::return_taint_param_indices(&self.workspace, funcs, max_precision);
+        bonsai_diagnostics::debug_log!(
+            "idg-summary",
+            "ordinary compiler summaries funcs={} symbolic_sensitive={} elapsed={:.3}s",
+            funcs.len(),
+            batch.symbolic_sensitive.len(),
+            summary_started.elapsed().as_secs_f64()
+        );
         if !self.workspace.symbolic_field().transforms().is_empty() {
+            let contextual_runtime =
+                self.cache_contextual_summary_runtime(max_precision, &batch.contextual_edges);
+            bonsai_diagnostics::debug_log!(
+                "idg-summary",
+                "contextual compiler runtime elapsed={:.3}s",
+                summary_started.elapsed().as_secs_f64()
+            );
+            let unified = self.ensure_unified();
+            unified
+                .symbolic_runtime
+                .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(&unified)));
+            bonsai_diagnostics::debug_log!(
+                "idg-summary",
+                "symbolic compiler runtime elapsed={:.3}s",
+                summary_started.elapsed().as_secs_f64()
+            );
+            let symbolic_sensitive = Arc::new(batch.symbolic_sensitive.clone());
+            let symbolic_callees = Arc::new(batch.symbolic_callees.clone());
             let symbolic_funcs: Vec<FuncId> = funcs
                 .iter()
                 .copied()
-                .filter(|func| batch.symbolic_sensitive.contains(func))
+                .filter(|func| symbolic_sensitive.contains(func))
                 .collect();
             let updates: Vec<(FuncId, Vec<u32>)> = symbolic_funcs
                 .par_iter()
                 .filter_map(|func| {
                     let func = *func;
-                    let Some(return_node) = self.return_node_of(func) else {
-                        return None;
-                    };
+                    let return_node = self.return_node_of(func)?;
                     let params = self.param_nodes_of(func);
                     let mut returning = batch.indices.get(&func).cloned().unwrap_or_default();
+                    if returning.len() >= params.len() {
+                        return Some((func, returning));
+                    }
+                    let mut allowed_funcs = AHashSet::default();
+                    let mut pending = vec![func];
+                    while let Some(current) = pending.pop() {
+                        if !allowed_funcs.insert(current) {
+                            continue;
+                        }
+                        if let Some(callees) = symbolic_callees.get(&current) {
+                            pending.extend(callees.iter().copied());
+                        }
+                    }
                     let already_returning: AHashSet<u32> = returning.iter().copied().collect();
                     for (index, param) in params.into_iter().enumerate() {
                         let index = u32::try_from(index).expect("parameter index exceeds u32");
                         if already_returning.contains(&index) {
                             continue;
                         }
-                        if self
-                            .forward_closure_with_max_precision(&[param], max_precision)
-                            .contains(&return_node)
-                        {
+                        let sliced = self.contextual_forward_closure_within_funcs_with_max_precision(
+                            &[param],
+                            &allowed_funcs,
+                            max_precision,
+                            contextual_runtime.as_ref(),
+                        );
+                        if sliced.contains(&return_node) {
                             returning.push(index);
                         }
                     }
@@ -443,8 +550,37 @@ impl IdgQueryService {
             for (func, returning) in updates {
                 batch.indices.insert(func, returning);
             }
+            bonsai_diagnostics::debug_log!(
+                "idg-summary",
+                "symbolic compiler summaries funcs={} elapsed={:.3}s",
+                symbolic_funcs.len(),
+                summary_started.elapsed().as_secs_f64()
+            );
         }
         batch.indices
+    }
+
+    fn contextual_forward_closure_within_funcs_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        allowed_funcs: &AHashSet<FuncId>,
+        max_precision: Option<Precision>,
+        contextual: &ContextualSummaryRuntime,
+    ) -> Vec<WsNodeId> {
+        let unified = self.ensure_unified();
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
+        self.symbolic_forward_closure_nodes(
+            &unified,
+            &contextual.reach,
+            &seed_nodes,
+            max_precision,
+            Some(allowed_funcs),
+            Some(contextual),
+            false,
+        )
+        .into_iter()
+        .map(|node| WsNodeId(node.0))
+        .collect()
     }
 
     /// Compute the function-local read/write storage reached from each formal
@@ -488,11 +624,19 @@ impl IdgQueryService {
     fn forward_closure_unfiltered(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        let reach = self.ensure_unfiltered_reach(&unified);
-        self.symbolic_forward_closure_nodes(&unified, &reach, &seed_nodes, None)
-            .into_iter()
-            .map(|n| WsNodeId(n.0))
-            .collect()
+        let contextual = self.ensure_contextual_summary_runtime(&unified, None);
+        self.symbolic_forward_closure_nodes(
+            &unified,
+            &contextual.reach,
+            &seed_nodes,
+            None,
+            None,
+            Some(contextual.as_ref()),
+            true,
+        )
+        .into_iter()
+        .map(|n| WsNodeId(n.0))
+        .collect()
     }
 
     /// Forward closure constrained to edges whose precision is at or
@@ -512,12 +656,20 @@ impl IdgQueryService {
             return self.forward_closure_unfiltered(seeds);
         };
         let unified = self.ensure_unified();
-        let reach = self.ensure_precision_reach(&unified, max_precision);
+        let contextual = self.ensure_contextual_summary_runtime(&unified, Some(max_precision));
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        self.symbolic_forward_closure_nodes(&unified, &reach, &seed_nodes, Some(max_precision))
-            .into_iter()
-            .map(|n| WsNodeId(n.0))
-            .collect()
+        self.symbolic_forward_closure_nodes(
+            &unified,
+            &contextual.reach,
+            &seed_nodes,
+            Some(max_precision),
+            None,
+            Some(contextual.as_ref()),
+            true,
+        )
+        .into_iter()
+        .map(|n| WsNodeId(n.0))
+        .collect()
     }
 
     /// Exact forward closure restricted to nodes owned by `func`.
@@ -547,15 +699,12 @@ impl IdgQueryService {
             .collect()
     }
 
-    /// Source-to-target cut: every node on at least one path from
-    /// `seeds` to any node owned by `target_funcs`, within the
-    /// requested precision scope.
+    /// Context-matched forward closure when at least one requested target
+    /// function is reached; otherwise empty.
     ///
-    /// Security taint analysis uses this instead of a plain forward
-    /// closure once it has already narrowed candidate sink functions
-    /// with the resolved callgraph. This keeps per-source work
-    /// proportional to the source-to-sink corridor rather than every
-    /// value reachable from the source in a large workspace.
+    /// Security scopes the service to its source/sink callgraph corridor
+    /// before querying, so returning the complete realizable closure retains
+    /// symbolic path evidence that a raw backward graph cut cannot see.
     pub fn forward_target_func_cut_with_max_precision(
         &self,
         seeds: &[WsNodeId],
@@ -566,19 +715,21 @@ impl IdgQueryService {
             return Vec::new();
         }
         let unified = self.ensure_unified();
-        let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        let backward = self.target_func_backward_closure(&unified, target_funcs, max_precision);
-        if backward.is_zero() {
-            return Vec::new();
+        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        if closure.iter().any(|node| {
+            unified
+                .node_funcs
+                .get(node.0 as usize)
+                .is_some_and(|func| target_funcs.contains(func))
+        }) {
+            closure
+        } else {
+            Vec::new()
         }
-        self.forward_closure_nodes_within(&unified, &seed_nodes, &backward, max_precision)
-            .into_iter()
-            .map(|node| WsNodeId(node.0))
-            .collect()
     }
 
-    /// Source-to-target cut where targets are concrete IDG nodes,
-    /// usually sink call arguments / receiver slots / returns.
+    /// Context-matched forward closure when at least one concrete target IDG
+    /// node is reached; otherwise empty.
     pub fn forward_target_nodes_cut_with_max_precision(
         &self,
         seeds: &[WsNodeId],
@@ -588,21 +739,17 @@ impl IdgQueryService {
         if seeds.is_empty() || target_nodes.is_empty() {
             return Vec::new();
         }
-        let unified = self.ensure_unified();
-        let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
-        let backward = self.target_nodes_backward_closure(&unified, target_nodes, max_precision);
-        if backward.is_zero() {
-            return Vec::new();
+        let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
+        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        if closure.iter().any(|node| targets.contains(node)) {
+            closure
+        } else {
+            Vec::new()
         }
-        self.forward_closure_nodes_within(&unified, &seed_nodes, &backward, max_precision)
-            .into_iter()
-            .map(|node| WsNodeId(node.0))
-            .collect()
     }
 
-    /// Source-to-target cut for a mixture of concrete target nodes and
-    /// fallback target functions. The backward slices are unioned first so
-    /// one restricted forward traversal covers both target classes.
+    /// Context-matched forward closure when a concrete target node or fallback
+    /// target function is reached; otherwise empty.
     pub fn forward_target_nodes_and_funcs_cut_with_max_precision(
         &self,
         seeds: &[WsNodeId],
@@ -614,23 +761,20 @@ impl IdgQueryService {
             return Vec::new();
         }
         let unified = self.ensure_unified();
-        let seed_nodes: Vec<NodeId> = seeds.iter().map(|node| NodeId(node.0)).collect();
-        let mut backward = if target_nodes.is_empty() {
-            NodeBitSet::zeros(unified.reverse.len())
+        let targets: AHashSet<WsNodeId> = target_nodes.iter().copied().collect();
+        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        let reaches_target = closure.iter().any(|node| {
+            targets.contains(node)
+                || unified
+                    .node_funcs
+                    .get(node.0 as usize)
+                    .is_some_and(|func| target_funcs.contains(func))
+        });
+        if reaches_target {
+            closure
         } else {
-            (*self.target_nodes_backward_closure(&unified, target_nodes, max_precision)).clone()
-        };
-        if !target_funcs.is_empty() {
-            let function_backward = self.target_func_backward_closure(&unified, target_funcs, max_precision);
-            backward.union_inplace(&function_backward);
+            Vec::new()
         }
-        if backward.is_zero() {
-            return Vec::new();
-        }
-        self.forward_closure_nodes_within(&unified, &seed_nodes, &backward, max_precision)
-            .into_iter()
-            .map(|node| WsNodeId(node.0))
-            .collect()
     }
 
     /// Backward closure: which nodes flow *into* `targets`?
@@ -646,9 +790,7 @@ impl IdgQueryService {
     /// Does any path lead from `from` to `to`?
     #[must_use]
     pub fn reaches(&self, from: WsNodeId, to: WsNodeId) -> bool {
-        let unified = self.ensure_unified();
-        self.ensure_unfiltered_reach(&unified)
-            .reaches(NodeId(from.0), NodeId(to.0))
+        self.forward_closure_unfiltered(&[from]).contains(&to)
     }
 
     /// Find every IDG node in `func` whose place is a `Place::Read`
@@ -1706,6 +1848,7 @@ impl IdgQueryService {
     /// materialised lazily for the precision actually requested.
     fn build_unified(&self) -> UnifiedAddressSpace {
         let mut reverse = Vec::new();
+        let mut node_funcs = Vec::new();
         let mut segment_bases = Vec::with_capacity(self.workspace.segment_count() + 1);
         let mut nodes_by_func: AHashMap<FuncId, Vec<NodeId>> = AHashMap::new();
         // 1. Allocate a workspace-global id for every segment-local
@@ -1719,6 +1862,7 @@ impl IdgQueryService {
                 let ws_node =
                     NodeId(u32::try_from(reverse.len()).expect("unified IDG node count exceeds u32"));
                 reverse.push((seg_id, local_node));
+                node_funcs.push(node.func);
                 nodes_by_func.entry(node.func).or_default().push(ws_node);
             }
         }
@@ -1730,14 +1874,13 @@ impl IdgQueryService {
         UnifiedAddressSpace {
             segment_bases: segment_bases.into_boxed_slice(),
             reverse,
+            node_funcs: node_funcs.into_boxed_slice(),
             nodes_by_func,
             unfiltered_reach: RwLock::new(None),
             precision_reach: RwLock::new(AHashMap::new()),
+            contextual_summaries: RwLock::new(AHashMap::new()),
             cross_calls_by_from: RwLock::new(None),
             symbolic_runtime: OnceLock::new(),
-            target_backward: RwLock::new(TargetCutCache::new(self.target_cut_cache_capacity)),
-            #[cfg(test)]
-            target_cut_computations: AtomicU64::new(0),
         }
     }
 
@@ -1748,47 +1891,22 @@ impl IdgQueryService {
         (local_node.0 < end.saturating_sub(start)).then(|| WsNodeId(start + local_node.0))
     }
 
-    fn ws_nodes_for_funcs(&self, unified: &UnifiedAddressSpace, funcs: &AHashSet<FuncId>) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        for func in funcs {
-            if let Some(nodes) = unified.nodes_by_func.get(func) {
-                out.extend_from_slice(nodes);
-            }
-        }
-        out.sort_by_key(|node| node.0);
-        out.dedup();
-        out
+    fn ws_node_func(&self, unified: &UnifiedAddressSpace, node: NodeId) -> Option<FuncId> {
+        unified.node_funcs.get(node.0 as usize).copied()
     }
 
-    fn target_func_backward_closure(
-        &self,
-        unified: &Arc<UnifiedAddressSpace>,
-        funcs: &AHashSet<FuncId>,
-        max_precision: Option<Precision>,
-    ) -> Arc<NodeBitSet> {
-        let key = TargetCutKey::Funcs(TargetFuncCutKey::new(max_precision, funcs));
-        let cached = unified.target_backward.read().get_cell(&key);
-        let cell = if let Some(hit) = cached {
-            hit
-        } else {
-            unified.target_backward.write().get_or_insert_cell(key)
+    fn node_is_projected_storage(&self, segment_id: SegmentId, node_id: NodeId) -> bool {
+        let Some(segment) = self.workspace.segment(segment_id) else {
+            return false;
         };
-        let closure = Arc::clone(cell.get_or_init(|| {
-            #[cfg(test)]
-            unified.target_cut_computations.fetch_add(1, Ordering::Relaxed);
-            let target_nodes = self.ws_nodes_for_funcs(unified, funcs);
-            Arc::new(if target_nodes.is_empty() {
-                NodeBitSet::zeros(unified.reverse.len())
-            } else if let Some(precision) = max_precision {
-                self.ensure_precision_reach(unified, precision)
-                    .backward_closure(&target_nodes)
-            } else {
-                self.ensure_unfiltered_reach(unified)
-                    .backward_closure(&target_nodes)
-            })
-        }));
-        unified.target_backward.write().trim_completed();
-        closure
+        let Some(node) = segment.nodes.get(node_id) else {
+            return false;
+        };
+        segment
+            .places
+            .get(node.place)
+            .and_then(|place| structured_storage_parts(segment, place))
+            .is_some_and(|(parts, _, _)| parts.len() > 1)
     }
 
     fn forward_closure_nodes_within(
@@ -1807,37 +1925,241 @@ impl IdgQueryService {
         }
     }
 
-    fn target_nodes_backward_closure(
+    fn build_contextual_summary_runtime(
         &self,
-        unified: &Arc<UnifiedAddressSpace>,
-        nodes: &[WsNodeId],
+        summary_edges: &[crate::function_summary::ContextualSummaryEdge],
         max_precision: Option<Precision>,
-    ) -> Arc<NodeBitSet> {
-        let key = TargetCutKey::Nodes(TargetNodeCutKey::new(max_precision, nodes));
-        let cached = unified.target_backward.read().get_cell(&key);
-        let cell = if let Some(hit) = cached {
-            hit
-        } else {
-            unified.target_backward.write().get_or_insert_cell(key)
+    ) -> ContextualSummaryRuntime {
+        let unified = self.ensure_unified();
+        let mut pairs = Vec::with_capacity(summary_edges.len());
+        for edge in summary_edges {
+            let Some(from) = Self::ws_node_for(&unified, edge.segment, edge.from) else {
+                continue;
+            };
+            let Some(to) = Self::ws_node_for(&unified, edge.segment, edge.to) else {
+                continue;
+            };
+            pairs.push((from.0, to.0));
+        }
+
+        // The function-summary compiler already contributes every
+        // function-local edge plus its matched call summaries. Preserve the
+        // remaining non-call relations that intentionally cross function
+        // ownership, such as adapter-derived receiver/object-field state
+        // flow between methods. Ordinary relations are context-neutral.
+        // Projected inter edges from compatibility adapters represent their
+        // allocation-insensitive heap places and are kept in `heap_by_from`;
+        // scalar InterCallArg / InterReturn / InterThrow edges remain exact
+        // stack boundaries.
+        let mut heap_by_from: AHashMap<NodeId, Vec<NodeId>> = AHashMap::default();
+        let mut record_non_call_relation = |from_segment: SegmentId,
+                                            to_segment: SegmentId,
+                                            edge: &IdgEdge| {
+            let projected_heap_relation = edge.meta.kind.is_inter()
+                && (self.node_is_projected_storage(from_segment, edge.from)
+                    || self.node_is_projected_storage(to_segment, edge.to));
+            if (edge.meta.kind.is_inter() && !projected_heap_relation)
+                || max_precision.is_some_and(|max| edge.meta.precision > max)
+            {
+                return;
+            }
+            let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
+                return;
+            };
+            let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
+                return;
+            };
+            if projected_heap_relation {
+                heap_by_from.entry(NodeId(from.0)).or_default().push(NodeId(to.0));
+            } else if self.ws_node_func(&unified, NodeId(from.0)) != self.ws_node_func(&unified, NodeId(to.0))
+            {
+                pairs.push((from.0, to.0));
+            }
         };
-        let closure = Arc::clone(cell.get_or_init(|| {
-            #[cfg(test)]
-            unified.target_cut_computations.fetch_add(1, Ordering::Relaxed);
-            let mut target_nodes: Vec<NodeId> = nodes.iter().map(|node| NodeId(node.0)).collect();
-            target_nodes.sort_by_key(|node| node.0);
-            target_nodes.dedup();
-            Arc::new(if target_nodes.is_empty() {
-                NodeBitSet::zeros(unified.reverse.len())
-            } else if let Some(precision) = max_precision {
-                self.ensure_precision_reach(unified, precision)
-                    .backward_closure(&target_nodes)
-            } else {
-                self.ensure_unfiltered_reach(unified)
-                    .backward_closure(&target_nodes)
-            })
-        }));
-        unified.target_backward.write().trim_completed();
-        closure
+        for (segment_id, segment) in self.workspace.segments() {
+            for edge in &segment.edges {
+                record_non_call_relation(segment_id, segment_id, edge);
+            }
+        }
+        for edge in &self.workspace.cross_file().edges {
+            record_non_call_relation(edge.from_segment, edge.to_segment, &edge.edge);
+        }
+        for targets in heap_by_from.values_mut() {
+            targets.sort_unstable_by_key(|node| node.0);
+            targets.dedup();
+        }
+
+        // Eager compatibility field edges can point at a canonical type-field
+        // node whose owning function differs from the logical callee. Build
+        // the authoritative call-site relation from structural formal/return
+        // places first, then attribute those synthetic edges to the exact
+        // same-span compiler boundary.
+        let mut structural_boundaries: AHashMap<(FuncId, Span), Vec<ContextBoundaryKey>> =
+            AHashMap::default();
+        let mut record_structural_boundary =
+            |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
+                if max_precision.is_some_and(|max| edge.meta.precision > max) {
+                    return;
+                }
+                let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
+                    return;
+                };
+                let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
+                    return;
+                };
+                let structural = match edge.meta.kind {
+                    IdgEdgeKind::InterCallArg => self
+                        .workspace
+                        .segment(to_segment)
+                        .and_then(|segment| segment.nodes.get(edge.to))
+                        .and_then(|node| {
+                            self.workspace
+                                .segment(to_segment)
+                                .and_then(|segment| segment.places.get(node.place))
+                        })
+                        .is_some_and(|place| matches!(place, Place::Param { .. })),
+                    IdgEdgeKind::InterReturn => self
+                        .workspace
+                        .segment(from_segment)
+                        .and_then(|segment| segment.nodes.get(edge.from))
+                        .and_then(|node| {
+                            self.workspace
+                                .segment(from_segment)
+                                .and_then(|segment| segment.places.get(node.place))
+                        })
+                        .is_some_and(|place| matches!(place, Place::Return)),
+                    IdgEdgeKind::InterThrow => self
+                        .workspace
+                        .segment(from_segment)
+                        .and_then(|segment| segment.nodes.get(edge.from))
+                        .and_then(|node| {
+                            self.workspace
+                                .segment(from_segment)
+                                .and_then(|segment| segment.places.get(node.place))
+                        })
+                        .is_some_and(|place| matches!(place, Place::Throw { .. })),
+                    _ => false,
+                };
+                if !structural {
+                    return;
+                }
+                let key = match edge.meta.kind {
+                    IdgEdgeKind::InterCallArg => self
+                        .ws_node_func(&unified, NodeId(from.0))
+                        .zip(self.ws_node_func(&unified, NodeId(to.0)))
+                        .map(|(caller, callee)| ContextBoundaryKey {
+                            caller,
+                            callee,
+                            span: edge.meta.via_span,
+                        }),
+                    IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => self
+                        .ws_node_func(&unified, NodeId(to.0))
+                        .zip(self.ws_node_func(&unified, NodeId(from.0)))
+                        .map(|(caller, callee)| ContextBoundaryKey {
+                            caller,
+                            callee,
+                            span: edge.meta.via_span,
+                        }),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    structural_boundaries
+                        .entry((key.caller, key.span))
+                        .or_default()
+                        .push(key);
+                }
+            };
+        for (segment_id, segment) in self.workspace.segments() {
+            for edge in &segment.edges {
+                record_structural_boundary(segment_id, segment_id, edge);
+            }
+        }
+        for edge in &self.workspace.cross_file().edges {
+            record_structural_boundary(edge.from_segment, edge.to_segment, &edge.edge);
+        }
+        for boundaries in structural_boundaries.values_mut() {
+            boundaries.sort_unstable_by_key(|key| (key.callee.raw(), key.span));
+            boundaries.dedup();
+        }
+
+        let mut calls_by_from: AHashMap<NodeId, Vec<ContextBoundaryEdge>> = AHashMap::default();
+        let mut returns_by_from: AHashMap<NodeId, Vec<ContextBoundaryEdge>> = AHashMap::default();
+        let mut record_boundary = |from_segment: SegmentId, to_segment: SegmentId, edge: &IdgEdge| {
+            if max_precision.is_some_and(|max| edge.meta.precision > max) {
+                return;
+            }
+            if edge.meta.kind.is_inter()
+                && (self.node_is_projected_storage(from_segment, edge.from)
+                    || self.node_is_projected_storage(to_segment, edge.to))
+            {
+                return;
+            }
+            let Some(from) = Self::ws_node_for(&unified, from_segment, edge.from) else {
+                return;
+            };
+            let Some(to) = Self::ws_node_for(&unified, to_segment, edge.to) else {
+                return;
+            };
+            let Some(caller_callee) = (match edge.meta.kind {
+                IdgEdgeKind::InterCallArg => self
+                    .ws_node_func(&unified, NodeId(from.0))
+                    .zip(self.ws_node_func(&unified, NodeId(to.0)))
+                    .map(|(caller, callee)| (caller, callee, true)),
+                IdgEdgeKind::InterReturn | IdgEdgeKind::InterThrow => self
+                    .ws_node_func(&unified, NodeId(to.0))
+                    .zip(self.ws_node_func(&unified, NodeId(from.0)))
+                    .map(|(caller, callee)| (caller, callee, false)),
+                _ => None,
+            }) else {
+                return;
+            };
+            let endpoint_key = ContextBoundaryKey {
+                caller: caller_callee.0,
+                callee: caller_callee.1,
+                span: edge.meta.via_span,
+            };
+            let structural = structural_boundaries.get(&(endpoint_key.caller, endpoint_key.span));
+            let keys: &[ContextBoundaryKey] = structural
+                .filter(|keys| !keys.contains(&endpoint_key))
+                .map(Vec::as_slice)
+                .unwrap_or(std::slice::from_ref(&endpoint_key));
+            for &key in keys {
+                let boundary = ContextBoundaryEdge {
+                    key,
+                    target: NodeId(to.0),
+                };
+                if caller_callee.2 {
+                    calls_by_from.entry(NodeId(from.0)).or_default().push(boundary);
+                } else {
+                    returns_by_from.entry(NodeId(from.0)).or_default().push(boundary);
+                }
+            }
+        };
+        for (segment_id, segment) in self.workspace.segments() {
+            for edge in &segment.edges {
+                record_boundary(segment_id, segment_id, edge);
+            }
+        }
+        for edge in &self.workspace.cross_file().edges {
+            record_boundary(edge.from_segment, edge.to_segment, &edge.edge);
+        }
+        for edges in calls_by_from.values_mut().chain(returns_by_from.values_mut()) {
+            edges.sort_unstable_by_key(|edge| {
+                (
+                    edge.key.caller.raw(),
+                    edge.key.callee.raw(),
+                    edge.key.span,
+                    edge.target.0,
+                )
+            });
+            edges.dedup_by_key(|edge| (edge.key, edge.target));
+        }
+        ContextualSummaryRuntime {
+            reach: ReachabilityIndex::from_pairs(unified.reverse.len(), &pairs),
+            heap_by_from,
+            calls_by_from,
+            returns_by_from,
+        }
     }
 
     fn symbolic_forward_closure_nodes(
@@ -1846,43 +2168,142 @@ impl IdgQueryService {
         reach: &ReachabilityIndex,
         seeds: &[NodeId],
         max_precision: Option<Precision>,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        contextual: Option<&ContextualSummaryRuntime>,
+        activate_seed_callers: bool,
     ) -> Vec<NodeId> {
         let symbolic = self.workspace.symbolic_field();
-        if symbolic.transforms().is_empty() {
+        if symbolic.transforms().is_empty() && contextual.is_none() {
             return reach.forward_closure_nodes(seeds);
         }
         let runtime = unified
             .symbolic_runtime
             .get_or_init(|| Arc::new(self.build_symbolic_runtime_index(unified)));
         let mut ordinary = Vec::with_capacity(seeds.len());
-        let mut reached = NodeBitSet::zeros(unified.reverse.len());
+        let mut reached = ClosureVisited::new(unified.reverse.len(), seeds.len());
         for seed in seeds.iter().copied() {
-            if (seed.0 as usize) < unified.reverse.len() && !reached.contains(seed) {
-                reached.set(seed);
-                ordinary.push(seed);
+            if (seed.0 as usize) < unified.reverse.len()
+                && allowed_funcs.is_none_or(|allowed| {
+                    self.ws_node_func(unified, seed)
+                        .is_some_and(|func| allowed.contains(&func))
+                })
+                && reached.insert(seed, 0)
+            {
+                ordinary.push(ClosureNodeState {
+                    node: seed,
+                    context: 0,
+                });
             }
         }
         let mut facts = AHashSet::default();
         let mut pending_facts = Vec::new();
         let mut node_cursor = 0usize;
         let mut fact_cursor = 0usize;
+        let mut contexts = CallContexts::new();
 
         while node_cursor < ordinary.len() || fact_cursor < pending_facts.len() {
             while node_cursor < ordinary.len() {
-                let node = ordinary[node_cursor];
+                let state = ordinary[node_cursor];
                 node_cursor += 1;
-                if let Some(node_facts) = runtime.facts_by_node.get(&WsNodeId(node.0)) {
-                    for fact in node_facts.iter().copied() {
+                if let Some(node_facts) = runtime.facts_by_node.get(&WsNodeId(state.node.0)) {
+                    for mut fact in node_facts.iter().copied() {
+                        fact.context = state.context;
                         if facts.insert(fact) {
                             pending_facts.push(fact);
                         }
                     }
                 }
-                for target in reach.forward_neighbours(node) {
+                for target in reach.forward_neighbours(state.node) {
                     let target = NodeId(*target);
-                    if !reached.contains(target) {
-                        reached.set(target);
-                        ordinary.push(target);
+                    if allowed_funcs.is_none_or(|allowed| {
+                        self.ws_node_func(unified, target)
+                            .is_some_and(|func| allowed.contains(&func))
+                    }) && reached.insert(target, state.context)
+                    {
+                        ordinary.push(ClosureNodeState {
+                            node: target,
+                            context: state.context,
+                        });
+                    }
+                }
+                if let Some(contextual) = contextual {
+                    if let Some(targets) = contextual.heap_by_from.get(&state.node) {
+                        for &target in targets {
+                            if allowed_funcs.is_none_or(|allowed| {
+                                self.ws_node_func(unified, target)
+                                    .is_some_and(|func| allowed.contains(&func))
+                            }) && reached.insert(target, 0)
+                            {
+                                ordinary.push(ClosureNodeState {
+                                    node: target,
+                                    context: 0,
+                                });
+                            }
+                        }
+                    }
+                    if let Some(calls) = contextual.calls_by_from.get(&state.node) {
+                        for call in calls {
+                            if allowed_funcs.is_some_and(|allowed| {
+                                self.ws_node_func(unified, call.target)
+                                    .is_none_or(|func| !allowed.contains(&func))
+                            }) {
+                                continue;
+                            }
+                            let (context, returned_nodes, returned_facts) =
+                                contexts.register_call(state.context, call.key);
+                            for target in returned_nodes {
+                                if allowed_funcs.is_none_or(|allowed| {
+                                    self.ws_node_func(unified, target)
+                                        .is_some_and(|func| allowed.contains(&func))
+                                }) && reached.insert(target, state.context)
+                                {
+                                    ordinary.push(ClosureNodeState {
+                                        node: target,
+                                        context: state.context,
+                                    });
+                                }
+                            }
+                            for mut returned_fact in returned_facts {
+                                returned_fact.context = state.context;
+                                if facts.insert(returned_fact) {
+                                    pending_facts.push(returned_fact);
+                                }
+                            }
+                            if reached.insert(call.target, context) {
+                                ordinary.push(ClosureNodeState {
+                                    node: call.target,
+                                    context,
+                                });
+                            }
+                        }
+                    }
+                    if let Some(returns) = contextual.returns_by_from.get(&state.node) {
+                        for returned in returns {
+                            if allowed_funcs.is_some_and(|allowed| {
+                                self.ws_node_func(unified, returned.target)
+                                    .is_none_or(|func| !allowed.contains(&func))
+                            }) {
+                                continue;
+                            }
+                            if contexts.matches(state.context, returned.key) {
+                                for context in contexts.complete_node_return(state.context, returned.target) {
+                                    if reached.insert(returned.target, context) {
+                                        ordinary.push(ClosureNodeState {
+                                            node: returned.target,
+                                            context,
+                                        });
+                                    }
+                                }
+                            } else if activate_seed_callers
+                                && state.context == 0
+                                && reached.insert(returned.target, 0)
+                            {
+                                ordinary.push(ClosureNodeState {
+                                    node: returned.target,
+                                    context: 0,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -1890,7 +2311,14 @@ impl IdgQueryService {
             while fact_cursor < pending_facts.len() {
                 let fact = pending_facts[fact_cursor];
                 fact_cursor += 1;
-                self.seed_symbolic_fact_consumers(runtime, fact, &mut ordinary, &mut reached);
+                self.seed_symbolic_fact_consumers(
+                    unified,
+                    runtime,
+                    fact,
+                    allowed_funcs,
+                    &mut ordinary,
+                    &mut reached,
+                );
                 let outgoing = symbolic.outgoing_transform_indices(fact.base);
                 for transform_index in outgoing {
                     let Some(transform) = symbolic.transforms().get(*transform_index as usize) else {
@@ -1907,6 +2335,44 @@ impl IdgQueryService {
                     {
                         continue;
                     }
+                    let mut next_contexts = vec![fact.context];
+                    let mut completed_context = None;
+                    if contextual.is_some() {
+                        if let Some((boundary, enters)) = symbolic_transform_boundary(symbolic, transform) {
+                            if enters {
+                                let (context, returned_nodes, returned_facts) =
+                                    contexts.register_call(fact.context, boundary);
+                                for node in returned_nodes {
+                                    if allowed_funcs.is_none_or(|allowed| {
+                                        self.ws_node_func(unified, node)
+                                            .is_some_and(|func| allowed.contains(&func))
+                                    }) && reached.insert(node, fact.context)
+                                    {
+                                        ordinary.push(ClosureNodeState {
+                                            node,
+                                            context: fact.context,
+                                        });
+                                    }
+                                }
+                                for mut returned_fact in returned_facts {
+                                    returned_fact.context = fact.context;
+                                    if facts.insert(returned_fact) {
+                                        pending_facts.push(returned_fact);
+                                    }
+                                }
+                                next_contexts.clear();
+                                next_contexts.push(context);
+                            } else if contexts.matches(fact.context, boundary) {
+                                completed_context = Some(fact.context);
+                                next_contexts.clear();
+                            } else if activate_seed_callers && fact.context == 0 {
+                                next_contexts.clear();
+                                next_contexts.push(0);
+                            } else {
+                                continue;
+                            }
+                        }
+                    }
                     if transform.kind == SymbolicFieldTransformKind::ScalarReturn {
                         let exact_matches = transform.exact_field != NO_SYMBOLIC_STRING
                             && symbolic
@@ -1920,13 +2386,39 @@ impl IdgQueryService {
                             {
                                 for node in nodes {
                                     let node = NodeId(node.0);
-                                    if !reached.contains(node) {
-                                        reached.set(node);
-                                        ordinary.push(node);
+                                    if allowed_funcs.is_some_and(|allowed| {
+                                        self.ws_node_func(unified, node)
+                                            .is_none_or(|func| !allowed.contains(&func))
+                                    }) {
+                                        continue;
+                                    }
+                                    if let Some(context) = completed_context {
+                                        for caller_context in contexts.complete_node_return(context, node) {
+                                            if reached.insert(node, caller_context) {
+                                                ordinary.push(ClosureNodeState {
+                                                    node,
+                                                    context: caller_context,
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        for &context in &next_contexts {
+                                            if reached.insert(node, context) {
+                                                ordinary.push(ClosureNodeState { node, context });
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                        continue;
+                    }
+                    if allowed_funcs.is_some_and(|allowed| {
+                        symbolic
+                            .bases()
+                            .get(transform.target as usize)
+                            .is_none_or(|base| !allowed.contains(&base.func))
+                    }) {
                         continue;
                     }
                     let next = SymbolicNodeFact {
@@ -1934,9 +2426,24 @@ impl IdgQueryService {
                         field: fact.field,
                         span: Some(transform.write_span),
                         interprocedural: transform.kind != SymbolicFieldTransformKind::Copy,
+                        context: 0,
                     };
-                    if facts.insert(next) {
-                        pending_facts.push(next);
+                    if let Some(context) = completed_context {
+                        for caller_context in contexts.complete_fact_return(context, next) {
+                            let mut returned = next;
+                            returned.context = caller_context;
+                            if facts.insert(returned) {
+                                pending_facts.push(returned);
+                            }
+                        }
+                    } else {
+                        for &context in &next_contexts {
+                            let mut next = next;
+                            next.context = context;
+                            if facts.insert(next) {
+                                pending_facts.push(next);
+                            }
+                        }
                     }
                 }
             }
@@ -1948,32 +2455,49 @@ impl IdgQueryService {
             ordinary.len(),
             facts.len()
         );
-        ordinary
+        let mut nodes: Vec<NodeId> = ordinary.into_iter().map(|state| state.node).collect();
+        nodes.sort_unstable_by_key(|node| node.0);
+        nodes.dedup();
+        nodes
     }
 
     fn seed_symbolic_fact_consumers(
         &self,
+        unified: &UnifiedAddressSpace,
         runtime: &SymbolicRuntimeIndex,
         fact: SymbolicNodeFact,
-        ordinary: &mut Vec<NodeId>,
-        reached: &mut NodeBitSet,
+        allowed_funcs: Option<&AHashSet<FuncId>>,
+        ordinary: &mut Vec<ClosureNodeState>,
+        reached: &mut ClosureVisited,
     ) {
         let exact_nodes = runtime.exact_reads.get(&symbolic_fact_key(fact.base, fact.field));
         if let Some(nodes) = exact_nodes {
             for node in nodes {
                 let node = NodeId(node.0);
-                if !reached.contains(node) {
-                    reached.set(node);
-                    ordinary.push(node);
+                if allowed_funcs.is_none_or(|allowed| {
+                    self.ws_node_func(unified, node)
+                        .is_some_and(|func| allowed.contains(&func))
+                }) && reached.insert(node, fact.context)
+                {
+                    ordinary.push(ClosureNodeState {
+                        node,
+                        context: fact.context,
+                    });
                 }
             }
         }
         if let Some(nodes) = runtime.bare_reads.get(&fact.base) {
             for node in nodes {
                 let node = NodeId(node.0);
-                if !reached.contains(node) {
-                    reached.set(node);
-                    ordinary.push(node);
+                if allowed_funcs.is_none_or(|allowed| {
+                    self.ws_node_func(unified, node)
+                        .is_some_and(|func| allowed.contains(&func))
+                }) && reached.insert(node, fact.context)
+                {
+                    ordinary.push(ClosureNodeState {
+                        node,
+                        context: fact.context,
+                    });
                 }
             }
         }
@@ -2023,6 +2547,7 @@ impl IdgQueryService {
                         field,
                         span: write_span,
                         interprocedural: false,
+                        context: 0,
                     };
                     out.facts_by_node.entry(ws_node).or_default().push(fact);
                     if is_read {
@@ -2044,7 +2569,15 @@ impl IdgQueryService {
             nodes.dedup();
         }
         for facts in out.facts_by_node.values_mut() {
-            facts.sort_unstable_by_key(|fact| (fact.base, fact.field, fact.span, fact.interprocedural));
+            facts.sort_unstable_by_key(|fact| {
+                (
+                    fact.base,
+                    fact.field,
+                    fact.span,
+                    fact.interprocedural,
+                    fact.context,
+                )
+            });
             facts.dedup();
         }
         out
@@ -2084,6 +2617,48 @@ impl IdgQueryService {
         let reach = Arc::new(self.build_reach(unified, Some(max_precision)));
         write.insert(max_precision, Arc::clone(&reach));
         reach
+    }
+
+    fn ensure_contextual_summary_runtime(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+        max_precision: Option<Precision>,
+    ) -> Arc<ContextualSummaryRuntime> {
+        {
+            let read = unified.contextual_summaries.read();
+            if let Some(runtime) = read.get(&max_precision) {
+                return Arc::clone(runtime);
+            }
+        }
+        let mut write = unified.contextual_summaries.write();
+        if let Some(runtime) = write.get(&max_precision) {
+            return Arc::clone(runtime);
+        }
+        // An empty requested-function set still compiles every function's
+        // local graph and recursive call summaries, but skips materializing
+        // any parameter-result rows. This is the canonical compiler graph for
+        // arbitrary forward closures.
+        let batch = crate::function_summary::return_taint_param_indices(&self.workspace, &[], max_precision);
+        let runtime = Arc::new(self.build_contextual_summary_runtime(&batch.contextual_edges, max_precision));
+        write.insert(max_precision, Arc::clone(&runtime));
+        runtime
+    }
+
+    fn cache_contextual_summary_runtime(
+        &self,
+        max_precision: Option<Precision>,
+        summary_edges: &[crate::function_summary::ContextualSummaryEdge],
+    ) -> Arc<ContextualSummaryRuntime> {
+        let unified = self.ensure_unified();
+        {
+            let read = unified.contextual_summaries.read();
+            if let Some(runtime) = read.get(&max_precision) {
+                return Arc::clone(runtime);
+            }
+        }
+        let runtime = Arc::new(self.build_contextual_summary_runtime(summary_edges, max_precision));
+        let mut write = unified.contextual_summaries.write();
+        Arc::clone(write.entry(max_precision).or_insert(runtime))
     }
 
     fn build_reach(
@@ -2179,6 +2754,7 @@ impl IdgQueryService {
                     param_idx: u32::MAX,
                     precision: link.precision,
                     call_kind: bonsai_callgraph::EdgeKind::Indirect,
+                    relation: CrossCallRelation::FieldState,
                 });
         }
         for cfe in &self.workspace.cross_file().edges {
@@ -2376,17 +2952,20 @@ fn lift_call_arg_edge(
     let from_place = from_seg.places.get(from_node.place)?;
     let to_place = to_seg.places.get(to_node.place)?;
     // Forward call-arg edge: caller's CallArg → callee's Param.
-    if let Place::CallArg { site, idx } = from_place {
-        if let Place::Param { idx: param_idx } = to_place {
-            return Some(CrossCallEdge {
-                caller: from_node.func,
-                callee: to_node.func,
-                call_span: site.0,
-                arg_idx: *idx,
-                param_idx: *param_idx,
-                precision: edge.meta.precision,
-                call_kind: edge.meta.call_kind,
-            });
+    if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg {
+        if let Place::CallArg { site, idx } = from_place {
+            if let Place::Param { idx: param_idx } = to_place {
+                return Some(CrossCallEdge {
+                    caller: from_node.func,
+                    callee: to_node.func,
+                    call_span: site.0,
+                    arg_idx: *idx,
+                    param_idx: *param_idx,
+                    precision: edge.meta.precision,
+                    call_kind: edge.meta.call_kind,
+                    relation: CrossCallRelation::Argument,
+                });
+            }
         }
     }
     // Source-callback edge: an external source API's call result is
@@ -2406,6 +2985,7 @@ fn lift_call_arg_edge(
                     param_idx: *param_idx,
                     precision: edge.meta.precision,
                     call_kind: edge.meta.call_kind,
+                    relation: CrossCallRelation::Callback,
                 });
             }
         }
@@ -2416,7 +2996,11 @@ fn lift_call_arg_edge(
     // callee reads `param.field`. Treat it as a cross-call lineage
     // hop without pretending the whole positional argument/parameter
     // is tainted.
-    if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg && from_node.func != to_node.func {
+    if matches!(
+        edge.meta.kind,
+        crate::edge::IdgEdgeKind::InterCallArg | crate::edge::IdgEdgeKind::InterFieldCallArg
+    ) && from_node.func != to_node.func
+    {
         let (arg_idx, param_idx) = field_cross_call_arg_and_param_indices(
             field_index,
             from_seg_id,
@@ -2438,6 +3022,11 @@ fn lift_call_arg_edge(
             param_idx,
             precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
+            relation: if edge.meta.kind == crate::edge::IdgEdgeKind::InterFieldCallArg {
+                CrossCallRelation::FieldState
+            } else {
+                CrossCallRelation::Capture
+            },
         });
     }
     // Return/outbound edge: any interprocedural return-family edge flows
@@ -2462,7 +3051,11 @@ fn lift_call_arg_edge(
     // `parent_trace_id` lookup returns None. Sentinel
     // `arg_idx = u32::MAX` / `param_idx = u32::MAX` distinguishes
     // the synthetic return row from real positional-arg edges.
-    if edge.meta.kind == crate::edge::IdgEdgeKind::InterReturn && from_node.func != to_node.func {
+    if matches!(
+        edge.meta.kind,
+        crate::edge::IdgEdgeKind::InterReturn | crate::edge::IdgEdgeKind::InterFieldReturn
+    ) && from_node.func != to_node.func
+    {
         return Some(CrossCallEdge {
             caller: from_node.func,
             callee: to_node.func,
@@ -2471,6 +3064,11 @@ fn lift_call_arg_edge(
             param_idx: u32::MAX,
             precision: edge.meta.precision,
             call_kind: edge.meta.call_kind,
+            relation: if edge.meta.kind == crate::edge::IdgEdgeKind::InterFieldReturn {
+                CrossCallRelation::FieldState
+            } else {
+                CrossCallRelation::Return
+            },
         });
     }
     None

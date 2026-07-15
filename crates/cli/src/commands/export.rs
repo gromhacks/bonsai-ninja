@@ -20,9 +20,11 @@ pub(crate) fn cmd_export(
     root: &std::path::Path,
     full_propagations: bool,
     complete_chains: bool,
+    compiled_propagations: bool,
     format: ExportFormat,
 ) -> Result<()> {
-    let cacheable_default_json = format == ExportFormat::Json && !complete_chains && !full_propagations;
+    let cacheable_default_json =
+        format == ExportFormat::Json && !complete_chains && !full_propagations && !compiled_propagations;
     if cacheable_default_json {
         let stage = progress::ScopedSpinner::new("checking export cache");
         let cache_hit = output::with_writer(|writer| {
@@ -59,6 +61,7 @@ pub(crate) fn cmd_export(
     let options = bonsai_sdk::NativeExportOptions {
         full_propagations,
         complete_chains,
+        compiled_propagations,
     };
     if !cacheable_default_json {
         write_native_json(&export, options)?;

@@ -1053,7 +1053,7 @@ fn field_argument_forwarding_preserves_matching_field_path() {
     let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
     let callee_segment = ws.segment(SegmentId(1)).expect("callee segment");
     let forwards_cmd_field = ws.cross_file().edges.iter().any(|edge| {
-        edge.edge.meta.kind == IdgEdgeKind::InterCallArg
+        edge.edge.meta.kind == IdgEdgeKind::InterFieldCallArg
             && place_storage_name(
                 caller_segment,
                 node_place(caller_segment, edge.edge.from).expect("from place"),
@@ -1075,11 +1075,14 @@ fn field_argument_forwarding_preserves_matching_field_path() {
     );
 }
 
-fn sparse_field_forwarding_reachability(callee_read: &str) -> ([AHashSet<usize>; 2], usize) {
-    sparse_field_forwarding_reachability_for_reads(&[callee_read])
+fn symbolic_field_forwarding_reachability(callee_read: &str) -> ([AHashSet<usize>; 2], usize) {
+    symbolic_field_forwarding_reachability_for_reads(&[callee_read], false)
 }
 
-fn sparse_field_forwarding_reachability_for_reads(callee_reads: &[&str]) -> ([AHashSet<usize>; 2], usize) {
+fn symbolic_field_forwarding_reachability_for_reads(
+    callee_reads: &[&str],
+    mixed_capabilities: bool,
+) -> ([AHashSet<usize>; 2], usize) {
     let mut caller = empty_decl(1, "caller");
     caller.params = vec!["live_src".to_string(), "dead_src".to_string()];
     caller.flow_events = vec![
@@ -1147,14 +1150,7 @@ fn sparse_field_forwarding_reachability_for_reads(callee_reads: &[&str]) -> ([AH
     resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
     let caller_transfer = transfer_function_for(&caller);
     let callee_transfer = transfer_function_for(&callee);
-    let terminal_sites = callee_reads
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            let start = 50 + u64::try_from(index).expect("test call index") * 20;
-            (FuncId::new(2), span(start, start + 15))
-        })
-        .collect();
+    let symbolic_funcs = mixed_capabilities.then(|| AHashSet::from([FuncId::new(1)]));
     let ws = stitch_idg_with_selective_field_forwarding_mode(
         vec![caller_transfer, callee_transfer],
         &resolver,
@@ -1164,8 +1160,7 @@ fn sparse_field_forwarding_reachability_for_reads(callee_reads: &[&str]) -> ([AH
         ])),
         true,
         true,
-        None,
-        Some(&terminal_sites),
+        symbolic_funcs.as_ref(),
     );
     let symbolic_transform_count = ws.symbolic_field().transforms().len();
     let service = IdgQueryService::new(Arc::new(ws), Arc::new(GlobalIndex::new()));
@@ -1195,84 +1190,34 @@ fn sparse_field_forwarding_reachability_for_reads(callee_reads: &[&str]) -> ([AH
 }
 
 #[test]
-fn sparse_field_forwarding_uses_exact_ast_projection_demand() {
-    let ([live, dead], symbolic_transform_count) = sparse_field_forwarding_reachability("arg.live");
+fn symbolic_field_forwarding_uses_exact_ast_projection() {
+    let ([live, dead], symbolic_transform_count) = symbolic_field_forwarding_reachability("arg.live");
     assert_eq!(live, AHashSet::from([0]));
     assert!(dead.is_empty());
     assert_eq!(symbolic_transform_count, 1);
 }
 
 #[test]
-fn sparse_field_forwarding_preserves_whole_object_ast_reads() {
-    let ([live, dead], _) = sparse_field_forwarding_reachability("arg");
+fn symbolic_field_forwarding_preserves_whole_object_ast_reads() {
+    let ([live, dead], _) = symbolic_field_forwarding_reachability("arg");
     assert_eq!(live, AHashSet::from([0]));
     assert_eq!(dead, AHashSet::from([0]));
 }
 
 #[test]
-fn whole_object_demand_does_not_erase_exact_projection_demand() {
-    let ([live, dead], _) = sparse_field_forwarding_reachability_for_reads(&["arg", "arg.live"]);
+fn whole_object_symbolic_read_does_not_erase_exact_projection() {
+    let ([live, dead], _) = symbolic_field_forwarding_reachability_for_reads(&["arg", "arg.live"], false);
     assert_eq!(live, AHashSet::from([0, 1]));
     assert_eq!(dead, AHashSet::from([0]));
 }
 
 #[test]
-fn explicit_empty_terminal_set_does_not_promote_unresolved_calls_to_wildcard_demand() {
-    let caller = FuncId::new(1);
-    let unresolved_site = span(50, 65);
-    let empty = AHashSet::default();
-    let terminal = AHashSet::from([(caller, unresolved_site)]);
-
-    assert!(whole_object_call_is_demanded(
-        None,
-        false,
-        caller,
-        unresolved_site
-    ));
-    assert!(!whole_object_call_is_demanded(
-        Some(&empty),
-        false,
-        caller,
-        unresolved_site
-    ));
-    assert!(whole_object_call_is_demanded(
-        Some(&terminal),
-        false,
-        caller,
-        unresolved_site
-    ));
-}
-
-#[test]
-fn call_argument_carriers_are_not_implicit_whole_object_read_roots() {
-    let mut carrier = empty_decl(1, "carrier");
-    carrier.params = vec!["box".to_string()];
-    carrier.flow_events = vec![FlowEvent::Call {
-        span: span(20, 35),
-        name: "external".to_string(),
-        receiver: None,
-        receiver_types: Vec::new(),
-        call_kind: CallKind::Function,
-        args: vec![CallArg {
-            passing_mode: Default::default(),
-            span: span(28, 31),
-            name: None,
-            value_text: "box".to_string(),
-            place: Some("box".to_string()),
-            source_names: Vec::new(),
-        }],
-    }];
-    let carrier_ws = stitch_idg_with_selective_field_forwarding_mode(
-        vec![transfer_function_for(&carrier)],
-        &MockResolver::new(),
-        &StaticF2S(AHashMap::from([(FuncId::new(1), SegmentId(0))])),
-        false,
-        true,
-        None,
-        Some(&AHashSet::default()),
-    );
-    let carrier_index = FieldPlaceIndex::from_workspace(&carrier_ws);
-    assert!(!carrier_index.has_whole_read(&field_write_key(SegmentId(0), FuncId::new(1), "box")));
+fn mixed_adapter_capabilities_keep_incomplete_field_places_eager() {
+    let ([live, dead], symbolic_transform_count) =
+        symbolic_field_forwarding_reachability_for_reads(&["arg.live", "arg.dead"], true);
+    assert_eq!(live, AHashSet::from([0]));
+    assert_eq!(dead, AHashSet::from([1]));
+    assert_eq!(symbolic_transform_count, 0);
 }
 
 #[test]
@@ -1518,7 +1463,8 @@ fn field_copy_fanout_is_not_truncated() {
         .filter_map(|edge| {
             let from = place_storage_name(segment, node_place(segment, edge.from)?)?;
             let to = place_storage_name(segment, node_place(segment, edge.to)?)?;
-            (from == "source.cmd" && to.starts_with("copy") && to.ends_with(".cmd")).then_some(to)
+            (from == "source.cmd" && to.starts_with("copy") && to.strip_suffix(".cmd").is_some())
+                .then_some(to)
         })
         .collect::<AHashSet<_>>();
 
@@ -1908,7 +1854,7 @@ fn deep_field_argument_forwarding_preserves_the_complete_storage_path() {
 
     assert!(
         ws.cross_file().edges.iter().any(|edge| {
-            edge.edge.meta.kind == IdgEdgeKind::InterCallArg
+            edge.edge.meta.kind == IdgEdgeKind::InterFieldCallArg
                 && place_storage_name(
                     caller_segment,
                     node_place(caller_segment, edge.edge.from).expect("caller place"),
@@ -2334,7 +2280,7 @@ fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_input
     );
     let segment = ws.segment(SegmentId(0)).expect("single segment");
     let forwards_cmd_field = segment.edges.iter().any(|edge| {
-        edge.meta.kind == IdgEdgeKind::InterCallArg
+        edge.meta.kind == IdgEdgeKind::InterFieldCallArg
             && place_storage_name(segment, node_place(segment, edge.from).expect("from place")).as_deref()
                 == Some("arg.cmd")
             && place_storage_name(segment, node_place(segment, edge.to).expect("to place")).as_deref()

@@ -18,6 +18,20 @@ fn compressed_complete_rows_are_honestly_non_materialized() {
         .is_some_and(|reason| reason.contains("compressed_callgraph")));
     assert!(flow_id_rows_incomplete_reason(true, 0, true)
         .is_some_and(|reason| reason.contains("compressed_callgraph")));
+    let compiled = NativeExportConfig {
+        full_propagations: false,
+        complete_chains: true,
+        compiled_propagations: true,
+    };
+    assert_eq!(propagation_mode(compiled), "compiled_idg");
+    assert!(propagation_omitted_reason(compiled).is_none());
+    let materialized = NativeExportConfig {
+        full_propagations: true,
+        complete_chains: true,
+        compiled_propagations: false,
+    };
+    assert_eq!(propagation_mode(materialized), "materialized_entries");
+    assert!(propagation_omitted_reason(materialized).is_none());
     assert_eq!(export_flow_label_options(), FlowIdLabelOptions::default());
 }
 
@@ -332,6 +346,7 @@ def entry(user):
         NativeExportConfig {
             full_propagations: true,
             complete_chains: true,
+            compiled_propagations: false,
         },
     )
     .expect("native export");

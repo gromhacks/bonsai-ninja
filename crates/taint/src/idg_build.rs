@@ -33,18 +33,38 @@ use bonsai_idg::IdgQueryService;
 /// removing the need for a fallback engine when the service is absent.
 #[must_use]
 pub fn ensure_idg_service(db: &AnalyzerDb) -> Arc<IdgQueryService> {
-    // Match the semantic graph used by security: diagnostic peer-method
-    // fan-out is intentionally excluded. Unresolved calls may preserve
-    // AST-proven inputs into their result at narrowed precision, but method
-    // arguments are never invented as exact receiver-state writes: mutation
-    // requires a resolved body or an explicit external summary.
-    let transfer_options = bonsai_idg::TransferOptions {
-        include_diagnostic_field_flows: false,
-        include_receiver_method_propagation: false,
-        include_unresolved_call_result_passthrough: true,
-        include_unresolved_receiver_result_passthrough: true,
-        ..bonsai_idg::TransferOptions::default()
-    };
+    if let Some(service) = db.idg_service() {
+        return service;
+    }
+    // Match the canonical workspace/compiler graph. Adapter capability facts
+    // select symbolic access paths; no command facade maintains its own
+    // language or API inventory.
+    let transfer_options =
+        bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages());
+    let service = configured_idg_service(db, &transfer_options);
+    // Bare-db tests do not have a Workspace to seed the default slot. Publish
+    // the same service there so subsequent taint/export facades share it.
+    if let Some(established) = db.idg_service() {
+        return established;
+    }
+    db.set_idg_service(Arc::clone(&service));
+    service
+}
+
+/// Return the canonical compiler IDG without publishing it as the workspace's
+/// explicitly warmed service.
+///
+/// The persisted dataflow facade uses this path on a cache miss: it still
+/// executes the one IDG engine, while `syntax_flow_graph` can truthfully keep
+/// its lifecycle contract that a cold inspect query does not warm the
+/// workspace IDG slot. The semantic-fingerprint cache shares the build across
+/// subsequent dataflow misses.
+pub(crate) fn compiler_idg_service_without_default_seed(db: &AnalyzerDb) -> Arc<IdgQueryService> {
+    if let Some(service) = db.idg_service() {
+        return service;
+    }
+    let transfer_options =
+        bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages());
     configured_idg_service(db, &transfer_options)
 }
 
@@ -65,6 +85,8 @@ pub(crate) fn idg_service_for_inter_config(
     {
         return ensure_idg_service(db);
     }
+    let compiler_options =
+        bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages());
     let transfer_options = bonsai_idg::TransferOptions {
         clean_output_overwrites: config
             .clean_output_overwrites
@@ -120,14 +142,15 @@ pub(crate) fn idg_service_for_inter_config(
                 receiver_type: shape.receiver_type.clone(),
             })
             .collect(),
-        include_diagnostic_field_flows: false,
-        include_receiver_method_propagation: false,
-        include_field_argument_forwarding: true,
-        demand_driven_field_forwarding: false,
-        field_demand_languages: Vec::new(),
-        field_demand_terminal_sites: Vec::new(),
-        include_unresolved_call_result_passthrough: true,
-        include_unresolved_receiver_result_passthrough: true,
+        include_diagnostic_field_flows: compiler_options.include_diagnostic_field_flows,
+        include_receiver_method_propagation: compiler_options.include_receiver_method_propagation,
+        include_field_argument_forwarding: compiler_options.include_field_argument_forwarding,
+        symbolic_field_forwarding: compiler_options.symbolic_field_forwarding,
+        symbolic_field_languages: compiler_options.symbolic_field_languages,
+        include_unresolved_call_result_passthrough: compiler_options
+            .include_unresolved_call_result_passthrough,
+        include_unresolved_receiver_result_passthrough: compiler_options
+            .include_unresolved_receiver_result_passthrough,
     }
     .canonicalized();
     configured_idg_service(db, &transfer_options)
@@ -207,7 +230,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn compatibility_idg_does_not_reuse_or_replace_default_service() {
+    fn public_taint_reuses_the_canonical_default_service() {
         let db = AnalyzerDb::new(
             Arc::new(bonsai_vfs::Vfs::new()),
             Arc::new(bonsai_lang_api::LanguageRegistry::new()),
@@ -218,12 +241,8 @@ mod tests {
         ));
         db.set_idg_service(default_service.clone());
 
-        let compatibility = ensure_idg_service(&db);
-        assert!(!Arc::ptr_eq(&compatibility, &default_service));
-        assert!(Arc::ptr_eq(
-            &db.idg_service().expect("default service remains seeded"),
-            &default_service
-        ));
-        assert!(Arc::ptr_eq(&ensure_idg_service(&db), &compatibility));
+        let canonical = ensure_idg_service(&db);
+        assert!(Arc::ptr_eq(&canonical, &default_service));
+        assert!(Arc::ptr_eq(&ensure_idg_service(&db), &canonical));
     }
 }

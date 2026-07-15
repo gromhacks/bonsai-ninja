@@ -902,6 +902,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
         args_value_text: vec!["String.to_charlist(cmd)".to_string()],
         args_span: vec![outer_arg_span],
         args_place: vec![None],
+        args_source_names: vec![vec!["cmd".to_string()]],
         receiver: None,
         receiver_types: Vec::new(),
     };
@@ -922,6 +923,7 @@ fn configured_passthrough_nested_call_return_is_not_pruned_as_clean() {
                 args_value_text: vec!["cmd".to_string()],
                 args_span: vec![Span::new(FileId::new(0), 13, 16)],
                 args_place: vec![Some("cmd".to_string())],
+                args_source_names: vec![vec!["cmd".to_string()]],
                 receiver: Some("String".to_string()),
                 receiver_types: Vec::new(),
             },
@@ -964,6 +966,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
         args_value_text: vec!["clean_return(cmd)".to_string()],
         args_span: vec![outer_arg_span],
         args_place: vec![None],
+        args_source_names: vec![vec!["cmd".to_string()]],
         receiver: None,
         receiver_types: Vec::new(),
     };
@@ -977,6 +980,7 @@ fn unmodeled_nested_call_return_is_pruned_as_clean() {
                 args_value_text: vec!["cmd".to_string()],
                 args_span: vec![Span::new(FileId::new(0), 15, 18)],
                 args_place: vec![Some("cmd".to_string())],
+                args_source_names: vec![vec!["cmd".to_string()]],
                 receiver: None,
                 receiver_types: Vec::new(),
             },
@@ -1016,6 +1020,7 @@ fn ast_lowered_nested_projection_place_is_not_pruned_as_unknown_return() {
         args_value_text: vec!["maps:get(cmd, C)".to_string()],
         args_span: vec![Span::new(FileId::new(0), 0, 20)],
         args_place: vec![Some("C.cmd".to_string())],
+        args_source_names: vec![vec!["C.cmd".to_string()]],
         receiver: None,
         receiver_types: Vec::new(),
     };
@@ -1051,6 +1056,7 @@ fn semantic_argument_covering_its_call_is_not_treated_as_a_nested_return() {
         args_value_text: vec!["interpolated value".to_string()],
         args_span: vec![call_span],
         args_place: vec![None],
+        args_source_names: vec![vec!["value".to_string()]],
         receiver: None,
         receiver_types: Vec::new(),
     };

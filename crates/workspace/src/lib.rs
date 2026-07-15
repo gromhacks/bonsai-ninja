@@ -1280,6 +1280,7 @@ impl Workspace {
         // bonsai-ninja (e.g. `git checkout` between two CLI calls).
         let root_path = self.root_path();
         let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, root_path.as_deref());
+        let transfer_options = default_workspace_idg_transfer_options(&self.inner.db);
         // Try to hydrate the workspace IDG from the on-disk sidecar
         // before paying for a fresh build. Cold rebuild on Redis `src/`
         // takes >1 minute and dominates `bonsai-ninja security ...`
@@ -1309,7 +1310,7 @@ impl Workspace {
         // reuses them to keep its name filter from rejecting
         // alias-rewritten call sites.
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_paths(
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options_with_paths(
             global.as_ref(),
             cg.as_ref(),
             |file| bonsai_resolve::semantic_import_binding_map_for_file(&db.imports_for(file)),
@@ -1320,6 +1321,7 @@ impl Workspace {
                     .ok()
                     .map(|path| path.to_string_lossy().into_owned())
             },
+            &transfer_options,
         );
         // Persist before constructing the query service so a subsequent
         // open warm-starts. Failures (read-only filesystem, full disk)
@@ -1361,9 +1363,9 @@ impl Workspace {
     /// it under those exact semantics.
     ///
     /// Configured transfer options use a distinct sidecar keyed by a
-    /// stable fingerprint of those options. The default IDG sidecar
-    /// represents source structure only, while transfer options come
-    /// from the editable security rulepack and can alter graph edges. A
+    /// stable fingerprint of those options. The default IDG sidecar uses the
+    /// canonical adapter-capability compiler semantics, while additional
+    /// transfer options can come from an editable security rulepack. A
     /// configured graph never replaces [`AnalyzerDb::idg_service`], whose
     /// invariant is the full-workspace graph with default transfer semantics.
     pub fn build_and_seed_idg_service_with_transfer_options(
@@ -1433,11 +1435,9 @@ impl Workspace {
             );
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
-        let service = self
-            .inner
+        self.inner
             .db
-            .set_idg_service_for_semantics(transfer_hash, service);
-        service
+            .set_idg_service_for_semantics(transfer_hash, service)
     }
 
     /// Build a file-scoped workspace IDG with caller-supplied transfer
@@ -1500,8 +1500,7 @@ impl Workspace {
             }
         }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
-        let service = self.inner.db.set_idg_service_for_semantics(scoped_hash, service);
-        service
+        self.inner.db.set_idg_service_for_semantics(scoped_hash, service)
     }
 
     /// Build a file-scoped workspace IDG using an already resolved semantic
@@ -3082,7 +3081,11 @@ pub(crate) const fn idg_stitching_semantic_fingerprint() -> u64 {
     // v33 (2026-07-10): IDG positional parameter/call-argument identities
     // use u32 end-to-end, so positions above 254 no longer collide with the
     // synthetic receiver/return sentinel.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 33;
+    // v34 (2026-07-15): projected field state has distinct interprocedural
+    // edge provenance, so it cannot be decoded as a scalar call boundary.
+    // v35 (2026-07-15): a resolved nested-expression edge is indexed only on
+    // the Tree-sitter call event that owns its resolved target.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 35;
     0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
@@ -3102,11 +3105,17 @@ pub(crate) fn build_fingerprint_hash() -> u64 {
 }
 
 fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
-    let mut pipeline_hash = idg_pipeline_hash() ^ crate::cache_fingerprint::workspace_content_fingerprint(db);
+    let mut pipeline_hash = idg_pipeline_hash()
+        ^ crate::cache_fingerprint::workspace_content_fingerprint(db)
+        ^ default_workspace_idg_transfer_options(db).semantic_fingerprint();
     if let Some(root) = root {
         pipeline_hash ^= crate::cache_fingerprint::dependency_metadata_fingerprint(root);
     }
     pipeline_hash
+}
+
+fn default_workspace_idg_transfer_options(db: &AnalyzerDb) -> bonsai_idg::TransferOptions {
+    bonsai_idg::TransferOptions::compiler_semantics(db.complete_field_place_languages())
 }
 
 fn idg_transfer_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>, transfer_hash: u64) -> u64 {

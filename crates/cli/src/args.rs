@@ -2371,8 +2371,10 @@ pub(crate) enum Cmd {
         /// `compressed_callgraph` instead of materialized path rows.
         #[arg(long)]
         complete_chains: bool,
-        /// Request every expensive export evidence section. Currently equivalent to
-        /// `--full-propagations --complete-chains` for native JSON output.
+        /// Request the complete compiler graph. Potentially quadratic derived
+        /// paths and per-entry propagation rows stay in exact compressed form;
+        /// combine with `--full-propagations` only when concrete row expansion
+        /// is intentionally required.
         #[arg(long)]
         all: bool,
         /// Output shape. `json` is the full native export; `networkx`,

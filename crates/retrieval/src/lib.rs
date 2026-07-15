@@ -39,7 +39,10 @@ use std::path::{Path, PathBuf};
 // function candidate text for file-scoped facts are persisted so filtered
 // browse commands can use warmed sidecars for file narrowing without
 // rendering retrieval docs as evidence.
-pub const RETRIEVAL_SCHEMA_VERSION: u32 = 7;
+// v8 (2026-07-13): persisted documents use an interned string dictionary and
+// streaming zstd compression. Canonical FactDoc semantics are unchanged; the
+// representation removes workspace-scale repetition from the sidecar.
+pub const RETRIEVAL_SCHEMA_VERSION: u32 = 8;
 
 /// Factstore table id for retrieval snapshots.
 pub const RETRIEVAL_TABLE_ID: u32 = 0x5254_5631;
@@ -94,6 +97,37 @@ pub struct FactSnapshot {
     pub schema_version: u32,
     pub pipeline_fingerprint: u64,
     pub docs: Vec<FactDoc>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CompactFactSnapshot {
+    schema_version: u32,
+    pipeline_fingerprint: u64,
+    strings: Vec<String>,
+    docs: Vec<CompactFactDoc>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CompactFactDoc {
+    fact_id: u32,
+    kind: u32,
+    language: Option<u32>,
+    file_path: u32,
+    span: FactSpan,
+    symbol_name: Option<u32>,
+    qualified_name: Option<u32>,
+    enclosing_function: Option<u32>,
+    enclosing_class: Option<u32>,
+    stable_ids: Vec<u32>,
+    resolver_precision: Option<u32>,
+    resolver_stage: Option<u32>,
+    provenance: Option<u32>,
+    confidence: Option<u8>,
+    static_limits: Vec<u32>,
+    incomplete_reasons: Vec<u32>,
+    normalized_search_text: u32,
+    content_fingerprint: u64,
+    pipeline_fingerprint: u64,
 }
 
 /// Result of ensuring the persisted retrieval sidecar exists.
@@ -422,6 +456,10 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
     let global = ws.db().global_index();
     let mut docs = Vec::new();
     for file in global.all_files() {
+        // Fact ids include the source file. Deduplicate one file at a time so
+        // a large workspace never retains and globally sorts the duplicate
+        // operation/ref/event projections for every file at once.
+        let mut file_docs = Vec::new();
         let file_path = ws
             .vfs()
             .path(file)
@@ -430,20 +468,27 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
             .db()
             .adapter_for(file)
             .map(|adapter| adapter.language_id().as_str().to_string());
-        push_file_doc(ws, &mut docs, file, &file_path, language.as_deref(), pipeline);
+        push_file_doc(
+            ws,
+            &mut file_docs,
+            file,
+            &file_path,
+            language.as_deref(),
+            pipeline,
+        );
         for decl in global.decls_in(file) {
-            push_decl_doc(ws, &mut docs, decl, language.as_deref(), pipeline);
+            push_decl_doc(ws, &mut file_docs, decl, language.as_deref(), pipeline);
             let ctx = FlowDocContext {
                 in_fn: &decl.name,
                 language: language.as_deref(),
                 pipeline,
             };
             for op in operations_from_flow_events(&decl.flow_events) {
-                push_operation_doc(ws, &mut docs, &op, &ctx);
+                push_operation_doc(ws, &mut file_docs, &op, &ctx);
             }
             walk_flow_events(
                 ws,
-                &mut docs,
+                &mut file_docs,
                 &decl.flow_events,
                 &decl.name,
                 language.as_deref(),
@@ -451,7 +496,7 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
             );
         }
         for import in import_specs_for_retrieval(ws, file) {
-            push_import_doc(ws, &mut docs, &import, language.as_deref(), pipeline);
+            push_import_doc(ws, &mut file_docs, &import, language.as_deref(), pipeline);
         }
         if let Some(idx) = global.file_index(file) {
             for reference in &idx.refs {
@@ -468,7 +513,7 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                 if let Some(function) = enclosing_function.as_deref() {
                     search_parts.push(function);
                 }
-                docs.push(new_doc(DocInput {
+                file_docs.push(new_doc(DocInput {
                     kind,
                     language: language.as_deref(),
                     file_path: &file_path,
@@ -497,7 +542,7 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                 if let Some(function) = enclosing_function.as_deref() {
                     search_parts.push(function);
                 }
-                docs.push(new_doc(DocInput {
+                file_docs.push(new_doc(DocInput {
                     kind: "string",
                     language: language.as_deref(),
                     file_path: &file_path,
@@ -526,7 +571,7 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                 if let Some(function) = enclosing_function.as_deref() {
                     search_parts.push(function);
                 }
-                docs.push(new_doc(DocInput {
+                file_docs.push(new_doc(DocInput {
                     kind: "comment",
                     language: language.as_deref(),
                     file_path: &file_path,
@@ -548,22 +593,374 @@ pub fn build_fact_docs(ws: &Workspace) -> Vec<FactDoc> {
                 }));
             }
         }
+        docs.extend(dedup_docs(file_docs));
     }
-    push_edge_docs(ws, &mut docs, pipeline);
-    dedup_docs(docs)
+    let mut edge_docs = Vec::new();
+    push_edge_docs(ws, &mut edge_docs, pipeline);
+    docs.extend(dedup_docs(edge_docs));
+    docs
+}
+
+#[derive(Default)]
+struct FileCandidateTerms {
+    terms: BTreeSet<String>,
+    stable_ids: BTreeSet<String>,
+}
+
+impl FileCandidateTerms {
+    fn add(&mut self, value: &str) {
+        let raw = value.trim().to_lowercase();
+        if !raw.is_empty() {
+            self.terms.insert(raw);
+        }
+        self.terms.extend(tokens(value));
+    }
+
+    fn add_stable_id(&mut self, value: String) {
+        self.add(&value);
+        self.stable_ids.insert(value);
+    }
+}
+
+fn candidate_terms<'a>(
+    groups: &'a mut AHashMap<String, FileCandidateTerms>,
+    kind: &str,
+) -> &'a mut FileCandidateTerms {
+    groups.entry(kind.to_string()).or_default()
+}
+
+fn collect_flow_candidate_terms(
+    groups: &mut AHashMap<String, FileCandidateTerms>,
+    events: &[FlowEvent],
+    in_fn: &str,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, args, .. } => {
+                let calls = candidate_terms(groups, "call");
+                calls.add(name);
+                calls.add(in_fn);
+                for arg in args {
+                    let args = candidate_terms(groups, "arg");
+                    args.add(&arg.value_text);
+                    args.add(in_fn);
+                    if let Some(name) = arg.name.as_deref() {
+                        args.add(name);
+                        args.add(&format!("{name}={}", arg.value_text));
+                    }
+                    if let Some(place) = arg.place.as_deref() {
+                        args.add(place);
+                    }
+                    for source in &arg.source_names {
+                        args.add(source);
+                    }
+                }
+            }
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                let vars = candidate_terms(groups, "var");
+                vars.add(target);
+                vars.add(in_fn);
+                let display_source = source_name
+                    .as_deref()
+                    .or(source_call.as_deref())
+                    .or_else(|| source_names.first().map(String::as_str));
+                if let Some(source) = display_source {
+                    vars.add(source);
+                    vars.add(&format!("{target} = {source}"));
+                }
+                if let Some(call) = source_call {
+                    let calls = candidate_terms(groups, "call");
+                    calls.add(call);
+                    calls.add(in_fn);
+                    for arg in source_call_args {
+                        candidate_terms(groups, "arg").add(arg);
+                    }
+                }
+                for source in source_names {
+                    let reads = candidate_terms(groups, "ref-read");
+                    reads.add(source);
+                    reads.add(in_fn);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_flow_candidate_terms(groups, then_events, in_fn);
+                collect_flow_candidate_terms(groups, else_events, in_fn);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_flow_candidate_terms(groups, body, in_fn);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_flow_candidate_terms(groups, body, in_fn);
+                collect_flow_candidate_terms(groups, catch_events, in_fn);
+                collect_flow_candidate_terms(groups, finally_events, in_fn);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn finish_file_candidate_groups(
+    docs: &mut Vec<FactDoc>,
+    file_path: &str,
+    language: Option<&str>,
+    span: FactSpan,
+    content_fingerprint: u64,
+    pipeline_fingerprint: u64,
+    groups: AHashMap<String, FileCandidateTerms>,
+) {
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for (kind, group) in groups {
+        let normalized_search_text = group.terms.into_iter().collect::<Vec<_>>().join(" ");
+        docs.push(FactDoc {
+            fact_id: fact_id_for_parts(&kind, file_path, span.line, span.column, "file-candidates"),
+            kind,
+            language: language.map(str::to_string),
+            file_path: file_path.to_string(),
+            span: span.clone(),
+            symbol_name: None,
+            qualified_name: None,
+            enclosing_function: None,
+            enclosing_class: None,
+            stable_ids: group.stable_ids.into_iter().collect(),
+            resolver_precision: None,
+            resolver_stage: None,
+            provenance: Some("file-candidate-index".to_string()),
+            confidence: None,
+            static_limits: Vec::new(),
+            incomplete_reasons: Vec::new(),
+            normalized_search_text,
+            content_fingerprint,
+            pipeline_fingerprint,
+        });
+    }
+}
+
+/// Build the persisted candidate-only projection used to narrow files before
+/// canonical hydration. One record per `(file, fact-kind)` retains the same
+/// lexical terms without serializing overlapping operation/event/ref rows.
+fn build_persisted_candidate_docs(ws: &Workspace) -> Vec<FactDoc> {
+    let pipeline = pipeline_hash_for_workspace(ws);
+    let global = ws.db().global_index();
+    let mut docs = Vec::new();
+    for file in global.all_files() {
+        let file_path = ws
+            .vfs()
+            .path(file)
+            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
+        let language = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.language_id().as_str().to_string());
+        let (file_span, content_fingerprint) = ws.vfs().snapshot(file).map_or_else(
+            |_| {
+                (
+                    FactSpan {
+                        line: 1,
+                        column: 1,
+                        ..FactSpan::default()
+                    },
+                    0,
+                )
+            },
+            |snapshot| {
+                (
+                    FactSpan {
+                        line: 1,
+                        column: 1,
+                        start: 0,
+                        end: snapshot.text.len() as u64,
+                    },
+                    fnv1a_bytes64(snapshot.text.as_bytes()),
+                )
+            },
+        );
+        let mut groups = AHashMap::default();
+        let file_name = Path::new(&file_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&file_path);
+        let files = candidate_terms(&mut groups, "file");
+        files.add(&file_path);
+        files.add(file_name);
+        if let Some(language) = language.as_deref() {
+            files.add(language);
+        }
+
+        for decl in global.decls_in(file) {
+            let kind = format!("{:?}", decl.kind).to_lowercase();
+            let declarations = candidate_terms(&mut groups, &kind);
+            declarations.add(&decl.name);
+            if let Some(qualified) = decl.qualified_name.as_deref() {
+                declarations.add(qualified);
+            }
+            for param in &decl.params {
+                declarations.add(param);
+            }
+            for op in operations_from_flow_events(&decl.flow_events) {
+                let operations = candidate_terms(&mut groups, "operation");
+                operations.add(op.kind.as_str());
+                operations.add(&decl.name);
+                if let Some(target) = op.target.as_deref() {
+                    operations.add(target);
+                }
+                if let Some(detail) = op.detail.as_deref() {
+                    operations.add(detail);
+                }
+                for operand in op.operands {
+                    operations.add(&operand.name);
+                    operations.add(operand.role.as_str());
+                    operations.add(&format!("{}:{}", operand.role.as_str(), operand.name));
+                }
+            }
+            collect_flow_candidate_terms(&mut groups, &decl.flow_events, &decl.name);
+        }
+        for import in import_specs_for_retrieval(ws, file) {
+            let kind = if import.alias.is_some() {
+                "import-alias"
+            } else {
+                "import"
+            };
+            let imports = candidate_terms(&mut groups, kind);
+            imports.add(&import.module);
+            if let Some(alias) = import.alias.as_deref() {
+                imports.add(alias);
+            }
+            if let Some(original) = import.original_name.as_deref() {
+                imports.add(original);
+            }
+        }
+        if let Some(index) = global.file_index(file) {
+            for reference in &index.refs {
+                let kind = match reference.kind {
+                    RefKind::Read => "ref-read",
+                    RefKind::Write => "ref-write",
+                    RefKind::Call => "ref-call",
+                    RefKind::Decorator => "ref-decorator",
+                    _ => "ref",
+                };
+                candidate_terms(&mut groups, kind).add(&reference.name);
+            }
+            for string in &index.strings {
+                let strings = candidate_terms(&mut groups, "string");
+                strings.add(&string.text);
+                strings.add(&format!("{:?}", string.category).to_lowercase());
+            }
+            for comment in &index.comments {
+                let comments = candidate_terms(&mut groups, "comment");
+                comments.add(&comment.text);
+                comments.add(&format!("{:?}", comment.kind).to_lowercase());
+            }
+        }
+        finish_file_candidate_groups(
+            &mut docs,
+            &file_path,
+            language.as_deref(),
+            file_span,
+            content_fingerprint,
+            pipeline,
+            groups,
+        );
+    }
+
+    let mut edge_groups: AHashMap<bonsai_common::FileId, AHashMap<String, FileCandidateTerms>> =
+        AHashMap::default();
+    for edge in &ws.resolved_call_graph().inner().edges {
+        if !edge.precision.is_semantic() {
+            continue;
+        }
+        let Some(caller) = global.decl_of(SymbolId::new(edge.from.raw())) else {
+            continue;
+        };
+        let Some(callee) = global.decl_of(SymbolId::new(edge.to.raw())) else {
+            continue;
+        };
+        let groups = edge_groups.entry(edge.span.file).or_default();
+        let edges = candidate_terms(groups, "edge");
+        edges.add(&caller.name);
+        edges.add(&callee.name);
+        edges.add(&format!("{} -> {}", caller.name, callee.name));
+        let file_path = ws
+            .vfs()
+            .path(edge.span.file)
+            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
+        let (span, _) = span_doc_fields(ws, edge.span);
+        edges.add_stable_id(edge_id_for_parts(
+            &caller.name,
+            &callee.name,
+            &file_path,
+            span.line,
+            span.column,
+        ));
+    }
+    for (file, groups) in edge_groups {
+        let file_path = ws
+            .vfs()
+            .path(file)
+            .map_or_else(|_| "<unknown>".to_string(), |path| path.display().to_string());
+        let language = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.language_id().as_str().to_string());
+        let (span, content) = ws.vfs().snapshot(file).map_or_else(
+            |_| (FactSpan::default(), 0),
+            |snapshot| {
+                (
+                    FactSpan {
+                        line: 1,
+                        column: 1,
+                        start: 0,
+                        end: snapshot.text.len() as u64,
+                    },
+                    fnv1a_bytes64(snapshot.text.as_bytes()),
+                )
+            },
+        );
+        finish_file_candidate_groups(
+            &mut docs,
+            &file_path,
+            language.as_deref(),
+            span,
+            content,
+            pipeline,
+            groups,
+        );
+    }
+    docs.sort_unstable_by(|left, right| {
+        left.file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    docs
 }
 
 /// Save a retrieval sidecar for `ws` under `workspace_root`.
 pub fn save_sidecar(ws: &Workspace, workspace_root: &Path) -> std::io::Result<usize> {
     require_complete_workspace(ws)?;
     let path = retrieval_sidecar_path(workspace_root);
-    let docs = build_fact_docs(ws);
-    let snapshot = FactSnapshot {
-        schema_version: RETRIEVAL_SCHEMA_VERSION,
-        pipeline_fingerprint: pipeline_hash_for_workspace(ws),
+    let docs = build_persisted_candidate_docs(ws);
+    save_docs_snapshot(
+        RETRIEVAL_SCHEMA_VERSION,
+        pipeline_hash_for_workspace(ws),
         docs,
-    };
-    save_snapshot(&snapshot, &path)
+        &path,
+    )
 }
 
 /// Validate an existing retrieval sidecar or build it when stale/missing.
@@ -686,15 +1083,156 @@ fn on_demand_build_file_limit() -> usize {
         .unwrap_or(DEFAULT_ON_DEMAND_BUILD_FILE_LIMIT)
 }
 
-fn save_snapshot(snapshot: &FactSnapshot, path: &Path) -> std::io::Result<usize> {
-    let bytes = bincode::serialize(snapshot).map_err(invalid_data)?;
+#[derive(Default)]
+struct PersistedStringInterner {
+    ids: AHashMap<String, u32>,
+}
+
+impl PersistedStringInterner {
+    fn intern(&mut self, value: String) -> u32 {
+        if let Some(id) = self.ids.get(value.as_str()).copied() {
+            return id;
+        }
+        let id = u32::try_from(self.ids.len()).expect("retrieval string dictionary exceeds u32");
+        self.ids.insert(value, id);
+        id
+    }
+
+    fn intern_option(&mut self, value: Option<String>) -> Option<u32> {
+        value.map(|value| self.intern(value))
+    }
+
+    fn intern_many(&mut self, values: Vec<String>) -> Vec<u32> {
+        values.into_iter().map(|value| self.intern(value)).collect()
+    }
+
+    fn finish(self) -> Vec<String> {
+        let mut strings = vec![String::new(); self.ids.len()];
+        for (value, id) in self.ids {
+            strings[id as usize] = value;
+        }
+        strings
+    }
+}
+
+impl CompactFactSnapshot {
+    fn from_docs(schema_version: u32, pipeline_fingerprint: u64, docs: Vec<FactDoc>) -> Self {
+        let mut strings = PersistedStringInterner::default();
+        let docs = docs
+            .into_iter()
+            .map(|doc| CompactFactDoc {
+                fact_id: strings.intern(doc.fact_id),
+                kind: strings.intern(doc.kind),
+                language: strings.intern_option(doc.language),
+                file_path: strings.intern(doc.file_path),
+                span: doc.span,
+                symbol_name: strings.intern_option(doc.symbol_name),
+                qualified_name: strings.intern_option(doc.qualified_name),
+                enclosing_function: strings.intern_option(doc.enclosing_function),
+                enclosing_class: strings.intern_option(doc.enclosing_class),
+                stable_ids: strings.intern_many(doc.stable_ids),
+                resolver_precision: strings.intern_option(doc.resolver_precision),
+                resolver_stage: strings.intern_option(doc.resolver_stage),
+                provenance: strings.intern_option(doc.provenance),
+                confidence: doc.confidence,
+                static_limits: strings.intern_many(doc.static_limits),
+                incomplete_reasons: strings.intern_many(doc.incomplete_reasons),
+                normalized_search_text: strings.intern(doc.normalized_search_text),
+                content_fingerprint: doc.content_fingerprint,
+                pipeline_fingerprint: doc.pipeline_fingerprint,
+            })
+            .collect();
+        Self {
+            schema_version,
+            pipeline_fingerprint,
+            strings: strings.finish(),
+            docs,
+        }
+    }
+
+    fn expand(self) -> std::io::Result<FactSnapshot> {
+        fn text(strings: &[String], id: u32) -> std::io::Result<String> {
+            strings.get(id as usize).cloned().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("retrieval string id out of range: {id}"),
+                )
+            })
+        }
+        fn optional(strings: &[String], id: Option<u32>) -> std::io::Result<Option<String>> {
+            id.map(|id| text(strings, id)).transpose()
+        }
+        fn many(strings: &[String], ids: Vec<u32>) -> std::io::Result<Vec<String>> {
+            ids.into_iter().map(|id| text(strings, id)).collect()
+        }
+
+        let Self {
+            schema_version,
+            pipeline_fingerprint,
+            strings,
+            docs,
+        } = self;
+        let docs = docs
+            .into_iter()
+            .map(|doc| {
+                Ok(FactDoc {
+                    fact_id: text(&strings, doc.fact_id)?,
+                    kind: text(&strings, doc.kind)?,
+                    language: optional(&strings, doc.language)?,
+                    file_path: text(&strings, doc.file_path)?,
+                    span: doc.span,
+                    symbol_name: optional(&strings, doc.symbol_name)?,
+                    qualified_name: optional(&strings, doc.qualified_name)?,
+                    enclosing_function: optional(&strings, doc.enclosing_function)?,
+                    enclosing_class: optional(&strings, doc.enclosing_class)?,
+                    stable_ids: many(&strings, doc.stable_ids)?,
+                    resolver_precision: optional(&strings, doc.resolver_precision)?,
+                    resolver_stage: optional(&strings, doc.resolver_stage)?,
+                    provenance: optional(&strings, doc.provenance)?,
+                    confidence: doc.confidence,
+                    static_limits: many(&strings, doc.static_limits)?,
+                    incomplete_reasons: many(&strings, doc.incomplete_reasons)?,
+                    normalized_search_text: text(&strings, doc.normalized_search_text)?,
+                    content_fingerprint: doc.content_fingerprint,
+                    pipeline_fingerprint: doc.pipeline_fingerprint,
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        Ok(FactSnapshot {
+            schema_version,
+            pipeline_fingerprint,
+            docs,
+        })
+    }
+}
+
+fn save_docs_snapshot(
+    schema_version: u32,
+    pipeline: u64,
+    docs: Vec<FactDoc>,
+    path: &Path,
+) -> std::io::Result<usize> {
+    let doc_count = docs.len();
+    let snapshot = CompactFactSnapshot::from_docs(schema_version, pipeline, docs);
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1)?;
+    bincode::serialize_into(&mut encoder, &snapshot).map_err(invalid_data)?;
+    let bytes = encoder.finish()?;
     let body_hash = fnv1a_bytes64(&bytes);
-    let writer = FactStoreWriter::create(path, RETRIEVAL_TABLE_ID, snapshot.pipeline_fingerprint)
-        .map_err(map_factstore_io)?;
+    let writer = FactStoreWriter::create(path, RETRIEVAL_TABLE_ID, pipeline).map_err(map_factstore_io)?;
     writer
         .add(SNAPSHOT_KEY, body_hash, &bytes)
         .map_err(map_factstore_io)?;
-    writer.finish().map_err(map_factstore_io)
+    writer.finish().map_err(map_factstore_io)?;
+    Ok(doc_count)
+}
+
+fn save_snapshot(snapshot: &FactSnapshot, path: &Path) -> std::io::Result<usize> {
+    save_docs_snapshot(
+        snapshot.schema_version,
+        snapshot.pipeline_fingerprint,
+        snapshot.docs.clone(),
+        path,
+    )
 }
 
 fn decode_snapshot_hit(hit: LookupHit, pipeline: u64) -> std::io::Result<FactSnapshot> {
@@ -708,7 +1246,9 @@ fn decode_snapshot_hit(hit: LookupHit, pipeline: u64) -> std::io::Result<FactSna
             ),
         ));
     }
-    let snapshot: FactSnapshot = bincode::deserialize(&hit.payload).map_err(invalid_data)?;
+    let decoder = zstd::stream::Decoder::new(std::io::Cursor::new(&hit.payload))?;
+    let compact: CompactFactSnapshot = bincode::deserialize_from(decoder).map_err(invalid_data)?;
+    let snapshot = compact.expand()?;
     validate_snapshot(&snapshot, pipeline)?;
     Ok(snapshot)
 }
@@ -2211,6 +2751,36 @@ mod tests {
             display_hits[0].fact_id, keyword_hits[0].fact_id,
             "display-text candidate indexing must hydrate the same canonical arg fact"
         );
+    }
+
+    #[test]
+    fn persisted_file_candidates_preserve_kind_and_compound_argument_lookup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("app.py"),
+            "def handler(endpoint):\n    connect(host=endpoint)\n",
+        )
+        .expect("write source");
+        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+        ws.ingest_dir(dir.path()).expect("ingest");
+
+        let docs = save_sidecar(&ws, dir.path()).expect("save candidate sidecar");
+        let index = load_sidecar(&ws, dir.path()).expect("load candidate sidecar");
+        assert_eq!(docs, index.len());
+        assert!(
+            docs < 32,
+            "persisted retrieval should be bounded by file/kind groups, not AST event count: {docs}"
+        );
+        let hits = index
+            .query(&RetrievalQuery {
+                text: "host=endpoint",
+                kind: Some("arg"),
+                workspace_root: Some(dir.path()),
+                ..RetrievalQuery::default()
+            })
+            .expect("query candidate sidecar");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].file_path.ends_with("app.py"));
     }
 
     #[test]

@@ -1114,12 +1114,7 @@ fn real_main() -> Result<()> {
             all,
             format,
             output: _,
-        } => cmd_export(
-            &workspace,
-            full_propagations || all,
-            complete_chains || all,
-            format,
-        ),
+        } => cmd_export(&workspace, full_propagations, complete_chains || all, all, format),
         Cmd::Cache { action } => cmd_cache(action),
         Cmd::Security { workspace, action } => commands::security::cmd_security(&workspace, action),
         Cmd::Tree {

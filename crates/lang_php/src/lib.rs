@@ -122,7 +122,7 @@ impl LanguageAdapter for PhpAdapter {
         if let Some((snapshot, tree)) = parsed.as_ref() {
             let src = snapshot.text.as_bytes();
             let visibility_by_span = collect_modifier_visibility(tree.root_node(), file, src, &PHP_VOCAB);
-            let aliases_by_span = collect_param_type_aliases(&tree, file, src, &PHP_TYPE_ALIASES);
+            let aliases_by_span = collect_param_type_aliases(tree, file, src, &PHP_TYPE_ALIASES);
             for decl in &mut idx.defs {
                 if let Some(visibility) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = visibility;
@@ -135,7 +135,7 @@ impl LanguageAdapter for PhpAdapter {
             // → ["Base", "I", "J"]. PHP exposes them as separate
             // `base_clause` (single) and `class_interface_clause`
             // (one or more) children of the class node.
-            let bases_by_span = collect_php_class_bases(&tree, file, src);
+            let bases_by_span = collect_php_class_bases(tree, file, src);
             for decl in &mut idx.defs {
                 if !is_class_like(decl.kind) {
                     continue;
@@ -146,7 +146,7 @@ impl LanguageAdapter for PhpAdapter {
                     decl.bases = bases.clone();
                 }
             }
-            let promoted_writes_by_span = collect_php_property_promotion_writes(&tree, file, src);
+            let promoted_writes_by_span = collect_php_property_promotion_writes(tree, file, src);
             for decl in &mut idx.defs {
                 if !matches!(decl.kind, DeclKind::Constructor) {
                     continue;

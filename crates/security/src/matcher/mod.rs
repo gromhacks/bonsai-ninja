@@ -3376,7 +3376,6 @@ fn scan_missing_batch(
 /// Walk the entry declaration's resolved callees up to the rule's exact
 /// `search_depth`, looking for the expected target. Used by the Missing
 /// walker only when the rule opts into cross-procedural reach.
-
 fn missing_target_in_reachable_callees(
     ws: &Workspace,
     file: FileId,

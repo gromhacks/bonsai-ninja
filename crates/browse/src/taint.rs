@@ -596,6 +596,9 @@ pub(crate) fn build_taint_record_from_cross_call(
     global: &bonsai_index::GlobalIndex,
     ws: &Workspace,
 ) -> Option<TaintRecord> {
+    if !ce.relation.is_renderable_call() {
+        return None;
+    }
     let caller_decl = global.decl_of(bonsai_common::SymbolId::new(ce.caller.raw()))?;
     let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()))?;
     let (caller_file, caller_line, _) = format_span(&caller_decl.name_span, ws);

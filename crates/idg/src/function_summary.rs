@@ -26,6 +26,9 @@ use crate::workspace::{IdgWorkspace, SegmentId};
 struct LocalNodeAddress {
     func: FuncId,
     compact: u32,
+    is_param: bool,
+    is_return: bool,
+    is_throw: bool,
 }
 
 struct LocalFunctionGraph {
@@ -118,7 +121,7 @@ struct CallBoundary {
 }
 
 fn edge_is_within_precision(edge: &IdgEdge, max_precision: Option<Precision>) -> bool {
-    !max_precision.is_some_and(|max| edge.meta.precision > max)
+    max_precision.is_none_or(|max| edge.meta.precision <= max)
 }
 
 fn build_layout(
@@ -140,6 +143,9 @@ fn build_layout(
             segment_addresses.push(LocalNodeAddress {
                 func: node.func,
                 compact,
+                is_param: matches!(place, Some(Place::Param { .. })),
+                is_return: matches!(place, Some(Place::Return)),
+                is_throw: matches!(place, Some(Place::Throw { .. })),
             });
         }
         addresses.push(segment_addresses);
@@ -182,6 +188,21 @@ fn record_summary_edge(
         if let Some(graph) = graphs.get_mut(&from.func) {
             graph.add_base_edge(from.compact, to.compact);
         }
+        return;
+    }
+
+    // Only structural formal/return places define compiler call-summary
+    // boundaries. Eager field compatibility edges reuse the InterCallArg /
+    // InterReturn tags but can be owned by canonical type-field functions;
+    // the contextual runtime normalizes those against these structural
+    // boundaries instead of allowing endpoint ownership to invent a callee.
+    let structural_boundary = match edge.meta.kind {
+        IdgEdgeKind::InterCallArg => to.is_param,
+        IdgEdgeKind::InterReturn => from.is_return,
+        IdgEdgeKind::InterThrow => from.is_throw,
+        _ => false,
+    };
+    if !structural_boundary {
         return;
     }
 
@@ -309,6 +330,42 @@ fn add_summary_edges_to_fixed_point(
 pub(crate) struct ReturnSummaryBatch {
     pub(crate) indices: AHashMap<FuncId, Vec<u32>>,
     pub(crate) symbolic_sensitive: AHashSet<FuncId>,
+    pub(crate) symbolic_callees: AHashMap<FuncId, Vec<FuncId>>,
+    pub(crate) contextual_edges: Vec<ContextualSummaryEdge>,
+}
+
+/// One function-local or call-summary edge addressed in the workspace's
+/// segmented node space. Raw interprocedural edges are deliberately absent:
+/// query evaluation enters callees and returns only through matched call
+/// boundaries.
+#[derive(Copy, Clone)]
+pub(crate) struct ContextualSummaryEdge {
+    pub(crate) segment: SegmentId,
+    pub(crate) from: NodeId,
+    pub(crate) to: NodeId,
+}
+
+fn contextual_summary_edges(graphs: &mut AHashMap<FuncId, LocalFunctionGraph>) -> Vec<ContextualSummaryEdge> {
+    let mut edges = Vec::new();
+    for graph in graphs.values_mut() {
+        graph.finalize_base_edges();
+        for &(from, to) in &graph.edges {
+            let Some(from) = graph.local_nodes.get(from as usize).copied() else {
+                continue;
+            };
+            let Some(to) = graph.local_nodes.get(to as usize).copied() else {
+                continue;
+            };
+            edges.push(ContextualSummaryEdge {
+                segment: graph.segment,
+                from,
+                to,
+            });
+        }
+    }
+    edges.sort_unstable_by_key(|edge| (edge.segment.0, edge.from.0, edge.to.0));
+    edges.dedup_by_key(|edge| (edge.segment.0, edge.from.0, edge.to.0));
+    edges
 }
 
 pub(crate) fn return_taint_param_indices(
@@ -356,6 +413,14 @@ pub(crate) fn return_taint_param_indices(
         continuations.dedup();
     }
     add_summary_edges_to_fixed_point(&mut graphs, boundaries.into_values().collect());
+    if funcs.is_empty() {
+        return ReturnSummaryBatch {
+            indices: AHashMap::default(),
+            symbolic_sensitive: AHashSet::default(),
+            symbolic_callees: AHashMap::default(),
+            contextual_edges: contextual_summary_edges(&mut graphs),
+        };
+    }
 
     let mut requested: Vec<FuncId> = funcs.to_vec();
     requested.sort_unstable_by_key(|func| func.raw());
@@ -404,6 +469,10 @@ pub(crate) fn return_taint_param_indices(
         callers.dedup();
     }
 
+    // Context-matched function dependencies for symbolic return queries.
+    // A callee is a predecessor only when its concrete return continuation
+    let contextual_edges = contextual_summary_edges(&mut graphs);
+
     // A symbolic dependency in a callee can change a caller summary only when
     // that exact call's returned continuation reaches the caller's Return.
     // Propagating over these compiler call/return boundaries is substantially
@@ -421,9 +490,27 @@ pub(crate) fn return_taint_param_indices(
         }
     }
 
+    let mut symbolic_callees: AHashMap<FuncId, Vec<FuncId>> = AHashMap::default();
+    for (callee, callers) in &return_callers_by_callee {
+        if !symbolic_sensitive.contains(callee) {
+            continue;
+        }
+        for caller in callers {
+            if symbolic_sensitive.contains(caller) {
+                symbolic_callees.entry(*caller).or_default().push(*callee);
+            }
+        }
+    }
+    for callees in symbolic_callees.values_mut() {
+        callees.sort_unstable_by_key(|func| func.raw());
+        callees.dedup();
+    }
+
     ReturnSummaryBatch {
         indices: summaries,
         symbolic_sensitive,
+        symbolic_callees,
+        contextual_edges,
     }
 }
 
@@ -440,7 +527,7 @@ fn symbolic_consumer_nodes(
         .transforms()
         .iter()
         .filter(|transform| transform.kind == SymbolicFieldTransformKind::ScalarReturn)
-        .filter(|transform| !max_precision.is_some_and(|max| transform.precision > max))
+        .filter(|transform| max_precision.is_none_or(|max| transform.precision <= max))
         .map(|transform| (transform.target, transform.write_span))
         .collect();
     let mut consumers: AHashMap<FuncId, AHashSet<u32>> = AHashMap::default();

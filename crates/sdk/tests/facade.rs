@@ -1507,7 +1507,10 @@ fn facade_semantic_context_reports_shared_workspace_shape() {
 
     assert_eq!(context.summary.indexed_files, project.stats().files);
     assert_eq!(context.summary.first_party_files, 1);
-    assert_eq!(context.summary.generated_files, 1);
+    assert_eq!(
+        context.summary.generated_files, 2,
+        "generated/client.py and the dist build output are both generated files"
+    );
     assert!(context
         .toolchain_manifests
         .iter()
@@ -1992,6 +1995,7 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .native_json(bonsai_sdk::NativeExportOptions {
             full_propagations: true,
             complete_chains: false,
+            compiled_propagations: false,
         })
         .expect("native export");
     assert!(native["taint_graph"]["functions"]

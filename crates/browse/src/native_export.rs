@@ -30,6 +30,9 @@ pub struct NativeExportConfig {
     /// many exact paths and may need the compressed callgraph
     /// representation instead of materialized path rows.
     pub complete_chains: bool,
+    /// Keep the complete propagation relation in compiler form rather than
+    /// materializing its potentially quadratic per-entry transitive product.
+    pub compiled_propagations: bool,
 }
 
 #[derive(Serialize)]
@@ -89,6 +92,7 @@ struct ExportAnalysisScope {
     semantic_max_precision: &'static str,
     full_propagations: bool,
     complete_chains: bool,
+    propagations_mode: &'static str,
 }
 
 struct ExportCompleteness {
@@ -159,9 +163,14 @@ struct ExportTaintGraph {
     /// filtering.
     propagations: Vec<ExportTaintPropagations>,
     /// Whether `propagations` is exhaustive. When false, the export
-    /// intentionally omitted propagation records and explains the
-    /// exact missing scope in `propagations_omitted_reason`.
+    /// either omitted concrete rows or represents the exact relation in
+    /// compiler form, as declared by `propagations_mode`.
     propagations_complete: bool,
+    /// `materialized_entries` contains every derived per-entry row;
+    /// `compiled_idg` keeps the exact relation in the function, call-edge,
+    /// summary, assignment, field, and entry-point compiler tables without
+    /// expanding their transitive product; `omitted` is the bounded default.
+    propagations_mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     propagations_omitted_reason: Option<String>,
     /// Per-target resolved chains (FuncId list per chain). Same
@@ -567,6 +576,7 @@ pub fn native_export_json(
         NativeExportConfig {
             full_propagations,
             complete_chains: false,
+            compiled_propagations: false,
         },
     )
 }
@@ -593,6 +603,7 @@ pub fn render_native_export_json(
         NativeExportConfig {
             full_propagations,
             complete_chains: false,
+            compiled_propagations: false,
         },
     )
 }
@@ -1065,33 +1076,12 @@ const EXPORT_SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
 const COMPRESSED_CHAIN_ROWS_REASON: &str = "concrete path rows are not materialized in compressed_callgraph mode; the complete semantic chain language is represented by the exported function and resolved call-edge graph";
 const COMPRESSED_FLOW_ID_ROWS_REASON: &str = "concrete flow-id label rows are not materialized in compressed_callgraph mode; the complete semantic flow relation is represented by the exported function and resolved call-edge graph";
 
-/// Build the semantic IDG used by native export projections.
+/// Reuse the canonical compiler IDG for native export projections.
 ///
-/// Export emits observable parameter/return, local-storage, and call-boundary
-/// facts; it does not expose otherwise-unread synthetic field writes. For
-/// adapters that declare complete AST field places, compiler-style backward
-/// demand therefore removes only dead synthetic writes while preserving every
-/// exported fact. Adapters without that capability retain eager forwarding.
+/// Adapter capability metadata selects symbolic versus eager field places in
+/// the workspace builder. Export does not maintain a second seed/graph policy.
 fn export_projection_idg_service(ws: &Workspace) -> Arc<bonsai_idg::IdgQueryService> {
-    let db = ws.db();
-    let global = db.global_index();
-    let mut field_demand_languages: Vec<String> = global
-        .all_files()
-        .filter_map(|file| db.adapter_for(file))
-        .filter(|adapter| adapter.capabilities().field_places_complete)
-        .map(|adapter| adapter.language_id().as_str().to_string())
-        .collect();
-    field_demand_languages.sort();
-    field_demand_languages.dedup();
-    let options = bonsai_idg::TransferOptions {
-        include_diagnostic_field_flows: false,
-        include_receiver_method_propagation: false,
-        demand_driven_field_forwarding: !field_demand_languages.is_empty(),
-        field_demand_languages,
-        ..bonsai_idg::TransferOptions::default()
-    }
-    .canonicalized();
-    ws.build_and_seed_idg_service_with_transfer_options(&options)
+    ws.build_and_seed_idg_service()
 }
 
 fn export_analysis_scope(config: NativeExportConfig) -> ExportAnalysisScope {
@@ -1099,6 +1089,7 @@ fn export_analysis_scope(config: NativeExportConfig) -> ExportAnalysisScope {
         semantic_max_precision: export_precision_label(EXPORT_SEMANTIC_FLOW_MAX_PRECISION),
         full_propagations: config.full_propagations,
         complete_chains: config.complete_chains,
+        propagations_mode: propagation_mode(config),
     }
 }
 
@@ -1110,7 +1101,7 @@ fn export_analysis_completeness(
     chain_limits: ExportChainLimits,
 ) -> ExportCompleteness {
     let mut incomplete_reasons = Vec::new();
-    if let Some(reason) = propagation_omitted_reason(config.full_propagations) {
+    if let Some(reason) = propagation_omitted_reason(config) {
         incomplete_reasons.push(format!("taint_graph.propagations: {reason}"));
     }
     if let Some(reason) = chain_export_incomplete_reason(
@@ -1357,13 +1348,8 @@ fn build_taint_graph(
     let alias_maps = export_alias_maps(ws);
     let class_fields = export_class_fields(ws, spans);
     let entry_points = export_entry_points(ws, spans);
-    let propagation_rows = export_taint_propagations_from_idg(
-        ws,
-        spans,
-        &projection_idg,
-        &entry_points,
-        config.full_propagations,
-    );
+    let propagation_rows =
+        export_taint_propagations_from_idg(ws, spans, &projection_idg, &entry_points, config);
     let chain_rows = export_taint_chains_and_flow_labels(
         ws,
         chain_limits,
@@ -1384,6 +1370,7 @@ fn build_taint_graph(
         entry_points,
         propagations: propagation_rows.propagations,
         propagations_complete: propagation_rows.complete,
+        propagations_mode: propagation_rows.mode,
         propagations_omitted_reason: propagation_rows.omitted_reason,
         chains: chain_rows.chains,
         chains_complete: chain_rows.chains_complete,
@@ -1457,7 +1444,8 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
         };
         map.serialize_entry("propagations", &propagation_rows)?;
         map.serialize_entry("propagations_complete", &self.config.full_propagations)?;
-        if let Some(reason) = propagation_omitted_reason(self.config.full_propagations) {
+        map.serialize_entry("propagations_mode", propagation_mode(self.config))?;
+        if let Some(reason) = propagation_omitted_reason(self.config) {
             map.serialize_entry("propagations_omitted_reason", &reason)?;
         }
         drop(entry_points);
@@ -1489,6 +1477,7 @@ impl Serialize for ExportTaintGraphStreaming<'_> {
 struct ExportTaintPropagationsSection {
     propagations: Vec<ExportTaintPropagations>,
     complete: bool,
+    mode: &'static str,
     omitted_reason: Option<String>,
 }
 
@@ -1520,8 +1509,17 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
         let mut render_cache = ExportTaintRecordRenderCache::default();
         let mut seq = serializer.serialize_seq(None)?;
         let mut count = 0usize;
+        let progress_stride = self.entry_points.len().div_ceil(100).max(1);
         for ep in self.entry_points {
             let entry_func = FuncId::new(ep.func_id);
+            let row_started = Instant::now();
+            bonsai_diagnostics::debug_log!(
+                "export-row",
+                "taint propagation start index={} func={} name={}",
+                count,
+                ep.func_id,
+                ep.function
+            );
             {
                 let row = export_taint_propagation_row_ref(
                     self.spans,
@@ -1534,6 +1532,22 @@ impl Serialize for ExportTaintPropagationsStreaming<'_> {
                 serde::ser::SerializeSeq::serialize_element(&mut seq, &row)?;
             }
             count += 1;
+            bonsai_diagnostics::debug_log!(
+                "export-row",
+                "taint propagation complete index={} func={} name={} elapsed={:.6}s",
+                count - 1,
+                ep.func_id,
+                ep.function,
+                row_started.elapsed().as_secs_f64()
+            );
+            if count % progress_stride == 0 || count == self.entry_points.len() {
+                export_phase_log(format_args!(
+                    "taint.propagations progress={}/{} elapsed={:.3}s",
+                    count,
+                    self.entry_points.len(),
+                    phase_started.elapsed().as_secs_f64()
+                ));
+            }
         }
         let result = serde::ser::SerializeSeq::end(seq);
         export_phase_log(format_args!(
@@ -2051,12 +2065,12 @@ fn export_taint_propagations_from_idg(
     spans: &ExportSpanCache,
     idg: &bonsai_idg::IdgQueryService,
     entry_points: &[ExportEntryPoint],
-    full_propagations: bool,
+    config: NativeExportConfig,
 ) -> ExportTaintPropagationsSection {
     let db = ws.db();
     let global = db.global_index();
-    let should_materialize_propagations = full_propagations;
-    let propagation_omitted_reason = propagation_omitted_reason(should_materialize_propagations);
+    let should_materialize_propagations = config.full_propagations;
+    let propagation_omitted_reason = propagation_omitted_reason(config);
     let phase_started = Instant::now();
     let mut propagations: Vec<ExportTaintPropagations> = if should_materialize_propagations {
         export_taint_propagation_rows(spans, global.as_ref(), idg, entry_points)
@@ -2073,12 +2087,23 @@ fn export_taint_propagations_from_idg(
     ExportTaintPropagationsSection {
         propagations,
         complete: should_materialize_propagations,
+        mode: propagation_mode(config),
         omitted_reason: propagation_omitted_reason,
     }
 }
 
-fn propagation_omitted_reason(full_propagations: bool) -> Option<String> {
-    (!full_propagations).then(|| {
+fn propagation_mode(config: NativeExportConfig) -> &'static str {
+    if config.full_propagations {
+        "materialized_entries"
+    } else if config.compiled_propagations {
+        "compiled_idg"
+    } else {
+        "omitted"
+    }
+}
+
+fn propagation_omitted_reason(config: NativeExportConfig) -> Option<String> {
+    (propagation_mode(config) == "omitted").then(|| {
         "interprocedural propagation records are omitted by default; rerun export --full-propagations for exhaustive propagation records".to_string()
     })
 }
@@ -2255,6 +2280,9 @@ fn export_taint_record_from_cross_call(
     global: &bonsai_index::GlobalIndex,
     spans: &ExportSpanCache,
 ) -> Option<ExportTaintRecord> {
+    if !edge.relation.is_renderable_call() {
+        return None;
+    }
     let caller = cached_export_func_render(cache, global, edge.caller)?;
     let callee = cached_export_func_render(cache, global, edge.callee)?;
     let call_line = cached_export_call_line(cache, spans, edge.call_span);

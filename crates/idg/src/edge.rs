@@ -58,6 +58,19 @@ pub enum IdgEdgeKind {
     IntraYield = 9,
     /// `await x` → consumer's place; coroutine flows.
     IntraAwait = 10,
+    /// A projected caller field → projected callee parameter field.
+    ///
+    /// This is heap/object-state propagation associated with a call, not a
+    /// scalar `CallArg → Param` boundary. Keeping the provenance explicit
+    /// prevents renderers from treating a canonical field node's owning
+    /// method as the resolved callee.
+    InterFieldCallArg = 11,
+    /// A projected callee field → projected caller field.
+    ///
+    /// Covers constructor results, receiver mutation, and projected return
+    /// state. It participates in interprocedural reachability but is not a
+    /// scalar `Return → CallRet` boundary.
+    InterFieldReturn = 12,
 }
 
 impl IdgEdgeKind {
@@ -140,6 +153,24 @@ impl IdgEdgeKind {
                 FlowEdgeKind::CallbackInvocation,
             ],
             Self::IntraAwait => &[FlowEdgeKind::AwaitResolution],
+            Self::InterFieldCallArg => &[
+                FlowEdgeKind::ArgToParam,
+                FlowEdgeKind::HeapLoad,
+                FlowEdgeKind::HeapStore,
+                FlowEdgeKind::ContainerLoad,
+                FlowEdgeKind::ContainerStore,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
+            Self::InterFieldReturn => &[
+                FlowEdgeKind::ReturnToCaller,
+                FlowEdgeKind::HeapLoad,
+                FlowEdgeKind::HeapStore,
+                FlowEdgeKind::ContainerLoad,
+                FlowEdgeKind::ContainerStore,
+                FlowEdgeKind::InterFile,
+                FlowEdgeKind::InterPackage,
+            ],
         }
     }
 
@@ -147,7 +178,14 @@ impl IdgEdgeKind {
     /// Phase 3 stitching. Lets queries filter intra-only flows.
     #[must_use]
     pub const fn is_inter(self) -> bool {
-        matches!(self, Self::InterCallArg | Self::InterReturn | Self::InterThrow)
+        matches!(
+            self,
+            Self::InterCallArg
+                | Self::InterReturn
+                | Self::InterThrow
+                | Self::InterFieldCallArg
+                | Self::InterFieldReturn
+        )
     }
 
     /// True iff this kind is intra-procedural (one function only).
@@ -180,6 +218,8 @@ impl IdgEdgeKind {
             8 => Some(Self::IntraFieldWrite),
             9 => Some(Self::IntraYield),
             10 => Some(Self::IntraAwait),
+            11 => Some(Self::InterFieldCallArg),
+            12 => Some(Self::InterFieldReturn),
             _ => None,
         }
     }

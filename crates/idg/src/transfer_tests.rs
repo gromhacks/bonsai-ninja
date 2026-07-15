@@ -1555,9 +1555,8 @@ fn configured_clean_output_overwrite_commits_fresh_output_writer() {
         include_diagnostic_field_flows: true,
         include_receiver_method_propagation: true,
         include_field_argument_forwarding: true,
-        demand_driven_field_forwarding: false,
-        field_demand_languages: Vec::new(),
-        field_demand_terminal_sites: Vec::new(),
+        symbolic_field_forwarding: false,
+        symbolic_field_languages: Vec::new(),
         include_unresolved_call_result_passthrough: false,
         include_unresolved_receiver_result_passthrough: false,
     };
@@ -2788,20 +2787,20 @@ fn matches_shared_projection_canonicalization_spec() {
 }
 
 #[test]
-fn transfer_fingerprint_canonicalizes_adapter_field_demand_languages() {
+fn transfer_fingerprint_canonicalizes_symbolic_adapter_languages() {
     let left = TransferOptions {
-        demand_driven_field_forwarding: true,
-        field_demand_languages: vec!["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
+        symbolic_field_forwarding: true,
+        symbolic_field_languages: vec!["zeta".to_string(), "alpha".to_string(), "alpha".to_string()],
         ..TransferOptions::default()
     };
     let right = TransferOptions {
-        demand_driven_field_forwarding: true,
-        field_demand_languages: vec!["alpha".to_string(), "zeta".to_string()],
+        symbolic_field_forwarding: true,
+        symbolic_field_languages: vec!["alpha".to_string(), "zeta".to_string()],
         ..TransferOptions::default()
     };
     let narrower = TransferOptions {
-        demand_driven_field_forwarding: true,
-        field_demand_languages: vec!["alpha".to_string()],
+        symbolic_field_forwarding: true,
+        symbolic_field_languages: vec!["alpha".to_string()],
         ..TransferOptions::default()
     };
 

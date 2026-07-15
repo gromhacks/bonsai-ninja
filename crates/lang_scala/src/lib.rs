@@ -550,7 +550,22 @@ fn scala_constructor_call_args(args_node: Node<'_>, file: FileId, src: &[u8]) ->
     let mut out = Vec::new();
     let mut cursor = args_node.walk();
     for child in args_node.named_children(&mut cursor) {
-        if let Some(argument) = call_arg_from_node(child, file, src, None) {
+        let named_value = (child.kind() == "assignment_expression")
+            .then(|| {
+                let label = child.child_by_field_name("left")?;
+                let value = child.child_by_field_name("right")?;
+                (label.kind() == "identifier").then(|| {
+                    let name = node_text(&label, src).trim().to_string();
+                    (value, (!name.is_empty()).then_some(name))
+                })
+            })
+            .flatten();
+        let argument = if let Some((value, name)) = named_value {
+            call_arg_from_nodes(child, value, file, src, name)
+        } else {
+            call_arg_from_node(child, file, src, None)
+        };
+        if let Some(argument) = argument {
             out.push(argument);
         }
     }
@@ -1464,7 +1479,7 @@ fn scala_dotted_member_access_parts(
     let mut segments: Vec<&str> = std::iter::once(projection.base.as_str())
         .chain(projection.path.iter().map(String::as_str))
         .collect();
-    if matches!(segments.first(), Some(&"this") | Some(&"super")) {
+    if matches!(segments.first(), Some(&"this" | &"super")) {
         segments.remove(0);
     }
     if segments.len() < 2 {

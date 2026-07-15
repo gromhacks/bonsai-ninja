@@ -248,6 +248,26 @@ impl AnalyzerDb {
         self.inner.registry.adapter_for_extension(ext)
     }
 
+    /// Adapter language ids whose tree-sitter lowering emits every field
+    /// projection as a concrete compiler place.
+    ///
+    /// The IDG uses this capability set to select its compact symbolic
+    /// access-path representation. Keeping the inventory on the database
+    /// prevents export, security, and taint facades from independently
+    /// rebuilding or hard-coding language lists.
+    pub fn complete_field_place_languages(&self) -> Vec<String> {
+        let global = self.global_index();
+        let mut languages: Vec<String> = global
+            .all_files()
+            .filter_map(|file| self.adapter_for(file))
+            .filter(|adapter| adapter.capabilities().field_places_complete)
+            .map(|adapter| adapter.language_id().as_str().to_string())
+            .collect();
+        languages.sort();
+        languages.dedup();
+        languages
+    }
+
     /// Build an [`AdapterContext`] without a workspace-root binding.
     /// Cheap to call but loses the workspace-relative module-path
     /// resolution; use [`Self::adapter_context_with`] when adapters
@@ -343,15 +363,14 @@ impl AnalyzerDb {
                 ) {
                     continue;
                 }
-                let implicit_receivers = decl
-                    .receiver_param_index
-                    .is_none()
-                    .then_some(capabilities.effective_implicit_receiver_tokens())
-                    .unwrap_or_default();
+                let implicit_receivers = if decl.receiver_param_index.is_none() {
+                    capabilities.effective_implicit_receiver_tokens()
+                } else {
+                    &[]
+                };
                 for receiver in implicit_receivers
                     .iter()
                     .chain(capabilities.effective_super_receiver_tokens().iter())
-                    .copied()
                 {
                     let receiver = receiver.trim();
                     if receiver.is_empty()

@@ -382,7 +382,9 @@ fn semantic_path_graph(ws: &Workspace) -> SemanticPathGraph {
 }
 
 fn idg_cross_call_is_structural_path_edge(edge: CrossCallEdge) -> bool {
-    edge.precision.is_semantic() && (edge.arg_idx != u32::MAX || edge.param_idx != u32::MAX)
+    edge.relation.is_renderable_call()
+        && edge.precision.is_semantic()
+        && (edge.arg_idx != u32::MAX || edge.param_idx != u32::MAX)
 }
 
 fn call_edge_from_idg_cross_call(edge: CrossCallEdge) -> CallEdge {
@@ -580,6 +582,7 @@ mod tests {
             param_idx,
             precision: Precision::Narrowed,
             call_kind: EdgeKind::Direct,
+            relation: bonsai_idg::CrossCallRelation::Argument,
         }
     }
 

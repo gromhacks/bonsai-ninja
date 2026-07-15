@@ -338,7 +338,7 @@ impl ParserCache {
             .entry(language)
             .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
             .clone();
-        let parser = pool.lock().pop().unwrap_or_else(Parser::new);
+        let parser = pool.lock().pop().unwrap_or_default();
         ParserLease {
             parser: Some(parser),
             pool,
@@ -419,11 +419,15 @@ fn point_at_byte(text: &str, byte: usize) -> Point {
     debug_assert!(byte <= text.len());
     debug_assert!(text.is_char_boundary(byte));
     let prefix = &text.as_bytes()[..byte];
-    let row = prefix.iter().filter(|&&value| value == b'\n').count();
-    let column = prefix
-        .iter()
-        .rposition(|&value| value == b'\n')
-        .map_or(byte, |newline| byte - newline - 1);
+    let mut row = 0usize;
+    let mut line_start = 0usize;
+    for (index, value) in prefix.iter().enumerate() {
+        if *value == b'\n' {
+            row += 1;
+            line_start = index + 1;
+        }
+    }
+    let column = byte - line_start;
     Point::new(row, column)
 }
 
