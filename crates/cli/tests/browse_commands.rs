@@ -1305,36 +1305,35 @@ fn export_produces_valid_json() {
 #[test]
 fn export_full_propagations_materializes_exact_records() {
     let ws = ws_path();
-    for flag in ["--full-propagations", "--all"] {
-        let Some(out) = run(&["export", ws.to_str().unwrap(), flag]) else {
-            return;
-        };
-        let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
-        assert_eq!(
-            value["taint_graph"]["propagations_complete"], true,
-            "{flag} should mark propagation records complete"
-        );
-        assert_eq!(
-            value["analysis_scope"]["full_propagations"], true,
-            "{flag} should declare the propagation export scope"
-        );
-        if flag == "--all" {
-            assert_eq!(
-                value["analysis_scope"]["complete_chains"], true,
-                "--all should request the complete chain evidence scope"
-            );
-            assert_eq!(
-                value["analysis_complete"], true,
-                "--all should be complete on the micro workspace"
-            );
-        }
-        assert!(
-            value["taint_graph"]["propagations"]
-                .as_array()
-                .is_some_and(|rows| !rows.is_empty()),
-            "{flag} should materialize propagation rows"
-        );
-    }
+    let Some(out) = run(&["export", ws.to_str().unwrap(), "--full-propagations"]) else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
+    assert_eq!(value["taint_graph"]["propagations_complete"], true);
+    assert_eq!(value["taint_graph"]["propagations_mode"], "materialized_entries");
+    assert_eq!(value["analysis_scope"]["full_propagations"], true);
+    assert!(value["taint_graph"]["propagations"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty()));
+}
+
+#[test]
+fn export_all_keeps_exact_propagation_language_in_compiler_form() {
+    let ws = ws_path();
+    let Some(out) = run(&["export", ws.to_str().unwrap(), "--all"]) else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
+    assert_eq!(value["analysis_scope"]["full_propagations"], false);
+    assert_eq!(value["analysis_scope"]["complete_chains"], true);
+    assert_eq!(value["analysis_scope"]["propagations_mode"], "compiled_idg");
+    assert_eq!(value["taint_graph"]["propagations_complete"], false);
+    assert_eq!(value["taint_graph"]["propagations_mode"], "compiled_idg");
+    assert!(value["taint_graph"]["propagations"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(value["taint_graph"]["propagations_omitted_reason"].is_null());
+    assert_eq!(value["analysis_complete"], true);
 }
 
 #[test]

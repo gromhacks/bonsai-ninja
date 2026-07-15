@@ -133,8 +133,8 @@ pub struct EntryTaintGraph {
     pub precision: Precision,
     #[serde(default)]
     pub saturated: bool,
-    /// Total `(func, seed)` pairs analyzed building this graph.
-    /// Used by callers to budget global work across many entry sources.
+    /// Compatibility metric for the number of resolved cross-call relations
+    /// represented by this graph. It never limits semantic work.
     #[serde(default)]
     pub pairs_analyzed: u32,
 }
@@ -566,17 +566,23 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
     }
 
     if !graph_seed.is_empty() {
+        // A cold cached-dataflow query must not publish a warmed workspace
+        // service, but it still uses the one canonical IDG engine. The
+        // semantic-fingerprint cache shares this compiler graph across entry
+        // misses without changing `AnalyzerDb::idg_service()` lifecycle.
+        let idg = crate::idg_build::compiler_idg_service_without_default_seed(db);
+        caches.mark_used();
         let config = crate::inter::InterTaintConfig {
             sanitizers: TokenSet::default(),
             max_edge_precision: Some(Precision::Narrowed),
             ..Default::default()
         };
-        let graph_result = crate::inter::interprocedural_taint_to_completion_with_caches(
+        let graph_result = crate::inter::idg_backed_interprocedural_taint_with_service(
             entry_func,
             &graph_seed,
             &config,
             db,
-            caches,
+            idg.as_ref(),
         );
         graph.call_records = graph_result
             .call_records
@@ -603,8 +609,12 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
         let result = if seed == graph_seed {
             &graph_result
         } else {
-            fact_result = crate::inter::interprocedural_taint_to_completion_with_caches(
-                entry_func, &seed, &config, db, caches,
+            fact_result = crate::inter::idg_backed_interprocedural_taint_with_service(
+                entry_func,
+                &seed,
+                &config,
+                db,
+                idg.as_ref(),
             );
             &fact_result
         };
@@ -1773,10 +1783,10 @@ pub fn entry_taint_call_records_from_idg_with_target_filters_and_max_precision_a
                 .collect::<Vec<_>>();
             bonsai_diagnostics::debug_log!("idg-closure", "node target cut detail={:?}", node_detail);
         }
-        let dist_map = distances_from_source(source_func, &edges);
+        let call_order = call_preorder_from_source(source_func, &edges);
         edges.sort_by_key(|ce| {
             (
-                dist_map.get(&ce.caller).copied().unwrap_or(u32::MAX),
+                call_order.get(&ce.caller).copied().unwrap_or(u32::MAX),
                 ce.caller.raw(),
                 ce.callee.raw(),
                 ce.call_span.start,
@@ -2185,14 +2195,13 @@ pub fn entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precisio
                 .collect::<Vec<_>>();
             bonsai_diagnostics::debug_log!("idg-closure", "node target cut exact detail={:?}", node_detail);
         }
-        // Topological sort: walk from source_func outward, ordering
-        // edges by their distance from source_func. Edges whose
-        // caller hasn't been visited yet come later. This is
-        // breadth-first by caller.
-        let dist_map = distances_from_source(source_func, &edges);
+        // Compiler callgraph pre-order keeps a caller's first evidenced
+        // inflow ahead of its descendants without running another semantic
+        // graph search.
+        let call_order = call_preorder_from_source(source_func, &edges);
         edges.sort_by_key(|ce| {
             (
-                dist_map.get(&ce.caller).copied().unwrap_or(u32::MAX),
+                call_order.get(&ce.caller).copied().unwrap_or(u32::MAX),
                 ce.caller.raw(),
                 ce.call_span.start,
                 ce.arg_idx,
@@ -3065,10 +3074,11 @@ fn call_arg_has_descendant_input(
         .get(arg_idx)
         .and_then(|place| place.as_deref())
         .is_some_and(|place| input_text_has_descendant_base(place, descendant_bases))
-        || summary
-            .args_value_text
-            .get(arg_idx)
-            .is_some_and(|text| input_text_has_descendant_base(text, descendant_bases))
+        || summary.args_source_names.get(arg_idx).is_some_and(|sources| {
+            sources
+                .iter()
+                .any(|source| input_text_has_descendant_base(source, descendant_bases))
+        })
 }
 
 fn input_text_has_descendant_base(text: &str, descendant_bases: &ahash::AHashSet<String>) -> bool {
@@ -3078,19 +3088,7 @@ fn input_text_has_descendant_base(text: &str, descendant_bases: &ahash::AHashSet
 }
 
 fn input_storage_bases(text: &str) -> Vec<String> {
-    let mut out = ahash::AHashSet::default();
-    let trimmed = text.trim();
-    if let Some(base) = storage_base_candidate(trimmed) {
-        out.insert(base);
-    }
-    for token in identifier_tokens_outside_strings(trimmed) {
-        if let Some(base) = storage_base_candidate(&token) {
-            out.insert(base);
-        }
-    }
-    let mut out: Vec<String> = out.into_iter().collect();
-    out.sort();
-    out
+    storage_base_candidate(text).into_iter().collect()
 }
 
 fn storage_base_candidate(text: &str) -> Option<String> {
@@ -3099,7 +3097,7 @@ fn storage_base_candidate(text: &str) -> Option<String> {
         return None;
     }
     let base = normalized.split('.').next().unwrap_or("").trim();
-    if is_bare_identifier(base) && !is_non_value_identifier(base) {
+    if is_bare_identifier(base) {
         Some(base.to_string())
     } else {
         None
@@ -3157,72 +3155,6 @@ fn normalize_storage_text(text: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(".")
-}
-
-fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for ch in text.chars() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(ch, '"' | '\'' | '`') {
-            push_identifier_token(&mut current, &mut out);
-            quote = Some(ch);
-            continue;
-        }
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
-            current.push(ch);
-        } else {
-            push_identifier_token(&mut current, &mut out);
-        }
-    }
-    push_identifier_token(&mut current, &mut out);
-    out
-}
-
-fn push_identifier_token(current: &mut String, out: &mut Vec<String>) {
-    if current.is_empty() {
-        return;
-    }
-    let token = std::mem::take(current);
-    let base = token.split('.').next().unwrap_or("").trim();
-    if is_bare_identifier(base) && !is_non_value_identifier(base) {
-        out.push(token);
-    }
-}
-
-fn is_non_value_identifier(token: &str) -> bool {
-    matches!(
-        token,
-        "as" | "await"
-            | "case"
-            | "else"
-            | "false"
-            | "False"
-            | "for"
-            | "from"
-            | "if"
-            | "in"
-            | "lambda"
-            | "map"
-            | "None"
-            | "null"
-            | "or"
-            | "return"
-            | "true"
-            | "True"
-            | "yield"
-    )
 }
 
 /// Apply rulepack-declared output-argument transfers. If a configured
@@ -3758,10 +3690,9 @@ fn short_member_tail(name: &str) -> &str {
     tail
 }
 
-/// Compute BFS distances from `source_func` over the cross-call edge
-/// graph. Callers absent from the returned map are unreachable and
-/// sort to the end of the topological order.
-fn distances_from_source(
+/// Deterministic compiler callgraph pre-order rooted at `source_func`.
+/// Callers absent from the returned map sort after the rooted component.
+fn call_preorder_from_source(
     source_func: FuncId,
     edges: &[bonsai_idg::CrossCallEdge],
 ) -> ahash::AHashMap<FuncId, u32> {
@@ -3769,25 +3700,23 @@ fn distances_from_source(
     for ce in edges {
         adj.entry(ce.caller).or_default().push(ce.callee);
     }
-
-    let mut distances: ahash::AHashMap<FuncId, u32> = ahash::AHashMap::default();
-    distances.insert(source_func, 0);
-    let mut frontier: Vec<FuncId> = vec![source_func];
-    let mut depth: u32 = 0;
-    while !frontier.is_empty() {
-        depth += 1;
-        let mut next: Vec<FuncId> = Vec::new();
-        for f in &frontier {
-            for &c in adj.get(f).map(Vec::as_slice).unwrap_or(&[]) {
-                if !distances.contains_key(&c) {
-                    distances.insert(c, depth);
-                    next.push(c);
-                }
-            }
-        }
-        frontier = next;
+    for callees in adj.values_mut() {
+        callees.sort_unstable_by_key(|func| func.raw());
+        callees.dedup();
     }
-    distances
+    let mut order = ahash::AHashMap::default();
+    let mut pending = vec![source_func];
+    while let Some(func) = pending.pop() {
+        if order.contains_key(&func) {
+            continue;
+        }
+        let next = u32::try_from(order.len()).unwrap_or(u32::MAX);
+        order.insert(func, next);
+        if let Some(callees) = adj.get(&func) {
+            pending.extend(callees.iter().rev().copied());
+        }
+    }
+    order
 }
 
 /// Walk `events` and collect every bare-identifier name reachable
@@ -3940,6 +3869,7 @@ struct CallEventSummary {
     args_value_text: Vec<String>,
     args_span: Vec<bonsai_common::Span>,
     args_place: Vec<Option<String>>,
+    args_source_names: Vec<Vec<String>>,
     receiver: Option<String>,
     receiver_types: Vec<String>,
 }
@@ -4457,6 +4387,7 @@ fn collect_call_event_summaries(
                         args_value_text: args.iter().map(|arg| arg.value_text.clone()).collect(),
                         args_span: args.iter().map(|arg| arg.span).collect(),
                         args_place: args.iter().map(|arg| arg.place.clone()).collect(),
+                        args_source_names: args.iter().map(|arg| arg.source_names.clone()).collect(),
                         receiver: receiver.clone(),
                         receiver_types: receiver_types.clone(),
                     },
@@ -4476,6 +4407,16 @@ fn collect_call_event_summaries(
                     args_place: source_call_args
                         .iter()
                         .map(|arg| is_bare_identifier(arg.trim()).then(|| arg.trim().to_string()))
+                        .collect(),
+                    args_source_names: source_call_args
+                        .iter()
+                        .map(|arg| {
+                            if is_bare_identifier(arg.trim()) {
+                                vec![arg.trim().to_string()]
+                            } else {
+                                Vec::new()
+                            }
+                        })
                         .collect(),
                     receiver: None,
                     receiver_types: Vec::new(),

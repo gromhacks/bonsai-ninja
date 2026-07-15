@@ -314,48 +314,6 @@ struct FieldPlaceKey {
 #[derive(Default, Debug)]
 struct FieldPlaceIndex {
     by_base: AHashMap<FieldPlaceKey, Vec<FieldPlaceHit>>,
-    /// Exact storage names read by the AST. A bare read of a transform
-    /// target (for example `sink(obj)`) is a wildcard demand for every
-    /// concrete field that can reach that object; projected reads continue
-    /// to use the precise `(base, suffix)` index above.
-    read_storages: AHashSet<(SegmentId, FuncId, String)>,
-    /// AST read nodes with at least one use other than carrying a value into
-    /// a `CallArg`. Carrier-only reads stay indexed for propagation but are
-    /// not liveness roots unless the call site is an explicit terminal.
-    observable_read_nodes: AHashSet<(SegmentId, FuncId, NodeId)>,
-}
-
-#[derive(Default, Debug)]
-struct FieldDemandIndex {
-    key_ids: AHashMap<FieldPlaceKey, usize>,
-    field_ids: AHashMap<String, u32>,
-    fields_by_key: Vec<Vec<u32>>,
-    all_fields_by_key: Vec<bool>,
-}
-
-impl FieldDemandIndex {
-    fn contains_all(&self, key: &FieldPlaceKey) -> bool {
-        let Some(key_id) = self.key_ids.get(key).copied() else {
-            return false;
-        };
-        self.all_fields_by_key.get(key_id).copied().unwrap_or(false)
-    }
-
-    fn contains_exact(&self, key: &FieldPlaceKey, field: &str) -> bool {
-        let Some(key_id) = self.key_ids.get(key).copied() else {
-            return false;
-        };
-        let Some(field_id) = self.field_ids.get(field).copied() else {
-            return false;
-        };
-        self.fields_by_key
-            .get(key_id)
-            .is_some_and(|fields| fields.binary_search(&field_id).is_ok())
-    }
-
-    fn contains(&self, key: &FieldPlaceKey, field: &str) -> bool {
-        self.contains_all(key) || self.contains_exact(key, field)
-    }
 }
 
 /// Finite access-path demand derived from the adapter-produced IDG before
@@ -572,38 +530,35 @@ pub fn stitch_idg_with_field_argument_forwarding(
     stitch_idg_with_field_forwarding_mode(outputs, resolver, f2s, include_field_argument_forwarding, false)
 }
 
-/// Stitch with an optional sparse, read-demanded field closure. The sparse
-/// mode changes only which unobserved synthetic writes are materialized; all
-/// paths ending at an AST field read or scalar projection remain complete.
+/// Stitch with an optional symbolic access-path relation. Complete adapter
+/// field places remain queryable without materializing base × suffix edges.
 pub fn stitch_idg_with_field_forwarding_mode(
     outputs: Vec<TransferOutput>,
     resolver: &dyn CalleeResolver,
     f2s: &dyn FuncToSegment,
     include_field_argument_forwarding: bool,
-    demand_driven_field_forwarding: bool,
+    symbolic_field_forwarding: bool,
 ) -> IdgWorkspace {
     stitch_idg_with_selective_field_forwarding_mode(
         outputs,
         resolver,
         f2s,
         include_field_argument_forwarding,
-        demand_driven_field_forwarding,
-        None,
+        symbolic_field_forwarding,
         None,
     )
 }
 
-/// Stitch with demand-driven field forwarding limited to adapter functions
-/// whose AST field-place emission is complete. `None` preserves the public
-/// all-functions sparse mode used by focused IDG tests and direct callers.
+/// Stitch with symbolic field forwarding limited to adapter functions whose
+/// AST field-place emission is complete. `None` preserves the public
+/// all-functions symbolic mode used by focused IDG tests and direct callers.
 pub fn stitch_idg_with_selective_field_forwarding_mode(
     outputs: Vec<TransferOutput>,
     resolver: &dyn CalleeResolver,
     f2s: &dyn FuncToSegment,
     include_field_argument_forwarding: bool,
-    demand_driven_field_forwarding: bool,
-    demand_driven_funcs: Option<&AHashSet<FuncId>>,
-    field_demand_terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
+    symbolic_field_forwarding: bool,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) -> IdgWorkspace {
     let mut ws = IdgWorkspace::new();
     let stitch_started = Instant::now();
@@ -813,9 +768,8 @@ pub fn stitch_idg_with_selective_field_forwarding_mode(
             &passthrough_field_copy_sites,
             &stitch_data,
             &mut ws,
-            demand_driven_field_forwarding,
-            demand_driven_funcs,
-            field_demand_terminal_sites,
+            symbolic_field_forwarding,
+            symbolic_funcs,
         );
     } else {
         stitch_debug_log(format_args!(
@@ -2713,9 +2667,8 @@ fn stitch_field_argument_forwarding(
     passthrough_field_copy_sites: &[FieldCopySite],
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
     ws: &mut IdgWorkspace,
-    demand_driven: bool,
-    demand_driven_funcs: Option<&AHashSet<FuncId>>,
-    field_demand_terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
+    symbolic: bool,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) {
     let mut copy_sites = collect_field_copy_sites(ws, stitch_data);
     copy_sites.extend_from_slice(passthrough_field_copy_sites);
@@ -2754,7 +2707,7 @@ fn stitch_field_argument_forwarding(
     {
         return;
     }
-    let transforms = build_field_write_transforms(
+    let mut transforms = build_field_write_transforms(
         sites,
         return_field_sites,
         scalar_return_sites,
@@ -2762,9 +2715,21 @@ fn stitch_field_argument_forwarding(
         receiver_mutation_sites,
         &copy_sites,
     );
-    if demand_driven {
-        ws.set_symbolic_field(build_symbolic_field_graph(&transforms));
-        return;
+    if symbolic {
+        // Keep complete adapter AST places as a compact symbolic relation.
+        // In a mixed-language workspace, transforms that cross an adapter
+        // without complete field places remain on the eager compatibility
+        // path.  This partition is capability-derived per function: a
+        // single complete adapter must never disable field forwarding for a
+        // peer adapter that cannot consume symbolic facts precisely.
+        ws.set_symbolic_field(build_symbolic_field_graph(&transforms, symbolic_funcs));
+        transforms.retain(|source, entries| {
+            entries.retain(|transform| !field_transform_is_symbolic(source, transform, symbolic_funcs));
+            !entries.is_empty()
+        });
+        if transforms.is_empty() {
+            return;
+        }
     }
     // Eager compatibility mode alone needs the concrete field universe and
     // synthetic-node indexes. Building them before the symbolic return made
@@ -2778,68 +2743,12 @@ fn stitch_field_argument_forwarding(
     // edges produced by this phase instead of duplicating every pre-existing
     // workspace edge (millions on large projects) in a second hash table.
     let mut known_edges = AHashSet::default();
-    let demands = demand_driven.then(|| {
-        build_field_demands(
-            &field_index,
-            &transforms,
-            stitch_data,
-            field_demand_terminal_sites,
-        )
-    });
-    if let Some(demands) = &demands {
-        let field_count = demands.fields_by_key.iter().map(Vec::len).sum::<usize>();
-        let exact_base_count = demands
-            .fields_by_key
-            .iter()
-            .filter(|fields| !fields.is_empty())
-            .count();
-        let wildcard_base_count = demands.all_fields_by_key.iter().filter(|all| **all).count();
-        stitch_debug_log(format_args!(
-            "field-forward demands: exact_bases={} wildcard_bases={} fields={}",
-            exact_base_count, wildcard_base_count, field_count
-        ));
-        if field_count <= 128 && wildcard_base_count <= 128 {
-            let fields_by_id: AHashMap<u32, &str> = demands
-                .field_ids
-                .iter()
-                .map(|(field, id)| (*id, field.as_str()))
-                .collect();
-            let mut rendered = Vec::new();
-            for (key, key_id) in &demands.key_ids {
-                if demands.all_fields_by_key.get(*key_id).copied().unwrap_or(false) {
-                    rendered.push(format!("{}:{}:{}.*", key.seg_id.0, key.func.raw(), key.base));
-                }
-                for field_id in demands.fields_by_key.get(*key_id).into_iter().flatten() {
-                    if let Some(field) = fields_by_id.get(field_id) {
-                        rendered.push(format!(
-                            "{}:{}:{}.{field}",
-                            key.seg_id.0,
-                            key.func.raw(),
-                            key.base
-                        ));
-                    }
-                }
-            }
-            rendered.sort();
-            stitch_debug_log(format_args!(
-                "field-forward demand facts: {}",
-                rendered.join(", ")
-            ));
-        }
-    }
+    // Every transform left after the symbolic partition touches at least one
+    // adapter with incomplete field places, so it is materialized eagerly.
     let transform_count = transforms.values().map(Vec::len).sum::<usize>();
-    let mut applicable_transform_cache: AHashMap<(usize, u32), SmallVec<[u32; 2]>> = AHashMap::default();
     let mut pending = VecDeque::new();
     let mut enqueued = AHashSet::default();
-    seed_field_write_worklist(
-        &field_index,
-        &transforms,
-        demands.as_ref(),
-        demand_driven,
-        demand_driven_funcs,
-        &mut pending,
-        &mut enqueued,
-    );
+    seed_field_write_worklist(&field_index, &transforms, &mut pending, &mut enqueued);
 
     let phase_started = Instant::now();
     let before_edges = ws.total_edge_count();
@@ -2899,33 +2808,6 @@ fn stitch_field_argument_forwarding(
                 node: write.node,
                 span: Some(write_span),
             };
-            let applicable = demands.as_ref().and_then(|demands| {
-                let key_id = demands.key_ids.get(&key).copied()?;
-                let field_id = demands.field_ids.get(&source.field).copied().unwrap_or(u32::MAX);
-                Some(
-                    applicable_transform_cache
-                        .entry((key_id, field_id))
-                        .or_insert_with(|| {
-                            sites
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, transform)| {
-                                    field_transform_may_apply(
-                                        transform,
-                                        &source.field,
-                                        demands,
-                                        demand_driven,
-                                        demand_driven_funcs,
-                                    )
-                                })
-                                .map(|(index, _)| {
-                                    u32::try_from(index).expect("field transform fanout exceeds u32")
-                                })
-                                .collect()
-                        })
-                        .as_slice(),
-                )
-            });
             let mut apply_site = |site: &FieldWriteTransform| {
                 if !field_transform_source_may_apply(
                     site,
@@ -2940,9 +2822,6 @@ fn stitch_field_argument_forwarding(
                 apply_field_write_transform(
                     site,
                     &source,
-                    demands.as_ref(),
-                    demand_driven,
-                    demand_driven_funcs,
                     &mut inter_call_arg_entries,
                     &mut synthetic_field_writes,
                     ws,
@@ -2954,25 +2833,18 @@ fn stitch_field_argument_forwarding(
                     stitch_data,
                 );
             };
-            if let Some(indices) = applicable {
-                for site_index in indices.iter().copied() {
-                    apply_site(&sites[site_index as usize]);
-                }
-            } else {
-                for site in sites {
-                    apply_site(site);
-                }
+            for site in sites {
+                apply_site(site);
             }
         }
     }
     let added_edges = ws.total_edge_count().saturating_sub(before_edges);
     stitch_debug_log(format_args!(
-        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} transform_field_views={} fallback_edges={} added_edges={} total_edges={} pending_remaining={}",
+        "field-forward worklist: {:.3}s processed={} transform_apps={} transforms={} fallback_edges={} added_edges={} total_edges={} pending_remaining={}",
         phase_started.elapsed().as_secs_f64(),
         processed,
         processed_transforms,
         transform_count,
-        applicable_transform_cache.len(),
         fallback_edges,
         added_edges,
         ws.total_edge_count(),
@@ -3045,6 +2917,7 @@ fn build_field_write_transforms(
 
 fn build_symbolic_field_graph(
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) -> SymbolicFieldGraph {
     let mut graph = SymbolicFieldGraph::new();
     let mut source_keys: Vec<FieldPlaceKey> = transforms.keys().cloned().collect();
@@ -3055,6 +2928,9 @@ fn build_symbolic_field_graph(
             continue;
         };
         for transform in entries {
+            if !field_transform_is_symbolic(&source_key, transform, symbolic_funcs) {
+                continue;
+            }
             let (target, exact_field, call_span, write_span, precision, call_kind, kind, allow) =
                 match transform {
                     FieldWriteTransform::Argument(site) => (
@@ -3134,313 +3010,26 @@ fn build_symbolic_field_graph(
     graph
 }
 
-fn field_transform_target_key(transform: &FieldWriteTransform) -> Option<FieldPlaceKey> {
-    match transform {
-        FieldWriteTransform::Argument(site) => {
-            Some(field_write_key(site.callee_seg, site.callee, &site.param_name))
-        }
-        FieldWriteTransform::Return(site) => {
-            Some(field_write_key(site.caller_seg, site.caller, &site.target_base))
-        }
-        FieldWriteTransform::ScalarReturn(_) => None,
-        FieldWriteTransform::ConstructorReturn(site) => {
-            Some(field_write_key(site.caller_seg, site.caller, &site.target_base))
-        }
-        FieldWriteTransform::ReceiverMutation(site) => {
-            Some(field_write_key(site.caller_seg, site.caller, &site.target_base))
-        }
-        FieldWriteTransform::Copy(site) => Some(field_write_key(site.seg_id, site.func, &site.target_base)),
-    }
-}
-
-fn build_field_demands(
-    field_index: &FieldPlaceIndex,
-    transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    stitch_data: &AHashMap<FuncId, FunctionStitchData>,
-    terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
-) -> FieldDemandIndex {
-    let mut demands = FieldDemandIndex::default();
-    let mut reverse: Vec<Vec<usize>> = Vec::new();
-    for (source_key, source_transforms) in transforms {
-        let source_id = intern_field_demand_key(&mut demands, &mut reverse, source_key.clone());
-        for transform in source_transforms {
-            let Some(target_key) = field_transform_target_key(transform) else {
-                continue;
-            };
-            let target_id = intern_field_demand_key(&mut demands, &mut reverse, target_key);
-            reverse[target_id].push(source_id);
-        }
-    }
-    for sources in &mut reverse {
-        sources.sort_unstable();
-        sources.dedup();
-    }
-
-    let mut roots_by_field: Vec<Vec<usize>> = Vec::new();
-    for (key, hits) in &field_index.by_base {
-        if key.writes {
-            continue;
-        }
-        let write_key = FieldPlaceKey {
-            seg_id: key.seg_id,
-            func: key.func,
-            base: key.base.clone(),
-            writes: true,
-        };
-        for hit in hits {
-            if !field_index.is_observable_read(key, hit.node) {
-                continue;
-            }
-            seed_exact_field_demand(
-                &mut demands,
-                &mut reverse,
-                &mut roots_by_field,
-                write_key.clone(),
-                &hit.field,
-            );
-        }
-    }
-    for (source_key, source_transforms) in transforms {
-        for transform in source_transforms {
-            let FieldWriteTransform::ScalarReturn(site) = transform else {
-                continue;
-            };
-            seed_exact_field_demand(
-                &mut demands,
-                &mut reverse,
-                &mut roots_by_field,
-                source_key.clone(),
-                &site.source_field,
-            );
-        }
-    }
-    let mut segment_by_func = AHashMap::default();
-    for key in field_index.by_base.keys().chain(demands.key_ids.keys()) {
-        segment_by_func.entry(key.func).or_insert(key.seg_id);
-    }
-    let mut resolved_call_sites = AHashSet::default();
-    for source_transforms in transforms.values() {
-        for transform in source_transforms {
-            let caller_and_span = match transform {
-                FieldWriteTransform::Argument(site) => Some((site.caller, site.call_span)),
-                FieldWriteTransform::Return(site) => Some((site.caller, site.call_span)),
-                FieldWriteTransform::ScalarReturn(site) => Some((site.caller, site.call_span)),
-                FieldWriteTransform::ConstructorReturn(site) => Some((site.caller, site.call_span)),
-                FieldWriteTransform::ReceiverMutation(site) => Some((site.caller, site.call_span)),
-                FieldWriteTransform::Copy(_) => None,
-            };
-            if let Some(caller_and_span) = caller_and_span {
-                resolved_call_sites.insert(caller_and_span);
-            }
-        }
-    }
-    let mut whole_demand_key_ids = AHashSet::default();
-    // Some grammars represent a zero-argument field/property access as a
-    // call-shaped AST node (`envelope.cmd`, `obj.size`). Treat its receiver
-    // and member spelling as a demanded access path. This is syntax-derived
-    // and only broadens sparse materialization toward the complete IDG.
-    for (func, data) in stitch_data {
-        let Some(seg_id) = segment_by_func.get(func).copied() else {
-            continue;
-        };
-        for site in &data.call_sites {
-            let call_is_resolved = resolved_call_sites.contains(&(*func, site.site.0));
-            let whole_object_is_demanded =
-                whole_object_call_is_demanded(terminal_sites, call_is_resolved, *func, site.site.0);
-            if whole_object_is_demanded {
-                let argument_count = site.call_arg_places.len().max(site.call_arg_values.len());
-                for index in 0..argument_count {
-                    let place = site
-                        .call_arg_places
-                        .get(index)
-                        .map(String::as_str)
-                        .filter(|place| !place.trim().is_empty())
-                        .or_else(|| site.call_arg_values.get(index).map(String::as_str))
-                        .unwrap_or_default()
-                        .trim();
-                    if place.is_empty() {
-                        continue;
-                    }
-                    seed_terminal_projection_demands(
-                        &mut demands,
-                        &mut reverse,
-                        &mut roots_by_field,
-                        seg_id,
-                        *func,
-                        place,
-                    );
-                    let key = field_write_key(seg_id, *func, place);
-                    let key_id = intern_field_demand_key(&mut demands, &mut reverse, key);
-                    whole_demand_key_ids.insert(key_id);
-                }
-                if site.call_kind == CallKind::Method {
-                    if let Some(receiver) = site
-                        .receiver
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|receiver| !receiver.is_empty())
-                    {
-                        seed_terminal_projection_demands(
-                            &mut demands,
-                            &mut reverse,
-                            &mut roots_by_field,
-                            seg_id,
-                            *func,
-                            receiver,
-                        );
-                        let key = field_write_key(seg_id, *func, receiver);
-                        let key_id = intern_field_demand_key(&mut demands, &mut reverse, key);
-                        whole_demand_key_ids.insert(key_id);
-                    }
-                }
-            }
-            if site.explicit_args_count != 0 {
-                continue;
-            }
-            let projection = if let Some(receiver) = site
-                .receiver
-                .as_deref()
-                .map(str::trim)
-                .filter(|receiver| !receiver.is_empty())
-            {
-                let field = site.callee_name.rsplit('.').next().unwrap_or_default().trim();
-                (!field.is_empty()).then(|| (receiver.to_string(), field.to_string()))
-            } else {
-                site.callee_name.rsplit_once('.').and_then(|(base, field)| {
-                    let base = base.trim();
-                    let field = field.trim();
-                    (!base.is_empty() && !field.is_empty()).then(|| (base.to_string(), field.to_string()))
-                })
-            };
-            let Some((base, field)) = projection else {
-                continue;
-            };
-            let key = field_write_key(seg_id, *func, &base);
-            seed_exact_field_demand(&mut demands, &mut reverse, &mut roots_by_field, key, &field);
-        }
-    }
-
-    let mut pending_all = VecDeque::new();
-    for (key, key_id) in &demands.key_ids {
-        if (field_index.has_whole_read(key) || whole_demand_key_ids.contains(key_id))
-            && !demands.all_fields_by_key[*key_id]
-        {
-            demands.all_fields_by_key[*key_id] = true;
-            pending_all.push_back(*key_id);
-        }
-    }
-    while let Some(target_id) = pending_all.pop_front() {
-        for source_id in reverse.get(target_id).into_iter().flatten().copied() {
-            if !demands.all_fields_by_key[source_id] {
-                demands.all_fields_by_key[source_id] = true;
-                pending_all.push_back(source_id);
-            }
-        }
-    }
-
-    // A wildcard is the lattice top for its base: transforms materialize all
-    // concrete syntactic suffixes directly, so duplicating those suffix ids
-    // in the demand relation adds no information. Exact facts propagate only
-    // through non-wildcard keys, using a generation-mark array for O(1)
-    // deduplication and no semantic work cap.
-    let exact_started = Instant::now();
-    let mut seen_generation = vec![0u32; demands.fields_by_key.len()];
-    let mut pending = VecDeque::new();
-    for (field_index, roots) in roots_by_field.into_iter().enumerate() {
-        let field_id = u32::try_from(field_index).expect("field demand id exceeds u32");
-        let generation = field_id.saturating_add(1);
-        for root in roots {
-            if demands.all_fields_by_key[root] || seen_generation[root] == generation {
-                continue;
-            }
-            seen_generation[root] = generation;
-            pending.push_back(root);
-        }
-        while let Some(target_id) = pending.pop_front() {
-            demands.fields_by_key[target_id].push(field_id);
-            for source_id in reverse.get(target_id).into_iter().flatten().copied() {
-                if demands.all_fields_by_key[source_id] || seen_generation[source_id] == generation {
-                    continue;
-                }
-                seen_generation[source_id] = generation;
-                pending.push_back(source_id);
-            }
-        }
-    }
-    stitch_debug_log(format_args!(
-        "exact field-demand closure: {:.3}s facts={}",
-        exact_started.elapsed().as_secs_f64(),
-        demands.fields_by_key.iter().map(Vec::len).sum::<usize>()
-    ));
-    demands
-}
-
-fn whole_object_call_is_demanded(
-    terminal_sites: Option<&AHashSet<(FuncId, Span)>>,
-    call_is_resolved: bool,
-    caller: FuncId,
-    site: Span,
+fn field_transform_is_symbolic(
+    source: &FieldPlaceKey,
+    transform: &FieldWriteTransform,
+    symbolic_funcs: Option<&AHashSet<FuncId>>,
 ) -> bool {
-    terminal_sites
-        .map(|terminals| terminals.contains(&(caller, site)))
-        .unwrap_or(!call_is_resolved)
+    symbolic_funcs.is_none_or(|funcs| {
+        funcs.contains(&source.func)
+            && field_transform_target_func(transform).is_some_and(|target| funcs.contains(&target))
+    })
 }
 
-fn seed_terminal_projection_demands(
-    demands: &mut FieldDemandIndex,
-    reverse: &mut Vec<Vec<usize>>,
-    roots_by_field: &mut Vec<Vec<usize>>,
-    seg_id: SegmentId,
-    func: FuncId,
-    place: &str,
-) {
-    let parts = storage_segments_cached(place);
-    for split in 1..parts.len() {
-        let base = join_storage_parts(&parts[..split]);
-        let field = join_storage_parts(&parts[split..]);
-        seed_exact_field_demand(
-            demands,
-            reverse,
-            roots_by_field,
-            field_write_key(seg_id, func, &base),
-            &field,
-        );
+fn field_transform_target_func(transform: &FieldWriteTransform) -> Option<FuncId> {
+    match transform {
+        FieldWriteTransform::Argument(site) => Some(site.callee),
+        FieldWriteTransform::Return(site) => Some(site.caller),
+        FieldWriteTransform::ScalarReturn(site) => Some(site.caller),
+        FieldWriteTransform::ConstructorReturn(site) => Some(site.caller),
+        FieldWriteTransform::ReceiverMutation(site) => Some(site.caller),
+        FieldWriteTransform::Copy(site) => Some(site.func),
     }
-}
-
-fn intern_field_demand_key(
-    demands: &mut FieldDemandIndex,
-    reverse: &mut Vec<Vec<usize>>,
-    key: FieldPlaceKey,
-) -> usize {
-    if let Some(id) = demands.key_ids.get(&key).copied() {
-        return id;
-    }
-    let id = demands.fields_by_key.len();
-    demands.key_ids.insert(key, id);
-    demands.fields_by_key.push(Vec::new());
-    demands.all_fields_by_key.push(false);
-    reverse.push(Vec::new());
-    id
-}
-
-fn seed_exact_field_demand(
-    demands: &mut FieldDemandIndex,
-    reverse: &mut Vec<Vec<usize>>,
-    roots_by_field: &mut Vec<Vec<usize>>,
-    key: FieldPlaceKey,
-    field: &str,
-) {
-    let key_id = intern_field_demand_key(demands, reverse, key);
-    let field_id = if let Some(id) = demands.field_ids.get(field).copied() {
-        id
-    } else {
-        let id = u32::try_from(demands.field_ids.len()).expect("field demand id exceeds u32");
-        demands.field_ids.insert(field.to_string(), id);
-        roots_by_field.push(Vec::new());
-        id
-    };
-    roots_by_field[field_id as usize].push(key_id);
 }
 
 fn push_field_write_transform(
@@ -3466,9 +3055,6 @@ fn field_write_key(seg_id: SegmentId, func: FuncId, base: &str) -> FieldPlaceKey
 fn seed_field_write_worklist(
     field_index: &FieldPlaceIndex,
     transforms: &AHashMap<FieldPlaceKey, Vec<FieldWriteTransform>>,
-    demands: Option<&FieldDemandIndex>,
-    demand_driven: bool,
-    demand_driven_funcs: Option<&AHashSet<FuncId>>,
     pending: &mut VecDeque<PendingFieldWrite>,
     enqueued: &mut AHashSet<PendingFieldWrite>,
 ) {
@@ -3479,11 +3065,6 @@ fn seed_field_write_worklist(
             continue;
         };
         for hit in hits {
-            if field_demand_applies(demand_driven, demand_driven_funcs, key.func)
-                && demands.is_some_and(|demands| !demands.contains(&key, &hit.field))
-            {
-                continue;
-            }
             enqueue_field_write(&key, hit, pending, enqueued);
         }
     }
@@ -3538,9 +3119,6 @@ fn dedup_receiver_mutation_sites(sites: &mut Vec<Arc<ReceiverMutationStitch>>) {
 fn apply_field_write_transform(
     transform: &FieldWriteTransform,
     source: &FieldPlaceHit,
-    demands: Option<&FieldDemandIndex>,
-    demand_driven: bool,
-    demand_driven_funcs: Option<&AHashSet<FuncId>>,
     inter_call_arg_entries: &mut InterCallArgEntryIndex,
     synthetic_field_writes: &mut SyntheticFieldWriteCache,
     ws: &mut IdgWorkspace,
@@ -3551,20 +3129,6 @@ fn apply_field_write_transform(
     enqueued: &mut AHashSet<PendingFieldWrite>,
     stitch_data: &AHashMap<FuncId, FunctionStitchData>,
 ) {
-    if let (Some(demands), Some(target_key)) = (demands, field_transform_target_key(transform)) {
-        if field_demand_applies(demand_driven, demand_driven_funcs, target_key.func) {
-            let aggregate_demand = demands.contains_all(&target_key);
-            let exact_demand = demands.contains_exact(&target_key, &source.field);
-            if aggregate_demand {
-                if let FieldWriteTransform::Argument(site) = transform {
-                    apply_field_argument_aggregate(site, source, inter_call_arg_entries, ws, known_edges);
-                }
-            }
-            if !aggregate_demand && !exact_demand {
-                return;
-            }
-        }
-    }
     match transform {
         FieldWriteTransform::Argument(site) => {
             apply_field_argument_write(
@@ -3643,21 +3207,6 @@ fn apply_field_write_transform(
     }
 }
 
-fn field_transform_may_apply(
-    transform: &FieldWriteTransform,
-    field: &str,
-    demands: &FieldDemandIndex,
-    demand_driven: bool,
-    demand_driven_funcs: Option<&AHashSet<FuncId>>,
-) -> bool {
-    let Some(target_key) = field_transform_target_key(transform) else {
-        return true;
-    };
-    !field_demand_applies(demand_driven, demand_driven_funcs, target_key.func)
-        || demands.contains_all(&target_key)
-        || demands.contains_exact(&target_key, field)
-}
-
 fn field_transform_source_may_apply(
     transform: &FieldWriteTransform,
     source: &FieldPlaceHit,
@@ -3691,54 +3240,6 @@ fn field_transform_source_may_apply(
         | FieldWriteTransform::ConstructorReturn(_)
         | FieldWriteTransform::ReceiverMutation(_) => true,
     }
-}
-
-fn apply_field_argument_aggregate(
-    site: &FieldArgStitch,
-    source: &FieldPlaceHit,
-    inter_call_arg_entries: &InterCallArgEntryIndex,
-    ws: &mut IdgWorkspace,
-    known_edges: &mut AHashSet<(SegmentId, SegmentId, IdgEdge)>,
-) {
-    if (!site.allow_out_of_order_source
-        && !source_write_can_reach_call(
-            source,
-            site.call_span,
-            inter_call_arg_entries,
-            site.caller_seg,
-            site.caller,
-        ))
-        || !is_forwardable_field(&source.field)
-    {
-        return;
-    }
-    let Some(actual_arg_node) = site.actual_arg_node else {
-        return;
-    };
-    let _ = place_inter_edge_if_absent(
-        site.caller_seg,
-        site.caller_seg,
-        IdgEdge {
-            from: source.node,
-            to: actual_arg_node,
-            meta: crate::edge::EdgeMeta {
-                precision: site.precision,
-                kind: crate::edge::IdgEdgeKind::IntraRead,
-                call_kind: site.call_kind,
-                via_span: site.call_span,
-            },
-        },
-        ws,
-        known_edges,
-    );
-}
-
-fn field_demand_applies(
-    demand_driven: bool,
-    demand_driven_funcs: Option<&AHashSet<FuncId>>,
-    func: FuncId,
-) -> bool {
-    demand_driven && demand_driven_funcs.is_none_or(|funcs| funcs.contains(&func))
 }
 
 #[allow(clippy::too_many_arguments)] // Call-site field forwarding carries source, destination, and worklist state.
@@ -3799,7 +3300,7 @@ fn apply_field_argument_write(
             to: param_field_write,
             meta: crate::edge::EdgeMeta {
                 precision: site.precision,
-                kind: crate::edge::IdgEdgeKind::InterCallArg,
+                kind: crate::edge::IdgEdgeKind::InterFieldCallArg,
                 call_kind: site.call_kind,
                 via_span: site.call_span,
             },
@@ -3860,7 +3361,7 @@ fn apply_return_field_write(
         transforms,
         pending,
         enqueued,
-        crate::edge::IdgEdgeKind::InterReturn,
+        crate::edge::IdgEdgeKind::InterFieldReturn,
         false,
     );
 }
@@ -3891,7 +3392,7 @@ fn apply_scalar_return_field_write(
             to: target_write,
             meta: crate::edge::EdgeMeta {
                 precision: site.precision,
-                kind: crate::edge::IdgEdgeKind::InterReturn,
+                kind: crate::edge::IdgEdgeKind::InterFieldReturn,
                 call_kind: site.call_kind,
                 via_span: site.call_span,
             },
@@ -3932,7 +3433,7 @@ fn apply_constructor_return_field_write(
         transforms,
         pending,
         enqueued,
-        crate::edge::IdgEdgeKind::InterReturn,
+        crate::edge::IdgEdgeKind::InterFieldReturn,
         false,
     );
 }
@@ -3968,7 +3469,7 @@ fn apply_receiver_mutation_field_write(
         transforms,
         pending,
         enqueued,
-        crate::edge::IdgEdgeKind::InterReturn,
+        crate::edge::IdgEdgeKind::InterFieldReturn,
         false,
     );
 }
@@ -4120,7 +3621,10 @@ fn apply_outbound_field_write(
         if changed
             && matches!(
                 edge_kind,
-                crate::edge::IdgEdgeKind::InterCallArg | crate::edge::IdgEdgeKind::InterReturn
+                crate::edge::IdgEdgeKind::InterCallArg
+                    | crate::edge::IdgEdgeKind::InterReturn
+                    | crate::edge::IdgEdgeKind::InterFieldCallArg
+                    | crate::edge::IdgEdgeKind::InterFieldReturn
             )
         {
             inter_call_arg_entries.insert(to_seg, to_func, target_field_write);
@@ -4197,7 +3701,7 @@ fn stitch_field_argument_fallbacks(
                     to: reader,
                     meta: crate::edge::EdgeMeta {
                         precision: site.precision,
-                        kind: crate::edge::IdgEdgeKind::InterCallArg,
+                        kind: crate::edge::IdgEdgeKind::InterFieldCallArg,
                         call_kind: site.call_kind,
                         via_span: site.call_span,
                     },
@@ -4651,27 +4155,6 @@ impl FieldPlaceIndex {
     fn from_workspace(ws: &IdgWorkspace) -> Self {
         let mut index = Self::default();
         for (seg_id, segment) in ws.segments() {
-            for edge in &segment.edges {
-                let Some(from_node) = segment.nodes.get(edge.from) else {
-                    continue;
-                };
-                if !matches!(segment.places.get(from_node.place), Some(Place::Read { .. })) {
-                    continue;
-                }
-                let carrier_only_use = edge.meta.kind == crate::edge::IdgEdgeKind::IntraRead
-                    && segment
-                        .nodes
-                        .get(edge.to)
-                        .and_then(|node| segment.places.get(node.place))
-                        .is_some_and(|place| matches!(place, Place::CallArg { .. }));
-                if !carrier_only_use {
-                    index
-                        .observable_read_nodes
-                        .insert((seg_id, from_node.func, edge.from));
-                }
-            }
-        }
-        for (seg_id, segment) in ws.segments() {
             for (node_idx, node) in segment.nodes.nodes.iter().enumerate() {
                 let Some(place) = segment.places.get(node.place) else {
                     continue;
@@ -4692,29 +4175,11 @@ impl FieldPlaceIndex {
                     _ => continue,
                 };
                 let node_id = NodeId(node_idx as u32);
-                if !writes
-                    && index
-                        .observable_read_nodes
-                        .contains(&(seg_id, node.func, node_id))
-                {
-                    index
-                        .read_storages
-                        .insert((seg_id, node.func, normalize_storage_base(&full_name)));
-                }
                 let _ = index.record_full_storage_place(seg_id, node.func, &full_name, writes, span, node_id);
             }
         }
         index.sort_and_dedup();
         index
-    }
-
-    fn has_whole_read(&self, write_key: &FieldPlaceKey) -> bool {
-        self.read_storages
-            .contains(&(write_key.seg_id, write_key.func, write_key.base.clone()))
-    }
-
-    fn is_observable_read(&self, key: &FieldPlaceKey, node: NodeId) -> bool {
-        self.observable_read_nodes.contains(&(key.seg_id, key.func, node))
     }
 
     fn syntactic_field_universe(&self) -> SyntacticFieldUniverse {
@@ -4980,7 +4445,12 @@ impl InterCallArgEntryIndex {
         let mut index = Self::default();
         for (seg_id, segment) in ws.segments() {
             for edge in &segment.edges {
-                if edge.meta.kind != crate::edge::IdgEdgeKind::InterCallArg {
+                if !matches!(
+                    edge.meta.kind,
+                    crate::edge::IdgEdgeKind::InterCallArg
+                        | crate::edge::IdgEdgeKind::InterFieldCallArg
+                        | crate::edge::IdgEdgeKind::InterFieldReturn
+                ) {
                     continue;
                 }
                 if let Some(to_node) = segment.nodes.get(edge.to) {
@@ -4989,7 +4459,12 @@ impl InterCallArgEntryIndex {
             }
         }
         for cross in &ws.cross_file().edges {
-            if cross.edge.meta.kind != crate::edge::IdgEdgeKind::InterCallArg {
+            if !matches!(
+                cross.edge.meta.kind,
+                crate::edge::IdgEdgeKind::InterCallArg
+                    | crate::edge::IdgEdgeKind::InterFieldCallArg
+                    | crate::edge::IdgEdgeKind::InterFieldReturn
+            ) {
                 continue;
             }
             if let Some(to_node) = ws

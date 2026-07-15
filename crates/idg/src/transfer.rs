@@ -126,24 +126,13 @@ pub struct TransferOptions {
     /// forwarding edges. Completeness-preserving semantic graphs keep this
     /// enabled; disabling it is only appropriate for diagnostic graph builds.
     pub include_field_argument_forwarding: bool,
-    /// Whether field forwarding materializes only facts that can reach an
-    /// adapter-emitted field read or scalar field projection. This is an
-    /// exact query optimization for sink-oriented analysis; complete export
-    /// graphs leave it disabled so unobserved propagated writes remain
-    /// inspectable.
-    pub demand_driven_field_forwarding: bool,
+    /// Whether complete adapter field places use the compact symbolic
+    /// access-path relation instead of materialized base × suffix edges.
+    pub symbolic_field_forwarding: bool,
     /// Adapter language ids whose emitted field places are complete enough
-    /// for demand-driven forwarding. An empty list retains the legacy
-    /// all-functions behavior for direct IDG callers; production workspace
-    /// builds populate this from adapter capabilities, never from a
-    /// hard-coded language inventory.
-    pub field_demand_languages: Vec<String>,
-    /// Query terminal call sites whose whole-object arguments are demand
-    /// roots. Security fills this from exact matcher spans. For workspace
-    /// builds with demand-driven forwarding enabled, an empty list means no
-    /// call site is a whole-object terminal; direct builder callers that pass
-    /// no terminal set retain conservative unresolved-call demand.
-    pub field_demand_terminal_sites: Vec<(FuncId, Span)>,
+    /// for symbolic forwarding. Production workspace builds populate this
+    /// from adapter capabilities, never from a hard-coded language inventory.
+    pub symbolic_field_languages: Vec<String>,
     /// When a call result cannot be resolved to a workspace body,
     /// conservatively carry its explicit arguments (and a syntax-classified
     /// method receiver) into the result at narrowed precision. This name-
@@ -170,9 +159,8 @@ impl Default for TransferOptions {
             include_diagnostic_field_flows: true,
             include_receiver_method_propagation: true,
             include_field_argument_forwarding: true,
-            demand_driven_field_forwarding: false,
-            field_demand_languages: Vec::new(),
-            field_demand_terminal_sites: Vec::new(),
+            symbolic_field_forwarding: false,
+            symbolic_field_languages: Vec::new(),
             include_unresolved_call_result_passthrough: false,
             // A syntax-classified method consumes its receiver even when the
             // external body is unavailable. Conservatively preserving that
@@ -186,6 +174,26 @@ impl Default for TransferOptions {
 }
 
 impl TransferOptions {
+    /// Canonical compiler graph semantics for ordinary analysis surfaces.
+    ///
+    /// `field_place_languages` comes from adapter capability metadata. Those
+    /// adapters use the compact symbolic access-path relation; all others
+    /// retain eager field forwarding. No API or library spellings participate
+    /// in this choice.
+    #[must_use]
+    pub fn compiler_semantics(field_place_languages: Vec<String>) -> Self {
+        Self {
+            include_diagnostic_field_flows: false,
+            include_receiver_method_propagation: false,
+            symbolic_field_forwarding: !field_place_languages.is_empty(),
+            symbolic_field_languages: field_place_languages,
+            include_unresolved_call_result_passthrough: true,
+            include_unresolved_receiver_result_passthrough: true,
+            ..Self::default()
+        }
+        .canonicalized()
+    }
+
     /// True when no optional transfer behavior is configured.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -198,9 +206,8 @@ impl TransferOptions {
             && self.include_diagnostic_field_flows
             && self.include_receiver_method_propagation
             && self.include_field_argument_forwarding
-            && !self.demand_driven_field_forwarding
-            && self.field_demand_languages.is_empty()
-            && self.field_demand_terminal_sites.is_empty()
+            && !self.symbolic_field_forwarding
+            && self.symbolic_field_languages.is_empty()
             && !self.include_unresolved_call_result_passthrough
             && self.include_unresolved_receiver_result_passthrough
     }
@@ -280,11 +287,8 @@ impl TransferOptions {
         self.receiver_state_propagations
             .sort_by(|a, b| (&a.method, &a.receiver_type).cmp(&(&b.method, &b.receiver_type)));
         self.receiver_state_propagations.dedup();
-        self.field_demand_languages.sort();
-        self.field_demand_languages.dedup();
-        self.field_demand_terminal_sites
-            .sort_by_key(|(func, span)| (func.raw(), span.file.raw(), span.start, span.end));
-        self.field_demand_terminal_sites.dedup();
+        self.symbolic_field_languages.sort();
+        self.symbolic_field_languages.dedup();
         self
     }
 
@@ -307,24 +311,17 @@ impl TransferOptions {
 
         let options = self.clone().canonicalized();
         let mut hasher = StableHasher::new();
-        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v13");
+        absorb_str(&mut hasher, "bonsai-idg-transfer-options-v14");
         absorb_u64(&mut hasher, u64::from(options.include_diagnostic_field_flows));
         absorb_u64(
             &mut hasher,
             u64::from(options.include_receiver_method_propagation),
         );
         absorb_u64(&mut hasher, u64::from(options.include_field_argument_forwarding));
-        absorb_u64(&mut hasher, u64::from(options.demand_driven_field_forwarding));
-        absorb_u64(&mut hasher, options.field_demand_languages.len() as u64);
-        for language in &options.field_demand_languages {
+        absorb_u64(&mut hasher, u64::from(options.symbolic_field_forwarding));
+        absorb_u64(&mut hasher, options.symbolic_field_languages.len() as u64);
+        for language in &options.symbolic_field_languages {
             absorb_str(&mut hasher, language);
-        }
-        absorb_u64(&mut hasher, options.field_demand_terminal_sites.len() as u64);
-        for (func, span) in &options.field_demand_terminal_sites {
-            absorb_u64(&mut hasher, func.raw() as u64);
-            absorb_u64(&mut hasher, span.file.raw() as u64);
-            absorb_u64(&mut hasher, span.start);
-            absorb_u64(&mut hasher, span.end);
         }
         absorb_u64(
             &mut hasher,

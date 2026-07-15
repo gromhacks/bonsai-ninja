@@ -260,7 +260,7 @@ fn synthesize_kotlin_data_copy_fields(events: &mut Vec<FlowEvent>, type_aliases:
                 synthesize_kotlin_data_copy_fields(else_events, type_aliases);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                synthesize_kotlin_data_copy_fields(body, type_aliases)
+                synthesize_kotlin_data_copy_fields(body, type_aliases);
             }
             FlowEvent::Try {
                 body,

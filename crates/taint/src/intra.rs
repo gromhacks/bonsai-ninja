@@ -57,8 +57,8 @@ pub struct TaintConfig {
     /// sanitizer list. Sanitizers are classification evidence, not a
     /// taint-transfer input, so this set does not alter propagation.
     pub sanitizers: TokenSet,
-    /// Optional diagnostic worklist iteration cap. `None` runs to the
-    /// fixed point and is the completeness-preserving default.
+    /// Retained for source compatibility. Compiler dataflow always runs to
+    /// its least fixed point; this value never limits semantic work.
     pub worklist_cap: Option<u32>,
 }
 
@@ -77,8 +77,8 @@ pub struct IntraTaintResult {
     /// How many worklist iterations the analysis took. Exposed for
     /// tests and performance validation; never affects semantics.
     pub iterations: u32,
-    /// True when an explicitly configured diagnostic cap stopped the
-    /// worklist before convergence.
+    /// Compatibility field. Compiler dataflow is never truncated, so this is
+    /// always false.
     pub saturated: bool,
     /// Diagnostics emitted for CFG shapes that force defensive
     /// analysis behavior. These are not parse diagnostics; they flag
@@ -114,10 +114,9 @@ use crate::tokens::{canonical_bare_name, qualified_wildcard_seed_matches, rhs_ha
 
 /// Run the intraprocedural analysis on a function's CFG.
 ///
-/// Worklist iteration until convergence, or until an explicitly configured
-/// diagnostic [`TaintConfig::worklist_cap`] is reached. Every block is
-/// visited at least once; blocks whose `in` state changes force their
-/// successors back onto the worklist.
+/// Worklist iteration until convergence. Every block is visited at least
+/// once; blocks whose `in` state changes force their successors back onto the
+/// worklist. The compatibility `worklist_cap` is intentionally ignored.
 #[must_use]
 pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResult {
     let predecessors = build_predecessor_map(cfg);
@@ -139,14 +138,9 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
     enqueued.insert(cfg.entry);
 
     let mut iterations: u32 = 0;
-    let mut saturated = false;
     while let Some(block_id) = worklist.pop_front() {
         enqueued.remove(&block_id);
-        iterations += 1;
-        if config.worklist_cap.is_some_and(|cap| iterations > cap) {
-            saturated = true;
-            break;
-        }
+        iterations = iterations.saturating_add(1);
 
         let new_in = if block_id == cfg.entry {
             // Entry block's `in` always equals the sources. Joining
@@ -193,7 +187,7 @@ pub fn intraprocedural_taint(cfg: &Cfg, config: &TaintConfig) -> IntraTaintResul
         block_in,
         block_out,
         iterations,
-        saturated,
+        saturated: false,
         diagnostics,
     }
 }

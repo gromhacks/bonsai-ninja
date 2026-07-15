@@ -133,7 +133,11 @@ fn enclosing_body_start_line(ws: &Workspace, hit: &RuleMatch, source: &str) -> u
     source
         .as_bytes()
         .get(..start.min(source.len()))
-        .map_or(0, |prefix| prefix.iter().filter(|byte| **byte == b'\n').count())
+        .map_or(0, |prefix| {
+            prefix
+                .iter()
+                .fold(0, |lines, byte| lines + usize::from(*byte == b'\n'))
+        })
 }
 
 fn js_dev_only_env_guard_line(line: &str) -> bool {

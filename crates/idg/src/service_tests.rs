@@ -9,6 +9,65 @@ fn span(file: u32, start: u64, end: u64) -> Span {
     Span::new(bonsai_common::FileId::new(file), start, end)
 }
 
+#[test]
+fn root_closure_visited_promotes_from_sparse_to_dense_without_changing_membership() {
+    let node_count = 4096usize;
+    let dense_bytes = node_count.div_ceil(u8::BITS as usize);
+    let sparse_entry_bytes = std::mem::size_of::<u32>() + std::mem::size_of::<usize>();
+    let promotion_count = dense_bytes.div_ceil(sparse_entry_bytes);
+    let mut visited = RootClosureVisited::new(node_count, 1);
+    assert!(matches!(visited, RootClosureVisited::Sparse { .. }));
+
+    for raw in 0..promotion_count {
+        assert!(visited.insert(NodeId(raw as u32)));
+    }
+    assert!(matches!(visited, RootClosureVisited::Dense(_)));
+    for raw in 0..promotion_count {
+        assert!(!visited.insert(NodeId(raw as u32)), "promotion lost node {raw}");
+    }
+    assert!(
+        !visited.insert(NodeId(node_count as u32)),
+        "out-of-range nodes must stay excluded"
+    );
+}
+
+#[test]
+fn call_context_tabulation_is_finite_and_replays_recursive_returns() {
+    let first = ContextBoundaryKey {
+        caller: FuncId::new(1),
+        callee: FuncId::new(2),
+        span: span(0, 10, 20),
+    };
+    let second = ContextBoundaryKey {
+        caller: FuncId::new(2),
+        callee: FuncId::new(1),
+        span: span(1, 30, 40),
+    };
+    let mut contexts = CallContexts::new();
+    let (first_context, _, _) = contexts.register_call(0, first);
+    let (second_context, _, _) = contexts.register_call(first_context, second);
+
+    // Re-entering an existing boundary records another tabulation caller; it
+    // never allocates the recursive call string first→second→first→… .
+    let (recursive_context, _, _) = contexts.register_call(second_context, first);
+    assert_eq!(recursive_context, first_context);
+    assert_eq!(contexts.boundaries.len(), 3);
+
+    let returned = NodeId(17);
+    let mut callers = contexts.complete_node_return(first_context, returned);
+    callers.sort_unstable();
+    assert_eq!(callers, vec![0, second_context]);
+
+    // A caller discovered after completion receives the cached summary.
+    let late_context = contexts.context_for(ContextBoundaryKey {
+        caller: FuncId::new(3),
+        callee: FuncId::new(1),
+        span: span(2, 50, 60),
+    });
+    let (_, replayed, _) = contexts.register_call(late_context, first);
+    assert_eq!(replayed, vec![returned]);
+}
+
 fn payload_map_flow() -> bonsai_lang_api::ExpressionFlow {
     bonsai_lang_api::ExpressionFlow {
         aggregate_fields: vec![
@@ -608,6 +667,145 @@ fn compiler_return_summaries_respect_the_precision_scope() {
 }
 
 #[test]
+fn symbolic_return_summary_matches_the_originating_call_site() {
+    let caller = FuncId::new(75);
+    let callee = FuncId::new(76);
+    let first_call = span(0, 30, 40);
+    let second_call = span(0, 50, 60);
+    let mut segment = crate::segment::IdgSegment::new();
+    let first_base = segment.strings.intern("first");
+    let second_base = segment.strings.intern("second");
+    let live_field = segment.strings.intern("live");
+    let dead_field = segment.strings.intern("dead");
+    let callee_base = segment.strings.intern("arg");
+    let caller_param_0 = segment.intern_place(Place::Param { idx: 0 });
+    let caller_param_1 = segment.intern_place(Place::Param { idx: 1 });
+    let caller_param_2 = segment.intern_place(Place::Param { idx: 2 });
+    let first_write = segment.intern_place(Place::Write {
+        name: first_base,
+        path: smallvec::smallvec![live_field],
+        span: span(0, 10, 20),
+    });
+    let second_live_write = segment.intern_place(Place::Write {
+        name: second_base,
+        path: smallvec::smallvec![live_field],
+        span: span(0, 20, 30),
+    });
+    let second_dead_write = segment.intern_place(Place::Write {
+        name: second_base,
+        path: smallvec::smallvec![dead_field],
+        span: span(0, 21, 29),
+    });
+    let first_ret = segment.intern_place(Place::CallRet {
+        site: crate::place::CallSiteId(first_call),
+    });
+    let second_ret = segment.intern_place(Place::CallRet {
+        site: crate::place::CallSiteId(second_call),
+    });
+    let caller_return = segment.intern_place(Place::Return);
+    let callee_read = segment.intern_place(Place::Read {
+        name: callee_base,
+        path: smallvec::smallvec![live_field],
+    });
+    let callee_return = segment.intern_place(Place::Return);
+
+    let caller_param_0 = segment.intern_node(caller, caller_param_0);
+    let caller_param_1 = segment.intern_node(caller, caller_param_1);
+    let caller_param_2 = segment.intern_node(caller, caller_param_2);
+    let first_write = segment.intern_node(caller, first_write);
+    let second_live_write = segment.intern_node(caller, second_live_write);
+    let second_dead_write = segment.intern_node(caller, second_dead_write);
+    let first_ret = segment.intern_node(caller, first_ret);
+    let second_ret = segment.intern_node(caller, second_ret);
+    let caller_return = segment.intern_node(caller, caller_return);
+    let callee_read = segment.intern_node(callee, callee_read);
+    let callee_return = segment.intern_node(callee, callee_return);
+
+    segment.add_edge(IdgEdge::intra_assign(
+        caller_param_0,
+        first_write,
+        span(0, 10, 20),
+    ));
+    segment.add_edge(IdgEdge::intra_assign(
+        caller_param_1,
+        second_live_write,
+        span(0, 20, 30),
+    ));
+    segment.add_edge(IdgEdge::intra_assign(
+        caller_param_2,
+        first_write,
+        span(0, 10, 20),
+    ));
+    segment.add_edge(IdgEdge::intra_assign(
+        caller_param_2,
+        second_dead_write,
+        span(0, 21, 29),
+    ));
+    segment.add_edge(IdgEdge::intra_assign(second_ret, caller_return, second_call));
+    segment.add_edge(IdgEdge::intra_assign(callee_read, callee_return, span(0, 70, 80)));
+    segment.add_edge(IdgEdge::inter_return(
+        callee_return,
+        first_ret,
+        first_call,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.add_edge(IdgEdge::inter_return(
+        callee_return,
+        second_ret,
+        second_call,
+        Precision::Exact,
+        EdgeKind::Direct,
+    ));
+    segment.record_func(caller);
+    segment.record_func(callee);
+
+    let mut workspace = IdgWorkspace::new();
+    let segment_id = workspace.register_segment(segment);
+    let mut symbolic = SymbolicFieldGraph::new();
+    let first = symbolic.intern_base(segment_id, caller, "first");
+    let second = symbolic.intern_base(segment_id, caller, "second");
+    let arg = symbolic.intern_base(segment_id, callee, "arg");
+    for (source, call_span) in [(first, first_call), (second, second_call)] {
+        symbolic.push_transform(SymbolicFieldTransform {
+            source,
+            target: arg,
+            exact_field: NO_SYMBOLIC_STRING,
+            call_span,
+            write_span: call_span,
+            precision: Precision::Exact,
+            call_kind: EdgeKind::Direct,
+            kind: SymbolicFieldTransformKind::Argument,
+            allow_out_of_order_source: false,
+        });
+    }
+    workspace.set_symbolic_field(symbolic);
+    let service = IdgQueryService::new(Arc::new(workspace), Arc::new(GlobalIndex::new()));
+    let summaries =
+        service.return_taint_param_indices_for_funcs_with_max_precision(&[caller], Some(Precision::Narrowed));
+
+    assert_eq!(
+        summaries.get(&caller),
+        Some(&vec![1]),
+        "only the live field entering the returned call may reach the caller return"
+    );
+    let params = service.param_nodes_of(caller);
+    let caller_return = service.return_node_of(caller).expect("caller return");
+    let first_closure: AHashSet<_> = service.forward_closure(&[params[0]]).into_iter().collect();
+    let second_closure: AHashSet<_> = service.forward_closure(&[params[1]]).into_iter().collect();
+    let mixed_closure: AHashSet<_> = service.forward_closure(&[params[2]]).into_iter().collect();
+    assert!(
+        !first_closure.contains(&caller_return),
+        "ordinary forward closure must keep symbolic call/return boundaries matched"
+    );
+    assert!(second_closure.contains(&caller_return));
+    assert!(
+        !mixed_closure.contains(&caller_return),
+        "a live field in the first call must not combine with a dead field that activates the returned call"
+    );
+}
+
+#[test]
 fn local_storage_summaries_never_absorb_callee_storage() {
     let caller = FuncId::new(73);
     let callee = FuncId::new(74);
@@ -969,9 +1167,13 @@ fn cross_call_edges_in_closure_reports_callarg_to_param() {
     let f_params = svc.param_nodes_of(f_id);
     let edges = svc.cross_call_edges_in_closure(&f_params);
     assert!(
-        edges
-            .iter()
-            .any(|e| { e.caller == f_id && e.callee == g_id && e.arg_idx == 0 && e.param_idx == 0 }),
+        edges.iter().any(|e| {
+            e.caller == f_id
+                && e.callee == g_id
+                && e.arg_idx == 0
+                && e.param_idx == 0
+                && e.relation == crate::service::CrossCallRelation::Argument
+        }),
         "expected one CallArg→Param edge for f→g, got {edges:?}",
     );
 }
@@ -1200,6 +1402,15 @@ fn field_argument_forwarding_preserves_sibling_fields_through_passthrough_calls(
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(2, 100, 110) && *idx == 0),
         "cmd field must not taint sibling user sink: {cmd_calls:?}"
+    );
+
+    let cross_calls = svc.cross_call_edges_in_closure(&cmd_seed);
+    assert!(
+        cross_calls.iter().any(|edge| {
+            edge.relation == crate::service::CrossCallRelation::FieldState
+                && !edge.relation.is_renderable_call()
+        }),
+        "projected field flow must retain non-call provenance: {cross_calls:?}"
     );
 }
 
@@ -3167,114 +3378,5 @@ fn c_indexed_argv_copy_reaches_address_of_struct_field_read() {
             .iter()
             .any(|(_, call_span, idx)| *call_span == span(1, 70, 80) && *idx == 0),
         "argv[1] copied into env.cmd should reach the callee's env.cmd sink without tainting the whole struct: {calls:?}"
-    );
-}
-
-#[test]
-fn target_cut_cache_is_lru_bounded_and_evicted_cuts_recompute_completely() {
-    let func = FuncId::new(7);
-    let mut segment = crate::segment::IdgSegment::new();
-    let param = segment.intern_place(Place::Param { idx: 0 });
-    let first_write = segment.intern_place(Place::Write {
-        name: 1,
-        path: Default::default(),
-        span: span(0, 10, 20),
-    });
-    let second_write = segment.intern_place(Place::Write {
-        name: 2,
-        path: Default::default(),
-        span: span(0, 30, 40),
-    });
-    let third_write = segment.intern_place(Place::Write {
-        name: 3,
-        path: Default::default(),
-        span: span(0, 50, 60),
-    });
-    let param_node = segment.intern_node(func, param);
-    let first_node = segment.intern_node(func, first_write);
-    let second_node = segment.intern_node(func, second_write);
-    let third_node = segment.intern_node(func, third_write);
-    segment.add_edge(IdgEdge::intra_assign(param_node, first_node, span(0, 10, 20)));
-    segment.add_edge(IdgEdge::intra_assign(first_node, second_node, span(0, 30, 40)));
-    segment.add_edge(IdgEdge::intra_assign(second_node, third_node, span(0, 50, 60)));
-    segment.record_func(func);
-
-    let mut workspace = IdgWorkspace::new();
-    workspace.register_segment(segment);
-    let service =
-        IdgQueryService::with_target_cut_cache_capacity(Arc::new(workspace), Arc::new(GlobalIndex::new()), 2);
-    let seeds = service.param_nodes_of(func);
-    let first_target = vec![WsNodeId(first_node.0)];
-    let second_target = vec![WsNodeId(second_node.0)];
-    let precision = Some(Precision::Narrowed);
-
-    let first_cut = service.forward_target_nodes_cut_with_max_precision(&seeds, &first_target, precision);
-    let second_cut = service.forward_target_nodes_cut_with_max_precision(&seeds, &second_target, precision);
-    assert!(first_cut.contains(&WsNodeId(first_node.0)));
-    assert!(second_cut.contains(&WsNodeId(second_node.0)));
-
-    // Refresh the first node cut, then insert a function cut. Both target
-    // kinds share the same two-entry budget, so the second node cut is the
-    // least-recent entry and must be evicted.
-    assert_eq!(
-        service.forward_target_nodes_cut_with_max_precision(&seeds, &first_target, precision),
-        first_cut
-    );
-    let mut target_funcs = AHashSet::default();
-    target_funcs.insert(func);
-    let function_cut = service.forward_target_func_cut_with_max_precision(&seeds, &target_funcs, precision);
-    assert!(function_cut.contains(&WsNodeId(third_node.0)));
-
-    let unified = service.ensure_unified();
-    let first_key = TargetCutKey::Nodes(TargetNodeCutKey::new(precision, &first_target));
-    let second_key = TargetCutKey::Nodes(TargetNodeCutKey::new(precision, &second_target));
-    let function_key = TargetCutKey::Funcs(TargetFuncCutKey::new(precision, &target_funcs));
-    {
-        let cache = unified.target_backward.read();
-        assert_eq!(cache.len(), 2, "retention must never exceed its worker budget");
-        assert!(cache.contains(&first_key), "a cache hit must refresh recency");
-        assert!(cache.contains(&function_key));
-        assert!(
-            !cache.contains(&second_key),
-            "least-recent target cut must be evicted"
-        );
-    }
-
-    // Eviction affects reuse only: querying the removed target reruns the
-    // complete reverse fixed point and returns byte-for-byte the same cut.
-    let recomputed_second =
-        service.forward_target_nodes_cut_with_max_precision(&seeds, &second_target, precision);
-    assert_eq!(recomputed_second, second_cut);
-    let cache = unified.target_backward.read();
-    assert_eq!(cache.len(), 2);
-    assert!(cache.contains(&second_key));
-    drop(cache);
-
-    // A cold same-target burst shares one in-flight reverse fixed point.
-    // Without the per-key OnceLock every worker allocates and walks the full
-    // reverse CSR before insert_or_get discards all but one result.
-    let before = unified.target_cut_computations.load(Ordering::Relaxed);
-    let service = Arc::new(service);
-    let barrier = Arc::new(std::sync::Barrier::new(8));
-    let third_target = vec![WsNodeId(third_node.0)];
-    let mut workers = Vec::new();
-    for _ in 0..8 {
-        let service = Arc::clone(&service);
-        let barrier = Arc::clone(&barrier);
-        let seeds = seeds.clone();
-        let target = third_target.clone();
-        workers.push(std::thread::spawn(move || {
-            barrier.wait();
-            service.forward_target_nodes_cut_with_max_precision(&seeds, &target, precision)
-        }));
-    }
-    for worker in workers {
-        let closure = worker.join().expect("target-cut worker");
-        assert!(closure.contains(&WsNodeId(third_node.0)));
-    }
-    assert_eq!(
-        unified.target_cut_computations.load(Ordering::Relaxed) - before,
-        1,
-        "same-key concurrent misses must compute one reverse closure"
     );
 }

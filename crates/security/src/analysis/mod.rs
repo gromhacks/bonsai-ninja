@@ -708,7 +708,7 @@ fn collect_unresolved_workspace_calls(
                 collect_unresolved_workspace_calls(else_events, caller, global, resolved_sites, unresolved);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_unresolved_workspace_calls(body, caller, global, resolved_sites, unresolved)
+                collect_unresolved_workspace_calls(body, caller, global, resolved_sites, unresolved);
             }
             FlowEvent::Try {
                 body,
@@ -1682,7 +1682,6 @@ where
             &transfer_languages,
             &scoped_files,
             &scoped_funcs,
-            &[],
             source_call_graph.as_ref(),
         );
         on_progress(AnalysisProgress::PhaseTicked);
@@ -3842,9 +3841,8 @@ fn normalize_path_for_filter(value: &str) -> String {
     value.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
-/// Stable matcher-output sort: language, file, line, column. Required
-/// for deterministic finding ids across runs (chain seeding hits the
-/// pair budget in input order).
+/// Stable matcher-output sort: language, file, line, column. Required for
+/// deterministic finding ids and reproducible fixed-point scheduling.
 fn sort_matches(matches: &mut [RuleMatch]) {
     matches.sort_by(|a, b| {
         (a.language.as_str(), a.file.as_str(), a.line, a.column).cmp(&(
@@ -5255,12 +5253,6 @@ where
     source_func_ids_for_graph.dedup();
     let mut sink_func_ids: Vec<FuncId> = sink_by_func.keys().copied().collect();
     sink_func_ids.sort_by_key(|func| func.raw());
-    let mut sink_demand_sites: Vec<(FuncId, Span)> = sink_by_func
-        .iter()
-        .flat_map(|(func, matches)| matches.iter().map(|matched| (*func, matched.span)))
-        .collect();
-    sink_demand_sites.sort_by_key(|(func, span)| (func.raw(), span.file.raw(), span.start, span.end));
-    sink_demand_sites.dedup();
     on_progress(AnalysisProgress::PhaseStarted {
         label: "building source-reachable callgraph",
         total: 0,
@@ -5319,8 +5311,7 @@ where
     let mut coarse_corridors_by_func: AHashMap<FuncId, SourceSinkCorridor> = AHashMap::new();
     let mut shared_coarse_corridors = SharedSourceSinkCorridors::default();
     if source_sink_prefilter_enabled {
-        let sparse_field_source_funcs =
-            sparse_field_demand_source_funcs(ws, global.as_ref(), &source_func_ids);
+        let symbolic_field_source_funcs = symbolic_field_source_funcs(ws, global.as_ref(), &source_func_ids);
         if let Some(corridor) = callgraph_sources_sink_corridor(
             &source_func_ids,
             &sink_func_set,
@@ -5331,7 +5322,7 @@ where
             shared_coarse_corridors = partition_source_sink_corridor(
                 corridor,
                 &source_func_ids,
-                &sparse_field_source_funcs,
+                &symbolic_field_source_funcs,
                 global.as_ref(),
                 chain_call_graph.as_ref(),
                 config.max_edge_precision,
@@ -5381,13 +5372,10 @@ where
         &config.output_arg_flows,
         &config.receiver_state_propagations,
     );
-    fingerprint_options.field_demand_languages = sparse_field_demand_languages(ws, &semantic_files);
-    fingerprint_options.field_demand_terminal_sites = sink_demand_sites.clone();
+    fingerprint_options.symbolic_field_languages = symbolic_field_languages(ws, &semantic_files);
     fingerprint_options.call_result_passthroughs =
         idg_call_result_passthrough_specs(&config.call_result_passthroughs);
-    fingerprint_options.demand_driven_field_forwarding =
-        !fingerprint_options.field_demand_languages.is_empty()
-            && !fingerprint_options.field_demand_terminal_sites.is_empty();
+    fingerprint_options.symbolic_field_forwarding = !fingerprint_options.symbolic_field_languages.is_empty();
     let idg_transfer_fingerprint = fingerprint_options.semantic_fingerprint();
     let taint_graph_fingerprint = taint_cache::scoped_config_fingerprint(
         pack,
@@ -5444,7 +5432,6 @@ where
             &transfer_languages,
             &semantic_files,
             &semantic_funcs,
-            &sink_demand_sites,
             chain_call_graph.as_ref(),
         );
         on_progress(AnalysisProgress::PhaseFinished);
@@ -6346,18 +6333,12 @@ where
                 batch_funcs.len(),
                 batch_files.len()
             );
-            let batch_sink_sites: Vec<(FuncId, Span)> = sink_demand_sites
-                .iter()
-                .copied()
-                .filter(|(func, _)| corridor.terminal_sinks.contains(func))
-                .collect();
             let batch_idg = build_idg_service_for_rulepack_for_files(
                 ws,
                 pack,
                 &transfer_languages,
                 &batch_files,
                 &batch_funcs,
-                &batch_sink_sites,
                 chain_call_graph.as_ref(),
             );
             parallel_out.extend(
@@ -6395,18 +6376,12 @@ where
                 batch_funcs.len(),
                 batch_files.len()
             );
-            let batch_sink_sites: Vec<(FuncId, Span)> = sink_demand_sites
-                .iter()
-                .copied()
-                .filter(|(func, _)| corridor.terminal_sinks.contains(func))
-                .collect();
             let batch_idg = build_idg_service_for_rulepack_for_files(
                 ws,
                 pack,
                 &transfer_languages,
                 &batch_files,
                 &batch_funcs,
-                &batch_sink_sites,
                 chain_call_graph.as_ref(),
             );
             parallel_out.extend(
@@ -7109,7 +7084,7 @@ fn callgraph_source_sink_corridor(
 fn partition_source_sink_corridor(
     mut corridor: SourceSinkCorridor,
     source_funcs: &[FuncId],
-    sparse_field_source_funcs: &AHashSet<FuncId>,
+    symbolic_field_source_funcs: &AHashSet<FuncId>,
     global: &GlobalIndex,
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
     max_precision: Option<Precision>,
@@ -7124,7 +7099,7 @@ fn partition_source_sink_corridor(
         if !corridor.lineage_funcs.contains(&source) {
             continue;
         }
-        if sparse_field_source_funcs.contains(&source) {
+        if symbolic_field_source_funcs.contains(&source) {
             sparse_sources.push(source);
             continue;
         }
@@ -9316,9 +9291,8 @@ fn idg_transfer_options_from_rulepack_shapes(
         include_diagnostic_field_flows: false,
         include_receiver_method_propagation: false,
         include_field_argument_forwarding: true,
-        demand_driven_field_forwarding: false,
-        field_demand_languages: Vec::new(),
-        field_demand_terminal_sites: Vec::new(),
+        symbolic_field_forwarding: false,
+        symbolic_field_languages: Vec::new(),
         // When no workspace body resolves, AST arguments are the available
         // dependency evidence for the result. Preserve them at narrowed
         // precision, independent of API names; receiver-state mutation still
@@ -9361,6 +9335,8 @@ pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) -> Arc<bon
     options.call_result_passthroughs = idg_call_result_passthrough_specs(
         &call_result_passthroughs_from_rulepack_for_languages(pack, &languages),
     );
+    options.symbolic_field_languages = ws.db().complete_field_place_languages();
+    options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     ws.build_and_seed_idg_service_with_transfer_options(&options)
 }
 
@@ -9370,7 +9346,6 @@ fn seed_idg_service_for_rulepack_for_files(
     languages: &AHashSet<String>,
     included_files: &[FileId],
     included_funcs: &[FuncId],
-    terminal_sites: &[(FuncId, Span)],
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
 ) -> Arc<bonsai_idg::IdgQueryService> {
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
@@ -9389,20 +9364,16 @@ fn seed_idg_service_for_rulepack_for_files(
     options.call_result_passthroughs = idg_call_result_passthrough_specs(
         &call_result_passthroughs_from_rulepack_for_languages(pack, languages),
     );
-    if !terminal_sites.is_empty() {
-        options.field_demand_languages = sparse_field_demand_languages(ws, included_files);
-        options.field_demand_terminal_sites = terminal_sites.to_vec();
-    }
-    options.demand_driven_field_forwarding =
-        !options.field_demand_languages.is_empty() && !options.field_demand_terminal_sites.is_empty();
+    options.symbolic_field_languages = symbolic_field_languages(ws, included_files);
+    options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     bonsai_diagnostics::debug_log!(
         "security-phase",
-        "semantic graph transfer options languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={} field_demand_languages={}",
+        "semantic graph transfer options languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={} symbolic_field_languages={}",
         languages.len(),
         included_funcs.len(),
         options.include_receiver_method_propagation,
         options.include_field_argument_forwarding,
-        options.field_demand_languages.len()
+        options.symbolic_field_languages.len()
     );
     ws.build_and_seed_idg_service_with_transfer_options_for_files_and_call_graph(
         &options,
@@ -9418,7 +9389,6 @@ fn build_idg_service_for_rulepack_for_files(
     languages: &AHashSet<String>,
     included_files: &[FileId],
     included_funcs: &[FuncId],
-    terminal_sites: &[(FuncId, Span)],
     call_graph: &bonsai_callgraph::ResolvedCallGraph,
 ) -> Arc<bonsai_idg::IdgQueryService> {
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, languages);
@@ -9437,20 +9407,16 @@ fn build_idg_service_for_rulepack_for_files(
     options.call_result_passthroughs = idg_call_result_passthrough_specs(
         &call_result_passthroughs_from_rulepack_for_languages(pack, languages),
     );
-    if !terminal_sites.is_empty() {
-        options.field_demand_languages = sparse_field_demand_languages(ws, included_files);
-        options.field_demand_terminal_sites = terminal_sites.to_vec();
-    }
-    options.demand_driven_field_forwarding =
-        !options.field_demand_languages.is_empty() && !options.field_demand_terminal_sites.is_empty();
+    options.symbolic_field_languages = symbolic_field_languages(ws, included_files);
+    options.symbolic_field_forwarding = !options.symbolic_field_languages.is_empty();
     bonsai_diagnostics::debug_log!(
         "security-phase",
-        "semantic graph transfer options languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={} field_demand_languages={}",
+        "semantic graph transfer options languages={} funcs={} receiver_method_propagation={} field_argument_forwarding={} symbolic_field_languages={}",
         languages.len(),
         included_funcs.len(),
         options.include_receiver_method_propagation,
         options.include_field_argument_forwarding,
-        options.field_demand_languages.len()
+        options.symbolic_field_languages.len()
     );
     ws.build_idg_service_with_transfer_options_for_files_and_call_graph(
         &options,
@@ -9460,7 +9426,7 @@ fn build_idg_service_for_rulepack_for_files(
     )
 }
 
-fn sparse_field_demand_languages(ws: &Workspace, files: &[FileId]) -> Vec<String> {
+fn symbolic_field_languages(ws: &Workspace, files: &[FileId]) -> Vec<String> {
     let mut languages: Vec<String> = files
         .iter()
         .filter_map(|file| ws.db().adapter_for(*file))
@@ -9472,11 +9438,7 @@ fn sparse_field_demand_languages(ws: &Workspace, files: &[FileId]) -> Vec<String
     languages
 }
 
-fn sparse_field_demand_source_funcs(
-    ws: &Workspace,
-    global: &GlobalIndex,
-    funcs: &[FuncId],
-) -> AHashSet<FuncId> {
+fn symbolic_field_source_funcs(ws: &Workspace, global: &GlobalIndex, funcs: &[FuncId]) -> AHashSet<FuncId> {
     funcs
         .iter()
         .copied()

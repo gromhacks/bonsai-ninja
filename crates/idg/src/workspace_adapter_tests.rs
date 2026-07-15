@@ -134,6 +134,65 @@ fn resolved_graph(edges: impl IntoIterator<Item = (FuncId, FuncId, Span)>) -> Re
 }
 
 #[test]
+fn nested_full_expression_edge_indexes_only_the_resolved_callee_event() {
+    let outer_span = span(0, 20, 50);
+    let inner_span = span(0, 35, 40);
+    let events = vec![
+        FlowEvent::Call {
+            span: outer_span,
+            name: "client.send".to_string(),
+            receiver: Some("client".to_string()),
+            receiver_types: vec!["Client".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![bonsai_lang_api::CallArg {
+                passing_mode: Default::default(),
+                span: span(0, 31, 45),
+                name: None,
+                value_text: "request.field()".to_string(),
+                place: None,
+                source_names: vec!["request".to_string(), "field".to_string()],
+            }],
+        },
+        FlowEvent::Call {
+            span: inner_span,
+            name: "request.field".to_string(),
+            receiver: Some("request".to_string()),
+            receiver_types: vec!["Request".to_string()],
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: Vec::new(),
+        },
+    ];
+
+    assert_eq!(
+        call_event_spans_matching_edge(&events, outer_span, Some("field"), false),
+        vec![inner_span],
+        "the resolved inner getter must not be replayed at the containing host call"
+    );
+
+    let mut caller = empty_decl(1, 0, "caller");
+    caller.flow_events = events;
+    let mut field = empty_decl(2, 1, "field");
+    field.kind = DeclKind::Method;
+    let idx = build_index(vec![caller, field]);
+    let caller_id = func_id(&idx, "caller");
+    let field_id = func_id(&idx, "field");
+    let graph = resolved_graph([(caller_id, field_id, outer_span)]);
+    let by_site = call_edges_by_site_for_funcs(&graph, &idx, None);
+
+    assert!(by_site.contains_key(&CallSiteEdgeKey {
+        caller: caller_id,
+        site: inner_span,
+    }));
+    assert!(
+        !by_site.contains_key(&CallSiteEdgeKey {
+            caller: caller_id,
+            site: outer_span,
+        }),
+        "a resolved inner edge must not also resolve the containing host call"
+    );
+}
+
+#[test]
 fn empty_workspace_produces_empty_idg() {
     let idx = GlobalIndex::new();
     let cg = ResolvedCallGraph::default();

@@ -1883,6 +1883,7 @@ fn native_export_json_cli_matches_sdk_for_every_language() {
             .native_json(bonsai_sdk::NativeExportOptions {
                 full_propagations: false,
                 complete_chains: false,
+                compiled_propagations: false,
             })
             .unwrap_or_else(|err| panic!("{lang} sdk native export: {err}"));
         assert_json_eq(&format!("{lang} native export"), cli, sdk);

@@ -2886,7 +2886,6 @@ impl Dump<'_> {
     pub fn taint(&self, mut filters: TaintFilters<'_>) -> TaintOutcome {
         self.project.refresh_from_disk_best_effort();
         if let Some(pack) = self.project.rulepack.as_deref() {
-            bonsai_security::seed_idg_service_for_rulepack(&self.project.workspace, pack);
             let transfers = bonsai_security::taint_transfers_from_rulepack(pack);
             filters.receiver_state_propagations = transfers.receiver_state_propagations;
             filters.call_result_passthroughs = transfers.call_result_passthroughs;
@@ -3269,6 +3268,9 @@ pub struct NativeExportOptions {
     /// exact `compressed_callgraph` representation instead of materializing
     /// every path row.
     pub complete_chains: bool,
+    /// Keep the complete propagation relation in canonical compiler form.
+    /// This is the scalable exact mode used by CLI `export --all`.
+    pub compiled_propagations: bool,
 }
 
 impl Export<'_> {
@@ -3280,6 +3282,7 @@ impl Export<'_> {
             bonsai_browse::NativeExportConfig {
                 full_propagations: options.full_propagations,
                 complete_chains: options.complete_chains,
+                compiled_propagations: options.compiled_propagations,
             },
         )
     }
@@ -3292,6 +3295,7 @@ impl Export<'_> {
             bonsai_browse::NativeExportConfig {
                 full_propagations: options.full_propagations,
                 complete_chains: options.complete_chains,
+                compiled_propagations: options.compiled_propagations,
             },
         )
     }
@@ -3308,6 +3312,7 @@ impl Export<'_> {
             bonsai_browse::NativeExportConfig {
                 full_propagations: options.full_propagations,
                 complete_chains: options.complete_chains,
+                compiled_propagations: options.compiled_propagations,
             },
             writer,
         )
@@ -3354,7 +3359,7 @@ impl Export<'_> {
 
     pub fn write_default_json_cache_streaming(&self, options: NativeExportOptions) -> Result<()> {
         anyhow::ensure!(
-            !options.complete_chains && !options.full_propagations,
+            !options.complete_chains && !options.full_propagations && !options.compiled_propagations,
             "default export cache can only store default native export scope"
         );
         let rulepack_root = self
@@ -3382,6 +3387,7 @@ impl Export<'_> {
         self.write_default_json_cache_streaming(NativeExportOptions {
             full_propagations: false,
             complete_chains: false,
+            compiled_propagations: false,
         })
     }
 

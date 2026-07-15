@@ -399,7 +399,7 @@ fn tuple_call_result_binding_index(src: &str, span: Span, target: &str) -> Optio
     let lhs = lhs.trim();
     let body = ['{', '[', '(']
         .into_iter()
-        .filter_map(|open| {
+        .find_map(|open| {
             let close = match open {
                 '{' => '}',
                 '[' => ']',
@@ -410,7 +410,6 @@ fn tuple_call_result_binding_index(src: &str, span: Span, target: &str) -> Optio
             let end = lhs.rfind(close)?;
             (start < end).then(|| &lhs[start + open.len_utf8()..end])
         })
-        .next()
         .unwrap_or(lhs);
     if !body.contains(',') {
         return None;
@@ -420,8 +419,8 @@ fn tuple_call_result_binding_index(src: &str, span: Span, target: &str) -> Optio
         let binding = binding
             .trim()
             .trim_start_matches('^')
-            .trim_start_matches(|ch: char| matches!(ch, '(' | '[' | '{'))
-            .trim_end_matches(|ch: char| matches!(ch, ')' | ']' | '}'));
+            .trim_start_matches(['(', '[', '{'])
+            .trim_end_matches([')', ']', '}']);
         binding == target || sanitize_assign_target(binding) == target
     })
 }

@@ -1,9 +1,10 @@
 //! Per-function return-taint summary types and the public
 //! [`function_summary`] accessor.
 //!
-//! Summaries are derived from the same IDG used by every taint query:
-//! a parameter transits to the return exactly when its node is in the
-//! return node's semantic backward closure.
+//! Summaries are derived from the same IDG used by every taint query. The
+//! compiler composes function-local CSRs over exact call-site boundaries to a
+//! recursive least fixed point, then evaluates symbolic access paths through
+//! the same context-matched closure as public taint queries.
 
 use bonsai_common::{FuncId, SymbolId};
 use bonsai_db::AnalyzerDb;
@@ -134,17 +135,16 @@ pub(crate) fn function_summary_from_idg(
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
         return FunctionSummary::default();
     };
-    let Some(return_node) = idg.return_node_of(func) else {
-        return FunctionSummary::default();
-    };
-    let backward: ahash::AHashSet<bonsai_idg::WsNodeId> =
-        idg.backward_closure(&[return_node]).into_iter().collect();
     let returns_taint_of = idg
-        .param_nodes_of(func)
+        .return_taint_param_indices_for_funcs_with_max_precision(
+            &[func],
+            Some(bonsai_common::Precision::Narrowed),
+        )
+        .remove(&func)
+        .unwrap_or_default()
         .into_iter()
-        .take(decl.params.len())
-        .enumerate()
-        .filter_map(|(index, param)| backward.contains(&param).then_some(index))
+        .filter_map(|index| usize::try_from(index).ok())
+        .filter(|index| *index < decl.params.len())
         .collect();
     FunctionSummary {
         returns_taint_of,

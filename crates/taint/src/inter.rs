@@ -272,11 +272,24 @@ fn idg_backed_interprocedural_taint(
         return InterTaintResult::default();
     }
     let idg = crate::idg_build::idg_service_for_inter_config(db, config);
+    idg_backed_interprocedural_taint_with_service(entry_func, entry_sources, config, db, idg.as_ref())
+}
+
+pub(crate) fn idg_backed_interprocedural_taint_with_service(
+    entry_func: FuncId,
+    entry_sources: &TokenSet,
+    config: &InterTaintConfig,
+    db: &AnalyzerDb,
+    idg: &bonsai_idg::IdgQueryService,
+) -> InterTaintResult {
+    if entry_sources.is_empty() {
+        return InterTaintResult::default();
+    }
     let global = db.global_index();
     let seed_nodes = crate::reachable::compose_idg_seed_nodes(
         crate::reachable::IdgSeedRequest::legacy_tokens(entry_func, entry_sources),
         global.as_ref(),
-        idg.as_ref(),
+        idg,
     );
     let graph = crate::reachable::entry_taint_graph_from_idg_with_target_nodes_and_filters_and_max_precision(
         entry_func,
@@ -291,7 +304,7 @@ fn idg_backed_interprocedural_taint(
         None,
         config.max_edge_precision,
         db,
-        idg.as_ref(),
+        idg,
         &seed_nodes,
         true,
     );

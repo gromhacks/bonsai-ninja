@@ -336,11 +336,12 @@ fn uncapped_worklist_runs_to_fixed_point() {
 }
 
 #[test]
-fn explicit_diagnostic_worklist_cap_reports_saturation() {
+fn compatibility_worklist_cap_never_truncates_compiler_dataflow() {
     let mut capped = config(&["recv"], &[]);
     capped.worklist_cap = Some(0);
     let (result, _) = run(vec![assign("x", Some("recv"))], &capped);
-    assert!(result.saturated);
+    assert!(!result.saturated);
+    assert!(result.block_out.values().any(|tokens| tokens.contains("x")));
 }
 
 #[test]

@@ -4126,7 +4126,7 @@ fn collect_call_argument_spans_at_site(events: &[FlowEvent], site: Span, out: &m
                 collect_call_argument_spans_at_site(else_events, site, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_argument_spans_at_site(body, site, out)
+                collect_call_argument_spans_at_site(body, site, out);
             }
             FlowEvent::Try {
                 body,
@@ -4167,7 +4167,7 @@ fn collect_call_events_strictly_inside<'a>(
                 collect_call_events_strictly_inside(else_events, outer, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_events_strictly_inside(body, outer, out)
+                collect_call_events_strictly_inside(body, outer, out);
             }
             FlowEvent::Try {
                 body,
@@ -4201,7 +4201,7 @@ fn collect_call_events_within<'a>(events: &'a [FlowEvent], outer: Span, out: &mu
                 collect_call_events_within(else_events, outer, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_call_events_within(body, outer, out)
+                collect_call_events_within(body, outer, out);
             }
             FlowEvent::Try {
                 body,
@@ -4290,7 +4290,7 @@ fn collect_return_expression_call_sites(events: &[FlowEvent], out: &mut AHashSet
                 collect_return_expression_call_sites(else_events, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_return_expression_call_sites(body, out)
+                collect_return_expression_call_sites(body, out);
             }
             FlowEvent::Try {
                 body,
@@ -4474,7 +4474,7 @@ fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str
     let keys = receiver_alias_keys(decl, receiver);
     decl.type_aliases
         .iter()
-        .find(|alias| keys.iter().any(|key| alias.name == *key))
+        .find(|alias| keys.contains(&alias.name))
         .map(|alias| alias.type_name.as_str())
 }
 

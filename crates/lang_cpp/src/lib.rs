@@ -305,7 +305,7 @@ fn collect_cpp_moved_events(events: &[FlowEvent], out: &mut Vec<(Span, String)>)
                 collect_cpp_moved_events(else_events, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_cpp_moved_events(body, out)
+                collect_cpp_moved_events(body, out);
             }
             FlowEvent::Try {
                 body,
@@ -351,7 +351,7 @@ fn apply_cpp_moved_argument_places_with_events(events: &mut [FlowEvent], moved: 
                 apply_cpp_moved_argument_places_with_events(else_events, moved);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                apply_cpp_moved_argument_places_with_events(body, moved)
+                apply_cpp_moved_argument_places_with_events(body, moved);
             }
             FlowEvent::Try {
                 body,
@@ -425,10 +425,8 @@ fn collect_cpp_class_fields(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span,
                 }
                 if let Some(identifier) = cpp_binding_identifier(child) {
                     let name = node_text(&identifier, src).trim();
-                    if !name.is_empty() {
-                        if !fields.iter().any(|field| field == name) {
-                            fields.push(name.to_string());
-                        }
+                    if !name.is_empty() && !fields.iter().any(|field| field == name) {
+                        fields.push(name.to_string());
                     }
                 }
             }
