@@ -252,8 +252,13 @@ pub(super) fn python_compiled_regex_guard_sanitizer(
         let Some((regex_name, guarded_target)) = python_compiled_regex_guard_line(line, &targets) else {
             continue;
         };
-        if !python_compiled_regex_declared_safe_before(&lines, 0, idx, &regex_name, sink_rule.tag.as_deref())
-        {
+        if !python_compiled_regex_declared_safe_before(
+            ws,
+            snk.span.file,
+            idx,
+            &regex_name,
+            sink_rule.tag.as_deref(),
+        ) {
             continue;
         }
         if !python_guard_exits_before_target(&lines, idx, sink_idx, guard_indent, target_indent) {
@@ -314,36 +319,55 @@ fn python_compiled_regex_call_parts(call_text: &str) -> Option<(String, &str)> {
 }
 
 fn python_compiled_regex_declared_safe_before(
-    lines: &[&str],
-    search_start: usize,
+    ws: &Workspace,
+    file: FileId,
     guard_idx: usize,
     regex_name: &str,
     sink_tag: Option<&str>,
 ) -> bool {
-    for idx in (search_start..guard_idx).rev() {
-        let Some(pattern) = python_re_compile_assignment_pattern(lines[idx], regex_name) else {
+    let Some(file_index) = ws.db().decl_index(file) else {
+        return false;
+    };
+    let Ok(snapshot) = ws.vfs().snapshot(file) else {
+        return false;
+    };
+    let span_map = bonsai_common::cached_span_map_arc(file, snapshot.version, &snapshot.text);
+    let mut assignments = Vec::new();
+    for decl in &file_index.defs {
+        collect_structured_assignments_before(
+            &decl.flow_events,
+            Span::empty(file, u64::MAX),
+            &mut assignments,
+        );
+    }
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    assignments.dedup_by_key(|assignment| assignment.span);
+    for assignment in assignments.into_iter().rev() {
+        let Ok(assignment_line) = usize::try_from(span_map.line_col(assignment.span.start).line) else {
             continue;
+        };
+        if assignment_line > guard_idx {
+            continue;
+        }
+        if clean_overwrite_target_key(assignment.target).as_deref() != Some(regex_name) {
+            continue;
+        }
+        if assignment
+            .source_call
+            .is_none_or(|call| clean_overwrite_callee_tail(call) != "compile")
+        {
+            continue;
+        }
+        let Some(pattern) = assignment
+            .source_call_args
+            .first()
+            .and_then(|argument| python_first_string_literal(argument))
+        else {
+            return false;
         };
         return python_regex_pattern_safe_for_sink(&pattern, sink_tag);
     }
     false
-}
-
-fn python_re_compile_assignment_pattern(line: &str, regex_name: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return None;
-    }
-    let (lhs, rhs) = trimmed.split_once('=')?;
-    let lhs_name = lhs.split_once(':').map_or(lhs, |(name, _)| name).trim();
-    if lhs_name != regex_name {
-        return None;
-    }
-    let rhs = rhs.trim_start();
-    let args = rhs
-        .strip_prefix("re.compile(")
-        .or_else(|| rhs.strip_prefix("regex.compile("))?;
-    python_first_string_literal(args)
 }
 
 fn python_first_string_literal(args: &str) -> Option<String> {
@@ -661,11 +685,7 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let parsed_var = constructor_assignment_target_at(&decl.flow_events, snk.span).or_else(|| {
-        lines
-            .get(sink_idx)
-            .and_then(|line| java_constructor_assignment_target_from_line(line))
-    })?;
+    let parsed_var = constructor_assignment_target_at(&decl.flow_events, snk.span)?;
     let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
     let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
     let end = usize::try_from(span_map.line_col(body_end).line)
@@ -727,20 +747,6 @@ pub(super) fn java_url_ssrf_guard_sanitizer(
         tainted_args: Vec::new(),
         sanitised_arg_indices: Vec::new(),
     })
-}
-
-fn java_constructor_assignment_target_from_line(line: &str) -> Option<String> {
-    let (lhs, rhs) = line.split_once('=')?;
-    if !(rhs.contains("new URL(")
-        || rhs.contains("new URI(")
-        || rhs.trim_start().starts_with("URL(")
-        || rhs.trim_start().starts_with("URI("))
-    {
-        return None;
-    }
-    let lhs = lhs.trim();
-    let target = lhs.split_whitespace().last()?;
-    clean_overwrite_target_key(target)
 }
 
 pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
@@ -913,37 +919,40 @@ pub(super) fn java_local_html_escape_helper_return_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
     let targets: Vec<String> = sink_tainted_args
         .iter()
         .filter_map(|arg| clean_overwrite_target_key(&arg.value_text))
         .filter(|target| !target.is_empty())
         .collect();
     for target in targets {
-        let Some(helper) = java_helper_assigned_to_target_before_sink(&lines, func_start, sink_idx, &target)
+        let Some(helper) = java_helper_assigned_to_target_before_sink(&decl.flow_events, snk.span, &target)
         else {
             continue;
         };
-        let Some((helper_idx, params, body_lines)) = java_local_method_body(&lines, &helper) else {
+        let Some((helper_decl, sanitizer_span)) = global
+            .decls_in(snk.span.file)
+            .iter()
+            .filter(|candidate| candidate.name == helper)
+            .find_map(|candidate| java_html_sanitizer_return_span(candidate).map(|span| (candidate, span)))
+        else {
             continue;
         };
-        let Some((san_line_idx, san_text)) = java_html_sanitizer_return_line(&body_lines, &params) else {
-            continue;
-        };
-        let line_idx = helper_idx.saturating_add(san_line_idx);
-        let line = *lines.get(line_idx)?;
+        let location = span_map.line_col(sanitizer_span.start);
+        let san_text = snapshot
+            .text
+            .get(sanitizer_span.start as usize..sanitizer_span.end as usize)?
+            .trim()
+            .to_string();
         return Some(FindingMatch {
             rule_id: "engine.sanitizer.java_local_html_escape_helper_return".to_string(),
             file: snk.file.clone(),
-            line: u32::try_from(line_idx + 1).ok()?,
-            column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
+            line: location.line,
+            column: location.column,
             text: san_text,
-            enclosing_fn: Some(helper),
+            enclosing_fn: Some(helper_decl.name.clone()),
             tag: Some("html-encode".to_string()),
             severity: None,
             category: Some("local-html-escape-helper".to_string()),
@@ -957,168 +966,168 @@ pub(super) fn java_local_html_escape_helper_return_sanitizer(
 }
 
 fn java_helper_assigned_to_target_before_sink(
-    lines: &[&str],
-    func_start: usize,
-    sink_idx: usize,
+    events: &[FlowEvent],
+    before: Span,
     target: &str,
 ) -> Option<String> {
-    for line in lines
-        .iter()
-        .take(sink_idx)
-        .skip(func_start)
-        .filter_map(|line| line.split("//").next())
-    {
-        let Some(eq_idx) = line.find('=') else {
-            continue;
-        };
-        let left = &line[..eq_idx];
-        if last_identifier_token(left).as_deref() != Some(target) {
-            continue;
-        }
-        let right = line[eq_idx + 1..].trim().trim_end_matches(';').trim();
-        let helper = direct_helper_call_name(right)?;
-        return Some(helper);
-    }
-    None
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(events, before, &mut assignments);
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    assignments.into_iter().rev().find_map(|assignment| {
+        (clean_overwrite_target_key(assignment.target).as_deref() == Some(target))
+            .then(|| assignment.source_call.map(callee_spelling_tail))
+            .flatten()
+    })
 }
 
-fn direct_helper_call_name(expr: &str) -> Option<String> {
-    let expr = expr.trim();
-    if expr.starts_with("new ") {
+fn callee_spelling_tail(name: &str) -> String {
+    name.rsplit(['.', ':'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(name)
+        .trim()
+        .to_string()
+}
+
+fn java_html_sanitizer_return_span(decl: &bonsai_lang_api::Decl) -> Option<Span> {
+    if decl.params.is_empty() {
         return None;
     }
-    let open = expr.find('(')?;
-    let callee = expr[..open].trim();
-    if callee.is_empty() || callee.contains(' ') {
-        return None;
-    }
-    let helper = callee.rsplit('.').next()?.trim();
-    if helper.is_empty()
-        || !helper
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-    {
-        return None;
-    }
-    Some(helper.to_string())
-}
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(
+        &decl.flow_events,
+        Span::empty(decl.span.file, decl.span.end),
+        &mut assignments,
+    );
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let mut returns = Vec::new();
+    collect_return_bindings(&decl.flow_events, &mut returns);
 
-fn java_local_method_body(lines: &[&str], helper: &str) -> Option<(usize, Vec<String>, Vec<String>)> {
-    let needle = format!("{helper}(");
-    for (idx, line) in lines.iter().enumerate() {
-        if !line.contains(&needle) || line.trim_end().ends_with(';') {
+    for call in calls {
+        if !java_html_sanitizer_call_wraps_param(call.name, call.args, &decl.params) {
             continue;
         }
-        let mut signature = String::new();
-        let mut open_line = None;
-        for (offset, sig_line) in lines.iter().enumerate().skip(idx) {
-            signature.push_str(sig_line);
-            signature.push('\n');
-            if sig_line.contains('{') {
-                open_line = Some(offset);
-                break;
+        if returns
+            .iter()
+            .any(|(return_span, _)| span_contains(*return_span, call.span))
+        {
+            return Some(call.span);
+        }
+        for assignment in &assignments {
+            if !span_contains(assignment.span, call.span) {
+                continue;
             }
-            if sig_line.contains(';') {
-                break;
-            }
-        }
-        let open_line = open_line?;
-        let params = java_method_param_names(&signature);
-        if params.is_empty() {
-            continue;
-        }
-        let mut depth = 0isize;
-        let mut seen_open = false;
-        let mut body = Vec::new();
-        for line in lines.iter().skip(open_line) {
-            for ch in line.chars() {
-                match ch {
-                    '{' => {
-                        depth += 1;
-                        seen_open = true;
-                    }
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-            }
-            body.push((*line).to_string());
-            if seen_open && depth == 0 {
-                break;
-            }
-        }
-        return Some((open_line, params, body));
-    }
-    None
-}
-
-fn java_method_param_names(signature: &str) -> Vec<String> {
-    let Some(open) = signature.find('(') else {
-        return Vec::new();
-    };
-    let Some((_, params_text)) = balanced_paren_extent(signature, open) else {
-        return Vec::new();
-    };
-    split_top_level_items(params_text)
-        .into_iter()
-        .filter_map(last_identifier_token)
-        .collect()
-}
-
-fn java_html_sanitizer_return_line(body_lines: &[String], params: &[String]) -> Option<(usize, String)> {
-    for (idx, line) in body_lines.iter().enumerate() {
-        if !java_html_sanitizer_line_wraps_param(line, params) {
-            continue;
-        }
-        let compact = compact_guard_text(line);
-        if compact.contains("return") {
-            return Some((idx, line.trim().to_string()));
-        }
-        if let Some(eq_idx) = line.find('=') {
-            let assigned = last_identifier_token(&line[..eq_idx])?;
-            let return_pattern = format!("return{assigned};");
-            if body_lines
-                .iter()
-                .skip(idx + 1)
-                .any(|later| compact_guard_text(later).contains(&return_pattern))
-            {
-                return Some((idx, line.trim().to_string()));
-            }
-        }
-    }
-    None
-}
-
-fn java_html_sanitizer_line_wraps_param(line: &str, params: &[String]) -> bool {
-    const HTML_SANITIZER_SUFFIXES: &[&str] = &[
-        "encodeForHTML",
-        "encodeForHTMLAttribute",
-        "forHtml",
-        "forHtmlContent",
-        "forHtmlAttribute",
-        "escapeHtml",
-        "htmlEscape",
-    ];
-    let compact = compact_guard_text(line);
-    for suffix in HTML_SANITIZER_SUFFIXES {
-        let call = format!("{suffix}(");
-        let mut search_from = 0usize;
-        while let Some(rel) = compact[search_from..].find(&call) {
-            let open = search_from + rel + suffix.len();
-            search_from = open.saturating_add(1);
-            let Some((_, args)) = balanced_paren_extent(&compact, open) else {
+            let Some(target) = clean_overwrite_target_key(assignment.target) else {
                 continue;
             };
-            if params.iter().any(|param| text_mentions_token(args, param)) {
-                return true;
+            if returns.iter().any(|(return_span, value_name)| {
+                return_span.start > assignment.span.start
+                    && value_name.and_then(clean_overwrite_target_key).as_deref() == Some(target.as_str())
+            }) {
+                return Some(assignment.span);
             }
         }
     }
-    false
+    None
 }
 
-fn last_identifier_token(text: &str) -> Option<String> {
-    identifier_tokens_outside_strings(text).into_iter().last()
+#[derive(Copy, Clone)]
+struct StructuredCall<'a> {
+    span: Span,
+    name: &'a str,
+    args: &'a [bonsai_lang_api::CallArg],
+}
+
+fn collect_structured_calls<'a>(events: &'a [FlowEvent], out: &mut Vec<StructuredCall<'a>>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, name, args, .. } => out.push(StructuredCall {
+                span: *span,
+                name,
+                args,
+            }),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_structured_calls(then_events, out);
+                collect_structured_calls(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_structured_calls(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_structured_calls(body, out);
+                collect_structured_calls(catch_events, out);
+                collect_structured_calls(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_return_bindings<'a>(events: &'a [FlowEvent], out: &mut Vec<(Span, Option<&'a str>)>) {
+    for event in events {
+        match event {
+            FlowEvent::Return { span, value_name, .. } => out.push((*span, value_name.as_deref())),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_bindings(then_events, out);
+                collect_return_bindings(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_bindings(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_bindings(body, out);
+                collect_return_bindings(catch_events, out);
+                collect_return_bindings(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn java_html_sanitizer_call_wraps_param(
+    call_name: &str,
+    args: &[bonsai_lang_api::CallArg],
+    params: &[String],
+) -> bool {
+    const HTML_SANITIZER_SUFFIXES: &[&str] = &[
+        "encodeforhtml",
+        "encodeforhtmlattribute",
+        "forhtml",
+        "forhtmlcontent",
+        "forhtmlattribute",
+        "escapehtml",
+        "htmlescape",
+    ];
+    let tail = clean_overwrite_callee_tail(call_name);
+    HTML_SANITIZER_SUFFIXES.contains(&tail.as_str())
+        && args.iter().any(|arg| {
+            arg.place
+                .as_deref()
+                .and_then(clean_overwrite_target_key)
+                .is_some_and(|place| params.iter().any(|param| param == &place))
+                || arg.source_names.iter().any(|source| {
+                    clean_overwrite_target_key(source)
+                        .is_some_and(|source| params.iter().any(|param| param == &source))
+                })
+        })
 }
 
 fn helper_wrapping_tainted_value(sink_text: &str, value_text: &str) -> Option<String> {
@@ -1308,12 +1317,7 @@ pub(super) fn go_xml_decoder_hardening_sanitizer(
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let decoder_var = assignment_target_for_source_call_at(&decl.flow_events, snk.span, "NewDecoder")
-        .or_else(|| {
-            lines
-                .get(sink_idx)
-                .and_then(|line| go_assignment_target_from_call_line(line, "NewDecoder"))
-        })?;
+    let decoder_var = assignment_target_for_source_call_at(&decl.flow_events, snk.span, "NewDecoder")?;
     let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
     let body_end = decl.body_span.unwrap_or(decl.span).end.saturating_sub(1);
     let end = usize::try_from(span_map.line_col(body_end).line)
@@ -1608,6 +1612,63 @@ fn split_top_level_once(text: &str, delimiter: char) -> Option<(&str, &str)> {
     None
 }
 
+#[derive(Copy, Clone)]
+struct StructuredAssignment<'a> {
+    span: Span,
+    target: &'a str,
+    source_call: Option<&'a str>,
+    source_call_args: &'a [String],
+}
+
+fn collect_structured_assignments_before<'a>(
+    events: &'a [FlowEvent],
+    before: Span,
+    out: &mut Vec<StructuredAssignment<'a>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_call,
+                source_call_args,
+                ..
+            } => {
+                if span.file == before.file && span.start < before.start {
+                    out.push(StructuredAssignment {
+                        span: *span,
+                        target,
+                        source_call: source_call.as_deref(),
+                        source_call_args,
+                    });
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_structured_assignments_before(then_events, before, out);
+                collect_structured_assignments_before(else_events, before, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_structured_assignments_before(body, before, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_structured_assignments_before(body, before, out);
+                collect_structured_assignments_before(catch_events, before, out);
+                collect_structured_assignments_before(finally_events, before, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn local_ldap_escape_helper_sanitizer(
     ws: &Workspace,
     sink_func: FuncId,
@@ -1624,29 +1685,40 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
         return None;
     }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let file_index = ws.db().decl_index(snk.span.file)?;
+    let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
     let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let func_start = usize::try_from(span_map.line_col(decl.span.start).line.saturating_sub(1)).ok()?;
     let targets = ldap_tainted_filter_targets(sink_tainted_args);
     if targets.is_empty() {
         return None;
     }
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, snk.span, &mut assignments);
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
     for target in targets {
-        for idx in (func_start..sink_idx).rev() {
-            let line = lines.get(idx).copied().unwrap_or_default();
-            let Some(rhs) = assignment_rhs_for_target(line, &target, snk.language.as_str()) else {
+        for assignment in assignments.iter().rev() {
+            if clean_overwrite_target_key(assignment.target).as_deref() != Some(target.as_str()) {
+                continue;
+            }
+            let Some(rhs) = assignment_values.rendering(assignment.span, snapshot.text.as_ref()) else {
                 continue;
             };
             if ldap_rhs_uses_verified_escape(&snapshot.text, rhs) {
+                let location = span_map.line_col(assignment.span.start);
+                let text = snapshot
+                    .text
+                    .get(assignment.span.start as usize..assignment.span.end as usize)
+                    .unwrap_or(rhs)
+                    .trim()
+                    .to_string();
                 return Some(FindingMatch {
                     rule_id: "engine.sanitizer.local_ldap_escape_helper".to_string(),
                     file: snk.file.clone(),
-                    line: u32::try_from(idx + 1).ok()?,
-                    column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
-                    text: line.trim().to_string(),
+                    line: location.line,
+                    column: location.column,
+                    text,
                     enclosing_fn: snk.enclosing_fn.clone(),
                     tag: Some("ldap-escape".to_string()),
                     severity: None,
@@ -1691,36 +1763,6 @@ fn ldap_tainted_filter_targets(sink_tainted_args: &[TaintedArgInfo]) -> Vec<Stri
     targets.sort();
     targets.dedup();
     targets
-}
-
-fn assignment_rhs_for_target<'a>(line: &'a str, target: &str, language: &str) -> Option<&'a str> {
-    let trimmed = line.trim().trim_end_matches(';');
-    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
-        return None;
-    }
-    match language {
-        "python" => {
-            let (lhs, rhs) = trimmed.split_once('=')?;
-            let lhs = lhs.split_once(':').map_or(lhs, |(name, _)| name).trim();
-            (lhs == target).then_some(rhs.trim())
-        }
-        "javascript" | "typescript" => {
-            let (lhs, rhs) = trimmed.split_once('=')?;
-            let lhs = lhs
-                .trim()
-                .trim_start_matches("const ")
-                .trim_start_matches("let ")
-                .trim_start_matches("var ")
-                .trim();
-            (lhs == target).then_some(rhs.trim())
-        }
-        "go" => {
-            let (lhs, rhs) = trimmed.split_once(":=").or_else(|| trimmed.split_once('='))?;
-            let lhs = lhs.split_whitespace().last().unwrap_or_default();
-            (lhs == target).then_some(rhs.trim())
-        }
-        _ => None,
-    }
 }
 
 fn ldap_rhs_uses_verified_escape(full_text: &str, rhs: &str) -> bool {
@@ -2008,7 +2050,7 @@ pub(super) fn python_url_ssrf_guard_sanitizer(
     let lines: Vec<&str> = snapshot.text.lines().collect();
     let prior = lines.get(func_start..sink_idx)?.join("\n");
     let compact = compact_guard_text(&prior);
-    let parsed_var = python_urlparse_assignment_var(&lines, func_start, sink_idx, &target)?;
+    let parsed_var = python_urlparse_assignment_var(&decl.flow_events, snk.span, &target)?;
     let scheme_guard = compact.contains(&format!("{parsed_var}.scheme!=\"https\""))
         || compact.contains(&format!("\"https\"!={parsed_var}.scheme"));
     let host_allowlist = compact.contains(&format!("{parsed_var}.hostname"))
@@ -2051,21 +2093,20 @@ pub(super) fn python_url_ssrf_guard_sanitizer(
     })
 }
 
-fn python_urlparse_assignment_var(lines: &[&str], start: usize, end: usize, target: &str) -> Option<String> {
-    for line in lines.iter().take(end).skip(start) {
-        let trimmed = line.trim();
-        let Some((lhs, rhs)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let lhs = lhs.trim();
-        let rhs_compact = compact_guard_text(rhs);
-        if rhs_compact == format!("urlparse({target})")
-            || rhs_compact == format!("urllib.parse.urlparse({target})")
-        {
-            return clean_overwrite_target_key(lhs);
+fn python_urlparse_assignment_var(events: &[FlowEvent], before: Span, target: &str) -> Option<String> {
+    let mut assignments = Vec::new();
+    collect_structured_assignments_before(events, before, &mut assignments);
+    assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    assignments.into_iter().rev().find_map(|assignment| {
+        let call = assignment.source_call?;
+        if clean_overwrite_callee_tail(call) != "urlparse" {
+            return None;
         }
-    }
-    None
+        let argument = assignment.source_call_args.first()?;
+        (clean_overwrite_target_key(argument).as_deref() == Some(target))
+            .then(|| clean_overwrite_target_key(assignment.target))
+            .flatten()
+    })
 }
 
 fn assignment_target_for_source_call_at(
@@ -2082,9 +2123,9 @@ fn assignment_target_for_source_call_at(
                 source_call,
                 ..
             } if span_contains(*span, sink_span)
-                && source_call
-                    .as_deref()
-                    .is_some_and(|call| clean_overwrite_callee_tail(call).ends_with(call_tail)) =>
+                && source_call.as_deref().is_some_and(|call| {
+                    clean_overwrite_callee_tail(call) == clean_overwrite_callee_tail(call_tail)
+                }) =>
             {
                 return clean_overwrite_target_key(target);
             }
@@ -2123,14 +2164,6 @@ fn assignment_target_for_source_call_at(
     None
 }
 
-fn go_assignment_target_from_call_line(line: &str, call_tail: &str) -> Option<String> {
-    if !line.contains(call_tail) {
-        return None;
-    }
-    let (lhs, _) = line.split_once(":=").or_else(|| line.split_once('='))?;
-    clean_overwrite_target_key(lhs.trim())
-}
-
 fn constructor_assignment_target_at(
     events: &[bonsai_lang_api::FlowEvent],
     sink_span: Span,
@@ -2145,7 +2178,7 @@ fn constructor_assignment_target_at(
                 ..
             } if span_contains(*span, sink_span)
                 && source_call.as_deref().is_some_and(|call| {
-                    matches!(clean_overwrite_callee_tail(call).as_str(), "URL" | "URI")
+                    matches!(clean_overwrite_callee_tail(call).as_str(), "url" | "uri")
                 }) =>
             {
                 return clean_overwrite_target_key(target);
@@ -2333,33 +2366,60 @@ pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
     let target_idx = usize::try_from(sink.line.checked_sub(1)?).ok()?;
     let target_line = *lines.get(target_idx)?;
     let target_indent = leading_ascii_whitespace(target_line);
+    let file_index = ws.db().decl_index(sink.span.file)?;
+    let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
+    let enclosing = ws
+        .enclosing_index()
+        .enclosing_for(ws.db(), sink.span.file, sink.span.start)?;
+    let global = ws.db().global_index();
+    let decl = global.decl_of(enclosing.symbol)?;
+    let mut file_assignments = Vec::new();
+    for candidate in &file_index.defs {
+        collect_structured_assignments_before(&candidate.flow_events, sink.span, &mut file_assignments);
+    }
+    file_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    file_assignments.dedup_by_key(|assignment| assignment.span);
+    let mut local_assignments = Vec::new();
+    collect_structured_assignments_before(&decl.flow_events, sink.span, &mut local_assignments);
+    local_assignments.sort_by_key(|assignment| (assignment.span.start, assignment.span.end));
+    let span_map = bonsai_common::cached_span_map_arc(sink.span.file, snapshot.version, &snapshot.text);
     for arg in tainted_args {
         let Some((map_name, key_name)) = python_index_lookup_parts(&arg.value_text) else {
             continue;
         };
-        if !python_literal_mapping_declared_before(&lines, target_idx, map_name) {
+        if !python_literal_mapping_declared_before(
+            &file_assignments,
+            map_name,
+            &assignment_values,
+            snapshot.text.as_ref(),
+        ) {
             continue;
         }
-        let search_start = enclosing_body_start_line(ws, sink, &snapshot.text);
-        for (idx, line) in lines
-            .iter()
-            .copied()
-            .enumerate()
-            .take(target_idx)
-            .skip(search_start)
-        {
-            if leading_ascii_whitespace(line) > target_indent {
+        for assignment in &local_assignments {
+            let location = span_map.line_col(assignment.span.start);
+            if location.column > u32::try_from(target_indent + 1).ok()? {
                 continue;
             }
-            if !python_assignment_narrows_key_to_map(line, key_name, map_name) {
+            if !python_assignment_narrows_key_to_map(
+                assignment,
+                key_name,
+                map_name,
+                &assignment_values,
+                snapshot.text.as_ref(),
+            ) {
                 continue;
             }
+            let text = snapshot
+                .text
+                .get(assignment.span.start as usize..assignment.span.end as usize)?
+                .trim()
+                .to_string();
             return Some(FindingMatch {
                 rule_id: "engine.sanitizer.literal_map_key_allowlist".to_string(),
                 file: sink.file.clone(),
-                line: u32::try_from(idx + 1).ok()?,
-                column: u32::try_from(leading_ascii_whitespace(line) + 1).ok()?,
-                text: line.trim().to_string(),
+                line: location.line,
+                column: location.column,
+                text,
                 enclosing_fn: sink.enclosing_fn.clone(),
                 tag: Some("allowlist-validate".to_string()),
                 severity: None,
@@ -2603,29 +2663,33 @@ fn python_index_lookup_parts(value: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn python_literal_mapping_declared_before(lines: &[&str], target_idx: usize, map_name: &str) -> bool {
-    let max_idx = target_idx.min(lines.len());
-    lines.iter().take(max_idx).any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with(map_name)
-            && trimmed.contains('=')
-            && trimmed
-                .split_once('=')
-                .is_some_and(|(_, rhs)| rhs.trim_start().starts_with('{'))
+fn python_literal_mapping_declared_before(
+    assignments: &[StructuredAssignment<'_>],
+    map_name: &str,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    assignments.iter().any(|assignment| {
+        clean_overwrite_target_key(assignment.target).as_deref() == Some(map_name)
+            && assignment_values
+                .rendering(assignment.span, source_text)
+                .is_some_and(|rhs| rhs.starts_with('{'))
     })
 }
 
-fn python_assignment_narrows_key_to_map(line: &str, key_name: &str, map_name: &str) -> bool {
-    let trimmed = line.trim();
-    let Some((lhs, rhs)) = trimmed.split_once('=') else {
-        return false;
-    };
-    let lhs = lhs.trim();
-    let lhs_name = lhs.rsplit_once(':').map_or(lhs, |(name, _)| name).trim();
-    if lhs_name != key_name {
+fn python_assignment_narrows_key_to_map(
+    assignment: &StructuredAssignment<'_>,
+    key_name: &str,
+    map_name: &str,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    if clean_overwrite_target_key(assignment.target).as_deref() != Some(key_name) {
         return false;
     }
-    let rhs = rhs.trim();
+    let Some(rhs) = assignment_values.rendering(assignment.span, source_text) else {
+        return false;
+    };
     if !(rhs.contains(" if ") && rhs.contains(" else ")) {
         return false;
     }
