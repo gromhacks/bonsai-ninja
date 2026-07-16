@@ -3276,37 +3276,21 @@ fn chain_funcs_for_lineage(
     if funcs.last().copied() != Some(terminal_func) {
         return None;
     }
-    // Collapse synthetic `Return → CallRet` round trips that bring
-    // the chain back to a function it already visited. Each
-    // `arg_idx = u32::MAX` edge in `records` adds a "callee returned
-    // to caller" hop, so chains like `handle → transform → handle`
-    // (the `g1_c_return` shape: source seeds in `handle`, sink
-    // also in `handle`, the chain goes out to `transform` and
-    // returns) and `handleRequest → updateUser → handleRequest`
-    // (the SDK Java micro case) walk the same physical call site
-    // twice on paper. Dedup adjacent revisits so the chain reads
-    // as the real distinct-frame path, while still rejecting true
-    // cycles (`A → B → A → B`) where a function recurs after
-    // intervening frames have advanced past it.
+    // Synthetic `Return → CallRet` stitches revisit the owning caller in the
+    // raw trace (`handle → transform → handle → sink`). Rendering the caller
+    // twice is noise, but removing every function between the two visits also
+    // erases the helper that actually transformed the value. Preserve each
+    // evidenced function at its first occurrence and omit only revisits. The
+    // raw record chain above remains fully validated and the taint-path steps
+    // still retain the return stitch; this is display compaction, not a graph
+    // search or a semantic cap.
     let mut seen: AHashSet<FuncId> = AHashSet::with_capacity(funcs.len());
     let mut deduped: Vec<FuncId> = Vec::with_capacity(funcs.len());
     for f in funcs.iter().copied() {
-        if deduped.last().copied() == Some(f) {
-            continue;
-        }
-        if deduped.contains(&f) && deduped.last().copied() != Some(f) {
-            // Function reappears non-adjacently after intervening
-            // hops — pop hops until we're back at the prior visit
-            // of `f`, treating the intermediate frames as a
-            // round-trip artefact (synthetic Return inflated the
-            // chain). The chain semantically ends at this revisit.
-            while deduped.last().copied() != Some(f) {
-                deduped.pop();
-            }
+        if !seen.insert(f) {
             continue;
         }
         deduped.push(f);
-        seen.insert(f);
     }
     Some(deduped)
 }

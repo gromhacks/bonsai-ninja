@@ -466,14 +466,18 @@
     callee:
       name: Cookie
   constraints:
-  - any_arg_matches_regex: |-
-      httpOnly.*true|secure.*true
+  - keyword_arg_equals:
+      name: httpOnly
+      value: "true"
+  - keyword_arg_equals:
+      name: secure
+      value: "true"
   match_examples:
   - name: generated shape example
     code: |
       object App {
         def handle(input: String): Unit = {
-          Cookie(httpOnly = true)
+          Cookie(httpOnly = true, secure = true)
         }
       }
     expect_match_text: [Cookie]

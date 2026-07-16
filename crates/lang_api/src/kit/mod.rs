@@ -3837,7 +3837,7 @@ fn argument_value_node(argument: Node<'_>) -> Node<'_> {
             | "tuple_expression_element"
             | "value_argument"
     ) {
-        return argument;
+        return unwrap_transparent_expression(argument);
     }
     // Dart represents one projected argument (`c.capacity`) as sibling
     // nodes inside the `argument` wrapper: an identifier followed by one or
@@ -3852,7 +3852,7 @@ fn argument_value_node(argument: Node<'_>) -> Node<'_> {
         .or_else(|| argument.child_by_field_name("argument"))
         .or_else(|| argument.child_by_field_name("operand"))
     {
-        return value;
+        return unwrap_transparent_expression(value);
     }
     let name_id = argument.child_by_field_name("name").map(|name| name.id());
     let label_id = argument.child_by_field_name("label").map(|label| label.id());
@@ -3863,7 +3863,28 @@ fn argument_value_node(argument: Node<'_>) -> Node<'_> {
             value = Some(child);
         }
     }
-    value.unwrap_or(argument)
+    unwrap_transparent_expression(value.unwrap_or(argument))
+}
+
+/// Peel parser-declared, single-child expression wrappers while preserving
+/// the actual operator/member/call node that proves value semantics. The
+/// Solidity grammar uses this shape for every call argument
+/// (`call_argument -> expression -> member_expression`); classifying the
+/// generic wrapper instead of its child loses an otherwise exact static
+/// access path such as `env.command`.
+fn unwrap_transparent_expression(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "expression" {
+        let mut cursor = node.walk();
+        let mut children = node.named_children(&mut cursor);
+        let Some(only_child) = children.next() else {
+            break;
+        };
+        if children.next().is_some() {
+            break;
+        }
+        node = only_child;
+    }
+    node
 }
 
 /// Whether a parser wrapper contains one static dotted value as a base node

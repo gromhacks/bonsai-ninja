@@ -394,6 +394,8 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
 /// that exposes nested scopes (e.g. inline-assembly Yul function defs) won't
 /// silently route synthetic events to the outer contract.
 fn attach_synthesized_calls_to_decls(idx: &mut DeclIndex, events: Vec<(Span, FlowEvent)>) {
+    let mut events = events;
+    events.sort_unstable_by_key(|(span, _)| (span.file.raw(), span.start, span.end));
     for (event_span, event) in events {
         let mut best_decl_idx: Option<usize> = None;
         let mut best_body_len: u64 = u64::MAX;
@@ -410,9 +412,99 @@ fn attach_synthesized_calls_to_decls(idx: &mut DeclIndex, events: Vec<(Span, Flo
             }
         }
         if let Some(target_idx) = best_decl_idx {
-            idx.defs[target_idx].flow_events.push(event);
+            insert_synthesized_event(&mut idx.defs[target_idx].flow_events, event_span, event);
         }
     }
+}
+
+/// Insert an AST-synthesized event at its source position. When the generic
+/// walker already emitted a nested event inside the same syntax construct
+/// (for example the `Action(...)` call inside `emit Action(...)`), that event
+/// is an anchor proving which branch/loop/try arm owns the synthesized call.
+/// This preserves the Tree-sitter control structure and prevents an event
+/// appearing after a later `return` merely because adapter enrichment ran as
+/// a post-pass.
+fn insert_synthesized_event(events: &mut Vec<FlowEvent>, span: Span, event: FlowEvent) {
+    for existing in events.iter_mut() {
+        let nested = match existing {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if contains_ast_anchor(then_events, span) {
+                    Some(then_events)
+                } else if contains_ast_anchor(else_events, span) {
+                    Some(else_events)
+                } else {
+                    None
+                }
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                contains_ast_anchor(body, span).then_some(body)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if contains_ast_anchor(body, span) {
+                    Some(body)
+                } else if contains_ast_anchor(catch_events, span) {
+                    Some(catch_events)
+                } else if contains_ast_anchor(finally_events, span) {
+                    Some(finally_events)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(nested) = nested {
+            insert_synthesized_event(nested, span, event);
+            return;
+        }
+    }
+
+    let insert_at = events
+        .iter()
+        .position(|existing| {
+            let existing = existing.span();
+            (existing.file.raw(), existing.start, existing.end) > (span.file.raw(), span.start, span.end)
+        })
+        .unwrap_or(events.len());
+    events.insert(insert_at, event);
+}
+
+fn contains_ast_anchor(events: &[FlowEvent], outer: Span) -> bool {
+    events.iter().any(|event| {
+        let span = event.span();
+        let directly_contained =
+            span.file == outer.file && outer.start <= span.start && span.end <= outer.end;
+        directly_contained
+            || match event {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => contains_ast_anchor(then_events, outer) || contains_ast_anchor(else_events, outer),
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => contains_ast_anchor(body, outer),
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    contains_ast_anchor(body, outer)
+                        || contains_ast_anchor(catch_events, outer)
+                        || contains_ast_anchor(finally_events, outer)
+                }
+                _ => false,
+            }
+    })
 }
 
 /// For every `try (...) returns (T name) { ... }` block, prepend a synthetic

@@ -728,6 +728,36 @@ fn taint_lineage_reconstructs_parent_edge_chain() {
 }
 
 #[test]
+fn taint_lineage_keeps_helper_across_nested_return_stitch() {
+    let source = FuncId::new(10);
+    let helper = FuncId::new(20);
+    let sink_func = FuncId::new(30);
+    let records = vec![
+        tainted_edge(1, None, source, helper, 10),
+        // IDG Return -> CallRet stitch back to the function containing
+        // `sink(helper(input))`.
+        tainted_edge(2, Some(1), helper, source, 20),
+        tainted_edge(3, Some(2), source, sink_func, 30),
+    ];
+    let terminal = TaintedCall {
+        parent_trace_id: Some(3),
+        caller: sink_func,
+        name: "sink".to_string(),
+        call_span: Span::new(bonsai_common::FileId::new(1), 40, 41),
+        tainted_args: Vec::new(),
+        tainted_receiver: None,
+        kind: TaintedCallKind::Call,
+    };
+
+    let lineage = lineage_records_for_call(&records, &terminal).expect("nested return lineage");
+    assert_eq!(
+        chain_funcs_for_lineage(&lineage, source, sink_func),
+        Some(vec![source, helper, sink_func]),
+        "display compaction must omit the caller revisit without erasing the helper body"
+    );
+}
+
+#[test]
 fn taint_lineage_requires_recorded_parent_trace() {
     let source = FuncId::new(10);
     let middle = FuncId::new(20);

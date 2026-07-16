@@ -1245,8 +1245,8 @@ def handle():
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint JSON");
     assert_eq!(
-        parsed.as_array().map(Vec::len),
-        Some(0),
+        json_rows(&parsed).len(),
+        0,
         "source-filtered taint run must not include source-less pattern findings:\n{out}"
     );
 }
@@ -2449,7 +2449,7 @@ def handle():
     let rows: serde_json::Value =
         serde_json::from_str(&first_json_all.stdout).expect("first JSON --all output");
     assert!(
-        rows.as_array().is_some_and(|items| !items.is_empty()),
+        !json_rows(&rows).is_empty(),
         "JSON --all should emit findings:\n{}",
         first_json_all.stdout
     );
@@ -3261,8 +3261,8 @@ def exec_cmd(cmd):
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&production).expect("production profile JSON");
     assert_eq!(
-        parsed.as_array().map(Vec::len),
-        Some(0),
+        json_rows(&parsed).len(),
+        0,
         "production profile must drop flows whose proof path crosses tests:\n{production}"
     );
 }
@@ -3499,8 +3499,9 @@ fn inferred_sources_use_objc_bound_parameter_name() {
         "--all",
     ])
     .unwrap();
-    let rows: Vec<serde_json::Value> =
+    let parsed: serde_json::Value =
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("invalid JSON: {e}\n{out}"));
+    let rows = json_rows(&parsed);
     assert!(
         rows.iter()
             .any(|row| row["source"]["text"] == "expr" && row["source"]["enclosing_fn"] == "evalExpression"),
