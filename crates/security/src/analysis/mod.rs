@@ -9875,6 +9875,7 @@ mod source_seed_tests {
             file,
             defs: vec![caller, callee],
             refs: Vec::new(),
+            assignment_values: Vec::new(),
             aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),

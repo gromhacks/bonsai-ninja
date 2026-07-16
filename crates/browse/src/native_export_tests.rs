@@ -3,10 +3,9 @@ use super::*;
 #[test]
 fn native_export_uses_versioned_flat_flow_ir() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        dir.path().join("app.py"),
-        r#"
+    let source = r#"
 def process(value):
+    current = value
     if value:
         while value:
             try:
@@ -17,14 +16,13 @@ def process(value):
                 cleanup(value)
     else:
         return value
-"#,
-    )
-    .expect("write fixture");
+"#;
+    std::fs::write(dir.path().join("app.py"), source).expect("write fixture");
     let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
     let exported = native_export_json(&ws, dir.path(), false).expect("native export");
 
     assert_eq!(exported["schema"], "bonsai-native-export");
-    assert_eq!(exported["schema_version"], 2);
+    assert_eq!(exported["schema_version"], 3);
     let file = exported["files"]
         .as_array()
         .and_then(|files| {
@@ -35,6 +33,28 @@ def process(value):
         .expect("exported app.py");
     let events = file["flow_events"].as_array().expect("flat flow event table");
     assert!(!events.is_empty(), "flow event table must contain parsed events");
+    let assignment_values = file["assignment_values"]
+        .as_array()
+        .expect("flat assignment-value table");
+    assert!(
+        !assignment_values.is_empty(),
+        "parsed assignments must retain exact Tree-sitter RHS spans"
+    );
+    assert!(
+        assignment_values.iter().any(|fact| {
+            let (Some(assignment_start), Some(assignment_end), Some(value_start), Some(value_end)) = (
+                fact["assignment_start_byte"].as_u64(),
+                fact["assignment_end_byte"].as_u64(),
+                fact["value_start_byte"].as_u64(),
+                fact["value_end_byte"].as_u64(),
+            ) else {
+                return false;
+            };
+            source.get(assignment_start as usize..assignment_end as usize) == Some("current = value")
+                && source.get(value_start as usize..value_end as usize) == Some("value")
+        }),
+        "exported byte spans must select the exact assignment and RHS nodes"
+    );
     let ids: std::collections::BTreeSet<u64> = events
         .iter()
         .map(|event| event["event_id"].as_u64().expect("numeric event id"))

@@ -51,6 +51,7 @@ fn build_index(decls: Vec<Decl>) -> GlobalIndex {
             file,
             defs,
             refs: Vec::new(),
+            assignment_values: Vec::new(),
             aggregate_layouts: Vec::new(),
             strings: Vec::new(),
             comments: Vec::new(),

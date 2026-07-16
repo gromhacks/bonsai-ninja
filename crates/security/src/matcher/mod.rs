@@ -633,6 +633,10 @@ fn write_rule_match_passes_constraints_at_expected_hit(
     let nested_ast_values = file_index
         .map(|index| NestedAstValueIndex::new(&index.defs))
         .unwrap_or_default();
+    let assignment_values = file_index
+        .map(|index| AssignmentValueIndex::new(&index.assignment_values))
+        .unwrap_or_default();
+    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let file_packages =
         file_package_set_with_workspace_context(ws, file, prepared.needs_workspace_package_context());
     let alias_map = file_alias_map(ws, file);
@@ -649,6 +653,7 @@ fn write_rule_match_passes_constraints_at_expected_hit(
             if write.span != expected.span {
                 continue;
             }
+            write.extend_with_assignment_value(&assignment_values, source_text.as_deref());
             write.extend_with_nested_ast_values(&nested_ast_values);
             if !callee_matches(
                 &write.target,
@@ -4626,13 +4631,15 @@ fn build_decl_match_facts_bundle(
         .filter(|decl| decl.name == "__module__")
         .flat_map(|decl| decl.type_aliases.iter().cloned())
         .collect();
+    let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     let mut by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>> = AHashMap::new();
     for decl in &file_index.defs {
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &module_type_aliases);
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
-        let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
+        let assignment_map =
+            collect_assignment_texts(&decl.flow_events, &assignment_values, source_text.as_deref());
         let factory_type_aliases = file_language
             .as_deref()
             .map(|lang| synth_factory_type_aliases(&assignment_map, factory, lang))
@@ -5311,14 +5318,45 @@ fn split_return_read_token(value: &str) -> Vec<String> {
     split_read_token(value)
 }
 
-fn collect_assignment_texts(events: &[FlowEvent], source_text: Option<&str>) -> AHashMap<String, String> {
+#[derive(Clone, Debug, Default)]
+struct AssignmentValueIndex {
+    value_spans: AHashMap<Span, Span>,
+}
+
+impl AssignmentValueIndex {
+    fn new(facts: &[bonsai_lang_api::AssignmentValueFact]) -> Self {
+        let mut value_spans = AHashMap::with_capacity(facts.len());
+        for fact in facts {
+            value_spans.entry(fact.assignment_span).or_insert(fact.value_span);
+        }
+        Self { value_spans }
+    }
+
+    fn rendering<'a>(&self, assignment_span: Span, source_text: Option<&'a str>) -> Option<&'a str> {
+        let value_span = self.value_spans.get(&assignment_span)?;
+        if value_span.file != assignment_span.file {
+            return None;
+        }
+        source_text?
+            .get(value_span.start as usize..value_span.end as usize)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+fn collect_assignment_texts(
+    events: &[FlowEvent],
+    assignment_values: &AssignmentValueIndex,
+    source_text: Option<&str>,
+) -> AHashMap<String, String> {
     let mut out = AHashMap::new();
-    collect_assignment_texts_into(events, source_text, &mut out);
+    collect_assignment_texts_into(events, assignment_values, source_text, &mut out);
     out
 }
 
 fn collect_assignment_texts_into(
     events: &[FlowEvent],
+    assignment_values: &AssignmentValueIndex,
     source_text: Option<&str>,
     out: &mut AHashMap<String, String>,
 ) {
@@ -5336,15 +5374,18 @@ fn collect_assignment_texts_into(
                 if target.is_empty() {
                     continue;
                 }
-                if let Some(rhs_text) = assignment_rhs_text(
-                    source_text,
-                    *span,
-                    target,
-                    source_name.as_deref(),
-                    source_call.as_deref(),
-                    source_call_args,
-                    source_names,
-                ) {
+                let rhs_text = assignment_values
+                    .rendering(*span, source_text)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        structured_assignment_rendering(
+                            source_name.as_deref(),
+                            source_call.as_deref(),
+                            source_call_args,
+                            source_names,
+                        )
+                    });
+                if let Some(rhs_text) = rhs_text {
                     out.insert(target.clone(), rhs_text);
                 }
             }
@@ -5353,11 +5394,11 @@ fn collect_assignment_texts_into(
                 else_events,
                 ..
             } => {
-                collect_assignment_texts_into(then_events, source_text, out);
-                collect_assignment_texts_into(else_events, source_text, out);
+                collect_assignment_texts_into(then_events, assignment_values, source_text, out);
+                collect_assignment_texts_into(else_events, assignment_values, source_text, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_assignment_texts_into(body, source_text, out);
+                collect_assignment_texts_into(body, assignment_values, source_text, out);
             }
             FlowEvent::Try {
                 body,
@@ -5365,50 +5406,24 @@ fn collect_assignment_texts_into(
                 finally_events,
                 ..
             } => {
-                collect_assignment_texts_into(body, source_text, out);
-                collect_assignment_texts_into(catch_events, source_text, out);
-                collect_assignment_texts_into(finally_events, source_text, out);
+                collect_assignment_texts_into(body, assignment_values, source_text, out);
+                collect_assignment_texts_into(catch_events, assignment_values, source_text, out);
+                collect_assignment_texts_into(finally_events, assignment_values, source_text, out);
             }
             _ => {}
         }
     }
 }
 
-/// Extract a textual RHS for an `Assign` flow event, used when an
-/// `arg_matches_regex` constraint follows the assignment to its
-/// expression. Prefers the verbatim source slice (`x = expr`); falls
-/// back to reconstructing from the structured `source_call` /
-/// `source_name` / `source_names` fields when the source text isn't
-/// available.
-fn assignment_rhs_text(
-    source_text: Option<&str>,
-    span: Span,
-    target: &str,
+/// Canonical display fallback for synthetic assignments that have no parsed
+/// RHS-node fact. This composes already-structured operands; it never scans
+/// an assignment statement or tokenizes source text.
+fn structured_assignment_rendering(
     source_name: Option<&str>,
     source_call: Option<&str>,
     source_call_args: &[String],
     source_names: &[String],
 ) -> Option<String> {
-    if let Some(source_text) = source_text {
-        if let Some(raw) = source_text.get(span.start as usize..span.end as usize) {
-            let mut rhs = raw.trim();
-            if let Some(eq) = rhs.find('=') {
-                rhs = rhs[eq + 1..].trim();
-                rhs = rhs.trim_matches(|ch: char| ch == ';' || ch == ',');
-                if !rhs.is_empty() {
-                    // Trailing `)` without a matching `(` indicates
-                    // we sliced into a partial call expression; drop
-                    // the orphan paren so the regex sees a clean RHS.
-                    if rhs.ends_with(')') && rhs.rfind('(').is_none() {
-                        rhs = rhs.trim_end_matches(')');
-                    }
-                    return Some(rhs.to_string());
-                }
-            }
-        }
-    }
-    // Reconstruct from structured fields when the raw text isn't
-    // available (cached spans, snapshot races).
     if let Some(source_call) = source_call {
         if source_call_args.is_empty() {
             return Some(source_call.to_string());
@@ -5420,9 +5435,6 @@ fn assignment_rhs_text(
     }
     if !source_names.is_empty() {
         return Some(source_names.join(", "));
-    }
-    if target.is_empty() {
-        return None;
     }
     None
 }
@@ -5544,9 +5556,12 @@ fn scan_writes_batch(
     );
     let alias_map = file_alias_map_with_retention(ws, file, retention);
     let nested_ast_values = NestedAstValueIndex::new(&file_index.defs);
+    let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
+    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     for decl in &file_index.defs {
         let writes = collect_writes(&decl.flow_events);
         for mut write in writes {
+            write.extend_with_assignment_value(&assignment_values, source_text.as_deref());
             write.extend_with_nested_ast_values(&nested_ast_values);
             let args = [write.argument.clone()];
             let ast_arg_values = [write.ast_values];
@@ -6604,6 +6619,16 @@ impl WriteFact {
 
     fn extend_with_nested_ast_values(&mut self, index: &NestedAstValueIndex) {
         index.extend_values_within(self.span, &mut self.ast_values);
+    }
+
+    fn extend_with_assignment_value(&mut self, index: &AssignmentValueIndex, source_text: Option<&str>) {
+        let Some(value) = index.rendering(self.span, source_text) else {
+            return;
+        };
+        self.argument.value_text = value.to_string();
+        if !self.ast_values.iter().any(|existing| existing == value) {
+            self.ast_values.push(value.to_string());
+        }
     }
 }
 

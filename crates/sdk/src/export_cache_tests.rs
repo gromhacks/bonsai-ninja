@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[test]
 fn default_export_tmp_paths_are_unique_per_write() {
-    let path = Path::new("/tmp/.bonsai/export.default.v9.json");
+    let path = Path::new("/tmp/.bonsai/export.default.v10.json");
     let first = unique_default_export_tmp_path(path);
     let second = unique_default_export_tmp_path(path);
 
@@ -16,7 +16,7 @@ fn default_export_tmp_paths_are_unique_per_write() {
     assert!(first
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("export.default.v9.json.tmp.")));
+        .is_some_and(|name| name.starts_with("export.default.v10.json.tmp.")));
 }
 
 fn tempdir(name: &str) -> std::path::PathBuf {

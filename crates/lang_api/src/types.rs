@@ -1468,11 +1468,26 @@ pub struct Ref {
     pub resolved: Option<SymbolId>,
 }
 
+/// Exact Tree-sitter relationship between an assignment-shaped syntax node
+/// and its RHS expression node. Consumers may render `value_span` from the
+/// file snapshot, but must not split the surrounding assignment text to
+/// recover expression structure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignmentValueFact {
+    pub assignment_span: Span,
+    pub value_span: Span,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclIndex {
     pub file: FileId,
     pub defs: Vec<Decl>,
     pub refs: Vec<Ref>,
+    /// RHS-node spans for assignment-shaped nodes in this file's parsed tree.
+    /// Kept file-local and flat so exact renderings remain zero-copy slices of
+    /// the source snapshot rather than duplicated strings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assignment_values: Vec<AssignmentValueFact>,
     /// Grammar-declared aggregate field layouts in this file. These are
     /// workspace-level type facts rather than function declarations, so they
     /// live beside the per-file declaration index and remain available for

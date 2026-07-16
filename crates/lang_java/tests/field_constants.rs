@@ -79,6 +79,41 @@ class C {
 }
 
 #[test]
+fn final_string_field_keeps_exact_rhs_syntax_fact() {
+    let db = db_with(
+        r#"
+class C {
+  static final String ALG = "AES/GCM/NoPadding";
+  void handle() throws Exception {
+    javax.crypto.Cipher.getInstance(ALG);
+  }
+}
+"#,
+    );
+    let file = db.vfs().all_files()[0];
+    let index = db.decl_index(file).expect("Java declaration index");
+    let assignment_span = index
+        .defs
+        .iter()
+        .find(|decl| decl.name == "handle")
+        .and_then(|decl| {
+            decl.flow_events.iter().find_map(|event| match event {
+                FlowEvent::Assign { span, target, .. } if target == "ALG" => Some(*span),
+                _ => None,
+            })
+        })
+        .expect("class constant assignment attached to method");
+    let value_span = index
+        .assignment_values
+        .iter()
+        .find_map(|fact| (fact.assignment_span == assignment_span).then_some(fact.value_span))
+        .expect("exact RHS syntax fact for attached class constant");
+    let snapshot = db.vfs().snapshot(file).expect("source snapshot");
+    let value = &snapshot.text[value_span.start as usize..value_span.end as usize];
+    assert_eq!(value, r#""AES/GCM/NoPadding""#);
+}
+
+#[test]
 fn final_string_field_shadowed_by_parameter_is_not_seeded() {
     let db = db_with(
         r#"

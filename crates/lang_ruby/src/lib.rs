@@ -303,10 +303,13 @@ impl LanguageAdapter for RubyAdapter {
         refs.extend(synthesize_rack_query_string_refs(src, file));
         let strings = bonsai_lang_api::kit::extract_string_literals(&tree, file, src);
         let comments = bonsai_lang_api::kit::extract_comments(&tree, file, src);
+        let assignment_values =
+            bonsai_lang_api::kit::extract_assignment_value_facts(&tree, file, &HANDLER, src);
         DeclIndex {
             file,
             defs,
             refs,
+            assignment_values,
             aggregate_layouts: Vec::new(),
             strings,
             comments,
