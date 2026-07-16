@@ -2668,6 +2668,35 @@ fn prior_local_value_assignment_still_shadows_workspace_callable() {
 }
 
 #[test]
+fn callback_argument_resolves_when_outer_callee_is_unresolved() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "entry",
+                vec![call_with_args(file, "external.readFile", &["path", "onRead"])],
+            ),
+            decl(file, 1, "onRead", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("javascript"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let callback = FuncId::new(global.find_by_name("onRead")[0].raw());
+
+    assert!(
+        cg.callees_of(entry)
+            .any(|edge| edge.to == callback && edge.kind == EdgeKind::Indirect),
+        "a compiler-resolved callback argument must survive an unresolved outer API call"
+    );
+}
+
+#[test]
 fn quoted_runtime_callable_variable_resolves_to_workspace_function() {
     let file = FileId::new(1);
     let mut global = GlobalIndex::new();

@@ -1317,6 +1317,25 @@ fn add_resolved_call_edges(
                 args,
                 ..
             } => {
+                // Callback arguments are independent callgraph facts. Resolve
+                // them before the outer callee pipeline so an ambiguous or
+                // unresolved external API cannot suppress a compiler-resolved
+                // local callback edge via an early `continue` below.
+                add_callback_arg_edges(
+                    args,
+                    from,
+                    caller_decl,
+                    global,
+                    alias_targets,
+                    local_bindings,
+                    caller_language,
+                    language_for_file,
+                    path_for_file,
+                    file_path_parts,
+                    method_candidate_cache,
+                    callable_target_cache,
+                    cg,
+                );
                 let short = short_callee(name);
                 let alias_qualified_call = qualified_module_alias_call(name, aliases)
                     || qualified_alias_target_entry_tail(name, alias_targets).is_some();
@@ -1715,21 +1734,6 @@ fn add_resolved_call_edges(
                         });
                     }
                 }
-                add_callback_arg_edges(
-                    args,
-                    from,
-                    caller_decl,
-                    global,
-                    alias_targets,
-                    local_bindings,
-                    caller_language,
-                    language_for_file,
-                    path_for_file,
-                    file_path_parts,
-                    method_candidate_cache,
-                    callable_target_cache,
-                    cg,
-                );
             }
             FlowEvent::Assign {
                 source_call: Some(name),

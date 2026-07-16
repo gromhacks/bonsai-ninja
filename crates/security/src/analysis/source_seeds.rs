@@ -132,9 +132,10 @@ pub(super) fn collect_source_seed_targets(
                 if call_matches && !source_output_args.is_empty() {
                     seed_source_output_call_args(out, args, source_output_args);
                 }
-                if call_matches && !source_callback_args.is_empty() {
-                    seed_source_callback_call_args(out, args, source_callback_args);
-                }
+                // Callback-source delivery is an IDG edge from this exact
+                // source call's anchored CallRet to the compiler-resolved
+                // callback parameter. Do not re-parse the callback argument's
+                // rendering to rediscover lambda parameters here.
                 if call_matches
                     && source_output_args.is_empty()
                     && source_callback_args.is_empty()
@@ -311,96 +312,6 @@ fn seed_source_output_call_args(
         insert_taint_aliases(out, text);
         insert_descendant_taint_aliases(out, text);
     }
-}
-
-fn seed_source_callback_call_args(
-    out: &mut TokenSet,
-    args: &[bonsai_lang_api::CallArg],
-    source_callback_args: &[SourceCallbackArgSemantics],
-) {
-    for shape in source_callback_args {
-        let Some(callback_arg) = args.get(shape.callback_arg_index) else {
-            continue;
-        };
-        let params = callback_param_names_from_value_text(&callback_arg.value_text);
-        if params.is_empty() {
-            continue;
-        }
-        for &index in &shape.source_param_indices {
-            let Some(param) = params.get(index).map(String::as_str) else {
-                continue;
-            };
-            if param.is_empty() || source_seed_text_is_literal(param) {
-                continue;
-            }
-            insert_taint_aliases(out, param);
-            insert_descendant_taint_aliases(out, param);
-        }
-    }
-}
-
-fn callback_param_names_from_value_text(value: &str) -> Vec<String> {
-    let mut text = value.trim();
-    if let Some(rest) = text.strip_prefix("async ") {
-        text = rest.trim_start();
-    }
-    if let Some(arrow) = text.find("=>") {
-        return parse_callback_param_list(text[..arrow].trim());
-    }
-    if text.starts_with("function") || text.starts_with("async function") {
-        if let Some(open) = text.find('(') {
-            if let Some(close) = text[open + 1..].find(')') {
-                return split_callback_params(&text[open + 1..open + 1 + close]);
-            }
-        }
-    }
-    Vec::new()
-}
-
-fn parse_callback_param_list(head: &str) -> Vec<String> {
-    let head = head.trim();
-    if let Some(inner) = head
-        .strip_prefix('(')
-        .and_then(|value| value.rsplit_once(')').map(|(inner, _)| inner))
-    {
-        return split_callback_params(inner);
-    }
-    split_callback_params(head)
-}
-
-fn split_callback_params(params: &str) -> Vec<String> {
-    params
-        .split(',')
-        .filter_map(callback_param_name)
-        .collect::<Vec<_>>()
-}
-
-fn callback_param_name(raw: &str) -> Option<String> {
-    let mut value = raw.trim().trim_start_matches("...").trim();
-    if value.starts_with('{') || value.starts_with('[') {
-        return None;
-    }
-    if let Some((name, _)) = value.split_once(':') {
-        value = name.trim();
-    }
-    if let Some((name, _)) = value.split_once('=') {
-        value = name.trim();
-    }
-    if value.is_empty() || !is_simple_callback_param_name(value) {
-        return None;
-    }
-    Some(value.to_string())
-}
-
-fn is_simple_callback_param_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 fn source_seed_text_is_literal(text: &str) -> bool {
