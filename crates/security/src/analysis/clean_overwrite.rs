@@ -1071,7 +1071,10 @@ fn literal_list_get_assignment_is_clean(
 fn literal_list_state_before_span(ws: &Workspace, span: Span, list_name: &str) -> Option<Vec<String>> {
     let snapshot = ws.vfs().snapshot(span.file).ok()?;
     let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
-    let start = end.saturating_sub(4096);
+    let start = ws
+        .enclosing_index()
+        .enclosing_for(ws.db(), span.file, span.start)
+        .map_or(0, |entry| entry.start as usize);
     let prefix = snapshot.text.get(start..end)?;
     let mut values: Option<Vec<String>> = None;
     let new_marker = format!("{list_name} = new ");
@@ -1218,40 +1221,337 @@ fn static_numeric_condition_value(ws: &Workspace, span: Span, condition: &str) -
 }
 
 fn numeric_constant_assignments_before_span(ws: &Workspace, span: Span) -> AHashMap<String, i64> {
-    let mut out = AHashMap::new();
+    let Some(file_index) = ws.db().decl_index(span.file) else {
+        return AHashMap::new();
+    };
     let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
-        return out;
+        return AHashMap::new();
     };
-    let end = usize::try_from(span.start).unwrap_or(0).min(snapshot.text.len());
-    let start = end.saturating_sub(4096);
-    let Some(prefix) = snapshot.text.get(start..end) else {
-        return out;
+    let global = ws.db().global_index();
+    let Some(decl) = global
+        .decls_in(span.file)
+        .iter()
+        .filter(|decl| span_contains(decl.body_span.unwrap_or(decl.span), span))
+        .min_by_key(|decl| decl.span.len())
+    else {
+        return AHashMap::new();
     };
-    for line in prefix.lines() {
-        let trimmed = line.trim().trim_end_matches(';').trim();
-        let Some((lhs, rhs)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let rhs = rhs.trim();
-        let Ok(value) = rhs.parse::<i64>() else {
-            continue;
-        };
-        let Some(name) = lhs
-            .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .filter(|part| !part.is_empty())
-            .next_back()
-        else {
-            continue;
-        };
-        if name
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        {
-            out.insert(name.to_string(), value);
+    let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
+    let mut constants = AHashMap::new();
+    constants_before_span_in_events(
+        &decl.flow_events,
+        span,
+        &assignment_values,
+        snapshot.text.as_ref(),
+        &mut constants,
+    );
+    constants
+}
+
+/// Execute the compiler-owned flow tree until `target_span`, retaining only
+/// integer constants that are identical on every path which can reach it.
+/// This is intentionally uncapped: scale comes from one linear walk over the
+/// enclosing declaration, not from dropping syntax beyond a byte budget.
+fn constants_before_span_in_events(
+    events: &[FlowEvent],
+    target_span: Span,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+    constants: &mut AHashMap<String, i64>,
+) -> bool {
+    for event in events {
+        let event_span = event.span();
+        if event_span == target_span {
+            return true;
+        }
+        if span_contains(event_span, target_span) {
+            return constants_before_nested_span(
+                event,
+                target_span,
+                assignment_values,
+                source_text,
+                constants,
+            );
+        }
+        if event_span.file == target_span.file && event_span.end <= target_span.start {
+            apply_constant_event(event, assignment_values, source_text, constants);
         }
     }
-    out
+    false
+}
+
+fn constants_before_nested_span(
+    event: &FlowEvent,
+    target_span: Span,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+    constants: &mut AHashMap<String, i64>,
+) -> bool {
+    match event {
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => nested_constants_from_one_of(
+            [then_events.as_slice(), else_events.as_slice()],
+            target_span,
+            assignment_values,
+            source_text,
+            constants,
+        ),
+        FlowEvent::Loop { body, .. } => {
+            // A target inside a loop may be reached after earlier iterations.
+            // Invalidate anything the loop can write before following the
+            // target's exact syntactic arm.
+            invalidate_written_constants(body, constants);
+            constants_before_span_in_events(body, target_span, assignment_values, source_text, constants)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            if events_contain_span(body, target_span) {
+                constants_before_span_in_events(body, target_span, assignment_values, source_text, constants)
+            } else if events_contain_span(catch_events, target_span) {
+                invalidate_written_constants(body, constants);
+                constants_before_span_in_events(
+                    catch_events,
+                    target_span,
+                    assignment_values,
+                    source_text,
+                    constants,
+                )
+            } else {
+                let mut body_state = constants.clone();
+                apply_constant_events(body, assignment_values, source_text, &mut body_state);
+                let mut catch_state = constants.clone();
+                apply_constant_events(catch_events, assignment_values, source_text, &mut catch_state);
+                *constants = merge_constant_states([constants.clone(), body_state, catch_state]);
+                constants_before_span_in_events(
+                    finally_events,
+                    target_span,
+                    assignment_values,
+                    source_text,
+                    constants,
+                )
+            }
+        }
+        FlowEvent::Defer { body, .. } => {
+            // Deferred code executes at scope exit, after arbitrary writes
+            // between its declaration and execution. Do not carry a lexical
+            // constant state into that later control-flow region.
+            constants.clear();
+            constants_before_span_in_events(body, target_span, assignment_values, source_text, constants)
+        }
+        FlowEvent::Using { body, .. } => {
+            constants_before_span_in_events(body, target_span, assignment_values, source_text, constants)
+        }
+        _ => false,
+    }
+}
+
+fn nested_constants_from_one_of<'a>(
+    candidates: impl IntoIterator<Item = &'a [FlowEvent]>,
+    target_span: Span,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+    constants: &mut AHashMap<String, i64>,
+) -> bool {
+    for events in candidates {
+        if events_contain_span(events, target_span) {
+            return constants_before_span_in_events(
+                events,
+                target_span,
+                assignment_values,
+                source_text,
+                constants,
+            );
+        }
+    }
+    false
+}
+
+fn events_contain_span(events: &[FlowEvent], target_span: Span) -> bool {
+    events
+        .iter()
+        .any(|event| event.span() == target_span || span_contains(event.span(), target_span))
+}
+
+fn apply_constant_events(
+    events: &[FlowEvent],
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+    constants: &mut AHashMap<String, i64>,
+) {
+    for event in events {
+        apply_constant_event(event, assignment_values, source_text, constants);
+    }
+}
+
+fn apply_constant_event(
+    event: &FlowEvent,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+    constants: &mut AHashMap<String, i64>,
+) {
+    match event {
+        FlowEvent::Assign {
+            span,
+            target,
+            value_kind,
+            ..
+        } => {
+            let Some(target) = clean_overwrite_target_key(target) else {
+                return;
+            };
+            let value = value_kind
+                .is_some_and(|kind| kind == AssignValueKind::Literal)
+                .then(|| assignment_values.rendering(*span, source_text))
+                .flatten()
+                .and_then(parse_static_integer_literal);
+            if let Some(value) = value {
+                constants.insert(target, value);
+            } else {
+                constants.remove(&target);
+            }
+        }
+        FlowEvent::AggregateAssign { target, .. } => {
+            if let Some(target) = clean_overwrite_target_key(target) {
+                constants.remove(&target);
+            }
+        }
+        FlowEvent::Call { args, .. } => {
+            for arg in args {
+                if arg.passing_mode != bonsai_lang_api::ArgumentPassingMode::WriteBack {
+                    continue;
+                }
+                if let Some(target) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
+                    constants.remove(&target);
+                }
+            }
+        }
+        FlowEvent::Branch {
+            condition,
+            then_events,
+            else_events,
+            ..
+        } => {
+            if let Some(takes_then) = condition
+                .as_deref()
+                .and_then(|condition| eval_numeric_condition(condition, constants))
+            {
+                apply_constant_events(
+                    if takes_then { then_events } else { else_events },
+                    assignment_values,
+                    source_text,
+                    constants,
+                );
+                return;
+            }
+            let mut then_state = constants.clone();
+            apply_constant_events(then_events, assignment_values, source_text, &mut then_state);
+            let mut else_state = constants.clone();
+            apply_constant_events(else_events, assignment_values, source_text, &mut else_state);
+            *constants = merge_constant_states([then_state, else_state]);
+        }
+        FlowEvent::Loop { body, .. } => {
+            let before = constants.clone();
+            let mut after_iteration = before.clone();
+            apply_constant_events(body, assignment_values, source_text, &mut after_iteration);
+            *constants = merge_constant_states([before, after_iteration]);
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            let before = constants.clone();
+            let mut body_state = before.clone();
+            apply_constant_events(body, assignment_values, source_text, &mut body_state);
+            let mut catch_state = before.clone();
+            apply_constant_events(catch_events, assignment_values, source_text, &mut catch_state);
+            *constants = merge_constant_states([before, body_state, catch_state]);
+            apply_constant_events(finally_events, assignment_values, source_text, constants);
+        }
+        FlowEvent::Using { body, .. } => {
+            apply_constant_events(body, assignment_values, source_text, constants);
+        }
+        FlowEvent::Defer { .. }
+        | FlowEvent::Return { .. }
+        | FlowEvent::Throw { .. }
+        | FlowEvent::Break { .. }
+        | FlowEvent::Continue { .. }
+        | FlowEvent::Yield { .. }
+        | FlowEvent::Await { .. }
+        | FlowEvent::Lifecycle { .. } => {}
+    }
+}
+
+fn invalidate_written_constants(events: &[FlowEvent], constants: &mut AHashMap<String, i64>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } | FlowEvent::AggregateAssign { target, .. } => {
+                if let Some(target) = clean_overwrite_target_key(target) {
+                    constants.remove(&target);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                invalidate_written_constants(then_events, constants);
+                invalidate_written_constants(else_events, constants);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                invalidate_written_constants(body, constants);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                invalidate_written_constants(body, constants);
+                invalidate_written_constants(catch_events, constants);
+                invalidate_written_constants(finally_events, constants);
+            }
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    if arg.passing_mode == bonsai_lang_api::ArgumentPassingMode::WriteBack {
+                        if let Some(target) = arg.place.as_deref().and_then(clean_overwrite_target_key) {
+                            constants.remove(&target);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn merge_constant_states<const N: usize>(states: [AHashMap<String, i64>; N]) -> AHashMap<String, i64> {
+    let Some(first) = states.first() else {
+        return AHashMap::new();
+    };
+    first
+        .iter()
+        .filter(|(name, value)| {
+            states
+                .iter()
+                .skip(1)
+                .all(|state| state.get(*name) == Some(*value))
+        })
+        .map(|(name, value)| (name.clone(), *value))
+        .collect()
+}
+
+fn parse_static_integer_literal(text: &str) -> Option<i64> {
+    let compact: String = text.trim().chars().filter(|ch| *ch != '_').collect();
+    compact.parse().ok()
 }
 
 fn eval_numeric_condition(condition: &str, vars: &AHashMap<String, i64>) -> Option<bool> {
@@ -1522,4 +1822,175 @@ pub(super) fn clean_overwrite_target_keys(text: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod numeric_constant_tests {
+    use super::*;
+    use bonsai_lang_api::{AssignmentValueFact, LoopKind};
+
+    fn span(file: FileId, start: usize, end: usize) -> Span {
+        Span::new(file, start as u64, end as u64)
+    }
+
+    fn literal_assign(assignment_span: Span, target: &str) -> FlowEvent {
+        FlowEvent::Assign {
+            span: assignment_span,
+            target: target.to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: true,
+            value_kind: Some(AssignValueKind::Literal),
+        }
+    }
+
+    fn assignment_fact(assignment_span: Span, target_span: Span, value_span: Span) -> AssignmentValueFact {
+        AssignmentValueFact {
+            assignment_span,
+            target_span: Some(target_span),
+            value_span,
+            call_sites: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn constant_lookup_is_uncapped_and_uses_exact_rhs_fact() {
+        let file = FileId::new(0);
+        let assignment = "let threshold = 7;";
+        let padding = "\n".repeat(8_192);
+        let branch = "if threshold > 5 {}";
+        let source = format!("{assignment}{padding}{branch}");
+        let assignment_span = span(file, 0, assignment.len());
+        let target_start = assignment.find("threshold").unwrap();
+        let value_start = assignment.find('7').unwrap();
+        let target_span = span(file, target_start, target_start + "threshold".len());
+        let value_span = span(file, value_start, value_start + 1);
+        let branch_start = assignment.len() + padding.len();
+        let branch_span = span(file, branch_start, source.len());
+        let facts = [assignment_fact(assignment_span, target_span, value_span)];
+        let values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
+        let events = [
+            literal_assign(assignment_span, "threshold"),
+            FlowEvent::Branch {
+                span: branch_span,
+                condition: Some("threshold > 5".to_string()),
+                then_events: Vec::new(),
+                else_events: Vec::new(),
+            },
+        ];
+        let mut constants = AHashMap::new();
+
+        assert!(constants_before_span_in_events(
+            &events,
+            branch_span,
+            &values,
+            &source,
+            &mut constants,
+        ));
+        assert_eq!(constants.get("threshold"), Some(&7));
+    }
+
+    #[test]
+    fn conditional_write_does_not_become_an_unconditional_constant() {
+        let file = FileId::new(0);
+        let source = "x = 7;if unknown { x = 8; }if x > 5 {}";
+        let first_start = source.find("x = 7").unwrap();
+        let conditional_start = source.find("if unknown").unwrap();
+        let nested_start = source.find("x = 8").unwrap();
+        let target_start = source.find("if x > 5").unwrap();
+        let first_span = span(file, first_start, first_start + "x = 7".len());
+        let nested_span = span(file, nested_start, nested_start + "x = 8".len());
+        let conditional_span = span(file, conditional_start, target_start);
+        let target_span = span(file, target_start, source.len());
+        let facts = [
+            assignment_fact(
+                first_span,
+                span(file, first_start, first_start + 1),
+                span(file, first_start + 4, first_start + 5),
+            ),
+            assignment_fact(
+                nested_span,
+                span(file, nested_start, nested_start + 1),
+                span(file, nested_start + 4, nested_start + 5),
+            ),
+        ];
+        let values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
+        let events = [
+            literal_assign(first_span, "x"),
+            FlowEvent::Branch {
+                span: conditional_span,
+                condition: Some("unknown".to_string()),
+                then_events: vec![literal_assign(nested_span, "x")],
+                else_events: Vec::new(),
+            },
+            FlowEvent::Branch {
+                span: target_span,
+                condition: Some("x > 5".to_string()),
+                then_events: Vec::new(),
+                else_events: Vec::new(),
+            },
+        ];
+        let mut constants = AHashMap::new();
+
+        assert!(constants_before_span_in_events(
+            &events,
+            target_span,
+            &values,
+            source,
+            &mut constants,
+        ));
+        assert!(!constants.contains_key("x"));
+    }
+
+    #[test]
+    fn loop_write_invalidates_a_constant_even_when_the_loop_may_not_run() {
+        let file = FileId::new(0);
+        let source = "x = 7;while unknown { x = 8; }if x > 5 {}";
+        let first_start = source.find("x = 7").unwrap();
+        let loop_start = source.find("while unknown").unwrap();
+        let nested_start = source.find("x = 8").unwrap();
+        let target_start = source.find("if x > 5").unwrap();
+        let first_span = span(file, first_start, first_start + "x = 7".len());
+        let nested_span = span(file, nested_start, nested_start + "x = 8".len());
+        let target_span = span(file, target_start, source.len());
+        let facts = [
+            assignment_fact(
+                first_span,
+                span(file, first_start, first_start + 1),
+                span(file, first_start + 4, first_start + 5),
+            ),
+            assignment_fact(
+                nested_span,
+                span(file, nested_start, nested_start + 1),
+                span(file, nested_start + 4, nested_start + 5),
+            ),
+        ];
+        let values = bonsai_lang_api::AssignmentValueIndex::new(&facts);
+        let events = [
+            literal_assign(first_span, "x"),
+            FlowEvent::Loop {
+                span: span(file, loop_start, target_start),
+                loop_kind: LoopKind::While,
+                body: vec![literal_assign(nested_span, "x")],
+            },
+            FlowEvent::Branch {
+                span: target_span,
+                condition: Some("x > 5".to_string()),
+                then_events: Vec::new(),
+                else_events: Vec::new(),
+            },
+        ];
+        let mut constants = AHashMap::new();
+
+        assert!(constants_before_span_in_events(
+            &events,
+            target_span,
+            &values,
+            source,
+            &mut constants,
+        ));
+        assert!(!constants.contains_key("x"));
+    }
 }

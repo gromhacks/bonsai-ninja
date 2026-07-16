@@ -8532,9 +8532,8 @@ fn prototype_pollution_sink_is_guarded(ws: &Workspace, sink_rule: &Rule, sink: &
         .enclosing_index()
         .enclosing_for(ws.db(), sink.span.file, sink.span.start)
         .map(|entry| entry.start as usize)
-        .unwrap_or_else(|| sink_start.saturating_sub(1200));
-    let guard_start = scope_start.max(sink_start.saturating_sub(1200));
-    let Some(prefix) = source.get(guard_start..sink_start) else {
+        .unwrap_or(0);
+    let Some(prefix) = source.get(scope_start..sink_start) else {
         return false;
     };
     let compact = compact_guard_text(prefix);
@@ -8549,16 +8548,6 @@ fn prototype_pollution_sink_is_guarded(ws: &Workspace, sink_rule: &Rule, sink: &
         return true;
     }
 
-    let wide_guard_start = sink_start.saturating_sub(1200);
-    if wide_guard_start < guard_start {
-        if let Some(prefix) = source.get(wide_guard_start..sink_start) {
-            let compact = compact_guard_text(prefix);
-            return compact.contains("Object.freeze(Object.prototype)")
-                || key_vars
-                    .iter()
-                    .any(|key| prototype_key_denylist_guard_present(&compact, key));
-        }
-    }
     false
 }
 

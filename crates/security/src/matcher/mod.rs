@@ -1410,9 +1410,6 @@ impl<'a> PreparedRule<'a> {
         file_packages: Option<&AHashSet<String>>,
         mode: ConstraintMode,
     ) -> bool {
-        if self.rule.id == "java.source.main_args" && !java_main_args_signature_possible(text) {
-            return false;
-        }
         let target_possible = self
             .text_anchor_groups
             .iter()
@@ -2126,33 +2123,6 @@ fn flush_regex_anchor_token(out: &mut Vec<String>, token: &mut String) {
     token.clear();
 }
 
-fn java_main_args_signature_possible(text: &str) -> bool {
-    let mut search_from = 0usize;
-    while let Some(relative) = text[search_from..].find("main") {
-        let idx = search_from + relative;
-        let before_start = floor_char_boundary(text, idx.saturating_sub(512));
-        let after_end = floor_char_boundary(text, (idx + 512).min(text.len()));
-        let before = &text[before_start..idx];
-        let after = &text[idx..after_end];
-        if before.contains("static") && before.contains("void") && after.contains("args") {
-            return true;
-        }
-        search_from = idx.saturating_add("main".len());
-        if search_from >= text.len() {
-            break;
-        }
-    }
-    false
-}
-
-fn floor_char_boundary(text: &str, mut idx: usize) -> usize {
-    idx = idx.min(text.len());
-    while idx > 0 && !text.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
 fn is_lifecycle_audit_pair_sink(rule: &Rule) -> bool {
     if rule.kind != crate::rule::RuleKind::Sink {
         return false;
@@ -2532,6 +2502,7 @@ fn scan_returns_batch(
     out: &mut Vec<RuleMatch>,
 ) {
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     for decl in &file_index.defs {
         let mut returns = Vec::new();
         collect_return_sites(&decl.flow_events, &mut returns);
@@ -2546,7 +2517,7 @@ fn scan_returns_batch(
                 else {
                     continue;
                 };
-                let span = canonical_flow_read_match_span(ws, file, span, &match_text);
+                let span = canonical_flow_read_match_span(ws, file, span, &match_text, &assignment_values);
                 let (file_path, line, col) = resolve_span(ws, file, span);
                 out.push(RuleMatch {
                     rule_id: prepared.rule.id.clone(),
@@ -4933,6 +4904,7 @@ fn scan_flow_reads_batch(
         retention,
     );
     let alias_map = file_alias_map_with_retention(ws, file, retention);
+    let assignment_values = AssignmentValueIndex::new(&file_index.assignment_values);
     for decl in &file_index.defs {
         let mut reads = Vec::new();
         collect_flow_read_sites(&decl.flow_events, &mut reads);
@@ -4962,7 +4934,7 @@ fn scan_flow_reads_batch(
                 if !prepared.call_context_allows(&match_text, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
-                let span = canonical_flow_read_match_span(ws, file, span, &match_text);
+                let span = canonical_flow_read_match_span(ws, file, span, &match_text, &assignment_values);
                 if out
                     .iter()
                     .any(|existing| existing.rule_id == prepared.rule.id && existing.span == span)
@@ -5103,7 +5075,13 @@ fn rule_primary_target(rule: &Rule) -> Option<&RuleTarget> {
 /// source rule matches a specific token inside that expression, report
 /// the token span rather than the wrapper span so source endpoints point
 /// at the attacker-controlled read instead of an assignment target.
-fn canonical_flow_read_match_span(ws: &Workspace, file: FileId, span: Span, match_text: &str) -> Span {
+fn canonical_flow_read_match_span(
+    ws: &Workspace,
+    file: FileId,
+    span: Span,
+    match_text: &str,
+    assignment_values: &AssignmentValueIndex,
+) -> Span {
     let match_text = match_text.trim();
     if match_text.is_empty() || match_text.contains(',') {
         return span;
@@ -5111,9 +5089,25 @@ fn canonical_flow_read_match_span(ws: &Workspace, file: FileId, span: Span, matc
     let Ok(snapshot) = ws.vfs().snapshot(file) else {
         return span;
     };
-    let source = snapshot.text.as_ref();
-    let start = span.start as usize;
-    let end = span.end as usize;
+    canonical_flow_read_match_span_in_source(
+        file,
+        span,
+        match_text,
+        assignment_values,
+        snapshot.text.as_ref(),
+    )
+}
+
+fn canonical_flow_read_match_span_in_source(
+    file: FileId,
+    span: Span,
+    match_text: &str,
+    assignment_values: &AssignmentValueIndex,
+    source: &str,
+) -> Span {
+    let search_span = assignment_values.value_span(span).unwrap_or(span);
+    let start = search_span.start as usize;
+    let end = search_span.end as usize;
     if start >= end || end > source.len() {
         return span;
     }
@@ -5122,15 +5116,11 @@ fn canonical_flow_read_match_span(ws: &Workspace, file: FileId, span: Span, matc
     let Some(raw) = source.get(start..end) else {
         return span;
     };
-    let preferred_start = raw.find('=').map_or(0, |idx| idx + 1);
-    let offset = raw[preferred_start..]
-        .find(match_text)
-        .map(|idx| preferred_start + idx)
-        .or_else(|| raw.find(match_text));
+    let offset = raw.find(match_text);
     let Some(offset) = offset else {
         return span;
     };
-    let match_start = span.start.saturating_add(offset as u64);
+    let match_start = search_span.start.saturating_add(offset as u64);
     Span::new(
         file,
         match_start,
