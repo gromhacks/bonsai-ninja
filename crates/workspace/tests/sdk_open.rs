@@ -120,6 +120,11 @@ fn workspace_root_under_generated_ancestor_still_indexes_root_sources() {
         1,
         "fingerprinting must use the same root-relative generated-path policy"
     );
+    assert_eq!(
+        fingerprints[0].hash,
+        bonsai_hash::fnv1a_bytes64(b"def handle():\n    return 1\n"),
+        "streaming fingerprints must preserve the canonical content digest"
+    );
 
     let _ = std::fs::remove_dir_all(outer);
 }

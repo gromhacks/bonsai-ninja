@@ -29,7 +29,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -657,6 +657,9 @@ impl Bonsai {
             rulepack: self.rulepack.clone(),
             rulepack_root: self.rulepack_root.clone(),
             fingerprints: Arc::new(Mutex::new(fingerprints)),
+            refresh_gate: Arc::new(Mutex::new(())),
+            last_refresh_error: Arc::new(Mutex::new(None)),
+            pending_dataflow_sidecar_save: Arc::new(AtomicBool::new(false)),
             refresh_options: open_options,
             auto_refresh: true,
         }
@@ -719,6 +722,9 @@ pub struct Project {
     rulepack: Option<Arc<Rulepack>>,
     rulepack_root: Option<PathBuf>,
     fingerprints: Arc<Mutex<AHashMap<PathBuf, u64>>>,
+    refresh_gate: Arc<Mutex<()>>,
+    last_refresh_error: Arc<Mutex<Option<String>>>,
+    pending_dataflow_sidecar_save: Arc<AtomicBool>,
     refresh_options: WorkspaceOpenOptions,
     auto_refresh: bool,
 }
@@ -766,6 +772,9 @@ impl Project {
             rulepack: None,
             rulepack_root: None,
             refresh_options: WorkspaceOpenOptions::default(),
+            refresh_gate: Arc::new(Mutex::new(())),
+            last_refresh_error: Arc::new(Mutex::new(None)),
+            pending_dataflow_sidecar_save: Arc::new(AtomicBool::new(false)),
             auto_refresh: true,
         }
     }
@@ -900,6 +909,20 @@ impl Project {
         self.current_source_fingerprint()
     }
 
+    /// Most recent automatic or explicit refresh failure, if any.
+    ///
+    /// Existing facade methods retain their infallible/typed return contracts,
+    /// so automatic refresh cannot always be returned through the method's
+    /// error type. Failures are recorded here instead of being silently
+    /// discarded. A later successful refresh clears the diagnostic.
+    #[must_use]
+    pub fn last_refresh_error(&self) -> Option<String> {
+        self.last_refresh_error
+            .lock()
+            .expect("refresh error lock")
+            .clone()
+    }
+
     /// Refresh this long-lived project from the current on-disk source
     /// tree. Modified files are reparsed and reindexed in place; deleted
     /// files are removed from the live VFS/global index; new files are
@@ -907,6 +930,20 @@ impl Project {
     /// introduce new call-resolution targets. When anything changed, the
     /// dataflow sidecar is warmed and written back for the next process.
     pub fn refresh_from_disk(&self) -> Result<WorkspaceRefreshReport> {
+        let result = self.refresh_from_disk_impl();
+        let mut last_error = self.last_refresh_error.lock().expect("refresh error lock");
+        match &result {
+            Ok(_) => *last_error = None,
+            Err(error) => *last_error = Some(format!("{error:#}")),
+        }
+        result
+    }
+
+    fn refresh_from_disk_impl(&self) -> Result<WorkspaceRefreshReport> {
+        // A Project is Clone and its facades may be queried concurrently.
+        // Serialise refresh transactions without holding the fingerprint-map
+        // lock across file IO, parsing, cache invalidation, or sidecar writes.
+        let _refresh = self.refresh_gate.lock().expect("refresh gate lock");
         let current = self
             .workspace
             .source_file_fingerprints(&self.root)
@@ -914,7 +951,7 @@ impl Project {
         let current_map: AHashMap<PathBuf, u64> =
             current.into_iter().map(|file| (file.path, file.hash)).collect();
 
-        let mut previous = self.fingerprints.lock().expect("fingerprint lock");
+        let previous = self.fingerprints.lock().expect("fingerprint lock").clone();
         let previous_paths: AHashSet<PathBuf> = previous.keys().cloned().collect();
         let current_paths: AHashSet<PathBuf> = current_map.keys().cloned().collect();
 
@@ -948,16 +985,23 @@ impl Project {
             }
         }
 
-        if report.changed() {
-            if self.refresh_options.prewarm_dataflow {
-                let pending = self.workspace.dataflow().pending_count(self.workspace.db());
-                self.workspace.dataflow().prewarm_all(self.workspace.db());
-                report.dataflow_entries_built = pending;
-                if self.refresh_options.save_dataflow_sidecar {
-                    let _ = self.save_dataflow_sidecar();
-                }
-            }
-            *previous = current_map;
+        // The live workspace now reflects every source hash in current_map.
+        // Publish that compact state before optional prewarm/persistence so a
+        // sidecar write failure cannot cause every later query to reparse the
+        // same already-applied edits.
+        *self.fingerprints.lock().expect("fingerprint lock") = current_map;
+
+        if report.changed() && self.refresh_options.prewarm_dataflow {
+            let pending = self.workspace.dataflow().pending_count(self.workspace.db());
+            self.workspace.dataflow().prewarm_all(self.workspace.db());
+            report.dataflow_entries_built = pending;
+            self.pending_dataflow_sidecar_save
+                .store(self.refresh_options.save_dataflow_sidecar, Ordering::Release);
+        }
+        if self.pending_dataflow_sidecar_save.load(Ordering::Acquire) {
+            self.save_dataflow_sidecar()
+                .with_context(|| format!("saving dataflow sidecar under {}", self.root.display()))?;
+            self.pending_dataflow_sidecar_save.store(false, Ordering::Release);
         }
         Ok(report)
     }
@@ -991,43 +1035,36 @@ impl Project {
 
     #[must_use]
     pub fn browse(&self) -> Browse<'_> {
-        self.refresh_from_disk_best_effort();
         Browse { project: self }
     }
 
     #[must_use]
     pub fn dump(&self) -> Dump<'_> {
-        self.refresh_from_disk_best_effort();
         Dump { project: self }
     }
 
     #[must_use]
     pub fn show(&self) -> Show<'_> {
-        self.refresh_from_disk_best_effort();
         Show { project: self }
     }
 
     #[must_use]
     pub fn export(&self) -> Export<'_> {
-        self.refresh_from_disk_best_effort();
         Export { project: self }
     }
 
     #[must_use]
     pub fn security(&self) -> Security<'_> {
-        self.refresh_from_disk_best_effort();
         Security { project: self }
     }
 
     #[must_use]
     pub fn trace(&self) -> Trace<'_> {
-        self.refresh_from_disk_best_effort();
         Trace { project: self }
     }
 
     #[must_use]
     pub fn inspect(&self) -> Inspect<'_> {
-        self.refresh_from_disk_best_effort();
         Inspect { project: self }
     }
 
@@ -3082,7 +3119,6 @@ pub struct SecurityFindingGroupShow {
 
 impl Show<'_> {
     pub fn by_id(&self, id: &str, options: ShowOptions<'_>) -> Result<ShowOutcome> {
-        self.project.refresh_from_disk_best_effort();
         let id = id.trim();
         let (prefix, body) = stable_id_parts(id)?;
         match prefix {
@@ -3949,13 +3985,13 @@ impl Inspect<'_> {
 
     pub fn matching_decls(&self, pattern: Option<&str>, regex: bool) -> Result<Vec<Decl>, regex::Error> {
         self.project.refresh_from_disk_best_effort();
-        let matcher = self.matcher(pattern, regex)?;
+        let matcher = bonsai_inspect::Matcher::build(pattern, regex)?;
         Ok(bonsai_inspect::matching_decls(&self.project.workspace, &matcher))
     }
 
     pub fn matching_func_ids(&self, pattern: Option<&str>, regex: bool) -> Result<Vec<FuncId>, regex::Error> {
         self.project.refresh_from_disk_best_effort();
-        let matcher = self.matcher(pattern, regex)?;
+        let matcher = bonsai_inspect::Matcher::build(pattern, regex)?;
         Ok(bonsai_inspect::matching_func_ids(
             &self.project.workspace,
             &matcher,
@@ -3964,7 +4000,7 @@ impl Inspect<'_> {
 
     pub fn chains(&self, query: InspectQuery<'_>) -> Result<Vec<InspectTargetChains>, regex::Error> {
         self.project.refresh_from_disk_best_effort();
-        let matcher = self.matcher(query.pattern, query.regex)?;
+        let matcher = bonsai_inspect::Matcher::build(query.pattern, query.regex)?;
         let targets = bonsai_inspect::matching_func_ids(&self.project.workspace, &matcher);
         let cache = bonsai_inspect::ChainCache::new(&self.project.workspace);
         let mut out = Vec::new();

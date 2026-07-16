@@ -1739,6 +1739,58 @@ fn facade_hot_reloads_saved_source_changes() {
 }
 
 #[test]
+fn facade_records_auto_refresh_failures_and_clears_them_after_recovery() {
+    let root = tempdir("hot-reload-diagnostic");
+    std::fs::write(root.join("app.py"), "def stable_name():\n    pass\n").expect("write initial source");
+    let project = bonsai_sdk::Bonsai::new().index(&root).expect("index");
+
+    let invalid = root.join("invalid.py");
+    std::fs::write(&invalid, [0xff, 0xfe]).expect("write invalid UTF-8 source");
+
+    // Constructing a facade is side-effect free; the operation itself owns
+    // the single refresh boundary.
+    let browse = project.browse();
+    assert!(project.last_refresh_error().is_none());
+    let defs = browse
+        .defs(Default::default())
+        .expect("existing defs remain queryable");
+    assert!(defs.iter().any(|def| def.name == "stable_name"));
+    let diagnostic = project
+        .last_refresh_error()
+        .expect("automatic refresh failure must be observable");
+    assert!(
+        diagnostic.contains("invalid.py"),
+        "unexpected diagnostic: {diagnostic}"
+    );
+
+    std::fs::write(&invalid, "def recovered_name():\n    pass\n").expect("repair source");
+    let defs = project
+        .browse()
+        .defs(Default::default())
+        .expect("defs after recovery");
+    assert!(defs.iter().any(|def| def.name == "recovered_name"));
+    assert!(project.last_refresh_error().is_none());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "set BONSAI_SCALE_ROOT to profile an external workspace"]
+fn external_workspace_fingerprint_profile() {
+    let root = std::env::var_os("BONSAI_SCALE_ROOT").expect("BONSAI_SCALE_ROOT");
+    let started = std::time::Instant::now();
+    let fingerprint = bonsai_sdk::workspace_source_fingerprint_from_disk(std::path::Path::new(&root))
+        .expect("fingerprint external workspace");
+    eprintln!(
+        "fingerprinted {} supported files in {:.3}s (digest {:016x})",
+        fingerprint.files,
+        started.elapsed().as_secs_f64(),
+        fingerprint.digest
+    );
+    assert!(fingerprint.files > 0);
+}
+
+#[test]
 fn facade_browse_plain_text_filters_rank_exact_before_prefix_and_substring() {
     let root = tempdir("browse-relevance");
     std::fs::write(

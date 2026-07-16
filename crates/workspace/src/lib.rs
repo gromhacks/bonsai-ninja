@@ -33,7 +33,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
-use bonsai_hash::{fnv1a_bytes64, Hasher as StableHasher};
+use bonsai_hash::Hasher as StableHasher;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent, LanguageRegistry};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
@@ -47,7 +47,7 @@ use enclosing_index::EnclosingIndex;
 use flow_ids::FlowIdCache;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use std::{io::Read, path::Path, sync::Arc};
 use taint_index::TaintGraphIndex;
 use thiserror::Error;
 use transitive_callers::TransitiveCallersIndex;
@@ -2288,14 +2288,7 @@ impl Workspace {
         root: &Path,
     ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
         let canonical_root = canonical_workspace_root(root);
-        let files = read_supported_source_files(&canonical_root, &self.inner.registry)?;
-        Ok(files
-            .into_iter()
-            .map(|file| SourceFileFingerprint {
-                path: file.path,
-                hash: file.hash,
-            })
-            .collect())
+        read_supported_source_file_fingerprints(&canonical_root, &self.inner.registry)
     }
 
     /// Refresh one on-disk source file in place. Parser, decl/import,
@@ -3233,7 +3226,6 @@ mod idg_pipeline_hash_tests;
 struct SourceFileContent {
     path: std::path::PathBuf,
     text: String,
-    hash: u64,
 }
 
 fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
@@ -3255,11 +3247,77 @@ fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|| root.to_path_buf())
 }
 
-fn read_supported_source_files(
+/// Hash every supported source file without retaining its contents.
+///
+/// Fingerprinting is a freshness check, not a parse pass. Keeping all source
+/// strings alive here made a single SDK refresh require memory proportional to
+/// the whole repository before it could compare one hash. Each Rayon worker
+/// now owns one fixed-size read buffer and the result retains only path/hash
+/// pairs, matching a compiler's streaming input-fingerprint phase.
+fn read_supported_source_file_fingerprints(
     canonical_root: &Path,
     registry: &LanguageRegistry,
-) -> Result<Vec<SourceFileContent>, WorkspaceError> {
-    read_supported_source_files_impl(canonical_root, registry, None, None)
+) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
+    let mut builder = ignore::WalkBuilder::new(canonical_root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .ignore(true)
+        .add_custom_ignore_filename(".bonsaiignore");
+    let entries = builder
+        .build()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| WorkspaceError::Io(std::io::Error::other(error.to_string())))?;
+
+    use rayon::prelude::*;
+    let outcomes: Vec<Result<Option<SourceFileFingerprint>, std::io::Error>> = entries
+        .into_par_iter()
+        .map(|entry| {
+            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+                return Ok(None);
+            }
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+                return Ok(None);
+            };
+            if registry.adapter_for_extension(ext).is_none() {
+                return Ok(None);
+            }
+
+            let mut file = std::fs::File::open(path)?;
+            let mut hasher = StableHasher::new();
+            // Keep the bounded per-worker buffer off Rayon worker stacks.
+            // Optimised iterator frames can otherwise duplicate a large
+            // inline array and overflow the platform's default worker stack.
+            let mut buffer = vec![0_u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.absorb(&buffer[..read]);
+            }
+            Ok(Some(SourceFileFingerprint {
+                path: path.to_path_buf(),
+                hash: hasher.finish(),
+            }))
+        })
+        .collect();
+
+    let mut fingerprints = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        match outcome {
+            Ok(Some(fingerprint)) => fingerprints.push(fingerprint),
+            Ok(None) => {}
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    fingerprints.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(fingerprints)
 }
 
 fn stream_supported_source_files<F>(
@@ -3304,11 +3362,9 @@ where
             Ok(text) => text,
             Err(error) => return Err(WorkspaceError::Io(error)),
         };
-        let hash = fnv1a_bytes64(text.as_bytes());
         on_file(SourceFileContent {
             path: path.to_path_buf(),
             text,
-            hash,
         })?;
     }
 
@@ -3360,8 +3416,7 @@ fn read_supported_source_file_at_path(
         Ok(text) => text,
         Err(error) => return Err(WorkspaceError::Io(error)),
     };
-    let hash = fnv1a_bytes64(text.as_bytes());
-    Ok(SourceFileContent { path, text, hash })
+    Ok(SourceFileContent { path, text })
 }
 
 fn read_supported_source_files_impl(
@@ -3433,11 +3488,9 @@ fn read_supported_source_files_impl(
                     return ReadOutcome::Skip;
                 }
             }
-            let hash = fnv1a_bytes64(text.as_bytes());
             ReadOutcome::Keep(SourceFileContent {
                 path: path.to_path_buf(),
                 text,
-                hash,
             })
         })
         .collect();
