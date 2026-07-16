@@ -2580,6 +2580,71 @@ def handle():
 }
 
 #[test]
+fn python_realpath_containment_branch_sanitizes_join_sink() {
+    let mut pack = rulepack("python", "source", "os.path.join");
+    let python_pack = pack.packs.get_mut("python").expect("python pack");
+    python_pack.sinks[0].tag = Some("path-traversal".to_string());
+    python_pack.sinks[0].constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(1),
+            kw: None,
+        },
+    }]);
+
+    let ws = workspace(&[(
+        "/app/app.py",
+        r#"
+import os
+
+def source():
+    return "user"
+
+def handle():
+    base = "/srv/uploads"
+    name = source()
+    candidate = os.path.realpath(os.path.join(base, name))
+    if not candidate.startswith(base + os.sep):
+        raise PermissionError("outside upload root")
+    return candidate
+"#,
+    )]);
+
+    let default_report =
+        run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "realpath containment branch should suppress the guarded join: {:#?}",
+        default_report.findings
+    );
+
+    let explicit_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(
+        explicit_report.findings.len(),
+        1,
+        "{:#?}",
+        explicit_report.findings
+    );
+    let finding = &explicit_report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "engine.sanitizer.python_realpath_containment_guard"),
+        "expected realpath containment guard evidence, got {:#?}",
+        finding.sanitizers_seen
+    );
+}
+
+#[test]
 fn java_url_constructor_guarded_by_scheme_host_and_private_ip_is_sanitized() {
     let mut pack = rulepack("java", "source", "URL");
     let java_pack = pack.packs.get_mut("java").expect("java pack");
