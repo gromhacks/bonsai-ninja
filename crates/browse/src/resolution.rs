@@ -114,7 +114,6 @@ impl ResolutionIndex {
         let global = ws.db().global_index();
         let workspace_module_tails = global
             .all_files()
-            .into_iter()
             .filter_map(|file| ws.vfs().path(file).ok())
             .filter_map(|path| {
                 normalize_file_key(&path.to_string_lossy())

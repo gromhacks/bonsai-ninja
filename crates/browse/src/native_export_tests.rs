@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn native_export_uses_versioned_flat_flow_ir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"
+def process(value):
+    if value:
+        while value:
+            try:
+                sink(value)
+            except Exception as error:
+                raise error
+            finally:
+                cleanup(value)
+    else:
+        return value
+"#,
+    )
+    .expect("write fixture");
+    let ws = Workspace::index(dir.path(), bonsai_adapters::all_languages_registry()).expect("index fixture");
+    let exported = native_export_json(&ws, dir.path(), false).expect("native export");
+
+    assert_eq!(exported["schema"], "bonsai-native-export");
+    assert_eq!(exported["schema_version"], 2);
+    let file = exported["files"]
+        .as_array()
+        .and_then(|files| {
+            files
+                .iter()
+                .find(|file| file["path"].as_str().is_some_and(|p| p.ends_with("app.py")))
+        })
+        .expect("exported app.py");
+    let events = file["flow_events"].as_array().expect("flat flow event table");
+    assert!(!events.is_empty(), "flow event table must contain parsed events");
+    let ids: std::collections::BTreeSet<u64> = events
+        .iter()
+        .map(|event| event["event_id"].as_u64().expect("numeric event id"))
+        .collect();
+    assert_eq!(ids.len(), events.len(), "event ids must be unique within a file");
+    for event in events {
+        if let Some(parent) = event.get("parent_event_id").and_then(serde_json::Value::as_u64) {
+            assert!(ids.contains(&parent), "parent event id {parent} must resolve");
+        }
+        for recursive_key in [
+            "then_events",
+            "else_events",
+            "body",
+            "catch_events",
+            "finally_events",
+        ] {
+            assert!(
+                event.get(recursive_key).is_none(),
+                "flat compiler event must not embed {recursive_key}: {event}"
+            );
+        }
+    }
+    let process = file["decls"]
+        .as_array()
+        .and_then(|decls| decls.iter().find(|decl| decl["name"] == "process"))
+        .expect("process declaration");
+    let roots = process["flow_event_ids"].as_array().expect("root event ids");
+    assert!(!roots.is_empty());
+    assert!(roots
+        .iter()
+        .all(|root| root.as_u64().is_some_and(|id| ids.contains(&id))));
+    assert!(events.iter().any(|event| event["region"] == "then"));
+    assert!(events.iter().any(|event| event["region"] == "body"));
+    assert!(events.iter().any(|event| event["region"] == "catch"));
+    assert!(events.iter().any(|event| event["region"] == "finally"));
+}
+
+#[test]
 fn materialized_chain_limits_are_always_finite() {
     let limits = ExportChainLimits::bounded_materialization();
     assert_eq!(
