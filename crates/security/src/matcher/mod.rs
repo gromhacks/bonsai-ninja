@@ -3519,9 +3519,6 @@ fn file_alias_map_with_retention(
 }
 
 fn transient_import_index(ws: &Workspace, file: FileId) -> Option<bonsai_lang_api::ImportIndex> {
-    if let Some(index) = java_textual_import_index(ws, file) {
-        return Some(index);
-    }
     ws.db().import_index_uncached(file)
 }
 
@@ -3656,15 +3653,12 @@ fn build_file_package_set(
     if let Some(imports) = imports {
         insert_file_import_packages(ws, file, &imports, retention, &mut out);
     }
-    if let Ok(snapshot) = ws.db().vfs().snapshot(file) {
-        let text = snapshot.text.as_ref();
-        if text.contains("req.files") {
-            out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
-            insert_import_target_prefixes(&mut out, "express-fileupload");
-        }
-        if js_like_routed_controller_request_context(ws, file, text) {
-            insert_import_target_prefixes(&mut out, "express");
-        }
+    if file_flow_references_place(ws, file, "req.files") {
+        out.insert(FILE_USES_REQ_FILES_MARKER.to_string());
+        insert_import_target_prefixes(&mut out, "express-fileupload");
+    }
+    if js_like_routed_controller_request_context(ws, file) {
+        insert_import_target_prefixes(&mut out, "express");
     }
     out.extend(
         workspace_imports
@@ -3678,7 +3672,7 @@ fn build_file_package_set(
     Arc::new(out)
 }
 
-fn js_like_routed_controller_request_context(ws: &Workspace, file: FileId, text: &str) -> bool {
+fn js_like_routed_controller_request_context(ws: &Workspace, file: FileId) -> bool {
     if ws.db().adapter_for(file).is_none_or(|adapter| {
         !matches!(
             adapter.language_id().as_str(),
@@ -3690,11 +3684,113 @@ fn js_like_routed_controller_request_context(ws: &Workspace, file: FileId, text:
     if !file_path_has_route_controller_segment(ws, file) {
         return false;
     }
-    (text.contains("req.") || text.contains("res."))
-        && (text.contains("(req, res")
-            || text.contains("(req,res")
-            || text.contains("(request, response")
-            || text.contains("(request,response"))
+    ws.db().global_index().decls_in(file).iter().any(|decl| {
+        let request_pair = decl.params.windows(2).any(|pair| {
+            matches!(pair, [request, response] if
+                (request == "req" && response == "res")
+                    || (request == "request" && response == "response"))
+        });
+        request_pair
+            && ["req", "res", "request", "response"]
+                .iter()
+                .any(|place| flow_events_reference_place(&decl.flow_events, place))
+    })
+}
+
+fn file_flow_references_place(ws: &Workspace, file: FileId, wanted: &str) -> bool {
+    ws.db()
+        .global_index()
+        .decls_in(file)
+        .iter()
+        .any(|decl| flow_events_reference_place(&decl.flow_events, wanted))
+}
+
+fn flow_events_reference_place(events: &[FlowEvent], wanted: &str) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Call { receiver, args, .. } => {
+            receiver
+                .as_deref()
+                .is_some_and(|place| place_matches_prefix(place, wanted))
+                || args.iter().any(|arg| {
+                    arg.place
+                        .as_deref()
+                        .is_some_and(|place| place_matches_prefix(place, wanted))
+                        || arg
+                            .source_names
+                            .iter()
+                            .any(|place| place_matches_prefix(place, wanted))
+                })
+        }
+        FlowEvent::Assign {
+            source_name,
+            source_names,
+            ..
+        } => {
+            source_name
+                .as_deref()
+                .is_some_and(|place| place_matches_prefix(place, wanted))
+                || source_names
+                    .iter()
+                    .any(|place| place_matches_prefix(place, wanted))
+        }
+        FlowEvent::AggregateAssign { value_flow, .. }
+        | FlowEvent::Return { value_flow, .. }
+        | FlowEvent::Yield { value_flow, .. } => expression_flow_references_place(value_flow, wanted),
+        FlowEvent::Throw { value_name, .. } | FlowEvent::Await { value_name, .. } => value_name
+            .as_deref()
+            .is_some_and(|place| place_matches_prefix(place, wanted)),
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            flow_events_reference_place(then_events, wanted)
+                || flow_events_reference_place(else_events, wanted)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_events_reference_place(body, wanted)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_events_reference_place(body, wanted)
+                || flow_events_reference_place(catch_events, wanted)
+                || flow_events_reference_place(finally_events, wanted)
+        }
+        FlowEvent::Break { .. } | FlowEvent::Continue { .. } | FlowEvent::Lifecycle { .. } => false,
+    })
+}
+
+fn expression_flow_references_place(flow: &bonsai_lang_api::ExpressionFlow, wanted: &str) -> bool {
+    flow.place
+        .as_deref()
+        .is_some_and(|place| place_matches_prefix(place, wanted))
+        || flow
+            .source_names
+            .iter()
+            .any(|place| place_matches_prefix(place, wanted))
+        || flow
+            .aggregate_fields
+            .iter()
+            .any(|field| expression_flow_references_place(&field.value, wanted))
+        || flow
+            .tuple_items
+            .iter()
+            .any(|item| expression_flow_references_place(item, wanted))
+        || flow
+            .spreads
+            .iter()
+            .any(|spread| expression_flow_references_place(spread, wanted))
+}
+
+fn place_matches_prefix(place: &str, wanted: &str) -> bool {
+    place == wanted
+        || place
+            .strip_prefix(wanted)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn file_path_has_route_controller_segment(ws: &Workspace, file: FileId) -> bool {
@@ -3750,11 +3846,11 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
                 .wrapping_add(u64::from(candidate_file.raw()))
                 .wrapping_add(snapshot.version)
                 .wrapping_add(package_cache_content_hash(snapshot.text.as_bytes()));
-            insert_textual_workspace_import_prefixes(
-                &mut context.packages,
-                language.as_str(),
-                snapshot.text.as_ref(),
-            );
+        }
+        if let Some(imports) = ws.db().import_index(candidate_file) {
+            for spec in &imports.imports {
+                insert_import_target_prefixes(&mut context.packages, &spec.module);
+            }
         }
     }
     let context = Arc::new(context);
@@ -3762,350 +3858,6 @@ fn workspace_import_package_context(ws: &Workspace, file: FileId) -> Arc<Workspa
         write.clear();
     }
     write.entry(key).or_insert_with(|| context.clone()).clone()
-}
-
-fn insert_textual_workspace_import_prefixes(out: &mut AHashSet<String>, language: &str, text: &str) {
-    match language {
-        "python" => insert_python_textual_imports(out, text),
-        "javascript" | "typescript" | "tsx" => insert_js_like_textual_imports(out, text),
-        "go" => insert_go_textual_imports(out, text),
-        "rust" => insert_rust_textual_imports(out, text),
-        "c" | "cpp" | "objective-c" | "objc" => insert_c_like_textual_includes(out, text),
-        "ruby" => insert_ruby_textual_imports(out, text),
-        "php" => insert_php_textual_imports(out, text),
-        "csharp" => insert_csharp_textual_imports(out, text),
-        "java" | "kotlin" | "scala" | "swift" | "dart" => insert_dotted_textual_imports(out, text),
-        _ => insert_generic_textual_imports(out, text),
-    }
-}
-
-fn java_textual_import_index(ws: &Workspace, file: FileId) -> Option<bonsai_lang_api::ImportIndex> {
-    let adapter = ws.db().adapter_for(file)?;
-    if adapter.language_id().as_str() != "java" {
-        return None;
-    }
-    let snapshot = ws.db().vfs().snapshot(file).ok()?;
-    let mut imports = Vec::new();
-    let mut offset = 0u64;
-    for raw_line in snapshot.text.lines() {
-        let trimmed = raw_line.trim_start();
-        let leading_ws = raw_line.len().saturating_sub(trimmed.len()) as u64;
-        let line_start = offset.saturating_add(leading_ws);
-        offset = offset.saturating_add(raw_line.len() as u64).saturating_add(1);
-        if trimmed.starts_with("//") || trimmed.starts_with('*') {
-            continue;
-        }
-        let Some(rest) = trimmed.strip_prefix("import ") else {
-            continue;
-        };
-        let mut rest = rest.trim();
-        let is_static = rest.starts_with("static ");
-        if is_static {
-            rest = rest.trim_start_matches("static ").trim_start();
-        }
-        let mut module = rest
-            .trim_end_matches(';')
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim();
-        if module.is_empty() {
-            continue;
-        }
-        let is_wildcard = module.ends_with(".*");
-        if is_wildcard {
-            module = module.trim_end_matches(".*");
-        }
-        let (module, original_name) = if is_static && !is_wildcard {
-            module
-                .rsplit_once('.')
-                .map(|(owner, member)| (owner, Some(member.to_string())))
-                .unwrap_or((module, None))
-        } else {
-            (module, None)
-        };
-        imports.push(ImportSpec {
-            span: Span::new(file, line_start, line_start.saturating_add(trimmed.len() as u64)),
-            module: module.to_string(),
-            alias: None,
-            is_wildcard,
-            original_name,
-            scope: bonsai_lang_api::ImportScope::Module,
-        });
-    }
-    Some(bonsai_lang_api::ImportIndex { file, imports })
-}
-
-fn insert_python_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with('#') {
-            continue;
-        }
-        let line = strip_inline_comment(line, '#').trim();
-        if let Some(rest) = line.strip_prefix("import ") {
-            for item in rest.split(',') {
-                let module = item.split_whitespace().next().unwrap_or_default();
-                insert_workspace_import_module(out, module);
-            }
-        } else if let Some(rest) = line.strip_prefix("from ") {
-            let module = rest.split_whitespace().next().unwrap_or_default();
-            insert_workspace_import_module(out, module);
-        }
-    }
-}
-
-fn insert_js_like_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with("//") || line.starts_with('*') {
-            continue;
-        }
-        let relevant = line.contains("import")
-            || line.contains("from ")
-            || line.contains("require(")
-            || line.contains("require.resolve(")
-            || line.contains("export ");
-        if !relevant {
-            continue;
-        }
-        for module in quoted_segments(line) {
-            insert_workspace_import_module(out, module);
-        }
-    }
-}
-
-fn insert_go_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    let mut in_import_block = false;
-    for line in text.lines().map(str::trim) {
-        if line.starts_with("//") {
-            continue;
-        }
-        if line.starts_with("import (") {
-            in_import_block = true;
-            continue;
-        }
-        if in_import_block && line.starts_with(')') {
-            in_import_block = false;
-            continue;
-        }
-        if in_import_block || line.starts_with("import ") {
-            for module in quoted_segments(line) {
-                insert_workspace_import_module(out, module);
-            }
-        }
-    }
-}
-
-fn insert_rust_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with("//") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("use ") {
-            let module = rest
-                .trim()
-                .trim_end_matches(';')
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            insert_workspace_import_module(out, module);
-        } else if let Some(rest) = line.strip_prefix("extern crate ") {
-            let module = rest
-                .trim()
-                .trim_end_matches(';')
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            insert_workspace_import_module(out, module);
-        }
-    }
-}
-
-fn insert_c_like_textual_includes(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        let Some(rest) = line.strip_prefix("#include") else {
-            continue;
-        };
-        let rest = rest.trim_start();
-        if let Some(module) =
-            bracketed_segment(rest, '<', '>').or_else(|| quoted_segments(rest).into_iter().next())
-        {
-            insert_workspace_import_module(out, module);
-        }
-    }
-}
-
-fn insert_ruby_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with('#') || line.starts_with("require_relative") {
-            continue;
-        }
-        if line.starts_with("require ") || line.starts_with("load ") || line.starts_with("autoload ") {
-            for module in quoted_segments(line) {
-                insert_workspace_import_module(out, module);
-            }
-        }
-    }
-}
-
-fn insert_php_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with("//") || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("use ") {
-            let module = rest
-                .trim()
-                .trim_end_matches(';')
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            insert_workspace_import_module(out, module);
-        } else if line.starts_with("require")
-            || line.starts_with("include")
-            || line.starts_with("require_once")
-            || line.starts_with("include_once")
-        {
-            for module in quoted_segments(line) {
-                insert_workspace_import_module(out, module);
-            }
-        }
-    }
-}
-
-fn insert_csharp_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with("//") {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("using ") {
-            let module = rest
-                .trim()
-                .trim_end_matches(';')
-                .trim_start_matches("static ")
-                .split('=')
-                .next_back()
-                .unwrap_or_default()
-                .trim();
-            insert_workspace_import_module(out, module);
-        }
-    }
-}
-
-fn insert_dotted_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with("//") || line.starts_with('*') {
-            continue;
-        }
-        let Some(rest) = line.strip_prefix("import ") else {
-            continue;
-        };
-        let module = rest
-            .trim()
-            .trim_end_matches(';')
-            .trim_start_matches("static ")
-            .trim_end_matches(".*")
-            .split_whitespace()
-            .next()
-            .unwrap_or_default();
-        insert_workspace_import_module(out, module);
-    }
-}
-
-fn insert_generic_textual_imports(out: &mut AHashSet<String>, text: &str) {
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with('#') {
-            if line.starts_with("#include") {
-                insert_c_like_textual_includes(out, line);
-            }
-            continue;
-        }
-        if line.starts_with("//") {
-            continue;
-        }
-        if line.starts_with("import ") {
-            insert_dotted_textual_imports(out, line);
-            insert_python_textual_imports(out, line);
-        } else if line.starts_with("from ") {
-            insert_python_textual_imports(out, line);
-        } else if line.starts_with("use ") {
-            insert_rust_textual_imports(out, line);
-        } else if line.contains("require(") || line.starts_with("require ") {
-            insert_js_like_textual_imports(out, line);
-            insert_ruby_textual_imports(out, line);
-        }
-    }
-}
-
-fn insert_workspace_import_module(out: &mut AHashSet<String>, module: &str) {
-    let mut module = module
-        .trim()
-        .trim_matches(|c| matches!(c, '\'' | '"' | '`' | '<' | '>' | '(' | ')' | ';' | ','));
-    if let Some(stripped) = module.strip_prefix("node:") {
-        module = stripped;
-    }
-    if module.is_empty()
-        || module.starts_with('.')
-        || module.starts_with('/')
-        || module.starts_with('@')
-        || module.contains("${")
-    {
-        return;
-    }
-    module = module
-        .trim_end_matches("::*")
-        .trim_end_matches(".*")
-        .trim_end_matches("::*")
-        .trim_end_matches("/*");
-    insert_import_target_prefixes(out, module);
-    if let Some(stripped) = module
-        .strip_suffix(".h")
-        .or_else(|| module.strip_suffix(".hpp"))
-        .or_else(|| module.strip_suffix(".hxx"))
-    {
-        insert_import_target_prefixes(out, stripped);
-    }
-}
-
-fn quoted_segments(line: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut start = 0usize;
-    let mut escape = false;
-    for (idx, ch) in line.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if ch == '\\' {
-            escape = true;
-            continue;
-        }
-        match quote {
-            Some(open) if ch == open => {
-                if let Some(segment) = line.get(start..idx) {
-                    out.push(segment);
-                }
-                quote = None;
-            }
-            Some(_) => {}
-            None if matches!(ch, '\'' | '"' | '`') => {
-                quote = Some(ch);
-                start = idx + ch.len_utf8();
-            }
-            None => {}
-        }
-    }
-    out
-}
-
-fn bracketed_segment(line: &str, open: char, close: char) -> Option<&str> {
-    let start = line.find(open)? + open.len_utf8();
-    let end = line[start..].find(close)? + start;
-    line.get(start..end)
-}
-
-fn strip_inline_comment(line: &str, marker: char) -> &str {
-    line.find(marker).and_then(|idx| line.get(..idx)).unwrap_or(line)
 }
 
 fn insert_file_import_packages(
