@@ -322,15 +322,21 @@ pub(super) fn make_finding(
             sanitizers_seen.push(ssrf_guard);
         }
     }
-    if let Some(jwt_guard) = go_jwt_inline_keyfunc_algorithm_guard_sanitizer(context.ws, snk, skr) {
+    if let Some(jwt_guard) =
+        go_jwt_inline_keyfunc_algorithm_guard_sanitizer(context.ws, context.sink_func, snk, skr)
+    {
         let dedup_key = (jwt_guard.file.clone(), jwt_guard.line, jwt_guard.column);
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(jwt_guard);
         }
     }
-    if let Some(html_helper) =
-        js_ts_local_html_escape_helper_sanitizer(context.ws, snk, skr, &context.sink_tainted_args)
-    {
+    if let Some(html_helper) = js_ts_local_html_escape_helper_sanitizer(
+        context.ws,
+        context.sink_func,
+        snk,
+        skr,
+        &context.sink_tainted_args,
+    ) {
         let dedup_key = (html_helper.file.clone(), html_helper.line, html_helper.column);
         if seen_keys.insert(dedup_key) {
             sanitizers_seen.push(html_helper);

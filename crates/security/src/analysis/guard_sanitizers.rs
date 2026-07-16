@@ -597,6 +597,7 @@ fn java_private_ip_reject_condition(condition: &str) -> bool {
 
 pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
     ws: &Workspace,
+    sink_func: FuncId,
     snk: &RuleMatch,
     sink_rule: &Rule,
 ) -> Option<FindingMatch> {
@@ -606,113 +607,133 @@ pub(super) fn go_jwt_inline_keyfunc_algorithm_guard_sanitizer(
     {
         return None;
     }
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&decl.flow_events, &mut calls);
+    let parse_call = structured_call_at_match(&calls, snk.span, "parse")?;
+    let callback_span = parse_call.args.get(1)?.span;
+    let mut branches = Vec::new();
+    collect_all_structured_branches(&decl.flow_events, &mut branches);
+    let guard = branches.into_iter().find(|branch| {
+        span_contains(callback_span, branch.span)
+            && go_jwt_algorithm_pin_condition(branch.condition)
+            && go_jwt_branch_rejects_mismatch(branch.then_events)
+    })?;
+    if !go_jwt_callback_returns_key(&decl.flow_events, callback_span, guard.span) {
+        return None;
+    }
     let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let sink_idx = usize::try_from(snk.line.checked_sub(1)?).ok()?;
-    let enclosing = ws
-        .enclosing_index()
-        .enclosing_for(ws.db(), snk.span.file, snk.span.start)?;
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
-    let end = usize::try_from(span_map.line_col(enclosing.end.saturating_sub(1)).line)
-        .ok()?
-        .min(lines.len());
-    let block = lines.get(sink_idx..end)?.join("\n");
-    let compact = compact_guard_text(&block);
-    let parse_idx = compact.find("Parse(")?;
-    let after_parse = &compact[parse_idx..];
-    if !after_parse.contains(",func(") {
-        return None;
+    finding_for_guard_span(
+        snk,
+        snapshot.text.as_ref(),
+        guard.span,
+        "engine.sanitizer.go_jwt_inline_keyfunc_algorithm_guard",
+        "jwt-verify",
+        "jwt-algorithm-keyfunc-guard",
+    )
+}
+
+fn go_jwt_algorithm_pin_condition(condition: &str) -> bool {
+    let compact = compact_guard_text(condition);
+    let lower = compact.to_ascii_lowercase();
+    if !compact.contains(".Method.Alg()") || !compact.contains("!=") {
+        return false;
     }
-    if after_parse.contains("UnsafeAllowNoneSignatureType")
-        || after_parse.contains("SigningMethodNone")
-        || after_parse.contains("\"none\"")
-        || after_parse.contains("\"None\"")
+    if lower.contains("signingmethodnone")
+        || lower.contains("unsafeallownonesignaturetype")
+        || lower.contains("\"none\"")
+        || lower.contains("'none'")
     {
-        return None;
+        return false;
     }
-    if !go_jwt_inline_keyfunc_has_pinned_algorithm_reject(after_parse) {
-        return None;
-    }
-    let guard_idx = lines
-        .iter()
-        .enumerate()
-        .skip(sink_idx)
-        .take(end.saturating_sub(sink_idx))
-        .find_map(|(idx, line)| {
-            (line.contains("Method.Alg") || line.contains("SigningMethod")).then_some(idx)
-        })?;
-    let guard_line = *lines.get(guard_idx)?;
-    Some(FindingMatch {
-        rule_id: "engine.sanitizer.go_jwt_inline_keyfunc_algorithm_guard".to_string(),
-        file: snk.file.clone(),
-        line: u32::try_from(guard_idx + 1).ok()?,
-        column: u32::try_from(leading_ascii_whitespace(guard_line) + 1).ok()?,
-        text: guard_line.trim().to_string(),
-        enclosing_fn: snk.enclosing_fn.clone(),
-        tag: Some("jwt-verify".to_string()),
-        severity: None,
-        category: Some("jwt-algorithm-keyfunc-guard".to_string()),
-        trust: None,
-        payload_types: Vec::new(),
-        tainted_args: Vec::new(),
-        sanitised_arg_indices: Vec::new(),
+    let Some((_, expected)) = compact.split_once("!=") else {
+        return false;
+    };
+    let expected = expected.trim_matches(|ch| ch == '(' || ch == ')');
+    (expected.starts_with('"') && expected.ends_with('"'))
+        || (expected.starts_with('\'') && expected.ends_with('\''))
+        || expected.contains("SigningMethod")
+}
+
+fn go_jwt_branch_rejects_mismatch(events: &[FlowEvent]) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Return {
+            value_name,
+            value_flow,
+            ..
+        } => {
+            value_name.is_none()
+                && value_flow.source_names.iter().any(|source| {
+                    source.ends_with("ErrSignatureInvalid") || source.ends_with("ErrTokenSignatureInvalid")
+                })
+        }
+        FlowEvent::Call { name, .. } => {
+            matches!(clean_overwrite_callee_tail(name).as_str(), "new" | "errorf")
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => go_jwt_branch_rejects_mismatch(then_events) || go_jwt_branch_rejects_mismatch(else_events),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            go_jwt_branch_rejects_mismatch(body)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            go_jwt_branch_rejects_mismatch(body)
+                || go_jwt_branch_rejects_mismatch(catch_events)
+                || go_jwt_branch_rejects_mismatch(finally_events)
+        }
+        _ => false,
+    }) && branch_arm_abruptly_exits(events)
+}
+
+fn go_jwt_callback_returns_key(events: &[FlowEvent], callback_span: Span, reject_span: Span) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Return {
+            span,
+            value_name,
+            value_flow,
+            ..
+        } => {
+            span_contains(callback_span, *span)
+                && !span_contains(reject_span, *span)
+                && value_name.as_deref().is_some_and(|name| name != "nil")
+                && !value_flow.source_names.is_empty()
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            go_jwt_callback_returns_key(then_events, callback_span, reject_span)
+                || go_jwt_callback_returns_key(else_events, callback_span, reject_span)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            go_jwt_callback_returns_key(body, callback_span, reject_span)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            go_jwt_callback_returns_key(body, callback_span, reject_span)
+                || go_jwt_callback_returns_key(catch_events, callback_span, reject_span)
+                || go_jwt_callback_returns_key(finally_events, callback_span, reject_span)
+        }
+        _ => false,
     })
-}
-
-fn go_jwt_inline_keyfunc_has_pinned_algorithm_reject(compact: &str) -> bool {
-    if !(compact.contains(".Method.Alg()!=")
-        || compact.contains("!=t.Method.Alg()")
-        || compact.contains("!=token.Method.Alg()"))
-    {
-        return false;
-    }
-    if !go_jwt_pinned_algorithm_mentioned(compact) {
-        return false;
-    }
-    let rejects_mismatch = compact.contains("returnnil,jwt.ErrSignatureInvalid")
-        || compact.contains("returnnil,errors.New(")
-        || compact.contains("returnnil,fmt.Errorf(");
-    let returns_key_on_success = compact.contains(",nil})") || compact.contains(",nil}");
-    rejects_mismatch && returns_key_on_success
-}
-
-fn go_jwt_pinned_algorithm_mentioned(compact: &str) -> bool {
-    const ALG_LITERALS: &[&str] = &[
-        "\"HS256\"",
-        "\"HS384\"",
-        "\"HS512\"",
-        "\"RS256\"",
-        "\"RS384\"",
-        "\"RS512\"",
-        "\"ES256\"",
-        "\"ES384\"",
-        "\"ES512\"",
-        "\"PS256\"",
-        "\"PS384\"",
-        "\"PS512\"",
-        "\"EdDSA\"",
-    ];
-    const ALG_CONSTANTS: &[&str] = &[
-        "SigningMethodHS256",
-        "SigningMethodHS384",
-        "SigningMethodHS512",
-        "SigningMethodRS256",
-        "SigningMethodRS384",
-        "SigningMethodRS512",
-        "SigningMethodES256",
-        "SigningMethodES384",
-        "SigningMethodES512",
-        "SigningMethodPS256",
-        "SigningMethodPS384",
-        "SigningMethodPS512",
-        "SigningMethodEdDSA",
-    ];
-    ALG_LITERALS.iter().any(|alg| compact.contains(alg))
-        || ALG_CONSTANTS.iter().any(|alg| compact.contains(alg))
 }
 
 pub(super) fn js_ts_local_html_escape_helper_sanitizer(
     ws: &Workspace,
+    sink_func: FuncId,
     snk: &RuleMatch,
     sink_rule: &Rule,
     sink_tainted_args: &[TaintedArgInfo],
@@ -722,36 +743,153 @@ pub(super) fn js_ts_local_html_escape_helper_sanitizer(
     {
         return None;
     }
-    let helper = sink_tainted_args
+    let global = ws.db().global_index();
+    let sink_decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
+    let mut sink_calls = Vec::new();
+    collect_structured_calls(&sink_decl.flow_events, &mut sink_calls);
+    let sink_call = structured_call_at_match(&sink_calls, snk.span, "")?;
+    let tainted_places: Vec<String> = sink_tainted_args
         .iter()
-        .filter_map(|arg| helper_wrapping_tainted_value(&snk.match_text, &arg.value_text))
-        .find(|helper| {
-            let lower = helper.to_ascii_lowercase();
-            lower.contains("escape") || lower.contains("encode") || lower.contains("sanitize")
-        })?;
-    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    let lines: Vec<&str> = snapshot.text.lines().collect();
-    let (helper_idx, helper_body) = js_ts_local_function_body(&lines, &helper)?;
-    let full_compact = compact_guard_text(&snapshot.text);
-    if !js_ts_html_escape_helper_body_is_strong(&helper_body, &full_compact) {
+        .flat_map(|arg| clean_overwrite_target_keys(&arg.value_text))
+        .collect();
+    let helper_call = sink_calls.iter().find(|call| {
+        call.span != sink_call.span
+            && sink_call
+                .args
+                .iter()
+                .any(|arg| span_contains(arg.span, call.span))
+            && call.args.iter().any(|arg| {
+                arg.place
+                    .as_deref()
+                    .and_then(clean_overwrite_target_key)
+                    .is_some_and(|place| tainted_places.iter().any(|target| target == &place))
+                    || arg.source_names.iter().any(|source| {
+                        clean_overwrite_target_key(source)
+                            .is_some_and(|source| tainted_places.iter().any(|target| target == &source))
+                    })
+            })
+    })?;
+    let helper = callee_spelling_tail(helper_call.name);
+    let helper_lower = helper.to_ascii_lowercase();
+    if !(helper_lower.contains("escape")
+        || helper_lower.contains("encode")
+        || helper_lower.contains("sanitize"))
+    {
         return None;
     }
-    let helper_line = *lines.get(helper_idx)?;
-    Some(FindingMatch {
-        rule_id: "engine.sanitizer.js_ts_local_html_escape_helper".to_string(),
-        file: snk.file.clone(),
-        line: u32::try_from(helper_idx + 1).ok()?,
-        column: u32::try_from(leading_ascii_whitespace(helper_line) + 1).ok()?,
-        text: helper_line.trim().to_string(),
-        enclosing_fn: snk.enclosing_fn.clone(),
-        tag: Some("html-encode".to_string()),
-        severity: None,
-        category: Some("local-html-escape-helper".to_string()),
-        trust: None,
-        payload_types: Vec::new(),
-        tainted_args: Vec::new(),
-        sanitised_arg_indices: Vec::new(),
+    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
+    let file_index = ws.db().decl_index(snk.span.file)?;
+    let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
+    let helper_decl = global
+        .decls_in(snk.span.file)
+        .iter()
+        .find(|candidate| candidate.name == helper)?;
+    let sanitizer_span = js_ts_html_escape_helper_span(
+        global.decls_in(snk.span.file),
+        helper_decl,
+        &assignment_values,
+        snapshot.text.as_ref(),
+    )?;
+    let mut finding = finding_for_guard_span(
+        snk,
+        snapshot.text.as_ref(),
+        sanitizer_span,
+        "engine.sanitizer.js_ts_local_html_escape_helper",
+        "html-encode",
+        "local-html-escape-helper",
+    )?;
+    finding.enclosing_fn = Some(helper);
+    Some(finding)
+}
+
+fn js_ts_html_escape_helper_span(
+    file_decls: &[bonsai_lang_api::Decl],
+    helper_decl: &bonsai_lang_api::Decl,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> Option<Span> {
+    let input = helper_decl.params.first()?;
+    let mut calls = Vec::new();
+    collect_structured_calls(&helper_decl.flow_events, &mut calls);
+    let mut returns = Vec::new();
+    collect_return_bindings(&helper_decl.flow_events, &mut returns);
+    calls.into_iter().find_map(|call| {
+        if clean_overwrite_callee_tail(call.name) != "replace"
+            || call.args.len() < 2
+            || !call.name.strip_suffix(".replace").is_some_and(|receiver| {
+                clean_overwrite_target_key(receiver).as_deref() == Some(input.as_str())
+            })
+            || !returns.iter().any(|(span, _)| span_contains(*span, call.span))
+        {
+            return None;
+        }
+        let pattern = compact_guard_text(&call.args[0].value_text);
+        let covers_html_metacharacters = ['&', '<', '>', '\'', '"']
+            .iter()
+            .all(|character| pattern.contains(*character));
+        if !covers_html_metacharacters {
+            return None;
+        }
+        js_ts_replacement_has_html_entities(file_decls, &call.args[1], assignment_values, source_text)
+            .then_some(call.span)
     })
+}
+
+fn js_ts_replacement_has_html_entities(
+    file_decls: &[bonsai_lang_api::Decl],
+    replacement: &bonsai_lang_api::CallArg,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    if html_entity_set_is_complete(&replacement.value_text) {
+        return true;
+    }
+    let maps: Vec<String> = replacement
+        .source_names
+        .iter()
+        .filter_map(|source| clean_overwrite_target_key(source))
+        .map(|source| source.split('.').next().unwrap_or(&source).to_string())
+        .collect();
+    file_decls.iter().any(|decl| {
+        let mut assignments = Vec::new();
+        collect_structured_assignments_before(
+            &decl.flow_events,
+            Span::empty(decl.span.file, decl.span.end),
+            &mut assignments,
+        );
+        assignments.into_iter().any(|assignment| {
+            maps.iter()
+                .any(|map| clean_overwrite_target_key(assignment.target).as_deref() == Some(map))
+                && assignment_values
+                    .rendering(assignment.span, source_text)
+                    .is_some_and(html_entity_set_is_complete)
+        })
+    })
+}
+
+fn html_entity_set_is_complete(text: &str) -> bool {
+    let compact = compact_guard_text(text).to_ascii_lowercase();
+    compact.contains("&amp;")
+        && compact.contains("&lt;")
+        && compact.contains("&gt;")
+        && (compact.contains("&quot;") || compact.contains("&#34;") || compact.contains("&#x22;"))
+        && (compact.contains("&#39;") || compact.contains("&apos;") || compact.contains("&#x27;"))
+}
+
+fn structured_call_at_match<'a>(
+    calls: &'a [StructuredCall<'a>],
+    matched_span: Span,
+    required_tail: &str,
+) -> Option<&'a StructuredCall<'a>> {
+    calls
+        .iter()
+        .filter(|call| {
+            (required_tail.is_empty() || clean_overwrite_callee_tail(call.name) == required_tail)
+                && (spans_overlap(call.span, matched_span)
+                    || span_contains(matched_span, call.span)
+                    || span_contains(call.span, matched_span))
+        })
+        .min_by_key(|call| call.span.start.abs_diff(matched_span.start))
 }
 
 pub(super) fn java_local_html_escape_helper_return_sanitizer(
@@ -976,55 +1114,6 @@ fn java_html_sanitizer_call_wraps_param(
         })
 }
 
-fn helper_wrapping_tainted_value(sink_text: &str, value_text: &str) -> Option<String> {
-    if let Some(helper) = helper_wrapping_tainted_expression(value_text) {
-        return Some(helper);
-    }
-    let target = clean_overwrite_target_key(value_text)?;
-    if target.is_empty() {
-        return None;
-    }
-    for (idx, _) in sink_text.match_indices(&target) {
-        if idx > 0 {
-            let prev = sink_text.as_bytes().get(idx - 1).copied().unwrap_or_default() as char;
-            if prev == '_' || prev == '$' || prev.is_ascii_alphanumeric() {
-                continue;
-            }
-        }
-        if let Some(next) = sink_text.as_bytes().get(idx + target.len()).copied() {
-            let next = next as char;
-            if next == '_' || next == '$' || next.is_ascii_alphanumeric() {
-                continue;
-            }
-        }
-        let before = sink_text[..idx].trim_end();
-        let Some(prefix) = before.strip_suffix('(') else {
-            continue;
-        };
-        let helper = trailing_js_identifier(prefix)?;
-        if !matches!(helper.as_str(), "String" | "Number" | "Boolean" | "BigInt") {
-            return Some(helper);
-        }
-    }
-    None
-}
-
-fn helper_wrapping_tainted_expression(value_text: &str) -> Option<String> {
-    let interpolations = template_interpolations(value_text);
-    if !interpolations.is_empty() {
-        let mut helper: Option<String> = None;
-        for expression in interpolations {
-            let current = helper_wrapping_entire_expression(expression.trim())?;
-            if helper.as_deref().is_some_and(|existing| existing != current) {
-                return None;
-            }
-            helper = Some(current.to_string());
-        }
-        return helper;
-    }
-    helper_wrapping_entire_expression(value_text.trim()).map(str::to_string)
-}
-
 pub(super) fn template_interpolations(value_text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let bytes = value_text.as_bytes();
@@ -1053,97 +1142,6 @@ pub(super) fn template_interpolations(value_text: &str) -> Vec<&str> {
         i += 1;
     }
     out
-}
-
-fn helper_wrapping_entire_expression(expression: &str) -> Option<&str> {
-    let open = expression.find('(')?;
-    let helper = expression[..open].trim();
-    if !is_js_identifier(helper) {
-        return None;
-    }
-    let lower = helper.to_ascii_lowercase();
-    if !(lower.contains("escape") || lower.contains("encode") || lower.contains("sanitize")) {
-        return None;
-    }
-    expression.trim_end().ends_with(')').then_some(helper)
-}
-
-fn trailing_js_identifier(text: &str) -> Option<String> {
-    let mut chars = Vec::new();
-    for ch in text.chars().rev() {
-        if ch == '_' || ch == '$' || ch.is_ascii_alphanumeric() {
-            chars.push(ch);
-        } else {
-            break;
-        }
-    }
-    if chars.is_empty() {
-        return None;
-    }
-    chars.reverse();
-    let ident: String = chars.into_iter().collect();
-    is_js_identifier(&ident).then_some(ident)
-}
-
-fn js_ts_local_function_body(lines: &[&str], helper: &str) -> Option<(usize, String)> {
-    let function_needle = format!("function{helper}(");
-    let const_needle = format!("const{helper}=");
-    let let_needle = format!("let{helper}=");
-    let var_needle = format!("var{helper}=");
-    for (idx, line) in lines.iter().enumerate() {
-        let compact = compact_guard_text(line);
-        if !(compact.contains(&function_needle)
-            || compact.starts_with(&const_needle)
-            || compact.starts_with(&let_needle)
-            || compact.starts_with(&var_needle)
-            || compact.contains(&format!(".{helper}(")))
-        {
-            continue;
-        }
-        let mut body = String::new();
-        let mut brace_depth = 0isize;
-        let mut saw_open = false;
-        for line in lines.iter().skip(idx) {
-            body.push_str(line);
-            body.push('\n');
-            for ch in line.chars() {
-                match ch {
-                    '{' => {
-                        saw_open = true;
-                        brace_depth += 1;
-                    }
-                    '}' if saw_open => {
-                        brace_depth -= 1;
-                        if brace_depth <= 0 {
-                            return Some((idx, body));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // An unterminated body is not sanitizer proof. Parser diagnostics
-        // expose the malformed file; do not accept a truncated prefix.
-    }
-    None
-}
-
-fn js_ts_html_escape_helper_body_is_strong(body: &str, full_compact: &str) -> bool {
-    let body_compact = compact_guard_text(body);
-    let chained_replace = body_compact.contains(".replace(/&/g")
-        && body_compact.contains(".replace(/</g")
-        && body_compact.contains(".replace(/>/g");
-    let char_class_replace =
-        body_compact.contains(".replace(/[&<") && body_compact.contains("]/g") && body_compact.contains("=>");
-    if !(chained_replace || char_class_replace) {
-        return false;
-    }
-    let haystack = format!("{body_compact}{full_compact}");
-    haystack.contains("&amp;")
-        && haystack.contains("&lt;")
-        && haystack.contains("&gt;")
-        && (haystack.contains("&quot;") || haystack.contains("&#34;") || haystack.contains("&#x22;"))
-        && (haystack.contains("&#39;") || haystack.contains("&apos;") || haystack.contains("&#x27;"))
 }
 
 pub(super) fn go_xml_decoder_hardening_sanitizer(
@@ -1783,7 +1781,6 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let file_index = ws.db().decl_index(snk.span.file)?;
     let assignment_values = bonsai_lang_api::AssignmentValueIndex::new(&file_index.assignment_values);
-    let span_map = bonsai_common::cached_span_map_arc(snk.span.file, snapshot.version, &snapshot.text);
     let targets = ldap_tainted_filter_targets(sink_tainted_args);
     if targets.is_empty() {
         return None;
@@ -1796,35 +1793,25 @@ pub(super) fn local_ldap_escape_helper_sanitizer(
             if clean_overwrite_target_key(assignment.target).as_deref() != Some(target.as_str()) {
                 continue;
             }
-            let Some(rhs) = assignment_values.rendering(assignment.span, snapshot.text.as_ref()) else {
-                continue;
-            };
-            if ldap_rhs_uses_verified_escape(&snapshot.text, rhs) {
-                let location = span_map.line_col(assignment.span.start);
-                let text = snapshot
-                    .text
-                    .get(assignment.span.start as usize..assignment.span.end as usize)
-                    .unwrap_or(rhs)
-                    .trim()
-                    .to_string();
-                return Some(FindingMatch {
-                    rule_id: "engine.sanitizer.local_ldap_escape_helper".to_string(),
-                    file: snk.file.clone(),
-                    line: location.line,
-                    column: location.column,
-                    text,
-                    enclosing_fn: snk.enclosing_fn.clone(),
-                    tag: Some("ldap-escape".to_string()),
-                    severity: None,
-                    category: Some("local-rfc4515-escape-helper".to_string()),
-                    trust: None,
-                    payload_types: Vec::new(),
-                    tainted_args: Vec::new(),
-                    sanitised_arg_indices: sink_tainted_args
-                        .iter()
-                        .filter_map(|arg| u32::try_from(arg.index).ok())
-                        .collect(),
-                });
+            if ldap_assignment_uses_verified_escape(
+                global.decls_in(snk.span.file),
+                assignment,
+                &assignment_values,
+                snapshot.text.as_ref(),
+            ) {
+                let mut finding = finding_for_guard_span(
+                    snk,
+                    snapshot.text.as_ref(),
+                    assignment.span,
+                    "engine.sanitizer.local_ldap_escape_helper",
+                    "ldap-escape",
+                    "local-rfc4515-escape-helper",
+                )?;
+                finding.sanitised_arg_indices = sink_tainted_args
+                    .iter()
+                    .filter_map(|arg| u32::try_from(arg.index).ok())
+                    .collect();
+                return Some(finding);
             }
         }
     }
@@ -1859,108 +1846,151 @@ fn ldap_tainted_filter_targets(sink_tainted_args: &[TaintedArgInfo]) -> Vec<Stri
     targets
 }
 
-fn ldap_rhs_uses_verified_escape(full_text: &str, rhs: &str) -> bool {
-    if rhs.contains("escape_filter_chars(")
-        || rhs.contains("EscapeFilter(")
-        || rhs.contains("escapeFilter(")
-        || rhs.contains("ldapEscape.filter(")
+fn ldap_assignment_uses_verified_escape(
+    file_decls: &[bonsai_lang_api::Decl],
+    assignment: &StructuredAssignment<'_>,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    if assignment.source_call.is_some_and(|call| {
+        ldap_call_uses_verified_escape(file_decls, call, assignment.span, assignment_values, source_text)
+    }) {
+        return true;
+    }
+    file_decls.iter().any(|decl| {
+        let mut calls = Vec::new();
+        collect_structured_calls(&decl.flow_events, &mut calls);
+        calls.into_iter().any(|call| {
+            span_contains(assignment.span, call.span)
+                && ldap_call_uses_verified_escape(
+                    file_decls,
+                    call.name,
+                    assignment.span,
+                    assignment_values,
+                    source_text,
+                )
+        })
+    })
+}
+
+fn ldap_call_uses_verified_escape(
+    file_decls: &[bonsai_lang_api::Decl],
+    call: &str,
+    call_context: Span,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    let tail = clean_overwrite_callee_tail(call);
+    if matches!(tail.as_str(), "escape_filter_chars" | "escapefilter")
+        || (tail == "filter" && call.to_ascii_lowercase().contains("ldapescape"))
     {
         return true;
     }
-    if let Some((receiver, _)) = rhs.split_once(".Replace(") {
-        let receiver = receiver
-            .rsplit(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-            .next()
+    if tail == "replace" {
+        let receiver = call
+            .rsplit_once('.')
+            .map(|(receiver, _)| receiver)
             .unwrap_or_default();
-        if !receiver.is_empty() && ldap_replacer_declared_safe(full_text, receiver) {
+        if !receiver.is_empty() && ldap_replacer_assignment_is_safe(file_decls, receiver, call_context) {
             return true;
         }
     }
-    call_names_outside_strings(rhs)
-        .into_iter()
-        .any(|helper| local_ldap_helper_declared_safe(full_text, &helper))
+    let helper = callee_spelling_tail(call);
+    file_decls
+        .iter()
+        .find(|decl| decl.name == helper)
+        .is_some_and(|decl| local_ldap_helper_is_safe(file_decls, decl, assignment_values, source_text))
 }
 
-fn call_names_outside_strings(text: &str) -> Vec<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let mut quote: Option<u8> = None;
-    let mut escaped = false;
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        let byte = bytes[idx];
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-                idx += 1;
-                continue;
-            }
-            if byte == b'\\' {
-                escaped = true;
-                idx += 1;
-                continue;
-            }
-            if byte == q {
-                quote = None;
-            }
-            idx += 1;
-            continue;
-        }
-        match byte {
-            b'\'' | b'"' | b'`' => {
-                quote = Some(byte);
-                idx += 1;
-            }
-            b'(' => {
-                let prefix = text[..idx].trim_end();
-                let name = prefix
-                    .rsplit(|ch: char| !(ch == '_' || ch == '$' || ch == '.' || ch.is_ascii_alphanumeric()))
-                    .next()
-                    .unwrap_or_default()
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or_default();
-                if !name.is_empty() && !matches!(name, "String" | "str" | "bytes" | "int" | "float" | "len") {
-                    out.push(name.to_string());
-                }
-                idx += 1;
-            }
-            _ => idx += 1,
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn local_ldap_helper_declared_safe(full_text: &str, helper: &str) -> bool {
-    if !ldap_escape_table_literals_present(full_text) {
+fn local_ldap_helper_is_safe(
+    file_decls: &[bonsai_lang_api::Decl],
+    helper: &bonsai_lang_api::Decl,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    let input = helper.params.first().map(String::as_str).unwrap_or_default();
+    if input.is_empty() {
         return false;
     }
-    let compact = compact_guard_text(full_text);
-    let helper_defs = [
-        format!("def{helper}("),
-        format!("function{helper}("),
-        format!("func{helper}("),
-        format!("const{helper}="),
-        format!("let{helper}="),
-    ];
-    helper_defs.iter().any(|needle| compact.contains(needle))
-        && (compact.contains(".get(ch,ch)")
-            || compact.contains("ESCAPES[c]??c")
-            || compact.contains("_LDAP_ESCAPES.get(ch,ch)")
-            || compact.contains("map(c=>")
-            || compact.contains("join(\"\")")
-            || compact.contains("strings.NewReplacer("))
+    let mut calls = Vec::new();
+    collect_structured_calls(&helper.flow_events, &mut calls);
+    let mut returns = Vec::new();
+    collect_return_bindings(&helper.flow_events, &mut returns);
+    let map_lookup_is_safe = calls.iter().any(|lookup| {
+        if clean_overwrite_callee_tail(lookup.name) != "get" || lookup.args.len() < 2 {
+            return false;
+        }
+        let Some(map) = lookup.name.rsplit_once('.').map(|(receiver, _)| receiver) else {
+            return false;
+        };
+        let key = lookup.args[0].place.as_deref();
+        if key.is_none() || lookup.args[1].place.as_deref() != key {
+            return false;
+        }
+        let helper_consumes_input = calls.iter().any(|call| {
+            call.args
+                .iter()
+                .any(|arg| arg.source_names.iter().any(|source| source == input))
+        }) || helper.flow_events.iter().any(|event| match event {
+            FlowEvent::Assign { source_names, .. } => source_names.iter().any(|source| source == input),
+            _ => false,
+        });
+        helper_consumes_input
+            && returns.iter().any(|(span, _)| span_contains(*span, lookup.span))
+            && ldap_escape_map_assignment_is_safe(file_decls, map, assignment_values, source_text)
+    });
+    map_lookup_is_safe
+        || calls.iter().any(|call| {
+            clean_overwrite_callee_tail(call.name) == "replace"
+                && call
+                    .args
+                    .iter()
+                    .any(|arg| arg.source_names.iter().any(|source| source == input))
+                && call.name.rsplit_once('.').is_some_and(|(receiver, _)| {
+                    ldap_replacer_assignment_is_safe(file_decls, receiver, helper.span)
+                })
+                && returns.iter().any(|(span, _)| span_contains(*span, call.span))
+        })
 }
 
-fn ldap_replacer_declared_safe(full_text: &str, receiver: &str) -> bool {
-    if !ldap_escape_table_literals_present(full_text) {
-        return false;
-    }
-    let compact = compact_guard_text(full_text);
-    compact.contains(&format!("{receiver}=strings.NewReplacer("))
-        || compact.contains(&format!("{receiver}:=strings.NewReplacer("))
+fn ldap_escape_map_assignment_is_safe(
+    file_decls: &[bonsai_lang_api::Decl],
+    map: &str,
+    assignment_values: &bonsai_lang_api::AssignmentValueIndex,
+    source_text: &str,
+) -> bool {
+    file_decls.iter().any(|decl| {
+        let mut assignments = Vec::new();
+        collect_structured_assignments_before(
+            &decl.flow_events,
+            Span::empty(decl.span.file, decl.span.end),
+            &mut assignments,
+        );
+        assignments.into_iter().any(|assignment| {
+            clean_overwrite_target_key(assignment.target).as_deref() == Some(map)
+                && assignment_values
+                    .rendering(assignment.span, source_text)
+                    .is_some_and(ldap_escape_table_literals_present)
+        })
+    })
+}
+
+fn ldap_replacer_assignment_is_safe(
+    file_decls: &[bonsai_lang_api::Decl],
+    receiver: &str,
+    before: Span,
+) -> bool {
+    file_decls.iter().any(|decl| {
+        let mut assignments = Vec::new();
+        collect_structured_assignments_before(&decl.flow_events, before, &mut assignments);
+        assignments.into_iter().any(|assignment| {
+            clean_overwrite_target_key(assignment.target).as_deref() == Some(receiver)
+                && assignment
+                    .source_call
+                    .is_some_and(|call| clean_overwrite_callee_tail(call) == "newreplacer")
+                && ldap_escape_table_literals_present(&assignment.source_call_args.join(" "))
+        })
+    })
 }
 
 fn ldap_escape_table_literals_present(text: &str) -> bool {
@@ -1993,8 +2023,11 @@ pub(super) fn go_same_origin_redirect_helper_guard_sanitizer(
     let global = ws.db().global_index();
     let decl = global.decl_of(SymbolId::new(sink_func.raw()))?;
     let guard = find_go_same_origin_helper_guard(&decl.flow_events, snk.span, &targets)?;
-    let snapshot = ws.vfs().snapshot(snk.span.file).ok()?;
-    if !go_same_origin_helper_declared(&snapshot.text, &guard.helper) {
+    let helper_decl = global
+        .decls_in(snk.span.file)
+        .iter()
+        .find(|candidate| candidate.name == guard.helper)?;
+    if !go_same_origin_helper_is_safe(helper_decl) {
         return None;
     }
     let (file, line, column) = resolve_span_location(ws, guard.span);
@@ -2114,11 +2147,37 @@ fn branch_assigns_literal_to_target(events: &[FlowEvent], target: &str) -> bool 
     })
 }
 
-fn go_same_origin_helper_declared(full_text: &str, helper: &str) -> bool {
-    let compact = compact_guard_text(full_text);
-    compact.contains(&format!("func{helper}("))
-        && (compact.contains("s[0]=='/'") || compact.contains("s[0]==\"/\""))
-        && (compact.contains("s[1]!='/'") || compact.contains("s[1]!=\"/\""))
+fn go_same_origin_helper_is_safe(helper: &bonsai_lang_api::Decl) -> bool {
+    let input = helper.params.first().map(String::as_str).unwrap_or_default();
+    if input.is_empty() {
+        return false;
+    }
+    helper.flow_events.iter().any(|event| {
+        let FlowEvent::Return {
+            value_text: Some(value),
+            value_flow,
+            ..
+        } = event
+        else {
+            return false;
+        };
+        let first = format!("{input}.0");
+        let second = format!("{input}.1");
+        if !(value_flow.source_names.iter().any(|source| source == &first)
+            && value_flow.source_names.iter().any(|source| source == &second))
+        {
+            return false;
+        }
+        let compact = compact_guard_text(value);
+        let first_is_slash =
+            compact.contains(&format!("{input}[0]=='/'")) || compact.contains(&format!("{input}[0]==\"/\""));
+        let second_is_not_slash =
+            compact.contains(&format!("{input}[1]!='/'")) || compact.contains(&format!("{input}[1]!=\"/\""));
+        let length_checked = compact.contains(&format!("len({input})>0"))
+            && (compact.contains(&format!("len({input})==1"))
+                || compact.contains(&format!("len({input})>1")));
+        first_is_slash && second_is_not_slash && length_checked
+    })
 }
 
 pub(super) fn python_url_ssrf_guard_sanitizer(
@@ -2413,13 +2472,6 @@ fn python_dev_only_env_guard_condition(condition: &str) -> bool {
         "'test'",
     ];
     DEV_LITERALS.iter().any(|literal| lower.contains(literal))
-}
-
-fn leading_ascii_whitespace(line: &str) -> usize {
-    line.as_bytes()
-        .iter()
-        .take_while(|byte| matches!(byte, b' ' | b'\t'))
-        .count()
 }
 
 pub(super) fn finite_literal_map_lookup_allowlist_sanitizer(
