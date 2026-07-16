@@ -1,6 +1,7 @@
 use super::{
     default_export_cache_metadata_path, default_export_cache_path, export_cache_is_fresh_via_fd,
     unique_default_export_tmp_path, workspace_source_fingerprint_from_disk, write_default_export_cache,
+    write_default_export_cache_with,
 };
 use std::path::Path;
 
@@ -58,6 +59,47 @@ fn export_cache_writer_writes_one_valid_json_document() {
     assert_eq!(parsed["ok"], true);
     assert!(cache_is_fresh(&root, None));
 
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn export_cache_writer_removes_abandoned_temp_siblings_under_lock() {
+    let root = tempdir("export-stale-temp");
+    std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");
+    let cache = default_export_cache_path(&root);
+    std::fs::create_dir_all(cache.parent().expect("cache parent")).expect("create cache dir");
+    let abandoned = unique_default_export_tmp_path(&cache);
+    std::fs::write(&abandoned, b"abandoned").expect("write abandoned temp");
+
+    write_cache(&root, None);
+
+    assert!(
+        !abandoned.exists(),
+        "exclusive writer should reclaim abandoned temp files"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn streaming_export_error_removes_its_temp_file() {
+    let root = tempdir("export-error-temp");
+    std::fs::write(root.join("app.py"), "print('root')\n").expect("write source");
+    let cache = default_export_cache_path(&root);
+    let sources = workspace_source_fingerprint_from_disk(&root).expect("source fingerprint");
+
+    let error = write_default_export_cache_with(&cache, &root, None, sources, |_writer| {
+        anyhow::bail!("synthetic streaming failure")
+    })
+    .expect_err("writer should fail");
+
+    assert!(error.to_string().contains("synthetic streaming failure"));
+    let prefix = format!("{}.tmp.", cache.file_name().unwrap().to_string_lossy());
+    let leftovers = std::fs::read_dir(cache.parent().expect("cache parent"))
+        .expect("read cache dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .count();
+    assert_eq!(leftovers, 0, "failed streaming writes must not leak temp files");
     std::fs::remove_dir_all(&root).ok();
 }
 
