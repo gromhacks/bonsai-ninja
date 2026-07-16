@@ -713,6 +713,7 @@ fn rulepack_declared_receiver_result_passthrough_seeds_call_return() {
     global.insert(bonsai_lang_api::DeclIndex {
         file,
         refs: Vec::new(),
+        assignment_values: Vec::new(),
         aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
@@ -828,6 +829,7 @@ fn rulepack_declared_arg_result_passthrough_accepts_descendant_container_input()
     global.insert(bonsai_lang_api::DeclIndex {
         file,
         refs: Vec::new(),
+        assignment_values: Vec::new(),
         aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),

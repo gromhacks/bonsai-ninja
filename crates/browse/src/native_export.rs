@@ -285,6 +285,7 @@ struct ExportFile<'a> {
     flow_events: Vec<ExportFlowEvent<'a>>,
     imports: Vec<ExportImport>,
     refs: Vec<ExportRef>,
+    assignment_values: Vec<ExportAssignmentValue>,
     strings: Vec<ExportString>,
 }
 
@@ -670,6 +671,18 @@ struct ExportRef {
 }
 
 #[derive(Serialize)]
+struct ExportAssignmentValue {
+    #[serde(rename = "assignment_start_byte")]
+    assignment_start: u64,
+    #[serde(rename = "assignment_end_byte")]
+    assignment_end: u64,
+    #[serde(rename = "value_start_byte")]
+    value_start: u64,
+    #[serde(rename = "value_end_byte")]
+    value_end: u64,
+}
+
+#[derive(Serialize)]
 struct ExportString {
     text: String,
     category: String,
@@ -836,7 +849,7 @@ fn write_native_export_streaming<W: Write + ?Sized>(
     let mut map = serializer.serialize_map(None)?;
 
     map.serialize_entry("schema", "bonsai-native-export")?;
-    map.serialize_entry("schema_version", &2_u32)?;
+    map.serialize_entry("schema_version", &3_u32)?;
     map.serialize_entry("engine_version", env!("CARGO_PKG_VERSION"))?;
     map.serialize_entry("workspace_root", &root.display().to_string())?;
     map.serialize_entry("generated_at_unix_ms", &generated_at_unix_ms())?;
@@ -1124,6 +1137,7 @@ fn build_export_file<'a>(
             flow_events: Vec::new(),
             imports: Vec::new(),
             refs: Vec::new(),
+            assignment_values: Vec::new(),
             strings: Vec::new(),
         };
     };
@@ -1201,6 +1215,16 @@ fn build_export_file<'a>(
             }
         })
         .collect();
+    let assignment_values = index
+        .assignment_values
+        .iter()
+        .map(|fact| ExportAssignmentValue {
+            assignment_start: fact.assignment_span.start,
+            assignment_end: fact.assignment_span.end,
+            value_start: fact.value_span.start,
+            value_end: fact.value_span.end,
+        })
+        .collect();
     let strings = index
         .strings
         .iter()
@@ -1222,6 +1246,7 @@ fn build_export_file<'a>(
         flow_events,
         imports,
         refs,
+        assignment_values,
         strings,
     }
 }

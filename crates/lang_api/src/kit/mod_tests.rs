@@ -1,10 +1,10 @@
 use super::{
     annotate_tuple_call_result_bindings, apply_assign_call_result_types, apply_call_receiver_types,
     apply_constructor_result_type_aliases, argument_place, build_call_event, canonical_simple_type_name,
-    collect_kinds, expression_flow_from_node, extract_return_value_name, extract_rhs_expr_operands,
-    language_from_pack, node_text, normalize_call_name_whitespace, normalize_call_result_assignment_sources,
-    package_module_segments_with_workspace_prefix, receiver_projected_alias_matches, GENERIC_HANDLER,
-    SYNTHETIC_TUPLE_RESULT_PREFIX,
+    collect_kinds, expression_flow_from_node, extract_assignment_value_facts, extract_return_value_name,
+    extract_rhs_expr_operands, language_from_pack, node_text, normalize_call_name_whitespace,
+    normalize_call_result_assignment_sources, package_module_segments_with_workspace_prefix,
+    receiver_projected_alias_matches, span_of, GENERIC_HANDLER, SYNTHETIC_TUPLE_RESULT_PREFIX,
 };
 use crate::{
     AssignValueKind, CallArg, CallKind, Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility,
@@ -191,6 +191,26 @@ fn return_value_name_uses_structured_syntax_before_text_fallback() {
         None,
         "literal return nodes must not become value-bearing identifier reads"
     );
+}
+
+#[test]
+fn assignment_value_fact_uses_exact_rhs_node_span() {
+    let language = language_from_pack("python").expect("python grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set python grammar");
+    let src = b"def f():\n    policy = \"left=right\"\n";
+    let tree = parser.parse(src, None).expect("parse python");
+    let assignment = collect_kinds(&tree, &["assignment"])
+        .into_iter()
+        .next()
+        .expect("assignment node");
+    let assignment_span = span_of(FileId::new(0), &assignment);
+
+    let facts = extract_assignment_value_facts(&tree, FileId::new(0), &GENERIC_HANDLER, src);
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].assignment_span, assignment_span);
+    let value = &src[facts[0].value_span.start as usize..facts[0].value_span.end as usize];
+    assert_eq!(value, b"\"left=right\"");
 }
 
 #[test]

@@ -1415,6 +1415,53 @@ impl GrammarHandler {
     }
 }
 
+/// Select an assignment target from Tree-sitter fields and named-node
+/// relationships. Downstream consumers must not split the surrounding source
+/// statement to rediscover this node.
+fn assignment_target_node<'tree>(node: Node<'tree>, src: &[u8]) -> Option<Node<'tree>> {
+    let kind = node.kind();
+    let target = node
+        .child_by_field_name("left")
+        .or_else(|| node.child_by_field_name("lhs"))
+        .or_else(|| node.child_by_field_name("target"))
+        .or_else(|| node.child_by_field_name("name"))
+        .or_else(|| node.child_by_field_name("pattern"))
+        .or_else(|| node.child_by_field_name("declarator"))
+        .or_else(|| {
+            (kind == "property_declaration")
+                .then(|| first_named_child_of_kind(&node, "variable_declaration"))
+                .flatten()
+        })
+        .or_else(|| first_non_keyword_named_child(&node, src))?;
+    Some(match target.kind() {
+        "variable_declarator"
+        | "init_declarator"
+        | "declarator"
+        | "property_identifier"
+        | "variable_declaration" => target
+            .child_by_field_name("name")
+            .or_else(|| {
+                first_named_child_of_kind(&target, "variable_declarator")
+                    .and_then(|decl| decl.child_by_field_name("name"))
+            })
+            .or_else(|| first_non_keyword_named_child(&target, src))
+            .unwrap_or(target),
+        _ => target,
+    })
+}
+
+/// Select an assignment RHS from Tree-sitter fields. The last-named-child
+/// fallback covers grammars whose initializer is an unfielded sibling while
+/// remaining a parsed-node relationship rather than a textual `=` scan.
+fn assignment_value_node<'tree>(node: Node<'tree>, target_node: Option<Node<'tree>>) -> Option<Node<'tree>> {
+    node.child_by_field_name("right")
+        .or_else(|| node.child_by_field_name("rhs"))
+        .or_else(|| node.child_by_field_name("value"))
+        .or_else(|| node.child_by_field_name("result"))
+        .or_else(|| node.child_by_field_name("target"))
+        .or_else(|| last_named_child_excluding(&node, target_node))
+}
+
 /// Walk the subtree rooted at `node` and produce a tree of [`FlowEvent`].
 /// The walker:
 ///
@@ -1971,19 +2018,7 @@ fn walk_into(
         // gets picked. Kotlin `property_declaration` is the canonical
         // offender: its first named child is the `val`/`var` keyword
         // node, which without filtering would become the target text.
-        let target_node = node
-            .child_by_field_name("left")
-            .or_else(|| node.child_by_field_name("lhs"))
-            .or_else(|| node.child_by_field_name("target"))
-            .or_else(|| node.child_by_field_name("name"))
-            .or_else(|| node.child_by_field_name("pattern"))
-            .or_else(|| node.child_by_field_name("declarator"))
-            .or_else(|| {
-                (kind == "property_declaration")
-                    .then(|| first_named_child_of_kind(&node, "variable_declaration"))
-                    .flatten()
-            })
-            .or_else(|| first_non_keyword_named_child(&node, src));
+        let target_node = assignment_target_node(node, src);
         // If the picked target is itself a declarator wrapper —
         // tree-sitter emits `variable_declarator` in C# /
         // JavaScript / TypeScript / Java, `init_declarator` in C /
@@ -1994,21 +2029,6 @@ fn walk_into(
         // and emit its own clean Assign, so without this unwrap we
         // get two events per variable: one with wrapper text and one
         // with the canonical identifier.
-        let target_node = target_node.map(|n| match n.kind() {
-            "variable_declarator"
-            | "init_declarator"
-            | "declarator"
-            | "property_identifier"
-            | "variable_declaration" => n
-                .child_by_field_name("name")
-                .or_else(|| {
-                    first_named_child_of_kind(&n, "variable_declarator")
-                        .and_then(|decl| decl.child_by_field_name("name"))
-                })
-                .or_else(|| first_non_keyword_named_child(&n, src))
-                .unwrap_or(n),
-            _ => n,
-        });
         let raw_target = target_node
             .map(|n| node_text(&n, src).trim().to_string())
             .unwrap_or_default();
@@ -2030,13 +2050,7 @@ fn walk_into(
         // just a sibling of the variable-declaration identifier. We'd
         // rather over-walk than miss calls on the RHS, so as a fallback
         // we pick the LAST named child that isn't the target node.
-        let rhs = node
-            .child_by_field_name("right")
-            .or_else(|| node.child_by_field_name("rhs"))
-            .or_else(|| node.child_by_field_name("value"))
-            .or_else(|| node.child_by_field_name("result"))
-            .or_else(|| node.child_by_field_name("target"))
-            .or_else(|| last_named_child_excluding(&node, target_node));
+        let rhs = assignment_value_node(node, target_node);
         let source_name = rhs.and_then(|rhs_node| {
             let rhs_text = node_text(&rhs_node, src).trim();
             // Only emit `source_name` for bare-identifier RHS — compound
@@ -5030,6 +5044,54 @@ where
     crate::ImportIndex { file, imports }
 }
 
+/// Build exact assignment-to-RHS node links from the parsed syntax tree. The
+/// traversal is iterative and uncapped. These are syntax facts rather than a
+/// projection of flow events: adapters may attach an assignment event to a
+/// callable after the generic walk (for example, a Java class constant used by
+/// a method), and its original Tree-sitter relationship must still be present.
+#[must_use]
+pub fn extract_assignment_value_facts(
+    tree: &Tree,
+    file: FileId,
+    handler: &GrammarHandler,
+    src: &[u8],
+) -> Vec<crate::AssignmentValueFact> {
+    let mut facts = Vec::new();
+    let mut node_stack = vec![tree.root_node()];
+    while let Some(node) = node_stack.pop() {
+        let span = span_of(file, &node);
+        let is_assignment = handler.is_assignment(node.kind())
+            && (node.kind() != "binary_operator" || binary_operator_is_assignment(&node, src));
+        if is_assignment {
+            let target = assignment_target_node(node, src);
+            if let Some(value) = assignment_value_node(node, target) {
+                let value_span = span_of(file, &value);
+                if value_span.start >= span.start
+                    && value_span.end <= span.end
+                    && value_span.start < value_span.end
+                {
+                    facts.push(crate::AssignmentValueFact {
+                        assignment_span: span,
+                        value_span,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        node_stack.extend(node.named_children(&mut cursor));
+    }
+    facts.sort_by_key(|fact| {
+        (
+            fact.assignment_span.start,
+            fact.assignment_span.end,
+            fact.value_span.start,
+            fact.value_span.end,
+        )
+    });
+    facts.dedup();
+    facts
+}
+
 /// Full adapter pipeline: parse with `pack_name`, scan for declarations,
 /// populate each function's `flow_events` via [`walk_flow_events`], and
 /// collect top-level call refs for legacy consumers.
@@ -5565,10 +5627,12 @@ pub fn decl_index_with_handler(
     refs.extend(extract_read_write_refs(&tree, file, src));
     let strings = extract_string_literals(&tree, file, src);
     let comments = extract_comments(&tree, file, src);
+    let assignment_values = extract_assignment_value_facts(&tree, file, handler, src);
     crate::DeclIndex {
         file,
         defs,
         refs,
+        assignment_values,
         aggregate_layouts: Vec::new(),
         strings,
         comments,

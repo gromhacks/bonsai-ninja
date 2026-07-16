@@ -156,6 +156,7 @@ fn insert_file(global: &mut GlobalIndex, file: FileId, defs: Vec<Decl>) {
         file,
         defs,
         refs: Vec::new(),
+        assignment_values: Vec::new(),
         aggregate_layouts: Vec::new(),
         strings: Vec::new(),
         comments: Vec::new(),
